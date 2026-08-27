@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalize } from "../lib/session-stream";
+import { clampLines, normalize, projectStream, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { RunnerKind, SessionEvent } from "../lib/types";
 
 /* Fixtures are pasted from spikes/cli-capabilities/samples/, so the mapping is
@@ -229,4 +229,297 @@ test("files are alphabetical and carry per-path touch counts", () => {
     event("TOOL_STARTED", { type: "tool_use", id: "3", name: "Edit", input: { file_path: "/a.ts" } }, { toolCallId: "3" }),
   ], "CLAUDE");
   assert.deepEqual(files, [{ path: "/a.ts", count: 2 }, { path: "/z.ts", count: 1 }]);
+});
+
+test("the projection groups only maximal consecutive tool runs", () => {
+  const first = event("TOOL_STARTED", { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/a.ts" } }, {
+    toolCallId: "read-1", at: "2026-08-15T10:00:00.000Z",
+  });
+  const second = event("TOOL_COMPLETED", { tool_use_id: "read-1", content: "a", is_error: false }, {
+    toolCallId: "read-1", at: "2026-08-15T10:00:01.000Z",
+  });
+  const third = event("TOOL_STARTED", { type: "tool_use", id: "run-1", name: "Bash", input: { command: "npm test" } }, {
+    toolCallId: "run-1", at: "2026-08-15T10:00:02.000Z",
+  });
+  const fourth = event("TOOL_COMPLETED", { tool_use_id: "run-1", content: "ok", is_error: false }, {
+    toolCallId: "run-1", at: "2026-08-15T10:00:03.000Z",
+  });
+  const message = event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT, { at: "2026-08-15T10:00:04.000Z" });
+  const fifth = event("TOOL_STARTED", { type: "tool_use", id: "edit-1", name: "Edit", input: { file_path: "/b.ts" } }, {
+    toolCallId: "edit-1", at: "2026-08-15T10:00:05.000Z",
+  });
+
+  const { nodes } = projectStream([first, second, third, fourth, message, fifth], "CLAUDE", false);
+  assert.deepEqual(nodes.map((node) => node.kind), ["tools", "text", "tools"]);
+  assert.equal(nodes[0]?.kind, "tools");
+  if (nodes[0]?.kind === "tools") {
+    assert.equal(nodes[0].calls.length, 2);
+    assert.equal(nodes[0].at, first.at);
+    assert.deepEqual(nodes[0].calls.map((call) => call.name), ["Read", "Bash"]);
+  }
+  assert.equal(nodes[2]?.kind, "tools");
+  if (nodes[2]?.kind === "tools") assert.deepEqual(nodes[2].calls.map((call) => call.name), ["Edit"]);
+});
+
+test("projection merges consecutive assistant prose with the earliest timestamp", () => {
+  const first = event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT, { at: "2026-08-15T10:00:00.000Z" });
+  const second = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "second paragraph" }] },
+  }, { at: "2026-08-15T10:00:01.000Z" });
+
+  const { nodes, counts } = projectStream([first, second], "CLAUDE", false);
+  assert.equal(nodes.length, 1);
+  assert.deepEqual(nodes[0], {
+    kind: "text", id: first.id, at: first.at, text: "3\n\nsecond paragraph", final: false,
+  });
+  assert.deepEqual(counts, { messages: 1, toolCalls: 0, files: 0 });
+});
+
+test("projection does not merge prose separated by a tool call", () => {
+  const first = event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT);
+  const tool = event("TOOL_STARTED", {
+    type: "tool_use", id: "read-between", name: "Read", input: { file_path: "/a.ts" },
+  }, { toolCallId: "read-between" });
+  const second = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after tool" }] },
+  });
+
+  const { nodes } = projectStream([first, tool, second], "CLAUDE", false);
+  assert.deepEqual(nodes.map((node) => node.kind), ["text", "tools", "text"]);
+  assert.equal(nodes[0]?.kind, "text");
+  assert.equal(nodes[2]?.kind, "text");
+  if (nodes[0]?.kind === "text" && nodes[2]?.kind === "text") {
+    assert.equal(nodes[0].text, "3");
+    assert.equal(nodes[2].text, "after tool");
+  }
+});
+
+test("projection does not merge prose separated by a marker or operator input", () => {
+  const beforeMarker = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "before marker" }] },
+  });
+  const marker = event("ADAPTER_ERROR", { message: "stream disconnected" });
+  const afterMarker = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after marker" }] },
+  });
+  const markerNodes = projectStream([beforeMarker, marker, afterMarker], "CLAUDE", true).nodes;
+  assert.deepEqual(markerNodes.map((node) => node.kind), ["text", "marker", "text"]);
+  assert.equal(markerNodes[0]?.kind, "text");
+  assert.equal(markerNodes[2]?.kind, "text");
+  if (markerNodes[0]?.kind === "text" && markerNodes[2]?.kind === "text") {
+    assert.equal(markerNodes[0].text, "before marker");
+    assert.equal(markerNodes[2].text, "after marker");
+  }
+
+  const beforeInput = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "before input" }], timestamp: 1 },
+  }, { source: "PI" });
+  const input = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "user", content: [{ type: "text", text: "operator input" }], timestamp: 2 },
+  }, { source: "PI" });
+  const afterInput = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "after input" }], timestamp: 3 },
+  }, { source: "PI" });
+  const inputNodes = projectStream([beforeInput, input, afterInput], "PI", false).nodes;
+  assert.deepEqual(inputNodes.map((node) => node.kind), ["text", "input", "text"]);
+  assert.equal(inputNodes[0]?.kind, "text");
+  assert.equal(inputNodes[2]?.kind, "text");
+  if (inputNodes[0]?.kind === "text" && inputNodes[2]?.kind === "text") {
+    assert.equal(inputNodes[0].text, "before input");
+    assert.equal(inputNodes[2].text, "after input");
+  }
+});
+
+test("projection drops empty and whitespace-only assistant prose", () => {
+  const events = [
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "   \n\t" }] } }),
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "" }] } }),
+  ];
+  const { nodes } = projectStream(events, "CLAUDE", false);
+  assert.deepEqual(nodes.map((node) => node.kind), ["text"]);
+  if (nodes[0]?.kind === "text") assert.equal(nodes[0].text, "3");
+});
+
+test("projection drops a repeated final output but keeps a distinct final output", () => {
+  const repeated = projectStream([
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("FINAL_OUTPUT", { type: "result", result: "3" }),
+  ], "CLAUDE", true);
+  assert.deepEqual(repeated.nodes.map((node) => node.kind), ["text"]);
+  assert.equal(repeated.nodes[0]?.kind, "text");
+  if (repeated.nodes[0]?.kind === "text") assert.equal(repeated.nodes[0].final, false);
+
+  const distinct = projectStream([
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("FINAL_OUTPUT", { type: "result", result: "all done" }),
+  ], "CLAUDE", true);
+  assert.deepEqual(distinct.nodes.map((node) => node.kind), ["text", "text"]);
+  assert.equal(distinct.nodes[1]?.kind, "text");
+  if (distinct.nodes[1]?.kind === "text") {
+    assert.equal(distinct.nodes[1].text, "all done");
+    assert.equal(distinct.nodes[1].final, true);
+  }
+});
+
+test("CODEX final output does not repeat the last constituent of merged prose", () => {
+  const projection = projectStream([
+    event("MODEL_DELTA", { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "Ran the tests." } }, { source: "CODEX" }),
+    event("MODEL_DELTA", { type: "item.completed", item: { id: "message-2", type: "agent_message", text: "All 42 pass." } }, { source: "CODEX" }),
+    event("FINAL_OUTPUT", { type: "turn.completed" }, { source: "CODEX" }),
+  ], "CODEX", true);
+
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text"]);
+  assert.equal(projection.nodes[0]?.kind, "text");
+  if (projection.nodes[0]?.kind === "text") {
+    assert.equal(projection.nodes[0].text, "Ran the tests.\n\nAll 42 pass.");
+    assert.equal(projection.nodes[0].final, false);
+  }
+});
+
+test("projection message count follows merging and final-output dropping in a mixed stream", () => {
+  const events = [
+    event("MODEL_DELTA", {
+      type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "first paragraph" }] },
+    }),
+    event("MODEL_DELTA", {
+      type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "second paragraph" }] },
+    }),
+    event("FINAL_OUTPUT", { type: "result", result: "first paragraph\n\nsecond paragraph" }),
+  ];
+  const projection = projectStream(events, "CLAUDE", true);
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text"]);
+  assert.equal(projection.nodes[0]?.kind, "text");
+  if (projection.nodes[0]?.kind === "text") {
+    assert.equal(projection.nodes[0].text, "first paragraph\n\nsecond paragraph");
+    assert.equal(projection.nodes[0].final, false);
+  }
+  assert.equal(projection.counts.messages, 1);
+});
+
+test("projection turns adapter and prompt-delivery failures into error markers in stream order", () => {
+  const adapterError = event("ADAPTER_ERROR", { message: "stream disconnected" }, { source: "CLAUDE" });
+  const promptFailure = event("PROMPT_DELIVERY_FAILED", { message: "broken pipe", code: "EPIPE" }, { source: "RUNNER" });
+  const projection = projectStream([
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    adapterError,
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after error" }] } }),
+    promptFailure,
+  ], "CLAUDE", true);
+
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text", "marker", "text", "marker"]);
+  assert.equal(projection.nodes[1]?.kind, "marker");
+  assert.equal(projection.nodes[3]?.kind, "marker");
+  if (projection.nodes[1]?.kind === "marker" && projection.nodes[3]?.kind === "marker") {
+    assert.deepEqual(projection.nodes[1], {
+      kind: "marker", id: adapterError.id, at: adapterError.at, variant: "error", text: "stream disconnected",
+    });
+    assert.deepEqual(projection.nodes[3], {
+      kind: "marker", id: promptFailure.id, at: promptFailure.at, variant: "error", text: "broken pipe",
+    });
+  }
+});
+
+test("projection marks only the second and later process starts as resume boundaries", () => {
+  const starts = [
+    event("PROCESS_STARTED", {}, { source: "RUNNER" }),
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("PROCESS_STARTED", {}, { source: "RUNNER" }),
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "resumed" }] } }),
+  ];
+  const projection = projectStream(starts, "CLAUDE", true);
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text", "marker", "text"]);
+  assert.equal(projection.nodes[1]?.kind, "marker");
+  if (projection.nodes[1]?.kind === "marker") {
+    assert.equal(projection.nodes[1].variant, "info");
+    assert.equal(projection.nodes[1].text, "sessions.stream.resumed");
+  }
+});
+
+test("a PI completed user message becomes an input node with its source timestamp", () => {
+  const input = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "user", content: [{ type: "text", text: "continue with the repair" }], timestamp: 1786788190000 },
+  }, { source: "PI", at: "2026-08-15T10:03:00.000Z" });
+  const projection = projectStream([input], "PI", false);
+
+  assert.deepEqual(projection.nodes, [{
+    kind: "input", id: input.id, at: input.at, text: "continue with the repair",
+  }]);
+  assert.deepEqual(projection.counts, { messages: 0, toolCalls: 0, files: 0 });
+});
+
+test("only PI user completions become input nodes; assistant messages and other runners do not", () => {
+  const user = (runner: RunnerKind) => event("MODEL_COMPLETED", {
+    type: "message_end", message: { role: "user", content: [{ type: "text", text: "operator input" }], timestamp: 1 },
+  }, { source: runner });
+  const assistant = event("MODEL_COMPLETED", {
+    type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "agent response" }], timestamp: 2 },
+  }, { source: "PI" });
+
+  assert.equal(projectStream([user("CLAUDE")], "CLAUDE", false).nodes.some((node) => node.kind === "input"), false);
+  assert.equal(projectStream([user("CODEX")], "CODEX", false).nodes.some((node) => node.kind === "input"), false);
+  assert.equal(projectStream([assistant], "PI", false).nodes.some((node) => node.kind === "input"), false);
+});
+
+test("projection counts derive from the nodes it returns", () => {
+  const events = [
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("TOOL_STARTED", { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/a.ts" } }, { toolCallId: "read-1" }),
+    event("TOOL_COMPLETED", { tool_use_id: "read-1", content: "a", is_error: false }, { toolCallId: "read-1" }),
+    event("TOOL_STARTED", { type: "tool_use", id: "edit-1", name: "Edit", input: { file_path: "/b.ts" } }, { toolCallId: "edit-1" }),
+    event("TOOL_COMPLETED", { tool_use_id: "edit-1", content: "b", is_error: false }, { toolCallId: "edit-1" }),
+    event("FINAL_OUTPUT", { type: "result", result: "done" }),
+  ];
+  const projection = projectStream(events, "CLAUDE", true);
+  assert.deepEqual(projection.counts, { messages: 2, toolCalls: 2, files: 2 });
+  assert.equal(projection.nodes.filter((node) => node.kind === "text").length, projection.counts.messages);
+  assert.equal(projection.nodes.filter((node) => node.kind === "tools").reduce((sum, node) => sum + node.calls.length, 0), projection.counts.toolCalls);
+  assert.equal(projection.files.length, projection.counts.files);
+});
+
+test("projection drops noise, unknown events and malformed payloads without throwing", () => {
+  const noise = ["MODEL_STARTED", "PROVIDER_STATUS", "PROVIDER_RAW", "STDERR", "TOOL_PROGRESS", "PROCESS_STARTED", "NOT_A_REAL_EVENT"];
+  const malformed = [null, 42, "text", []];
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const events = noise.map((type) => event(type, { unexpected: true }));
+    for (const payload of malformed) {
+      events.push(
+        event("MODEL_DELTA", payload),
+        event("ADAPTER_ERROR", payload),
+        event("PROMPT_DELIVERY_FAILED", payload),
+        event("PROCESS_STARTED", payload),
+        event("PROCESS_STARTED", payload),
+      );
+    }
+    events.push(event("MODEL_COMPLETED", null), event("FINAL_OUTPUT", null));
+    assert.doesNotThrow(() => projectStream(events, runner, true), runner);
+    const projection = projectStream(events, runner, true);
+    assert.deepEqual(projection.nodes, [], runner);
+    assert.deepEqual(projection.counts, { messages: 0, toolCalls: 0, files: 0 }, runner);
+  }
+});
+
+test("projection preserves the normalizer's orphan tool completion fallback", () => {
+  const projection = projectStream([
+    event("TOOL_COMPLETED", null, { toolCallId: "orphan-tool" }),
+  ], "CLAUDE", true);
+
+  assert.equal(projection.nodes.length, 1);
+  assert.equal(projection.nodes[0]?.kind, "tools");
+  if (projection.nodes[0]?.kind === "tools") {
+    assert.equal(projection.nodes[0].calls[0]?.id, "orphan-tool");
+  }
+  assert.equal(projection.counts.toolCalls, 1);
+});
+
+test("line clamp keeps the first N lines and reports withheld lines", () => {
+  assert.deepEqual(clampLines("one\ntwo\nthree\nfour", 2), { text: "one\ntwo", dropped: 2 });
+  const short = "one\ntwo";
+  assert.deepEqual(clampLines(short, 2), { text: short, dropped: 0 });
+  assert.equal(TOOL_OUTPUT_MAX_LINES, 40);
+  assert.equal(TEXT_NODE_MAX_LINES, 12);
 });

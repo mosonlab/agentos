@@ -9,13 +9,12 @@ import { fatal } from "../lib/poll-state";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
-import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList } from "../components/chain-list";
 import {
-  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, SHOW_MORE_BUTTON, STACK,
+  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, TaskPill, Toggle, isLongText,
+  Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
 } from "../components/ui";
 import { retryable } from "../lib/board";
 import { Button } from "../components/ui/button";
@@ -198,23 +197,12 @@ export const Activity = ({ taskId }: { taskId: string }): ReactNode => {
  *  same job over rendered blocks. Whitespace-only bodies get the Prompt card's
  *  empty state rather than an empty box (spec §6). */
 export const StepOutput = ({ output }: { output: TaskStepOutput }): ReactNode => {
-  const [open, setOpen] = useState(false);
   const t = useT();
   const empty = output.body.trim().length === 0;
-  const long = isLongText(output.body, 10);
   return (
     <Card title={t("taskDetail.output.title")} extra={<Pill tone="grey">{output.kind}</Pill>}>
       {empty ? <EmptyState>{t("taskDetail.output.empty")}</EmptyState> : (
-        <div>
-          <div className={cn(!open && long && "max-h-[420px] overflow-hidden")}>
-            <Markdown text={output.body} />
-          </div>
-          {long ? (
-            <button type="button" className={SHOW_MORE_BUTTON} onClick={() => setOpen(!open)}>
-              <IconChevron open={open} />{t(open ? "ui.showMore.less" : "ui.showMore.more")}
-            </button>
-          ) : null}
-        </div>
+        <MarkdownClamp text={output.body} lines={10} maxHeightClass="max-h-[420px]" />
       )}
       <div className="mt-2.5">{t("taskDetail.output.updated", { at: timeAgo(output.updatedAt) })}</div>
     </Card>

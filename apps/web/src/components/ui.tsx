@@ -570,6 +570,31 @@ export const Markdown = ({ text }: { text: string }): ReactNode => {
   return <div className="text-[12.5px] leading-[1.75] text-secondary-foreground [&>*:last-child]:mb-0">{blocks}</div>;
 };
 
+/** A shared reveal control for rendered markdown, whose block elements cannot
+ * use ShowMore's single-text-node line clamp. */
+export const MarkdownClamp = ({ text, lines, maxHeightClass }: {
+  text: string;
+  lines: number;
+  maxHeightClass: string;
+}): ReactNode => {
+  const [open, setOpen] = useState(false);
+  const t = useT();
+  const long = isLongText(text, lines);
+  const closedText = long ? text.split("\n").slice(0, lines).join("\n") : text;
+  return (
+    <div>
+      <div className={cn(!open && long && maxHeightClass, !open && long && "overflow-hidden")}>
+        <Markdown text={open ? text : closedText} />
+      </div>
+      {long ? (
+        <button type="button" className={SHOW_MORE_BUTTON} onClick={() => setOpen((current) => !current)}>
+          <IconChevron open={open} />{t(open ? "ui.showMore.less" : "ui.showMore.more")}
+        </button>
+      ) : null}
+    </div>
+  );
+};
+
 export const Label = ({ value }: { value: string }): ReactNode => <span className="text-muted-foreground">{titleCase(value)}</span>;
 
 /* --------------------------------------------------------------- overlays */
