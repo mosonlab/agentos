@@ -30,6 +30,7 @@ failure rather than a silent inclusion.
 | --- | --- | --- |
 | First-party source, tests, configuration and manifests | the majority | Written for this repository. MIT, per `LICENSE`. |
 | Third-party source, vendored | 14 files | shadcn/ui. See below. |
+| Chain prompts carrying upstream text | `agents/roles/`, `agents/templates/` | mattpocock/skills. See below. |
 | Data fixtures | 5 files | See below. |
 | Images, fonts, audio, video, icons, compiled binaries, archives | **0** | There are none. |
 
@@ -85,6 +86,18 @@ These files import `@radix-ui/*`, `class-variance-authority`, `clsx`,
 `tailwind-merge` and `lucide-react`. Those are installed dependencies, not
 vendored code; they are listed with their licenses in `THIRD_PARTY_NOTICES.md`
 and are not redistributed by this repository.
+
+**mattpocock/skills prompts** — the chain role and step prompts under
+`agents/roles/` and `agents/templates/` carry verbatim paragraphs from five
+upstream skills, wrapped in paragraphs written here for this platform's
+contracts. No file is wholly upstream and none is wholly first-party, so these
+are listed as a body rather than hashed per file. Upstream baseline:
+`mattpocock/skills` at commit `c75f10c`. Upstream copyright:
+`Copyright (c) 2026 Matt Pocock`; the full notice text is in
+`THIRD_PARTY_NOTICES.md`.
+
+Disposition: **published**, under the combined grant of the upstream MIT license
+and this repository's own.
 
 ## Data fixtures
 

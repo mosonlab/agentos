@@ -2,7 +2,7 @@
 
 Source-of-truth files for canonical agent prompts and initial runtime defaults, the mechanical merge sentinel, and task-template step prompts. The seed script imports these into the `Agent`, join, and `TaskTemplateStep` tables; `packages/db/prisma/seed.ts` is the consumer. Models and runners changed by the operator in the console are persisted runtime overrides and are not replaced by seed or canonical prompt sync. Skills remain an API-managed concept (`Skill` / `AgentSkill`), but no canonical skill is seeded from this directory.
 
-All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from Danny Postma's talk); none are his verbatim files.
+All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from Danny Postma's talk); none are his verbatim files. The chain prompts with an upstream counterpart in [mattpocock/skills](https://github.com/mattpocock/skills) do carry that text verbatim, wrapped in paragraphs written here for this platform's contracts; the notice is in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
 ## Layout
 

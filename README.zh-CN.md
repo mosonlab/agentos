@@ -164,5 +164,10 @@ provider 作出兼容性承诺。
 本项目是受 Danny Postma 的视频 *How I Built My Own AgentOS on Claude's Agent
 SDK (So You Can Too)*（2026）启发的独立实现，从视频中的想法出发从零构建。
 
+任务链的角色与步骤提示词则是另一种性质的欠账：其行文主体来自
+[mattpocock/skills](https://github.com/mattpocock/skills) 的五个技能，逐字沿用，
+外面包着为本平台契约另写的段落。上游以 MIT 授权，`Copyright (c) 2026 Matt
+Pocock`，声明在 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
 本快照以 [MIT License](LICENSE) 授权；快照边界由
 [`public-snapshot.json`](public-snapshot.json) 定义。
