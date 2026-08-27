@@ -14,6 +14,7 @@ import { AgentDetailPage, AgentsPage } from "./pages/Agents";
 import { ArchivedPage } from "./pages/Archived";
 import { AutomationsPage } from "./pages/Automations";
 import { ConnectionsPage } from "./pages/Connections";
+import { CostsPage } from "./pages/Costs";
 import { GoalDetailPage, GoalsPage } from "./pages/Goals";
 import { InboxPage, InboxThreadPage } from "./pages/Inbox";
 import { ProjectDetailPage, ProjectsPage } from "./pages/Projects";
@@ -35,6 +36,7 @@ export const ROUTES: Array<{ pattern: string; render: (params: Record<string, st
   { pattern: "/archived", render: () => <ArchivedPage /> },
   { pattern: "/sessions", render: () => <SessionsPage /> },
   { pattern: "/sessions/:sessionId", render: (params) => <SessionDetailPage sessionId={params.sessionId ?? ""} /> },
+  { pattern: "/costs", render: () => <CostsPage /> },
   { pattern: "/agents", render: () => <AgentsPage /> },
   { pattern: "/agents/:agentId", render: (params) => <AgentDetailPage agentId={params.agentId ?? ""} /> },
   { pattern: "/inbox", render: () => <InboxPage /> },
