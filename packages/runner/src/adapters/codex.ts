@@ -103,7 +103,7 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
 };
 
 const isReconnectStatus = (message: string | null): boolean =>
-  /^Reconnecting\.\.\. [1-5]\/5$/u.test(message?.trim() ?? "");
+  /^Reconnecting\.\.\. \d+\/\d+$/u.test(message?.trim() ?? "");
 
 export const parseCodexEvent = (
   state: AdapterState,
@@ -153,7 +153,6 @@ export const parseCodexEvent = (
   } else if (type === "turn.completed") {
     state.terminalEventSeen = true;
     state.terminalSuccess = !state.sawError;
-    if (state.terminalSuccess && isReconnectStatus(state.providerError)) state.providerError = null;
     emitAdapterEvent(state, sink, "FINAL_OUTPUT", event);
   } else emitAdapterEvent(state, sink, "PROVIDER_STATUS", event);
 };

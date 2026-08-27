@@ -1211,7 +1211,7 @@ test("Codex structured errors take precedence over stderr warnings", () => {
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
 });
 
-test("Codex clears recovered reconnect evidence after successful terminal completion", () => {
+test("Codex treats recovered reconnect evidence as provisional after terminal completion", () => {
   const state = parseCodexTranscript([
     { type: "error", message: "Reconnecting... 1/5" },
     { type: "error", message: "Reconnecting... 2/5" },
@@ -1222,8 +1222,23 @@ test("Codex clears recovered reconnect evidence after successful terminal comple
 
   assert.equal(evidence.terminalEventSeen, true);
   assert.equal(evidence.terminalSuccess, true);
-  assert.equal(evidence.providerError, null);
+  assert.equal(evidence.providerError, "Reconnecting... 2/5");
   assert.equal(adapterExecutionSucceeded(evidence), true);
+});
+
+test("Codex reconnect classification follows the counter shape instead of a fixed retry budget", () => {
+  const cases = [
+    { message: "Reconnecting... 2/8", terminalSuccess: true },
+    { message: "stream disconnected", terminalSuccess: false },
+  ] as const;
+
+  for (const { message, terminalSuccess } of cases) {
+    const state = parseCodexTranscript([
+      { type: "error", message },
+      { type: "turn.completed" },
+    ]);
+    assert.equal(state.terminalSuccess, terminalSuccess, message);
+  }
 });
 
 test("Codex preserves reconnect evidence when the stream ends before completion", () => {
