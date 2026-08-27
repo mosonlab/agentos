@@ -66,6 +66,9 @@ export type BoardCard = {
     id: string;
     runNumber: number;
     status: string;
+    /** The model snapshot taken when the run was claimed, not the assignee's
+     *  current configuration: a re-tiered agent must not relabel a past run. */
+    model: string;
     costUsd: string | null;
     startedAt: Date | null;
     endedAt: Date | null;
@@ -242,6 +245,7 @@ export const boardCard = (
           id: run.id,
           runNumber: run.runNumber,
           status: run.status,
+          model: run.model,
           costUsd: decimal(run.session?.costUsd),
           startedAt: run.session?.startedAt ?? null,
           endedAt: run.session?.endedAt ?? null,
