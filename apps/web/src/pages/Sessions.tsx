@@ -289,14 +289,16 @@ export const SessionsPage = (): ReactNode => {
 
   const dayGroups = useMemo(() => filterAndGroupSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
   const agentOptions = useMemo(() => sessionAgentOptions(sessions, t("sessions.filter.all")), [sessions, t]);
-  const statusOptions = useMemo(() => SESSION_STATUS_FILTERS.map((value) => ({
-    value,
-    label: value === ALL_SESSION_FILTER ? t("sessions.filter.all")
-      : value === "live" ? t("sessions.filter.live")
-        : value === "done" ? t("sessions.filter.done")
-          : value === "failed" ? t("sessions.filter.failed")
-            : t("sessions.filter.cancelled"),
-  })), [t]);
+  const statusOptions = useMemo(() => {
+    const labels: Record<SessionStatusFilter, string> = {
+      all: t("sessions.filter.all"),
+      live: t("sessions.filter.live"),
+      done: t("sessions.filter.done"),
+      failed: t("sessions.filter.failed"),
+      cancelled: t("sessions.filter.cancelled"),
+    };
+    return SESSION_STATUS_FILTERS.map((value) => ({ value, label: labels[value] }));
+  }, [t]);
   const filtersActive = agentFilter !== ALL_SESSION_FILTER || statusFilter !== ALL_SESSION_FILTER;
   const seenState = seenSnapshot?.projectId === projectId ? seenSnapshot.state : null;
 
