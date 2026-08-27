@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build -w @agentos/db",
-    "test": "node --import tsx --test ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY} src/*.test.ts",
+    "test": "node --import tsx --test src/*.test.ts ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },
