@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { AssigneeType, Prisma, RunStatus } from "@prisma/client";
 
 export type LegacyStepTuple = readonly [
@@ -24,10 +26,32 @@ export type LegacyStepTuple = readonly [
  * `pre-zero-gate`: the compound graph that existed immediately before the
  * spec and revise-plan approval gates were removed (2026-08-26 ruling); the
  * direct graph did not change in that transition.
+ * `pre-blind-review-retirement`: the graphs that existed immediately before the
+ * merge tail's independent blind review and the release-authority signature
+ * layer were retired (2026-08-26 ruling). This is the first generation whose
+ * structure is identical to its successor's; it is told apart by
+ * `promptDigest`, and the note on that field explains why that is sound.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
   shape: readonly LegacyStepTuple[];
+  /**
+   * The prompt generation this entry retires, as a digest over its ordered step
+   * prompts, or absent when the structure alone identifies it.
+   *
+   * A structural change is its own evidence that a graph was retired, so the
+   * generations that carry one need nothing more. A prompt-only change is not:
+   * the outgoing and incoming graphs have identical structure, so without this
+   * field the successor would match its own predecessor's entry and every sync
+   * would roll the row over again, forever.
+   *
+   * Registering it stays a deliberate act. This is not "the prompt changed, so
+   * roll" -- nothing computes a rollover from drift. An operator writes the
+   * outgoing generation's digest here by hand, exactly as they write a shape,
+   * and a prompt edit with no entry still refuses the deploy rather than
+   * migrating anything on its own.
+   */
+  promptDigest?: string;
 }>;
 
 export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly LegacyTemplateGeneration[]>> = {
@@ -55,6 +79,21 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
         ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 5],
         ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 6],
         ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 7],
+      ],
+    },
+    {
+      marker: "pre-blind-review-retirement",
+      // Structurally identical to the current graph on purpose: this transition
+      // changed prompts only. `promptDigest` is what tells the two apart.
+      promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
+      shape: [
+        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 4],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
       ],
     },
   ],
@@ -111,7 +150,48 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
         ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
       ],
     },
+    {
+      marker: "pre-blind-review-retirement",
+      // Structurally identical to the current graph on purpose: this transition
+      // changed prompts only. `promptDigest` is what tells the two apart.
+      promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
+      shape: [
+        ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
+        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
+        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
+        ["plan-reviser", AssigneeType.AGENT, false, "revised-plan", true, false, null, 4],
+        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
+        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 9],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+      ],
+    },
   ],
+};
+
+/**
+ * The prompt generation of an ordered step set, as one digest.
+ *
+ * Ordering is by `stepIndex` rather than by array order so a caller cannot
+ * change the answer by handing the same graph back in a different order, and
+ * each step contributes its index as well as its text so that moving a prompt
+ * between two steps is a different generation from leaving it in place. The
+ * separators are NUL because a prompt body can contain any printable run,
+ * including one that would otherwise let two different step sets serialize to
+ * the same bytes.
+ */
+export const templatePromptGenerationDigest = (
+  steps: readonly { stepIndex: number; prompt: string }[],
+): string => {
+  const hash = createHash("sha256");
+  for (const step of [...steps].sort((left, right) => left.stepIndex - right.stepIndex)) {
+    hash.update(`${String(step.stepIndex)}\u0000${step.prompt}\u0000`);
+  }
+  return hash.digest("hex");
 };
 
 export const legacyGenerationMarkerForTemplateName = (templateName: string): string | null => {
@@ -201,17 +281,32 @@ const shapeMatches = (
 /**
  * The marker of the retired generation this persisted graph is, or null when
  * it is none of them (the caller then checks it against the current source
- * graph). Generations never overlap: each transition changed at least one
- * compared field, so at most one shape can match.
+ * graph).
+ *
+ * Generations never overlap. A generation that changed the shape is told apart
+ * by the shape; a generation that changed only the prompts is told apart by
+ * `promptDigest`, which its successor by construction does not share. So at
+ * most one entry can match, and the current source graph matches none.
  */
+export const legacyGenerationMatches = (
+  generation: LegacyTemplateGeneration,
+  steps: readonly PersistedTransitionStep[],
+): boolean => {
+  if (!shapeMatches(steps, generation.shape)) return false;
+  // An entry without a digest is identified by its shape alone. An entry with
+  // one is a prompt-only transition, whose successor has the same shape, so the
+  // digest is the whole difference between "this is the graph we retired" and
+  // "this is the graph that replaced it".
+  if (generation.promptDigest === undefined) return true;
+  return generation.promptDigest === templatePromptGenerationDigest(steps);
+};
+
 export const matchedLegacyGeneration = (
   templateName: string,
   steps: readonly PersistedTransitionStep[],
-): string | null => {
-  const generations = LEGACY_TEMPLATE_GENERATIONS[templateName];
-  if (!generations) return null;
-  return generations.find((generation) => shapeMatches(steps, generation.shape))?.marker ?? null;
-};
+): string | null =>
+  LEGACY_TEMPLATE_GENERATIONS[templateName]
+    ?.find((generation) => legacyGenerationMatches(generation, steps))?.marker ?? null;
 
 /**
  * Return a named refusal reason when a canonical row is neither an exact

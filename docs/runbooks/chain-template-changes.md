@@ -62,7 +62,7 @@ Two narrow exceptions sit beside those shapes. `ASSIGNEE_TRANSITIONS`,
 `sync-canonical-prompts.ts` name one step at a time and let it adopt a new
 assignee, display name or base pin in place instead of refusing. Each entry is a
 one-shot for a migration that has already happened; do not reach for one to
-avoid registering a legacy shape.
+avoid registering a legacy generation.
 
 So a change that alters the *shape* of a template — adding, removing or
 reordering a step, or moving a layer, a base pin or an output kind — has to
@@ -82,10 +82,40 @@ Once any task has been created from a step, sync refuses to change that step's
 prompt at all, so a text-only edit to a template that has already run stops the
 deploy exactly like structural drift does.
 
-The consequence is worth stating plainly: on a template with live history, there
-is no prompt-only change. Rewriting a prompt has to ride a shape change that
-rolls the row over — the new canonical row starts with no tasks and carries the
-new text, and the old row keeps the text its own chains were dispatched under.
+Rewriting it therefore has to roll the row over: the new canonical row starts
+with no tasks and carries the new text, and the old row keeps the text its own
+chains were dispatched under.
+
+What has changed is what a rollover can be registered *as*. Until 2026-08-26 a
+rollover could only be registered as a shape, so a prompt-only rewrite had no
+way to express itself and had to ride an unrelated structural change. A
+generation may now also be registered by its **prompt generation**: the
+`promptDigest` field on an entry in
+`packages/db/src/canonical-template-transition.ts`, a digest over that
+generation's ordered step prompts. An entry carrying one matches a persisted
+graph only when the shape *and* the digest agree, which is what lets the
+outgoing and incoming graphs be structurally identical without the successor
+matching its own predecessor's entry and rolling over again on every deploy.
+This supersedes the earlier rule that a template with instantiation history
+admits no prompt-only change (operator ruling, 2026-08-26).
+
+Structural changes are unaffected: they are still registered as a shape, and an
+entry with no `promptDigest` still matches on shape alone.
+
+Registering one stays a deliberate act, and this is the part not to misread.
+Nothing computes a rollover from drift. The digest of the outgoing generation is
+written into the registry by hand, exactly as a shape is, and a prompt edit with
+no registered entry still stops the deploy rather than migrating anything on its
+own. The freeze did not become advisory; it became expressible.
+
+One consequence to plan for: the rolled-over row keeps its own prompt, so tasks
+already instantiated from it keep the text they were created with. That is
+correct for a task that has run, and wrong for one that has not yet started when
+the old text has become false. Startup reconciliation
+(`packages/api/src/rolled-prompt-descriptions.ts`) recomposes the description of
+not-yet-started tasks from the current canonical step, and only across
+prompt-only generations, where the shape is identical and a step ordinal is
+guaranteed to mean the same node.
 
 ## What a template change does and does not affect
 
@@ -118,7 +148,10 @@ the outgoing row's chains to be finished.
    `sync-canonical-prompts.ts` and `seed.ts`.
 4. For a shape change, add the outgoing graph to
    `packages/db/src/canonical-template-transition.ts`, mint its legacy name,
-   and teach the name-plus-ordinal predicates listed above about it.
+   and teach the name-plus-ordinal predicates listed above about it. For a
+   prompt-only change, add the outgoing graph the same way and give the entry
+   the `promptDigest` of the generation it retires; the shape is the current
+   one, unchanged, so the predicates need nothing new.
 5. Run `npm run typecheck`, `npm run lint`, `npm test --workspaces`, and the
    database suites `npm run test:db -w @agentos/db` and
    `npm run test:db -w @agentos/api` against a scratch PostgreSQL.

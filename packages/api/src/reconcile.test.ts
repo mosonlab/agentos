@@ -154,6 +154,7 @@ test("startup reconciliation does not fail when archived notice persistence fail
     // The retired-park sweep runs in the same startup pass and reads these.
     task: { findMany: async () => [] },
     inboxMessage: { findMany: async () => [] },
+    taskTemplate: { findMany: async () => [] },
   } as unknown as PrismaClient;
   const originalError = console.error;
   let logged = "";
@@ -172,6 +173,7 @@ test("startup reconciliation does not fail when archived notice persistence fail
         closedResignMessages: 0,
         reviewTasksWithActiveRuns: 0,
       },
+      rolledPrompts: { rewritten: 0, alreadyCurrent: 0, unresolvedVariables: 0 },
     });
     assert.match(logged, /Archived-run startup notice failed.*audit unavailable/);
   } finally {

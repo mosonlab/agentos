@@ -112,7 +112,8 @@ const retryableTemplateUniqueConflict = (error: unknown): boolean => {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 };
 
-const interpolate = (source: string, variables: Record<string, string>): string => source.replace(
+/** Substitute {{name}} placeholders, leaving an unknown name in place so it stays visible. */
+export const interpolate = (source: string, variables: Record<string, string>): string => source.replace(
   /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g,
   (_match, name: string) => variables[name] ?? `{{${name}}}`,
 );
