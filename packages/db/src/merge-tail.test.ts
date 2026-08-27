@@ -159,6 +159,7 @@ test("the defense list covers tracked merge-tail machinery", () => {
     assert.notEqual(defenseListReason(path), null, path);
   }
   assert.equal(defenseListReason("apps/web/src/app.tsx"), null);
+  assert.equal(defenseListReason("scripts/regression-verification.sh"), "merge-tail-machinery");
 });
 
 test("renames preserve guarded source identities", () => {
