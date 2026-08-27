@@ -4,6 +4,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./adapters": {
+      "types": "./src/adapters.ts",
+      "import": "./dist/adapters.js"
+    },
+    "./api": {
+      "types": "./src/api.ts",
+      "import": "./dist/api.js"
+    },
     "./reclaim": {
       "types": "./src/reclaim.ts",
       "import": "./dist/reclaim.js"

@@ -7,9 +7,11 @@ import type { Prisma } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
-import { parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
+import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
+/** Migration-only marker: pre-whitelist template rows retain the old all-output handoff. */
+export const LEGACY_ALL_PRIOR_OUTPUTS = "__legacy_all_prior_outputs__";
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   {
     name: INTEGRATOR_TEMPLATE_NAME,
@@ -30,6 +32,7 @@ const STRUCTURAL_FIELDS = [
   "approvalGate",
   "outputKind",
   "attachmentsFromPrevious",
+  "priorOutputKinds",
   "opensPullRequest",
   "baseFromStepIndex",
   "spawnPolicy",
@@ -42,6 +45,7 @@ export type TemplateStepSource = {
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
   opensPullRequest: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.InputJsonObject | null;
@@ -60,6 +64,7 @@ export type PersistedTemplateStepStructure = {
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
   opensPullRequest: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
@@ -77,6 +82,7 @@ export const templateStepStructureDifferences = (
     ["approvalGate", actual.approvalGate, expected.approvalGate],
     ["outputKind", actual.outputKind, expected.outputKind],
     ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
+    ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
     ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
     ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
     ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
@@ -155,6 +161,7 @@ export const loadTemplateStepSources = async (
       approvalGate: parseBoolean(requiredFrontmatter(document, "approvalGate", filePath), filePath, "approvalGate"),
       outputKind: requiredFrontmatter(document, "outputKind", filePath),
       attachmentsFromPrevious: parseBoolean(requiredFrontmatter(document, "attachmentsFromPrevious", filePath), filePath, "attachmentsFromPrevious"),
+      priorOutputKinds: parseInlineList(document.attributes.priorOutputKinds, filePath, "priorOutputKinds"),
       opensPullRequest: parseBoolean(requiredFrontmatter(document, "opensPullRequest", filePath), filePath, "opensPullRequest"),
       baseFromStepIndex: parseOptionalStepIndex(requiredFrontmatter(document, "baseFromStepIndex", filePath), filePath),
       spawnPolicy: parseSpawnPolicy(requiredFrontmatter(document, "spawnPolicy", filePath), filePath),
@@ -174,6 +181,22 @@ export const loadTemplateStepSources = async (
   const expectedIndexes = Array.from({ length: sourceSpec.stepCount }, (_, index) => index + 1);
   if (JSON.stringify(indexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`${templateRoot} stepIndex values must be contiguous from 1 through ${sourceSpec.stepCount}`);
+  }
+  for (const step of steps) {
+    const duplicatePriorKind = step.priorOutputKinds.find((kind, index) => step.priorOutputKinds.indexOf(kind) !== index);
+    if (duplicatePriorKind) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} contains duplicate priorOutputKinds ${duplicatePriorKind}`);
+    }
+    const earlierOutputKinds = new Set(steps
+      .filter((candidate) => candidate.stepIndex < step.stepIndex)
+      .map((candidate) => candidate.outputKind));
+    const nonPriorKind = step.priorOutputKinds.find((kind) => !earlierOutputKinds.has(kind));
+    if (nonPriorKind) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} priorOutputKinds ${nonPriorKind} does not reference an earlier step`);
+    }
+    if (step.outputKind === "blind-findings" && step.priorOutputKinds.length > 0) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} blind-findings cannot declare priorOutputKinds`);
+    }
   }
   for (let index = 1; index < steps.length; index += 1) {
     const previous = steps[index - 1]!;
