@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/*.test.ts"
+    "test": "node --import tsx --test src/*.test.ts ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
