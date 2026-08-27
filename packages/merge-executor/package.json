@@ -7,10 +7,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build -w @agentos/github-client && npm run build -w @agentos/db",
-    "test": "node --import tsx --test src/*.test.ts",
+    "test": "node --import tsx --test src/*.test.ts ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}",
     "start": "node dist/index.js",
     "preschema-gate": "npm run build -w @agentos/github-client",
-    "schema-gate": "MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED=1 node --import tsx --test src/schema-gate.test.ts"
+    "schema-gate": "MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED=1 node --import tsx --test src/schema-gate.test.ts ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}"
   },
   "dependencies": {
     "@agentos/db": "0.3.0",
