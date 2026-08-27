@@ -145,6 +145,7 @@ test("a run that has already started refuses a second start as not-active", asyn
     fencingToken: seeded.run.fencingToken,
     adapterVersion: "1",
     cliVersion: "1",
+    promptHash: "a".repeat(64),
     manifest: {},
     workspacePath: "/scratch/started",
   });

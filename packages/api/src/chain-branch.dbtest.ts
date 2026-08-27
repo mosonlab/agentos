@@ -122,6 +122,7 @@ const startRunViaRoute = async (claim: any, branch: string): Promise<Response> =
       fencingToken: claim.fencingToken,
       adapterVersion: "test-adapter",
       cliVersion: "test-cli",
+      promptHash: "a".repeat(64),
       manifest: {},
       workspacePath: `${isolatedRoot}/${claim.run.id}`,
       branch,

@@ -116,6 +116,7 @@ test("a missing CLI blocks only its backend, dedupes the outage, and recovers on
     adapterVersion: "test",
     cliVersion: "codex-cli test",
     authMode: "test",
+    promptHash: "a".repeat(64),
     manifest: {},
     workspacePath: "/tmp/availability-test",
   });

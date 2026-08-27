@@ -1,7 +1,7 @@
 import { appendFile, chmod, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
 import { RUNNER_DEFINITIONS } from "./adapters.js";
@@ -9,7 +9,7 @@ import { workspaceEnvironment } from "./adapters/environment.js";
 import type { SessionConfigOptions } from "./adapters/session-config.js";
 import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
-import { runCommand, type CommandOptions } from "./exec.js";
+import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
 import { type RetryOptions } from "./network-retry.js";
 import {
   ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
@@ -26,6 +26,67 @@ export type Workspace = {
 };
 
 const inside = (root: string, candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
+
+const assertMaterializationPathIsPlain = async (workspace: string, path: string): Promise<void> => {
+  const parentParts = relative(workspace, dirname(path)).split(sep).filter(Boolean);
+  let current = workspace;
+  for (const part of parentParts) {
+    current = join(current, part);
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) throw new Error(`Prepared specification parent ${current} is a symlink`);
+      if (!info.isDirectory()) throw new Error(`Prepared specification parent ${current} is not a directory`);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw error;
+    }
+  }
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Prepared specification target ${path} is not a regular file`);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+};
+
+const materializePreparedSpecification = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  workspace: Workspace,
+  execute: WorkspaceCommandExecutor,
+  env: NodeJS.ProcessEnv,
+): Promise<Workspace> => {
+  const prepared = claim.specificationMaterialization;
+  if (!prepared) return workspace;
+  if (workspace.pinnedBaseSha) throw new Error("Pinned review workspace cannot materialize a direct implementation specification");
+  const expectedPath = `.chain/${workspace.branch}/spec.md`;
+  if (prepared.kind !== "direct-implementation" || prepared.path !== expectedPath) {
+    throw new Error(`Prepared specification path ${prepared.path} does not match claimed branch ${workspace.branch}`);
+  }
+  const absolutePath = resolve(workspace.path, prepared.path);
+  if (!inside(workspace.path, absolutePath)) throw new Error("Prepared specification escaped the controlled workspace");
+  await assertMaterializationPathIsPlain(workspace.path, absolutePath);
+
+  await execute(
+    config,
+    "/bin/sh",
+    ["-c", 'umask 022; mkdir -p -- "$1"; cat > "$2"', "agentos-specification", dirname(absolutePath), absolutePath],
+    workspace.path,
+    env,
+    { input: prepared.body },
+  );
+  await execute(config, "git", ["add", "-f", "--", prepared.path], workspace.path, env);
+  const status = await execute(config, "git", ["status", "--porcelain", "--", prepared.path], workspace.path, env);
+  if (!status) return workspace;
+  await execute(
+    config,
+    "git",
+    platformCommitArgs("Materialize direct-chain specification", prepared.path),
+    workspace.path,
+    env,
+  );
+  return { ...workspace, baseSha: await execute(config, "git", ["rev-parse", "HEAD"], workspace.path, env) };
+};
 
 export type WorkspaceCommandExecutor = (
   config: RunnerConfig,
@@ -310,8 +371,9 @@ export const provisionWorkspace = async (
         return { path: workspace, branch, baseSha };
       },
     );
+    const materialized = await materializePreparedSpecification(config, claim, provisioned, execute, env);
     await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
-    return provisioned;
+    return materialized;
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);
     throw error;

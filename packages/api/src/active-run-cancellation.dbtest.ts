@@ -261,6 +261,7 @@ test("start and cancellation acknowledgement serialize to one Run and Session ou
         fencingToken: seeded.run.fencingToken,
         adapterVersion: "test",
         cliVersion: "test",
+        promptHash: "a".repeat(64),
         manifest: {},
         workspacePath: "/scratch/start-cancel-race",
         runtimeHandle: "test:123",

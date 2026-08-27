@@ -6,6 +6,7 @@ import {
   prepareSpecificationVerification,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
+  specificationMaterializationForDirectImplementation,
   specificationPathForBranch,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
@@ -83,6 +84,30 @@ test("tampered materialization returns one stable operator-visible reason", asyn
   );
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
   assert.match(verdict?.message ?? "", /Spec transcription claim refused: spec-transcription-mismatch/u);
+});
+
+test("direct implementation materialization uses only the marker-delimited authoritative brief", () => {
+  const description = composeTemplateTaskDescription({
+    prompt: "Implement the feature below.",
+    featureBrief: "the exact brief",
+    priorOutputKinds: [],
+    outputKind: "implementation",
+  });
+  assert.deepEqual(specificationMaterializationForDirectImplementation({
+    description,
+    templateId: "direct-template",
+    chainId: "direct-chain",
+    templateStep: {
+      stepIndex: 1,
+      outputKind: "implementation",
+      priorOutputKinds: [],
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  }, "feature/direct"), {
+    kind: "direct-implementation",
+    path: ".chain/feature/direct/spec.md",
+    body: "the exact brief",
+  });
 });
 
 test("a transient repository failure retries with backoff and then accepts faithful content", async () => {
@@ -216,7 +241,7 @@ test("direct authority is read from the implementation task and compound authori
   const directTx = {
     task: { findMany: async () => [{
       description,
-      templateStep: { outputKind: "implementation", attachmentsFromPrevious: false },
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
@@ -239,11 +264,11 @@ test("direct authority is read from the implementation task and compound authori
   const compoundTx = {
     task: { findMany: async () => [{
       description: "specification task",
-      templateStep: { outputKind: "spec", attachmentsFromPrevious: false },
+      templateStep: { outputKind: "spec", priorOutputKinds: [] },
       stepOutput: { kind: "spec", body: JSON.stringify({ schemaVersion: 1, spec: "approved compound spec" }) },
     }, {
       description: "implementation task",
-      templateStep: { outputKind: "implementation", attachmentsFromPrevious: true },
+      templateStep: { outputKind: "implementation", priorOutputKinds: ["spec"] },
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
@@ -274,7 +299,7 @@ test("an unsupported repository remote is refused before repository I/O with a n
   const tx = {
     task: { findMany: async () => [{
       description,
-      templateStep: { outputKind: "implementation", attachmentsFromPrevious: false },
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];

@@ -16,6 +16,15 @@ export const KILL_GRACE_MS = 2_000;
  */
 export const KILL_OVERHEAD_MS = 2 * KILL_GRACE_MS;
 
+export const platformCommitArgs = (message: string, pathspec?: string): string[] => [
+  "-c", "user.name=AgentOS Runner",
+  "-c", "user.email=runner@agentos.local",
+  "-c", "commit.gpgSign=false",
+  "-c", "core.hooksPath=/dev/null",
+  "commit", "--no-verify", "-m", message,
+  ...(pathspec === undefined ? [] : ["--", pathspec]),
+];
+
 export type CommandOptions = {
   /**
    * Wall-clock ceiling for the command. Omitting it means "no timeout", which

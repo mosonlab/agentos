@@ -300,6 +300,11 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.doesNotMatch(directRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directImplementation = directTemplateSteps[0]!.prompt;
   assert.match(directImplementation, /brief is the specification of record/u);
+  assert.doesNotMatch(directImplementation, /Copy the brief verbatim/u);
+  assert.match(
+    directImplementation,
+    /The platform materializes `\.chain\/\{\{branchName\}\}\/spec\.md` as the specification of record; leave it untouched\./u,
+  );
   assert.match(directImplementation, /at least two child-writer branches need integration/u);
   assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
   assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
