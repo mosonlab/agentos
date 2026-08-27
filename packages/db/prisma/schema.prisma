@@ -579,6 +579,7 @@ model Task {
   goalEventIdentities     GoalExecutionEvent[] @relation("GoalEventTaskIdentity")
   goalExecutionEvents     GoalExecutionEvent[]
   mergeRecoveryAttempts   MergeRecoveryAttempt[]
+  gateAttestations        MergeGateAttestation[]
 
   @@unique([chainId, chainIndex])
   @@unique([id, projectId])
@@ -662,6 +663,35 @@ model TaskStepOutput {
   task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
   run       Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
 
+  @@index([runId])
+}
+
+/// One merge gate verdict, bound to the commit the gate signed.
+///
+/// `scripts/merge-gate.sh` prints `MERGE GATE: PASS <oid>`, and a Regression
+/// verification run copies that line verbatim into its output. Ingestion writes
+/// the line here in the same fenced transaction that persists the output, so the
+/// attestation and the evidence it was derived from can never disagree.
+///
+/// Both merge authorization channels read this table. Before it existed the
+/// Inbox and PATCH channels built an authorization from the card body alone and
+/// never saw a gate verdict at all, so a human approval could authorize a head
+/// no gate had signed. `(chainId, headSha)` is unique because an attestation is
+/// a statement about a commit, not about the run that reported it.
+model MergeGateAttestation {
+  id          String   @id @default(cuid())
+  chainId     String
+  taskId      String
+  runId       String?
+  headSha     String
+  baseHeadSha String
+  proof       String
+  createdAt   DateTime @default(now())
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  run         Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@unique([chainId, headSha])
+  @@index([taskId])
   @@index([runId])
 }
 
@@ -891,6 +921,7 @@ model Run {
   goalLineageTask       Task?                @relation("RunGoalLineageIdentity", fields: [taskId, goalId, goalGeneration, goalIteration], references: [id, goalId, goalGeneration, goalIteration], onDelete: Restrict)
   goalEventIdentities   GoalExecutionEvent[] @relation("GoalEventRunIdentity")
   goalExecutionEvents   GoalExecutionEvent[]
+  gateAttestations      MergeGateAttestation[]
 
   @@unique([taskId, runNumber])
   @@unique([id, projectId])
