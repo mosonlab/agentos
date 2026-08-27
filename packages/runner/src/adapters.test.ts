@@ -147,6 +147,14 @@ test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
+test("buildPrompt appends operator notes after the task context", () => {
+  const prompt = buildPrompt({
+    ...claim,
+    operatorNotes: ["Please preserve the existing API shape.", "The deployment window closes at 5pm."],
+  });
+  assert.match(prompt, /Task: Ship it[\s\S]*Do the work[\s\S]*Operator notes:\n- Please preserve the existing API shape\.\n- The deployment window closes at 5pm\./u);
+});
+
 test("buildPrompt makes the platform-pinned pull request base comparison and merge authority", () => {
   const retriedClaim = {
     ...claim,

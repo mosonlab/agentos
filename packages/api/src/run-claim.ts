@@ -13,6 +13,7 @@ import {
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
+  Prisma,
   type PrismaClient,
   RunStatus,
   SessionExecutionStatus,
@@ -69,6 +70,47 @@ export type ClaimRunInput = {
 };
 
 const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
+
+const MAX_OPERATOR_NOTES = 10;
+const MAX_OPERATOR_NOTES_CHARS = 4_000;
+
+/**
+ * Operator notes are a between-attempt handoff. They deliberately use the
+ * previous Run's creation time as the lower bound: a note written while a Run
+ * is in flight cannot interrupt that live provider session, but is still
+ * available if that Run needs another attempt. The newest rows are selected
+ * first so the character bound never drops the most recent operator context.
+ */
+const operatorNotesForClaim = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  runNumber: number,
+): Promise<string[]> => {
+  if (runNumber <= 1) return [];
+  const previousRun = await tx.run.findUnique({
+    where: { taskId_runNumber: { taskId, runNumber: runNumber - 1 } },
+    select: { createdAt: true },
+  });
+  if (!previousRun) return [];
+  const rows = await tx.taskActivity.findMany({
+    where: {
+      taskId,
+      actorType: "operator",
+      createdAt: { gt: previousRun.createdAt },
+    },
+    select: { body: true, createdAt: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: MAX_OPERATOR_NOTES,
+  });
+  let remaining = MAX_OPERATOR_NOTES_CHARS;
+  const newestFirst = rows.flatMap(({ body }) => {
+    if (remaining <= 0) return [];
+    const note = body.slice(0, remaining);
+    remaining -= note.length;
+    return note.length > 0 ? [note] : [];
+  });
+  return newestFirst.reverse();
+};
 
 /**
  * Claim one queued run, or answer that nothing was claimable.
@@ -480,6 +522,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       // write endpoint already caps each artifact at 500k; pass the durable
       // body verbatim until artifact references replace prompt embedding.
       const priorOutputs = priorOutputsRaw;
+      const operatorNotes = await operatorNotesForClaim(tx, candidate.task.id, candidate.runNumber);
       const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
         where: {
           repoId: candidate.repo.id,
@@ -521,6 +564,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           sessionToken: sessionCredential.token,
           secrets,
           priorOutputs,
+          operatorNotes,
           previousRunHandoff,
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff
