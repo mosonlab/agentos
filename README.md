@@ -14,7 +14,7 @@ implement, verify, merge. Every run stays observable and reviewable.
 
 [Install](#quick-start) · [Docs](#documentation) · [Status](#status) · [简体中文](README.zh-CN.md)
 
-<img src="docs/media/tasks.png" alt="AgentOS task board: a twelve-step template chain in flight, with per-run status and cost on each card" width="880">
+<img src="docs/media/tasks.png" alt="AgentOS task board: template chains in flight, each card showing its step, run status, model and cost" width="880">
 
 </div>
 
@@ -80,6 +80,14 @@ and every role carries its own runner, model and reasoning effort.
 | 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Claude | Claude Opus 5 · medium |
 | 11 | Merge readiness | — | Recomputes the head, requires every open review to clear, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
+
+<div align="center">
+
+<img src="docs/media/chain.png" alt="Task detail: the twelve-step chain with each step's role and status, above the completed run and the task prompt" width="880">
+
+<sub>A chain in flight: step 4 running, steps 6 and 7 waiting as parallel siblings.</sub>
+
+</div>
 
 Steps 6 and 7 are parallel siblings: the blind review never sees the other's
 output, and step 8 adjudicates both. Step 5's root session dispatches native

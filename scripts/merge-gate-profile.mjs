@@ -7,7 +7,6 @@ const FAST_DOCUMENTS = new Set([
   "SECURITY.md",
   "THIRD_PARTY_NOTICES.md",
   "docs/BRIEF-TEMPLATE.md",
-  "docs/governance/review-role-convergence-v1.md",
   "docs/governance/task-routing-v1.md",
   "docs/public-snapshot.md",
   "docs/runbooks/gate-worker.md",
