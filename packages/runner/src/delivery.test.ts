@@ -17,15 +17,19 @@ const claim = {
 } as ClaimedTask;
 const workspace = { path: "/fake/work", branch: "feature/test", baseSha: "base" };
 
-test("delivery degrades to manual instructions when gh is unavailable", async () => {
+test("delivery fails loudly with the gh probe error when gh is unavailable", async () => {
   const calls: string[] = [];
+  const probeError = new Error("ENOENT");
   const fake: CommandExecutor = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
-    if (executable === "gh") throw new Error("ENOENT");
+    if (executable === "gh") throw probeError;
     return "";
   };
   const result = await deliverWorkspace(config, claim, workspace, fake);
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.pushedBranch, workspace.branch);
+  assert.equal(result.failure?.operation, "gh --version");
+  assert.equal(result.failure?.error, probeError);
   assert.match(result.deliveryInstructions ?? "", /gh CLI is unavailable/);
   assert.deepEqual(calls, ["git push --set-upstream origin feature/test", "gh --version"]);
 });
@@ -37,6 +41,7 @@ test("delivery records a pushed branch without invoking gh for a non-GitHub remo
     ...claim, repo: { ...claim.repo, remoteUrl: "ssh://git@example.test/acme/app.git" },
   }, workspace, fake);
   assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.failure, undefined);
   assert.match(result.deliveryInstructions ?? "", /not hosted on GitHub/);
   assert.equal(calls.length, 1);
 });
@@ -51,6 +56,20 @@ test("a chain step reuses the open pull request on its shared head branch", asyn
   const result = await deliverWorkspace(config, claim, workspace, fake);
   assert.equal(result.pullRequestNumber, 7);
   assert.equal(calls.some((call) => call.startsWith("gh pr create")), false);
+});
+
+test("a failed initial pull-request lookup fails delivery with the lookup error", async () => {
+  const lookupError = new Error("gh: API rate limit exceeded");
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") throw lookupError;
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake);
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.pushedBranch, workspace.branch);
+  assert.equal(result.failure?.operation, "gh pr list");
+  assert.equal(result.failure?.error, lookupError);
+  assert.match(result.pushError ?? "", /API rate limit exceeded/);
 });
 
 test("delivery opens one pull request titled after the chain, not the step", async () => {
@@ -181,6 +200,7 @@ test("a read-back that cannot be completed never authorises a second create", as
   // create` again — five more times — each send a candidate duplicate PR.
   let createCalls = 0;
   let listCalls = 0;
+  const createError = new Error("Post https://api.github.com/graphql: unexpected EOF");
   const fake: CommandExecutor = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
@@ -189,15 +209,17 @@ test("a read-back that cannot be completed never authorises a second create", as
     }
     if (executable === "gh" && args[1] === "create") {
       createCalls += 1;
-      throw new Error("Post https://api.github.com/graphql: unexpected EOF");
+      throw createError;
     }
     return "";
   };
   const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
   assert.equal(createCalls, 1, "the create was resent without a read-back that found nothing");
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
   assert.equal(result.pushedBranch, workspace.branch);
   assert.equal(result.pullRequestNumber, undefined);
+  assert.equal(result.failure?.operation, "gh pr create");
+  assert.equal(result.failure?.error, createError);
   // And the operator is told it is ambiguous, not told to go create one.
   assert.match(result.deliveryInstructions ?? "", /may already have been created/);
   assert.doesNotMatch(result.deliveryInstructions ?? "", /Run gh pr create manually/);
@@ -218,7 +240,8 @@ test("a deterministic create failure is read back once and never resent", async 
   };
   const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
   assert.equal(createCalls, 1);
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "gh pr create");
   assert.match(result.deliveryInstructions ?? "", /PR creation failed/);
 });
 
@@ -248,11 +271,12 @@ test("a create that succeeded and a lookup that failed never asks for a second c
   // a pull request is known to exist.
   let createCalls = 0;
   let listCalls = 0;
+  const lookupError = new Error("Get https://api.github.com/repos/acme/app/pulls: EOF");
   const fake: CommandExecutor = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       if (listCalls === 1) return "[]";
-      throw new Error("Get https://api.github.com/repos/acme/app/pulls: EOF");
+      throw lookupError;
     }
     // An older `gh` that prints nothing we can parse: the create succeeded, but
     // it did not name what it made.
@@ -261,11 +285,31 @@ test("a create that succeeded and a lookup that failed never asks for a second c
   };
   const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
   assert.equal(createCalls, 1);
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
   assert.equal(result.pushedBranch, workspace.branch);
+  assert.equal(result.failure?.operation, "gh pr list");
+  assert.equal(result.failure?.error, lookupError);
   assert.match(result.deliveryInstructions ?? "", /a pull request was created for it/);
   assert.match(result.deliveryInstructions ?? "", /Do not create another/);
   assert.doesNotMatch(result.deliveryInstructions ?? "", /Run gh pr create manually/);
+});
+
+test("a successful but unnamed create fails when no open pull request can be found", async () => {
+  let listCalls = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") {
+      listCalls += 1;
+      return "[]";
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
+  assert.equal(listCalls, 2);
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.pushedBranch, workspace.branch);
+  assert.equal(result.failure?.operation, "gh pr create");
+  assert.match(result.failure?.message ?? "", /no open pull request was found/);
+  assert.match(result.deliveryInstructions ?? "", /returned no URL/);
 });
 
 test("a bare EOF is a lost response, so a read-back that finds nothing earns exactly one resend", async () => {
@@ -316,12 +360,12 @@ test("a resend is not started with less budget than one attempt needs", async ()
     wait: async () => { clock += 1_000; },
   });
   assert.equal(createCalls, 1);
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
   assert.match(result.deliveryInstructions ?? "", /PR creation failed/);
   assert.ok(clock < LEASE_MS, `delivery outlived its lease: ${clock}ms`);
 });
 
-test("a pushed branch remains a successful delivery after PR retries are exhausted", async () => {
+test("a pushed branch remains published when PR retries are exhausted, but delivery fails", async () => {
   let createCalls = 0;
   const fake: CommandExecutor = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") return "[]";
@@ -333,9 +377,10 @@ test("a pushed branch remains a successful delivery after PR retries are exhaust
   };
   const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
   assert.equal(createCalls, 6);
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
   assert.equal(result.pushedBranch, workspace.branch);
-  assert.equal(result.failureClass, undefined);
+  assert.equal(result.failureClass, "TOOL_FAILED");
+  assert.equal(result.failure?.operation, "gh pr create");
   assert.match(result.deliveryInstructions ?? "", /PR creation failed/);
 });
 
@@ -489,7 +534,7 @@ test("the ref that was actually pushed is recorded on every path that pushed", a
     return "";
   };
   const failed = await deliverWorkspace(config, claim, workspace, prFails);
-  assert.equal(failed.pushStatus, "SUCCEEDED");
+  assert.equal(failed.pushStatus, "FAILED");
   assert.equal(failed.pushedBranch, "feature/test");
 
   const pushFails: CommandExecutor = async (executable, args) => {
@@ -677,10 +722,12 @@ test("a hung pull-request creation and its probe cannot open a second budget", a
     now: () => clock,
     wait: async () => { clock += 1_000; },
   });
-  // The push already succeeded, so this stays a degraded success with repair
-  // instructions rather than a failed run.
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  // The push already succeeded, so publication is retained even though the
+  // delivery step fails and preserves the typed timeout.
+  assert.equal(result.pushStatus, "FAILED");
   assert.equal(result.pushedBranch, "feature/test");
+  assert.ok(result.failure);
+  assert.equal(result.failure?.error instanceof CommandTimeoutError, true);
   assert.match(result.deliveryInstructions ?? "", /PR creation failed/);
   assert.ok(ghTimeouts.every((timeoutMs) => timeoutMs !== undefined && timeoutMs <= NETWORK_COMMAND_TIMEOUT_MS));
   assert.ok(clock < LEASE_MS, `delivery outlived its lease: ${clock}ms`);
@@ -711,7 +758,7 @@ test("retries across the delivery chain cannot stack into more than one lease", 
     now: () => clock,
     wait: async () => { clock += 1_000; },
   });
-  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushStatus, "FAILED");
   assert.equal(result.pushedBranch, "feature/test");
   assert.ok(clock < LEASE_MS, `delivery outlived its lease: ${clock}ms`);
   // The chain really did get as far as creation before the budget stopped it.

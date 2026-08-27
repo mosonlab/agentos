@@ -85,6 +85,8 @@ const failureClassFor = (message: string): FailureClass =>
     ? "AUTH_REQUIRED"
     : "TOOL_FAILED";
 
+const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
 const manual = (branch: string, remote: string, reason: string): DeliveryResult => ({
   pushStatus: "SUCCEEDED",
   pushRemote: remote,
@@ -101,46 +103,22 @@ const noPullRequest = (branch: string, remote: string): DeliveryResult => ({
   deliveryInstructions: `Branch '${branch}' was pushed. This step does not open a pull request.`,
 });
 
-/**
- * Creation did not produce a pull request we can name. The push already
- * succeeded, so this stays a degraded success with repair instructions rather
- * than a failed run whose completed work is retried or discarded.
- *
- * `indeterminate` gets its own sentence because it asks the operator for a
- * different action. It means one `gh pr create` was sent, its response was
- * lost, and the read-back that would have settled whether the pull request
- * exists could not be completed either — so "run gh pr create manually" is
- * exactly the wrong advice: it is how one PR becomes two.
- */
-const creationUnfinished = (
+/** A GitHub delivery failure after the branch was published. */
+const failedPullRequestDelivery = (
   branch: string,
   remote: string,
-  outcome: { status: "refused" | "not-applied" | "indeterminate"; reason: string },
+  operation: string,
+  error: unknown,
+  reason: string = messageOf(error),
+  instructions: string = `Branch '${branch}' was pushed, but pull request delivery failed: ${reason}.`,
 ): DeliveryResult => ({
-  pushStatus: "SUCCEEDED",
-  pushRemote: remote,
-  pushedBranch: branch,
-  pushError: outcome.reason,
-  deliveryInstructions: outcome.status === "indeterminate"
-    ? `Branch '${branch}' was pushed, but PR creation failed without a verdict: ${outcome.reason}. A pull request may already have been created — check the head branch before opening one manually.`
-    : `Branch '${branch}' was pushed, but PR creation failed. Run gh pr create manually.`,
-});
-
-/**
- * The pull request was created — `gh pr create` exited 0 — and only its
- * identity could not be read back.
- *
- * This is the one outcome that must never carry "run gh pr create manually":
- * the write is confirmed applied, so a manual create is a duplicate, not a
- * repair. It is the mirror image of `indeterminate` and gets its own sentence
- * for the same reason — the operator's next action differs.
- */
-const createdButUnnamed = (branch: string, remote: string, reason: string): DeliveryResult => ({
-  pushStatus: "SUCCEEDED",
+  pushStatus: "FAILED",
   pushRemote: remote,
   pushedBranch: branch,
   pushError: reason,
-  deliveryInstructions: `Branch '${branch}' was pushed and a pull request was created for it, but its URL could not be read back: ${reason}. Do not create another — open the pull request from the head branch.`,
+  deliveryInstructions: instructions,
+  failureClass: failureClassFor(reason),
+  failure: { operation, message: reason, error },
 });
 
 /**
@@ -214,7 +192,7 @@ export const deliverWorkspace = async (
       retryOptions,
     );
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = messageOf(error);
     return {
       pushStatus: "FAILED",
       pushRemote: remote,
@@ -244,10 +222,17 @@ export const deliverWorkspace = async (
     // the one command in delivery that is not on the retry allowlist, and a
     // hung `gh` would otherwise stall the phase before the budget applies.
     await command("gh", ["--version"], workspace.path, env, { timeoutMs: boundedTimeout(retryOptions, GH_PROBE_TIMEOUT_MS) });
-  } catch {
-    return opensPullRequest
-      ? manual(workspace.branch, remote, "The gh CLI is unavailable.")
-      : noPullRequest(workspace.branch, remote);
+  } catch (error: unknown) {
+    if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
+    const reason = messageOf(error);
+    return failedPullRequestDelivery(
+      workspace.branch,
+      remote,
+      "gh --version",
+      error,
+      reason,
+      `The gh CLI is unavailable. Branch '${workspace.branch}' was pushed, but pull request delivery failed: ${reason}.`,
+    );
   }
   // Only an *open* PR on this head may be reused: a merged or closed one would
   // silently swallow the push. One open PR per head branch is a GitHub invariant,
@@ -291,6 +276,7 @@ export const deliverWorkspace = async (
     // this call site used to get wrong, because a probe that threw on a flaky
     // link looked like a transient failure of the *create* and earned it
     // another send.
+    let lastCreateError: unknown;
     const creation = await confirmedWrite<{ url: string; number: number } | null>({
       resend: "after-confirmed-absent",
       attempts: NETWORK_ATTEMPTS,
@@ -314,6 +300,7 @@ export const deliverWorkspace = async (
           // operator was told to go and create another one.
           return { status: "applied", value: pullRequestFromUrl(stdout) };
         } catch (createError: unknown) {
+          lastCreateError = createError;
           const reason = createError instanceof Error ? createError.message : String(createError);
           // Both classifications are read back before anything is decided; the
           // split only decides whether a *resend* may follow a confirmed absence.
@@ -334,7 +321,20 @@ export const deliverWorkspace = async (
         }
       },
     });
-    if (creation.status !== "applied") return creationUnfinished(workspace.branch, remote, creation);
+    if (creation.status !== "applied") {
+      const error = lastCreateError ?? new Error(creation.reason);
+      const instructions = creation.status === "indeterminate"
+        ? `Branch '${workspace.branch}' was pushed, but PR creation failed without a verdict: ${creation.reason}. A pull request may already have been created — check the head branch before retrying.`
+        : `Branch '${workspace.branch}' was pushed, but PR creation failed: ${creation.reason}.`;
+      return failedPullRequestDelivery(
+        workspace.branch,
+        remote,
+        "gh pr create",
+        error,
+        creation.reason,
+        instructions,
+      );
+    }
     if (creation.value) {
       // Either `gh pr create` named it on stdout, or the read-back found it —
       // our own lost create having landed, or a concurrent human or runner
@@ -353,18 +353,32 @@ export const deliverWorkspace = async (
       const created = await openPullRequest();
       return created
         ? { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: created.url, pullRequestNumber: created.number }
-        : { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch };
+        : failedPullRequestDelivery(
+          workspace.branch,
+          remote,
+          "gh pr create",
+          new Error("gh pr create succeeded without returning a pull request URL, and no open pull request was found"),
+          "gh pr create succeeded without returning a pull request URL, and no open pull request was found",
+          `Branch '${workspace.branch}' was pushed, but PR creation returned no URL and no open pull request was found.`,
+        );
     } catch (lookupError: unknown) {
       // The write is CONFIRMED applied and only its name is missing. Falling
-      // through to the generic handler would tell the operator to run
-      // `gh pr create` manually — the blind resend this whole change exists to
-      // prevent, issued for the one case where we know for certain that a pull
-      // request was created.
-      return createdButUnnamed(workspace.branch, remote,
-        lookupError instanceof Error ? lookupError.message : String(lookupError));
+      // through to a manual-create advisory would risk a duplicate, because
+      // the write is known to have created a pull request. The run fails so its
+      // identity can be recorded by a retry, while the lookup error remains on
+      // the delivery result for the completion envelope.
+      const reason = messageOf(lookupError);
+      return failedPullRequestDelivery(
+        workspace.branch,
+        remote,
+        "gh pr list",
+        lookupError,
+        reason,
+        `Branch '${workspace.branch}' was pushed and a pull request was created for it, but its URL could not be read back: ${reason}. Do not create another — inspect the head branch.`,
+      );
     }
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = messageOf(error);
     // The push above already succeeded, so the branch exists on the remote no
     // matter what `gh` did. Report that fact (`pushedBranch`) on both paths, or
     // the chain's next step bases on the default branch and its push of the
@@ -377,16 +391,14 @@ export const deliverWorkspace = async (
     // step *after* its push, and the runner marks a delivery failure with a
     // failureClass non-retryable.
     if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
-    return {
-      // Git publication is the durable delivery boundary. A PR API outage is a
-      // degraded success with explicit repair instructions, not a failed agent
-      // run whose completed work is then retried or discarded.
-      pushStatus: "SUCCEEDED",
-      pushRemote: remote,
-      pushedBranch: workspace.branch,
-      pushError: message,
-      deliveryInstructions: `Branch '${workspace.branch}' was pushed, but PR creation failed. Run gh pr create manually.`,
-    };
+    return failedPullRequestDelivery(
+      workspace.branch,
+      remote,
+      "gh pr list",
+      error,
+      message,
+      `Branch '${workspace.branch}' was pushed, but checking for an open pull request failed: ${message}.`,
+    );
   }
 };
 
