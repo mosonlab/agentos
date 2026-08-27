@@ -246,6 +246,7 @@ export const acknowledgeCancellation = async (
   claim: ClaimedTask,
   cancellation: CancellationRequest,
   workspace?: { path: string; branch: string; baseSha: string } | null,
+  containment: { worktreeContainmentViolations?: string[] } = {},
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/cancel/acknowledge`, {
     method: "POST",
@@ -254,6 +255,7 @@ export const acknowledgeCancellation = async (
       fencingToken: claim.fencingToken,
       requestId: cancellation.requestId,
       ...(workspace ? { workspacePath: workspace.path, branch: workspace.branch, baseSha: workspace.baseSha } : {}),
+      ...containment,
     }),
   });
 };
@@ -359,6 +361,10 @@ export type Completion = {
   cleanupStatus: CleanupStatus;
   cleanupFailureReason?: string | null;
   workspaceRetained: boolean;
+  /** Absolute worktree paths outside the Run workspace observed at completion.
+   *  This is report-only evidence; omission or an empty list is compliant and
+   *  does not affect the API's terminal outcome classification. */
+  worktreeContainmentViolations?: string[];
   /** Structured account of a failure, from which the API — not this process —
    *  decides the failure class, whether it is retryable and whether it spends
    *  the task's run budget. `failureClass`/`retryable`/`externalFailure` above

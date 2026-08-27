@@ -22,7 +22,6 @@ import { createApp } from "./test-app.js";
 import { testDatabaseUrl } from "./testdb.js";
 
 const targetMigration = "20260827000000_prior_output_kinds";
-const promptHashMigration = "20260827110000_run_prompt_hash_exact_dispatch";
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
 const RUNNER_TOKEN = "prior-outputs-upgrade-runner-token";
 
@@ -171,7 +170,8 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
       await preMigration.$disconnect();
     }
 
-    for (const migration of [targetMigration, promptHashMigration]) {
+    for (const migration of readdirSync(join(dbDirectory, "prisma", "migrations"))) {
+      if (migration < targetMigration) continue;
       cpSync(join(dbDirectory, "prisma", "migrations", migration), join(stagedMigrations, migration), { recursive: true });
     }
     deploy();
