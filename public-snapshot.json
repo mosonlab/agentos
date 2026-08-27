@@ -136,6 +136,7 @@
     { "glob": "scripts/merge-gate-parallel.test.mjs", "purpose": "merge-gate concurrent-group failure reporting fixtures" },
     { "glob": "scripts/merge-lease.sh", "purpose": "global exact-head merge delivery lease backed by an atomic origin ref" },
     { "glob": "scripts/merge-lease.test.mjs", "purpose": "merge lease: mutual exclusion, release outcomes, status and the machine and human steal boundaries against a real origin ref" },
+    { "glob": "scripts/regression-verification.sh", "purpose": "token-free regression refresh, merge-lease, exact-head gate dispatch and verdict persistence" },
     { "glob": "scripts/merge-integrator-real-checks.mjs", "purpose": "redacted real-infrastructure merge-integrator checks" },
     { "glob": "scripts/merge-integrator-system-test.mjs", "purpose": "redacted end-to-end merge-integrator system harness" },
     { "glob": "scripts/os-isolation/patch-runner-plists.sh", "purpose": "OS isolation: launchd RUNNER_RUN_AS_PREFIX wiring" },
@@ -377,6 +378,11 @@
       "category": "pii-email",
       "glob": "packages/build-info/stamp.test.mjs",
       "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by Leo on 2026-08-19"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/regression-verification-script.test.ts",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     },
     {
       "category": "pii-email",

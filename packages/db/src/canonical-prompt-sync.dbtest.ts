@@ -181,8 +181,8 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
     });
     assert.notEqual(current.id, template.id);
     const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
-    assert.match(currentRegression.prompt, /semantic verification passes[\s\S]*merge-lease\.sh acquire/u);
-    assert.match(currentRegression.prompt, /never call `scripts\/merge-lease\.sh release`/u);
+    assert.match(currentRegression.prompt, /regression-verification\.sh prepare/u);
+    assert.match(currentRegression.prompt, /script persists the one allowed v2 outcome/u);
   }
 
   const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);

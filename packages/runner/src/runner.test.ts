@@ -46,6 +46,7 @@ const mechanicalClaim: ClaimedTask = {
   executionMode: "mechanical",
   task: {
     id: "task-10",
+    chainId: null,
     name: "Merge execution",
     description: "Execute the authorized merge",
     repoId: "repo-1",

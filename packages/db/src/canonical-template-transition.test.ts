@@ -93,14 +93,14 @@ test("a structure-identical generation is decided by its prompt digest alone", (
   assert.equal(legacyGenerationMatches({ marker: "synthetic", shape: shape as never }, successor), true);
 });
 
-test("the blind-review retirement is registered as a prompt-only rollover that cannot re-roll", async () => {
+test("the regression step split is registered as a prompt-only rollover that cannot re-roll", async () => {
   // The upgrade this mechanism was extended for: the deployed graph and the
   // source graph have identical structure, so a graph still referenced by
   // instantiated tasks has to be recognised through its prompts or the deploy
   // stops at canonical sync.
   const sources = await loadAllTemplateStepSources();
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
-    const generation = generationOf(templateName, "pre-blind-review-retirement");
+    const generation = generationOf(templateName, "pre-regression-step-split");
     assert.ok(generation.promptDigest, `${templateName} prompt-only generation must carry a digest`);
 
     const current = sources.get(templateName);
@@ -144,19 +144,19 @@ test("a rollover refuses a source that is not the successor it was registered to
     assert.ok(current);
 
     // The source as registered: no drift.
-    assert.equal(successorPromptDrift(templateName, "pre-blind-review-retirement", current), null);
+    assert.equal(successorPromptDrift(templateName, "pre-regression-step-split", current), null);
 
     // The same rollover, with the prompts edited again after registration.
     const driftedSource = current.map((step) => (
       step.stepIndex === current[0]!.stepIndex ? { ...step, prompt: `${step.prompt}\n\nlater edit` } : step
     ));
-    const refusal = successorPromptDrift(templateName, "pre-blind-review-retirement", driftedSource);
+    const refusal = successorPromptDrift(templateName, "pre-regression-step-split", driftedSource);
     assert.ok(refusal, `${templateName} must refuse an unregistered successor`);
     assert.match(refusal, /registered to install prompt generation/u);
 
     // The outgoing row is unaffected by that edit and still matches, which is
     // exactly why the successor has to be checked separately.
-    const generation = generationOf(templateName, "pre-blind-review-retirement");
+    const generation = generationOf(templateName, "pre-regression-step-split");
     assert.ok(generation.successorPromptDigest);
     assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
   }

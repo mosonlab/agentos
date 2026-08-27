@@ -56,6 +56,35 @@ branch".
 Some checks are deliberately outside the gate and belong to the list a developer
 runs: `npm run test:dependency-gate` and `npm run verify:compose-binding`.
 
+### Delivering to main
+
+A merge requires `MERGE GATE: PASS <oid>` for the exact integrated head being
+merged (`scripts/merge-gate.sh --expect-head <oid>`). When another gate might
+be running, dispatch through `scripts/gate-worker/gate-dispatch.sh <oid>`; read
+[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
+a remote worker.
+
+Every delivery that advances `main` acquires `scripts/merge-lease.sh` before
+running the merge gate for the final integrated head and holds it until the
+merge consumes that proof. Writing code, pushing a feature branch, and opening
+a pull request need no lease. Pass `--task <id>` to both `acquire` and
+`release`: the default holder `user@host` is shared by every agent window on
+one machine, so a release without a task id cannot tell its own lease from a
+sibling's.
+
+Open the pull request right after pushing the feature branch, before
+dispatching the gate: once the exact-head fast-forward lands, GitHub refuses a
+pull request from a branch main already contains, while one opened beforehand
+flips to merged on its own.
+
+Several agent windows share one checkout, and a branch switch there carries
+away another window's uncommitted work — the shared checkout stays on `main`
+and never receives feature commits. Deliver from an isolated worktree on your
+own branch: use your tool's native worktree mechanism when it has one, and
+otherwise create one under a fresh temporary directory
+(`git worktree add "$(mktemp -d)/checkout" <branch>`). Stage only the paths
+you changed, and remove the worktree once merged.
+
 ### Testing red lines
 
 These are not style preferences. Each one exists because ignoring it destroys

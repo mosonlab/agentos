@@ -49,6 +49,36 @@ test("a direct brief ending in the prior-output reminder round-trips without tru
   assert.equal(featureBriefFromTaskDescription(description, false), featureBrief);
 });
 
+test("mechanical cards retain only their canonical prompt while model cards retain generated context", () => {
+  const common = {
+    prompt: "Execute this step.",
+    featureBrief: "Build the feature",
+    priorOutputKinds: ["implementation"],
+  };
+  for (const outputKind of ["merge-authorization", "merge-result"]) {
+    assert.equal(
+      composeTemplateTaskDescription({ ...common, outputKind }),
+      common.prompt,
+      `${outputKind} is server-owned and must not receive model-only context`,
+    );
+  }
+  for (const outputKind of ["regression-verification", "regression-verification-v2", "regression-verification-v3"]) {
+    assert.equal(
+      composeTemplateTaskDescription({ ...common, outputKind }),
+      `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.`,
+    );
+  }
+  const regressionDescription = composeTemplateTaskDescription({
+    ...common,
+    outputKind: "regression-verification-v2",
+  });
+  assert.equal(
+    featureBriefFromTaskDescription(regressionDescription, true),
+    common.featureBrief,
+    "a platform-authored regression output must not make its brief unreadable",
+  );
+});
+
 test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {
   const canonicalTemplateSteps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
   const created: Array<Record<string, any>> = [];
