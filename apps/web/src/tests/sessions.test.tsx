@@ -299,39 +299,43 @@ test("focusing the title opens the translated hover card, including Inbox-wait d
     executionStatus: "FAILED", resumeAttempt: 1, endedAt: "2026-08-16T00:05:01.000Z",
     failureReason: `first line ${"x".repeat(240)}`,
   });
-  for (const [locale, labels] of [
-    ["en", { started: "Started", duration: "Duration", runner: "Runner", result: "Result", run: "Run", failure: "Failure reason", wait: "wall-clock \\(includes Inbox wait\\)" }],
-    ["zh", { started: "开始时间", duration: "时长", runner: "Runner", result: "结果", run: "运行", failure: "失败原因", wait: "墙上时钟时间（包括收件箱等待）" }],
-  ] as const) {
-    const dom = jsdom();
-    const container = dom.window.document.querySelector("#root");
-    assert.ok(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => { root.render(<LocaleProvider initialLocale={locale}><SessionRow session={data} /></LocaleProvider>); });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      await act(async () => { await Promise.resolve(); });
-      const title = dom.window.document.querySelector<HTMLElement>("[data-session-title]");
-      assert.ok(title, container.innerHTML);
-      await act(async () => {
-        title.focus();
-        title.dispatchEvent(new dom.window.FocusEvent("focusin", { bubbles: true }));
-        await new Promise((resolve) => dom.window.setTimeout(resolve, 240));
-      });
-      await act(async () => { await Promise.resolve(); });
-      await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
-      const body = dom.window.document.body.textContent ?? "";
-      for (const label of [labels.started, labels.duration, labels.runner, labels.result, labels.run, labels.failure]) {
-        assert.match(body, new RegExp(label));
+  try {
+    for (const [locale, labels] of [
+      ["en", { started: "Started", duration: "Duration", runner: "Runner", result: "Result", run: "Run", failure: "Failure reason", wait: "wall-clock \\(includes Inbox wait\\)" }],
+      ["zh", { started: "开始时间", duration: "时长", runner: "Runner", result: "结果", run: "运行", failure: "失败原因", wait: "墙上时钟时间（包括收件箱等待）" }],
+    ] as const) {
+      const dom = jsdom();
+      const container = dom.window.document.querySelector("#root");
+      assert.ok(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => { root.render(<LocaleProvider initialLocale={locale}><SessionRow session={data} /></LocaleProvider>); });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await act(async () => { await Promise.resolve(); });
+        const title = dom.window.document.querySelector<HTMLElement>("[data-session-title]");
+        assert.ok(title, container.innerHTML);
+        await act(async () => {
+          title.focus();
+          title.dispatchEvent(new dom.window.FocusEvent("focusin", { bubbles: true }));
+          await new Promise((resolve) => dom.window.setTimeout(resolve, 240));
+        });
+        await act(async () => { await Promise.resolve(); });
+        await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
+        const body = dom.window.document.body.textContent ?? "";
+        for (const label of [labels.started, labels.duration, labels.runner, labels.result, labels.run, labels.failure]) {
+          assert.match(body, new RegExp(label));
+        }
+        assert.match(body, new RegExp(labels.wait));
+        assert.match(body, /first line/);
+        assert.doesNotMatch(body, /x{240}/);
+        assert.equal(dom.window.document.querySelector("[data-slot='hover-card-content'] button"), null);
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
       }
-      assert.match(body, new RegExp(labels.wait));
-      assert.match(body, /first line/);
-      assert.doesNotMatch(body, /x{240}/);
-      assert.equal(dom.window.document.querySelector("[data-slot='hover-card-content'] button"), null);
-    } finally {
-      await act(async () => root.unmount());
-      dom.window.close();
     }
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
   }
 });
 
