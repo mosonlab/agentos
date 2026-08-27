@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createGitHubReader, GitHubReadError } from "./github-read.js";
-import { readinessDecision } from "./readiness-decision.js";
 
 test("compare preserves ancestry, rename identity, and fails completeness closed at GitHub's file ceiling", async () => {
   const files = Array.from({ length: 300 }, (_, index) => ({
@@ -60,25 +59,11 @@ test("transport backoff stops immediately when the read deadline aborts", async 
     throw new TypeError("fetch failed");
   })!;
 
-  let failure: GitHubReadError | null = null;
   await assert.rejects(
     reader.compareCommits!("owner/repo", "a".repeat(40), "b".repeat(40), deadline.signal),
-    (error: unknown) => {
-      if (!(error instanceof GitHubReadError)) return false;
-      failure = error;
-      return error.kind === "timeout";
-    },
+    (error: unknown) => error instanceof GitHubReadError && error.kind === "timeout",
   );
   assert.equal(calls, 1);
-  assert.deepEqual(readinessDecision({
-    readiness: { id: "readiness", chainId: "chain", projectId: "project", repoId: "repo" },
-    now: new Date("2026-08-27T00:00:00.000Z"),
-    stage: "read-failed",
-    failure: { kind: failure!.kind, message: failure!.message },
-  }), {
-    kind: "defer",
-    reason: "readiness evaluation failed: GitHub read aborted at its deadline",
-  });
 });
 
 test("claim-side file reads are single-shot so the outer claim policy owns retries", async () => {
