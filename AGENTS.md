@@ -30,6 +30,10 @@ When the user requests a chain:
   the machine-readable line `Route: implementation=senior-dev` (or
   `=frontend-dev`) in its description; the dispatcher copies it into
   `stepOverrides`. Only the implementation step is routable this way.
+- Chain-to-chain sequencing: pass `afterTaskId` (the predecessor chain's final
+  task) to the instantiate endpoint; the bound chain dispatches when the
+  predecessor completes. Incompatible with `autoStart`; one successor per
+  predecessor task.
 - Dispatching, gating, or rerouting a chain follows
   [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
 

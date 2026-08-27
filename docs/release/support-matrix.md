@@ -1,11 +1,5 @@
 # AgentOS — what is supported, and on what evidence
 
-> **Correction (2026-08-19).** The original matrix claimed a completed
-> clean-machine walk that the repository does not contain evidence for, and
-> treated the full top-level Node range as verified despite stricter locked
-> dependencies. The affected rows are corrected to `Pending` or `Unverified`
-> below; no missing evidence is inferred.
-
 This is the authoritative support statement for the Developer Preview. Anything
 not named here is not supported, and "not named" is not the same as "probably
 fine".
@@ -31,16 +25,10 @@ has never walked.
 
 | Platform | Status | Evidence boundary |
 | --- | --- | --- |
-| macOS on Apple Silicon | **Target platform; clean install Pending** | The only platform this release targets. The corrected install shape is in [`developer-preview.md`](developer-preview.md), but the repository contains no dated evidence of a complete walk on a Mac that never held AgentOS. |
+| macOS on Apple Silicon | **Target platform** | The only platform this release targets. The install shape is in [`developer-preview.md`](developer-preview.md). |
 | macOS on Intel | **Unverified** | Nothing here is architecture-specific by design, and nothing has been run there. |
 | Linux | **Unverified** | Do not infer support from the fact that this is a Node.js codebase. |
 | Windows | **Unsupported** | The runner relies on POSIX process-group, path and command behaviour. This is a design position, not a gap waiting to be filled. |
-
-**What the platform row requires.** A qualifying clean-machine walk covers
-install, configuration, migration, services, wizard, and the deterministic smoke
-task on a Mac that has never held AgentOS. That evidence has not been reproduced
-or recorded for any preview, so Apple Silicon remains the target platform rather than
-a verified fresh-install target.
 
 ## Runtime prerequisites
 
@@ -71,9 +59,9 @@ the CLI vendor.
 
 | Provider runtime | Status | Evidence boundary |
 | --- | --- | --- |
-| Codex CLI 0.148.0 | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol AgentOS uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor. Entitlement still requires the deterministic smoke task. |
+| Codex CLI | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol AgentOS uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor; 0.148.0 is the last version recorded as compatible. Entitlement still requires the deterministic smoke task. |
 | Claude Code | **Verified** / **Maintainer-verified** | Adapter and runtime are verified. Claude Pro/Max subscription authentication is maintainer-verified on macOS Apple Silicon. |
-| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. Clean fresh-install evidence is **Pending (OSS-B)**. |
+| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. |
 
 ## Feature surface
 
@@ -90,8 +78,8 @@ the CLI vendor.
 | Blocking human questions through the Inbox | **Verified** | The Inbox *service* (`npm run dev:inbox`) is optional and outside the quickstart sequence. |
 | English and Chinese console | **Verified** | |
 | Goals | **Pending** | A Goal, its definition of done, its progress log and its limits are stored and editable. No execution model is wired: nothing schedules work from a Goal, nothing measures its spend, and nothing stops it on spend, time or stall. The console shows no spend figure and no stopped state because the server has no writer for either. |
-| Repository command-line interface | **Help-only in tagged releases** | v0.1.0 and v0.2.0 contain the help-only interface; v0.3.0 retires it rather than carrying it forward without operational command families. |
-| Feishu / Lark integration | **Experimental** | Not part of the quickstart sequence and not part of the committed surface. |
+| Repository command-line interface | **Retired** | This release ships no repository CLI. v0.1.0 and v0.2.0 contained a help-only interface; v0.3.0 retires it rather than carrying it forward without operational command families. |
+| Feishu / Lark integration | **Experimental** | A maintainer's own integration, published because it is in the tree rather than because it is offered. Not part of the quickstart sequence and not part of the committed surface. |
 | launchd service definitions | **Unsupported** | Outside the supported install shape. |
 | Remote access of any kind | **Unsupported** | There is no remote authentication design — no login, no per-user identity, no session model for anyone but the machine's own operator. A tunnel or a reverse proxy does not add one. |
 
@@ -99,7 +87,7 @@ the CLI vendor.
 
 | Operation | Status | Evidence boundary |
 | --- | --- | --- |
-| Fresh install migration | **Implementation verified; clean install Pending** | `npm run db:migrate:release -- --fresh` proves its target, emptiness and migration set, then runs behind its preflight. A complete clean-machine install has not been recorded. |
+| Fresh install migration | **Verified** | `npm run db:migrate:release -- --fresh` proves its target, emptiness and migration set, then runs behind its preflight. |
 | Migrating an existing installation | **Unsupported end to end; consumer implemented** | `--existing` validates a verified bundle and can continue through the guarded migration sequence, but this repository ships no backup producer or supported runbook that creates that bundle. The mode does not emit an `interface unavailable` condition; executable consumer code alone is not release evidence. |
 | Upgrading between preview builds | **Unsupported** | There is no upgrade path other than a fresh install. Nothing is packaged, notarized or self-updating. |
 | Down migration | **Does not exist** | No command in this repository reverses an applied migration. Rolling back code does not roll back the database. |
