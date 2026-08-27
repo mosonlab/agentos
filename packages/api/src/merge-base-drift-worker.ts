@@ -25,7 +25,7 @@ import {
   type MergeRecoveryAttempt,
 } from "@agentos/db";
 
-import { createGitHubReader, type GitHubReader, type PullRequestSnapshot } from "./github-read.js";
+import { createGitHubReader, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 
 type DbReader = PrismaClient | Prisma.TransactionClient;
 
@@ -489,7 +489,7 @@ export type BaseDriftRecoveryTickResult = { examined: number; recovered: number;
 
 export const baseDriftRecoveryTick = async (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
+  reader: PullRequestReader | null = createGitHubReader(),
   now = new Date(),
   limit = 5,
 ): Promise<BaseDriftRecoveryTickResult> => {
@@ -597,7 +597,7 @@ export const baseDriftRecoveryTick = async (
 
 export const startBaseDriftRecoveryWorker = (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
+  reader: PullRequestReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> => {
   const run = (): void => {
     void baseDriftRecoveryTick(db, reader).catch((error: unknown) => console.error("Base-drift recovery tick failed", error));

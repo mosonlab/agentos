@@ -28,7 +28,7 @@ import {
   type PrismaClient,
 } from "@agentos/db";
 
-import { createGitHubReader, type GitHubReader } from "./github-read.js";
+import { createGitHubReader, type PullRequestReader } from "./github-read.js";
 
 /**
  * Slower than the readiness poll on purpose: what this waits for is a person
@@ -64,7 +64,7 @@ const latestOpenRequest = (rows: Array<{ metadata: Prisma.JsonValue | null }>): 
 
 export const authorityResignTick = async (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
+  reader: PullRequestReader | null = createGitHubReader(),
   now = new Date(),
 ): Promise<AuthorityResignTickResult> => {
   const result: AuthorityResignTickResult = { resumed: 0, waiting: 0, unwatchable: 0 };
@@ -179,7 +179,7 @@ export const authorityResignTick = async (
 
 export const startAuthorityResignWorker = (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
+  reader: PullRequestReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> => {
   const timer = setInterval(() => {
     void authorityResignTick(db, reader).catch((error: unknown) => console.error("Authority resign tick failed", error));

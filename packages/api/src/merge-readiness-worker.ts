@@ -27,7 +27,7 @@ import {
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
-import { createGitHubReader, GitHubReadError, type GitHubReader } from "./github-read.js";
+import { createGitHubReader, GitHubReadError, type PullRequestReader } from "./github-read.js";
 import {
   readinessDecision,
   type ReadinessDecision,
@@ -425,7 +425,7 @@ const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
 
 const readReadiness = async (
   db: PrismaClient,
-  reader: GitHubReader | null,
+  reader: PullRequestReader | null,
   readiness: ReadinessCandidate,
   now: Date,
 ): Promise<ReadinessRead> => {
@@ -829,7 +829,7 @@ const applyReadinessDecision = async (
 
 export const readinessTick = async (
   db: PrismaClient,
-  reader: GitHubReader | null,
+  reader: PullRequestReader | null,
   now: Date,
   limit: number,
   releaseChainLease: ReleaseMergeLease,
@@ -871,7 +871,7 @@ export const readinessTick = async (
 
 export const startReadinessWorker = (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
+  reader: PullRequestReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> => {
   let inFlight = false;
   const timer = setInterval(() => {

@@ -78,7 +78,7 @@ test("readFileAtCommit reads exact bytes from a commit-pinned Contents request",
     }), { status: 200 });
   })!;
 
-  const bytes = await reader.readFileAtCommit!(
+  const bytes = await reader.readFileAtCommit(
     "owner/repo",
     "docs/spec file.md",
     "0123456789abcdef0123456789abcdef01234567",
@@ -104,7 +104,7 @@ test("readFileAtCommit preserves a zero-byte repository file", async () => {
     content: "",
   }), { status: 200 }))!;
 
-  const bytes = await reader.readFileAtCommit!(
+  const bytes = await reader.readFileAtCommit(
     "owner/repo",
     "spec.md",
     "commit",
@@ -124,7 +124,7 @@ test("readFileAtCommit refuses malformed JSON, file metadata, and base64", async
   for (const response of responses) {
     const reader = createGitHubReader("read-token", async () => response)!;
     await assert.rejects(
-      reader.readFileAtCommit!("owner/repo", "spec.md", "commit", new AbortController().signal),
+      reader.readFileAtCommit("owner/repo", "spec.md", "commit", new AbortController().signal),
       (error: unknown) => error instanceof GitHubReadError && error.kind === "response" && /malformed/u.test(error.message),
     );
   }
@@ -137,7 +137,7 @@ test("readFileAtCommit names a missing file and surfaces other HTTP errors", asy
     return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
   })!;
   await assert.rejects(
-    missingReader.readFileAtCommit!("owner/repo", "spec.md", "commit", new AbortController().signal),
+    missingReader.readFileAtCommit("owner/repo", "spec.md", "commit", new AbortController().signal),
     (error: unknown) => error instanceof GitHubReadError
       && error.kind === "response"
       && /repository file is missing/u.test(error.message),
@@ -146,7 +146,7 @@ test("readFileAtCommit names a missing file and surfaces other HTTP errors", asy
 
   const errorReader = createGitHubReader("read-token", async () => new Response("bad request", { status: 422 }))!;
   await assert.rejects(
-    errorReader.readFileAtCommit!("owner/repo", "spec.md", "commit", new AbortController().signal),
+    errorReader.readFileAtCommit("owner/repo", "spec.md", "commit", new AbortController().signal),
     (error: unknown) => error instanceof GitHubReadError
       && error.kind === "response"
       && /returned 422/u.test(error.message),

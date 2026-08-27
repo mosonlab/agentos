@@ -107,13 +107,16 @@ export type GitHubReader = {
     files: ChangedFile[];
   }>;
   /** Read the exact bytes of one repository path at a pinned commit. */
-  readFileAtCommit?: (
+  readFileAtCommit: (
     repository: string,
     path: string,
     commitSha: string,
     signal: AbortSignal,
   ) => Promise<Buffer>;
 };
+
+/** Read-only capability used by merge evidence workers that never fetch repository files. */
+export type PullRequestReader = Pick<GitHubReader, "readPullRequest" | "compareCommits">;
 
 type GitHubReadRetryOptions = {
   wait?: (delayMs: number) => Promise<void>;

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { INTEGRATOR_TEMPLATE_NAME } from "@agentos/db";
-
 import {
   normalizeLineEndings,
   prepareSpecificationVerification,
+  SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
   specificationPathForBranch,
   verifyPreparedSpecification,
@@ -72,8 +71,11 @@ test("direct authority is read from the implementation task and compound authori
     outputKind: "implementation",
   });
   const directTx = {
-    task: { findFirst: async () => ({ description }) },
-    taskStepOutput: { findFirst: async () => null },
+    task: { findMany: async () => [{
+      description,
+      templateStep: { outputKind: "implementation", attachmentsFromPrevious: false },
+      stepOutput: null,
+    }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
   const direct = await prepareSpecificationVerification(directTx, {
     task: {
@@ -92,8 +94,15 @@ test("direct authority is read from the implementation task and compound authori
   if (direct.status === "ready") assert.equal(new TextDecoder().decode(direct.verification.authoritativeBytes), brief);
 
   const compoundTx = {
-    task: { findFirst: async () => null },
-    taskStepOutput: { findFirst: async () => ({ kind: "spec", body: JSON.stringify({ schemaVersion: 1, spec: "approved compound spec" }) }) },
+    task: { findMany: async () => [{
+      description: "specification task",
+      templateStep: { outputKind: "spec", attachmentsFromPrevious: false },
+      stepOutput: { kind: "spec", body: JSON.stringify({ schemaVersion: 1, spec: "approved compound spec" }) },
+    }, {
+      description: "implementation task",
+      templateStep: { outputKind: "implementation", attachmentsFromPrevious: true },
+      stepOutput: null,
+    }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
   const compound = await prepareSpecificationVerification(compoundTx, {
     task: {
@@ -103,11 +112,45 @@ test("direct authority is read from the implementation task and compound authori
       chainId: "compound-chain",
       chainIndex: 6,
       description: "review task description must not become authority",
-      templateStep: { stepIndex: 6, outputKind: "sol-findings", baseFromStepIndex: 5, taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } },
+      templateStep: { stepIndex: 6, outputKind: "sol-findings", baseFromStepIndex: 5, taskTemplate: { name: "compound-engineer-workflow-legacy-pre-zero-gate-row" } },
     },
     repo: { remoteUrl: "https://github.com/acme/repo" },
     branch: "feature/compound",
   }, "d".repeat(40));
   assert.equal(compound.status, "ready");
   if (compound.status === "ready") assert.equal(new TextDecoder().decode(compound.verification.authoritativeBytes), "approved compound spec");
+});
+
+test("an unsupported repository remote is refused before repository I/O with a named cause", async () => {
+  const description = composeTemplateTaskDescription({
+    prompt: "Implement the feature below.",
+    featureBrief: "direct brief",
+    attachmentsFromPrevious: false,
+    outputKind: "implementation",
+  });
+  const tx = {
+    task: { findMany: async () => [{
+      description,
+      templateStep: { outputKind: "implementation", attachmentsFromPrevious: false },
+      stepOutput: null,
+    }] },
+  } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
+  const prepared = await prepareSpecificationVerification(tx, {
+    task: {
+      id: "direct-review",
+      projectId: "project",
+      templateId: "direct-template",
+      chainId: "direct-chain",
+      chainIndex: 2,
+      description: "review task",
+      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1 },
+    },
+    repo: { remoteUrl: "https://example.test/acme/repo.git" },
+    branch: "feature/direct",
+  }, "e".repeat(40));
+  assert.equal(prepared.status, "refused");
+  if (prepared.status === "refused") {
+    assert.equal(prepared.refusal.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+    assert.match(prepared.refusal.message, /remote is not a supported GitHub repository/u);
+  }
 });

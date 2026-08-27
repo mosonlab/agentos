@@ -125,6 +125,56 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       take: 20,
     });
     const executorRunnerIds = mergeExecutorRunnerIds();
+    const parkQueuedCandidate = async (
+      candidate: (typeof candidates)[number],
+      settlement: {
+        reason: string;
+        condition: string;
+        activityBody: string;
+        inboxBody: string;
+        metadata?: Record<string, unknown>;
+      },
+    ): Promise<{ chainLocked: boolean }> => {
+      if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to park`);
+      const stopped = await tx.run.updateMany({
+        where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+        data: {
+          status: RunStatus.FAILED,
+          failureClass: FailureClass.TASK_FAILED,
+          failureReason: settlement.reason,
+          retryable: false,
+          endedAt: now,
+        },
+      });
+      if (stopped.count !== 1) return { chainLocked: false };
+      const parked = await writeTask(tx, candidate.task.id, async () => ({
+        update: { status: TaskStatus.BACKLOG, failureReason: settlement.reason },
+        activity: {
+          actorType: "control-plane",
+          body: settlement.activityBody,
+          metadata: {
+            runId: candidate.id,
+            condition: settlement.condition,
+            ...settlement.metadata,
+          },
+        },
+        value: null,
+      }));
+      const dedupeKey = `${settlement.condition}:${candidate.id}`;
+      await tx.inboxMessage.upsert({
+        where: { dedupeKey },
+        create: {
+          from: "AGENT",
+          agentId: candidate.agentId,
+          taskId: candidate.task.id,
+          kind: "TEXT",
+          body: settlement.inboxBody,
+          dedupeKey,
+        },
+        update: {},
+      });
+      return { chainLocked: parked.ok && parked.chainLocked };
+    };
     // One candidate's decision, taken as its own unit of work so the loop can
     // isolate it. `skip` moves to the next candidate, `halt` ends the whole
     // claim without one, `claimed` carries the run handed to the runner.
@@ -284,46 +334,14 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       } catch (error: unknown) {
         if (!isCandidateActivationFailure(error)) throw error;
         const reason = namedFailureReason(error);
-        const stopped = await tx.run.updateMany({
-          where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
-          data: {
-            status: RunStatus.FAILED,
-            failureClass: FailureClass.TASK_FAILED,
-            failureReason: reason,
-            retryable: false,
-            endedAt: now,
-          },
+        const parked = await parkQueuedCandidate(candidate, {
+          reason,
+          condition: "candidate-activation-failed",
+          activityBody: `Queued run activation failed: ${reason}`,
+          inboxBody: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
+          metadata: { failureType: error.name, reason },
         });
-        if (stopped.count === 1) {
-          const parked = await writeTask(tx, candidate.task.id, async () => ({
-            update: { status: TaskStatus.BACKLOG, failureReason: reason },
-            activity: {
-              actorType: "control-plane",
-              body: `Queued run activation failed: ${reason}`,
-              metadata: {
-                runId: candidate.id,
-                condition: "candidate-activation-failed",
-                failureType: error.name,
-                reason,
-              },
-            },
-            value: null,
-          }));
-          const dedupeKey = `candidate-activation-failed:${candidate.id}`;
-          await tx.inboxMessage.upsert({
-            where: { dedupeKey },
-            create: {
-              from: "AGENT",
-              agentId: candidate.agentId,
-              taskId: candidate.task.id,
-              kind: "TEXT",
-              body: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
-              dedupeKey,
-            },
-            update: {},
-          });
-          if (parked.ok && parked.chainLocked) return HALT;
-        }
+        if (parked.chainLocked) return HALT;
         return SKIP;
       }
       const prepared = await prepareSpecificationVerification(
@@ -332,7 +350,13 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         implementationRange?.implementationHeadSha ?? null,
       );
       if (prepared.status === "refused") {
-        return { error: prepared.refusal.message, reason: prepared.refusal.reason };
+        await parkQueuedCandidate(candidate, {
+          reason: prepared.refusal.message,
+          condition: prepared.refusal.reason,
+          activityBody: `Review claim stopped: ${prepared.refusal.message}`,
+          inboxBody: `Review claim failed and the task was parked in Backlog: ${prepared.refusal.message}`,
+        });
+        return SKIP;
       }
       if (prepared.status === "ready") {
         if (!verificationResults.has(prepared.verification.key)) {
@@ -343,47 +367,16 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         }
         const refusal = verificationResults.get(prepared.verification.key) ?? null;
         if (refusal) {
-          if (refusal.reason === SPEC_TRANSCRIPTION_REFUSAL_REASON) {
-            const stopped = await tx.run.updateMany({
-              where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
-              data: {
-                status: RunStatus.FAILED,
-                failureClass: FailureClass.TASK_FAILED,
-                failureReason: refusal.message,
-                retryable: false,
-                endedAt: now,
-              },
-            });
-            if (stopped.count === 1) {
-              await writeTask(tx, candidate.task.id, async () => ({
-                update: { status: TaskStatus.BACKLOG, failureReason: refusal.message },
-                activity: {
-                  actorType: "control-plane",
-                  body: `Review claim stopped: ${refusal.message}`,
-                  metadata: {
-                    runId: candidate.id,
-                    condition: refusal.reason,
-                    implementationHeadSha: prepared.verification.implementationHeadSha,
-                  },
-                },
-                value: null,
-              }));
-              const dedupeKey = `${refusal.reason}:${candidate.id}`;
-              await tx.inboxMessage.upsert({
-                where: { dedupeKey },
-                create: {
-                  from: "AGENT",
-                  agentId: candidate.agentId,
-                  taskId: candidate.task.id,
-                  kind: "TEXT",
-                  body: `Review claim failed and the task was parked in Backlog: ${refusal.message}`,
-                  dedupeKey,
-                },
-                update: {},
-              });
-            }
-          }
-          return { error: refusal.message, reason: refusal.reason };
+          await parkQueuedCandidate(candidate, {
+            reason: refusal.message,
+            condition: refusal.reason,
+            activityBody: `Review claim stopped: ${refusal.message}`,
+            inboxBody: `Review claim failed and the task was parked in Backlog: ${refusal.message}`,
+            metadata: { implementationHeadSha: prepared.verification.implementationHeadSha },
+          });
+          return refusal.reason === SPEC_TRANSCRIPTION_REFUSAL_REASON
+            ? { error: refusal.message, reason: refusal.reason }
+            : SKIP;
         }
       }
       const generation = candidate.leaseGeneration + 1;

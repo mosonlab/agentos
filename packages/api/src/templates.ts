@@ -135,13 +135,18 @@ export const composeTemplateTaskDescription = (input: {
 ].join("");
 
 /** Recover exactly the user-authored brief from a platform-composed task description. */
-export const featureBriefFromTaskDescription = (description: string): string | null => {
+export const featureBriefFromTaskDescription = (
+  description: string,
+  attachmentsFromPrevious: boolean,
+): string | null => {
   const startMarker = description.indexOf(FEATURE_BRIEF_PREFIX);
   const endMarker = description.lastIndexOf(PERSIST_OUTPUT_PREFIX);
   if (startMarker < 0 || endMarker < startMarker) return null;
   const start = startMarker + FEATURE_BRIEF_PREFIX.length;
   const reminderStart = endMarker - PRIOR_OUTPUTS_REMINDER.length;
-  const end = reminderStart >= start && description.slice(reminderStart, endMarker) === PRIOR_OUTPUTS_REMINDER
+  const end = attachmentsFromPrevious
+    && reminderStart >= start
+    && description.slice(reminderStart, endMarker) === PRIOR_OUTPUTS_REMINDER
     ? reminderStart
     : endMarker;
   return description.slice(start, end);

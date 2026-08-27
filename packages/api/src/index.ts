@@ -201,9 +201,7 @@ const main = async (): Promise<void> => {
   await ensureStartupActive();
 
   const githubReader = createGitHubReader();
-  const specificationReader = githubReader?.readFileAtCommit
-    ? { readFileAtCommit: githubReader.readFileAtCommit }
-    : null;
+  const specificationReader = githubReader;
   const app = createApp(prisma, { ownership, specificationReader });
   const { host: hostname, port } = startup;
   const activeServer = serve({ fetch: app.fetch, hostname, port });

@@ -1,7 +1,7 @@
 import {
   githubRepositoryFromRemote,
-  INTEGRATOR_TEMPLATE_NAME,
   Prisma,
+  stepRole,
 } from "@agentos/db";
 
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
@@ -91,31 +91,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === "object" && value !== null && !Array.isArray(value)
 );
 
-const compoundAuthority = async (
-  tx: Prisma.TransactionClient,
-  candidate: SpecificationReviewCandidate,
-): Promise<AuthorityResult> => {
-  if (!candidate.task.templateId || !candidate.task.chainId) {
-    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "compound chain identity is unavailable") };
+type AuthoritySource = {
+  description: string;
+  templateStep: { outputKind: string; attachmentsFromPrevious: boolean } | null;
+  stepOutput: { kind: string; body: string } | null;
+};
+
+const compoundAuthority = (source: AuthoritySource): AuthorityResult => {
+  if (!source.stepOutput) {
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output is missing") };
   }
-  const source = await tx.taskStepOutput.findFirst({
-    where: {
-      task: {
-        projectId: candidate.task.projectId,
-        templateId: candidate.task.templateId,
-        chainId: candidate.task.chainId,
-        chainIndex: 1,
-      },
-    },
-    select: { kind: true, body: true },
-  });
-  if (!source) return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output is missing") };
-  if (source.kind !== "spec") {
+  if (source.stepOutput.kind !== "spec") {
     return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output has an unexpected kind") };
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(source.body);
+    parsed = JSON.parse(source.stepOutput.body);
   } catch {
     return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output is not valid JSON") };
   }
@@ -125,27 +116,14 @@ const compoundAuthority = async (
   return { text: parsed.spec };
 };
 
-const directAuthority = async (
-  tx: Prisma.TransactionClient,
-  candidate: SpecificationReviewCandidate,
-): Promise<AuthorityResult> => {
-  if (!candidate.task.templateId || !candidate.task.chainId) {
-    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct chain identity is unavailable") };
+const directAuthority = (source: AuthoritySource): AuthorityResult => {
+  if (!source.templateStep) {
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain implementation step metadata is missing") };
   }
-  // The implementation task is the direct chain's authority. Later review
-  // tasks may have different descriptions, so never derive the brief from the
-  // candidate under review.
-  const source = await tx.task.findFirst({
-    where: {
-      projectId: candidate.task.projectId,
-      templateId: candidate.task.templateId,
-      chainId: candidate.task.chainId,
-      chainIndex: 1,
-    },
-    select: { description: true },
-  });
-  if (!source) return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain implementation task is missing") };
-  const text = featureBriefFromTaskDescription(source.description);
+  const text = featureBriefFromTaskDescription(
+    source.description,
+    source.templateStep.attachmentsFromPrevious,
+  );
   return text === null
     ? { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain task brief is unavailable") }
     : { text };
@@ -157,10 +135,40 @@ const authorityFor = async (
   tx: Prisma.TransactionClient,
   candidate: SpecificationReviewCandidate,
 ): Promise<AuthorityResult> => {
-  const templateName = candidate.task.templateStep?.taskTemplate?.name;
-  return templateName === INTEGRATOR_TEMPLATE_NAME
-    ? compoundAuthority(tx, candidate)
-    : directAuthority(tx, candidate);
+  if (!candidate.task.templateId || !candidate.task.chainId) {
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "chain identity is unavailable") };
+  }
+  const sources = await tx.task.findMany({
+    where: {
+      projectId: candidate.task.projectId,
+      templateId: candidate.task.templateId,
+      chainId: candidate.task.chainId,
+    },
+    select: {
+      description: true,
+      templateStep: { select: { outputKind: true, attachmentsFromPrevious: true } },
+      stepOutput: { select: { kind: true, body: true } },
+    },
+  });
+  const sourcesForRole = (role: "spec" | "implementation") => sources.filter((source) => (
+    source.templateStep !== null && stepRole(source.templateStep) === role
+  ));
+  const specificationSources = sourcesForRole("spec");
+  if (specificationSources.length > 1) {
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "compound chain has multiple specification steps") };
+  }
+  if (specificationSources[0]) return compoundAuthority(specificationSources[0]);
+
+  const implementationSources = sourcesForRole("implementation");
+  if (implementationSources.length !== 1) {
+    return { error: refusal(
+      SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
+      implementationSources.length === 0
+        ? "direct-chain implementation task is missing"
+        : "direct chain has multiple implementation steps",
+    ) };
+  }
+  return directAuthority(implementationSources[0]!);
 };
 
 export type SpecificationVerification = {
@@ -202,7 +210,12 @@ export const prepareSpecificationVerification = async (
   const authority = await authorityFor(tx, candidate);
   if ("error" in authority) return { status: "refused", refusal: authority.error };
 
-  const repository = githubRepositoryFromRemote(candidate.repo.remoteUrl) ?? candidate.repo.remoteUrl;
+  const repository = githubRepositoryFromRemote(candidate.repo.remoteUrl);
+  if (!repository) {
+    return { status: "refused", refusal: specificationUnreadableRefusal(
+      `repository remote is not a supported GitHub repository: ${candidate.repo.remoteUrl}`,
+    ) };
+  }
   const path = specificationPathForBranch(candidate.branch);
   const authoritativeBytes = new TextEncoder().encode(authority.text);
   return {

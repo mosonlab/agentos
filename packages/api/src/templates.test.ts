@@ -32,8 +32,19 @@ test("composed task descriptions round-trip the exact brief with and without pri
       attachmentsFromPrevious,
       outputKind: "implementation",
     });
-    assert.equal(featureBriefFromTaskDescription(description), featureBrief);
+    assert.equal(featureBriefFromTaskDescription(description, attachmentsFromPrevious), featureBrief);
   }
+});
+
+test("a direct brief ending in the prior-output reminder round-trips without truncation", () => {
+  const featureBrief = "Keep this user-authored suffix.\nRead the prior template steps' persisted outputs before working.";
+  const description = composeTemplateTaskDescription({
+    prompt: "Implement the feature brief below.",
+    featureBrief,
+    attachmentsFromPrevious: false,
+    outputKind: "implementation",
+  });
+  assert.equal(featureBriefFromTaskDescription(description, false), featureBrief);
 });
 
 test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {

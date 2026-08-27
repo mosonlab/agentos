@@ -3308,7 +3308,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (claimed && "error" in claimed) {
       if (typeof claimed.error !== "string") throw new TypeError("Run claim refusal has no message");
       if (typeof claimed.reason !== "string") throw new TypeError("Run claim refusal has no reason");
-      return context.json({ error: claimed.error, reason: claimed.reason }, 409);
+      return refusalJson(context, refusal("conflict", claimed.error, { reason: claimed.reason }));
     }
     return claimed ? context.json(claimed) : context.body(null, 204);
   });
