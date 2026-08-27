@@ -142,7 +142,7 @@ export const compactTokens = (value: number | null | undefined): string => {
 /** Usage estimates routinely land below one cent. Keep ordinary amounts on the
  * familiar two decimals, but retain enough precision that a positive amount is
  * never presented as zero. */
-const usageMoney = (value: string | number): string => {
+export const usageMoney = (value: string | number): string => {
   const amount = Number(value);
   if (amount === 0 || Math.abs(amount) >= 0.005 || !Number.isFinite(amount)) return money(value);
   const decimals = Math.min(8, Math.max(3, Math.ceil(-Math.log10(Math.abs(amount))) + 2));

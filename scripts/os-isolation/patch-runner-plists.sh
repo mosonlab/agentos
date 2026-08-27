@@ -297,7 +297,7 @@ expected_keys() {
   # and the post-apply re-read cannot drift apart.
   local label="$1"
   if [ "$label" = "$API_LABEL" ]; then
-    printf 'RUNNER_WORKSPACE_ROOT RUNNER_RUN_AS_PREFIX'
+    printf 'RUNNER_WORKSPACE_ROOT RUNNER_RUN_AS_PREFIX RUNNER_HOME RUNNER_REPO_MIRROR_ROOT'
   else
     printf 'RUNNER_RUN_AS_PREFIX RUNNER_HOME RUNNER_WORKSPACE_ROOT RUNNER_MCP_SERVER_PATH RUNNER_PI_EXTENSION_PATH RUNNER_CLAUDE_SETTINGS_PATH RUNNER_SESSION_CONFIG_BASELINE_ROOT RUNNER_PATH'
   fi
@@ -434,6 +434,10 @@ else
   manifest_records=""
   backup "$api_plist"
   set_env "$api_plist" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$(manifest_for "$API_LABEL")"
+  # Claim-side specification verification runs git as runner 1, so it must use
+  # that same principal's home and persistent repository mirror.
+  set_env "$api_plist" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$(account_for 1)" "$(manifest_for "$API_LABEL")"
+  set_env "$api_plist" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors" "$(manifest_for "$API_LABEL")"
   # Advisory only: the API reads this to decide whether to warn that
   # FilesystemGrant has no OS backstop (packages/api/src/files/config.ts).
   set_env "$api_plist" "$API_LABEL" RUNNER_RUN_AS_PREFIX "sudo -u $(account_for 1) -E --" "$(manifest_for "$API_LABEL")"
@@ -477,6 +481,10 @@ else
     plutil -lint "$api_plist" >/dev/null 2>&1 || fail "$API_LABEL is no longer a valid plist"
     api_root="$(buddy_get "$api_plist" RUNNER_WORKSPACE_ROOT)"
     [ "$api_root" = "$WORKSPACE_ROOT" ] || fail "$API_LABEL: RUNNER_WORKSPACE_ROOT is '${api_root:-<unset>}', expected $WORKSPACE_ROOT"
+    api_runner_home="$(buddy_get "$api_plist" RUNNER_HOME)"
+    [ "$api_runner_home" = "$HOME_BASE/$(account_for 1)" ] || fail "$API_LABEL: RUNNER_HOME is '${api_runner_home:-<unset>}', expected $HOME_BASE/$(account_for 1)"
+    api_mirror_root="$(buddy_get "$api_plist" RUNNER_REPO_MIRROR_ROOT)"
+    [ "$api_mirror_root" = "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors" ] || fail "$API_LABEL: RUNNER_REPO_MIRROR_ROOT is '${api_mirror_root:-<unset>}', expected $HOME_BASE/$(account_for 1)/.agentos/repo-mirrors"
     if [ "$failures" -eq 0 ]; then ok "every managed key re-read from disk with the expected value"; fi
   fi
 fi
