@@ -9,9 +9,9 @@ import { isTransientNetworkError } from "./network-retry.js";
  *
  * `packages/db/src/failure-envelope.ts` is the canonical definition; this is a
  * hand-kept mirror, for the same reason `FailureClass` and `CleanupStatus` are
- * mirrored in api.ts — this package deliberately has no `@agentos/db`
- * dependency, so a compromised or buggy runner cannot reach a database. The
- * API's zod schema for the complete route is the boundary that catches drift.
+ * mirrored in api.ts — this package deliberately does not import the Prisma
+ * client. The API's zod schema for the complete route is the boundary that
+ * catches drift.
  *
  * What this module does *not* do is decide anything. It reports facts: which
  * phase the run was in, what exited with what, which channel each piece of text
