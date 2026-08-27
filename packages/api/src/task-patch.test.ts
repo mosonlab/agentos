@@ -6,11 +6,11 @@ import { AssigneeType, type PrismaClient, TaskStatus } from "@agentos/db";
 import { composeBrief, readBrief } from "./task-brief.js";
 import { patchTask } from "./task-patch.js";
 
-const patchFixture = (description: string) => {
+const patchFixture = (description: string, outputKind = "implementation") => {
   let update: Record<string, unknown> | null = null;
   const templateStep = {
     stepIndex: 1,
-    outputKind: "implementation",
+    outputKind,
     priorOutputKinds: [],
     taskTemplate: { name: "direct-engineer-workflow" },
   };
@@ -84,4 +84,13 @@ test("a template Chain description patch refuses an unparseable stored brief", a
     message: "Cannot rewrite task brief: task brief marker is missing",
   });
   assert.equal(fixture.update(), null);
+});
+
+test("a mechanical template Step keeps its free-form description patch", async () => {
+  const fixture = patchFixture("Run the merge readiness gate.", "merge-authorization");
+
+  const result = await patchTask(fixture.db, "task-1", { description: "concurrent writer completed after recovery" });
+
+  assert.ok("task" in result);
+  assert.equal(fixture.update()?.description, "concurrent writer completed after recovery");
 });

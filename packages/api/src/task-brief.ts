@@ -25,9 +25,9 @@ type LegacyBriefMigration = {
   legacyAttachmentsFromPrevious: boolean;
 };
 
-const isMechanicalTemplateStep = (outputKind: string): boolean => {
+export const stepHasTaskBrief = (outputKind: string): boolean => {
   const role = stepRole({ outputKind });
-  return role === "readiness" || role === "integrator";
+  return role !== "readiness" && role !== "integrator";
 };
 
 const outputIsPlatformAuthored = (outputKind: string): boolean => {
@@ -48,7 +48,7 @@ export const composeBrief = (input: {
   // Readiness and merge execution are server-owned mechanical Steps. Their
   // task cards preview the canonical prompt, but no model reads generated
   // brief, predecessor, or output-persistence context from them.
-  if (isMechanicalTemplateStep(input.outputKind)) return input.prompt;
+  if (!stepHasTaskBrief(input.outputKind)) return input.prompt;
   return [
     input.prompt,
     input.brief ? frameBrief(input.brief) : "",

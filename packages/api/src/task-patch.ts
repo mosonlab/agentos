@@ -18,7 +18,7 @@ import type { TaskPatchInput } from "./app.js";
 import { blockingPredecessor } from "./chain.js";
 import { type Refusal, refusalFor } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
-import { rewriteBrief } from "./task-brief.js";
+import { rewriteBrief, stepHasTaskBrief } from "./task-brief.js";
 import {
   hasActiveRun,
   isLiveStatus,
@@ -148,26 +148,30 @@ export const patchTask = async (
     }
   }
   let patch = body;
-  if (body.description !== undefined && before.templateId != null && before.chainId != null) {
+  if (body.description !== undefined
+    && before.templateId != null
+    && before.chainId != null) {
     const templateStep = before.templateStepId
       ? await db.taskTemplateStep.findUnique({
         where: { id: before.templateStepId },
-        select: { priorOutputKinds: true },
+        select: { outputKind: true, priorOutputKinds: true },
       })
       : null;
     if (!templateStep) {
       return { reason: "invalid-request", message: "Cannot rewrite task brief: template Step metadata is missing" };
     }
-    const rewritten = rewriteBrief(before.description, body.description, {
-      legacyAttachmentsFromPrevious: templateStep.priorOutputKinds.length > 0,
-    });
-    if (typeof rewritten !== "string") {
-      return {
-        reason: "invalid-request",
-        message: `Cannot rewrite task brief: ${rewritten.unparseable}`,
-      };
+    if (stepHasTaskBrief(templateStep.outputKind)) {
+      const rewritten = rewriteBrief(before.description, body.description, {
+        legacyAttachmentsFromPrevious: templateStep.priorOutputKinds.length > 0,
+      });
+      if (typeof rewritten !== "string") {
+        return {
+          reason: "invalid-request",
+          message: `Cannot rewrite task brief: ${rewritten.unparseable}`,
+        };
+      }
+      patch = { ...body, description: rewritten };
     }
-    patch = { ...body, description: rewritten };
   }
   const updateData = {
     ...withoutUndefined(patch),
