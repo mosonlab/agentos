@@ -3825,6 +3825,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       },
     });
     if (!run) return context.json({ error: "Run not found" }, 404);
+    const outputPersisted = run.task?.stepOutput?.runId === run.id;
+    const outputSatisfiedByPriorRun = Boolean(
+      run.task?.stepOutput
+      && !outputPersisted
+      && outputIsImmutableOncePersisted(run.task.templateStep),
+    );
     return context.json({
       run: {
         id: run.id,
@@ -3848,9 +3854,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         outputRequired: requiredOutputKind(run.task.templateStep) !== null,
         outputRemediationAllowed:
           !(run.task.stepOutput && outputIsImmutableOncePersisted(run.task.templateStep)),
+        outputSatisfiedByPriorRun,
         // A retry must not mistake an earlier Run's artifact for its own. This
         // is the same run-scoped fact completion validates before it advances.
-        outputPersisted: run.task.stepOutput?.runId === run.id,
+        outputPersisted,
       } : null,
     });
   });
