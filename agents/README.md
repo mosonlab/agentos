@@ -29,6 +29,7 @@ layer: 5
 agent: implementation-plan-executioner # Agent.name, or null for a human step
 approvalGate: false
 outputKind: implementation
+priorOutputKinds: []         # Prior TaskStepOutput kinds required by this prompt
 attachmentsFromPrevious: true
 opensPullRequest: true
 baseFromStepIndex: null                # null or a step in a strictly earlier layer
