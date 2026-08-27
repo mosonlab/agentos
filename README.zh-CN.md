@@ -56,6 +56,34 @@ AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、prov
 
 </div>
 
+## 十二步任务链
+
+AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个角色自带 runner、
+模型与推理档位。
+
+| # | 步骤 | Agent 角色 | 做什么 | Runner | 模型 · 档位 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 写规格 | `spec` | 把任务转成作准的规格说明 | Claude | Claude Opus 5 · high |
+| 2 | 规划 | `plan` | 把规格切成可并行的垂直曳光弹切片 | Claude | Claude Fable 5 · medium |
+| 3 | 规划评审 | `review-coordinator` | 对着规格与冻结基线逐片评审 | Pi | GPT-5.6 Sol · xhigh |
+| 4 | 修订规划 | `plan-reviser` | 在全新会话里按评审结论就地改切片 | Claude | Claude Opus 5 · medium |
+| 5 | 实现 | `implementation-plan-executioner` | 从活的依赖前沿执行切片集，并开出 PR | Codex | GPT-5.6 Sol · high，子代理为 GPT-5.6 Luna · max |
+| 6 | 代码评审 | `review-coordinator-sol` | 在钉死的 base 与 head 上评审集成后的 diff | Pi | GPT-5.6 Sol · xhigh |
+| 7 | 盲评 | `review-coordinator-opus` | 对同一份 diff 再评一次，看不到第 6 步的结论 | Claude | Claude Opus 5 · high |
+| 8 | 应用评审修复 | `senior-dev` | 对两份评审的每条结论逐条裁决，并落实采纳项 | Codex | GPT-5.6 Sol · high |
+| 9 | 文档 | `librarian` | 把内部文档更新到与交付代码一致 | Pi | GPT-5.6 Luna · xhigh |
+| 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Claude | Claude Opus 5 · medium |
+| 11 | 合并就绪 | — | 重算 head，要求每份未结评审清空，签发精确 head 的合并授权 | — | 机械步，不跑模型 |
+| 12 | 执行合并 | `merge-integrator` | 对着线上 PR 重新校验每一项前置条件，然后合并 | — | 机械步，不跑模型 |
+
+第 6、7 步是并行同层：盲评看不到对方的输出，由第 8 步一并裁决。第 5 步的根会话
+派发原生子代理，档位钉死在 Luna max，最多八个并发。
+
+角色绑定在
+[`agents/templates/compound-engineer-workflow/`](agents/templates/compound-engineer-workflow)，
+模型在 [`agents/roles/`](agents/roles)。在控制台改过的模型或档位是持久化的运行时
+覆盖，后续 seed 不会替换它。
+
 > **Developer Preview 3（v0.3.0）。** 接口、配置与已存数据的形状都可能在预览版
 > 之间变动，预览版之间除全新安装外没有升级路径。
 >
