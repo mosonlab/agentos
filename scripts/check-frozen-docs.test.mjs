@@ -3,7 +3,7 @@
 // gate runs it, because the whole subject of that script is what git reports
 // about a branch — a unit test that stubbed git would test nothing.
 //
-// The rules under test are AGENTS.md "Frozen records": the four record
+// The rules under test are the script's own contract: the four record
 // directories are append-only once merged, files added to them are dated, and
 // a supersession marker has one shape. Each rule gets a passing case and a
 // failing one; the baseline cases are the ones that matter most, because a
