@@ -46,7 +46,9 @@ export const claudeArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     "--model", model, "--effort", effort ?? "high",
     ...denyArgs(spec.claim.agent.disabledTools),
     // Excluding the user source prevents host CLAUDE.md, settings, hooks,
-    // skills, plugins, and memory instructions from entering the session.
+    // plugins, memory, and Claude's user skill root ~/.claude/skills from
+    // entering the session. Audited separately: this CLI does not discover the
+    // cross-agent ~/.agents/skills root used by Codex and PI.
     // Authentication remains the CLI's existing Keychain flow: no
     // CLAUDE_CONFIG_DIR or HOME override is supplied here.
     "--setting-sources", "project,local", "--settings", claudePlatformSettingsPath(),
@@ -117,6 +119,17 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
   }
+  const help = await capturePreflight(spec.config, "CLAUDE", ["--help"], spec.env);
+  if (help.code !== 0 || !`${help.stdout}\n${help.stderr}`.includes("--setting-sources")) {
+    return {
+      ok: false,
+      cliVersion: version.stdout.trim() || version.stderr.trim(),
+      authMode: null,
+      capabilities,
+      error: PREFLIGHT_REASONS.cliIncompatible,
+    };
+  }
+  Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "print-stream-json-user-source-isolated" });
   const auth = await capturePreflight(spec.config, "CLAUDE", ["auth", "status"], spec.env);
   const text = `${auth.stdout}\n${auth.stderr}`;
   const ok = auth.code === 0 && /"loggedIn"\s*:\s*true/u.test(text);

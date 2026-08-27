@@ -166,6 +166,7 @@ export const buildChildEnvironment = (
   const {
     CLAUDE_CONFIG_DIR: _claudeConfigDir,
     CODEX_HOME: _codexHome,
+    GIT_CONFIG_GLOBAL: _gitConfigGlobal,
     PI_CODING_AGENT_DIR: _piCodingAgentDir,
     PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
@@ -202,7 +203,7 @@ export const buildChildEnvironment = (
 };
 
 const isolationVariables = [
-  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
+  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "HOME", "GIT_CONFIG_GLOBAL", "CODEX_HOME", "PI_CODING_AGENT_DIR",
   "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX", "AGENTOS_GATE_SERVER",
 ] as const;
 
@@ -218,8 +219,12 @@ const isolationVariables = [
  *
  * Losing them is also the one failure that is both silent and catastrophic: an
  * old base falls back to the production default and sweeps it, which is #125.
- * Everything else a scrubbing launcher drops — PATH, HOME,
- * AGENTOS_SESSION_TOKEN — fails loudly and immediately instead.
+ * Everything else a scrubbing launcher drops — PATH and
+ * AGENTOS_SESSION_TOKEN — fails loudly and immediately instead. HOME is a
+ * containment variable because Codex discovers ~/.agents/skills independently
+ * of CODEX_HOME; losing it could silently expose the launched account's home.
+ * GIT_CONFIG_GLOBAL travels with it so that relocation does not silently
+ * replace the configured runner identity or drop credential helpers.
  *
  * So the containment variables and the non-secret, Run-snapshotted Codex
  * profile are set again by `/usr/bin/env`, which runs after
