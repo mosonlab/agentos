@@ -20,6 +20,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
+import { requireGateAttestation } from "./gate-attestation.js";
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   MERGE_INTEGRATOR_KIND,
@@ -2110,6 +2111,18 @@ export const produceMergeAuthorization = async (
     issuedAt: now.toISOString(),
     decision: { channel: input.channel, inboxDecisionId: input.inboxDecisionId, inboxMessageId: input.card.id },
   };
+  // The evidence block says what the head *is*; it says nothing about whether the
+  // merge gate ever signed it. Without this the Inbox and PATCH channels could
+  // authorize a merge at a commit no gate ran against — the mechanical channel
+  // reads the Regression verdict, these two never did.
+  const attested = await requireGateAttestation(tx, {
+    chainId: gateTask.chainId,
+    headSha: payload.headSha,
+  });
+  if (!attested.satisfied) {
+    throw new MergeEvidenceError(`${attested.reason}; approval refused`);
+  }
+
   const activity = await tx.taskActivity.create({ data: {
     taskId: gateTaskId,
     actorType: "operator",

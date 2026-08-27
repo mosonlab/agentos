@@ -15,6 +15,7 @@ export * from "./chain-branch.js";
 export * from "./maintenance-lock.js";
 export * from "./service-maintenance-lock.js";
 export * from "./deploy-barrier.js";
+export * from "./gate-attestation.js";
 export * from "./merge-integrator.js";
 export * from "./merge-integrator-db.js";
 export * from "./merge-tail.js";

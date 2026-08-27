@@ -1,7 +1,7 @@
 /**
  * Which browser origins the control plane answers cross-origin.
  *
- * In the supported v0.1.0 path the browser never asks cross-origin at all: the
+ * In the supported path the browser never asks cross-origin at all: the
  * Vite dev/preview server proxies `/api` on its own origin and attaches the
  * operator token in its own process, so these requests are same-origin and CORS
  * is not consulted. This list is therefore a boundary, not a transport — it

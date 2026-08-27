@@ -272,6 +272,7 @@ const DEFENSE_EXACT = new Set([
   "scripts/merge-lease.sh",
   "packages/db/src/workflow.ts",
   "packages/db/src/merge-integrator.ts",
+  "packages/db/src/gate-attestation.ts",
   "packages/db/src/merge-integrator-db.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",

@@ -1,6 +1,7 @@
 import {
   isRegressionVerificationOutputKind,
   Prisma,
+  recordGateAttestation,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
   RunStatus,
@@ -656,6 +657,18 @@ export const persistSessionTaskOutput = async (
       ...(input.commitSha ? { commitSha: input.commitSha } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
     },
+  });
+  // The gate's signature is recorded in the same transaction that persists the
+  // output it was copied from, so an attestation can never outlive or contradict
+  // its evidence. Ingestion is the only writer because it is the only path every
+  // Regression verification output takes, whichever channel authorizes the merge
+  // afterwards.
+  await recordGateAttestation(tx, {
+    chainId: task.chainId,
+    taskId: task.id,
+    runId: input.fence.runId,
+    kind: input.kind,
+    body: input.body,
   });
   const predecessorOutputs = legacyBlind && phase === BLIND_REVIEW_PHASE.evidenceUnlocked
     && task.chainId && task.chainIndex !== null
