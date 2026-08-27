@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { Prisma } from "@agentos/db";
+
 import {
+  commitWithLeaseDisposition,
+  leaseHandoffsWithoutConsumer,
+  leaseHolderFor,
+  settleLease,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseRelease,
@@ -15,11 +21,112 @@ const released: MergeLeaseRelease = {
   sha: "abc",
 };
 
+const holderTx = (input: {
+  task: { chainId: string | null; templateStep: { stepIndex: number; outputKind: string; taskTemplate: { name: string } } };
+  markers?: unknown[];
+  regressionChainId?: string | null;
+}): Prisma.TransactionClient => ({
+  task: {
+    findUnique: async ({ where }: { where: { id: string } }) => where.id === "task-1"
+      ? input.task
+      : { chainId: input.regressionChainId ?? null },
+  },
+  taskActivity: {
+    findMany: async () => input.markers ?? [],
+  },
+} as unknown as Prisma.TransactionClient);
+
+test("leaseHolderFor owns every merge-tail Task shape, including a failed auxiliary", async () => {
+  const cases = [
+    {
+      name: "mechanical",
+      tx: holderTx({ task: { chainId: "chain-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }),
+      expected: { chainId: "chain-1", taskId: "task-1", role: "mechanical" },
+    },
+    {
+      name: "regression",
+      tx: holderTx({ task: { chainId: "chain-2", templateStep: { stepIndex: 5, outputKind: "regression-verification-v2", taskTemplate: { name: "direct-engineer-workflow" } } } }),
+      expected: { chainId: "chain-2", taskId: "task-1", role: "regression" },
+    },
+    {
+      name: "failed auxiliary reads its repair marker without success gating",
+      tx: holderTx({
+        task: { chainId: null, templateStep: { stepIndex: 0, outputKind: "result", taskTemplate: { name: "repair" } } },
+        markers: [{ metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1, regressionTaskId: "regression-1" } }],
+        regressionChainId: "chain-3",
+      }),
+      expected: { chainId: "chain-3", taskId: "task-1", role: "auxiliary" },
+    },
+    {
+      name: "ordinary agent Task",
+      tx: holderTx({ task: { chainId: "chain-4", templateStep: { stepIndex: 2, outputKind: "implementation", taskTemplate: { name: "direct-engineer-workflow" } } } }),
+      expected: null,
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    assert.deepEqual(await leaseHolderFor(entry.tx, "task-1"), entry.expected, entry.name);
+  }
+});
+
+test("settleLease maps continuation and stop outcomes through the holder record", async () => {
+  const tx = holderTx({ task: { chainId: "chain-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } });
+  assert.deepEqual(await settleLease(tx, { taskId: "task-1", outcome: "continue" }), {
+    disposition: "retain",
+    leaseToRelease: null,
+  });
+  assert.deepEqual(await settleLease(tx, { taskId: "task-1", outcome: "stop" }), {
+    disposition: "release",
+    leaseToRelease: "chain-1",
+  });
+});
+
+test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", async () => {
+  const now = new Date("2026-08-27T12:02:00.000Z");
+  const tx = {
+    taskActivity: { findMany: async () => [
+      { taskId: "task-stale", metadata: { state: "pending", chainId: "chain-stale", toRunId: "run-stale", handedOffAt: "2026-08-27T12:00:00.000Z" } },
+      { taskId: "task-active", metadata: { state: "pending", chainId: "chain-active", toRunId: "run-active", handedOffAt: "2026-08-27T12:01:30.000Z" } },
+      { taskId: "task-done", metadata: { state: "released", chainId: "chain-done", toRunId: "run-done" } },
+      { taskId: "task-done", metadata: { state: "pending", chainId: "chain-done", toRunId: "run-done" } },
+    ] },
+    run: { findMany: async () => [{ id: "run-stale" }] },
+  } as unknown as Prisma.TransactionClient;
+
+  assert.deepEqual(await leaseHandoffsWithoutConsumer(tx, now), [
+    { chainId: "chain-stale", toRunId: "run-stale", taskId: "task-stale" },
+  ]);
+});
+
+test("commitWithLeaseDisposition releases only after the transaction commits", async () => {
+  const events: string[] = [];
+  const db = {
+    $transaction: async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => {
+      const result = await fn({} as Prisma.TransactionClient);
+      events.push("commit");
+      return result;
+    },
+  } as unknown as Parameters<typeof commitWithLeaseDisposition>[0];
+
+  const value = await commitWithLeaseDisposition(db, async () => {
+    events.push("transaction");
+    return {
+      value: 42,
+      lease: { disposition: "release", leaseToRelease: "chain-1" },
+    };
+  }, async (chainId) => {
+    events.push(`release:${chainId}`);
+  });
+
+  assert.equal(value, 42);
+  assert.deepEqual(events, ["transaction", "commit", "release:chain-1"]);
+});
+
 test("a completed callback releases the merge Lease", async () => {
   const acquiredFor: string[] = [];
   const releasedFor: string[] = [];
   const result = await withMergeLease("chain-1", async () => ({
-    disposition: "release",
+    disposition: { kind: "release" },
     value: 42,
   }), {
     acquire: async (chainId) => {
@@ -40,7 +147,7 @@ test("a completed callback releases the merge Lease", async () => {
 test("retain hands the merge Lease to the downstream consumer", async () => {
   let releaseCalled = false;
   const result = await withMergeLease("chain-2", async () => ({
-    disposition: "retain",
+    disposition: { kind: "retain", handoffRunId: "run-2" },
     value: "authorized",
   }), {
     acquire: acquired,
@@ -76,7 +183,7 @@ test("a contended merge Lease does not run the callback", async () => {
   let releaseCalled = false;
   const result = await withMergeLease("chain-4", async () => {
     callbackCalled = true;
-    return { disposition: "release", value: null };
+    return { disposition: { kind: "release" }, value: null };
   }, {
     acquire: async () => ({ outcome: "contended" }),
     release: async () => {
@@ -94,7 +201,7 @@ test("the module reports a release anomaly itself", async (t) => {
   const said: string[] = [];
   t.mock.method(console, "error", (...args: unknown[]) => { said.push(args.map(String).join(" ")); });
 
-  await withMergeLease("chain-5", async () => ({ disposition: "release", value: null }), {
+  await withMergeLease("chain-5", async () => ({ disposition: { kind: "release" }, value: null }), {
     acquire: acquired,
     release: async () => ({ outcome: "skipped", heldFor: "chain-42" }),
   });
@@ -109,7 +216,7 @@ test("a rejected release adapter is reported as unreachable", async (t) => {
   t.mock.method(console, "error", (...args: unknown[]) => { said.push(args.map(String).join(" ")); });
   const releaser: MergeLeaseReleaser = async () => { throw new Error("spawn bash ENOENT"); };
 
-  await withMergeLease("chain-6", async () => ({ disposition: "release", value: null }), {
+  await withMergeLease("chain-6", async () => ({ disposition: { kind: "release" }, value: null }), {
     acquire: acquired,
     release: releaser,
   });
@@ -120,7 +227,7 @@ test("a rejected release adapter is reported as unreachable", async (t) => {
 });
 
 test("a Task without a Chain runs without either Lease adapter", async () => {
-  const result = await withMergeLease(null, async () => ({ disposition: "release", value: "unleased" }), {
+  const result = await withMergeLease(null, async () => ({ disposition: { kind: "release" }, value: "unleased" }), {
     acquire: async () => { throw new Error("the acquirer must not be called"); },
     release: async () => { throw new Error("the releaser must not be called"); },
   });

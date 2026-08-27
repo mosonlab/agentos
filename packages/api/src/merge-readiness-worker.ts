@@ -4,6 +4,7 @@ import {
   AUTHORIZED_MERGE_METHOD,
   MergeRecoveryStatus,
   Prisma,
+  RunStatus,
   TaskStatus,
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
@@ -29,6 +30,7 @@ import {
   type ReadinessInput,
 } from "./readiness-decision.js";
 import {
+  noteLeaseHandoff,
   releaseMergeLease,
   withMergeLease,
   type ReleaseMergeLease,
@@ -462,8 +464,20 @@ const applyReadinessDecision = async (
       const activeSuccessor = current?.status === TaskStatus.DONE
         || (current?.status === TaskStatus.DOING
           && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
+      const handoff = activeSuccessor && readiness.chainId
+        ? await db.run.findFirst({
+          where: {
+            task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+            status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+          },
+          select: { id: true },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        })
+        : null;
       return {
-        disposition: activeSuccessor ? "retain" as const : "release" as const,
+        disposition: handoff
+          ? { kind: "retain" as const, handoffRunId: handoff.id }
+          : { kind: "release" as const },
         value: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
       };
     }
@@ -484,7 +498,20 @@ const applyReadinessDecision = async (
         const activeSuccessor = current?.status === TaskStatus.DONE
           || (current?.status === TaskStatus.DOING
             && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
-        return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+        const handoff = activeSuccessor && readiness.chainId
+          ? await tx.run.findFirst({
+            where: {
+              task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+              status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+            },
+            select: { id: true },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          })
+          : null;
+        return {
+          kind: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
+          handoffRunId: handoff?.id ?? null,
+        };
       }
       const binding = `mechanical:${readiness.id}:${randomUUID()}`;
       const payload = {
@@ -548,24 +575,32 @@ const applyReadinessDecision = async (
           recoverySourceStopId: recovery?.sourceStopId ?? null,
         },
       });
-      if (recovery) {
-        await activateRecoveryIntegratorSuccessor(tx, {
+      const activated = recovery
+        ? await activateRecoveryIntegratorSuccessor(tx, {
           readinessTaskId: readiness.id,
           integratorTaskId: recovery.integratorTaskId,
           sourceStopId: recovery.sourceStopId,
           recoveryRunId: recovery.recoveryRunId,
           authorizationActivityId: activity.id,
-        }, read.input.now);
-      } else {
-        await activateChainSuccessor(tx, readiness, {}, read.input.now);
+        }, read.input.now)
+        : await activateChainSuccessor(tx, readiness, {}, read.input.now);
+      const handoff = activated.nextTaskId
+        ? await tx.run.findFirst({
+          where: { taskId: activated.nextTaskId, status: RunStatus.QUEUED },
+          select: { id: true },
+          orderBy: { runNumber: "desc" },
+        })
+        : null;
+      if (handoff && readiness.chainId) {
+        await noteLeaseHandoff(tx, { chainId: readiness.chainId, toRunId: handoff.id, at: read.input.now });
       }
-      return "authorized" as const;
+      return { kind: "authorized" as const, handoffRunId: handoff?.id ?? null };
     });
     return {
-      disposition: authorization === "authorized" || authorization === "claim-lost-active"
-        ? "retain" as const
-        : "release" as const,
-      value: authorization,
+      disposition: authorization.handoffRunId
+        ? { kind: "retain" as const, handoffRunId: authorization.handoffRunId }
+        : { kind: "release" as const },
+      value: authorization.kind,
     };
   });
   if (leased.outcome === "contended") return;

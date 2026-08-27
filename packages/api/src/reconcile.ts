@@ -11,7 +11,13 @@ import {
   type PrismaClient,
 } from "@agentos/db";
 
-import { mergeTailLeaseChainId, releaseMergeLease, type ReleaseMergeLease } from "./merge-lease.js";
+import {
+  leaseHandoffsWithoutConsumer,
+  noteLeaseHandoffReleased,
+  releaseMergeLease,
+  settleLease,
+  type ReleaseMergeLease,
+} from "./merge-lease.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
@@ -132,8 +138,11 @@ export const reconcileDatabaseRuns = async (
   const orphans = candidates.filter((run) => run.cancelRequestedAt !== null || !(
     run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
   ));
-  if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
-  const strandedChainLeases = await db.$transaction(async (tx) => {
+  const reconciliation = await db.$transaction(async (tx) => {
+    const strandedHandoffs = await leaseHandoffsWithoutConsumer(tx, now);
+    if (orphans.length === 0 && expiredInboxRuns.length === 0 && strandedHandoffs.length === 0) {
+      return { strandedChainLeases: [] as string[], strandedHandoffs, count: 0 };
+    }
     // Chains whose tail run this sweep terminalizes without a successor. Held
     // until the sweep commits, because a lease released against a transaction
     // that then rolls back would free a window the chain still owns.
@@ -216,8 +225,8 @@ export const reconcileDatabaseRuns = async (
             },
           } });
         }
-        const cancelledChainId = await mergeTailLeaseChainId(tx, run.taskId);
-        if (cancelledChainId) stranded.add(cancelledChainId);
+        const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
+        if (lease.leaseToRelease) stranded.add(lease.leaseToRelease);
         continue;
       }
       // Losing a lease is an external failure: it buys an attempt, never spends one.
@@ -272,8 +281,8 @@ export const reconcileDatabaseRuns = async (
             data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
           });
         } else {
-          const lostChainId = await mergeTailLeaseChainId(tx, run.taskId);
-          if (lostChainId) stranded.add(lostChainId);
+          const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
+          if (lease.leaseToRelease) stranded.add(lease.leaseToRelease);
           await tx.task.update({
             where: { id: run.taskId },
             data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
@@ -293,8 +302,8 @@ export const reconcileDatabaseRuns = async (
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.
-        const lostChainId = await mergeTailLeaseChainId(tx, run.taskId);
-        if (lostChainId) stranded.add(lostChainId);
+        const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
+        if (lease.leaseToRelease) stranded.add(lease.leaseToRelease);
         await tx.task.update({
           where: { id: run.taskId },
           data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
@@ -349,10 +358,24 @@ export const reconcileDatabaseRuns = async (
         });
       }
     }
-    return [...stranded];
+    for (const handoff of strandedHandoffs) {
+      stranded.add(handoff.chainId);
+    }
+    return {
+      strandedChainLeases: [...stranded],
+      strandedHandoffs,
+      count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length,
+    };
   });
-  for (const chainId of strandedChainLeases) await releaseChainLease(chainId);
-  return orphans.length + expiredInboxRuns.length;
+  for (const chainId of reconciliation.strandedChainLeases) await releaseChainLease(chainId);
+  if (reconciliation.strandedHandoffs.length > 0) {
+    await db.$transaction(async (tx) => {
+      for (const handoff of reconciliation.strandedHandoffs) {
+        await noteLeaseHandoffReleased(tx, { ...handoff, at: now });
+      }
+    });
+  }
+  return reconciliation.count;
 };
 
 /**
