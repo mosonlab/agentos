@@ -9,6 +9,7 @@ import {
   specificationPathForBranch,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
+import { GitHubReadError } from "./github-read.js";
 import { composeTemplateTaskDescription } from "./templates.js";
 
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
@@ -79,6 +80,121 @@ test("tampered materialization returns one stable operator-visible reason", asyn
   );
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
   assert.match(verdict?.message ?? "", /Spec transcription claim refused: spec-transcription-mismatch/u);
+});
+
+test("a transient repository failure retries with backoff and then accepts faithful content", async () => {
+  let reads = 0;
+  const waits: number[] = [];
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async () => {
+      reads += 1;
+      if (reads === 1) throw new GitHubReadError("proxy flap", "transport");
+      return bytes("authoritative");
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [17, 29], wait: async (delayMs) => { waits.push(delayMs); } },
+  );
+  assert.equal(verdict, null);
+  assert.equal(reads, 2);
+  assert.deepEqual(waits, [17]);
+});
+
+test("persistent transient repository failure reports retry count and last failure", async () => {
+  let reads = 0;
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async () => {
+      reads += 1;
+      throw new GitHubReadError(`proxy flap ${reads}`, "transport");
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [17, 29], wait: async () => {} },
+  );
+  assert.equal(reads, 3);
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+  assert.match(verdict?.message ?? "", /after 2 retries \(3 total attempts\)/u);
+  assert.match(verdict?.message ?? "", /last failure: proxy flap 3/u);
+});
+
+test("a read deadline overrun is transient and exhausts the bounded retry schedule", async () => {
+  let reads = 0;
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
+      reads += 1;
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [0, 0], attemptTimeoutsMs: [5, 5, 5], wait: async () => {} },
+  );
+  assert.equal(reads, 3);
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+  assert.match(verdict?.message ?? "", /last failure: repository content read exceeded the 5ms server deadline/u);
+});
+
+test("a permanent repository response failure refuses without retrying", async () => {
+  let reads = 0;
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async () => {
+      reads += 1;
+      throw new GitHubReadError("repository file is missing", "response");
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [0, 0], wait: async () => {} },
+  );
+  assert.equal(reads, 1);
+  assert.match(verdict?.message ?? "", /repository file is missing/u);
+});
+
+test("a content mismatch refuses immediately without retrying", async () => {
+  let reads = 0;
+  const waits: number[] = [];
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async () => {
+      reads += 1;
+      return bytes("tampered");
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [17, 29], wait: async (delayMs) => { waits.push(delayMs); } },
+  );
+  assert.equal(reads, 1);
+  assert.deepEqual(waits, []);
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
 });
 
 test("direct authority is read from the implementation task and compound authority from the approved spec output", async () => {

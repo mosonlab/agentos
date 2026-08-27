@@ -50,6 +50,22 @@ test("transport failures retry with bounded exponential delays", async () => {
   assert.deepEqual(waits, [250, 1_000]);
 });
 
+test("transport backoff stops immediately when the read deadline aborts", async () => {
+  const deadline = new AbortController();
+  let calls = 0;
+  const reader = createGitHubReader("read-token", async () => {
+    calls += 1;
+    queueMicrotask(() => deadline.abort());
+    throw new TypeError("fetch failed");
+  })!;
+
+  await assert.rejects(
+    reader.compareCommits!("owner/repo", "a".repeat(40), "b".repeat(40), deadline.signal),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  assert.equal(calls, 1);
+});
+
 test("permission failures never retry", async () => {
   let calls = 0;
   const waits: number[] = [];

@@ -35,7 +35,6 @@ import {
   type SpecificationReader,
   type SpecificationRefusal,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
-  specificationUnreadableRefusal,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
@@ -68,8 +67,6 @@ export type ClaimRunInput = {
   specificationReader: SpecificationReader | null;
   signal?: AbortSignal;
 };
-
-const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
 
 const MAX_OPERATOR_NOTES = 10;
 const MAX_OPERATOR_NOTES_CHARS = 4_000;
@@ -626,29 +623,11 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
 
     // The repository read is deliberately outside the serializable claim
     // transaction. A slow provider must not hold Run, Task, or chain locks.
-    const deadline = new AbortController();
-    const requestSignal = input.signal;
-    const abortFromRequest = () => deadline.abort(requestSignal?.reason);
-    if (requestSignal?.aborted) abortFromRequest();
-    else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
-    const timer = setTimeout(() => deadline.abort(), SPECIFICATION_READ_TIMEOUT_MS);
-    let verdict: SpecificationRefusal | null;
-    try {
-      verdict = await verifyPreparedSpecification(
-        attempted.verification,
-        input.specificationReader,
-        deadline.signal,
-      );
-    } catch (error: unknown) {
-      if (requestSignal?.aborted) throw error;
-      if (!deadline.signal.aborted) throw error;
-      verdict = specificationUnreadableRefusal(
-        `repository content read exceeded the ${SPECIFICATION_READ_TIMEOUT_MS}ms server deadline`,
-      );
-    } finally {
-      clearTimeout(timer);
-      requestSignal?.removeEventListener("abort", abortFromRequest);
-    }
+    const verdict: SpecificationRefusal | null = await verifyPreparedSpecification(
+      attempted.verification,
+      input.specificationReader,
+      input.signal ?? new AbortController().signal,
+    );
     verificationResults.set(attempted.verification.key, verdict);
   }
 };

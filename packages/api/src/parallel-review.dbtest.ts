@@ -18,6 +18,7 @@ import {
 } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
+import { GitHubReadError } from "./github-read.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 import { instantiateTemplate } from "./templates.js";
 
@@ -412,6 +413,79 @@ test("a faithful direct spec with one conventional final newline remains claimab
   assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
+test("a transient specification read failure retries and claims without parking", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "transient-read-implementation");
+  let reads = 0;
+  const response = await createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async () => {
+        reads += 1;
+        if (reads === 1) throw new GitHubReadError("TLS handshake eof", "transport");
+        return new TextEncoder().encode(SPECIFICATION_BRIEF);
+      },
+    },
+  }).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "transient-read-review", leaseSeconds: 120 }),
+  });
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  assert.equal(reads, 2);
+  assert.equal(await db.run.count({
+    where: { taskId: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: RunStatus.FAILED },
+  }), 0);
+  assert.equal(await db.task.count({
+    where: { id: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: TaskStatus.BACKLOG },
+  }), 0);
+  assert.equal(await db.inboxMessage.count({
+    where: { body: { contains: "spec-transcription" } },
+  }), 0);
+});
+
+test("persistent specification read failure parks with retry evidence", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "persistent-read-implementation");
+  let reads = 0;
+  const response = await createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async () => {
+        reads += 1;
+        throw new GitHubReadError(`proxy flap ${reads}`, "transport");
+      },
+    },
+  }).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "persistent-read-review", leaseSeconds: 120 }),
+  });
+  assert.equal(response.status, 204, await response.text());
+  assert.equal(reads, 6);
+  const parked = await db.task.findMany({
+    where: { id: { in: [fixture.solTaskId, fixture.blindTaskId] } },
+    select: { status: true, failureReason: true },
+  });
+  assert.equal(parked.length, 2);
+  assert.ok(parked.every(({ status }) => status === TaskStatus.BACKLOG));
+  assert.match(parked[0]!.failureReason ?? "", /after 2 retries \(3 total attempts\)/u);
+  assert.match(parked[0]!.failureReason ?? "", /last failure: proxy flap 3/u);
+  assert.match(parked[1]!.failureReason ?? "", /last failure: proxy flap 6/u);
+  const failed = await db.run.findMany({
+    where: { taskId: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: RunStatus.FAILED },
+    select: { id: true, failureReason: true, retryable: true },
+  });
+  assert.equal(failed.length, 2);
+  assert.ok(failed.every(({ failureReason, retryable }) => (
+    retryable === false && failureReason?.includes("after 2 retries (3 total attempts)")
+  )));
+  for (const run of failed) {
+    assert.equal(await db.inboxMessage.count({
+      where: { dedupeKey: `spec-transcription-unreadable:${run.id}` },
+    }), 1);
+  }
+});
+
 test("a repository change between verification and claim triggers verification against the new repository", async () => {
   const fixture = await instantiateDirect();
   await completeImplementation(fixture, "repository-change-implementation");
@@ -513,6 +587,7 @@ test("tampered direct and compound materializations refuse claim with the named 
     const refusalBody = refused.body as { error: string; reason: string };
     assert.equal(refusalBody.reason, "spec-transcription-mismatch");
     assert.match(refusalBody.error, /Spec transcription claim refused: spec-transcription-mismatch/u);
+    assert.equal(specificationReads.length, 1);
 
     const failed = await db.run.findFirstOrThrow({
       where: { taskId: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: RunStatus.FAILED },

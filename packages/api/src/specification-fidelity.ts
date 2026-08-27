@@ -6,6 +6,7 @@ import {
 
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
 import { isValidBranchName } from "./branch-name.js";
+import { GitHubReadError } from "./github-read.js";
 import { featureBriefFromTaskDescription } from "./templates.js";
 
 /** Stable, operator-visible reasons for the distinct fail-closed outcomes. */
@@ -235,25 +236,117 @@ const isAbortError = (error: unknown): boolean => (
   error instanceof Error && error.name === "AbortError"
 );
 
+export type SpecificationReadFailureKind = "transient" | "permanent";
+
+const TRANSIENT_SYSTEM_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETRESET",
+  "ENETUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
+
+/** Only transport and deadline failures are retried; repository/content responses fail closed immediately. */
+export const classifySpecificationReadFailure = (error: unknown): SpecificationReadFailureKind => {
+  if (error instanceof GitHubReadError) {
+    return error.kind === "timeout" || error.kind === "transport" ? "transient" : "permanent";
+  }
+  if (isAbortError(error)) return "transient";
+  const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+  return code && TRANSIENT_SYSTEM_ERROR_CODES.has(code) ? "transient" : "permanent";
+};
+
+type SpecificationReadRetryOptions = {
+  retryDelaysMs?: readonly number[];
+  attemptTimeoutsMs?: readonly number[];
+  wait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+};
+
+// Three reads and both backoffs preserve the claim-side read's existing 4s total bound.
+const SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS = [1_200, 1_200, 1_200] as const;
+const SPECIFICATION_READ_RETRY_DELAYS_MS = [100, 300] as const;
+
+const abortReason = (signal: AbortSignal): unknown => (
+  signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+);
+
+const waitForSpecificationRetry = (delayMs: number, signal: AbortSignal): Promise<void> => new Promise(
+  (resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }, delayMs);
+    const aborted = (): void => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", aborted, { once: true });
+  },
+);
+
+const failureDetail = (error: unknown): string => (
+  error instanceof Error ? error.message : "repository content read failed"
+);
+
 /** Perform repository I/O only; callers must invoke this outside a transaction. */
 export const verifyPreparedSpecification = async (
   verification: SpecificationVerification,
   reader: SpecificationReader | null,
   signal: AbortSignal,
+  options: SpecificationReadRetryOptions = {},
 ): Promise<SpecificationRefusal | null> => {
   if (!reader) return specificationUnreadableRefusal("server-side repository content reader is unavailable");
-  let materialized: Uint8Array;
-  try {
-    materialized = await reader.readFileAtCommit(
-      verification.repository,
-      verification.path,
-      verification.implementationHeadSha,
-      signal,
-    );
-  } catch (error: unknown) {
-    if (signal.aborted || isAbortError(error)) throw error;
-    const detail = error instanceof Error ? error.message : "repository content read failed";
-    return specificationUnreadableRefusal(detail);
+  const retryDelaysMs = options.retryDelaysMs ?? SPECIFICATION_READ_RETRY_DELAYS_MS;
+  const attemptTimeoutsMs = options.attemptTimeoutsMs ?? SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS;
+  const wait = options.wait ?? waitForSpecificationRetry;
+  let materialized: Uint8Array | undefined;
+  for (let attempt = 0; materialized === undefined; attempt += 1) {
+    signal.throwIfAborted();
+    const attemptDeadline = new AbortController();
+    const abortFromRequest = (): void => attemptDeadline.abort(abortReason(signal));
+    signal.addEventListener("abort", abortFromRequest, { once: true });
+    const timeoutMs = attemptTimeoutsMs[attempt] ?? attemptTimeoutsMs.at(-1) ?? 4_000;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      attemptDeadline.abort();
+    }, timeoutMs);
+    let failure: unknown;
+    try {
+      materialized = await reader.readFileAtCommit(
+        verification.repository,
+        verification.path,
+        verification.implementationHeadSha,
+        attemptDeadline.signal,
+      );
+      continue;
+    } catch (error: unknown) {
+      if (signal.aborted) throw error;
+      failure = timedOut
+        ? new GitHubReadError(`repository content read exceeded the ${timeoutMs}ms server deadline`, "timeout")
+        : error;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abortFromRequest);
+    }
+
+    const detail = failureDetail(failure);
+    const delayMs = retryDelaysMs[attempt];
+    if (classifySpecificationReadFailure(failure) === "permanent" || delayMs === undefined) {
+      return specificationUnreadableRefusal(
+        delayMs === undefined && attempt > 0
+          ? `after ${attempt} retries (${attempt + 1} total attempts); last failure: ${detail}`
+          : detail,
+      );
+    }
+    await wait(delayMs, signal);
   }
   return bytesEqual(
     normalizeLineEndings(materialized),

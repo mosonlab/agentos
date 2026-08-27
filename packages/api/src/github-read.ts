@@ -119,11 +119,25 @@ export type GitHubReader = {
 export type PullRequestReader = Pick<GitHubReader, "readPullRequest" | "compareCommits">;
 
 type GitHubReadRetryOptions = {
-  wait?: (delayMs: number) => Promise<void>;
+  wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>;
 };
 
 const GITHUB_READ_RETRY_DELAYS_MS = [250, 1_000] as const;
-const waitForRetry = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs));
+const waitForRetry = (delayMs: number, signal?: AbortSignal | null): Promise<void> => new Promise((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    return;
+  }
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", aborted);
+    resolve();
+  }, delayMs);
+  const aborted = (): void => {
+    clearTimeout(timer);
+    reject(signal?.reason ?? new DOMException("The operation was aborted", "AbortError"));
+  };
+  signal?.addEventListener("abort", aborted, { once: true });
+});
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asObject = (value: unknown): Record<string, unknown> | null =>
@@ -284,7 +298,7 @@ export const createGitHubReader = (
         if (isDeterministicRefusal(error)) throw new GitHubReadError(`GitHub read failed: ${message}`, "permission");
         const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
         if (delay === undefined) throw new GitHubReadError(`GitHub read failed: ${message}`, "transport");
-        await wait(delay);
+        await wait(delay, init.signal);
         continue;
       }
       if (response.status === 401 || response.status === 403) {
@@ -297,7 +311,7 @@ export const createGitHubReader = (
       const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
       const transientStatus = response.status === 429 || response.status >= 500;
       if (transientStatus && delay !== undefined) {
-        await wait(delay);
+        await wait(delay, init.signal);
         continue;
       }
       throw new GitHubReadError(
