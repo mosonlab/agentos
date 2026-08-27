@@ -170,7 +170,10 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
       await preMigration.$disconnect();
     }
 
-    cpSync(join(dbDirectory, "prisma", "migrations", targetMigration), join(stagedMigrations, targetMigration), { recursive: true });
+    for (const migration of readdirSync(join(dbDirectory, "prisma", "migrations"))) {
+      if (migration < targetMigration) continue;
+      cpSync(join(dbDirectory, "prisma", "migrations", migration), join(stagedMigrations, migration), { recursive: true });
+    }
     deploy();
     const synced = spawnSync("npx", ["tsx", "prisma/sync-canonical-prompts.ts"], {
       cwd: dbDirectory,
