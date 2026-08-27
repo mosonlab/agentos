@@ -4,8 +4,8 @@
 
 **A local control plane for coding agents.**
 
-You write the spec. A chain of agents takes it from there — plan, review,
-implement, verify, merge — and every run stays observable and reviewable.
+You write the spec. A chain of agents takes it from there: plan, review,
+implement, verify, merge. Every run stays observable and reviewable.
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](docs/status.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -27,32 +27,31 @@ into one workflow that runs entirely on your own machine.
 It orchestrates the official Codex CLI, Claude Code and Pi that you have
 already installed and signed in to, so the subscription logins those CLIs
 already hold are what it runs on. AgentOS supplies no credential of its own and
-resells no subscription — see
+resells no subscription. See
 [Authentication and subscriptions](#authentication-and-subscriptions).
 
 ## What it changes
 
-A task chain carries a whole delivery path — specification, plan, plan review,
+A task chain covers the whole delivery path: specification, plan, plan review,
 implementation, two independent code reviews, fix application, regression
 verification, merge readiness and the merge itself. Each step carries its own
 role, prompt, model and reasoning effort, and each step's output becomes the
 next step's input.
 
-Once a chain starts it advances on its own. Your attention is required when an
-agent asks you something through the Inbox, when a step you marked as gated
-needs a human decision, or when a run escalates. Everything between those points
+Once a chain starts it advances on its own. You step in when an agent asks you
+something through the Inbox, when a step you marked as gated needs a human
+decision, or when a run escalates. Everything between those points
 runs unattended, including delivery: a branch, an optional pull request, and a
 merge behind the merge gate.
 
-That is the leverage. The scarce resource stops being your hours and becomes how
-many runners you have registered — chains for different tasks and different
-repositories are in flight at the same time, and you are reading review output
-instead of typing the implementation.
+That changes what limits you. Throughput comes from how many runners you have
+registered rather than from your hours: chains for different tasks and different
+repositories are in flight at the same time, and you read review output instead
+of typing the implementation.
 
-One honest limit: long-horizon autonomy is not wired yet. A Goal is stored and
-edited but nothing schedules work from it, so a chain is still started by you or
-by a webhook trigger, not by a standing objective. See
-[Status](docs/status.md).
+Long-horizon autonomy is not wired yet. A Goal is stored and edited but nothing
+schedules work from it, so a chain is still started by you or by a webhook
+trigger, not by a standing objective. See [Status](docs/status.md).
 
 <div align="center">
 
@@ -104,7 +103,7 @@ seed.
 
 ## Quick start
 
-Targets an Apple Silicon Mac with Node.js `22.17.0` from `.nvmrc` (installation requires
+You need an Apple Silicon Mac with Node.js `22.17.0` from `.nvmrc` (installation requires
 Node.js satisfying `^20.19.0 || ^22.13.0 || >=24` and refuses anything else), npm 10.9.2+,
 Docker Compose, Git, and the official Codex CLI already signed in under the same
 macOS account. Claude Code and Pi are optional.
@@ -149,7 +148,7 @@ and the authoritative matrix in
 ## Authentication and subscriptions
 
 AgentOS holds no provider credential. It launches the official CLIs you have
-already installed and signed in to — Codex CLI, Claude Code and Pi — and their
+already installed and signed in to (Codex CLI, Claude Code and Pi), and their
 authentication stays where each CLI keeps it, in that CLI's own configuration.
 AgentOS neither reads it nor forwards it, and there is no AgentOS account, no
 API proxy and no key to paste in.
@@ -159,28 +158,28 @@ ChatGPT subscription login, a Claude Pro/Max login, or each CLI's own API-key
 mode, exactly as you already configured it. Pi carries no account of its own
 either: it authenticates through the Codex login.
 
-You can check this instead of taking it on faith. The runner constructs the
+You can check this. The runner constructs the
 child environment for the provider process rather than copying the host
 environment wholesale
 ([`docs/architecture.md`](docs/architecture.md), `packages/runner/src/adapters/`),
 and the release check scans this checkout for token variables, bearer headers
 and `Authorization` ([`docs/release/security.md`](docs/release/security.md)).
 
-What none of that does is settle a provider's terms on your behalf. Plan limits,
+None of that settles a provider's terms for you. Plan limits,
 rate limits, usage allowances, and whether your plan permits this kind of
 orchestration are between you and the provider. AgentOS grants no entitlement
 and makes no compatibility promise for a CLI provider.
 
 ## Documentation
 
-- [Architecture and security model](docs/architecture.md) — how the console,
+- [Architecture and security model](docs/architecture.md): how the console,
   API, runner and provider CLIs fit together, and what the grants do and do not
   contain.
-- [Installation notes and verification](docs/install.md) — environment file,
+- [Installation notes and verification](docs/install.md): environment file,
   migrations, merge executor, and the check sequence.
-- [Security](docs/release/security.md) — read before pointing this at
+- [Security](docs/release/security.md): read before pointing this at
   anything you care about.
-- [Migration and recovery](docs/release/migration-and-recovery.md) — read
+- [Migration and recovery](docs/release/migration-and-recovery.md): read
   before putting data in it.
 - [Release notes](docs/release/v0.3.0-release-notes.md) · [Support](SUPPORT.md) ·
   [Contributing](CONTRIBUTING.md)
@@ -191,7 +190,7 @@ An independent build inspired by Danny Postma's video *How I Built My Own
 AgentOS on Claude's Agent SDK (So You Can Too)* (2026), written from scratch
 from the ideas in it.
 
-The chain's role and step prompts are a different kind of debt: five skills from
+The chain's role and step prompts owe more than inspiration: five skills from
 [mattpocock/skills](https://github.com/mattpocock/skills) supply their working
 text, carried verbatim and wrapped in paragraphs written here for this
 platform's contracts. That work is MIT-licensed, `Copyright (c) 2026 Matt
