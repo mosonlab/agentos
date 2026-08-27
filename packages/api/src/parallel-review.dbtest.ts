@@ -53,6 +53,11 @@ type Claim = {
     implementationHeadSha: string | null;
     pinnedBaseSha: string | null;
   };
+  specificationMaterialization: {
+    kind: "direct-implementation";
+    path: string;
+    body: string;
+  } | null;
   fencingToken: string;
   sessionToken: string;
 };
@@ -384,7 +389,12 @@ const queuedRunsFor = (taskIds: string[]) => db.run.findMany({
 
 test("Direct sync instantiates a parallel review frontier claimable by distinct runners with one pinned range", async () => {
   const fixture = await instantiateDirect();
-  await completeImplementation(fixture);
+  const implementation = await completeImplementation(fixture);
+  assert.deepEqual(implementation.specificationMaterialization, {
+    kind: "direct-implementation",
+    path: `.chain/${fixture.branchName}/spec.md`,
+    body: SPECIFICATION_BRIEF,
+  });
 
   const queued = await queuedRunsFor([fixture.solTaskId, fixture.blindTaskId]);
   assert.equal(queued.length, 2);
@@ -498,7 +508,9 @@ test("tampered direct and compound materializations refuse claim with the named 
     await resetTestDb(db);
     await runDbScript("seed.ts");
     await runDbScript("sync-canonical-prompts.ts");
-    materializedSpecification = "tampered specification";
+    materializedSpecification = shape === "direct"
+      ? `Feature brief:\n${SPECIFICATION_BRIEF}\nPersist the final implementation output for this step through the AgentOS task output endpoint.`
+      : "tampered specification";
     specificationReads.length = 0;
     const fixture = shape === "direct"
       ? await instantiateDirect()

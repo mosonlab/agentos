@@ -32,6 +32,7 @@ import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
 import {
   prepareSpecificationVerification,
+  specificationMaterializationForDirectImplementation,
   type SpecificationReader,
   type SpecificationRefusal,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
@@ -543,6 +544,10 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         },
         select: { id: true },
       }) !== null;
+      const specificationMaterialization = specificationMaterializationForDirectImplementation(
+        candidate.task,
+        run.branch,
+      );
       return {
         outcome: "claimed" as const,
         claim: {
@@ -575,6 +580,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff
             : null,
+          specificationMaterialization,
           resume: priorResume,
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         },

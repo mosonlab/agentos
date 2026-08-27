@@ -31,6 +31,8 @@ export type LegacyStepTuple = readonly [
  * layer were retired (2026-08-26 ruling). This is the first generation whose
  * structure is identical to its successor's; it is told apart by
  * `promptDigest`, and the note on that field explains why that is sound.
+ * `pre-platform-spec-materialization`: the direct graph whose implementation
+ * prompt still delegated exact specification transcription to the model.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
@@ -103,6 +105,20 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
       successorPromptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
+      shape: [
+        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 4],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+      ],
+    },
+    {
+      marker: "pre-platform-spec-materialization",
+      promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
+      successorPromptDigest: "8ac9da9253e198741581a2a11d564a4c9b96d04da083d9433544c9ba65d096ba",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],

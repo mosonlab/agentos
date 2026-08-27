@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chown, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chown, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import test from "node:test";
@@ -73,6 +73,97 @@ test("provisioning trusts an already-published intended head after its database 
     assert.equal(workspace.branch, "agentos/chain/demo-deadbeef");
     assert.equal(workspace.baseSha, publishedSha);
     assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "published\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("provisioning commits the server-prepared direct specification before the agent starts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-specification-"));
+  try {
+    const remote = join(root, "origin.git");
+    const seed = join(root, "seed");
+    git(root, "init", "--bare", "--initial-branch=main", remote);
+    git(root, "init", "--initial-branch=main", seed);
+    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.email", "runner@agentos.local");
+    await writeFile(join(seed, "tree.txt"), "base\n");
+    git(seed, "add", "tree.txt");
+    git(seed, "commit", "-m", "base");
+    const originalHead = git(seed, "rev-parse", "HEAD");
+    git(seed, "remote", "add", "origin", remote);
+    git(seed, "push", "-u", "origin", "main");
+
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+    } as unknown as RunnerConfig;
+    const branch = "feature/platform-spec";
+    const specificationPath = `.chain/${branch}/spec.md`;
+    const claim = {
+      task: { id: "task-specification" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
+      run: {
+        id: "run-specification",
+        runNumber: 1,
+        targetBranch: "main",
+        branch,
+      },
+      specificationMaterialization: {
+        kind: "direct-implementation",
+        path: specificationPath,
+        body: "authoritative brief",
+      },
+    } as ClaimedTask;
+
+    const workspace = await provisionWorkspace(config, claim);
+    assert.equal(await readFile(join(workspace.path, specificationPath), "utf8"), "authoritative brief");
+    assert.equal(git(workspace.path, "status", "--porcelain"), "");
+    assert.equal(workspace.baseSha, git(workspace.path, "rev-parse", "HEAD"));
+    assert.equal(git(workspace.path, "rev-parse", "HEAD^"), originalHead);
+    assert.equal(git(workspace.path, "show", `HEAD:${specificationPath}`), "authoritative brief");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prepared specification refuses a repository symlink that would escape the workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-specification-symlink-"));
+  try {
+    const remote = join(root, "origin.git");
+    const seed = join(root, "seed");
+    const escaped = join(root, "escaped");
+    await mkdir(escaped);
+    git(root, "init", "--bare", "--initial-branch=main", remote);
+    git(root, "init", "--initial-branch=main", seed);
+    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.email", "runner@agentos.local");
+    await symlink(escaped, join(seed, ".chain"));
+    git(seed, "add", ".chain");
+    git(seed, "commit", "-m", "symlink fixture");
+    git(seed, "remote", "add", "origin", remote);
+    git(seed, "push", "-u", "origin", "main");
+
+    const config = {
+      workspaceRoot: join(root, "workspaces"), runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin", home: root,
+    } as unknown as RunnerConfig;
+    const branch = "feature/platform-spec";
+    const claim = {
+      task: { id: "task-specification-symlink" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
+      run: { id: "run-specification-symlink", runNumber: 1, targetBranch: "main", branch },
+      specificationMaterialization: {
+        kind: "direct-implementation",
+        path: `.chain/${branch}/spec.md`,
+        body: "must stay inside",
+      },
+    } as ClaimedTask;
+
+    await assert.rejects(provisionWorkspace(config, claim), /Prepared specification parent .* is a symlink/u);
+    await assert.rejects(readFile(join(escaped, branch, "spec.md")), /ENOENT/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,0 +1,9 @@
+Filed 2026-08-27 after a production failure (chain cfbbec00, Costs dashboard): both review claims were refused with spec-transcription-mismatch. Root cause: the implementation prompt says "Copy the brief verbatim to .chain/<branch>/spec.md", but the authoritative text is the marker-delimited slice of the task description (between the "Feature brief:" and "Persist the final " markers; templates.ts:121-123, featureBriefFromTaskDescription). The agent included the "Feature brief:" heading line and the trailing "Persist the final ..." line, so the byte-level check necessarily failed. Any model can trip this; the instruction leaves the brief boundary ambiguous.
+
+Scope: make the transcription mechanical instead of delegated. Preferred: the platform writes .chain/<branch>/spec.md itself (at claim or first push) from the authoritative slice and the implementation prompt drops the copy instruction; the fidelity check stays and now verifies platform output. Alternative if platform-side write is infeasible: give the prompt exact delimiters and add tolerant normalization (strip the two known frame lines) in verifyPreparedSpecification.
+
+Also fix while in the area: Run.promptHash (workflow.ts:92-97) hashes only foundational+role+name+description, not the dispatched prompt, and PROCESS_STARTED events copy it under the same name. Rename or rehash so the field matches what it claims.
+
+Acceptance: a direct chain instantiated after the fix passes review claim without manual spec.md repair; a dbtest covers the mismatch path; lint and tests green.
+
+Ruling (Leo 2026-08-27): implement the preferred platform-write approach. The platform materializes .chain/<branch>/spec.md itself from the authoritative slice (at branch bootstrap or claim), the implementation prompt drops the copy instruction, and the fidelity check stays unchanged. Do not implement the tolerant-normalization alternative.

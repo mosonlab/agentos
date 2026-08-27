@@ -53,6 +53,10 @@ const generationOf = (templateName: string, marker: string) => {
 };
 
 const PROMPT_ROLLOVER_TEMPLATES = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
+const LATEST_PROMPT_ROLLOVER = {
+  "direct-engineer-workflow": "pre-platform-spec-materialization",
+  "compound-engineer-workflow": "pre-blind-review-retirement",
+} as const;
 
 test("a prompt generation is decided by step index and text, not by array order", () => {
   const forward = [{ stepIndex: 1, prompt: "one" }, { stepIndex: 2, prompt: "two" }];
@@ -140,24 +144,34 @@ test("a rollover refuses a source that is not the successor it was registered to
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
     const current = sources.get(templateName);
     assert.ok(current);
+    const marker = LATEST_PROMPT_ROLLOVER[templateName];
 
     // The source as registered: no drift.
-    assert.equal(successorPromptDrift(templateName, "pre-blind-review-retirement", current), null);
+    assert.equal(successorPromptDrift(templateName, marker, current), null);
 
     // The same rollover, with the prompts edited again after registration.
     const driftedSource = current.map((step) => (
       step.stepIndex === current[0]!.stepIndex ? { ...step, prompt: `${step.prompt}\n\nlater edit` } : step
     ));
-    const refusal = successorPromptDrift(templateName, "pre-blind-review-retirement", driftedSource);
+    const refusal = successorPromptDrift(templateName, marker, driftedSource);
     assert.ok(refusal, `${templateName} must refuse an unregistered successor`);
     assert.match(refusal, /registered to install prompt generation/u);
 
     // The outgoing row is unaffected by that edit and still matches, which is
     // exactly why the successor has to be checked separately.
-    const generation = generationOf(templateName, "pre-blind-review-retirement");
+    const generation = generationOf(templateName, marker);
     assert.ok(generation.successorPromptDigest);
     assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
   }
+});
+
+test("direct platform specification materialization is a registered prompt-only rollover", async () => {
+  const current = (await loadAllTemplateStepSources()).get("direct-engineer-workflow");
+  assert.ok(current);
+  const generation = generationOf("direct-engineer-workflow", "pre-platform-spec-materialization");
+  assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+  assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+  assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
 });
 
 test("a structural generation pins no successor and is unaffected", () => {

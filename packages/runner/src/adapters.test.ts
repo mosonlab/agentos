@@ -20,6 +20,7 @@ import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
 
 const claim: ClaimedTask = {
   executionMode: "agent",
+  specificationMaterialization: null,
   task: {
     id: "task-1",
     name: "Ship it",

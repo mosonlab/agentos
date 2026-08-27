@@ -6,6 +6,7 @@ import {
   prepareSpecificationVerification,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
+  specificationMaterializationForDirectImplementation,
   specificationPathForBranch,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
@@ -79,6 +80,30 @@ test("tampered materialization returns one stable operator-visible reason", asyn
   );
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
   assert.match(verdict?.message ?? "", /Spec transcription claim refused: spec-transcription-mismatch/u);
+});
+
+test("direct implementation materialization uses only the marker-delimited authoritative brief", () => {
+  const description = composeTemplateTaskDescription({
+    prompt: "Implement the feature below.",
+    featureBrief: "the exact brief",
+    attachmentsFromPrevious: false,
+    outputKind: "implementation",
+  });
+  assert.deepEqual(specificationMaterializationForDirectImplementation({
+    description,
+    templateId: "direct-template",
+    chainId: "direct-chain",
+    templateStep: {
+      stepIndex: 1,
+      outputKind: "implementation",
+      attachmentsFromPrevious: false,
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  }, "feature/direct"), {
+    kind: "direct-implementation",
+    path: ".chain/feature/direct/spec.md",
+    body: "the exact brief",
+  });
 });
 
 test("direct authority is read from the implementation task and compound authority from the approved spec output", async () => {

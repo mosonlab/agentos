@@ -299,6 +299,7 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directRegression, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
   const directImplementation = directTemplateSteps[0]!.prompt;
   assert.match(directImplementation, /brief is the specification of record/u);
+  assert.doesNotMatch(directImplementation, /Copy the brief verbatim/u);
   assert.match(directImplementation, /at least two child-writer branches need integration/u);
   assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
   assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);

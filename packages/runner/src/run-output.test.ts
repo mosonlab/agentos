@@ -101,6 +101,7 @@ const config = (workspaceRoot: string, agentBinary: string): RunnerConfig => ({
 
 const claim = (remoteUrl: string): ClaimedTask => ({
   executionMode: "agent",
+  specificationMaterialization: null,
   task: {
     id: "task-114",
     name: "Find the inbox deadlock",

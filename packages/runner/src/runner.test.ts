@@ -44,6 +44,7 @@ const cleanupTestSession = async (root: string): Promise<void> => {
 
 const mechanicalClaim: ClaimedTask = {
   executionMode: "mechanical",
+  specificationMaterialization: null,
   task: {
     id: "task-10",
     name: "Merge execution",

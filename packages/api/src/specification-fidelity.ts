@@ -1,5 +1,6 @@
 import {
   githubRepositoryFromRemote,
+  isDirectImplementationStep,
   Prisma,
   stepRole,
 } from "@agentos/db";
@@ -25,6 +26,41 @@ export type SpecificationRefusal = {
 
 /** The path the implementation step promises to materialize. */
 export const specificationPathForBranch = (branch: string): string => `.chain/${branch}/spec.md`;
+
+export type SpecificationMaterialization = {
+  kind: "direct-implementation";
+  path: string;
+  body: string;
+};
+
+/** Prepare the direct-chain brief for runner-owned workspace bootstrap. */
+export const specificationMaterializationForDirectImplementation = (
+  task: {
+    description: string;
+    templateId?: string | null;
+    chainId?: string | null;
+    templateStep?: {
+      stepIndex?: number;
+      outputKind?: string;
+      attachmentsFromPrevious: boolean;
+      taskTemplate?: { name: string } | null;
+    } | null;
+  },
+  branch: string | null,
+): SpecificationMaterialization | null => {
+  if (!task.templateId || !task.chainId
+    || !isDirectImplementationStep(task.templateStep ?? null)
+    || !branch || !isValidBranchName(branch)) return null;
+  const body = featureBriefFromTaskDescription(
+    task.description,
+    task.templateStep?.attachmentsFromPrevious ?? false,
+  );
+  return body === null ? null : {
+    kind: "direct-implementation",
+    path: specificationPathForBranch(branch),
+    body,
+  };
+};
 
 /** Narrow repository capability needed by review-claim verification. */
 export type SpecificationReader = {

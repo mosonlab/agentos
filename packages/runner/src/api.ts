@@ -32,6 +32,12 @@ export type ClaimedTask = {
    * `@agentos/merge-executor`, a different process under a different OS user.
    */
   executionMode: "mechanical" | "agent";
+  /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */
+  specificationMaterialization: {
+    kind: "direct-implementation";
+    path: string;
+    body: string;
+  } | null;
   task: {
     id: string;
     name: string;
