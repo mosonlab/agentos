@@ -1,24 +1,15 @@
 import type { InboxMessage } from "./types";
 
-/** A detached notification: an agent-authored text card that hangs off no task,
- *  goal, session, gate, or parent message. The control plane owns this exact
- *  predicate — `POST /inbox/messages/:id/close` refuses anything else, because
- *  closing such a card archives it without approving or resuming anything. The
- *  Inbox mirrors it to split cards that need a reply from cards that only
- *  report something, so the awaiting-reply count means what it says. */
-export const isNotice = (message: InboxMessage): boolean =>
-  message.from === "AGENT"
-  && message.kind === "TEXT"
-  && message.taskId === null
-  && message.goalId === null
-  && message.sessionId === null
-  && message.gateTaskId === null
-  && message.replyToMessageId === null;
-
 /** Cards the operator still owes an answer to — the badge count and the Active
- *  lane. Notices are open too, but nobody is blocked on them. */
+ *  lane. A notification is open too, but nobody is blocked on it: the control
+ *  plane decides which is which and says so in `dismissible`, the same rule
+ *  `POST /inbox/messages/:id/close` enforces. */
 export const needsReply = (message: InboxMessage): boolean =>
-  message.status === "OPEN" && !isNotice(message);
+  message.status === "OPEN" && !message.dismissible;
+
+/** Open, and safe to archive without approving or resuming anything. */
+export const isNotice = (message: InboxMessage): boolean =>
+  message.status === "OPEN" && message.dismissible;
 
 export type DeployNotice = {
   outcome: "success" | "failure";

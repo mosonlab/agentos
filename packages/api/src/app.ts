@@ -12,6 +12,8 @@ import {
   GoalStatus,
   enqueueTaskRun,
   openRun,
+  InboxKind,
+  InboxSender,
   InboxStatus,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
@@ -215,6 +217,41 @@ const withArtifactTask = <T extends { gateTaskId: string | null; session: { task
 ): Omit<T, "session"> & { artifactTaskId: string | null } => {
   const { session, ...rest } = message;
   return { ...rest, artifactTaskId: message.gateTaskId === null ? null : session?.taskId ?? null };
+};
+
+/**
+ * A card nobody is blocked on, so archiving it strands nothing.
+ *
+ * The rule used to be "attached to no task, goal, or session", which was a
+ * proxy for that and misfired on the common case: a merge-tail stop report is
+ * attached to the task it happened on, yet its run ended long ago and no reply
+ * would resume anything. What actually blocks is a suspended session pointing
+ * at the card through `Session.waitingOnMessageId` (`inbox.ts`'s
+ * `suspendForInbox`), or a decision the operator still owes — a choice list or
+ * an approval gate.
+ */
+const withDismissible = <T extends {
+  id: string; from: InboxSender; kind: InboxKind; gateTaskId: string | null; replyToMessageId: string | null;
+}>(message: T, blocked: ReadonlySet<string>): T & { dismissible: boolean } => ({
+  ...message,
+  dismissible: message.from === "AGENT"
+    && message.kind === InboxKind.TEXT
+    && message.gateTaskId === null
+    && message.replyToMessageId === null
+    && !blocked.has(message.id),
+});
+
+/** The cards a suspended session will resume on. A session only ever waits on a
+ *  message its own suspension created, so this set cannot grow for a card that
+ *  already exists — which is why the close route may check it before its
+ *  conditional update rather than inside one statement. */
+const blockedMessageIds = async (db: PrismaClient, ids: string[]): Promise<ReadonlySet<string>> => {
+  if (ids.length === 0) return new Set();
+  const waiting = await db.session.findMany({
+    where: { waitingOnMessageId: { in: ids } },
+    select: { waitingOnMessageId: true },
+  });
+  return new Set(waiting.flatMap((session) => session.waitingOnMessageId === null ? [] : [session.waitingOnMessageId]));
 };
 
 const id = z.string().min(1);
@@ -3000,7 +3037,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     include: { decisions: true, replies: { orderBy: { createdAt: "asc" } }, session: { select: { taskId: true } } },
     orderBy: { createdAt: "desc" },
     });
-    return context.json(messages.map(withArtifactTask));
+    const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
+    return context.json(messages.map((message) => withDismissible(withArtifactTask(message), blocked)));
   });
   app.get("/inbox/messages/:messageId", async (context) => {
     const message = await db.inboxMessage.findUnique({
@@ -3012,7 +3050,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         session: { select: { taskId: true } },
       },
     });
-    return message ? context.json(withArtifactTask(message)) : context.json({ error: "Inbox message not found" }, 404);
+    if (!message) return context.json({ error: "Inbox message not found" }, 404);
+    return context.json(withDismissible(withArtifactTask(message), await blockedMessageIds(db, [message.id])));
   });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const body = await readJson(context.req.raw, inboxDecisionInput);
@@ -3054,21 +3093,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const messageId = id.parse(context.req.param("messageId"));
     const message = await db.inboxMessage.findUnique({
       where: { id: messageId },
-      select: {
-        status: true, from: true, kind: true, taskId: true, goalId: true,
-        sessionId: true, gateTaskId: true, replyToMessageId: true,
-      },
+      select: { id: true, status: true, from: true, kind: true, gateTaskId: true, replyToMessageId: true },
     });
     if (!message) return context.json({ error: "Inbox message not found" }, 404);
-    const detachedNotification = message.from === "AGENT"
-      && message.kind === "TEXT"
-      && message.taskId === null
-      && message.goalId === null
-      && message.sessionId === null
-      && message.gateTaskId === null
-      && message.replyToMessageId === null;
-    if (!detachedNotification) {
-      return context.json({ error: "Only a detached agent notification can be closed without a decision" }, 409);
+    if (!withDismissible(message, await blockedMessageIds(db, [messageId])).dismissible) {
+      return context.json({ error: "Only a notification no run is waiting on can be closed without a decision" }, 409);
     }
     if (message.status === InboxStatus.CLOSED) {
       return context.json({ closed: false, duplicate: true, requestId: body.requestId });
@@ -3079,7 +3108,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const closed = await db.inboxMessage.updateMany({
       where: {
         id: messageId, status: InboxStatus.OPEN, from: "AGENT", kind: "TEXT",
-        taskId: null, goalId: null, sessionId: null, gateTaskId: null, replyToMessageId: null,
+        gateTaskId: null, replyToMessageId: null,
       },
       data: { status: InboxStatus.CLOSED, answeredAt: new Date() },
     });

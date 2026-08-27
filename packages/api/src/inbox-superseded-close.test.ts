@@ -280,12 +280,10 @@ test("detached notifications retain the original close route contract", async ()
   await withTokens(async () => {
     const state = fixture();
     const notification = {
+      id: "message-1",
       status: InboxStatus.OPEN,
       from: "AGENT",
       kind: "TEXT",
-      taskId: null,
-      goalId: null,
-      sessionId: null,
       gateTaskId: null,
       replyToMessageId: null,
     };
@@ -298,6 +296,7 @@ test("detached notifications retain the original close route contract", async ()
           return { count: 1 };
         },
       },
+      session: { findMany: async () => [] },
     } as unknown as PrismaClient;
     const response = await request(database, "/inbox/messages/message-1/close");
     assert.equal(response.status, 200);

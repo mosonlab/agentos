@@ -9,7 +9,7 @@ import type { InboxMessage } from "../lib/types";
 const now = "2026-08-26T00:00:00.000Z";
 
 const card = (overrides: Partial<InboxMessage> & Pick<InboxMessage, "id" | "body">): InboxMessage => ({
-  from: "AGENT", agentId: null, sessionId: null, taskId: null, goalId: null,
+  from: "AGENT", dismissible: true, agentId: null, sessionId: null, taskId: null, goalId: null,
   gateTaskId: null, artifactTaskId: null, threadId: "thread-1", replyToMessageId: null,
   kind: "TEXT", choices: null, selectedChoiceId: null, status: "OPEN", channel: "FEISHU",
   deliveryStatus: "DELIVERED", deliveryAttempts: 1, lastDeliveryError: null,
@@ -20,7 +20,7 @@ const card = (overrides: Partial<InboxMessage> & Pick<InboxMessage, "id" | "body
 /** The three shapes the lanes have to tell apart: a gate that blocks a task, a
  *  detached notification nobody is blocked on, and an archived deploy record. */
 const gate = card({
-  id: "gate-1", body: "审批闸门：合并 PR #44", kind: "MULTIPLE_CHOICE", agentId: "agent-1",
+  id: "gate-1", body: "审批闸门：合并 PR #44", kind: "MULTIPLE_CHOICE", agentId: "agent-1", dismissible: false,
   taskId: "gate-task", gateTaskId: "gate-task", choices: [{ id: "approve", label: "批准" }],
 });
 const notice = card({ id: "notice-1", body: "Autonomous merge tail stopped: missing regression output" });

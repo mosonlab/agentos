@@ -76,7 +76,7 @@ type InboxFilter = "active" | "notices" | "answered";
 
 const LANE: Record<InboxFilter, (message: InboxMessage) => boolean> = {
   active: needsReply,
-  notices: (message) => message.status === "OPEN" && isNotice(message),
+  notices: isNotice,
   answered: (message) => message.status !== "OPEN",
 };
 
