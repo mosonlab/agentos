@@ -32,7 +32,6 @@ import {
   recordIntegratorStop,
   runBudgetCeiling,
   RunStatus,
-  SessionExecutionStatus,
   TaskStatus,
   writeMarker,
 } from "@agentos/db";
@@ -59,6 +58,7 @@ import {
   stopMergeTail,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
+import { terminalizeRun } from "./run-terminal.js";
 import {
   commitWithLeaseDisposition,
   settleLease,
@@ -438,16 +438,19 @@ export const completeRun = async (
       : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
         ? RunStatus.TIMED_OUT
         : RunStatus.FAILED;
-    const closed = await tx.run.updateMany({
-      // The terminal compare-and-set deliberately drops `runnerId`: settlement
-      // races completion on this row and neither may win twice. Same instant
-      // as the read above, which is what `at` on the fence is for.
-      where: fencedRunWhere({ runId, fencingToken: body.fencingToken, at: now }),
-      data: {
+    const terminal = await terminalizeRun(tx, {
+      runId,
+      at: now,
+      outcome: {
+        kind: "completed",
+        // The terminal compare-and-set deliberately drops `runnerId`:
+        // cancellation settlement races completion on this row and neither
+        // may win twice. Same instant as the read above, which is what `at` on
+        // the fence is for.
+        where: fencedRunWhere({ runId, fencingToken: body.fencingToken, at: now }),
         status: terminalStatus,
-        endedAt: now,
-        leaseExpiresAt: null,
-        sessionTokenRevokedAt: now,
+        sessionId: run.session.id,
+        run: {
         failureClass,
         failureReason,
         retryable,
@@ -486,24 +489,18 @@ export const completeRun = async (
           : Prisma.DbNull,
         maxRunsPerTask: budgetCeiling,
         budgetGrants,
-      },
-    });
-    if (closed.count !== 1) return null;
-    await tx.session.update({
-      where: { id: run.session.id },
-      data: {
-        executionStatus: succeeded ? SessionExecutionStatus.SUCCEEDED
-          : terminalStatus === RunStatus.TIMED_OUT ? SessionExecutionStatus.TIMED_OUT : SessionExecutionStatus.FAILED,
+        },
+        session: {
         cleanupStatus: body.cleanupStatus,
         exitCode: body.exitCode,
         signal: body.signal ?? null,
         terminationReason: body.terminationReason ?? null,
-        endedAt: now,
-        cleanupEndedAt: now,
         failureReason,
         cleanupFailureReason: body.cleanupFailureReason ?? null,
+        },
       },
     });
+    if (terminal === null || "message" in terminal) return null;
     let retryCreated = false;
     let retryRefusal: Refusal | null = null;
     if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
