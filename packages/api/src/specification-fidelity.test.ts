@@ -13,10 +13,14 @@ import { composeTemplateTaskDescription } from "./templates.js";
 
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 
-test("line-ending normalization is byte-preserving apart from CRLF and lone CR", () => {
+test("line-ending normalization folds CR variants and removes at most one final LF", () => {
   assert.deepEqual(
-    [...normalizeLineEndings(Uint8Array.from([0x41, 0x0d, 0x0a, 0x42, 0x0d, 0x43]))],
+    [...normalizeLineEndings(Uint8Array.from([0x41, 0x0d, 0x0a, 0x42, 0x0d, 0x43, 0x0a]))],
     [0x41, 0x0a, 0x42, 0x0a, 0x43],
+  );
+  assert.deepEqual(
+    [...normalizeLineEndings(Uint8Array.from([0x41, 0x0a, 0x0a]))],
+    [0x41, 0x0a],
   );
 });
 
@@ -44,6 +48,21 @@ test("faithful pinned materialization accepts normalized line endings and passes
     path: ".chain/feature/spec-check/spec.md",
     commitSha: "a".repeat(40),
   });
+});
+
+test("faithful pinned materialization accepts one final LF absent from authority", async () => {
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "a".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async () => bytes("authoritative\n") },
+    new AbortController().signal,
+  );
+  assert.equal(verdict, null);
 });
 
 test("tampered materialization returns one stable operator-visible reason", async () => {

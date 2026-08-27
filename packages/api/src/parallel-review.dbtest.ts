@@ -403,6 +403,15 @@ test("a faithful direct brief ending in the prior-output reminder remains claima
   assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
+test("a faithful direct spec with one conventional final newline remains claimable", async () => {
+  const brief = "Preserve this exact ending without a final newline.";
+  materializedSpecification = `${brief}\n`;
+  const fixture = await instantiateDirect(brief);
+  await completeImplementation(fixture, "final-newline-implementation");
+  const reviewed = await claim("final-newline-review");
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
+});
+
 test("a faithful rolled-over compound chain still resolves the approved specification", async () => {
   const fixture = await instantiateFullAtReviewFrontier();
   await db.taskTemplate.update({

@@ -63,7 +63,7 @@ const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => (
   left.length === right.length && left.every((byte, index) => byte === right[index])
 );
 
-/** Normalize CRLF and lone CR to LF without decoding arbitrary bytes. */
+/** Normalize CR variants and ignore one optional trailing LF without decoding arbitrary bytes. */
 export const normalizeLineEndings = (bytes: Uint8Array): Uint8Array => {
   const normalized: number[] = [];
   for (let index = 0; index < bytes.length; index += 1) {
@@ -75,6 +75,7 @@ export const normalizeLineEndings = (bytes: Uint8Array): Uint8Array => {
       normalized.push(byte);
     }
   }
+  if (normalized.at(-1) === 0x0a) normalized.pop();
   return Uint8Array.from(normalized);
 };
 
