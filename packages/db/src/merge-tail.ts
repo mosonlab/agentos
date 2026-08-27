@@ -22,6 +22,7 @@ export const LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX = 7;
 export const LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX = 12;
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
+  leaseHandoff: "mergeTail.leaseHandoff",
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
@@ -221,6 +222,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/merge-integrator-db.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
+  "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
   "packages/db/src/agent-contract.ts",
   "packages/db/prisma/seed.ts",

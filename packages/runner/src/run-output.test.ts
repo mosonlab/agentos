@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { ClaimedTask } from "./api.js";
+import { ControlPlaneError, type ClaimedTask } from "./api.js";
+import { adapters, type RuntimeHandle } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
-import { RUNNER_EXCEPTION_REASON } from "./envelope.js";
+import { RUNNER_EXCEPTION_REASON, summarizeEvidence } from "./envelope.js";
 import { executeClaim } from "./runner.js";
 import { createControlPlaneDouble } from "./test-control-plane.js";
 
@@ -65,7 +66,11 @@ const succeedingAgent = [
   "exit 0",
 ].join("\n");
 
-const remediatingAgent = (remediationPrompt: string): string => [
+const remediatingAgent = (
+  remediationPrompt: string,
+  resumeCommands: string[] = [],
+  remediationResult = "task output persisted",
+): string => [
   "#!/bin/sh",
   'case "$1" in',
   '  --version) echo "1.2.3-stub"; exit 0 ;;',
@@ -75,8 +80,15 @@ const remediatingAgent = (remediationPrompt: string): string => [
   'case " $* " in',
   '  *" --resume conversation-114 "*)',
   `    cat > ${JSON.stringify(remediationPrompt)}`,
+  ...resumeCommands.map((command) => `    ${command}`),
   '    echo \'{"type":"system","session_id":"conversation-114"}\'',
-  '    echo \'{"type":"result","is_error":false,"terminal_reason":"completed","session_id":"conversation-114","result":"task output persisted"}\'',
+  `    echo ${JSON.stringify(JSON.stringify({
+    type: "result",
+    is_error: false,
+    terminal_reason: "completed",
+    session_id: "conversation-114",
+    result: remediationResult,
+  }))}`,
   "    ;;",
   "  *)",
   "    cat > /dev/null",
@@ -179,6 +191,34 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   regressionRepairHandoff: null,
 });
 
+const requiredOutputClaim = (remoteUrl: string): ClaimedTask => {
+  const base = claim(remoteUrl);
+  return {
+    ...base,
+    task: {
+      ...base.task,
+      templateStep: { name: "Implementation", outputKind: "implementation" },
+    },
+  };
+};
+
+const outputStatus = (overrides: Partial<{
+  outputKind: string | null;
+  outputRequired: boolean;
+  outputRemediationAllowed: boolean;
+  outputSatisfiedByPriorRun: boolean;
+  outputPersisted: boolean;
+}> = {}) => ({
+  task: {
+    outputKind: "implementation",
+    outputRequired: true,
+    outputRemediationAllowed: true,
+    outputSatisfiedByPriorRun: false,
+    outputPersisted: false,
+    ...overrides,
+  },
+});
+
 /**
  * The succeeding stub again, with one addition: it drops a sentinel file on its
  * way out. The fetch stub below watches for that file, so a request can be
@@ -254,23 +294,15 @@ test("a successful run remediates its missing required output in the same provid
     const controlPlane = createControlPlaneDouble({
       readSessionTaskOutputStatus: async () => {
         statusReads += 1;
-        return {
-          outputKind: "implementation",
-          outputRequired: true,
-          outputRemediationAllowed: true,
-          outputPersisted: statusReads >= 2,
-        };
+        return outputStatus({ outputPersisted: statusReads >= 2 }).task;
       },
     });
 
-    const baseClaim = claim(remote);
-    await executeClaim(config(join(root, "workspaces"), agentBinary), {
-      ...baseClaim,
-      task: {
-        ...baseClaim.task,
-        templateStep: { name: "Implementation", outputKind: "implementation" },
-      },
-    }, { controlPlane: controlPlane.controlPlane });
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      requiredOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
 
     assert.equal(
       statusReads,
@@ -289,6 +321,253 @@ test("a successful run remediates its missing required output in the same provid
     assert.ok(completion);
     assert.equal(completion.terminalSuccess, true);
     assert.equal(completion.output, "implemented the requested change");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an immutable output satisfied by a prior Run skips remediation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-immutable-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({
+          outputRemediationAllowed: false,
+          outputSatisfiedByPriorRun: true,
+      }).task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    assert.equal(existsSync(remediationPrompt), false);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_SKIPPED"));
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("missing output with no provider conversation reports remediation unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-no-conversation-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, succeedingAgent);
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const unavailable = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_UNAVAILABLE");
+    assert.ok(unavailable);
+    assert.equal(unavailable.payload.providerConversationIdAvailable, false);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed output status read is diagnosed without attempting remediation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-check-failed-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => {
+        throw new ControlPlaneError(503, "status unavailable");
+      },
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    assert.equal(existsSync(remediationPrompt), false);
+    const events = controlPlane.eventBatches.flat();
+    const failed = events.find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_CHECK_FAILED");
+    assert.ok(failed);
+    assert.match(String(failed.payload.message), /503/u);
+    assert.equal(events.some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("remediation that still leaves output missing fails with provider evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-still-missing-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    const remediationResult = `${"x".repeat(5_000)}diagnostic final output`;
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt, [], remediationResult));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    assert.ok(finished);
+    assert.equal(finished.payload.outputPersisted, false);
+    const evidence = finished.payload.evidence as Record<string, unknown>;
+    assert.equal(evidence.finalOutputTail, summarizeEvidence(remediationResult));
+    assert.match(String(evidence.finalOutputTail), /^…\[\d+ earlier characters truncated\]/u);
+    assert.match(String(evidence.finalOutputTail), /diagnostic final output$/u);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.match(String(completion?.failureReason), /finished without persisting implementation output/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cancellation during remediation drains the resumed handle before ACK", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-cancel-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt, ["sleep 30"]));
+    await chmod(agentBinary, 0o755);
+    let resumedHandle: RuntimeHandle | null = null;
+    let resumeReturning = false;
+    let resumedHandleDrained = false;
+    const adapter = {
+      ...adapters.CLAUDE,
+      resume: async (...args: Parameters<typeof adapters.CLAUDE.resume>) => {
+        const launched = await adapters.CLAUDE.resume(...args);
+        resumedHandle = launched;
+        resumeReturning = true;
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        return launched;
+      },
+      kill: async (...args: Parameters<typeof adapters.CLAUDE.kill>) => {
+        const result = await adapters.CLAUDE.kill(...args);
+        if (args[0] === resumedHandle) resumedHandleDrained = !result.processAlive;
+        return result;
+      },
+    };
+    let cancellationSent = false;
+    let ackObservedAfterDrain = false;
+    let acknowledgementCount = 0;
+    const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+      heartbeat: async () => {
+        if (!resumeReturning || cancellationSent) return { ok: true, cancellation: null };
+        cancellationSent = true;
+        return {
+          ok: false,
+          cancellation: { requestId: "cancel-remediation", reason: "operator stop", requestedAt: new Date(0).toISOString() },
+        };
+      },
+      acknowledgeCancellation: async () => {
+        acknowledgementCount += 1;
+        ackObservedAfterDrain = resumedHandleDrained;
+      },
+    });
+
+    await executeClaim(configured, requiredOutputClaim(remote), { adapter, controlPlane: controlPlane.controlPlane });
+
+    assert.equal(cancellationSent, true);
+    assert.equal(resumedHandleDrained, true);
+    assert.equal(ackObservedAfterDrain, true);
+    assert.equal(acknowledgementCount, 1);
+    assert.equal(controlPlane.completions.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("remediation cannot change workspace HEAD or publish its changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-head-drift-"));
+  try {
+    const remote = await seedRemote(root);
+    const originalHead = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master");
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt, [
+      "printf 'remediation edit\\n' > tree.txt",
+      "git add tree.txt",
+      "git -c user.name='AgentOS Test' -c user.email='runner@agentos.local' commit -m 'forbidden remediation edit' >/dev/null",
+    ]));
+    await chmod(agentBinary, 0o755);
+    let statusReads = 0;
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => {
+        statusReads += 1;
+        return outputStatus({ outputPersisted: statusReads >= 2 }).task;
+      },
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    assert.ok(finished);
+    assert.equal(finished.payload.workspaceChanged, true);
+    assert.notEqual(
+      (finished.payload.workspaceBefore as Record<string, unknown>).headSha,
+      (finished.payload.workspaceAfter as Record<string, unknown>).headSha,
+    );
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion?.pushStatus, "NOT_REQUESTED");
+    assert.equal(git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master"), originalHead);
+    assert.deepEqual(git(root, `--git-dir=${remote}`, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n"), ["refs/heads/master"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the original Run budget continues through remediation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-budget-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt, ["sleep 30"]));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+    });
+    const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
+    const claimed = requiredOutputClaim(remote);
+    claimed.run.maxDurationMin = 0.002;
+
+    await executeClaim(configured, claimed, { controlPlane: controlPlane.controlPlane });
+    // Let the heartbeat callback that performed the budget kill finish its
+    // best-effort API report before afterEach restores the real global fetch.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "BUDGET_EXCEEDED");
+    assert.match(String(completion?.failureReason), /walltime budget exceeded/u);
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    assert.ok(finished);
+    assert.equal(finished.payload.outputPersisted, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

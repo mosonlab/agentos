@@ -9,6 +9,8 @@ import {
   MergeConfirmationError,
   MergeEvidenceError,
   PinnedBaseCommitError,
+  WorkflowRefusalError,
+  type WorkflowRefusalReason,
 } from "@agentos/db";
 
 import {
@@ -96,18 +98,21 @@ test("the five error families formerly missed by app.onError never reach its 500
   assert.equal(responseFor(new MergeEvidenceError("Merge evidence is incomplete")).status, 409);
 });
 
-test("the five Inbox decision messages formerly matched by regex have concrete reasons", () => {
-  const cases = {
-    "No matching Inbox question": "inbox-question-not-found",
-    "Approval gate decision must be approve or reject": "approval-gate-decision-invalid",
-    "Decision must match an Inbox choice id": "inbox-choice-mismatch",
-    "No matching waiting Inbox question": "inbox-run-not-waiting",
-    "Approval gate has no executable previous task to reject to": "approval-gate-rejection-target-missing",
-  } as const;
-  for (const [message, reason] of Object.entries(cases)) {
-    const refusal = refusalFor(new Error(message));
+test("workflow refusals are classified by reason independently of prose", () => {
+  const messagesByReason = {
+    "invalid-request": "changed configuration wording",
+    conflict: "changed concurrency wording",
+    "inbox-question-not-found": "changed missing-question wording",
+    "approval-gate-decision-invalid": "changed decision wording",
+    "inbox-choice-mismatch": "changed choice wording",
+    "inbox-run-not-waiting": "changed run-state wording",
+    "approval-gate-rejection-target-missing": "changed rejection-target wording",
+  } as const satisfies Record<WorkflowRefusalReason, string>;
+  for (const [reason, message] of Object.entries(messagesByReason) as Array<[WorkflowRefusalReason, string]>) {
+    const refusal = refusalFor(new WorkflowRefusalError(reason, message));
     assert.equal(refusal?.reason, reason);
-    assert.equal(refusal && refusalResponse(refusal).status, 409);
+    assert.equal(refusal?.message, message);
+    assert.equal(refusal && refusalResponse(refusal).status, reason === "invalid-request" ? 400 : 409);
   }
   assert.equal(refusalFor(new Error("unclassified")), null);
 });

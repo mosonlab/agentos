@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   ADAPTER_VERSION,
   adapterExecutionSucceeded,
@@ -21,6 +23,7 @@ import {
   type CancellationRequest,
   type ControlPlane,
   type SessionEventPayload,
+  type SessionTaskOutputStatus,
 } from "./api.js";
 import {
   probeSupportedCliAvailability,
@@ -37,13 +40,14 @@ import {
   type FailurePhase,
   RUNNER_EXCEPTION_REASON,
   runnerExceptionEnvelope,
+  summarizeEvidence,
 } from "./envelope.js";
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import {
-  captureWorkspaceResult, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
+  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
-  type AgentScratch, type Workspace,
+  type AgentScratch, type Workspace, type WorkspaceSnapshot,
 } from "./workspace.js";
 import { observeExternalWorktrees } from "./worktree-observer.js";
 
@@ -65,6 +69,27 @@ const missingOutputRemediationInput = (outputKind: string): string => [
   `Using the work and evidence already produced in this conversation, call task_output with kind '${outputKind}' and a body that satisfies the task's exact output contract and current HEAD binding.`,
   "If the write is rejected, correct the body and retry. Then call task_status and finish only after it reports outputPersisted: true for this Run.",
 ].join("\n");
+
+const sameWorkspaceSnapshot = (left: WorkspaceSnapshot, right: WorkspaceSnapshot): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
+
+const workspaceSnapshotEvidence = (snapshot: WorkspaceSnapshot): Record<string, unknown> => ({
+  headSha: snapshot.headSha,
+  treeDigest: createHash("sha256").update(JSON.stringify(snapshot)).digest("hex"),
+  dirty: snapshot.status.length > 0,
+});
+
+const exitEvidencePayload = (evidence: ExitEvidence): Record<string, unknown> => ({
+  exitCode: evidence.exitCode,
+  signal: evidence.signal,
+  terminalEventSeen: evidence.terminalEventSeen,
+  terminalSuccess: evidence.terminalSuccess,
+  terminationReason: evidence.terminationReason,
+  finalOutputTail: summarizeEvidence(evidence.finalOutput),
+  providerErrorTail: summarizeEvidence(evidence.providerError),
+  stdoutTail: summarizeEvidence(evidence.stdout),
+  stderrTail: summarizeEvidence(evidence.stderr),
+});
 
 const cleanup = async (
   config: RunnerConfig,
@@ -123,16 +148,33 @@ export const executeClaim = async (
   let waitingInbox = false;
   let cancellation: CancellationRequest | null = null;
   let cancellationPromise: Promise<void> | null = null;
-  let closeProviderLaunch!: () => void;
-  const providerLaunchSettled = new Promise<void>((resolve) => {
+  let providerLaunchSettled = Promise.resolve();
+  let closeProviderLaunch = (): void => undefined;
+  const openProviderLaunch = (): void => {
     let closed = false;
+    let resolveLaunch!: () => void;
+    providerLaunchSettled = new Promise<void>((resolve) => { resolveLaunch = resolve; });
     closeProviderLaunch = () => {
       if (closed) return;
       closed = true;
-      resolve();
+      resolveLaunch();
     };
-  });
+  };
+  // Cancellation may arrive at any provisioning point before the first start.
+  openProviderLaunch();
+  const providerKillPromises = new WeakMap<RuntimeHandle, Promise<void>>();
+  const drainProviderHandle = (target: RuntimeHandle, reason: string): Promise<void> => {
+    const active = providerKillPromises.get(target);
+    if (active) return active;
+    const draining = adapter.kill(target, reason).then((killed) => {
+      if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+    });
+    providerKillPromises.set(target, draining);
+    return draining;
+  };
   let budgetReason: string | null = null;
+  let remediationFailureReason: string | null = null;
+  let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
   // agent's own work, everything else is this process's plumbing.
@@ -211,8 +253,7 @@ export const executeClaim = async (
     fencingRejected = true;
     if (handle) {
       try {
-        const killed = await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
-        if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+        await drainProviderHandle(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
       } catch (killError: unknown) {
         console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(killError)}`);
       }
@@ -229,8 +270,7 @@ export const executeClaim = async (
       // either abandoned or has produced the handle that must be killed.
       await providerLaunchSettled;
       if (handle) {
-        const killed = await adapter.kill(handle, request.reason);
-        if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+        await drainProviderHandle(handle, request.reason);
       }
       await controlPlane.acknowledgeCancellation(
         config,
@@ -242,6 +282,11 @@ export const executeClaim = async (
     })();
     await cancellationPromise;
   };
+
+  // Cancellation and fencing are mutated by heartbeat continuations, which
+  // TypeScript cannot observe across the awaited provider launch.
+  const providerStopReason = (): string => cancellation?.reason
+    ?? (waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
 
   const observeEventFlush = async (error: unknown): Promise<void> => {
     await noteFencingError(error);
@@ -455,7 +500,7 @@ export const executeClaim = async (
         });
         if (!decision.allowed && snapshot.processAlive) {
           budgetReason = `${decision.gate}: ${decision.reason}`;
-          await adapter.kill(heartbeatHandle, budgetReason);
+          await drainProviderHandle(heartbeatHandle, budgetReason);
         }
         try {
           const result = await controlPlane.heartbeat(config, claim, {
@@ -486,7 +531,7 @@ export const executeClaim = async (
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
       && !fencingRejected) {
-      let outputStatus: Awaited<ReturnType<ControlPlane["readSessionTaskOutputStatus"]>> = null;
+      let outputStatus: SessionTaskOutputStatus | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
       } catch (error: unknown) {
@@ -496,48 +541,109 @@ export const executeClaim = async (
           payload: { message: errorMessage(error) },
         });
       }
-      if (outputStatus?.outputRequired
-        && outputStatus.outputRemediationAllowed
-        && !outputStatus.outputPersisted) {
+      if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
         const outputKind = outputStatus.outputKind;
         const providerConversationId = completedHandle.providerConversationId;
-        if (outputKind && providerConversationId && !fencingRejected) {
+        if (outputStatus.outputSatisfiedByPriorRun) {
           sink({
             source: "RUNNER",
-            type: "TASK_OUTPUT_REMEDIATION_STARTED",
-            payload: { outputKind },
+            type: "TASK_OUTPUT_REMEDIATION_SKIPPED",
+            payload: { outputKind, reason: "immutable-output-satisfied-by-prior-run" },
           });
-          handle = await adapter.resume({
-            ...spec,
-            providerConversationId,
-            input: missingOutputRemediationInput(outputKind),
-          }, sink);
-          const remediationEvidence = await handle.exit;
-          let remediated = false;
-          try {
-            remediated = (await controlPlane.readSessionTaskOutputStatus(config, claim))?.outputPersisted === true;
-          } catch (error: unknown) {
+        } else if (outputStatus.outputRemediationAllowed
+          && outputKind
+          && providerConversationId
+          && !fencingRejected) {
+          const beforeRemediation = await captureWorkspaceSnapshot(config, workspace);
+          // Snapshotting is asynchronous. Cancellation may have been ACKed
+          // against the already-closed first launch while it ran, so no second
+          // provider launch may be opened without this fresh fence check.
+          if (!fencingRejected) {
             sink({
               source: "RUNNER",
-              type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
-              payload: { message: errorMessage(error) },
+              type: "TASK_OUTPUT_REMEDIATION_STARTED",
+              payload: { outputKind, workspace: workspaceSnapshotEvidence(beforeRemediation) },
             });
+            let remediationHandle: RuntimeHandle | null = null;
+            openProviderLaunch();
+            try {
+              remediationHandle = await adapter.resume({
+                ...spec,
+                providerConversationId,
+                input: missingOutputRemediationInput(outputKind),
+              }, sink);
+              handle = remediationHandle;
+            } finally {
+              closeProviderLaunch();
+            }
+            // A cancellation can win while adapter.resume is constructing the
+            // process group. Recheck before awaiting its exit and drain the newly
+            // returned handle; the ACK waits on this same deduplicated kill.
+            if (fencingRejected && remediationHandle) {
+              await drainProviderHandle(
+                remediationHandle,
+                providerStopReason(),
+              );
+              if (cancellation) await cancellationPromise;
+            }
+            if (!fencingRejected && remediationHandle) {
+              const remediationEvidence = await remediationHandle.exit;
+              const afterRemediation = await captureWorkspaceSnapshot(config, workspace);
+              const workspaceChanged = !sameWorkspaceSnapshot(beforeRemediation, afterRemediation);
+              let remediated = false;
+              let statusCheckError: string | null = null;
+              if (!workspaceChanged) {
+                try {
+                  const remediatedStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
+                  remediated = remediatedStatus?.outputPersisted === true
+                    || remediatedStatus?.outputSatisfiedByPriorRun === true;
+                } catch (error: unknown) {
+                  statusCheckError = errorMessage(error);
+                  sink({
+                    source: "RUNNER",
+                    type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
+                    payload: { message: statusCheckError },
+                  });
+                }
+              }
+              if (workspaceChanged) {
+                workspacePublicationForbidden = true;
+                remediationFailureReason = `Task output remediation changed workspace HEAD or tree for Run ${claim.run.id}`;
+              } else if (!remediated) {
+                remediationFailureReason = statusCheckError
+                  ? `Task output remediation status check failed for Run ${claim.run.id}: ${statusCheckError}`
+                  : `Task output remediation finished without persisting ${outputKind} output for Run ${claim.run.id}`;
+              }
+              sink({
+                source: "RUNNER",
+                type: "TASK_OUTPUT_REMEDIATION_FINISHED",
+                payload: {
+                  outputKind,
+                  outputPersisted: remediated,
+                  terminalSuccess: adapterExecutionSucceeded(remediationEvidence),
+                  evidence: exitEvidencePayload(remediationEvidence),
+                  workspaceChanged,
+                  ...(workspaceChanged ? {
+                    workspaceBefore: workspaceSnapshotEvidence(beforeRemediation),
+                    workspaceAfter: workspaceSnapshotEvidence(afterRemediation),
+                  } : {}),
+                  ...(statusCheckError ? { statusCheckError } : {}),
+                },
+              });
+            }
           }
-          sink({
-            source: "RUNNER",
-            type: "TASK_OUTPUT_REMEDIATION_FINISHED",
-            payload: {
-              outputKind,
-              outputPersisted: remediated,
-              terminalSuccess: adapterExecutionSucceeded(remediationEvidence),
-            },
-          });
         } else {
+          remediationFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
+            !outputStatus.outputRemediationAllowed ? "remediation is not allowed"
+              : !outputKind ? "output kind is unavailable"
+                : "provider conversation id is unavailable"
+          }`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
             payload: {
               outputKind,
+              outputRemediationAllowed: outputStatus.outputRemediationAllowed,
               providerConversationIdAvailable: providerConversationId !== null,
             },
           });
@@ -586,7 +692,9 @@ export const executeClaim = async (
       });
       return;
     }
-    const executionSucceeded = adapterExecutionSucceeded(evidence);
+    const executionSucceeded = adapterExecutionSucceeded(evidence)
+      && remediationFailureReason === null
+      && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
     try { gitResult = await captureWorkspaceResult(config, workspace); } catch (error: unknown) {
@@ -628,7 +736,10 @@ export const executeClaim = async (
       // A failed PR operation can follow a successful, acknowledged push. That
       // branch is already durable even though the run must fail, so salvaging it
       // would publish a second ref and replace the primary delivery evidence.
-      succeeded || Boolean(workspace.pinnedBaseSha) || Boolean(primaryDelivery?.pushedBranch),
+      succeeded
+        || workspacePublicationForbidden
+        || Boolean(workspace.pinnedBaseSha)
+        || Boolean(primaryDelivery?.pushedBranch),
       controlPlane,
     );
     if (!succeeded && cleaned.salvage) {
@@ -640,9 +751,14 @@ export const executeClaim = async (
     }
     const sessionDisposal = await sessionConfigLease.settle(succeeded ? "succeeded" : "failed");
     const { salvage: _salvage, ...finishedCleanup } = cleaned;
-    const classified = succeeded ? null : primaryDelivery?.failureClass
-      ? { failureClass: primaryDelivery.failureClass, retryable: false }
-      : adapter.classifyError(evidence);
+    const classified = succeeded ? null
+      : budgetReason
+        ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
+        : remediationFailureReason
+          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: true }
+          : primaryDelivery?.failureClass
+            ? { failureClass: primaryDelivery.failureClass, retryable: false }
+            : adapter.classifyError(evidence);
     // The normal delivery failure remains the failure-envelope evidence even
     // when terminal salvage subsequently succeeds. The wire publication is the
     // salvage result, because it names the ref that actually became durable.
@@ -663,17 +779,28 @@ export const executeClaim = async (
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     lease.close();
+    // The primary provider may have ended cleanly while the required
+    // remediation protocol failed afterwards. Reflect that protocol failure in
+    // the structured envelope too; otherwise the API correctly distrusts the
+    // runner's asserted class and would classify the clean primary evidence as
+    // TASK_FAILED instead of PROTOCOL_ERROR.
+    const completionEvidence = remediationFailureReason
+      ? { ...evidence, terminalSuccess: false }
+      : evidence;
     await controlPlane.completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: evidence.signal,
       terminalEventSeen: evidence.terminalEventSeen,
       terminalSuccess: succeeded && evidence.terminalSuccess,
       terminationReason: budgetReason ?? evidence.terminationReason,
-      ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
+      ...(classified ? { failureClass: classified.failureClass, retryable: classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
       ...(!succeeded ? {
         failureReason: appendRetainedSessionConfig(
-          budgetReason ?? (executionSucceeded ? primaryDelivery?.pushError : null) ?? failureReasonFromEvidence(evidence),
+          budgetReason
+            ?? remediationFailureReason
+            ?? (executionSucceeded ? primaryDelivery?.pushError : null)
+            ?? failureReasonFromEvidence(evidence),
           retainedPath,
         ),
       } : {}),
@@ -685,9 +812,9 @@ export const executeClaim = async (
       ...(succeeded ? {} : {
         failureEnvelope: completionEnvelope({
           executionSucceeded,
-          evidence,
+          evidence: completionEvidence,
           deliveryFailure,
-          runnerClass: budgetReason ? "BUDGET_EXCEEDED" : classified?.failureClass ?? null,
+          runnerClass: classified?.failureClass ?? null,
           terminationReason: budgetReason ?? evidence.terminationReason,
         }),
       }),

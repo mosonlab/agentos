@@ -181,6 +181,8 @@ export type SessionEventPayload = {
 const request = async (config: RunnerConfig, path: string, init: RequestInit): Promise<Response> => {
   const response = await fetch(`${config.apiUrl}${path}`, {
     ...init,
+    // Endpoint-specific credentials intentionally come last. Session routes
+    // must replace the runner principal rather than sending runner auth.
     headers: { Authorization: `Bearer ${config.runnerToken}`, "Content-Type": "application/json", ...init.headers },
     signal: AbortSignal.timeout(config.apiTimeoutMs),
   }).catch((error: unknown) => {
@@ -297,6 +299,7 @@ export type SessionTaskOutputStatus = {
   outputKind: string | null;
   outputRequired: boolean;
   outputRemediationAllowed: boolean;
+  outputSatisfiedByPriorRun: boolean;
   outputPersisted: boolean;
 };
 
@@ -315,6 +318,7 @@ export const readSessionTaskOutputStatus = async (
       outputKind?: unknown;
       outputRequired?: unknown;
       outputRemediationAllowed?: unknown;
+      outputSatisfiedByPriorRun?: unknown;
       outputPersisted?: unknown;
     } | null;
   };
@@ -323,6 +327,7 @@ export const readSessionTaskOutputStatus = async (
     || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
     || typeof payload.task.outputRequired !== "boolean"
     || typeof payload.task.outputRemediationAllowed !== "boolean"
+    || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
     || typeof payload.task.outputPersisted !== "boolean") {
     throw new Error(`AgentOS API returned an invalid task output status for Run ${claim.run.id}`);
   }
@@ -330,6 +335,7 @@ export const readSessionTaskOutputStatus = async (
     outputKind: payload.task.outputKind,
     outputRequired: payload.task.outputRequired,
     outputRemediationAllowed: payload.task.outputRemediationAllowed,
+    outputSatisfiedByPriorRun: payload.task.outputSatisfiedByPriorRun,
     outputPersisted: payload.task.outputPersisted,
   };
 };

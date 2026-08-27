@@ -282,3 +282,33 @@ test("a lost ordinary step with no attempts left never touches the lease", async
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.LOST);
   assert.deepEqual(releasedChainLeases, []);
 });
+
+test("a stranded queued handoff releases once and records settlement after release", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const run = await seedRun(chain, { status: RunStatus.QUEUED });
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Chain Lease handed to queued Run ${run.id}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: run.id,
+      handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+    },
+  } });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  const settled = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: chain.task.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff } },
+    orderBy: { createdAt: "desc" },
+  });
+  assert.equal((settled.metadata as Record<string, unknown>).state, "released");
+
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), collectRelease), 0);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+});

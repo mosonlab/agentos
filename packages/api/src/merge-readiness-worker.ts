@@ -4,6 +4,7 @@ import {
   AUTHORIZED_MERGE_METHOD,
   MergeRecoveryStatus,
   Prisma,
+  RunStatus,
   TaskStatus,
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
@@ -21,14 +22,15 @@ import {
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { openDefenseAuditNotice } from "./merge-tail-actions.js";
-import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
-import { createGitHubReader, GitHubReadError, type PullRequestReader } from "./github-read.js";
+import { createGitHubReader, type PullRequestReader } from "./github-read.js";
 import {
-  readinessDecision,
+  evaluateReadiness,
+  READINESS_READ_BUDGET_MS,
   type ReadinessDecision,
   type ReadinessInput,
 } from "./readiness-decision.js";
 import {
+  noteLeaseHandoff,
   releaseMergeLease,
   withMergeLease,
   type ReleaseMergeLease,
@@ -41,7 +43,7 @@ export const readinessPollIntervalMs = (): number => {
 };
 
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
-export const READINESS_READ_BUDGET_MS = 20_000;
+export { READINESS_READ_BUDGET_MS };
 export const READINESS_CLAIM_LEASE_MS = 60_000;
 const READINESS_CANDIDATE_INCLUDE = {
   templateStep: { include: { taskTemplate: { select: { name: true } } } },
@@ -294,7 +296,6 @@ const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
 
 const readReadiness = async (
   db: PrismaClient,
-  reader: PullRequestReader | null,
   readiness: ReadinessCandidate,
   now: Date,
 ): Promise<ReadinessRead> => {
@@ -329,7 +330,6 @@ const readReadiness = async (
   if (claimed.count !== 1) return { claimed: false, input: { ...context, stage: "claim-lost" } };
 
   let recovery: RecoveryContext | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
     if (recovery) {
@@ -354,60 +354,18 @@ const readReadiness = async (
       || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
       return claimedRead({ ...context, stage: "invalid-regression-evidence" });
     }
-    if (!reader?.compareCommits) {
-      return claimedRead({ ...context, stage: "reader-unavailable" });
-    }
     const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
-    if (!target.resolved) {
-      return claimedRead({ ...context, stage: "target-unresolved", unresolvable: target.unresolvable });
-    }
-
-    const controller = new AbortController();
-    timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
-    const snapshot = await reader.readPullRequest(
-      target.repository,
-      target.prNumber,
-      readiness.repo?.defaultBranch ?? "main",
-      controller.signal,
-    );
-    const readyInput = (
-      values: Partial<Extract<ReadinessInput, { stage: "ready" }>> = {},
-    ): ClaimedReadiness => claimedRead({
+    return claimedRead({
       ...context,
       stage: "ready",
       regression: {
         headSha: verdict.verdict.headSha,
         baseHeadSha: verdict.verdict.baseHeadSha,
       },
-      target: { repository: target.repository, prNumber: target.prNumber },
-      snapshot,
-      comparison: null,
-      evidence: null,
-      ...values,
-    });
-    if (snapshot.headRefOid !== verdict.verdict.headSha
-      || !snapshot.baseSha
-      || !snapshot.baseRefName
-      || snapshot.baseSha !== verdict.verdict.baseHeadSha) {
-      return readyInput();
-    }
-    const comparison = await reader.compareCommits(
-      target.repository,
-      snapshot.baseSha,
-      verdict.verdict.headSha,
-      controller.signal,
-    );
-    if (!comparison.filesComplete
-      || ((comparison.status !== "ahead" && comparison.status !== "identical")
-        || comparison.behindBy !== 0)) {
-      return readyInput({ comparison });
-    }
-    return readyInput({
-      comparison,
-      evidence: evidenceFromSnapshot(snapshot, randomUUID()),
+      target,
+      defaultBranch: readiness.repo?.defaultBranch ?? "main",
     });
   } catch (error: unknown) {
-    const kind = error instanceof GitHubReadError ? error.kind : "unexpected";
     const message = error instanceof Error ? error.message : String(error);
     return {
       claimed: true,
@@ -415,10 +373,8 @@ const readReadiness = async (
       regression,
       recovery,
       claimReason,
-      input: { ...context, stage: "read-failed", failure: { kind, message } },
+      input: { ...context, stage: "read-failed", failure: { kind: "unexpected", message } },
     };
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 };
 
@@ -508,8 +464,20 @@ const applyReadinessDecision = async (
       const activeSuccessor = current?.status === TaskStatus.DONE
         || (current?.status === TaskStatus.DOING
           && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
+      const handoff = activeSuccessor && readiness.chainId
+        ? await db.run.findFirst({
+          where: {
+            task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+            status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+          },
+          select: { id: true },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        })
+        : null;
       return {
-        disposition: activeSuccessor ? "retain" as const : "release" as const,
+        disposition: handoff
+          ? { kind: "retain" as const, handoffRunId: handoff.id }
+          : { kind: "release" as const },
         value: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
       };
     }
@@ -530,7 +498,20 @@ const applyReadinessDecision = async (
         const activeSuccessor = current?.status === TaskStatus.DONE
           || (current?.status === TaskStatus.DOING
             && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
-        return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+        const handoff = activeSuccessor && readiness.chainId
+          ? await tx.run.findFirst({
+            where: {
+              task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+              status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+            },
+            select: { id: true },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          })
+          : null;
+        return {
+          kind: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
+          handoffRunId: handoff?.id ?? null,
+        };
       }
       const binding = `mechanical:${readiness.id}:${randomUUID()}`;
       const payload = {
@@ -594,24 +575,32 @@ const applyReadinessDecision = async (
           recoverySourceStopId: recovery?.sourceStopId ?? null,
         },
       });
-      if (recovery) {
-        await activateRecoveryIntegratorSuccessor(tx, {
+      const activated = recovery
+        ? await activateRecoveryIntegratorSuccessor(tx, {
           readinessTaskId: readiness.id,
           integratorTaskId: recovery.integratorTaskId,
           sourceStopId: recovery.sourceStopId,
           recoveryRunId: recovery.recoveryRunId,
           authorizationActivityId: activity.id,
-        }, read.input.now);
-      } else {
-        await activateChainSuccessor(tx, readiness, {}, read.input.now);
+        }, read.input.now)
+        : await activateChainSuccessor(tx, readiness, {}, read.input.now);
+      const handoff = activated.nextTaskId
+        ? await tx.run.findFirst({
+          where: { taskId: activated.nextTaskId, status: RunStatus.QUEUED },
+          select: { id: true },
+          orderBy: { runNumber: "desc" },
+        })
+        : null;
+      if (handoff && readiness.chainId) {
+        await noteLeaseHandoff(tx, { chainId: readiness.chainId, toRunId: handoff.id, at: read.input.now });
       }
-      return "authorized" as const;
+      return { kind: "authorized" as const, handoffRunId: handoff?.id ?? null };
     });
     return {
-      disposition: authorization === "authorized" || authorization === "claim-lost-active"
-        ? "retain" as const
-        : "release" as const,
-      value: authorization,
+      disposition: authorization.handoffRunId
+        ? { kind: "retain" as const, handoffRunId: authorization.handoffRunId }
+        : { kind: "release" as const },
+      value: authorization.kind,
     };
   });
   if (leased.outcome === "contended") return;
@@ -634,8 +623,8 @@ export const readinessTick = async (
     if (result.claimed >= limit) break;
     if (!isMergeReadinessStep(readiness.templateStep)) continue;
 
-    const read = await readReadiness(db, reader, readiness, now);
-    const decision = readinessDecision(read.input);
+    const read = await readReadiness(db, readiness, now);
+    const decision = await evaluateReadiness(reader, read.input);
     if (!read.claimed) continue;
     result.claimed += 1;
     try {

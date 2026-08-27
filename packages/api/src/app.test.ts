@@ -781,7 +781,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
         }),
         findUniqueOrThrow: async () => run.task,
       },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     };
@@ -811,7 +811,6 @@ test("completion refunds an external failure but refuses an automatic retry for 
       succeeded: false,
       retryCreated: false,
       failureClass: "TRANSIENT_PROVIDER",
-      releaseMergeLeaseTask: null,
     });
     });
   } finally {
@@ -852,7 +851,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
         findUnique: async () => null,
         findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
       },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
     }),
   } as unknown as PrismaClient;
@@ -902,6 +901,31 @@ const retryRequest = async (
     // which is what `maxRunsPerTask: 4` already was.
     budgetGrants: 0,
   };
+  const currentTask = {
+    id: "task-1",
+    projectId: "project-1",
+    name: "Retry me",
+    description: "Use current config",
+    assigneeType: "AGENT",
+    assigneeAgentId: assigneeAgent?.id ?? null,
+    repoId: "repo-current",
+    repo: null,
+    templateId: null,
+    templateStepId: currentTemplateStep ? "step-1" : null,
+    maxSessionsPerTask: 4,
+    maxDurationMin: 120,
+    stallTimeoutMin: 10,
+    opensPullRequest: true,
+    chainId: null,
+    chainIndex: null,
+    targetBranch: "main",
+    archivedAt: null,
+    dispatchAfterTaskId: null,
+    dispatchAfter: null,
+    assigneeAgent,
+    templateStep: currentTemplateStep,
+    runs: [last],
+  };
   const database = {
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       // Retry takes the shared task-row lock before it reads anything else.
@@ -909,38 +933,24 @@ const retryRequest = async (
       agent: { findUnique: async () => lockedAgent(assigneeAgent as Record<string, unknown> | null) },
       task: {
         findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
-        findUnique: async () => ({
-          id: "task-1",
-          projectId: "project-1",
-          name: "Retry me",
-          description: "Use current config",
-          assigneeType: "AGENT",
-          assigneeAgentId: assigneeAgent?.id ?? null,
-          repoId: "repo-current",
-          repo: null,
-          templateId: null,
-          templateStepId: currentTemplateStep ? "step-1" : null,
-          maxSessionsPerTask: 4,
-          maxDurationMin: 120,
-          stallTimeoutMin: 10,
-          opensPullRequest: true,
-          chainId: null,
-          chainIndex: null,
-          targetBranch: "main",
-          archivedAt: null,
-          assigneeAgent,
-          templateStep: currentTemplateStep,
-          runs: [last],
-        }),
+        findUnique: async () => currentTask,
+        findMany: async () => [currentTask],
         update: async () => ({}),
       },
       run: {
         count: async () => 0,
+        groupBy: async () => [{
+          taskId: "task-1",
+          status: "FAILED",
+          _count: { _all: 1 },
+          _max: { budgetGrants: 0 },
+        }],
         create: async ({ data }: { data: Record<string, unknown> }) => {
           created = data;
           return { id: "run-2", ...data };
         },
       },
+      agentRepoAccess: { count: async () => 1 },
       taskActivity: { create: async () => ({}) },
     }),
   } as unknown as PrismaClient;
@@ -1579,7 +1589,7 @@ test("claim query filters archived agents before take so active work cannot star
         },
         update: async () => ({}),
       },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
       taskStepOutput: { findMany: async () => [{
         kind: "spec", body: completePriorOutput,
         task: { name: "Approved specification", chainIndex: 0 },
@@ -1617,6 +1627,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
         $queryRaw: async () => [{ granted: true }],
         run: { findMany: async () => [] },
+        taskActivity: { findMany: async () => [] },
       }),
     } as unknown as PrismaClient;
     const app = createApp(database);
@@ -1716,6 +1727,7 @@ test("successful completion commits output and parks an archived chain successor
           },
         },
         taskActivity: {
+          findMany: async () => [],
           create: async ({ data }: { data: Record<string, unknown> }) => {
             if (data.taskId === successor.id) successorActivity = data;
             return {};
