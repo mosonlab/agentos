@@ -49,11 +49,11 @@ export const piArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     "--model", model,
     ...(effort ? ["--thinking", effort] : []),
     ...denyArgs(spec.claim.agent.disabledTools),
-    // Disable host-level pi discovery. PI_CODING_AGENT_DIR points at a fresh
-    // config root with no extensions directory, so the explicit AgentOS
-    // extension below remains enabled. The reviewer's role prompt supplies its
-    // rules, and repository context files remain review material rather than
-    // instructions.
+    // Disable PI's $PI_CODING_AGENT_DIR/skills discovery (normally
+    // ~/.pi/agent/skills) and the other user resource classes. The config root
+    // is fresh, so only the explicit AgentOS extension below remains enabled.
+    // The reviewer's role prompt supplies its rules, and repository context
+    // files remain review material rather than instructions.
     "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
     "--extension", piExtensionPath(),
     ...(resume ? ["--session", resume.providerConversationId] : []),
@@ -248,6 +248,11 @@ export const piChildEnvironment = (
   claim: Pick<ClaimedTask, "run">,
   scratch: AgentScratch,
 ): NodeJS.ProcessEnv => ({
+  // PI's other global skill root is $HOME/.agents/skills, independent of
+  // PI_CODING_AGENT_DIR. Keep it inside the session as well. Authentication is
+  // copied into the explicit config root below, so relocating HOME preserves
+  // the existing auth channel.
+  HOME: scratch.configRoot,
   PI_CODING_AGENT_DIR: scratch.configRoot,
   ...(claim.run.model.startsWith("openai-codex/") ? { AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1" } : {}),
 });
