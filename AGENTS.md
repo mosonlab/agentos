@@ -1,148 +1,108 @@
 # Repository instructions
 
-These public rules apply to every repository change, including work in a fork.
-Host configuration, credentials, and private operator procedure belong in the
-operator documentation, not here.
+Public rules for every repository change. Host configuration, credentials, and
+private operator procedure stay in the operator documentation outside this
+repository.
 
 ## Work directly
 
-Work in the current session by default. Create or dispatch a task chain only
-when the human user explicitly requests one. Complexity may justify recommending
-a chain; it does not authorize one.
+Work in the current session by default; create or dispatch a task chain only
+when the human user explicitly requests one.
 
 When the user requests a chain:
 
-- Use the direct chain when one implementation context window can deliver a
-  brief whose change points are enumerable. Its `description` is the
-  specification of record; write it using [`docs/BRIEF-TEMPLATE.md`](docs/BRIEF-TEMPLATE.md)
-  before instantiating the chain.
-- Use the full assurance chain when the work exceeds one implementation context
-  window or decomposes into independently demonstrable slices worth executing
-  in parallel. Its specification and plan stages own that decomposition.
-- Keep the direct template's implementation assignee when the brief enumerates
-  its change points. Assign `senior-dev` before the chain starts only when the
-  work touches persisted data or a defense-list path. Defense-list paths are
-  the merge gate, gate worker, migrations, and merge automation. A surface
-  too large or cross-cutting for the brief to enumerate
-  is not an escalation reason: that work belongs to the full assurance chain.
-  When classification against these two criteria is uncertain, use
-  `senior-dev`. Keep the review-fix step's template assignee, raising it to
-  `senior-dev` under the same criteria.
+- Direct chain: one implementation context window can deliver a brief whose
+  change points are enumerable. Its `description` is the specification of
+  record — write it from [`docs/BRIEF-TEMPLATE.md`](docs/BRIEF-TEMPLATE.md)
+  before instantiating.
+- Full assurance chain: the work exceeds one implementation window or
+  decomposes into independently demonstrable slices; its spec and plan stages
+  own that decomposition. A surface too large for a brief to enumerate belongs
+  here, not to an assignee escalation.
+- Implementation assignee: keep the direct template's default. Assign
+  `senior-dev` (same rule for the review-fix step) only when the work touches
+  persisted data or a defense-list path — merge gate, gate worker, migrations,
+  merge automation — or when that classification is uncertain. Assign
+  `frontend-dev` when the work is primarily a new or redesigned web page or UI
+  surface (Leo 2026-08-27); the defense-list rule above still wins when both
+  apply.
 - A backlog card that needs a non-default implementation assignee states it as
-  one machine-readable line in its description — `Route: implementation=senior-dev`
-  — never as prose. The dispatcher copies that line into `stepOverrides` at
-  instantiation. Only the implementation step is routable this way; every other
-  step keeps its template assignee.
-- Archive a backlog card in the same action that dispatches its work or records
-  the decisions that settle it. Leave only genuinely open questions on the
-  board.
-- Dispatching, gating, or rerouting a chain follows
-  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md):
-  it owns the Product Contract, tier definitions, Critical classification,
-  approval-gate placement, and the routing snapshot recorded at dispatch.
+  the machine-readable line `Route: implementation=senior-dev` (or
+  `=frontend-dev`) in its description; the dispatcher copies it into
+  `stepOverrides`. Only the implementation step is routable this way.
+- Chain-to-chain sequencing: pass `afterTaskId` (the predecessor chain's final
+  task) to the instantiate endpoint; the bound chain dispatches when the
+  predecessor completes. Incompatible with `autoStart`; one successor per
+  predecessor task. Dependency qualification in
+  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md)
+  precedes every instantiation; ordering preferences stay in the backlog.
+- Dispatching, gating, rerouting, and the backlog card lifecycle (create,
+  route, archive at instantiation) follow
+  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
 
 Before changing canonical Agents, roles, or task templates, read
-[`agents/README.md`](agents/README.md). Its source map and the contract files it
-names own canonical defaults; do not copy those defaults into another document.
+[`agents/README.md`](agents/README.md); it and the contract files it names own
+canonical defaults.
 
 ## Design simply
 
-Implement the simplest design that fully meets the current requirement. Add an
+Implement the simplest design that fully meets the current requirement; add an
 abstraction, configuration option, or compatibility path only when a current
 acceptance criterion or caller requires it.
 
 ## Test safely
 
-- Before tests outside the merge gate, set `RUNNER_WORKSPACE_ROOT` to a new
-  temporary directory. Runner tests provision real workspaces. A test that
-  builds a `RunnerConfig` by hand must also point `home` at a temporary
-  directory: provisioning keeps its repository mirror under it.
-- Run database tests only against a throwaway PostgreSQL server. Set
-  `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL`, and give each
-  worktree its own `?schema=`. `npm run test:db` drops and recreates its target.
-- Local verification before dispatching a gate is targeted, not exhaustive:
-  run only the test files your change touches
-  (`npm run test:db -w @agentos/api -- src/<file>.dbtest.ts` runs a subset).
-  The merge gate runs the full suite on the gate worker; repeating it locally
-  costs minutes without adding confidence.
+- Before tests outside the merge gate, point `RUNNER_WORKSPACE_ROOT` at a new
+  temporary directory; a hand-built `RunnerConfig` also pins `home` to one.
+  Runner tests provision real workspaces.
+- Local pre-gate verification is targeted: run only the test files your change
+  touches (`npm run test:db -w @agentos/api -- src/<file>.dbtest.ts` runs a
+  subset). The merge gate runs the full suite.
 - Spawn the real API entrypoint in tests through
-  `packages/api/src/test-startup-environment.ts`. The entrypoint loads the root
+  `packages/api/src/test-startup-environment.ts`: the entrypoint loads the root
   `.env`, and dotenv restores omitted credentials unless the helper pins them
   from the test URL.
-- **Appliance checkout:** before changing files or branches in a checkout named
-  by a loaded `com.agentos.*` service, read
+- Appliance checkout: before changing files or branches in a checkout named by
+  a loaded `com.agentos.*` service, read
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md).
-  Leave that checkout on clean `main`; do the work in a separate worktree.
+  Leave that checkout on clean `main`; work in a separate worktree.
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) owns the full test-safety rules, disposable
-development-database bootstrap, public-snapshot policy, and repository style.
-Read the applicable section before acting on one of those surfaces.
+Database bootstrap and the full test-safety rules are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md); read the applicable section before acting
+on one of those surfaces.
 
 ## Deliver an exact head
 
-`scripts/merge-gate.sh` is the only CI. A merge requires
-`MERGE GATE: PASS <oid>` for the exact commit being merged:
+`scripts/merge-gate.sh` is the only CI; a merge requires
+`MERGE GATE: PASS <oid>` for the exact commit being merged
+(`scripts/merge-gate.sh --expect-head <oid>`). When another gate might be
+running, dispatch through `scripts/gate-worker/gate-dispatch.sh <oid>`; read
+[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
+a remote worker.
 
-```sh
-scripts/merge-gate.sh --expect-head <oid>
-```
-
-The gate selects its proof profile from the exact baseline-to-candidate diff.
-Only content modifications to its explicit prose allowlist use the `docs-only`
-profile; structural changes, executable surfaces, and unknown paths use the full
-profile. Callers cannot request the cheaper profile.
-
-The gate owns an exclusive worktree lock. When another gate might be running,
-use `scripts/gate-worker/gate-dispatch.sh <oid>` so the first free local or
-remote slot runs it. Read [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md)
-before operating or troubleshooting a remote worker.
-
-Every delivery that advances `main` — PR merge or direct push, regardless of
-size — must acquire `scripts/merge-lease.sh` before running the merge gate for
-the final integrated head, and hold it until that proof is consumed by the
-merge. An autonomous Regression run acquires only after its semantic checks,
-then rechecks the target base before gate dispatch; the control plane alone
-releases or steals that chain lease. Other delivery paths release immediately
-after the delivery lands or fails. Writing code, pushing a feature branch, and
-opening a PR do not require the lease.
-
-Pass `--task <id>` to both `acquire` and `release`. The default holder is
-`user@host`, which every agent window on one machine shares, so without a task
-id a release cannot tell its own lease from a sibling window's.
+Every delivery that advances `main` acquires `scripts/merge-lease.sh` before
+running the merge gate for the final integrated head and holds it until the
+merge consumes that proof. Writing code, pushing a feature branch, and opening
+a PR need no lease. Pass `--task <id>` to both `acquire` and `release`: the
+default holder `user@host` is shared by every agent window on one machine, so
+a release without a task id cannot tell its own lease from a sibling's.
 
 Open the PR right after pushing the feature branch, before dispatching the
-gate. After the exact-head fast-forward lands, GitHub refuses to create a PR
-from a branch main already contains, so a delivery that waits loses its PR
-record; one opened beforehand flips to merged on its own.
+gate: once the exact-head fast-forward lands, GitHub refuses a PR from a branch
+main already contains, while one opened beforehand flips to merged on its own.
 
-Several agent windows work one checkout at a time. Deliver from a dedicated
-`git worktree` on your own branch, never by switching the shared checkout's
-branch, and stage only the exact paths you changed. A branch switch in the
-shared checkout carries away another window's uncommitted work.
-
-Put that worktree under
-`~/Documents/claude_projects/agentos-public-worktrees/<task-name>/`, one folder
-per task, and remove it once the work is merged. Presence in that directory
-therefore means in flight or awaiting review; absence means delivered.
-
-## Frozen records
-
-`docs/reviews/`, `docs/merge-notes/`, `docs/briefs/`, and
-`docs/plans/archive/` contain dated, append-only records and are never current
-authority. They live in the private operator repository and are not tracked by
-this public repository.
-
-`scripts/check-frozen-docs.sh` enforces immutable merged records, dated names,
-byte-identical corrective renames, and the exact `> Superseded by
-<repository-root-relative path> (YYYY-MM-DD)` marker shape. The gate cannot
-detect a missing marker; reviewers must identify documents that stopped being
-authority.
+Several agent windows share one checkout. Deliver from a dedicated worktree
+under `~/Documents/claude_projects/agentos-public-worktrees/<task-name>/` on
+your own branch, stage only the paths you changed, and remove the worktree once
+merged — a branch switch in the shared checkout carries away another window's
+uncommitted work.
 
 ## Editing these instructions
 
-Keep this file as the repository-wide routing and guardrail layer. Put
-branch-specific detail in its owning document and add a trigger-first pointer
-here only when agents must discover it. Treat `package.json`, configuration,
-the directory tree, and command `--help` output as live authority instead of
-caching them here. Keep every rule in one authoritative place and remove an
-obsolete path when its replacement lands.
+This file is the routing and guardrail layer: branch-specific detail lives in
+its owning document, with a trigger-first pointer here only when agents must
+discover it. `package.json`, configuration, the directory tree, and `--help`
+output are live authority — never cached here. One authoritative home per rule;
+an obsolete path is removed when its replacement lands.
+
+For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md). A change that adds, removes, or alters an HTTP route updates the handbook in the same change.

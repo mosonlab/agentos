@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.3
+Version: 1.6 (2026-08-27: adds dependency qualification — every instantiation classifies chain-to-chain dependency before choosing `afterTaskId` or parallel dispatch)
 
 Status: Active
 
@@ -38,11 +38,10 @@ SPEC and Plan are optional. The Product Contract is not.
 
 Work done directly in the current session is outside these tiers and does not require a Product Contract. The tiers apply only after the human user explicitly requests a task chain.
 
-Choose the shortest tier that satisfies the Product Contract. This contract defines three tiers:
+Choose the shortest tier that satisfies the Product Contract. This contract defines two chain tiers:
 
-- 顺手小活：本窗直接做，不上看板。
-- Direct：没有 spec/plan；从任务 brief 直接实现，经并行盲评审、终裁、修复、回归与机械合并交付。
-- Full Assurance：全链；specification 与 plan 阶段拥有分解权。
+- Direct: no specification or plan; implementation proceeds straight from the task brief and is delivered through parallel reviews, a self-adjudicating fix step, regression, and the mechanical merge tail.
+- Full Assurance: the full chain; its specification and plan stages own decomposition.
 
 Direct is a formal chain route, not an exemption from review or exact-head mechanical authorization. Full Assurance is required when the Product Contract calls for specification, planning, plan review, or revised-plan implementation authorization.
 
@@ -78,7 +77,7 @@ Direct has no planning gates. Gate selection is recorded at dispatch; an active 
 Record this block when creating or materially rerouting a chain:
 
 ```text
-Routing Contract: v1.3
+Routing Contract: v1.4
 Tier: Direct
 Implementation Agent: senior-dev-luna
 Critical: no
@@ -86,3 +85,16 @@ Reason: Bounded change; Direct review and exact-head acceptance remain intact.
 ```
 
 If risk or ambiguity increases during execution, pause before the newly unsafe work and reroute. If rerouting changes a Product Contract boundary, return to the product owner for approval. New work uses the current routing contract; active work keeps its recorded snapshot until explicitly rerouted.
+
+## Backlog card lifecycle
+
+A backlog card is a dispatch-ready brief waiting for a decision, not a work item of its own. The board holds either the card or its chain, never both.
+
+- Create the card with `assigneeType: HUMAN` so no runner claims it, with the brief as its description (written from `docs/BRIEF-TEMPLATE.md`) plus the machine-readable `Route:` line when the implementation assignee is non-default. The create API has no status field and lands the card in TODO; move it to BACKLOG explicitly.
+- Dispatch instantiates a chain from the card: the brief becomes the instantiate `description` (the chain's implementation task is then the specification of record) and the `Route:` line becomes `stepOverrides`. Chain-to-chain ordering uses `afterTaskId` per the dispatch rules in `AGENTS.md`.
+- Dependency qualification precedes every instantiation: classify the new chain against every in-flight or co-dispatched chain and pick exactly one outcome.
+  1. True dependency — the new chain consumes another chain's output, or needs that chain merged and deployed first: bind with `afterTaskId` and record the basis (`Depends on: <chain> — <what is consumed or why deploy-first>`) in the instantiate description or the card's activity log.
+  2. Heavy overlap — no dependency, but both chains rewrite the same code area: weigh expected refresh-conflict repair cost against serial wall-clock loss; either choice is valid, and a serial choice records its reason the same way.
+  3. Independent — dispatch in parallel, no justification needed; the merge tail and the deploy quiet window already serialize delivery.
+  Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — schema migrations touching the same tables, changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list).
+- Archive the card at the moment of instantiation. The archived card remains recoverable in the Archived view; re-dispatching its work is a new decision, not a revival of the card.

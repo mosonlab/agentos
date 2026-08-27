@@ -14,7 +14,7 @@
 
 [安装](#快速开始) · [文档](#文档) · [支持状态](#支持状态) · [English](README.md)
 
-<img src="docs/media/tasks.png" alt="任务看板：十二步模板链运行中，每张卡片展示逐 run 状态与成本" width="880">
+<img src="docs/media/tasks.png" alt="任务看板：模板链运行中，每张卡片展示所处步骤、run 状态、模型与成本" width="880">
 
 </div>
 
@@ -72,6 +72,14 @@ AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个�
 | 11 | 合并就绪 | — | 重算 head，要求每份未结评审清空，签发精确 head 的合并授权 | — | 机械步，不跑模型 |
 | 12 | 执行合并 | `merge-integrator` | 对着线上 PR 重新校验每一项前置条件，然后合并 | — | 机械步，不跑模型 |
 
+<div align="center">
+
+<img src="docs/media/chain.png" alt="任务详情：十二步链的每一步及其角色与状态，上方是已完成的 run，下方是任务提示词" width="880">
+
+<sub>运行中的一条链：第 4 步执行中，第 6、7 步作为并行同层等待。</sub>
+
+</div>
+
 第 6、7 步是并行同层：盲评看不到对方的输出，由第 8 步一并裁决。第 5 步的根会话
 派发原生子代理，档位钉死在 Luna max，最多八个并发。
 
@@ -116,42 +124,16 @@ npm run db:migrate:release -- --fresh
 
 ## 支持状态
 
-以下标签描述本仓库内记录的证据，不是 CLI provider 作出的兼容性承诺。
+Developer Preview。支持范围以及每一条主张背后的证据，记录在
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md)，那是权威支持
+声明（仅英文）。它描述的是本仓库内记录的证据，不是 CLI provider 作出的兼容性
+承诺。
 
-- **已验证（Verified）**：所述路径已有实际运行或仓库证据。
-- **维护者已验证（Maintainer-verified）**：维护者已在指定平台实际运行，但全新
-  机器复现关卡仍未完成。
-- **实验性（Experimental）**：实现程度足够用于开发评估，但不构成支持承诺。
-- **待完成（Pending）**：所需证据尚未完成，不应据此推断已支持。
-- **未验证（Unverified）**：尚无符合要求的证据记录。
-- **不支持（Unsupported）**：不在支持目标内。
+AgentOS 的目标平台是 Apple Silicon 上的 macOS。Linux 未验证；Windows 按设计不
+支持：runner 依赖 POSIX 进程组、路径和命令行为。
 
-### Provider 支持
-
-| Provider 运行时 | 状态 | 证据边界 |
-| --- | --- | --- |
-| Codex CLI | **已验证** | adapter/runtime 和订阅认证路径已验证；全新安装证据为 **待完成（OSS-B）**。 |
-| Claude Code | **已验证** / **维护者已验证** | adapter/runtime 已验证；Claude Pro/Max 认证已由维护者在 macOS Apple Silicon 上验证；全新安装关卡为 **待完成（OSS-B）**。 |
-| Pi | **已验证** | adapter/runtime 与订阅认证路径均已验证。Pi 走 Codex 那份登录。干净全新安装的证据仍为 **待完成（OSS-B）**。 |
-
-Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由
-用户负责。AgentOS 不提供 provider 凭据或使用资格。
-
-### 平台支持
-
-| 平台 | 状态 | 证据边界 |
-| --- | --- | --- |
-| Apple Silicon 上的 macOS | **目标平台** | 当前维护者证据包括 Claude Pro/Max 认证；完整的全新安装关卡仍为 **待完成（OSS-B）**。 |
-| Linux | **未验证** | 不应因为项目使用 Node.js 就推断已支持。 |
-| Windows | **不支持** | 当前 runner 依赖 POSIX 进程组、路径和命令行为。 |
-
-### 能力支持
-
-| 能力 | 状态 | 证据边界 |
-| --- | --- | --- |
-| Goals | **待完成** | 控制平面存储 Goal 及其 Definition of Done、进展日志和各项上限，控制台可以编辑它们。执行模型未接线：没有任何东西从 Goal 派发工作，没有任何东西统计它的花费，也没有任何东西按花费、时间或停滞把它停下。因此控制台不渲染花费数字，也不渲染已停止状态，因为服务端对这两者都没有写入方。 |
-
-[`docs/release/support-matrix.md`](docs/release/support-matrix.md) 是权威支持声明。
+Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由你
+自己负责。AgentOS 不提供 provider 凭据，也不提供使用资格。
 
 ## 认证与订阅
 

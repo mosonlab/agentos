@@ -450,6 +450,13 @@ test("repaired compound approval is atomic and exactly once across PATCH, Inbox,
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
 });
 
+// Activation holds a mutex over every row of the chain for the whole
+// transaction: it takes them all before reading any successor, and has no
+// unlocked observation or CAS phase afterwards. The interleavings that used to
+// need their own tests -- a successor deleted, patched, or parked between the
+// observation and the lock, and the two-row barrier between PATCH DONE and a
+// HUMAN-gate reject -- are therefore unconstructible rather than merely
+// untested. What remains testable is the outcome, below.
 test("concurrent chain advance creates exactly one successor run with no client-visible conflict", async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const otherDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
@@ -631,78 +638,6 @@ test("automatic advancement skips a legacy DONE gap and queues the later TODO", 
   await db.$transaction((tx) => activateChainSuccessor(tx, predecessor, {}, new Date()));
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
   assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
-});
-
-// The full-chain mutex makes the old delete-between-observation-and-lock race
-// unexecutable: activation takes every chain row before reading any successor.
-void test.skip("automatic advancement reselects after the observed successor is deleted", async () => {
-  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
-  const later = await db.task.create({ data: {
-    projectId: project.id,
-    assigneeAgentId: agent.id,
-    repoId: repo.id,
-    chainId: predecessor.chainId,
-    chainIndex: 2,
-    chainLayer: 3,
-    name: "Third",
-    description: "third",
-  } });
-  const deleteDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  let deleted = false;
-  try {
-    await db.$transaction(async (tx) => {
-      const task = new Proxy(tx.task, { get(target, property, receiver) {
-        if (property !== "findFirst") return Reflect.get(target, property, receiver);
-        return async (args: any) => {
-          const candidate = await tx.task.findFirst(args);
-          if (!deleted) {
-            deleted = true;
-            await deleteDb.task.delete({ where: { id: successor.id } });
-          }
-          return candidate;
-        };
-      } });
-      const instrumented = new Proxy(tx, { get(target, property, receiver) {
-        return property === "task" ? task : Reflect.get(target, property, receiver);
-      } });
-      await activateChainSuccessor(instrumented as any, predecessor, {}, new Date());
-    });
-  } finally {
-    await deleteDb.$disconnect();
-  }
-  assert.equal(deleted, true);
-  assert.equal(await db.task.count({ where: { id: successor.id } }), 0);
-  assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
-});
-
-// Likewise, activation has no unlocked observation/CAS phase to re-read.
-void test.skip("an unrelated successor patch between observation and lock is re-read and still queues", async () => {
-  const { predecessor, successor } = await seedExecutableChain();
-  const patchDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  let patched = false;
-  try {
-    await db.$transaction(async (tx) => {
-      const task = new Proxy(tx.task, { get(target, property, receiver) {
-        if (property !== "findFirst") return Reflect.get(target, property, receiver);
-        return async (args: any) => {
-          const candidate = await tx.task.findFirst(args as any);
-          if (!patched) {
-            patched = true;
-            await patchDb.task.update({ where: { id: successor.id }, data: { description: "harmless operator edit" } });
-          }
-          return candidate;
-        };
-      } });
-      const instrumentedTx = new Proxy(tx, { get(target, property, receiver) {
-        return property === "task" ? task : Reflect.get(target, property, receiver);
-      } });
-      await activateChainSuccessor(instrumentedTx as any, predecessor, {}, new Date());
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-  } finally {
-    await patchDb.$disconnect();
-  }
-  assert.equal(patched, true);
-  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
 });
 
 test("repeating DONE after the successor finished never resurrects or requeues it", async () => {
@@ -1051,103 +986,6 @@ test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () =>
   assert.equal(winnerActivities, 1);
 });
 
-// Both writers now take the same complete chain mutex, so the old two-row
-// barrier cannot be constructed and is superseded by the concurrent winner
-// test above.
-void test.skip("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock order", { timeout: 20_000 }, async () => {
-  const { predecessor, successor, gate } = await completeIntoHumanGate();
-  // Recreate the legitimate P -> G activation edge while preserving the OPEN
-  // HUMAN gate on G. Before the fix, reject locked G -> P and this interleaving
-  // deterministically deadlocked against PATCH's P -> G order.
-  await db.task.update({ where: { id: predecessor.id }, data: { status: "REVIEW" } });
-
-  const patchClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  const rejectClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  let patchHasPredecessor!: () => void;
-  let releasePatch!: () => void;
-  let rejectReachedOrderBarrier!: () => void;
-  const predecessorLocked = new Promise<void>((resolve) => { patchHasPredecessor = resolve; });
-  const patchMayContinue = new Promise<void>((resolve) => { releasePatch = resolve; });
-  const lockOrderObserved = new Promise<void>((resolve) => { rejectReachedOrderBarrier = resolve; });
-  let patchPaused = false;
-  const instrumentedPatchClient = new Proxy(patchClient, { get(target, property, receiver) {
-    if (property !== "$transaction") {
-      const value = Reflect.get(target, property, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
-    }
-    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
-      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
-        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
-        return async (...args: any[]) => {
-          const result = await (tx.$queryRaw as any)(...args);
-          if (!patchPaused
-            && args[1] === predecessor.projectId
-            && args[2] === predecessor.chainId
-            && args[3] === predecessor.chainIndex) {
-            patchPaused = true;
-            patchHasPredecessor();
-            await patchMayContinue;
-          }
-          return result;
-        };
-      } });
-      return operation(instrumentedTx);
-    }, options as any);
-  } }) as PrismaClient;
-
-  let firstRejectLock = true;
-  const reject = () => rejectClient.$transaction(async (tx) => {
-    const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
-      if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
-      return async (...args: any[]) => {
-        if (!firstRejectLock) return (tx.$queryRaw as any)(...args);
-        firstRejectLock = false;
-        const taskId = args[1];
-        // Fixed order: the first P lock waits behind PATCH, so release PATCH as
-        // soon as the attempt is made. Old order: first acquire G, then release
-        // PATCH; PATCH and reject proceed into the P/G cycle and PostgreSQL
-        // reports 40P01.
-        if (taskId === predecessor.id) rejectReachedOrderBarrier();
-        const result = await (tx.$queryRaw as any)(...args);
-        if (taskId === successor.id) rejectReachedOrderBarrier();
-        return result;
-      };
-    } });
-    return applyInboxDecisionTx(instrumentedTx as any, {
-      inboxMessageId: gate.id, externalEventId: `predecessor-patch-reject-${Date.now()}`, decision: "reject",
-    });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-
-  const priorToken = process.env.OPERATOR_TOKEN;
-  process.env.OPERATOR_TOKEN = "operator-db-token";
-  try {
-    const patchPromise = createApp(instrumentedPatchClient).request(`/tasks/${predecessor.id}`, {
-      method: "PATCH", headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "DONE" }),
-    });
-    await predecessorLocked;
-    const rejectPromise = reject();
-    await lockOrderObserved;
-    releasePatch();
-    const [patchResponse, decision] = await Promise.all([patchPromise, rejectPromise]);
-    assert.equal(patchResponse.status, 200);
-    assert.equal(decision.gateAction, "rejected");
-  } finally {
-    releasePatch();
-    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
-    await Promise.all([patchClient.$disconnect(), rejectClient.$disconnect()]);
-  }
-
-  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "TODO");
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "TODO");
-  assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 2);
-  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
-  assert.equal(await db.taskActivity.count({ where: {
-    taskId: predecessor.id, body: "Approval gate rejected; step queued again",
-  } }), 1);
-});
-
 // A parked successor used to hang: the CAS matches TODO/DOING/REVIEW, so a
 // BACKLOG or archived row makes updateMany match zero rows while the re-read
 // returns the same row forever — inside the caller's transaction.
@@ -1224,40 +1062,6 @@ test("an archived successor is parked, not spun on", { timeout: 20_000 }, async 
   await activateOnParkedSuccessor(predecessor);
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
   assert.match(await latestActivity(successor.id), /is archived and was not queued/);
-});
-
-// There is no observation gap after the full-chain lock is acquired.
-void test.skip("a successor parked between observation and lock is caught by the locked re-read", { timeout: 20_000 }, async () => {
-  const { predecessor, successor } = await seedExecutableChain();
-  const parkDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  const hangDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  let parked = false;
-  try {
-    await hangDb.$transaction(async (tx) => {
-      const task = new Proxy(tx.task, { get(target, property, receiver) {
-        if (property !== "findFirst") return Reflect.get(target, property, receiver);
-        return async (args: any) => {
-          const candidate = await tx.task.findFirst(args as any);
-          if (!parked) {
-            parked = true;
-            await parkDb.task.update({ where: { id: successor.id }, data: { status: "BACKLOG" } });
-          }
-          return candidate;
-        };
-      } });
-      const instrumentedTx = new Proxy(tx, { get(target, property, receiver) {
-        return property === "task" ? task : Reflect.get(target, property, receiver);
-      } });
-      return activateChainSuccessor(instrumentedTx as any, predecessor, {}, new Date());
-    }, { maxWait: 2_000, timeout: 5_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-  } finally {
-    await parkDb.$disconnect();
-    await hangDb.$disconnect();
-  }
-  assert.equal(parked, true);
-  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "BACKLOG");
-  assert.match(await latestActivity(successor.id), /parked in Backlog/);
 });
 
 // --- batch 2.5: GET /tasks/:taskId/chain and the GET /tasks extension --------

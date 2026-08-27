@@ -13,6 +13,7 @@ import {
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
+  Prisma,
   type PrismaClient,
   RunStatus,
   SessionExecutionStatus,
@@ -69,6 +70,51 @@ export type ClaimRunInput = {
 };
 
 const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
+
+const MAX_OPERATOR_NOTES = 10;
+const MAX_OPERATOR_NOTES_CHARS = 4_000;
+export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
+
+/**
+ * Operator notes are a claim-time handoff. Run 1 uses the task's creation
+ * time as the lower bound; later attempts use the previous Run's creation
+ * time. A note written after a claim cannot interrupt that live provider
+ * session, but is still available if the task needs another attempt. Newest
+ * rows are selected first, and a note that cannot fit the character budget is
+ * omitted whole.
+ */
+const operatorNotesForClaim = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  runNumber: number,
+  taskCreatedAt: Date,
+): Promise<string[]> => {
+  const lowerBound = runNumber <= 1
+    ? taskCreatedAt
+    : (await tx.run.findUnique({
+      where: { taskId_runNumber: { taskId, runNumber: runNumber - 1 } },
+      select: { createdAt: true },
+    }))?.createdAt;
+  if (!lowerBound) return [];
+  const rows = await tx.taskActivity.findMany({
+    where: {
+      taskId,
+      actorType: "operator",
+      metadata: { path: [OPERATOR_NOTE_METADATA_FIELD], equals: true },
+      createdAt: { gt: lowerBound },
+    },
+    select: { body: true, createdAt: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: MAX_OPERATOR_NOTES,
+  });
+  let remaining = MAX_OPERATOR_NOTES_CHARS;
+  const newestFirst = rows.flatMap(({ body }) => {
+    if (body.length > remaining) return [];
+    remaining -= body.length;
+    return [body];
+  });
+  return newestFirst.reverse();
+};
 
 /**
  * Claim one queued run, or answer that nothing was claimable.
@@ -480,6 +526,9 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       // write endpoint already caps each artifact at 500k; pass the durable
       // body verbatim until artifact references replace prompt embedding.
       const priorOutputs = priorOutputsRaw;
+      const operatorNotes = blindReviewTask
+        ? []
+        : await operatorNotesForClaim(tx, candidate.task.id, candidate.runNumber, candidate.task.createdAt);
       const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
         where: {
           repoId: candidate.repo.id,
@@ -521,6 +570,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           sessionToken: sessionCredential.token,
           secrets,
           priorOutputs,
+          operatorNotes,
           previousRunHandoff,
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff

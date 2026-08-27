@@ -166,17 +166,6 @@ test("startup reconciliation does not fail when archived notice persistence fail
       runs: 0,
       openReclaimIntents: 0,
       archivedNotices: 0,
-      retiredParks: {
-        unparkedReviews: 0,
-        unparkedResigns: 0,
-        queuedResignRuns: 0,
-        archivedReviewTasks: 0,
-        cancelledReviewRuns: 0,
-        closedResignMessages: 0,
-        reviewTasksWithActiveRuns: 0,
-        alreadyResolved: 0,
-      },
-      rolledPrompts: { rewritten: 0, alreadyCurrent: 0, unresolvedVariables: 0, startedBeforeRewrite: 0 },
     });
     assert.match(logged, /Archived-run startup notice failed.*audit unavailable/);
   } finally {
