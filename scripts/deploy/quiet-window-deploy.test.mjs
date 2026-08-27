@@ -21,6 +21,7 @@ import test from "node:test";
 
 import {
   DeployFailure,
+  SERVICE_LABELS,
   dryRunDecision,
   executeUpgrade,
   gitPreflightFailure,
@@ -88,7 +89,11 @@ const fixture = (failure = null) => {
   const step = (name, work = async () => undefined) => async () => {
     calls.push(name);
     if (failure === name) {
-      const reason = name === "canonical-prompt-sync" ? "canonical-prompt-sync-refused" : `${name}-failed`;
+      const reason = name === "canonical-prompt-sync"
+        ? "canonical-prompt-sync-refused"
+        : name === "generate-prisma-client"
+          ? "prisma-client-generation-refused"
+          : `${name}-failed`;
       throw new DeployFailure(reason, "fixture");
     }
     return work();
@@ -100,6 +105,7 @@ const fixture = (failure = null) => {
     build: step("build"),
     backup: step("backup"),
     guardedMigration: step("guarded-migration"),
+    generatePrismaClient: step("generate-prisma-client"),
     syncCanonicalPrompts: step("canonical-prompt-sync"),
     verifyRuntimePrismaClient: step("verify-runtime-prisma-client"),
     assertQuietBeforeRestart: step("quiet-recheck"),
@@ -119,6 +125,24 @@ const fixture = (failure = null) => {
   };
   return { host, calls, state };
 };
+
+test("service label inventory covers every loaded production service", () => {
+  assert.deepEqual(SERVICE_LABELS, [
+    "com.agentos.api",
+    "com.agentos.inbox",
+    "com.agentos.runner",
+    "com.agentos.runner-2",
+    "com.agentos.runner-3",
+    "com.agentos.runner-4",
+    "com.agentos.runner-5",
+    "com.agentos.runner-6",
+    "com.agentos.runner-7",
+    "com.agentos.runner-8",
+    "com.agentos.runner-9",
+    "com.agentos.runner-10",
+    "com.agentos.web",
+  ]);
+});
 
 test("quiet-window predicate blocks only claimed, provisioning, and running", () => {
   for (const status of ["claimed", "provisioning", "running", "CLAIMED", "RUNNING"]) {
@@ -205,7 +229,7 @@ test("successful upgrade runs the safety sequence in order", async () => {
   assert.deepEqual(await executeUpgrade(host, revisions), { ok: true });
   assert.deepEqual(calls, [
     "fast-forward", "create-stage", "install-dependencies", "build", "backup",
-    "guarded-migration", "canonical-prompt-sync", "verify-runtime-prisma-client", "quiet-recheck",
+    "guarded-migration", "generate-prisma-client", "canonical-prompt-sync", "verify-runtime-prisma-client", "quiet-recheck",
     "publish-build", "restart-services", "verify-services", "notify-success", "commit-build", "cleanup-stage",
   ]);
   assert.equal(state.serving, "candidate");
@@ -236,6 +260,16 @@ test("structural sync refusal escalates without publishing or restarting", async
   assert.equal(calls.includes("restart-services"), false);
   assert.equal(state.serving, "previous");
   assert.equal(state.escalated.reason, "canonical-prompt-sync-refused");
+});
+
+test("Prisma client generation refusal escalates before canonical sync", async () => {
+  const { host, calls, state } = fixture("generate-prisma-client");
+  const result = await executeUpgrade(host, revisions);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "prisma-client-generation-refused");
+  assert.equal(calls.includes("canonical-prompt-sync"), false);
+  assert.equal(calls.includes("publish-build"), false);
+  assert.equal(state.escalated.reason, "prisma-client-generation-refused");
 });
 
 test("restart failure rolls the build back and restarts the previous services", async () => {
@@ -540,7 +574,7 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
   assert.equal(result.quiet, true);
   assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "backup"]));
   assert.ok(result.lines.includes("DRY-RUN backup=ready mode=container"));
-  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 10);
+  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 11);
 });
 
 const buildCacheFixture = (root, revision, buildKey) => {
@@ -640,10 +674,13 @@ test("the merge gate publishes deploy acceleration only after its final drift pr
   assert.ok(drift >= 0 && drift < buildPublication && buildPublication < releasePublication);
 });
 
-test("deployment relies on npm ci postinstall once and verifies the generated Prisma client", () => {
+test("deployment regenerates Prisma Client after migration and verifies it", () => {
   const repositoryRoot = realpathSync(new URL("../../", import.meta.url));
   const source = readFileSync(join(repositoryRoot, "scripts/deploy/quiet-window-deploy.mjs"), "utf8");
-  assert.doesNotMatch(source, /\[loadBinaries\(\)\.npm, "run", "db:generate"\]/u);
+  assert.match(source, /prisma-client-generation-refused/u);
+  assert.match(source, /\[loadBinaries\(\)\.npm, "run", "db:generate"\]/u);
+  assert.ok(source.indexOf("guardedMigration:") < source.indexOf("generatePrismaClient:"));
+  assert.ok(source.indexOf("generatePrismaClient:") < source.indexOf("syncCanonicalPrompts:"));
   assert.match(source, /npm-ci-did-not-produce-generated-prisma-client/u);
   assert.match(source, /node_modules\/\.prisma\/client\/schema\.prisma/u);
 });
