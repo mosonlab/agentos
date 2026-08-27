@@ -3,15 +3,37 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  DebugEvents, FilesTouched, SessionRow, StreamItemView, WaitingNotice, fileTrackingHint, lifecycleStat,
-  sessionPill, truncateBlock,
-} from "../pages/Sessions";
+import { formatDate, setFormatLocale, timeAgo } from "../lib/format";
+import { LocaleProvider } from "../lib/i18n";
+import { translate } from "../lib/i18n-core";
+import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
+import { storage } from "../lib/storage";
+import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+
+// Radix chooses useLayoutEffect or useEffect when its module is first loaded.
+// Seed a browser global before importing Sessions so portaled hover-card content
+// is observable in this jsdom test, just as it is in the browser.
+const preloadDom = new JSDOM("<!doctype html><html><body></body></html>", { pretendToBeVisual: true });
+for (const [key, value] of Object.entries({
+  window: preloadDom.window, document: preloadDom.window.document, navigator: preloadDom.window.navigator,
+  HTMLElement: preloadDom.window.HTMLElement, Element: preloadDom.window.Element, Node: preloadDom.window.Node,
+  NodeFilter: preloadDom.window.NodeFilter,
+  CustomEvent: preloadDom.window.CustomEvent, MutationObserver: preloadDom.window.MutationObserver,
+  PointerEvent: preloadDom.window.MouseEvent, DOMRect: preloadDom.window.DOMRect,
+  getComputedStyle: preloadDom.window.getComputedStyle.bind(preloadDom.window),
+})) Object.defineProperty(globalThis, key, { configurable: true, value });
+Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+
+const {
+  DebugEvents, FilesTouched, SessionRow, SessionsPage, StreamNodeView, WaitingNotice, fileTrackingHint, lifecycleStat,
+  sessionPill, truncateBlock,
+} = await import("../pages/Sessions");
+preloadDom.window.close();
 
 const STATUSES: SessionExecutionStatus[] = [
   "REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX", "SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "LOST",
@@ -32,6 +54,8 @@ const event = (overrides: Partial<SessionEvent> = {}): SessionEvent => ({
   id: "e1", sessionId: "session-1", runId: "run-1", seq: 1, at: "2026-08-16T00:00:00.000Z",
   source: "RUNNER", type: "PROCESS_STARTED", toolCallId: null, payload: {}, ...overrides,
 });
+
+const CLAUDE_TEXT_ASSISTANT = { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "3" }] } };
 
 /* ------------------------------------------------------------ pure mappings */
 
@@ -74,15 +98,133 @@ test("blocks truncate at 8 000 characters and say how much is left", () => {
 /* --------------------------------------------------------- initial markup */
 
 test("a collapsed tool row is one line and hides its Arguments and Result", () => {
-  const markup = renderToStaticMarkup(<StreamItemView item={{
-    kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Read",
-    primaryArg: "/Users/dev/repo/src/adapters.ts", filePath: "/Users/dev/repo/src/adapters.ts",
-    args: { file_path: "/Users/dev/repo/src/adapters.ts" }, result: "ok", state: "ok",
+  const markup = renderToStaticMarkup(<StreamNodeView node={{
+    kind: "tools", id: "group-0", at: "2026-08-16T00:00:00.000Z", calls: [{
+      kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Read",
+      primaryArg: "/Users/dev/repo/src/adapters.ts", filePath: "/Users/dev/repo/src/adapters.ts",
+      args: { file_path: "/Users/dev/repo/src/adapters.ts" }, result: "ok", state: "ok",
+    }],
   }} />);
   assert.match(markup, /Read/);
   assert.match(markup, /\/Users\/dev\/repo\/src\/adapters\.ts/);
   assert.doesNotMatch(markup, />Arguments</);
   assert.doesNotMatch(markup, />Result</);
+});
+
+const toolNode = {
+  kind: "tools" as const,
+  id: "group-1",
+  at: "2026-08-16T00:00:00.000Z",
+  calls: [
+    {
+      kind: "tool" as const, id: "read-1", at: "2026-08-16T00:00:00.000Z", name: "Read",
+      primaryArg: "/repo/a.ts", filePath: "/repo/a.ts", args: { file_path: "/repo/a.ts" }, result: "READ_RESULT_UNIQUE", state: "ok" as const,
+    },
+    {
+      kind: "tool" as const, id: "run-1", at: "2026-08-16T00:00:01.000Z", name: "Bash",
+      primaryArg: "npm test", filePath: null, args: { command: "npm test" }, result: "RUN_RESULT_UNIQUE", state: "running" as const,
+    },
+  ],
+};
+
+test("a tools node is one card of collapsed one-line calls", () => {
+  const markup = renderToStaticMarkup(<StreamNodeView node={toolNode} />);
+  assert.match(markup, /Tool calls/);
+  assert.equal((markup.match(/data-tool-line=/g) ?? []).length, 2);
+  assert.match(markup, /Read/);
+  assert.match(markup, /Bash/);
+  assert.match(markup, /\/repo\/a\.ts/);
+  assert.match(markup, /npm test/);
+  assert.doesNotMatch(markup, /READ_RESULT_UNIQUE|RUN_RESULT_UNIQUE/);
+  assert.doesNotMatch(markup, />Arguments</);
+  assert.doesNotMatch(markup, />Result</);
+});
+
+test("a failed tool line shows the first result line in the destructive tone", () => {
+  const failed = {
+    ...toolNode,
+    calls: [{ ...toolNode.calls[0]!, state: "error" as const, result: "first failure line\nsecond failure line" }],
+  };
+  const markup = renderToStaticMarkup(<StreamNodeView node={failed} />);
+  assert.match(markup, /first failure line/);
+  assert.doesNotMatch(markup, /second failure line/);
+  assert.match(markup, /text-\[color:var\(--destructive-fg\)\]/);
+});
+
+test("a failed tool line without result text keeps its primary argument", () => {
+  const failed = {
+    ...toolNode,
+    calls: [{ ...toolNode.calls[1]!, state: "error" as const, result: null }],
+  };
+  const markup = renderToStaticMarkup(<StreamNodeView node={failed} />);
+  assert.match(markup, /npm test/);
+});
+
+test("text nodes keep the existing Agent and Result message headings", () => {
+  const agent = renderToStaticMarkup(<StreamNodeView node={{ kind: "text", id: "m1", at: "2026-08-16T00:00:00.000Z", text: "agent prose", final: false }} />);
+  const result = renderToStaticMarkup(<StreamNodeView node={{ kind: "text", id: "m2", at: "2026-08-16T00:00:00.000Z", text: "final prose", final: true }} />);
+  assert.match(agent, />Agent</);
+  assert.match(agent, /agent prose/);
+  assert.match(result, />Result</);
+  assert.match(result, /final prose/);
+});
+
+test("text nodes clamp at the named line limit behind Show more", () => {
+  const text = Array.from({ length: TEXT_NODE_MAX_LINES + 2 }, (_, index) => `prose line ${index + 1}`).join("\n");
+  const markup = renderToStaticMarkup(<StreamNodeView node={{ kind: "text", id: "long", at: "2026-08-16T00:00:00.000Z", text, final: false }} />);
+  assert.match(markup, /Show more/);
+  assert.match(markup, /prose line 12/);
+  assert.doesNotMatch(markup, /prose line 13/);
+});
+
+test("stream markers render muted resume copy in both locales and errors through ErrorNotice", () => {
+  const info = { kind: "marker" as const, id: "resume-1", at: "2026-08-16T00:00:00.000Z", variant: "info" as const, text: "sessions.stream.resumed" };
+  const error = { kind: "marker" as const, id: "error-1", at: "2026-08-16T00:00:00.000Z", variant: "error" as const, text: "stream disconnected" };
+
+  const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={info} /></LocaleProvider>);
+  const chinese = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={info} /></LocaleProvider>);
+  const errorMarkup = renderToStaticMarkup(<StreamNodeView node={error} />);
+  assert.match(english, /Session resumed/);
+  assert.match(chinese, /会话已恢复/);
+  assert.match(english, /text-muted-foreground/);
+  assert.match(errorMarkup, /stream disconnected/);
+  assert.match(errorMarkup, /var\(--destructive-bg\)/);
+});
+
+test("operator input renders in the message card under a translated Operator heading", () => {
+  const input = { kind: "input" as const, id: "input-1", at: "2026-08-16T00:00:00.000Z", text: "continue with the repair" };
+  const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={input} /></LocaleProvider>);
+  const chinese = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={input} /></LocaleProvider>);
+  assert.match(english, /Operator/);
+  assert.match(english, /continue with the repair/);
+  assert.match(english, /rounded-xl border border-border bg-card/);
+  assert.match(chinese, /操作员/);
+  assert.match(chinese, /continue with the repair/);
+});
+
+test("operator input uses the same line clamp and Show more control as agent prose", () => {
+  const text = Array.from({ length: TEXT_NODE_MAX_LINES + 2 }, (_, index) => `operator line ${index + 1}`).join("\n");
+  const markup = renderToStaticMarkup(<StreamNodeView node={{
+    kind: "input", id: "long-input", at: "2026-08-16T00:00:00.000Z", text,
+  }} />);
+  assert.match(markup, /Show more/);
+  assert.match(markup, /operator line 12/);
+  assert.doesNotMatch(markup, /operator line 13/);
+});
+
+test("tool groups and text node headings are translated in English and Chinese", () => {
+  try {
+    const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={toolNode} /></LocaleProvider>);
+    const chinese = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={toolNode} /></LocaleProvider>);
+    const englishText = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={{ kind: "text", id: "m1", at: toolNode.at, text: "agent prose", final: false }} /></LocaleProvider>);
+    const chineseText = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={{ kind: "text", id: "m1", at: toolNode.at, text: "agent prose", final: false }} /></LocaleProvider>);
+    assert.match(english, /Tool calls/);
+    assert.match(chinese, /工具调用/);
+    assert.match(englishText, />Agent</);
+    assert.match(chineseText, />Agent</);
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
 });
 
 test("Files touched and Debug events render collapsed by default", () => {
@@ -123,27 +265,398 @@ test("a WAITING_INBOX session always says why, with or without a message id", ()
   }
 });
 
-test("session durations identify wall-clock spans that include Inbox wait", () => {
-  const waiting = renderToStaticMarkup(<table><tbody><SessionRow session={session({ executionStatus: "WAITING_INBOX" })} /></tbody></table>);
-  assert.match(waiting, /wall-clock \(includes Inbox wait\)/);
+test("a session row leads with its title and status, not table columns", () => {
+  const markup = renderToStaticMarkup(<SessionRow session={session()} />);
+  assert.match(markup, /data-session-row/);
+  assert.match(markup, />Batch 4</);
+  assert.match(markup, />Frontend Dev</);
+  assert.match(markup, /bg-\[color:var\(--status-green-fg\)\]/);
+  assert.doesNotMatch(markup, /<table|Started|Runner|Duration|Result/);
+});
 
-  const resumed = renderToStaticMarkup(<table><tbody><SessionRow session={session({
-    executionStatus: "SUCCEEDED",
-    resumeAttempt: 1,
-    endedAt: "2026-08-16T00:05:01.000Z",
-  })} /></tbody></table>);
-  assert.match(resumed, /5m 0s wall-clock \(includes Inbox wait\)/);
+test("a queued row uses requestedAt for its relative time when it has not started", () => {
+  const requestedAt = new Date(Date.now() - 2_000).toISOString();
+  const markup = renderToStaticMarkup(<SessionRow session={session({ startedAt: null, requestedAt })} />);
+  const renderedTime = /data-session-time="true"[^>]*>([^<]*)</u.exec(markup)?.[1];
+  assert.equal(renderedTime, timeAgo(requestedAt));
+});
 
-  const uninterrupted = renderToStaticMarkup(<table><tbody><SessionRow session={session({
-    executionStatus: "SUCCEEDED",
-    endedAt: "2026-08-16T00:05:01.000Z",
-  })} /></tbody></table>);
-  assert.doesNotMatch(uninterrupted, /wall-clock|Inbox wait/);
+test("a session row title falls back from Task to Goal to Session id", () => {
+  const task = renderToStaticMarkup(<SessionRow session={session()} />);
+  assert.match(task, />Batch 4</);
+
+  const goal = renderToStaticMarkup(<SessionRow session={session({
+    task: null, taskId: null, goal: { id: "goal-1", title: "Ship it" }, goalId: "goal-1",
+  })} />);
+  assert.match(goal, />Ship it</);
+
+  const id = renderToStaticMarkup(<SessionRow session={session({
+    task: null, taskId: null, goal: null, goalId: null,
+  })} />);
+  assert.match(id, />session-1</);
+});
+
+test("sessions are grouped by day, capped at five, and expandable in both locales", async () => {
+  const localIso = (offset: number, hour: number): string => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset, hour, 0, 0, 0).toISOString();
+  };
+  const today = Array.from({ length: 6 }, (_, index) => {
+    const at = localIso(0, 8 + index);
+    return session({ id: `today-${index}`, requestedAt: at, startedAt: at });
+  });
+  const yesterdayAt = localIso(-1, 12);
+  const yesterday = session({ id: "yesterday", requestedAt: yesterdayAt, startedAt: yesterdayAt });
+  const olderAt = localIso(-2, 15);
+  const older = session({ id: "older", requestedAt: olderAt, startedAt: olderAt });
+  const sessions = [...today, yesterday, older];
+
+  const { ProjectProvider } = await import("../lib/project");
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const locale of ["en", "zh"] as const) {
+      const dom = jsdom();
+      const container = dom.window.document.querySelector("#root");
+      assert.ok(container);
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        value: async (input: string) => {
+          const path = String(input);
+          const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }] : sessions;
+          return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+        },
+      });
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(<LocaleProvider initialLocale={locale}><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
+        });
+        for (let turn = 0; turn < 20; turn += 1) await act(async () => { await Promise.resolve(); });
+
+        const dayGroups = [...dom.window.document.querySelectorAll<HTMLElement>("[data-session-day]")];
+        assert.equal(dayGroups.length, 3, container.innerHTML);
+        const dayText = dayGroups.map((group) => group.textContent ?? "");
+        assert.match(dayText[0]!, locale === "en" ? /Today/ : /今天/);
+        assert.match(dayText[1]!, locale === "en" ? /Yesterday/ : /昨天/);
+        assert.ok(dayText[2]?.includes(formatDate(olderAt)), `${dayText[2]} does not include ${formatDate(olderAt)}`);
+        assert.match(dayText[0]!, locale === "en" ? /6 sessions/ : /6 个会话/);
+        assert.equal(dom.window.document.querySelectorAll("table").length, 0);
+        assert.doesNotMatch(container.textContent ?? "", /Started|Runner|Duration|Result/u);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
+
+        const expand = dom.window.document.querySelector<HTMLButtonElement>("[data-session-day-toggle]");
+        assert.ok(expand, container.innerHTML);
+        assert.match(expand.textContent ?? "", locale === "en" ? /Show 1 more/ : /再显示 1 个/);
+        await click(dom, expand);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 8);
+        assert.match(expand.textContent ?? "", locale === "en" ? /Show fewer/ : /显示更少/);
+        await click(dom, expand);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
+test("day expansion resets when the Project scope changes", async () => {
+  const localIso = (offset: number, hour: number): string => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset, hour, 0, 0, 0).toISOString();
+  };
+  const sessionsFor = (projectId: string): Session[] => Array.from({ length: 6 }, (_, index) => {
+    const at = localIso(0, 8 + index);
+    return session({ id: `${projectId}-${index}`, projectId, requestedAt: at, startedAt: at });
+  });
+  const byProject = { p1: sessionsFor("p1"), p2: sessionsFor("p2") };
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/projects")
+        ? [{ id: "p1", name: "One" }, { id: "p2", name: "Two" }]
+        : path.includes("projectId=p2") ? byProject.p2 : byProject.p1;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { ProjectProvider, useProjectScope } = await import("../lib/project");
+  const ScopeProbe = (): ReactNode => {
+    const scope = useProjectScope();
+    return <button type="button" data-switch-project onClick={() => scope.select("p2")}>Switch project</button>;
+  };
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><ScopeProbe /><SessionsPage /></ProjectProvider></LocaleProvider>);
+    });
+    await flush();
+    const expand = dom.window.document.querySelector<HTMLButtonElement>("[data-session-day-toggle]");
+    assert.ok(expand, container.innerHTML);
+    await click(dom, expand);
+    assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 6);
+
+    const switchProject = dom.window.document.querySelector<HTMLButtonElement>("[data-switch-project]");
+    assert.ok(switchProject);
+    await click(dom, switchProject);
+    await flush();
+    assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 5, "new project starts collapsed");
+    assert.match(dom.window.document.querySelector("[data-session-day-toggle]")?.textContent ?? "", /Show 1 more/);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unseen terminal row has a trailing green dot and bold title, while a seen row has neither", () => {
+  const finished = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-21T00:00:00.000Z" });
+  const unseen = renderToStaticMarkup(<SessionRow session={finished} unseen />);
+  const seen = renderToStaticMarkup(<SessionRow session={finished} unseen={false} />);
+  assert.match(unseen, /data-session-unseen/);
+  assert.match(unseen, /data-session-unseen="true"[^>]*bg-\[color:var\(--status-green-fg\)\]/);
+  assert.ok(unseen.indexOf("data-session-unseen") < unseen.indexOf("data-session-time"), "unseen dot trails title and precedes time");
+  assert.match(unseen, /font-bold/);
+  assert.doesNotMatch(seen, /data-session-unseen/);
+  assert.match(seen, /font-normal/);
+});
+
+test("agent and status filters show loaded-only copy and localized choices", async () => {
+  const sessions = [
+    session({ id: "live-match", task: { id: "task-live", name: "Live match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "RUNNING" }),
+    ...Array.from({ length: 5 }, (_, index) => session({
+      id: `live-match-${index}`, task: { id: `task-live-${index}`, name: `Live match ${index}` },
+      agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "RUNNING",
+    })),
+    session({ id: "done-other", task: { id: "task-done", name: "Done other" }, agentId: "agent-other", agent: { id: "agent-other", title: "Agent Other" }, executionStatus: "SUCCEEDED" }),
+    session({ id: "failed-match", task: { id: "task-failed", name: "Failed match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "FAILED" }),
+  ];
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const locale of ["en", "zh"] as const) {
+      const dom = jsdom();
+      const container = dom.window.document.querySelector("#root");
+      assert.ok(container);
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        value: async (input: string) => {
+          const payload = String(input).includes("/projects") ? [{ id: "p1", name: "Demo" }] : sessions;
+          return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+        },
+      });
+      const { ProjectProvider } = await import("../lib/project");
+      const root = createRoot(container);
+      const flush = async (): Promise<void> => {
+        await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+      };
+      const choose = async (selector: string, value: string): Promise<void> => {
+        const select = dom.window.document.querySelector<HTMLSelectElement>(selector);
+        assert.ok(select, `${selector} not found in ${container.innerHTML}`);
+        select.value = value;
+        await act(async () => { select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+        await flush();
+      };
+      try {
+        await act(async () => {
+          root.render(<LocaleProvider initialLocale={locale}><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
+        });
+        await flush();
+
+        const agentFilter = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]");
+        const statusFilter = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-status]");
+        assert.ok(agentFilter);
+        assert.ok(statusFilter);
+        assert.equal(agentFilter.value, "all");
+        assert.equal(statusFilter.value, "all");
+        const agentOptions = [...agentFilter.options].map((option) => option.textContent);
+        const statusOptions = [...statusFilter.options].map((option) => option.textContent);
+        assert.deepEqual(agentOptions, locale === "en" ? ["All", "Agent Match", "Agent Other"] : ["全部", "Agent Match", "Agent Other"]);
+        assert.deepEqual(statusOptions, locale === "en" ? ["All", "Live", "Done", "Failed", "Cancelled"] : ["全部", "进行中", "完成", "失败", "已取消"]);
+        assert.match(container.textContent ?? "", locale === "en" ? /Agent.*Status/u : /Agent.*状态/u);
+
+        await choose("[data-session-filter-agent]", "agent-match");
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 5, "the filtered group still caps at five rows");
+        assert.match(dom.window.document.querySelector("[data-session-day-count]")?.textContent ?? "", locale === "en" ? /7 sessions/u : /7 个会话/u);
+        assert.match(dom.window.document.querySelector("[data-session-day-toggle]")?.textContent ?? "", locale === "en" ? /Show 2 more/u : /再显示 2 个/u);
+        assert.ok(dom.window.document.querySelector("[data-session-filter-hint]"));
+        assert.match(container.textContent ?? "", locale === "en" ? /Filters apply to loaded Sessions only\./u : /筛选仅适用于已加载的会话。/u);
+
+        await choose("[data-session-filter-status]", "cancelled");
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 0);
+        assert.match(container.textContent ?? "", locale === "en" ? /No sessions match the selected filters\./u : /没有会话符合所选筛选条件。/u);
+        assert.doesNotMatch(container.textContent ?? "", locale === "en" ? /No sessions yet\./u : /还没有会话。/u);
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
+test("agent and status filters reset when the Project scope changes", async () => {
+  const projects = [{ id: "p1", name: "One" }, { id: "p2", name: "Two" }];
+  const sessionsFor = (projectId: string): Session[] => [session({
+    id: `${projectId}-session`, projectId, agentId: `${projectId}-agent`,
+    agent: { id: `${projectId}-agent`, title: `${projectId} Agent` }, executionStatus: "RUNNING",
+  })];
+  const originalFetch = globalThis.fetch;
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/projects") ? projects : path.includes("projectId=p2") ? sessionsFor("p2") : sessionsFor("p1");
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { ProjectProvider, useProjectScope } = await import("../lib/project");
+  const ScopeProbe = (): ReactNode => {
+    const scope = useProjectScope();
+    return <button type="button" data-switch-project onClick={() => scope.select("p2")}>Switch project</button>;
+  };
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  const choose = async (selector: string, value: string): Promise<void> => {
+    const select = dom.window.document.querySelector<HTMLSelectElement>(selector);
+    assert.ok(select);
+    select.value = value;
+    await act(async () => { select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+    await flush();
+  };
+  try {
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><ScopeProbe /><SessionsPage /></ProjectProvider></LocaleProvider>);
+    });
+    await flush();
+    await choose("[data-session-filter-agent]", "p1-agent");
+    await choose("[data-session-filter-status]", "live");
+    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]")?.value, "p1-agent");
+    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-status]")?.value, "live");
+
+    const switchProject = dom.window.document.querySelector<HTMLButtonElement>("[data-switch-project]");
+    assert.ok(switchProject);
+    await click(dom, switchProject);
+    await flush();
+    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]")?.value, "all");
+    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-status]")?.value, "all");
+    assert.equal(dom.window.document.querySelector("[data-session-filter-hint]"), null);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {
   const source = readFileSync(fileURLToPath(new URL("../pages/Sessions.tsx", import.meta.url)), "utf8");
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(source), false);
+});
+
+test("opening a Session marks it opened, and returning to the list clears its dot", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const detail = session({ projectId: "p-open", executionStatus: "SUCCEEDED", endedAt: "2026-08-21T01:00:00.000Z" });
+  const seenKey = sessionSeenKey("p-open");
+  storage.set(seenKey, JSON.stringify({ since: "2026-08-20T00:00:00.000Z", opened: {} }));
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+        : path.includes("/projects")
+          ? [{ id: "p-open", name: "Open project" }]
+          : path.includes("/sessions/session-1") ? detail : [detail];
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const { ProjectProvider } = await import("../lib/project");
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const opened = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
+    assert.ok(opened?.opened[detail.id], "detail mount records the opened Session");
+
+    await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
+    await flush();
+    assert.equal(dom.window.document.querySelectorAll("[data-session-unseen]").length, 0, container.innerHTML);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a Session finishing while its detail page is open is marked opened again", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  let detail = session({ projectId: "p-transition", executionStatus: "RUNNING", endedAt: null });
+  const seenKey = sessionSeenKey("p-transition");
+  storage.set(seenKey, JSON.stringify({ since: "2026-08-20T00:00:00.000Z", opened: {} }));
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const initial = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
+    const initialStamp = initial?.opened[detail.id];
+    assert.ok(initialStamp, "mount records the live Session too");
+
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 2));
+    detail = { ...detail, executionStatus: "SUCCEEDED", endedAt: "2026-08-21T01:00:00.000Z" };
+    const refresh = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+    const transitioned = JSON.parse(storage.get(seenKey) ?? "null") as { since: string; opened: Record<string, string> } | null;
+    const transitionedStamp = transitioned?.opened[detail.id];
+    assert.ok(transitionedStamp, "terminal transition writes another opened stamp");
+    assert.ok(new Date(transitionedStamp!).getTime() > new Date(initialStamp!).getTime(), "terminal transition writes a newer stamp");
+    assert.equal(isSessionUnseen(detail, transitioned!), false, "the watched Session remains seen after finishing");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
 });
 
 /* ------------------------------------------------------------ interaction */
@@ -153,7 +666,10 @@ const jsdom = (): JSDOM => {
   const globals = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node,
-    MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    NodeFilter: dom.window.NodeFilter,
+    CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver,
+    PointerEvent: dom.window.MouseEvent, DOMRect: dom.window.DOMRect,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   };
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -164,13 +680,58 @@ const click = async (dom: JSDOM, node: Element): Promise<void> => {
   await act(async () => { node.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, button: 0 })); });
 };
 
+test("focusing the title opens the translated hover card, including Inbox-wait duration", async () => {
+  const data = session({
+    executionStatus: "FAILED", resumeAttempt: 1, endedAt: "2026-08-16T00:05:01.000Z",
+    failureReason: `first line ${"x".repeat(240)}`,
+  });
+  try {
+    for (const [locale, labels] of [
+      ["en", { started: "Started", duration: "Duration", runner: "Runner", result: "Result", run: "Run", failure: "Failure reason", wait: "wall-clock \\(includes Inbox wait\\)" }],
+      ["zh", { started: "开始时间", duration: "时长", runner: "Runner", result: "结果", run: "运行", failure: "失败原因", wait: "墙上时钟时间（包括收件箱等待）" }],
+    ] as const) {
+      const dom = jsdom();
+      const container = dom.window.document.querySelector("#root");
+      assert.ok(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => { root.render(<LocaleProvider initialLocale={locale}><SessionRow session={data} /></LocaleProvider>); });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await act(async () => { await Promise.resolve(); });
+        const title = dom.window.document.querySelector<HTMLElement>("[data-session-title]");
+        assert.ok(title, container.innerHTML);
+        await act(async () => {
+          title.focus();
+          title.dispatchEvent(new dom.window.FocusEvent("focusin", { bubbles: true }));
+          await new Promise((resolve) => dom.window.setTimeout(resolve, 240));
+        });
+        await act(async () => { await Promise.resolve(); });
+        await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
+        const body = dom.window.document.body.textContent ?? "";
+        for (const label of [labels.started, labels.duration, labels.runner, labels.result, labels.run, labels.failure]) {
+          assert.match(body, new RegExp(label));
+        }
+        assert.match(body, new RegExp(labels.wait));
+        assert.match(body, /first line/);
+        assert.doesNotMatch(body, /x{240}/);
+        assert.equal(dom.window.document.querySelector("[data-slot='hover-card-content'] button"), null);
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
+      }
+    }
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
 test("clicking the nested Task link opens the task, not the session", async () => {
   const dom = jsdom();
   dom.window.location.hash = "#/sessions";
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  await act(async () => { root.render(<table><tbody><SessionRow session={session()} /></tbody></table>); });
+  await act(async () => { root.render(<SessionRow session={session()} />); });
 
   const link = dom.window.document.querySelector<HTMLAnchorElement>("a[href='#/tasks/task-1']");
   assert.ok(link, container.innerHTML);
@@ -189,11 +750,11 @@ test("clicking a row anywhere else opens the session", async () => {
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  await act(async () => { root.render(<table><tbody><SessionRow session={session()} /></tbody></table>); });
+  await act(async () => { root.render(<SessionRow session={session()} />); });
 
-  const cell = dom.window.document.querySelectorAll("td")[4];
-  assert.ok(cell);
-  await click(dom, cell);
+  const row = dom.window.document.querySelector("[data-session-row]");
+  assert.ok(row);
+  await click(dom, row);
   assert.equal(dom.window.location.hash, "#/sessions/session-1");
 
   await act(async () => root.unmount());
@@ -206,9 +767,11 @@ test("clicking a collapsed tool row reveals Arguments and Result", async () => {
   assert.ok(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<StreamItemView item={{
-      kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Bash", primaryArg: "printf 3",
-      filePath: null, args: { command: "printf 3" }, result: "3", state: "ok",
+    root.render(<StreamNodeView node={{
+      kind: "tools", id: "group-0", at: "2026-08-16T00:00:00.000Z", calls: [{
+        kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Bash", primaryArg: "printf 3",
+        filePath: null, args: { command: "printf 3" }, result: "3", state: "ok",
+      }],
     }} />);
   });
   assert.doesNotMatch(container.innerHTML, />Arguments</);
@@ -218,6 +781,134 @@ test("clicking a collapsed tool row reveals Arguments and Result", async () => {
   await click(dom, toggle);
   assert.match(container.innerHTML, />Arguments</);
   assert.match(container.innerHTML, />Result</);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+test("clicking one tool line expands only that call", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  await act(async () => { root.render(<StreamNodeView node={toolNode} />); });
+
+  const lines = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button[data-tool-line]")];
+  assert.equal(lines.length, 2);
+  assert.doesNotMatch(container.innerHTML, /READ_RESULT_UNIQUE|RUN_RESULT_UNIQUE/);
+  await click(dom, lines[0]!);
+  assert.match(container.innerHTML, /READ_RESULT_UNIQUE/);
+  assert.doesNotMatch(container.innerHTML, /RUN_RESULT_UNIQUE/);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+const oversizedToolNode = {
+  kind: "tools" as const,
+  id: "oversized-group",
+  at: "2026-08-16T00:00:00.000Z",
+  calls: [{
+    kind: "tool" as const,
+    id: "oversized-call",
+    at: "2026-08-16T00:00:00.000Z",
+    name: "Bash",
+    primaryArg: "printf output",
+    filePath: null,
+    args: Array.from({ length: TOOL_OUTPUT_MAX_LINES + 3 }, (_, index) => `argument ${index + 1}`),
+    result: Array.from({ length: TOOL_OUTPUT_MAX_LINES + 5 }, (_, index) => `result ${index + 1}`).join("\n"),
+    state: "ok" as const,
+  }],
+};
+
+test("expanded tool arguments and results clamp at 40 lines and show what was withheld", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  await act(async () => { root.render(<StreamNodeView node={oversizedToolNode} />); });
+  const toggle = dom.window.document.querySelector<HTMLButtonElement>("button[data-tool-line]");
+  assert.ok(toggle);
+  await click(dom, toggle);
+
+  const body = container.textContent ?? "";
+  assert.match(body, /argument 1/);
+  assert.match(body, /result 1/);
+  assert.doesNotMatch(body, /argument 43/);
+  assert.doesNotMatch(body, /result 45/);
+  assert.equal((body.match(/5 more lines withheld/gu) ?? []).length, 2);
+  assert.match(container.innerHTML, /max-h-\[460px\]/);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+test("a one-line result still reaches the 8 000-character byte backstop after line clamping", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<StreamNodeView node={{
+      kind: "tools", id: "byte-group", at: "2026-08-16T00:00:00.000Z", calls: [{
+        kind: "tool", id: "byte-call", at: "2026-08-16T00:00:00.000Z", name: "Bash", primaryArg: "printf",
+        filePath: null, args: null, result: "x".repeat(9_000), state: "ok",
+      }],
+    }} />);
+  });
+  const toggle = dom.window.document.querySelector<HTMLButtonElement>("button[data-tool-line]");
+  assert.ok(toggle);
+  await click(dom, toggle);
+  assert.match(container.textContent ?? "", /… truncated, 1000 more characters/);
+  assert.doesNotMatch(container.textContent ?? "", /more lines withheld/);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+test("withheld-line wording is translated with its count in English and Chinese", async () => {
+  const renderExpanded = async (locale: "en" | "zh"): Promise<{ dom: JSDOM; root: ReturnType<typeof createRoot>; container: Element }> => {
+    const dom = jsdom();
+    const container = dom.window.document.querySelector("#root");
+    assert.ok(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale={locale}><StreamNodeView node={oversizedToolNode} /></LocaleProvider>);
+    });
+    const toggle = dom.window.document.querySelector<HTMLButtonElement>("button[data-tool-line]");
+    assert.ok(toggle);
+    await click(dom, toggle);
+    return { dom, root, container };
+  };
+
+  try {
+    const english = await renderExpanded("en");
+    assert.match(english.container.textContent ?? "", /5 more lines withheld/);
+    await act(async () => english.root.unmount());
+    english.dom.window.close();
+
+    const chinese = await renderExpanded("zh");
+    assert.match(chinese.container.textContent ?? "", /还有 5 行未显示/);
+    await act(async () => chinese.root.unmount());
+    chinese.dom.window.close();
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
+test("clicking Show more reveals the rest of a long text node", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const text = Array.from({ length: TEXT_NODE_MAX_LINES + 2 }, (_, index) => `full prose ${index + 1}`).join("\n");
+  await act(async () => { root.render(<StreamNodeView node={{ kind: "text", id: "long-interactive", at: "2026-08-16T00:00:00.000Z", text, final: false }} />); });
+  assert.doesNotMatch(container.textContent ?? "", /full prose 14/);
+  const more = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Show more");
+  assert.ok(more);
+  await click(dom, more);
+  assert.match(container.textContent ?? "", /full prose 14/);
+  assert.match(container.textContent ?? "", /Show less/);
 
   await act(async () => root.unmount());
   dom.window.close();
@@ -258,10 +949,14 @@ test("Load more keeps page one and dedupes it against the live head", async () =
   // getter throws, which lib/storage.ts already degrades to its in-memory map.
   const dom = jsdom();
 
-  const head = (ids: string[]) => ids.map((id, index) =>
-    session({ id, requestedAt: `2026-08-16T02:${String(index).padStart(2, "0")}:00.000Z` }));
-  const older = Array.from({ length: 50 }, (_, index) =>
-    session({ id: `old-${index}`, requestedAt: `2026-08-15T01:${String(index).padStart(2, "0")}:00.000Z` }));
+  const head = (ids: string[]) => ids.map((id, index) => {
+    const at = new Date(Date.UTC(2026, 7, 16 - index, 2, 0, 0)).toISOString();
+    return session({ id, requestedAt: at, startedAt: at });
+  });
+  const older = Array.from({ length: 50 }, (_, index) => {
+    const at = new Date(Date.UTC(2026, 1, 15 - index, 1, 0, 0)).toISOString();
+    return session({ id: `old-${index}`, requestedAt: at, startedAt: at });
+  });
 
   let headRows = head(Array.from({ length: 50 }, (_, index) => `new-${index}`));
   const requests: string[] = [];
@@ -288,7 +983,8 @@ test("Load more keeps page one and dedupes it against the live head", async () =
   await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
   await flush();
 
-  const rows = (): number => dom.window.document.querySelectorAll("tbody tr").length;
+  const rows = (): number => dom.window.document.querySelectorAll("[data-session-row]").length;
+  assert.equal(dom.window.document.querySelectorAll("table").length, 0);
   assert.equal(rows(), 50);
 
   const more = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
@@ -311,6 +1007,78 @@ test("Load more keeps page one and dedupes it against the live head", async () =
 
   await act(async () => root.unmount());
   dom.window.close();
+});
+
+test("an applied filter remains active across Refresh and Load more", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const at = (index: number): string => new Date(Date.now() - index * 86_400_000).toISOString();
+  const listRow = (id: string, index: number, agentId: string): Session => session({
+    id,
+    requestedAt: at(index),
+    startedAt: at(index),
+    agentId,
+    agent: { id: agentId, title: agentId === "agent-match" ? "Matching agent" : "Other agent" },
+    task: { id: `task-${id}`, name: id },
+  });
+  const initialHead = [listRow("initial-match", 0, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`initial-other-${index}`, index + 1, "agent-other"))];
+  const refreshedHead = [listRow("refreshed-match", 0, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`refreshed-other-${index}`, index + 1, "agent-other"))];
+  const older = [listRow("older-match", 60, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`older-other-${index}`, index + 61, "agent-other"))];
+  let headRows = initialHead;
+  const requests: string[] = [];
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      requests.push(path);
+      const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }]
+        : path.includes("before=") ? older : headRows;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { ProjectProvider } = await import("../lib/project");
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+  };
+  const chooseAgent = async (): Promise<void> => {
+    const select = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]");
+    assert.ok(select);
+    select.value = "agent-match";
+    await act(async () => { select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+    await flush();
+  };
+  const rowTexts = (): string[] => [...dom.window.document.querySelectorAll("[data-session-row]")].map((row) => row.textContent ?? "");
+  try {
+    await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
+    await flush();
+    await chooseAgent();
+    assert.deepEqual(rowTexts().filter((text) => text.includes("initial-match")).length, 1);
+    assert.equal(rowTexts().some((text) => text.includes("initial-other")), false);
+
+    headRows = refreshedHead;
+    const refresh = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Refresh");
+    assert.ok(refresh);
+    await click(dom, refresh);
+    await flush();
+    assert.equal(rowTexts().some((text) => text.includes("refreshed-match")), true);
+    assert.equal(rowTexts().some((text) => text.includes("initial-match")), false);
+    assert.equal(rowTexts().some((text) => text.includes("refreshed-other")), false);
+
+    const more = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
+    assert.ok(more);
+    await click(dom, more);
+    await flush();
+    assert.equal(rowTexts().some((text) => text.includes("older-match")), true);
+    assert.equal(rowTexts().some((text) => text.includes("older-other")), false);
+    assert.ok(requests.some((path) => path.includes("before=")));
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("the detail page does not call the initial drain `N new`", async () => {
@@ -352,7 +1120,7 @@ test("the detail page does not call the initial drain `N new`", async () => {
       await act(async () => { for (let inner = 0; inner < 20; inner += 1) await Promise.resolve(); });
       await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
     }
-    assert.match(container.innerHTML, /line 11/, "both pages drained");
+    assert.match(container.innerHTML, /line 5/, "both pages drained into the visible merged node");
     assert.doesNotMatch(container.innerHTML, /new ↓/, "history is not news");
   } finally {
     // The page polls forever on real timers; without an unmount on the failure
@@ -362,10 +1130,210 @@ test("the detail page does not call the initial drain `N new`", async () => {
   }
 });
 
+test("the live stream counts a call added to the tail tool group as one new node", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
+  Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
+
+  const initial = [
+    event({ id: "tool-1-start", seq: 1, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-1", payload: { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/a.ts" } } }),
+    event({ id: "tool-1-end", seq: 2, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-1", payload: { tool_use_id: "tool-1", content: "a", is_error: false } }),
+  ];
+  const calls = [
+    event({ id: "tool-2-start", seq: 3, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-2", payload: { type: "tool_use", id: "tool-2", name: "Bash", input: { command: "npm test" } } }),
+    event({ id: "tool-2-end", seq: 4, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-2", payload: { tool_use_id: "tool-2", content: "ok", is_error: false } }),
+  ];
+  let current = initial;
+  const detail = session({ executionStatus: "RUNNING" });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? path.includes("afterSeq=2")
+          ? { events: calls, nextAfterSeq: 4, hasMore: false, total: 4 }
+          : { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
+    assert.ok(scroller, container.innerHTML);
+    scroller.scrollTop = 0;
+    current = [...initial, ...calls];
+    const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+
+    assert.match(container.textContent ?? "", /1 new ↓/u, "one call inside the projected tools node is new");
+    assert.equal((container.textContent?.match(/Tool calls/gu) ?? []).length, 1);
+    const news = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "1 new ↓");
+    assert.ok(news, container.innerHTML);
+    await click(dom, news);
+    assert.equal(scroller.scrollTop, 5_000);
+    assert.doesNotMatch(container.textContent ?? "", /1 new ↓/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a live stream at the bottom auto-scrolls after its initial drain", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
+  Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
+  const initial = event({
+    id: "initial-bottom", seq: 1, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT,
+  });
+  let current = [initial];
+  const detail = session({ executionStatus: "RUNNING" });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
+    assert.ok(scroller, container.innerHTML);
+    assert.equal(scroller.scrollTop, 5_000);
+    scroller.scrollTop = 4_600;
+    current = [initial, event({ id: "new-bottom", seq: 2, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT })];
+    const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+    assert.equal(scroller.scrollTop, 5_000);
+    assert.doesNotMatch(container.textContent ?? "", /new ↓/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a live stream counts assistant prose absorbed by the tail text node", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
+  Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
+  const first = event({ id: "assistant-1", seq: 1, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT });
+  let current = [first];
+  const detail = session({ executionStatus: "RUNNING" });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
+    assert.ok(scroller, container.innerHTML);
+    scroller.scrollTop = 0;
+    current = [first, event({
+      id: "assistant-2", seq: 2, source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "more prose" }] } },
+    })];
+    const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+    assert.match(container.textContent ?? "", /more prose/u);
+    assert.match(container.textContent ?? "", /1 new ↓/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a capped stream keeps the visible event-cap notice", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  const detail = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-16T00:10:00.000Z" });
+  let seq = 0;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      if (!path.includes("/runs/")) {
+        return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(detail) } as unknown as Response;
+      }
+      seq += 1;
+      const row = event({
+        id: `capped-${seq}`, seq, source: "CLAUDE", type: "MODEL_DELTA",
+        payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `event ${seq}` }] } },
+      });
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({
+        events: [row], nextAfterSeq: seq, hasMore: true, total: 100,
+      }) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    for (let turn = 0; turn < 100 && seq < 40; turn += 1) {
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
+    }
+    assert.equal(seq, 40);
+    assert.match(container.textContent ?? "", /Showing the first 40 of 100 events/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
 test("a failed Load more tells the operator instead of vanishing into the console", async () => {
   const dom = jsdom();
-  const headRows = Array.from({ length: 50 }, (_, index) =>
-    session({ id: `new-${index}`, requestedAt: `2026-08-16T02:${String(index).padStart(2, "0")}:00.000Z` }));
+  const headRows = Array.from({ length: 50 }, (_, index) => {
+    const at = new Date(Date.UTC(2026, 7, 16 - index, 2, 0, 0)).toISOString();
+    return session({ id: `new-${index}`, requestedAt: at, startedAt: at });
+  });
 
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
@@ -399,7 +1367,7 @@ test("a failed Load more tells the operator instead of vanishing into the consol
   await flush();
 
   assert.match(container.textContent ?? "", /503/, "the failure is on the page, not only in the console");
-  assert.equal(dom.window.document.querySelectorAll("tbody tr").length, 50, "page one survives a failed page two");
+  assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 50, "page one survives a failed page two");
   const retry = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
   assert.ok(retry, "the button stays available as the retry");
   assert.equal(retry.hasAttribute("disabled"), false);
