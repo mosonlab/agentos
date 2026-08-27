@@ -176,16 +176,6 @@ test("completion-path sites read the recent-state window (app.ts success and fai
   assert.equal(latestMarker(markers, "repairAttempt")?.regressionTaskId, "reg-1");
 });
 
-test("mergeTailLeaseChainId reads the same window as the completion path (merge-lease.ts)", async () => {
-  const { tx, reads } = recordingTx([
-    marker("repairAttempt", { repairKind: "gate-fix", regressionTaskId: "reg-9" }),
-  ]);
-  const markers = await readMarkers(tx, "repair-task");
-
-  assert.equal(reads[0]!.take, MERGE_TAIL_MARKER_SCAN);
-  assert.equal(latestMarker(markers, "repairAttempt")?.regressionTaskId, "reg-9");
-});
-
 test("alreadyAttempted sees an attempt buried past the recent-state window (app.ts:639)", async () => {
   const rows = [
     ...Array.from({ length: 25 }, () => marker("regression", {})),

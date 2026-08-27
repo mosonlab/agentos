@@ -82,7 +82,7 @@ import {
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import {
-  mergeTailLeaseChainId,
+  settleLease,
   releaseMergeLease,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
@@ -1020,7 +1020,8 @@ const settleCancellation = async (
   // until a machine steals it 45 minutes later. Release it instead.
   return {
     runId: run.id, taskId: run.taskId, status: RunStatus.CANCELLED, cancellationState: "acknowledged",
-    requestId: input.requestId, releaseMergeLeaseTask: await mergeTailLeaseChainId(tx, run.taskId),
+    requestId: input.requestId,
+    releaseMergeLeaseTask: (await settleLease(tx, { taskId: run.taskId, outcome: "stop" })).leaseToRelease,
   };
 };
 
@@ -3854,9 +3855,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       runId,
       body,
       claimantClass: principal.kind === "merge-executor" ? "merge-executor" : "runner",
-    });
+    }, releaseChainLease);
     if ("message" in result) return refusalJson(context, result);
-    await releaseChainLease(result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
     // Nothing is deleted here, or anywhere else in this process. The runner
     // removed its own workspace before it called /complete and reported the
