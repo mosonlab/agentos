@@ -38,7 +38,7 @@ AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、prov
 
 </div>
 
-> **Developer Preview 2（v0.2.0）。** 接口、配置与已存数据的形状都可能在预览版
+> **Developer Preview 3（v0.3.0）。** 接口、配置与已存数据的形状都可能在预览版
 > 之间变动，预览版之间除全新安装外没有升级路径。
 >
 > **裸机执行警告。** AgentOS 会用非交互式 permission bypass 启动 coding CLI。
@@ -56,7 +56,7 @@ Git，以及在同一 macOS 账号下**已安装且已登录**的官方 Codex CL
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.2.0
+git checkout v0.3.0
 npm ci
 npm run setup:local
 npm run build
@@ -70,7 +70,7 @@ npm run db:migrate:release -- --fresh
 `npm run dev:web`，并打开 `http://127.0.0.1:5173`。
 
 以上是简写形式。包含文件系统、端口、runner identity 与仓库 preflight 的逐字序列
-在 [`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md)，
+在 [`docs/release/developer-preview.md`](docs/release/developer-preview.md)，
 其余安装细节在 [`docs/install.zh-CN.md`](docs/install.zh-CN.md)。
 
 ## 支持状态
@@ -86,16 +86,16 @@ npm run db:migrate:release -- --fresh
 
 上面的每个标签指的都是本仓库内记录的证据，而不是 CLI provider 的兼容性承诺。
 证据边界见 [`docs/status.zh-CN.md`](docs/status.zh-CN.md)，权威支持矩阵见
-[`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md)。
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md)。
 
 ## 文档
 
 - [架构与安全模型](docs/architecture.zh-CN.md)——控制台、API、runner 与 provider
   CLI 如何拼在一起，以及 grant 约束了什么、没约束什么。
 - [安装细节与验证](docs/install.zh-CN.md)——环境文件、迁移、merge executor 与检查序列。
-- [安全](docs/release/v0.1.0-security.md)——在把它指向任何你在乎的东西之前先读。
-- [迁移与恢复](docs/release/v0.1.0-migration-and-recovery.md)——在往里放数据之前先读。
-- [发布说明](docs/release/v0.2.0-release-notes.md) · [支持](SUPPORT.md) ·
+- [安全](docs/release/security.md)——在把它指向任何你在乎的东西之前先读。
+- [迁移与恢复](docs/release/migration-and-recovery.md)——在往里放数据之前先读。
+- [发布说明](docs/release/v0.3.0-release-notes.md) · [支持](SUPPORT.md) ·
   [贡献](CONTRIBUTING.md)
 
 ## 致谢与许可证

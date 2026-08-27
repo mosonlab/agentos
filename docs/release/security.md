@@ -1,4 +1,4 @@
-# AgentOS v0.1.0 — security boundaries, and where they stop
+# AgentOS — security boundaries, and where they stop
 
 This page is written to be believed, which means it has to be usable as a list
 of what AgentOS does *not* protect you from. Read the limits section before you

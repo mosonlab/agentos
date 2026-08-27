@@ -1,6 +1,6 @@
 # Support
 
-AgentOS v0.1.0 is a **Developer Preview**. This page says what that means in
+AgentOS v0.3.0 is a **Developer Preview**. This page says what that means in
 practice, so that you can decide what to expect before you need it.
 
 ## What is supported
@@ -9,7 +9,7 @@ One platform, one shape of install: macOS on Apple Silicon, run from a `git
 clone` of a released commit, on loopback, by the machine's own operator, against
 repositories you are willing to have an agent write to.
 
-[`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md)
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md)
 is the authoritative statement of what is Verified, Maintainer-verified,
 Experimental, Unverified and Unsupported, with the evidence boundary for each
 row. Nothing outside that matrix is supported, including Linux, Windows, remote
@@ -25,11 +25,11 @@ is usually faster than anything else:
   than values — `STOP release-migrate <condition>: <reason>`, `STOP preflight
   <condition>: <detail>`, or a startup line naming the environment variables at
   fault.
-- [`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md)
+- [`docs/release/developer-preview.md`](docs/release/developer-preview.md)
   has a "When something refuses" table covering the common ones, including the
   upgrade case where an older `.env` no longer satisfies the current startup
   checks.
-- [`docs/release/v0.1.0-migration-and-recovery.md`](docs/release/v0.1.0-migration-and-recovery.md)
+- [`docs/release/migration-and-recovery.md`](docs/release/migration-and-recovery.md)
   lists every migration refusal condition and what it means, and states plainly
   what recovery this release does and does not give you.
 

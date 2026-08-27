@@ -6,8 +6,8 @@ import test from "node:test";
 const PUBLIC_EXISTING_MODE_DOCS = [
   "docs/install.md",
   "docs/install.zh-CN.md",
-  "docs/release/v0.1.0-migration-and-recovery.md",
-  "docs/release/v0.1.0-support-matrix.md",
+  "docs/release/migration-and-recovery.md",
+  "docs/release/support-matrix.md",
 ];
 
 const CURRENT_CLI_SURFACE_DOCS = [
@@ -19,7 +19,7 @@ const CURRENT_CLI_SURFACE_DOCS = [
   "docs/install.zh-CN.md",
   "CONTRIBUTING.md",
   "CHANGELOG.md",
-  "docs/release/v0.1.0-support-matrix.md",
+  "docs/release/support-matrix.md",
   "docs/release/v0.2.0-release-notes.md",
 ];
 

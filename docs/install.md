@@ -2,7 +2,7 @@
 
 This file holds the detail that used to live in the README. The authoritative
 installation sequence is
-[`docs/release/v0.1.0-developer-preview.md`](release/v0.1.0-developer-preview.md).
+[`docs/release/developer-preview.md`](release/developer-preview.md).
 
 ## Start locally
 
@@ -27,7 +27,7 @@ into a provider and never reads a credential store.
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.2.0
+git checkout v0.3.0
 npm ci
 npm run setup:local
 npm run build
@@ -39,7 +39,7 @@ npm run db:migrate:release -- --fresh
 
 This is the release installation path, not a contributor bootstrap. Follow the
 corrected, literal sequence in
-[`docs/release/v0.1.0-developer-preview.md`](release/v0.1.0-developer-preview.md),
+[`docs/release/developer-preview.md`](release/developer-preview.md),
 including its filesystem, port, runner identity and repository preflights. Then
 start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`, in that
 order, in three terminals, and open `http://127.0.0.1:5173`.
@@ -55,9 +55,9 @@ LaunchDaemon and Linux systemd profiles in the public
 Those procedures do not change the platform classifications above or the
 authoritative support matrix.
 
-Read [`docs/release/v0.1.0-security.md`](release/v0.1.0-security.md)
+Read [`docs/release/security.md`](release/security.md)
 before pointing this at anything, and
-[`docs/release/v0.1.0-migration-and-recovery.md`](release/v0.1.0-migration-and-recovery.md)
+[`docs/release/migration-and-recovery.md`](release/migration-and-recovery.md)
 before putting data in it.
 
 `npm run db:migrate` is `prisma migrate dev`, and it is **development only**. It

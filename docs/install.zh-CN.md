@@ -1,7 +1,7 @@
 # 安装细节与验证
 
 本文承接 README 中被精简掉的安装细节。权威安装序列见
-[`docs/release/v0.1.0-developer-preview.md`](release/v0.1.0-developer-preview.md)。
+[`docs/release/developer-preview.md`](release/developer-preview.md)。
 
 ## 本地启动
 
@@ -24,7 +24,7 @@ AgentOS 从不替你登录 provider，也从不读取任何凭据存储。
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.2.0
+git checkout v0.3.0
 npm ci
 npm run setup:local
 npm run build
@@ -35,7 +35,7 @@ npm run db:migrate:release -- --fresh
 ```
 
 这是发布安装路径，不是 contributor bootstrap。请逐字执行已更正的
-[`docs/release/v0.1.0-developer-preview.md`](release/v0.1.0-developer-preview.md)，
+[`docs/release/developer-preview.md`](release/developer-preview.md)，
 包括文件系统、端口、runner identity 与仓库 preflight。然后在三个终端里依次启动
 `npm run dev:api`、`npm run dev:runner`、`npm run dev:web`，并打开
 `http://127.0.0.1:5173`。
@@ -49,9 +49,9 @@ systemd profile，见公开的
 不改变上面的平台分级，也不改变权威支持矩阵。
 
 在把它指向任何东西之前先读
-[`docs/release/v0.1.0-security.md`](release/v0.1.0-security.md)，在往里放数据
+[`docs/release/security.md`](release/security.md)，在往里放数据
 之前先读
-[`docs/release/v0.1.0-migration-and-recovery.md`](release/v0.1.0-migration-and-recovery.md)。
+[`docs/release/migration-and-recovery.md`](release/migration-and-recovery.md)。
 
 `npm run db:migrate` 就是 `prisma migrate dev`，**只用于开发**；它只在
 `CONTRIBUTING.md` 中作为开发命令说明，不是安装命令。上面的有闸发布路径运行

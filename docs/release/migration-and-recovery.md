@@ -1,4 +1,4 @@
-# AgentOS v0.1.0 — migrations, refusals, and what recovery does not cover
+# AgentOS — migrations, refusals, and what recovery does not cover
 
 Two commands in this repository change a database schema, and they are not
 alternatives. This page says which is which, what each one refuses and why, and
@@ -70,7 +70,7 @@ happens.
 > validates the bundle, attested target, maintenance lock, WAL fingerprint and
 > migration history before it can deploy. The repository does not ship the
 > backup producer or a supported runbook that creates such a bundle. Therefore
-> no end-to-end existing-install migration is supported in v0.1.0, even though
+> no end-to-end existing-install migration is supported in any preview, even though
 > the consumer is executable. It does not emit an `interface unavailable`
 > condition; supplying an absent, malformed or mismatched bundle reaches the
 > corresponding refusal below.
@@ -259,7 +259,7 @@ That refusal is deliberate, it changes nothing, and restarting will not clear it
 The reason codes and the complete fix — including the fact that changing
 `POSTGRES_PASSWORD` does not change the password of a database that already
 exists — are in the "Startup configuration refusals" section of
-[`v0.1.0-developer-preview.md`](v0.1.0-developer-preview.md).
+[`developer-preview.md`](developer-preview.md).
 
 The honest summary: on the Developer Preview, the recovery story for a database
 you care about is *do not put it here yet*.

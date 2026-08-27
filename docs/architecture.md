@@ -104,7 +104,7 @@ workspace it has ever created, so it can delete its own earlier ones. The Files
 path walk also carries a known open gap against an adversary who can already
 write inside the Files Root.
 
-[`docs/release/v0.1.0-security.md`](release/v0.1.0-security.md) states each
+[`docs/release/security.md`](release/security.md) states each
 of these limits and what is and is not checked; read it before pointing this at
 anything you care about.
 

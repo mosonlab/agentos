@@ -5,7 +5,7 @@
 - **已验证（Verified）**：所述路径已有实际运行或仓库证据。
 - **维护者已验证（Maintainer-verified）**：维护者已在指定平台实际运行，但全新
   机器复现关卡仍未完成。
-- **实验性（Experimental）**：实现程度足够用于开发评估，但不构成 v0.1 支持
+- **实验性（Experimental）**：实现程度足够用于开发评估，但不构成支持
   承诺。
 - **待完成（Pending）**：所需证据尚未完成，不应据此推断已支持。
 - **未验证（Unverified）**：尚无符合要求的证据记录。
@@ -16,8 +16,8 @@
 | Provider 运行时 | 状态 | 证据边界 |
 | --- | --- | --- |
 | Codex CLI | **已验证** | adapter/runtime 和订阅认证路径已验证；全新安装证据为 **待完成（OSS-B）**。 |
-| Claude Code | **已验证** / **维护者已验证** | adapter/runtime 已验证；Claude Pro/Max 认证已由维护者在 macOS Apple Silicon 上验证；v0.1 全新安装关卡为 **待完成（OSS-B）**。 |
-| Pi | **实验性** | adapter 代码已存在，但 Pi 不属于已承诺的 v0.1 支持范围。 |
+| Claude Code | **已验证** / **维护者已验证** | adapter/runtime 已验证；Claude Pro/Max 认证已由维护者在 macOS Apple Silicon 上验证；全新安装关卡为 **待完成（OSS-B）**。 |
+| Pi | **实验性** | adapter 代码已存在，但 Pi 不属于已承诺的支持范围。 |
 
 Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由
 用户负责。AgentOS 不提供 provider 凭据或使用资格。

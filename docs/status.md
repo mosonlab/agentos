@@ -8,7 +8,7 @@ not compatibility promises by the CLI providers.
 - **Maintainer-verified**: a maintainer exercised the stated path on the named
   platform, but the clean-machine reproduction gate is still open.
 - **Experimental**: implemented enough for development evaluation, without a
-  v0.1 support commitment.
+  support commitment.
 - **Pending**: required evidence has not been completed. Do not infer support.
 - **Unverified**: no qualifying evidence has been recorded.
 - **Unsupported**: outside the supported target.
@@ -18,8 +18,8 @@ not compatibility promises by the CLI providers.
 | Provider runtime | Status | Evidence boundary |
 | --- | --- | --- |
 | Codex CLI | **Verified** | Adapter/runtime and subscription authentication path are verified. Clean fresh-install evidence is **Pending (OSS-B)**. |
-| Claude Code | **Verified** / **Maintainer-verified** | Adapter/runtime is verified. Claude Pro/Max authentication is maintainer-verified on macOS Apple Silicon. The v0.1 clean-install gate is **Pending (OSS-B)**. |
-| Pi | **Experimental** | Adapter code exists, but Pi is not part of the committed v0.1 support surface. |
+| Claude Code | **Verified** / **Maintainer-verified** | Adapter/runtime is verified. Claude Pro/Max authentication is maintainer-verified on macOS Apple Silicon. The clean-install gate is **Pending (OSS-B)**. |
+| Pi | **Experimental** | Adapter code exists, but Pi is not part of the committed support surface. |
 
 Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
 limits, models, and provider-side availability remain the user's responsibility.

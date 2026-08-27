@@ -85,6 +85,6 @@ runner 账号，并在启用 `RUNNER_RUN_AS_PREFIX` 前阅读 `.env.example` 中
 workspace，因此仍可删除自己此前的 workspace。此外，面对已经能在 Files Root 内写入
 的攻击者，Files 路径遍历还留有一个已知缺口。
 
-[`docs/release/v0.1.0-security.md`](release/v0.1.0-security.md) 逐条写明了这些
+[`docs/release/security.md`](release/security.md) 逐条写明了这些
 限制，以及哪些被检查、哪些没有；在把它指向任何你在意的东西之前先读它。
 

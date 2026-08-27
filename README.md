@@ -40,7 +40,7 @@ terms and plan limits apply.
 
 </div>
 
-> **Developer Preview 2 (v0.2.0).** Interfaces, configuration and stored data
+> **Developer Preview 3 (v0.3.0).** Interfaces, configuration and stored data
 > shapes may change between preview releases, and the only upgrade path is a
 > fresh install.
 >
@@ -60,7 +60,7 @@ macOS account. Claude Code and the experimental Pi adapter are optional.
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.2.0
+git checkout v0.3.0
 npm ci
 npm run setup:local
 npm run build
@@ -75,7 +75,7 @@ that order, in three terminals, and open `http://127.0.0.1:5173`.
 
 This is the short form. The literal sequence, including its filesystem, port,
 runner identity and repository preflights, is in
-[`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md),
+[`docs/release/developer-preview.md`](docs/release/developer-preview.md),
 with the remaining installation detail in [`docs/install.md`](docs/install.md).
 
 ## Status
@@ -92,7 +92,7 @@ with the remaining installation detail in [`docs/install.md`](docs/install.md).
 Every label above means recorded evidence in this repository, not a promise by a
 CLI provider. The evidence boundaries are in [`docs/status.md`](docs/status.md)
 and the authoritative matrix in
-[`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md).
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md).
 
 ## Documentation
 
@@ -101,11 +101,11 @@ and the authoritative matrix in
   contain.
 - [Installation notes and verification](docs/install.md) — environment file,
   migrations, merge executor, and the check sequence.
-- [Security](docs/release/v0.1.0-security.md) — read before pointing this at
+- [Security](docs/release/security.md) — read before pointing this at
   anything you care about.
-- [Migration and recovery](docs/release/v0.1.0-migration-and-recovery.md) — read
+- [Migration and recovery](docs/release/migration-and-recovery.md) — read
   before putting data in it.
-- [Release notes](docs/release/v0.2.0-release-notes.md) · [Support](SUPPORT.md) ·
+- [Release notes](docs/release/v0.3.0-release-notes.md) · [Support](SUPPORT.md) ·
   [Contributing](CONTRIBUTING.md)
 
 ## Credits and license
