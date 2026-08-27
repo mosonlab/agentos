@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { lstat, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
@@ -62,10 +61,6 @@ export class MirrorSpecificationReadError extends Error {
     this.condition = condition;
   }
 }
-
-const isErrno = (error: unknown, code: string): boolean => (
-  typeof error === "object" && error !== null && "code" in error && error.code === code
-);
 
 const outputText = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
@@ -131,39 +126,6 @@ const defaultGit = (prefix: readonly string[]): MirrorGitCommand => (mirrorPath,
 });
 
 const missing = (result: MirrorGitResult): boolean => result.code !== 0 && result.code !== null;
-
-const expectedRemoteUrls = (repository: string): string[] => [
-  `https://github.com/${repository}.git`,
-  `https://github.com/${repository}`,
-  `git@github.com:${repository}.git`,
-  `ssh://git@github.com/${repository}.git`,
-];
-
-const mirrorCandidates = async (
-  root: string,
-  repository: string,
-  remoteUrl: string | undefined,
-): Promise<string[]> => {
-  const remotes = remoteUrl ? [remoteUrl] : expectedRemoteUrls(repository);
-  const paths = new Set(remotes.map((remote) => repoMirrorPath(root, remote)));
-  // A direct call to the reader may not have the original remote URL. Scan only
-  // the runner's hashed mirror entries in that case, and use each mirror's
-  // origin URL to recover the exact key. Prepared claim verification always
-  // takes the direct path above, so this is compatibility for other callers.
-  if (!remoteUrl) {
-    let entries: string[];
-    try {
-      entries = await readdir(root);
-    } catch (error: unknown) {
-      if (isErrno(error, "ENOENT")) return [...paths];
-      throw new MirrorSpecificationReadError(root, "root-unreadable", { cause: error });
-    }
-    for (const entry of entries) {
-      if (/^[0-9a-f]{64}\.git$/u.test(entry)) paths.add(join(root, entry));
-    }
-  }
-  return [...paths];
-};
 
 const readMirrorAtPath = async (
   root: string,
@@ -233,36 +195,22 @@ const localMirrorRead = async (
   signal: AbortSignal,
   runGit: MirrorGitCommand,
 ): Promise<Uint8Array | null> => {
-  // The prepared claim path has the exact Repo.remoteUrl. Do not lstat either
-  // root or mirror here: RUNNER_HOME and its 0700 parents may be traversable
-  // only by the account selected by RUNNER_RUN_AS_PREFIX. Git itself runs at
-  // that boundary and a nonzero result is the ordinary mirror miss.
-  if (remoteUrl) {
-    return readMirrorAtPath(root, repoMirrorPath(root, remoteUrl), repository, path, commitSha, remoteUrl, signal, runGit);
-  }
-
-  // Compatibility for callers that only have owner/name. This best-effort scan
-  // necessarily runs as the API uid; prepared claim verification never uses it.
-  let rootInfo;
-  try {
-    rootInfo = await lstat(root);
-  } catch {
-    return null;
-  }
-  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return null;
-  const candidates = await mirrorCandidates(root, repository, remoteUrl).catch(() => []);
-  for (const mirror of candidates) {
-    let mirrorInfo;
-    try {
-      mirrorInfo = await lstat(mirror);
-    } catch {
-      continue;
-    }
-    if (mirrorInfo.isSymbolicLink() || !mirrorInfo.isDirectory()) continue;
-    const local = await readMirrorAtPath(root, mirror, repository, path, commitSha, remoteUrl, signal, runGit);
-    if (local !== null) return local;
-  }
-  return null;
+  // Prepared claims always carry the exact URL used by the runner's mirror
+  // hash. A four-argument test double or other caller simply misses locally.
+  if (!remoteUrl) return null;
+  // Do not lstat either root or mirror: RUNNER_HOME and its 0700 parents may be
+  // traversable only by the account selected by RUNNER_RUN_AS_PREFIX. Git runs
+  // at that boundary and a nonzero result is the ordinary mirror miss.
+  return readMirrorAtPath(
+    root,
+    repoMirrorPath(root, remoteUrl),
+    repository,
+    path,
+    commitSha,
+    remoteUrl,
+    signal,
+    runGit,
+  );
 };
 
 /**

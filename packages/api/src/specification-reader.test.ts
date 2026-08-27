@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   createMirrorBackedSpecificationReader,
@@ -16,6 +18,7 @@ const path = ".chain/feat/spec/spec.md";
 const repository = "acme/repo";
 const remoteUrl = "git@github.com:acme/repo.git";
 const bytes = new TextEncoder().encode("the local specification\n");
+const execFileAsync = promisify(execFile);
 
 const result = (stdout: Uint8Array | string = "", code = 0): MirrorGitResult => ({
   code,
@@ -75,6 +78,38 @@ test("serves the pinned file from the exact runner mirror key before GitHub", as
       new AbortController().signal,
     );
     assert.equal(mirrorVerdict, githubVerdict);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reads exact bytes from a real bare mirror at the pinned commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-api-spec-reader-real-"));
+  const seed = join(root, "seed");
+  const mirrorRoot = join(root, "mirrors");
+  const mirror = repoMirrorPath(mirrorRoot, remoteUrl);
+  try {
+    await mkdir(join(seed, ".chain/feat/spec"), { recursive: true });
+    await writeFile(join(seed, path), bytes);
+    await execFileAsync("git", ["init", "-b", "main"], { cwd: seed });
+    await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: seed });
+    await execFileAsync("git", ["config", "user.name", "Specification Reader Test"], { cwd: seed });
+    await execFileAsync("git", ["add", path], { cwd: seed });
+    await execFileAsync("git", ["commit", "-m", "materialize specification"], { cwd: seed });
+    const { stdout: head } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: seed });
+    await mkdir(mirrorRoot, { recursive: true });
+    await execFileAsync("git", ["clone", "--mirror", seed, mirror]);
+    await execFileAsync("git", ["--git-dir", mirror, "config", "remote.origin.url", remoteUrl]);
+
+    const reader = createMirrorBackedSpecificationReader(null, { mirrorRoot, runAsPrefix: [] });
+    const actual = await reader.readFileAtCommit(
+      repository,
+      path,
+      head.trim(),
+      new AbortController().signal,
+      remoteUrl,
+    );
+    assert.deepEqual([...actual], [...bytes]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
