@@ -118,6 +118,7 @@ import {
 } from "./refusal.js";
 import {
   acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
+  terminalRunStatuses,
 } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
 import {
@@ -255,6 +256,7 @@ const blockedMessageIds = async (db: PrismaClient, ids: string[]): Promise<Reado
 };
 
 const id = z.string().min(1);
+const costsDays = z.coerce.number().int().positive();
 const fence = z.string().min(1);
 const projectFields = {
   name: z.string().trim().min(1).max(120),
@@ -1334,6 +1336,116 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.delete("/projects/:projectId", async (context) => {
     await db.project.delete({ where: { id: id.parse(context.req.param("projectId")) } });
     return context.body(null, 204);
+  });
+
+  app.get("/projects/:projectId/costs", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const days = costsDays.parse(context.req.query("days") ?? "30");
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1_000);
+    const settledRunWhere: Prisma.RunWhereInput = {
+      projectId,
+      status: { in: [...terminalRunStatuses] },
+      startedAt: { gte: since },
+    };
+
+    // Run owns lifecycle and identity; Session owns provider-reported usage.
+    // Keep the two grouped reads on the same settled Run predicate so a
+    // missing Session cannot make a run disappear from the run count.
+    const [runGroups, sessionGroups, runs] = await Promise.all([
+      db.run.groupBy({
+        by: ["agentId"],
+        where: settledRunWhere,
+        _count: { _all: true },
+      }),
+      db.session.groupBy({
+        by: ["agentId"],
+        where: { run: settledRunWhere },
+        _sum: { costUsd: true },
+      }),
+      db.run.findMany({
+        where: settledRunWhere,
+        select: {
+          id: true,
+          agentId: true,
+          model: true,
+          startedAt: true,
+          agent: { select: { name: true } },
+          task: { select: { name: true } },
+          session: { select: { costUsd: true } },
+        },
+      }),
+    ]);
+
+    const zero = new Prisma.Decimal(0);
+    const costByAgent = new Map(sessionGroups.map((group) => [group.agentId, group._sum.costUsd ?? zero]));
+    const totalUsd = sessionGroups.reduce(
+      (total, group) => total.plus(group._sum.costUsd ?? zero),
+      zero,
+    );
+    const runCount = runGroups.reduce((total, group) => total + group._count._all, 0);
+    const asUsd = (value: Prisma.Decimal): string => value.toString();
+    const averageUsd = (value: Prisma.Decimal, count: number): string => asUsd(count === 0 ? zero : value.dividedBy(count));
+    const agentNameById = new Map(runs.map((run) => [run.agentId, run.agent.name]));
+
+    const byAgent = runGroups.map((group) => {
+      const usd = costByAgent.get(group.agentId) ?? zero;
+      return {
+        agent: agentNameById.get(group.agentId) ?? group.agentId,
+        usd,
+        runs: group._count._all,
+      };
+    }).sort((left, right) => (
+      right.usd.comparedTo(left.usd)
+      || left.agent.localeCompare(right.agent)
+    )).map(({ agent, usd, runs: runsForAgent }) => ({
+      agent,
+      usd: asUsd(usd),
+      runs: runsForAgent,
+      avgUsd: averageUsd(usd, runsForAgent),
+    }));
+
+    const dailyByDate = new Map<string, Map<string, Prisma.Decimal>>();
+    for (const run of runs) {
+      const date = run.startedAt?.toISOString().slice(0, 10);
+      const cost = run.session?.costUsd;
+      if (date === undefined || cost === null || cost === undefined) continue;
+      const byAgentForDate = dailyByDate.get(date) ?? new Map<string, Prisma.Decimal>();
+      byAgentForDate.set(run.agent.name, (byAgentForDate.get(run.agent.name) ?? zero).plus(cost));
+      dailyByDate.set(date, byAgentForDate);
+    }
+    const daily = [...dailyByDate.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, agents]) => ({
+      date,
+      byAgent: Object.fromEntries([...agents.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([agent, usd]) => [agent, asUsd(usd)])),
+    }));
+
+    // A missing provider amount is unknown spend, not a zero-cost top run.
+    // Keep such settled runs in counts and averages, but do not surface them
+    // in a ranking that promises the most expensive runs.
+    const topRuns = runs.filter((run) => run.session?.costUsd !== null && run.session?.costUsd !== undefined).map((run) => ({
+      run,
+      usd: run.session!.costUsd!,
+    })).sort((left, right) => (
+      right.usd.comparedTo(left.usd)
+      || (right.run.startedAt?.getTime() ?? Number.NEGATIVE_INFINITY) - (left.run.startedAt?.getTime() ?? Number.NEGATIVE_INFINITY)
+      || left.run.id.localeCompare(right.run.id)
+    )).slice(0, 10).map(({ run, usd }) => ({
+      taskName: run.task?.name ?? "",
+      agent: run.agent.name,
+      model: run.model,
+      usd: asUsd(usd),
+      startedAt: run.startedAt,
+    }));
+
+    return context.json({
+      totalUsd: asUsd(totalUsd),
+      runCount,
+      avgUsd: averageUsd(totalUsd, runCount),
+      daily,
+      byAgent,
+      topRuns,
+    });
   });
 
   app.get("/projects/:projectId/environments", async (context) => context.json(await db.environment.findMany({
