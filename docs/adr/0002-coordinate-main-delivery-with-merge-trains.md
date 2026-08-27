@@ -30,9 +30,11 @@ These terms are local to this proposal. They do not become canonical
 - **Train Prefix**: the cumulative integration commit after merging entries one
   through N. Prefix N has Prefix N-1 as its first parent and the Nth candidate
   head in its ancestry.
-- **Prefix Proof**: `MERGE GATE: PASS <oid>` for one Train Prefix, with the
-  immediately preceding prefix, or the Train Base for the first prefix, supplied
-  as `--master`.
+- **Gate Proof**: `MERGE GATE: PASS <oid>` for one exact train commit and one
+  stated `--master` baseline.
+- **Prefix Proof**: a Gate Proof for one Train Prefix, with the immediately
+  preceding prefix, or the Train Base for the first prefix, supplied as
+  `--master`.
 - **Publishable Prefix**: the longest prefix for which every preceding prefix
   has a valid Prefix Proof and every submitted candidate head remains exact.
 - **Ejected Entry**: a candidate removed from the current train because it
@@ -135,10 +137,12 @@ Any replacement must preserve all of these properties:
 1. Published history is append-only. `main` advances only by fast-forward;
    rebase, reset, force-push, or substitution of an unsubmitted head is outside
    this design.
-2. A merge consumes `MERGE GATE: PASS <exact-prefix-oid>`. A PASS for another
-   commit, an earlier commit, or a branch name is not evidence.
-3. Each Prefix Proof names its exact predecessor as `--master`. Publication
-   reaches that predecessor before it consumes the proof for the next prefix.
+2. A publication consumes `MERGE GATE: PASS <exact-target-oid>`. A PASS for
+   another commit, an earlier commit, or a branch name is not evidence.
+3. A Gate Proof names the exact live `main` predecessor as `--master`. Prefix
+   mode publishes one prefix at a time and therefore gives each prefix its own
+   predecessor proof. Terminal-batch mode proves the terminal prefix against
+   the Train Base and publishes the whole batch in one fast-forward.
 4. The submitted pull-request head must remain the exact head recorded by its
    Train Entry until that entry publishes. Head drift ejects the entry.
 5. Every delivered pull-request head is an ancestor of the surviving `main`.
@@ -423,9 +427,10 @@ This phase earns locality and recovery value before changing throughput.
 ### Phase 2: cumulative batches with one terminal gate
 
 - Admit up to three clean candidates.
-- Build cumulative merge commits and gate the terminal prefix once.
-- On PASS, publish prefixes sequentially under one hold after proving the
-  terminal tree contains every entry.
+- Build cumulative merge commits and gate the terminal prefix once with the
+  Train Base as `--master`.
+- On PASS, fast-forward `main` once from the Train Base to the terminal prefix
+  after proving the terminal tree contains every submitted head.
 - On FAIL, publish nothing and split the batch to locate the failing entry.
 
 This is the smallest throughput experiment, but it delays failure attribution.
