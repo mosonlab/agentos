@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ClaimedTask } from "./api.js";
+import { ControlPlaneError, type ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { deliverUnderLease, openDeliveryLease, type LeaseHeartbeat } from "./lease.js";
 import { DELIVERY_LEASE_RESERVE_MS, MIN_DELIVERY_BUDGET_MS } from "./network-retry.js";
@@ -9,7 +9,7 @@ import { DELIVERY_LEASE_RESERVE_MS, MIN_DELIVERY_BUDGET_MS } from "./network-ret
 const config = { leaseSeconds: 60, heartbeatIntervalMs: 30_000 } as unknown as RunnerConfig;
 const claim = { run: { id: "run-1" } } as ClaimedTask;
 
-const rejection = (status: number, code?: string): Error => Object.assign(new Error("rejected"), { status, code });
+const rejection = (status: number, code?: string): Error => new ControlPlaneError(status, "rejected", code);
 
 const openWith = async (send: LeaseHeartbeat, lastRenewalAt = 0, now: () => number = () => 0) =>
   openDeliveryLease(config, claim, lastRenewalAt, { send, now, startedAt: new Date(0) });

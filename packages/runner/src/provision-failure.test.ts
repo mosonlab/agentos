@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, test } from "node:test";
+import { test } from "node:test";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { type FailureEnvelope, RUNNER_EXCEPTION_REASON, runnerExceptionEnvelope } from "./envelope.js";
 import { runCommand } from "./exec.js";
 import { executeClaim } from "./runner.js";
+import { createControlPlaneDouble } from "./test-control-plane.js";
 import { provisionWorkspace } from "./workspace.js";
 
 /**
@@ -105,22 +106,15 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   regressionRepairHandoff: null,
 });
 
-const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
-
 test("a clone that cannot succeed reaches the API as a PROVISION envelope stamped 'runner exception'", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-provision-"));
-  const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
+  const controlPlane = createControlPlaneDouble();
 
-  await executeClaim(config(root), claim(UNREACHABLE_REMOTE));
+  await executeClaim(config(root), claim(UNREACHABLE_REMOTE), { controlPlane: controlPlane.controlPlane });
 
-  const completion = posts.find((post) => post.path.endsWith("/complete"));
+  const completion = controlPlane.completions.at(-1);
   assert.ok(completion, "provisioning failure must still complete the run");
-  const envelope = completion.body.failureEnvelope as FailureEnvelope;
+  const envelope = completion.failureEnvelope as FailureEnvelope;
   // The three facts the API's verdict turns on, none of which the old
   // hand-written fixture had right.
   assert.equal(envelope.phase, "PROVISION", "no agent was started, so this is the runner's own plumbing");
@@ -131,8 +125,8 @@ test("a clone that cannot succeed reaches the API as a PROVISION envelope stampe
   assert.equal(envelope.transient, false);
   assert.equal(envelope.timedOut, false);
   assert.match(String(envelope.stderrSummary), /repository|not a git|does not exist/i);
-  assert.equal(completion.body.externalFailure, true);
-  assert.equal(completion.body.terminationReason, RUNNER_EXCEPTION_REASON);
+  assert.equal(completion.externalFailure, true);
+  assert.equal(completion.terminationReason, RUNNER_EXCEPTION_REASON);
 });
 
 test("a transient mirror fetch failure escapes provisioning as a transient error, and the envelope says so", async () => {

@@ -1,19 +1,22 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { AssigneeType, Prisma, RunStatus } from "@prisma/client";
 
 import { stepRole, type StepRole } from "./step-role.js";
 
-export type LegacyStepTuple = readonly [
-  string,
-  AssigneeType,
-  boolean,
-  string,
-  boolean,
-  boolean,
-  number | null,
-  number,
-];
+export type LegacyStepRecord = Readonly<{
+  name: string;
+  agentName: string | null;
+  assigneeType: AssigneeType;
+  approvalGate: boolean;
+  outputKind: string;
+  attachmentsFromPrevious: boolean;
+  opensPullRequest: boolean;
+  baseFromStepIndex: number | null;
+  layer: number;
+  spawnPolicy: Prisma.JsonValue;
+}>;
 
 /**
  * Every retired canonical graph, keyed by the marker its renamed rows carry.
@@ -38,7 +41,7 @@ export type LegacyStepTuple = readonly [
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
-  shape: readonly LegacyStepTuple[];
+  shape: readonly LegacyStepRecord[];
   /**
    * The prompt generation this entry retires, as a digest over its ordered step
    * prompts, or absent when the structure alone identifies it.
@@ -79,26 +82,26 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-narrow-regression-lease",
       shape: [
-        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 4],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
       ],
     },
     {
       marker: "pre-adjudication",
       shape: [
-        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
-        ["review-adjudicator-opus", AssigneeType.AGENT, false, "must-fix", true, false, 1, 3],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 4],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 5],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 6],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 7],
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Opus adjudication", agentName: "review-adjudicator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "must-fix", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 3, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
       ],
     },
     {
@@ -108,13 +111,13 @@ const legacyTemplateGenerations = {
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
       successorPromptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
-        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 4],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
       ],
     },
     {
@@ -122,13 +125,13 @@ const legacyTemplateGenerations = {
       promptDigest: "c1a9ec1f8e783c3c814c0d0f5f4a9b91d5759b9dc39473dc200447aeb96677c5",
       successorPromptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
-        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 4],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
       ],
     },
     {
@@ -138,13 +141,13 @@ const legacyTemplateGenerations = {
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
       successorPromptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
-        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 4],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
       ],
     },
   ],
@@ -152,53 +155,53 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-narrow-regression-lease",
       shape: [
-        ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
-        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
-        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
-        ["plan-reviser", AssigneeType.AGENT, false, "revised-plan", true, false, null, 4],
-        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
-        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 9],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+        { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", agentName: "librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
       ],
     },
     {
       marker: "pre-adjudication",
       shape: [
-        ["spec", AssigneeType.AGENT, true, "spec", false, false, null, 1],
-        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
-        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
-        ["plan-reviser", AssigneeType.AGENT, true, "revised-plan", true, false, null, 4],
-        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
-        ["review-adjudicator-opus", AssigneeType.AGENT, false, "must-fix", true, false, 5, 7],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 8],
-        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 9],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 10],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 11],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 12],
+        { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Opus adjudication", agentName: "review-adjudicator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "must-fix", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 7, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Librarian", agentName: "librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 12, spawnPolicy: null },
       ],
     },
     {
       marker: "pre-zero-gate",
       shape: [
-        ["spec", AssigneeType.AGENT, true, "spec", false, false, null, 1],
-        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
-        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
-        ["plan-reviser", AssigneeType.AGENT, true, "revised-plan", true, false, null, 4],
-        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
-        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 9],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+        { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", agentName: "librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
       ],
     },
     {
@@ -208,18 +211,18 @@ const legacyTemplateGenerations = {
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
       successorPromptDigest: "f7635395085052a8f613a65a7e7c11f1389abd950fa624409eb52cac3133fa14",
       shape: [
-        ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
-        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
-        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
-        ["plan-reviser", AssigneeType.AGENT, false, "revised-plan", true, false, null, 4],
-        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
-        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 9],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+        { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", agentName: "librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
       ],
     },
     {
@@ -229,18 +232,18 @@ const legacyTemplateGenerations = {
       promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
       successorPromptDigest: "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
       shape: [
-        ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
-        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
-        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
-        ["plan-reviser", AssigneeType.AGENT, false, "revised-plan", true, false, null, 4],
-        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
-        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
-        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
-        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
-        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
-        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 9],
-        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
-        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+        { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", agentName: "librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
       ],
     },
   ],
@@ -302,9 +305,9 @@ export const canonicalStepOrdinals = (
   }
 
   const ordinals: Partial<Record<StepRole, number>> = {};
-  for (const [index, tuple] of registered.shape.entries()) {
-    const role = stepRole({ outputKind: tuple[3] });
-    if (role === null) throw new Error(`Registered ${canonicalName} generation ${registered.marker} has unknown outputKind ${tuple[3]}`);
+  for (const [index, step] of registered.shape.entries()) {
+    const role = stepRole({ outputKind: step.outputKind });
+    if (role === null) throw new Error(`Registered ${canonicalName} generation ${registered.marker} has unknown outputKind ${step.outputKind}`);
     if (ordinals[role] !== undefined) throw new Error(`Registered ${canonicalName} generation ${registered.marker} repeats Step role ${role}`);
     ordinals[role] = index + 1;
   }
@@ -389,22 +392,23 @@ export type PersistedTransitionStep = {
 
 const shapeMatches = (
   steps: readonly PersistedTransitionStep[],
-  expected: readonly LegacyStepTuple[],
+  expected: readonly LegacyStepRecord[],
 ): boolean => {
   if (steps.length !== expected.length) return false;
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
   if (ordered.some((step, index) => step.stepIndex !== index + 1)) return false;
   for (const [index, step] of ordered.entries()) {
-    const [agentName, assigneeType, approvalGate, outputKind, attachmentsFromPrevious, opensPullRequest, baseFromStepIndex, layer] = expected[index]!;
-    if ((step.assigneeAgent?.name ?? null) !== agentName
-      || step.assigneeType !== assigneeType
-      || step.approvalGate !== approvalGate
-      || step.outputKind !== outputKind
-      || step.attachmentsFromPrevious !== attachmentsFromPrevious
-      || step.opensPullRequest !== opensPullRequest
-      || step.baseFromStepIndex !== baseFromStepIndex
-      || step.layer !== layer
-      || step.spawnPolicy !== null) {
+    const expectedStep = expected[index]!;
+    if (step.name !== expectedStep.name
+      || (step.assigneeAgent?.name ?? null) !== expectedStep.agentName
+      || step.assigneeType !== expectedStep.assigneeType
+      || step.approvalGate !== expectedStep.approvalGate
+      || step.outputKind !== expectedStep.outputKind
+      || step.attachmentsFromPrevious !== expectedStep.attachmentsFromPrevious
+      || step.opensPullRequest !== expectedStep.opensPullRequest
+      || step.baseFromStepIndex !== expectedStep.baseFromStepIndex
+      || step.layer !== expectedStep.layer
+      || !isDeepStrictEqual(step.spawnPolicy, expectedStep.spawnPolicy)) {
       return false;
     }
   }

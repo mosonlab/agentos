@@ -204,7 +204,7 @@ const helpIsCompatible = (help: string): boolean => [
 
 const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
-  if (!spec.model.includes("/")) {
+  if (spec.model === null || !spec.model.includes("/")) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: PREFLIGHT_REASONS.unsupportedModel };
   }
   if (spec.model.startsWith("openai-codex/") && spec.env.AGENTOS_RUN_ID

@@ -82,7 +82,6 @@ import {
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import {
-  mergeTailLeaseChainId,
   releaseMergeLease,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
@@ -128,6 +127,7 @@ import {
   type RunFence,
   withFencedRun,
 } from "./run-fence.js";
+import { terminalizeRun } from "./run-terminal.js";
 import { InboxRunFenceRefusal, supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
@@ -871,159 +871,6 @@ const sessionWriteInput = z.object({
 const isPublic = (path: string, method: string): boolean =>
   path === "/" || path === "/health" || path === "/version" || method === "OPTIONS"
   || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
-
-type CancellationSettlement =
-  | Refusal
-  | {
-      runId: string; taskId: string | null; status: RunStatus; cancellationState: "acknowledged";
-      requestId: string; releaseMergeLeaseTask: string | null;
-    };
-
-/** Terminalize one already-recorded cancellation intent. The Run row is the
- * race authority: completion and settlement both update it with mutually
- * exclusive predicates, so whichever commits first is the only terminal
- * writer. No retry or successor is created on this path. */
-const settleCancellation = async (
-  tx: Prisma.TransactionClient,
-  input: {
-    runId: string;
-    requestId: string;
-    now: Date;
-    runnerId?: string;
-    fencingToken?: string;
-    actorId?: string;
-    workspacePath?: string;
-    branch?: string;
-    baseSha?: string;
-    worktreeContainmentViolations?: string[];
-  },
-): Promise<CancellationSettlement> => {
-  await lockRunRow(tx, input.runId);
-  const run = await tx.run.findUnique({
-    where: { id: input.runId },
-    select: {
-      id: true, taskId: true, runNumber: true, status: true, runnerId: true, fencingToken: true,
-      cancelRequestId: true, cancelReason: true, cancelAcknowledgedAt: true,
-      worktreeContainmentViolations: true,
-      session: { select: { id: true, waitingOnMessageId: true } },
-    },
-  });
-  if (!run) return refusal("not-found", "Run not found");
-  if (run.cancelRequestId !== input.requestId) return refusal("conflict", "Cancellation request does not match this Run");
-  if (input.runnerId !== undefined && (run.runnerId !== input.runnerId || run.fencingToken !== input.fencingToken)) {
-    return refusal("conflict", "Cancellation acknowledgement is not owned by this runner");
-  }
-  if (run.status === RunStatus.CANCELLED) {
-    // Reconciliation can settle an expired cancellation before the runner's
-    // final ACK arrives. That ACK is still the only durable account of a
-    // workspace provisioned before /start, so idempotence must backfill its
-    // evidence instead of discarding it.
-    if (input.workspacePath !== undefined) await tx.run.updateMany({
-      where: { id: run.id, workspacePath: null }, data: { workspacePath: input.workspacePath },
-    });
-    if (input.branch !== undefined) await tx.run.updateMany({
-      where: { id: run.id, branch: null }, data: { branch: input.branch },
-    });
-    if (input.baseSha !== undefined) await tx.run.updateMany({
-      where: { id: run.id, baseSha: null }, data: { baseSha: input.baseSha },
-    });
-    if (input.worktreeContainmentViolations?.length && run.worktreeContainmentViolations === null) {
-      await tx.run.update({
-        where: { id: run.id },
-        data: { worktreeContainmentViolations: jsonValue(input.worktreeContainmentViolations) },
-      });
-    }
-    if (!run.cancelAcknowledgedAt && input.runnerId !== undefined) {
-      await tx.run.update({
-        where: { id: run.id },
-        data: { cancelAcknowledgedAt: input.now },
-      });
-      if (run.taskId) await tx.taskActivity.create({ data: {
-        taskId: run.taskId,
-        actorType: "runner",
-        actorId: input.actorId ?? null,
-        body: `Run ${run.runNumber} cancellation cleanup confirmed after terminalization`,
-        metadata: { runId: run.id, requestId: input.requestId, status: RunStatus.CANCELLED },
-      } });
-    } else if (!run.cancelAcknowledgedAt) {
-      return refusal("conflict", "Cancellation cleanup has not been acknowledged by the runner");
-    }
-    // The terminal writer that got here first already released the lease; a
-    // later acknowledgement of the same cancellation has nothing left to free.
-    return {
-      runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged",
-      requestId: input.requestId, releaseMergeLeaseTask: null,
-    };
-  }
-  if (run.taskId) await lockTaskMutationRows(tx, run.taskId);
-  const settled = await tx.run.updateMany({
-    where: {
-      id: run.id,
-      cancelRequestId: input.requestId,
-      status: { in: [RunStatus.QUEUED, ...activeRunStatuses] },
-      ...(input.runnerId === undefined ? {} : { runnerId: input.runnerId, fencingToken: input.fencingToken }),
-    },
-    data: {
-      status: RunStatus.CANCELLED,
-      endedAt: input.now,
-      leaseExpiresAt: null,
-      sessionTokenRevokedAt: input.now,
-      cancelAcknowledgedAt: input.now,
-      failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
-      failureReason: run.cancelReason ?? "Cancelled by operator",
-      terminationReason: run.cancelReason ?? "Cancelled by operator",
-      retryable: false,
-      retryAt: null,
-      workspaceRetained: true,
-      ...(input.workspacePath === undefined ? {} : { workspacePath: input.workspacePath }),
-      ...(input.branch === undefined ? {} : { branch: input.branch }),
-      ...(input.baseSha === undefined ? {} : { baseSha: input.baseSha }),
-      ...(input.worktreeContainmentViolations?.length
-        ? { worktreeContainmentViolations: jsonValue(input.worktreeContainmentViolations) }
-        : {}),
-    },
-  });
-  if (settled.count !== 1) return refusal("conflict", `Run is already ${run.status}`);
-  await tx.session.updateMany({
-    where: { runId: run.id },
-    data: {
-      executionStatus: SessionExecutionStatus.CANCELLED,
-      cleanupStatus: CleanupStatus.RETAINED,
-      endedAt: input.now,
-      cleanupEndedAt: input.now,
-      failureReason: run.cancelReason ?? "Cancelled by operator",
-      terminationReason: run.cancelReason ?? "Cancelled by operator",
-    },
-  });
-  if (run.session?.waitingOnMessageId) {
-    await tx.inboxMessage.updateMany({
-      where: { id: run.session.waitingOnMessageId, status: InboxStatus.OPEN },
-      data: { status: InboxStatus.CLOSED },
-    });
-  }
-  if (run.taskId) {
-    const reason = run.cancelReason ?? "Cancelled by operator";
-    await tx.task.updateMany({
-      where: { id: run.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] } },
-      data: { status: TaskStatus.REVIEW, failureReason: reason },
-    });
-    await tx.taskActivity.create({ data: {
-      taskId: run.taskId,
-      actorType: input.actorId ? "runner" : "control-plane",
-      actorId: input.actorId ?? null,
-      body: `Run ${run.runNumber} cancellation acknowledged; execution authority revoked and evidence retained`,
-      metadata: { runId: run.id, requestId: input.requestId, status: RunStatus.CANCELLED },
-    } });
-  }
-  // Cancellation never creates a retry or a successor, so a cancelled chain-tail
-  // run is the chain's last word: whatever lease it was holding is now stranded
-  // until a machine steals it 45 minutes later. Release it instead.
-  return {
-    runId: run.id, taskId: run.taskId, status: RunStatus.CANCELLED, cancellationState: "acknowledged",
-    requestId: input.requestId, releaseMergeLeaseTask: await mergeTailLeaseChainId(tx, run.taskId),
-  };
-};
-
 
 /** Locks a whole candidate set in one statement. `ORDER BY "id"` is not
  *  decoration: it is what stops two concurrent Archive All presses from
@@ -3318,23 +3165,29 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, cancelAcknowledgeInput);
-    const result = await db.$transaction((tx) => settleCancellation(tx, {
+    const result = await db.$transaction((tx) => terminalizeRun(tx, {
       runId,
-      requestId: body.requestId,
-      runnerId: body.runnerId,
-      fencingToken: body.fencingToken,
-      actorId: body.runnerId,
-      now: new Date(),
-      ...(body.workspacePath === undefined ? {} : { workspacePath: body.workspacePath }),
-      ...(body.branch === undefined ? {} : { branch: body.branch }),
-      ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
-      ...(body.worktreeContainmentViolations === undefined
-        ? {}
-        : { worktreeContainmentViolations: body.worktreeContainmentViolations }),
+      at: new Date(),
+      outcome: {
+        kind: "cancelled",
+        requestId: body.requestId,
+        runnerId: body.runnerId,
+        fencingToken: body.fencingToken,
+        actorId: body.runnerId,
+        cleanupConfirmed: true,
+        activity: "acknowledged",
+        ...(body.workspacePath === undefined ? {} : { workspacePath: body.workspacePath }),
+        ...(body.branch === undefined ? {} : { branch: body.branch }),
+        ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
+        ...(body.worktreeContainmentViolations === undefined
+          ? {}
+          : { worktreeContainmentViolations: body.worktreeContainmentViolations }),
+      },
     }));
+    if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being acknowledged"));
     if ("message" in result) return refusalJson(context, result);
-    const { releaseMergeLeaseTask, ...settlement } = result;
-    await releaseChainLease(releaseMergeLeaseTask);
+    const { leaseToRelease, ...settlement } = result;
+    await releaseChainLease(leaseToRelease);
     return context.json(settlement);
   });
 
@@ -3854,9 +3707,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       runId,
       body,
       claimantClass: principal.kind === "merge-executor" ? "merge-executor" : "runner",
-    });
+    }, releaseChainLease);
     if ("message" in result) return refusalJson(context, result);
-    await releaseChainLease(result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
     // Nothing is deleted here, or anywhere else in this process. The runner
     // removed its own workspace before it called /complete and reported the
@@ -4037,7 +3889,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // including WAITING_INBOX, requires runner-owned process cleanup or an
       // explicitly unconfirmed terminalization after runner loss.
       if (run.status === RunStatus.QUEUED) {
-        return settleCancellation(tx, { runId: run.id, requestId: body.requestId, now });
+        const terminal = await terminalizeRun(tx, {
+          runId: run.id,
+          at: now,
+          outcome: {
+            kind: "cancelled",
+            requestId: body.requestId,
+            cleanupConfirmed: true,
+            activity: "acknowledged",
+          },
+        });
+        if (terminal === null || "message" in terminal) return terminal;
+        const { leaseToRelease, ...settlement } = terminal;
+        return { ...settlement, releaseMergeLeaseTask: leaseToRelease };
       }
       return {
         runId: run.id,
@@ -4051,6 +3915,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         releaseMergeLeaseTask: null,
       };
     });
+    if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being settled"));
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...cancellation } = result;
     await releaseChainLease(releaseMergeLeaseTask);

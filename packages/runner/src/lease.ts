@@ -1,4 +1,11 @@
-import { heartbeat as sendHeartbeat, type CancellationRequest, type ClaimedTask } from "./api.js";
+import {
+  authorityFor as defaultAuthorityFor,
+  authorityAfterHeartbeat as defaultAuthorityAfterHeartbeat,
+  heartbeat as sendHeartbeat,
+  type Authority,
+  type CancellationRequest,
+  type ClaimedTask,
+} from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { deliveryDeadline, type RetryOptions } from "./network-retry.js";
 
@@ -32,9 +39,6 @@ export type DeliveryLease = {
   close: () => void;
 };
 
-const statusOf = (error: unknown): number | undefined => (error as { status?: number }).status;
-const codeOf = (error: unknown): string | undefined => (error as { code?: string }).code;
-
 /**
  * Renew once up front, then keep renewing, and report whether this runner may
  * still act. The opening renewal is awaited so the phase deadline starts from
@@ -44,9 +48,17 @@ export const openDeliveryLease = async (
   config: RunnerConfig,
   claim: ClaimedTask,
   lastKnownRenewalAt: number,
-  options: { send?: LeaseHeartbeat; now?: () => number; startedAt?: Date } = {},
+  options: {
+    send?: LeaseHeartbeat;
+    authorityFor?: (error: unknown) => Authority;
+    authorityAfterHeartbeat?: (result: Awaited<ReturnType<LeaseHeartbeat>>) => Authority;
+    now?: () => number;
+    startedAt?: Date;
+  } = {},
 ): Promise<DeliveryLease> => {
   const send = options.send ?? sendHeartbeat;
+  const authorityFor = options.authorityFor ?? defaultAuthorityFor;
+  const authorityAfterHeartbeat = options.authorityAfterHeartbeat ?? defaultAuthorityAfterHeartbeat;
   const now = options.now ?? (() => Date.now());
   const startedAt = options.startedAt ?? new Date(now());
   const tool = {
@@ -71,16 +83,18 @@ export const openDeliveryLease = async (
         lastProgressEventAt: startedAt,
         inFlightTool: tool,
       });
-      if (result.cancellation) {
+      const authority = authorityAfterHeartbeat(result);
+      if (!authority.held && authority.reason === "cancelled") {
         state.rejected = true;
-        state.cancellation = result.cancellation;
+        state.cancellation = authority.request;
         return;
       }
       state.renewedAt = sentAt;
     } catch (error: unknown) {
-      if (statusOf(error) === 409) {
+      const authority = authorityFor(error);
+      if (!authority.held) {
         state.rejected = true;
-        state.waitingInbox = codeOf(error) === "WAITING_INBOX";
+        state.waitingInbox = authority.reason === "waiting-inbox";
       } else console.error("Delivery lease renewal failed", error);
     }
   };

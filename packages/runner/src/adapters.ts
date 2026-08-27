@@ -13,14 +13,12 @@ import { manifestLines, toolsFor, type SessionToolTransport } from "./session-to
 import type { AgentScratch } from "./workspace.js";
 import { createClaudeAdapter, claudeArgs, claudeChildEnvironment, provisionClaudeSessionConfig } from "./adapters/claude.js";
 import {
-  codexArgs, codexChildEnvironment, codexNativeSubagentProfile, codexPlatformBaselinePath, createCodexAdapter,
+  CODEX_STARTER_MODEL, codexArgs, codexChildEnvironment, codexNativeSubagentProfile, codexPlatformBaselinePath, createCodexAdapter,
   provisionCodexSessionConfig,
 } from "./adapters/codex.js";
 import { workspaceEnvironment } from "./adapters/environment.js";
 import { createPiAdapter, piArgs, piChildEnvironment, provisionPiSessionConfig } from "./adapters/pi.js";
 import type { SessionConfigOptions } from "./adapters/session-config.js";
-
-export { CODEX_STARTER_MODEL } from "./adapters/codex.js";
 
 export const ADAPTER_VERSION = "2.1.0";
 
@@ -382,7 +380,7 @@ export type RuntimeHandle = AdapterState & {
 export type PreflightSpec = {
   config: RunnerConfig;
   runner: RunnerKind;
-  model: string;
+  model: string | null;
   env: NodeJS.ProcessEnv;
 };
 
@@ -841,6 +839,10 @@ export type RunnerDefinition = {
   toolTransport: SessionToolTransport;
   toolEntrypoint(): string;
   adapter: CliAdapter;
+  /** Whether this CLI owns a per-Session config root outside disposable scratch. */
+  isolatesSessionConfig: boolean;
+  /** Model identity used only for daemon startup preflight, when that adapter requires one. */
+  startupPreflightModel: string | null;
   args(spec: RunSpec, resume?: ResumeSpec): string[];
   childEnvironment(claim: Pick<ClaimedTask, "run">, scratch: AgentScratch): NodeJS.ProcessEnv;
   provisionSessionConfig(
@@ -878,6 +880,8 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefi
     toolTransport: "mcp-stdio",
     toolEntrypoint: mcpServerPath,
     adapter: deferredAdapter(() => createClaudeAdapter()),
+    isolatesSessionConfig: false,
+    startupPreflightModel: null,
     args: (spec, resume) => claudeArgs(spec, resume),
     childEnvironment: (claim, scratch) => claudeChildEnvironment(claim, scratch),
     provisionSessionConfig: (config, scratch, options) => provisionClaudeSessionConfig(config, scratch, options),
@@ -889,6 +893,8 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefi
     toolTransport: "mcp-stdio",
     toolEntrypoint: mcpServerPath,
     adapter: deferredAdapter(() => createCodexAdapter()),
+    isolatesSessionConfig: true,
+    startupPreflightModel: CODEX_STARTER_MODEL,
     args: (spec, resume) => codexArgs(spec, resume),
     childEnvironment: (claim, scratch) => codexChildEnvironment(claim, scratch),
     provisionSessionConfig: (config, scratch, options) => provisionCodexSessionConfig(config, scratch, options),
@@ -900,6 +906,8 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefi
     toolTransport: "pi-extension",
     toolEntrypoint: piExtensionPath,
     adapter: deferredAdapter(() => createPiAdapter()),
+    isolatesSessionConfig: true,
+    startupPreflightModel: "openai-codex/gpt-5.6-luna",
     args: (spec, resume) => piArgs(spec, resume),
     childEnvironment: (claim, scratch) => piChildEnvironment(claim, scratch),
     provisionSessionConfig: (config, scratch, options) => provisionPiSessionConfig(config, scratch, options),

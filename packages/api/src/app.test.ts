@@ -781,7 +781,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
         }),
         findUniqueOrThrow: async () => run.task,
       },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     };
@@ -811,7 +811,6 @@ test("completion refunds an external failure but refuses an automatic retry for 
       succeeded: false,
       retryCreated: false,
       failureClass: "TRANSIENT_PROVIDER",
-      releaseMergeLeaseTask: null,
     });
     });
   } finally {
@@ -852,7 +851,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
         findUnique: async () => null,
         findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
       },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
     }),
   } as unknown as PrismaClient;
@@ -1590,7 +1589,7 @@ test("claim query filters archived agents before take so active work cannot star
         },
         update: async () => ({}),
       },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
       taskStepOutput: { findMany: async () => [{
         kind: "spec", body: completePriorOutput,
         task: { name: "Approved specification", chainIndex: 0 },
@@ -1628,6 +1627,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
         $queryRaw: async () => [{ granted: true }],
         run: { findMany: async () => [] },
+        taskActivity: { findMany: async () => [] },
       }),
     } as unknown as PrismaClient;
     const app = createApp(database);
@@ -1727,6 +1727,7 @@ test("successful completion commits output and parks an archived chain successor
           },
         },
         taskActivity: {
+          findMany: async () => [],
           create: async ({ data }: { data: Record<string, unknown> }) => {
             if (data.taskId === successor.id) successorActivity = data;
             return {};

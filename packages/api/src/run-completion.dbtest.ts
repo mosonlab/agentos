@@ -126,7 +126,6 @@ test("an accepted completion returns what it did rather than a response", async 
     succeeded: true,
     retryCreated: false,
     failureClass: null,
-    releaseMergeLeaseTask: null,
   });
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.SUCCEEDED);
 });

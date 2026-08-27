@@ -1,6 +1,6 @@
 import {
-  appendActivity, recordPublishedBranch, recordReclaimPublication,
-  type ClaimedTask, type CleanupStatus,
+  controlPlane as defaultControlPlane,
+  type ClaimedTask, type CleanupStatus, type ControlPlane,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { salvageWorkspace, type DeliveryResult } from "./delivery.js";
@@ -69,12 +69,13 @@ const acknowledgePublication = async (
   config: RunnerConfig,
   identity: WorkspaceDisposalIdentity,
   pushedBranch: string,
+  controlPlane: ControlPlane,
 ): Promise<void> => {
   if (identity.source === "runner") {
-    await recordPublishedBranch(config, identity.claim, pushedBranch);
+    await controlPlane.recordPublishedBranch(config, identity.claim, pushedBranch);
     return;
   }
-  await recordReclaimPublication(config, {
+  await controlPlane.recordReclaimPublication(config, {
     runnerId: config.runnerId,
     runId: identity.runId,
     pushedBranch,
@@ -85,10 +86,11 @@ const recordNothingToSalvage = async (
   config: RunnerConfig,
   identity: WorkspaceDisposalIdentity,
   reason: string,
+  controlPlane: ControlPlane,
 ): Promise<void> => {
   audit("nothing-to-salvage", identity, { reason });
   if (identity.source !== "runner") return;
-  await appendActivity(config, identity.claim,
+  await controlPlane.appendActivity(config, identity.claim,
     `Workspace disposal verified there was nothing to salvage: ${reason}`,
     { stream: "runner" }).catch((error: unknown) => {
     audit("nothing-to-salvage-activity-failed", identity, { error: errorMessage(error) });
@@ -108,6 +110,7 @@ export const disposeWorkspace = async (
   identity: WorkspaceDisposalIdentity,
   workspace: DisposableWorkspace,
   policy: WorkspaceDisposalPolicy,
+  controlPlane: ControlPlane = defaultControlPlane,
 ): Promise<WorkspaceDisposal> => {
   let salvage: DeliveryResult | null = null;
   if (!policy.alreadyDurable) {
@@ -117,7 +120,7 @@ export const disposeWorkspace = async (
         pinnedBaseSha: workspace.pinnedBaseSha,
       });
     } else if (workspace.baseSha === null) {
-      await recordNothingToSalvage(config, identity, "run never completed provisioning and has no clone base");
+      await recordNothingToSalvage(config, identity, "run never completed provisioning and has no clone base", controlPlane);
     } else {
       let captured: Workspace;
       try {
@@ -146,17 +149,17 @@ export const disposeWorkspace = async (
       }
       if (salvage?.pushedBranch) {
         try {
-          await acknowledgePublication(config, identity, salvage.pushedBranch);
+          await acknowledgePublication(config, identity, salvage.pushedBranch, controlPlane);
         } catch (error: unknown) {
           if (identity.source === "runner") {
-            await appendActivity(config, identity.claim,
+            await controlPlane.appendActivity(config, identity.claim,
               `Salvage ref '${salvage.pushedBranch}' is durable, but its publication ACK failed: ${errorMessage(error)}`,
               { stream: "runner" }).catch(() => undefined);
           }
           return failed(`Salvage publication ACK failed: ${errorMessage(error)}`, salvage);
         }
       } else {
-        await recordNothingToSalvage(config, identity, "clean tree with no commits past the clone base");
+        await recordNothingToSalvage(config, identity, "clean tree with no commits past the clone base", controlPlane);
       }
     }
   }
