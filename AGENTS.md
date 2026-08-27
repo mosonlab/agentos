@@ -33,8 +33,11 @@ When the user requests a chain:
 - Chain-to-chain sequencing: pass `afterTaskId` (the predecessor chain's final
   task) to the instantiate endpoint; the bound chain dispatches when the
   predecessor completes. Incompatible with `autoStart`; one successor per
-  predecessor task.
-- Dispatching, gating, or rerouting a chain follows
+  predecessor task. Dependency qualification in
+  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md)
+  precedes every instantiation; ordering preferences stay in the backlog.
+- Dispatching, gating, rerouting, and the backlog card lifecycle (create,
+  route, archive at instantiation) follow
   [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
 
 Before changing canonical Agents, roles, or task templates, read
@@ -102,4 +105,4 @@ discover it. `package.json`, configuration, the directory tree, and `--help`
 output are live authority — never cached here. One authoritative home per rule;
 an obsolete path is removed when its replacement lands.
 
-For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md).
+For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md). A change that adds, removes, or alters an HTTP route updates the handbook in the same change.
