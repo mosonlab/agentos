@@ -33,9 +33,9 @@ When the user requests a chain:
 - Chain-to-chain sequencing: pass `afterTaskId` (the predecessor chain's final
   task) to the instantiate endpoint; the bound chain dispatches when the
   predecessor completes. Incompatible with `autoStart`; one successor per
-  predecessor task. Bind only a qualified dependency; ordering preferences
-  stay in the backlog — qualification rules in
-  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
+  predecessor task. Dependency qualification in
+  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md)
+  precedes every instantiation; ordering preferences stay in the backlog.
 - Dispatching, gating, rerouting, and the backlog card lifecycle (create,
   route, archive at instantiation) follow
   [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
