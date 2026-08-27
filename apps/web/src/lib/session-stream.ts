@@ -41,6 +41,22 @@ export type FileTouch = { path: string; count: number };
 export type StreamCounts = { messages: number; toolCalls: number; files: number };
 export type StreamProjection = { nodes: StreamNode[]; files: FileTouch[]; counts: StreamCounts };
 
+/** The line budgets keep an expanded tool call or a prose card from taking over
+ *  the page. They live with the stream contract so the renderer and its tests
+ *  cannot drift to different defaults. */
+export const TOOL_OUTPUT_MAX_LINES = 40;
+export const TEXT_NODE_MAX_LINES = 12;
+
+export type LineClamp = { text: string; dropped: number };
+
+/** Keep the first `maxLines` lines and report what was withheld. A short value
+ *  is returned byte-for-byte so callers can compose this with other caps. */
+export const clampLines = (text: string, maxLines: number): LineClamp => {
+  const lines = text.split(/\r?\n/u);
+  if (lines.length <= maxLines) return { text, dropped: 0 };
+  return { text: lines.slice(0, maxLines).join("\n"), dropped: lines.length - maxLines };
+};
+
 const PRIMARY_ARG_MAX = 120;
 const ERROR_MESSAGE_MAX = 500;
 

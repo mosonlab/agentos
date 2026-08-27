@@ -7,7 +7,10 @@ import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
 import { Link, navigate } from "../lib/router";
 import { useProjectScope } from "../lib/project";
-import { projectStream, type StreamNode, type ToolCall } from "../lib/session-stream";
+import {
+  clampLines, projectStream, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES,
+  type StreamNode, type ToolCall,
+} from "../lib/session-stream";
 import { useEventStream } from "../lib/use-event-stream";
 import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 import {
@@ -18,7 +21,8 @@ import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB,
-  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, Markdown, Page, Pill, Segmented, type PillTone,
+  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, Markdown, Page, Pill, Segmented,
+  SHOW_MORE_BUTTON, isLongText, type PillTone,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
@@ -267,6 +271,20 @@ const toolKind = (name: string): ToolKind => {
 
 const jsonBlock = (value: unknown): string => JSON.stringify(value ?? null, null, 2) ?? "—";
 
+/** Apply the line budget before the existing byte backstop. The line notice is
+ *  appended after the byte truncator so both notices remain visible when a
+ *  single capped line is also over the character budget. */
+const cappedBlock = (
+  text: string,
+  t: ReturnType<typeof useT>,
+): string => {
+  const lineClamp = clampLines(text, TOOL_OUTPUT_MAX_LINES);
+  const byteClamp = truncateBlock(lineClamp.text);
+  return lineClamp.dropped === 0
+    ? byteClamp
+    : `${byteClamp}\n${t("sessions.tool.linesWithheld", { n: lineClamp.dropped })}`;
+};
+
 const ToolCallLine = ({ call }: { call: ToolCall }): ReactNode => {
   const [open, setOpen] = useState(false);
   const t = useT();
@@ -299,11 +317,11 @@ const ToolCallLine = ({ call }: { call: ToolCall }): ReactNode => {
           )}
           <div>
             <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.arguments")}</div>
-            <div className={CODE_BLOCK}>{truncateBlock(jsonBlock(call.args))}</div>
+            <div className={CODE_BLOCK}>{cappedBlock(jsonBlock(call.args), t)}</div>
           </div>
           <div>
             <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.result")}</div>
-            <div className={CODE_BLOCK}>{call.result === null ? "—" : truncateBlock(call.result)}</div>
+            <div className={CODE_BLOCK}>{cappedBlock(call.result === null ? "—" : call.result, t)}</div>
           </div>
         </div>
       ) : null}
@@ -323,6 +341,29 @@ export const ToolGroup = ({ node }: { node: Extract<StreamNode, { kind: "tools" 
   );
 };
 
+/** Markdown renders several block elements, so the shared ShowMore component's
+ *  single-text-node clamp cannot wrap it directly. Clamp the source at the
+ *  stream's line budget for the closed view, keep the rendered markdown intact,
+ *  and use the same existing control to reveal the full body. */
+const TextNodeBody = ({ text }: { text: string }): ReactNode => {
+  const [open, setOpen] = useState(false);
+  const t = useT();
+  const clamped = clampLines(text, TEXT_NODE_MAX_LINES);
+  const long = clamped.dropped > 0 || isLongText(text, TEXT_NODE_MAX_LINES);
+  return (
+    <div>
+      <div className={cn(!open && long && "max-h-[300px] overflow-hidden")}>
+        <Markdown text={open ? text : clamped.text} />
+      </div>
+      {long ? (
+        <button type="button" className={SHOW_MORE_BUTTON} onClick={() => setOpen((current) => !current)}>
+          <IconChevron open={open} />{t(open ? "ui.showMore.less" : "ui.showMore.more")}
+        </button>
+      ) : null}
+    </div>
+  );
+};
+
 export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
   const t = useT();
   if (node.kind === "tools") return <ToolGroup node={node} />;
@@ -337,7 +378,7 @@ export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
         <span className="text-foreground">{t(node.final ? "sessions.stream.result" : "sessions.stream.agent")}</span>
         <span className={MSG_TIME}>{formatDateTime(node.at)}</span>
       </div>
-      <Markdown text={node.text} />
+      <TextNodeBody text={node.text} />
     </div>
   );
 };

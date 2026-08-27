@@ -621,6 +621,7 @@ export const en = {
   "sessions.table.task": "Task",
   "sessions.tool.arguments": "Arguments",
   "sessions.tool.group": "Tool calls",
+  "sessions.tool.linesWithheld": "… {n} more lines withheld",
   "sessions.tool.result": "Result",
   "sessions.tool.state.error": "error",
   "sessions.tool.state.incomplete": "incomplete",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalize, projectStream } from "../lib/session-stream";
+import { clampLines, normalize, projectStream, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { RunnerKind, SessionEvent } from "../lib/types";
 
 /* Fixtures are pasted from spikes/cli-capabilities/samples/, so the mapping is
@@ -289,4 +289,12 @@ test("projection drops noise, unknown events and malformed payloads without thro
     assert.deepEqual(projection.nodes, [], runner);
     assert.deepEqual(projection.counts, { messages: 0, toolCalls: 0, files: 0 }, runner);
   }
+});
+
+test("line clamp keeps the first N lines and reports withheld lines", () => {
+  assert.deepEqual(clampLines("one\ntwo\nthree\nfour", 2), { text: "one\ntwo", dropped: 2 });
+  const short = "one\ntwo";
+  assert.deepEqual(clampLines(short, 2), { text: short, dropped: 0 });
+  assert.equal(TOOL_OUTPUT_MAX_LINES, 40);
+  assert.equal(TEXT_NODE_MAX_LINES, 12);
 });

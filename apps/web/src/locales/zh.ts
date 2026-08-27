@@ -618,6 +618,7 @@ export const zh = {
   "sessions.table.task": "任务",
   "sessions.tool.arguments": "参数",
   "sessions.tool.group": "工具调用",
+  "sessions.tool.linesWithheld": "… 还有 {n} 行未显示",
   "sessions.tool.result": "结果",
   "sessions.tool.state.error": "错误",
   "sessions.tool.state.incomplete": "未完成",

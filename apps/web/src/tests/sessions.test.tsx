@@ -14,6 +14,7 @@ import {
 import { setFormatLocale } from "../lib/format";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
+import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 
 const STATUSES: SessionExecutionStatus[] = [
@@ -139,6 +140,14 @@ test("text nodes keep the existing Agent and Result message headings", () => {
   assert.match(agent, /agent prose/);
   assert.match(result, />Result</);
   assert.match(result, /final prose/);
+});
+
+test("text nodes clamp at the named line limit behind Show more", () => {
+  const text = Array.from({ length: TEXT_NODE_MAX_LINES + 2 }, (_, index) => `prose line ${index + 1}`).join("\n");
+  const markup = renderToStaticMarkup(<StreamNodeView node={{ kind: "text", id: "long", at: "2026-08-16T00:00:00.000Z", text, final: false }} />);
+  assert.match(markup, /Show more/);
+  assert.match(markup, /prose line 12/);
+  assert.doesNotMatch(markup, /prose line 13/);
 });
 
 test("tool groups and text node headings are translated in English and Chinese", () => {
@@ -309,6 +318,116 @@ test("clicking one tool line expands only that call", async () => {
   await click(dom, lines[0]!);
   assert.match(container.innerHTML, /READ_RESULT_UNIQUE/);
   assert.doesNotMatch(container.innerHTML, /RUN_RESULT_UNIQUE/);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+const oversizedToolNode = {
+  kind: "tools" as const,
+  id: "oversized-group",
+  at: "2026-08-16T00:00:00.000Z",
+  calls: [{
+    kind: "tool" as const,
+    id: "oversized-call",
+    at: "2026-08-16T00:00:00.000Z",
+    name: "Bash",
+    primaryArg: "printf output",
+    filePath: null,
+    args: Array.from({ length: TOOL_OUTPUT_MAX_LINES + 3 }, (_, index) => `argument ${index + 1}`),
+    result: Array.from({ length: TOOL_OUTPUT_MAX_LINES + 5 }, (_, index) => `result ${index + 1}`).join("\n"),
+    state: "ok" as const,
+  }],
+};
+
+test("expanded tool arguments and results clamp at 40 lines and show what was withheld", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  await act(async () => { root.render(<StreamNodeView node={oversizedToolNode} />); });
+  const toggle = dom.window.document.querySelector<HTMLButtonElement>("button[data-tool-line]");
+  assert.ok(toggle);
+  await click(dom, toggle);
+
+  const body = container.textContent ?? "";
+  assert.match(body, /argument 1/);
+  assert.match(body, /result 1/);
+  assert.doesNotMatch(body, /argument 43/);
+  assert.doesNotMatch(body, /result 45/);
+  assert.equal((body.match(/5 more lines withheld/gu) ?? []).length, 2);
+  assert.match(container.innerHTML, /max-h-\[460px\]/);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+test("a one-line result still reaches the 8 000-character byte backstop after line clamping", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<StreamNodeView node={{
+      kind: "tools", id: "byte-group", at: "2026-08-16T00:00:00.000Z", calls: [{
+        kind: "tool", id: "byte-call", at: "2026-08-16T00:00:00.000Z", name: "Bash", primaryArg: "printf",
+        filePath: null, args: null, result: "x".repeat(9_000), state: "ok",
+      }],
+    }} />);
+  });
+  const toggle = dom.window.document.querySelector<HTMLButtonElement>("button[data-tool-line]");
+  assert.ok(toggle);
+  await click(dom, toggle);
+  assert.match(container.textContent ?? "", /… truncated, 1000 more characters/);
+  assert.doesNotMatch(container.textContent ?? "", /more lines withheld/);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+test("withheld-line wording is translated with its count in English and Chinese", async () => {
+  const renderExpanded = async (locale: "en" | "zh"): Promise<{ dom: JSDOM; root: ReturnType<typeof createRoot>; container: Element }> => {
+    const dom = jsdom();
+    const container = dom.window.document.querySelector("#root");
+    assert.ok(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale={locale}><StreamNodeView node={oversizedToolNode} /></LocaleProvider>);
+    });
+    const toggle = dom.window.document.querySelector<HTMLButtonElement>("button[data-tool-line]");
+    assert.ok(toggle);
+    await click(dom, toggle);
+    return { dom, root, container };
+  };
+
+  try {
+    const english = await renderExpanded("en");
+    assert.match(english.container.textContent ?? "", /5 more lines withheld/);
+    await act(async () => english.root.unmount());
+    english.dom.window.close();
+
+    const chinese = await renderExpanded("zh");
+    assert.match(chinese.container.textContent ?? "", /还有 5 行未显示/);
+    await act(async () => chinese.root.unmount());
+    chinese.dom.window.close();
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
+test("clicking Show more reveals the rest of a long text node", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const text = Array.from({ length: TEXT_NODE_MAX_LINES + 2 }, (_, index) => `full prose ${index + 1}`).join("\n");
+  await act(async () => { root.render(<StreamNodeView node={{ kind: "text", id: "long-interactive", at: "2026-08-16T00:00:00.000Z", text, final: false }} />); });
+  assert.doesNotMatch(container.textContent ?? "", /full prose 14/);
+  const more = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Show more");
+  assert.ok(more);
+  await click(dom, more);
+  assert.match(container.textContent ?? "", /full prose 14/);
+  assert.match(container.textContent ?? "", /Show less/);
 
   await act(async () => root.unmount());
   dom.window.close();
