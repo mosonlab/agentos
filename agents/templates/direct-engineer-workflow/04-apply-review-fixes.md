@@ -4,6 +4,7 @@ layer: 3
 agent: senior-dev
 approvalGate: false
 outputKind: fixed-implementation
+priorOutputKinds: [sol-findings, blind-findings]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null

@@ -232,7 +232,9 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundRegression, /regression-verification\.sh review-fail/u);
   assert.match(compoundRegression, /regression-verification\.sh finalize/u);
   assert.match(compoundRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
-  assert.match(compoundRegression, /all\s+preceding Step outputs/u);
+  assert.match(compoundRegression, /implementation summary,\s+both review reports/u);
+  assert.match(compoundRegression, /fixed implementation with its dispositions/u);
+  assert.doesNotMatch(compoundRegression, /all\s+preceding Step outputs/u);
   assert.doesNotMatch(compoundRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directRegression = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))
     .find((step) => step.stepIndex === 5)!.prompt;
@@ -364,6 +366,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     approvalGate: expected.approvalGate,
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy,
@@ -376,6 +379,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     ["approvalGate", { ...persisted, approvalGate: !persisted.approvalGate }],
     ["outputKind", { ...persisted, outputKind: "different-output" }],
     ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],
+    ["priorOutputKinds", { ...persisted, priorOutputKinds: ["different-output"] }],
     ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
     ["baseFromStepIndex", { ...persisted, baseFromStepIndex: 0 }],
     ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],

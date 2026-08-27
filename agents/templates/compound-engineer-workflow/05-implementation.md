@@ -4,6 +4,7 @@ layer: 5
 agent: implementation-plan-executioner
 approvalGate: false
 outputKind: implementation
+priorOutputKinds: [revised-plan]
 attachmentsFromPrevious: true
 opensPullRequest: true
 baseFromStepIndex: null

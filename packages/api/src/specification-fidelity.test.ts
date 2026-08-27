@@ -210,7 +210,7 @@ test("direct authority is read from the implementation task and compound authori
   const description = composeTemplateTaskDescription({
     prompt: "Implement the feature below.",
     featureBrief: brief,
-    attachmentsFromPrevious: false,
+    priorOutputKinds: [],
     outputKind: "implementation",
   });
   const directTx = {
@@ -268,7 +268,7 @@ test("an unsupported repository remote is refused before repository I/O with a n
   const description = composeTemplateTaskDescription({
     prompt: "Implement the feature below.",
     featureBrief: "direct brief",
-    attachmentsFromPrevious: false,
+    priorOutputKinds: [],
     outputKind: "implementation",
   });
   const tx = {
