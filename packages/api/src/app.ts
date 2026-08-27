@@ -635,6 +635,10 @@ const completionInput = z.object({
   cleanupStatus: z.nativeEnum(CleanupStatus),
   cleanupFailureReason: z.string().max(4000).nullable().optional(),
   workspaceRetained: z.boolean().default(false),
+  // Report-only completion evidence. An omitted or empty list means that the
+  // runner observed no worktree outside its run workspace; it never changes
+  // terminal outcome classification.
+  worktreeContainmentViolations: z.array(z.string().min(1).max(4096)).max(5000).optional(),
   failureEnvelope: versionedEnvelopeInput.optional(),
 });
 export type CompletionInput = z.infer<typeof completionInput>;

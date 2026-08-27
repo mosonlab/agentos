@@ -353,6 +353,10 @@ export type Completion = {
   cleanupStatus: CleanupStatus;
   cleanupFailureReason?: string | null;
   workspaceRetained: boolean;
+  /** Absolute worktree paths outside the Run workspace observed at completion.
+   *  This is report-only evidence; omission or an empty list is compliant and
+   *  does not affect the API's terminal outcome classification. */
+  worktreeContainmentViolations?: string[];
   /** Structured account of a failure, from which the API — not this process —
    *  decides the failure class, whether it is retryable and whether it spends
    *  the task's run budget. `failureClass`/`retryable`/`externalFailure` above
