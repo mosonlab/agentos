@@ -2,7 +2,7 @@ import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@agentos
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { isCommandTimeout, KILL_OVERHEAD_MS, runCommand, type CommandOptions } from "./exec.js";
+import { isCommandTimeout, KILL_OVERHEAD_MS, platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
 import {
   boundedTimeout, budgetRemains, GH_PROBE_TIMEOUT_MS, MIN_ATTEMPT_TIMEOUT_MS, NETWORK_ATTEMPTS,
   NETWORK_COMMAND_TIMEOUT_MS, runWithNetworkRetry, transientBackoff,
@@ -422,13 +422,12 @@ export const salvageWorkspace = async (
     await command("git", ["add", "-A"], workspace.path, env);
     const status = await command("git", ["status", "--porcelain"], workspace.path, env);
     if (status) {
-      await command("git", [
-        "-c", "user.name=AgentOS Runner",
-        "-c", "user.email=runner@agentos.local",
-        "-c", "commit.gpgSign=false",
-        "-c", "core.hooksPath=/dev/null",
-        "commit", "--no-verify", "-m", `WIP salvage for AgentOS run ${identity.runId}`,
-      ], workspace.path, env);
+      await command(
+        "git",
+        platformCommitArgs(`WIP salvage for AgentOS run ${identity.runId}`),
+        workspace.path,
+        env,
+      );
     }
     const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env);
     // A clean run branch that never diverged from its base has nothing to push.

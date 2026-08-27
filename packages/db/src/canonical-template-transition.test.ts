@@ -174,6 +174,14 @@ test("direct platform specification materialization is a registered prompt-only 
   assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
 });
 
+test("every direct prompt-only generation can roll straight to the current source", async () => {
+  const current = (await loadAllTemplateStepSources()).get("direct-engineer-workflow");
+  assert.ok(current);
+  for (const marker of ["pre-blind-review-retirement", "pre-platform-spec-materialization"]) {
+    assert.equal(successorPromptDrift("direct-engineer-workflow", marker, current), null, marker);
+  }
+});
+
 test("a structural generation pins no successor and is unaffected", () => {
   const sources: { stepIndex: number; prompt: string }[] = [{ stepIndex: 1, prompt: "anything" }];
   assert.equal(successorPromptDrift("direct-engineer-workflow", "pre-adjudication", sources), null);

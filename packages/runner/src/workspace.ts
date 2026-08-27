@@ -9,7 +9,7 @@ import { workspaceEnvironment } from "./adapters/environment.js";
 import type { SessionConfigOptions } from "./adapters/session-config.js";
 import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
-import { runCommand, type CommandOptions } from "./exec.js";
+import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
 import { type RetryOptions } from "./network-retry.js";
 import {
   ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
@@ -78,13 +78,13 @@ const materializePreparedSpecification = async (
   await execute(config, "git", ["add", "-f", "--", prepared.path], workspace.path, env);
   const status = await execute(config, "git", ["status", "--porcelain", "--", prepared.path], workspace.path, env);
   if (!status) return workspace;
-  await execute(config, "git", [
-    "-c", "user.name=AgentOS Runner",
-    "-c", "user.email=runner@agentos.local",
-    "-c", "commit.gpgSign=false",
-    "-c", "core.hooksPath=/dev/null",
-    "commit", "--no-verify", "-m", "Materialize direct-chain specification", "--", prepared.path,
-  ], workspace.path, env);
+  await execute(
+    config,
+    "git",
+    platformCommitArgs("Materialize direct-chain specification", prepared.path),
+    workspace.path,
+    env,
+  );
   return { ...workspace, baseSha: await execute(config, "git", ["rev-parse", "HEAD"], workspace.path, env) };
 };
 

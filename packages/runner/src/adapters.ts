@@ -909,7 +909,7 @@ export const adapters: Readonly<Record<RunnerKind, CliAdapter>> = Object.freeze(
 /** Hash the exact prompt bytes sent to the provider on this invocation. */
 export const promptHashFor = (prompt: string): string => createHash("sha256").update(prompt).digest("hex");
 
-export const manifestFor = (spec: RunSpec, dispatchedPrompt = spec.prompt): Record<string, unknown> => ({
+export const manifestFor = (spec: RunSpec, dispatchedPrompt: string): Record<string, unknown> => ({
   adapterVersion: ADAPTER_VERSION,
   runner: spec.claim.runner,
   binary: spec.config.binaries[spec.claim.runner],

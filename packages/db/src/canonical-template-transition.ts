@@ -104,7 +104,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
+      successorPromptDigest: "3826487bd356bca1539efc62cb5d2722d75fcee73cdae41737380cff270b189f",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -118,7 +118,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
     {
       marker: "pre-platform-spec-materialization",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "8ac9da9253e198741581a2a11d564a4c9b96d04da083d9433544c9ba65d096ba",
+      successorPromptDigest: "3826487bd356bca1539efc62cb5d2722d75fcee73cdae41737380cff270b189f",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],

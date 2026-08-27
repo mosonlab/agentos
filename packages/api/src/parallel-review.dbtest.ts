@@ -384,7 +384,7 @@ const completeReview = async (claimed: Claim, runnerId: string, kind: "sol-findi
 
 const queuedRunsFor = (taskIds: string[]) => db.run.findMany({
   where: { taskId: { in: taskIds }, status: RunStatus.QUEUED },
-  select: { id: true, taskId: true, runNumber: true },
+  select: { id: true, taskId: true, runNumber: true, promptHash: true },
 });
 
 test("Direct sync instantiates a parallel review frontier claimable by distinct runners with one pinned range", async () => {
@@ -398,6 +398,7 @@ test("Direct sync instantiates a parallel review frontier claimable by distinct 
 
   const queued = await queuedRunsFor([fixture.solTaskId, fixture.blindTaskId]);
   assert.equal(queued.length, 2);
+  assert.ok(queued.every(({ promptHash }) => promptHash === null));
   const { first, second } = await reviewClaims(fixture);
   assert.notEqual(first.run.id, second.run.id);
   assert.deepEqual(new Set([first.task.chainLayer, second.task.chainLayer]), new Set([2]));

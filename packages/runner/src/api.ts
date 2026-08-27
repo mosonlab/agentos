@@ -103,7 +103,7 @@ export type ClaimedTask = {
     /** Immutable review range exposed without revealing predecessor outputs. */
     implementationBaseSha: string | null;
     implementationHeadSha: string | null;
-    promptHash: string;
+    promptHash: string | null;
     workspacePath: string | null;
     branch: string | null;
     baseSha: string | null;
@@ -208,7 +208,7 @@ export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | nul
 export const startRun = async (
   config: RunnerConfig,
   claim: ClaimedTask,
-  snapshot: Record<string, unknown>,
+  snapshot: Record<string, unknown> & { promptHash: string },
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/start`, {
     method: "POST",

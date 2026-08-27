@@ -857,7 +857,9 @@ model Run {
   subagentMaxConcurrent Int?
   authMode              String?
   manifest              Json?
-  promptHash            String
+  /// SHA-256 of the exact prompt bytes most recently dispatched for this Run.
+  /// Null before the first successful runner start write.
+  promptHash            String?
   maxDurationMin        Int                  @default(240)
   stallTimeoutMin       Int                  @default(10)
   maxRunsPerTask        Int                  @default(5)

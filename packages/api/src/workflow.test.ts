@@ -1,6 +1,5 @@
 import "./test-workspace-root.js";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -78,12 +77,10 @@ test("deriveRunConfig preserves the selected Agent runtime profile for ordinary 
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   };
-  const task = { name: "Task name", description: "Task description" };
-  assert.deepEqual(deriveRunConfig(ordinaryAgent, { runner: RunnerKind.CODEX }, task), {
+  assert.deepEqual(deriveRunConfig(ordinaryAgent, { runner: RunnerKind.CODEX }), {
     runner: RunnerKind.CODEX,
     model: "current-model",
     codexServiceTier: CodexServiceTier.DEFAULT,
-    promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
   const executionerAgent = {
     ...ordinaryAgent,
@@ -96,18 +93,17 @@ test("deriveRunConfig preserves the selected Agent runtime profile for ordinary 
     stepIndex: 5,
     outputKind: "implementation",
     taskTemplate: { name: "compound-engineer-workflow" },
-  }, task), {
+  }), {
     runner: RunnerKind.CODEX,
     model: "gpt-5.6-luna:max",
     codexServiceTier: CodexServiceTier.FAST,
-    promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
   assert.throws(() => deriveRunConfig(ordinaryAgent, {
     runner: null,
     stepIndex: 5,
     outputKind: "implementation",
     taskTemplate: { name: "compound-engineer-workflow" },
-  }, task), /requires a Codex gpt-\* model/u);
+  }), /requires a Codex gpt-\* model/u);
 });
 
 test("Codex implementation steps receive the fixed native Luna child capability", () => {
@@ -128,7 +124,7 @@ test("Codex implementation steps receive the fixed native Luna child capability"
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, null), null);
 });
 
-test("task creation keeps its runner, model, and promptHash output while derivation is shared", async () => {
+test("task creation leaves promptHash empty until the exact prompt is dispatched", async () => {
   const previousToken = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = "operator-workflow-test";
   try {
@@ -185,7 +181,7 @@ test("task creation keeps its runner, model, and promptHash output while derivat
       runner: RunnerKind.CODEX,
       model: agent.model,
       codexServiceTier: CodexServiceTier.DEFAULT,
-      promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
+      promptHash: null,
       maxDurationMin: 240,
     });
   } finally {

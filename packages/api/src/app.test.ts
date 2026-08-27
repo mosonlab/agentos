@@ -575,6 +575,7 @@ test("session output authorization cannot introduce a second fence instant", asy
 test("resuming a run preserves its original Run and Session start timestamps", async () => {
   await withTokens(async () => {
     const originalStartedAt = new Date("2026-08-21T00:00:00.000Z");
+    const resumedPromptHash = createHash("sha256").update("exact continuation input").digest("hex");
     const runWrites: Array<Record<string, unknown>> = [];
     const sessionWrites: Array<Record<string, unknown>> = [];
     const tx = {
@@ -604,12 +605,14 @@ test("resuming a run preserves its original Run and Session start timestamps", a
         fencingToken: "1:run-1:current",
         adapterVersion: "test",
         cliVersion: "test",
+        promptHash: resumedPromptHash,
         manifest: {},
         workspacePath: "/scratch/resumed",
       }),
     });
     assert.equal(response.status, 200);
     assert.equal(runWrites[0]?.startedAt, originalStartedAt);
+    assert.equal(runWrites[0]?.promptHash, resumedPromptHash);
     assert.equal(sessionWrites[0]?.startedAt, originalStartedAt);
   });
 });
@@ -657,6 +660,24 @@ test("starting a fresh run stamps the same new timestamp on its Run and Session"
     assert.equal(sessionWrites[0]?.startedAt, runWrites[0]?.startedAt);
     assert.ok((runWrites[0]?.startedAt as Date).getTime() >= before);
     assert.equal(runWrites[0]?.promptHash, dispatchedPromptHash);
+  });
+});
+
+test("starting a run without an exact dispatched prompt hash is refused before database access", async () => {
+  await withTokens(async () => {
+    const response = await createApp({} as PrismaClient).request("/runner/runs/run-1/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "test",
+        cliVersion: "test",
+        manifest: {},
+        workspacePath: "/scratch/fresh",
+      }),
+    });
+    assert.equal(response.status, 400);
   });
 });
 
@@ -892,7 +913,7 @@ const retryRequest = async (
   return { response, created, last };
 };
 
-test("operator retry re-derives runner, model, promptHash and current agent id", async () => {
+test("operator retry re-derives runtime configuration and clears promptHash until dispatch", async () => {
   await withTokens(async () => {
     const { response, created, last } = await retryRequest({
       id: "current-agent",
@@ -906,16 +927,16 @@ test("operator retry re-derives runner, model, promptHash and current agent id",
     assert.equal(created?.repoId, "repo-current");
     assert.equal(created?.runner, RunnerKind.PI);
     assert.equal(created?.model, "deepseek-current");
-    assert.notEqual(created?.promptHash, last.promptHash);
+    assert.equal(created?.promptHash, null);
     assert.equal(created?.branch, last.branch);
     assert.equal(created?.targetBranch, last.targetBranch);
     assert.equal(created?.maxRunsPerTask, last.maxRunsPerTask);
   });
 });
 
-test("operator retry with unchanged agent preserves the previously derived config", async () => {
+test("operator retry with unchanged agent preserves runtime config but not a prior dispatch hash", async () => {
   await withTokens(async () => {
-    const { response, created, last } = await retryRequest({
+    const { response, created } = await retryRequest({
       id: "old-agent",
       model: "old-model",
       runnerPreference: RunnerPreference.CLAUDE,
@@ -944,7 +965,7 @@ test("operator retry with unchanged agent preserves the previously derived confi
       maxDurationMin: 90,
       stallTimeoutMin: 7,
       maxRunsPerTask: 4,
-      promptHash: last.promptHash,
+      promptHash: null,
     });
   });
 });

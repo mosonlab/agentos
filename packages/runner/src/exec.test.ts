@@ -5,10 +5,27 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 
-import { CommandTimeoutError, KILL_GRACE_MS, runCommand } from "./exec.js";
+import { CommandTimeoutError, KILL_GRACE_MS, platformCommitArgs, runCommand } from "./exec.js";
 import { isTransientNetworkError } from "./network-retry.js";
 
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+
+test("platformCommitArgs centralizes the runner commit identity and optional pathspec", () => {
+  assert.deepEqual(platformCommitArgs("Materialize direct-chain specification", ".chain/feature/spec.md"), [
+    "-c", "user.name=AgentOS Runner",
+    "-c", "user.email=runner@agentos.local",
+    "-c", "commit.gpgSign=false",
+    "-c", "core.hooksPath=/dev/null",
+    "commit", "--no-verify", "-m", "Materialize direct-chain specification", "--", ".chain/feature/spec.md",
+  ]);
+  assert.deepEqual(platformCommitArgs("WIP salvage"), [
+    "-c", "user.name=AgentOS Runner",
+    "-c", "user.email=runner@agentos.local",
+    "-c", "commit.gpgSign=false",
+    "-c", "core.hooksPath=/dev/null",
+    "commit", "--no-verify", "-m", "WIP salvage",
+  ]);
+});
 
 const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
