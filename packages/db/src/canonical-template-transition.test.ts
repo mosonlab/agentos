@@ -5,6 +5,7 @@ import {
   LEGACY_TEMPLATE_GENERATIONS,
   legacyGenerationMatches,
   matchedLegacyGeneration,
+  successorPromptDrift,
   templatePromptGenerationDigest,
   templateRolloverBlockerCount,
   type PersistedTransitionStep,
@@ -129,4 +130,37 @@ test("an unregistered prompt edit matches nothing, so sync refuses instead of ro
     const edited = asPersisted(current).map((step) => ({ ...step, prompt: `${step.prompt}\n\nunregistered edit` }));
     assert.equal(matchedLegacyGeneration(templateName, edited), null);
   }
+});
+
+test("a rollover refuses a source that is not the successor it was registered to install", async () => {
+  // The gap a single digest leaves: the outgoing row still matches, so the
+  // rename would fire, but the tree now holds prompts nobody registered. That
+  // edit would be installed on the registered transition's authority.
+  const sources = await loadAllTemplateStepSources();
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+
+    // The source as registered: no drift.
+    assert.equal(successorPromptDrift(templateName, "pre-blind-review-retirement", current), null);
+
+    // The same rollover, with the prompts edited again after registration.
+    const driftedSource = current.map((step) => (
+      step.stepIndex === current[0]!.stepIndex ? { ...step, prompt: `${step.prompt}\n\nlater edit` } : step
+    ));
+    const refusal = successorPromptDrift(templateName, "pre-blind-review-retirement", driftedSource);
+    assert.ok(refusal, `${templateName} must refuse an unregistered successor`);
+    assert.match(refusal, /registered to install prompt generation/u);
+
+    // The outgoing row is unaffected by that edit and still matches, which is
+    // exactly why the successor has to be checked separately.
+    const generation = generationOf(templateName, "pre-blind-review-retirement");
+    assert.ok(generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+  }
+});
+
+test("a structural generation pins no successor and is unaffected", () => {
+  const sources: { stepIndex: number; prompt: string }[] = [{ stepIndex: 1, prompt: "anything" }];
+  assert.equal(successorPromptDrift("direct-engineer-workflow", "pre-adjudication", sources), null);
 });

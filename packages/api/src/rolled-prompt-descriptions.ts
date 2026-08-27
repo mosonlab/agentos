@@ -1,11 +1,12 @@
 import {
   LEGACY_TEMPLATE_GENERATIONS,
   legacyGenerationMarkerForTemplateName,
-  RunStatus,
   TaskStatus,
+  type Prisma,
   type PrismaClient,
 } from "@agentos/db";
 
+import { lockTaskMutationRows } from "./task-write.js";
 import {
   composeTemplateTaskDescription,
   featureBriefFromTaskDescription,
@@ -35,18 +36,14 @@ import {
  * a task the wrong node's prompt, which is worse than a stale one.
  */
 
-const STARTED_RUN_STATUSES = [
-  RunStatus.CLAIMED,
-  RunStatus.PROVISIONING,
-  RunStatus.RUNNING,
-  RunStatus.WAITING_INBOX,
-  RunStatus.SUCCEEDED,
-  RunStatus.FAILED,
-  RunStatus.TIMED_OUT,
-  RunStatus.CANCELLED,
-  RunStatus.LOST,
-] as const;
-
+/**
+ * "Not yet started" means no Run at all, not merely no *started* Run.
+ *
+ * A queued Run has already been opened against the description as it stood, and
+ * the run's prompt hash was taken from it. Rewriting the text under a queued run
+ * would leave the two disagreeing, so a task that has been enqueued is out of
+ * scope even though nothing has claimed it yet.
+ */
 const NOT_YET_STARTED_TASK_STATUSES = [TaskStatus.TODO, TaskStatus.BACKLOG] as const;
 
 const UNRESOLVED_VARIABLE = /\{\{\s*[A-Za-z][A-Za-z0-9_]*\s*\}\}/u;
@@ -58,11 +55,13 @@ export type RolledPromptDescriptionReconciliation = {
   alreadyCurrent: number;
   /**
    * Tasks skipped because the current prompt still carries a template variable
-   * this sweep cannot resolve. Instantiation-time variables are not persisted,
-   * so recomposing would bake a literal `{{name}}` into the description. Left
-   * for an operator, and said out loud rather than written badly.
+   * no persisted task field supplies. Recomposing would bake a literal
+   * `{{name}}` into the description, so the copy is left for an operator and the
+   * reason is said out loud rather than written badly.
    */
   unresolvedVariables: number;
+  /** Tasks a runner or another instance moved between the scan and the write. */
+  startedBeforeRewrite: number;
 };
 
 /** The canonical template name a legacy rollover name was minted from. */
@@ -79,6 +78,36 @@ const isPromptOnlyGeneration = (canonicalName: string, marker: string): boolean 
     ?.some((generation) => generation.marker === marker && generation.promptDigest !== undefined)
   ?? false;
 
+/**
+ * The interpolation a task can be rebuilt from, out of what the task row itself
+ * persists.
+ *
+ * Instantiation interpolates from the caller's variables, and those are not
+ * stored. Both variables the canonical prompts actually use do survive on the
+ * task: `chainId` directly, and `branchName` as `targetBranch`, which every
+ * non-first step of a chain carries. Reading them from the row rather than
+ * guessing is what lets a regression step -- the step this sweep exists for,
+ * and the one prompt that names `{{branchName}}` -- be rebuilt at all.
+ */
+export const persistedPromptVariables = (task: {
+  chainId: string | null;
+  targetBranch: string | null;
+}): Record<string, string> => ({
+  ...(task.chainId ? { chainId: task.chainId } : {}),
+  ...(task.targetBranch ? { branchName: task.targetBranch } : {}),
+});
+
+type Tx = Prisma.TransactionClient;
+
+const noteOnce = async (tx: Tx, taskId: string, body: string): Promise<void> => {
+  const existing = await tx.taskActivity.count({ where: { taskId, actorType: "control-plane", body } });
+  if (existing > 0) return;
+  await tx.taskActivity.create({ data: { taskId, actorType: "control-plane", body } });
+};
+
+const UNRESOLVED_NOTE = "This step's canonical prompt was rolled over, but refreshing this task's copy would leave an unresolved template variable in it, so the copy is left as it is for an operator to replace.";
+const REWRITTEN_NOTE = "This step's canonical prompt was rolled over before this task started, so its frozen copy was refreshed from the current prompt. No task that had already started was touched.";
+
 export const reconcileRolledPromptDescriptions = async (
   db: PrismaClient,
 ): Promise<RolledPromptDescriptionReconciliation> => {
@@ -86,6 +115,7 @@ export const reconcileRolledPromptDescriptions = async (
     rewritten: 0,
     alreadyCurrent: 0,
     unresolvedVariables: 0,
+    startedBeforeRewrite: 0,
   };
 
   const legacyTemplates = await db.taskTemplate.findMany({
@@ -112,50 +142,68 @@ export const reconcileRolledPromptDescriptions = async (
     }
     const currentByIndex = new Map(canonical.steps.map((step) => [step.stepIndex, step]));
 
+    // Discovery only; every decision is retaken under the lock below.
     const candidates = await db.task.findMany({
       where: {
         templateId: legacy.id,
         archivedAt: null,
         status: { in: [...NOT_YET_STARTED_TASK_STATUSES] },
-        runs: { none: { status: { in: [...STARTED_RUN_STATUSES] } } },
+        runs: { none: {} },
       },
-      select: { id: true, description: true, chainId: true, chainIndex: true },
+      select: { id: true, chainIndex: true },
       orderBy: { id: "asc" },
     });
 
-    for (const task of candidates) {
-      if (task.chainIndex === null) continue;
-      const current = currentByIndex.get(task.chainIndex);
+    for (const candidate of candidates) {
+      if (candidate.chainIndex === null) continue;
+      const current = currentByIndex.get(candidate.chainIndex);
       if (!current) {
-        throw new Error(`Task ${task.id} sits at step ${String(task.chainIndex)} with no matching step on ${canonicalName}`);
+        throw new Error(`Task ${candidate.id} sits at step ${String(candidate.chainIndex)} with no matching step on ${canonicalName}`);
       }
-      const prompt = interpolate(current.prompt, task.chainId ? { chainId: task.chainId } : {});
-      if (UNRESOLVED_VARIABLE.test(prompt)) {
-        result.unresolvedVariables += 1;
-        await db.taskActivity.create({ data: {
-          taskId: task.id,
+      const outcome = await db.$transaction(async (tx) => {
+        await lockTaskMutationRows(tx, candidate.id);
+        const task = await tx.task.findUnique({
+          where: { id: candidate.id },
+          select: {
+            description: true,
+            chainId: true,
+            targetBranch: true,
+            status: true,
+            archivedAt: true,
+            _count: { select: { runs: true } },
+          },
+        });
+        // A runner may have opened or claimed a run between the scan and this
+        // write. Rewriting now would leave a run's prompt hash disagreeing with
+        // the text it was taken from.
+        if (!task || task.archivedAt !== null) return "moved" as const;
+        if (task._count.runs > 0) return "moved" as const;
+        if (!NOT_YET_STARTED_TASK_STATUSES.some((status) => status === task.status)) return "moved" as const;
+
+        const prompt = interpolate(current.prompt, persistedPromptVariables(task));
+        if (UNRESOLVED_VARIABLE.test(prompt)) {
+          await noteOnce(tx, candidate.id, UNRESOLVED_NOTE);
+          return "unresolved" as const;
+        }
+        const description = composeTemplateTaskDescription({
+          prompt,
+          featureBrief: featureBriefFromTaskDescription(task.description, current.attachmentsFromPrevious) ?? undefined,
+          attachmentsFromPrevious: current.attachmentsFromPrevious,
+          outputKind: current.outputKind,
+        });
+        if (description === task.description) return "current" as const;
+        await tx.task.update({ where: { id: candidate.id }, data: { description } });
+        await tx.taskActivity.create({ data: {
+          taskId: candidate.id,
           actorType: "control-plane",
-          body: "This step's canonical prompt was rolled over, but refreshing this task's copy would leave an unresolved template variable in it, so the copy is left as it is for an operator to replace.",
+          body: REWRITTEN_NOTE,
         } });
-        continue;
-      }
-      const description = composeTemplateTaskDescription({
-        prompt,
-        featureBrief: featureBriefFromTaskDescription(task.description, current.attachmentsFromPrevious) ?? undefined,
-        attachmentsFromPrevious: current.attachmentsFromPrevious,
-        outputKind: current.outputKind,
+        return "rewritten" as const;
       });
-      if (description === task.description) {
-        result.alreadyCurrent += 1;
-        continue;
-      }
-      await db.task.update({ where: { id: task.id }, data: { description } });
-      await db.taskActivity.create({ data: {
-        taskId: task.id,
-        actorType: "control-plane",
-        body: "This step's canonical prompt was rolled over before this task started, so its frozen copy was refreshed from the current prompt. No task that had already started was touched.",
-      } });
-      result.rewritten += 1;
+      if (outcome === "rewritten") result.rewritten += 1;
+      else if (outcome === "current") result.alreadyCurrent += 1;
+      else if (outcome === "unresolved") result.unresolvedVariables += 1;
+      else result.startedBeforeRewrite += 1;
     }
   }
 

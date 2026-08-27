@@ -195,8 +195,8 @@ const main = async (): Promise<void> => {
   const parks = reconciliation.retiredParks;
   const prompts = reconciliation.rolledPrompts;
   console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.openReclaimIntents} workspace reclaim intents awaiting their runner, ${reconciliation.archivedNotices} archived-run notices`);
-  console.log(`Retired merge-tail parks: ${parks.unparkedReviews} review parks and ${parks.unparkedResigns} re-signature parks returned to the queue, ${parks.archivedReviewTasks} review tasks archived, ${parks.cancelledReviewRuns} queued review runs cancelled, ${parks.closedResignMessages} re-signature messages closed, ${parks.reviewTasksWithActiveRuns} review tasks left for their active run`);
-  console.log(`Rolled canonical prompts: ${prompts.rewritten} not-yet-started task descriptions refreshed, ${prompts.alreadyCurrent} already current, ${prompts.unresolvedVariables} left for an operator`);
+  console.log(`Retired merge-tail parks: ${parks.unparkedReviews} review parks and ${parks.unparkedResigns} re-signature parks returned to the queue, ${parks.archivedReviewTasks} review tasks archived, ${parks.cancelledReviewRuns} queued review runs cancelled, ${parks.closedResignMessages} re-signature messages closed, ${parks.reviewTasksWithActiveRuns} review tasks left for their active run, ${parks.alreadyResolved} rows another instance had already moved`);
+  console.log(`Rolled canonical prompts: ${prompts.rewritten} not-yet-started task descriptions refreshed, ${prompts.alreadyCurrent} already current, ${prompts.unresolvedVariables} left for an operator, ${prompts.startedBeforeRewrite} started before the rewrite`);
   await ensureStartupActive();
 
   const githubReader = createGitHubReader();

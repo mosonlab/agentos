@@ -191,10 +191,11 @@ The job then performs exactly this sequence and stops at the first failure:
    Assurance shape has Regression before Librarian, sync preserves that template
    and its task foreign keys under a deterministic legacy identity, then creates
    the documentation-before-regression canonical replacement for new chains.
-   It refuses this rollover while any unarchived Task on the old template is
-   unfinished, or when the old template carries webhook configuration, rather
-   than changing live-chain semantics or moving operator-owned trigger state
-   implicitly. The same guarded rollover preserves both pre-merge-lease
+   It refuses this rollover while an unarchived, not-`DONE` Task on the old
+   template still has an active Run or carries no chain identity, or when the
+   old template carries webhook configuration, rather than changing live-chain
+   semantics or moving operator-owned trigger state implicitly. A quiescent
+   chain moves under the legacy identity intact and does not block it. The same guarded rollover preserves both pre-merge-lease
    canonical templates before installing their lease-aware Regression prompts;
 7. verify the staged generated Prisma client, recheck the barrier and blocking
    statuses, swap the staged `dist/` trees and target `node_modules`, and

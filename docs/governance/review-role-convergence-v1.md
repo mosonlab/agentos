@@ -72,8 +72,10 @@ implementation reviews concurrent and their join deterministic.
    requires an explicit Product Contract evidence requirement, isolated
    resources, a pre-reproduction findings checkpoint, and the smallest decisive
    case.
-7. Existing instantiated chains keep their captured assignments and prompts;
-   new canonical templates use the split review/adjudication graph.
+7. Existing instantiated chains keep their captured assignments and prompts,
+   except that a not-yet-started task's stored prompt is refreshed across a
+   prompt-only rollover (see `docs/runbooks/chain-template-changes.md`); new
+   canonical templates use the split review/adjudication graph.
 
 ## Risks and stopping conditions
 

@@ -69,11 +69,15 @@ reordering a step, or moving a layer, a base pin or an output kind — has to
 register the outgoing graph as the legacy shape in the same change. Without
 that registration the deploy does not degrade quietly; it stops.
 
-A rename also refuses while the outgoing row still has unfinished tasks, or
-while it carries webhook configuration. Both are deliberate: a rollover is for a
-row whose chains are done. "Unfinished" counts unarchived tasks that are not
-`DONE`, so archiving a live chain's remaining tasks hides them from the guard —
-do not do that to get a rollover through.
+A rename also refuses while the outgoing row still has blocking work, or while
+it carries webhook configuration. Both are deliberate. What blocks is narrower
+than "any unfinished task": among unarchived tasks that are not `DONE`, the
+guard counts those with an **active Run** (queued, claimed, provisioning,
+running, or waiting on the inbox) and those with **no chain identity**. A
+quiescent chain moves under the legacy name intact, keeping its task and step
+ids and its runtime contract, which is why a merely unfinished but idle chain is
+not a blocker. Archiving a live chain's remaining tasks does hide them from the
+guard — do not do that to get a rollover through.
 
 ## Prompt text is frozen once a step has been instantiated
 
@@ -119,10 +123,16 @@ guaranteed to mean the same node.
 
 ## What a template change does and does not affect
 
-A template change affects **future instantiations only**. Tasks that already
-exist keep the template step rows they were created against — a rollover renames
-the old row and leaves its step ids intact, precisely so a running chain keeps
-its runtime contract.
+A template change affects **future instantiations**, with one named exception
+below. Tasks that already exist keep the template step rows they were created
+against — a rollover renames the old row and leaves its step ids intact,
+precisely so a running chain keeps its runtime contract.
+
+The exception is the description refresh described above: across a prompt-only
+rollover, a task that has not started — no Run at all — has its own frozen copy
+recomposed from the current canonical step, because the text it was created with
+is exactly what the rollover declared untrue. Its template step row is still not
+rewritten, and a task with any Run is never touched.
 
 That is also the trap to check. Runtime predicates key on template *name* plus
 step ordinal: `isIntegratorStep`, `isMergeReadinessStep`, `isCanonicalAgentStep`,

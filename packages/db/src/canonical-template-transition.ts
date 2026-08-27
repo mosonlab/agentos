@@ -52,6 +52,22 @@ export type LegacyTemplateGeneration = Readonly<{
    * migrating anything on its own.
    */
   promptDigest?: string;
+  /**
+   * The prompt generation this entry rolls *forward to*, as the same digest
+   * over the successor's ordered step prompts.
+   *
+   * `promptDigest` authenticates the row being retired. On its own that is only
+   * half the transition: it says nothing about what the source tree happens to
+   * contain when the rollover finally runs. If the prompts were edited again
+   * between registering this entry and deploying it, the rename would still
+   * fire and would install whatever the tree now holds -- the unregistered edit
+   * would ride in on the registered one's authority.
+   *
+   * Pinning the successor closes that. The rollover verifies the source against
+   * this digest before renaming anything, and a mismatch is refused exactly
+   * like any other unregistered drift.
+   */
+  successorPromptDigest?: string;
 }>;
 
 export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly LegacyTemplateGeneration[]>> = {
@@ -86,6 +102,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
+      successorPromptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -155,6 +172,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
+      successorPromptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
       shape: [
         ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
         ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
@@ -288,6 +306,26 @@ const shapeMatches = (
  * `promptDigest`, which its successor by construction does not share. So at
  * most one entry can match, and the current source graph matches none.
  */
+/**
+ * A named reason the source graph is not the successor a matched generation was
+ * registered to roll forward to, or null when it is.
+ *
+ * Only entries that pin a successor are checked. A structural generation is
+ * already authenticated by the shape the source has to match, and entries
+ * predating this field keep their previous behaviour.
+ */
+export const successorPromptDrift = (
+  templateName: string,
+  marker: string,
+  sourceSteps: readonly { stepIndex: number; prompt: string }[],
+): string | null => {
+  const generation = LEGACY_TEMPLATE_GENERATIONS[templateName]?.find((candidate) => candidate.marker === marker);
+  if (!generation?.successorPromptDigest) return null;
+  const actual = templatePromptGenerationDigest(sourceSteps);
+  if (actual === generation.successorPromptDigest) return null;
+  return `${templateName} rollover ${marker} is registered to install prompt generation ${generation.successorPromptDigest}, but the source tree holds ${actual}`;
+};
+
 export const legacyGenerationMatches = (
   generation: LegacyTemplateGeneration,
   steps: readonly PersistedTransitionStep[],

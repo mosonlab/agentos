@@ -5,6 +5,7 @@ import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-s
 import {
   legacyTemplateName,
   matchedLegacyGeneration,
+  successorPromptDrift,
   TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES,
   templateRolloverBlockerCount,
   type PersistedTransitionStep,
@@ -172,6 +173,12 @@ const transitionCanonicalTemplateRows = async (
       const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
       const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
       if (legacyMarker === null) continue;
+      // The registration names both ends of the transition. Renaming a row on
+      // the strength of the outgoing digest alone would let prompts edited
+      // after the entry was written ride in on its authority, so the source has
+      // to be the successor this rollover was registered to install.
+      const drift = successorPromptDrift(templateName, legacyMarker, steps);
+      if (drift) throw new Error(drift);
       const rolloverTasks = await tx.task.findMany({
         where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
         select: {

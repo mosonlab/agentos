@@ -58,7 +58,7 @@ Critical is a risk label, not a routing tier or a model route: it marks the slic
 
 The seeded templates under `agents/templates/` are the execution canon: step prompts, layer structure, blind-review isolation, and the mechanical merge tail live in those Markdown sources, and `agents/README.md` owns the structural rules that bind them. Model and runner defaults live in `agents/roles/` frontmatter and `packages/db/src/agent-contract.ts`.
 
-Chains instantiated before a template change keep their stored prompts, assignments, and behavior; canonical sync preserves superseded templates under deterministic `-legacy-v1` identities instead of rewriting instantiated work.
+Chains instantiated before a template change keep their stored prompts, assignments, and behavior; canonical sync preserves superseded templates under deterministic legacy identities instead of rewriting instantiated work. One exception, added with prompt-only rollovers (2026-08-26): a task that has not started — no Run at all — has its stored prompt recomposed from the current canonical step, since a prompt-only rollover is the declaration that the old text stopped being true. Anything that has run keeps what it was dispatched under.
 
 ## Human approval placement
 
