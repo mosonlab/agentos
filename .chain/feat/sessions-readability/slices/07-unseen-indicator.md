@@ -3,7 +3,7 @@ id: 07-unseen-indicator
 title: Completed-but-unseen indicator with client-side seen state
 blocked_by:
   - 01-list-row-hover-card
-risk: false
+risk: true
 ---
 
 # 07: Completed-but-unseen indicator with client-side seen state
@@ -23,10 +23,23 @@ LOST Session still resolves. The detail page marks the Session opened on mount
 and again when the watched Session transitions to a terminal status, so a
 Session that finishes while the operator watches does not come back as unread.
 The list reads the record once per mount; the opened map prunes to its 500
-newest entries; an unparseable record is treated as absent and replaced. No
-schema change, no server round trip. (Spec: L21-L30; stories 30-37.)
+newest entries; an unparseable record is treated as absent and replaced.
+(Spec: L21-L30; stories 30-37.)
 
 **Blocked by:** 01-list-row-hover-card.
+
+**Risk: true.** This slice writes persisted client data — a per-Project record
+in the browser's local storage, through the existing storage wrapper. The
+record is disposable and per-browser, and there is still no schema change and
+no server round trip, but the write outlives the page and the process, which
+is what the risk flag marks. A key-shape or baseline-semantics mistake shipped
+here is corrected only by every operator's browser reaching the corrected
+code, so the key name and the record shape are decided once, in this slice,
+and not revised later in the chain.
+
+**Boundaries this slice preserves rather than proves:** no database schema
+change, no new API call, and no cross-device synchronisation. That non-change
+is chain-level regression evidence.
 
 - [ ] The unseen predicate is false for a live Session, false for a terminal
   Session finished at or before the baseline, true for a terminal Session
@@ -35,6 +48,9 @@ schema change, no server round trip. (Spec: L21-L30; stories 30-37.)
   requestedAt` — pure unit tests in the list module.
 - [ ] First creation of a Project's record writes the baseline, so
   pre-existing terminal Sessions count as seen on a fresh browser — pure test.
+- [ ] The record is written under the existing per-Project key convention and
+  two Projects keep independent records — pure test asserting the stored key
+  and value shape.
 - [ ] Marking a Session opened clears unseen for that Session and nothing
   else; the opened map prunes to its 500-entry bound on write; an unparseable
   stored record is treated as absent and does not throw — pure tests, modelled
@@ -48,7 +64,6 @@ schema change, no server round trip. (Spec: L21-L30; stories 30-37.)
 - [ ] A Session that transitions to a terminal status while its detail page is
   open is marked opened again and does not reappear unseen — component test
   driving the status transition.
-- [ ] With storage blocked, the wrapper's in-memory degrade keeps the list
-  rendering without the indicator failing — test over the degrade path.
-- [ ] New copy, if any, in both locale dictionaries; locale parity, sweep,
-  no-hard-coded-colour, lint and type checks green.
+- [ ] With the storage wrapper degraded to its in-memory path, seen state still
+  works for the life of the page — marking a Session opened clears its dot and
+  nothing throws — test over the degrade path.

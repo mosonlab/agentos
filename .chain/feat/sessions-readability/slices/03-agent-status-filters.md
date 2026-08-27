@@ -25,6 +25,10 @@ pure list module. (Spec: L15-L20; stories 23-29.)
 
 **Blocked by:** 01-list-row-hover-card, 02-day-grouping.
 
+**Boundaries this slice preserves rather than proves:** no Agent, status or
+sort parameter is added to `GET /sessions`; filtering is entirely client-side.
+The unchanged API surface is chain-level regression evidence.
+
 - [ ] Each status bucket selects exactly the execution statuses it names — Live
   is the existing live-status set, Done is SUCCEEDED, Failed is FAILED,
   TIMED_OUT and LOST, Cancelled is CANCELLED — pure unit tests on the bucket
@@ -40,7 +44,11 @@ pure list module. (Spec: L15-L20; stories 23-29.)
   exclude every loaded Session the filtered-empty wording renders instead of
   the no-Sessions-yet wording — component tests.
 - [ ] Both filters default to All, are component state, and reset when the
-  Project scope changes; the existing page-level Refresh and Load more tests
-  pass with a filter applied — component and page tests.
-- [ ] New copy in both locale dictionaries; locale parity, sweep,
-  no-hard-coded-colour, lint and type checks green.
+  Project scope changes — component test switching the scoped Project.
+- [ ] With a filter applied, Refresh and Load more still work: a new page-level
+  test applies a filter, then drives Refresh and Load more against a stubbed
+  fetch and asserts the newly arrived matching Sessions appear under the active
+  filter while non-matching ones do not.
+- [ ] Both filter labels, their All options, the bucket names and the
+  loaded-Sessions hint render in English and in Chinese — component test under
+  each active locale using the existing locale-switching test harness.

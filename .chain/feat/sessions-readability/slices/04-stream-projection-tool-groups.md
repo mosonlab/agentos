@@ -23,11 +23,18 @@ block. Text and final-output nodes render in the existing message card under
 the existing Agent or Result heading. Counts derive from the nodes, the
 projection is memoised on the same keys as today, and the stream container
 keeps its scroll box, drain priming, auto-scroll rule, new-items control (now
-counting nodes) and event-cap notice. Files touched and Debug events are
-untouched. (Spec: D1-D3, D5, D8-D10, D12-D14, D17-D18; stories 38-45 partial,
-54-57, 60.)
+counting nodes) and event-cap notice. (Spec: D1-D3, D5, D7 drop rules, D8-D10,
+D12-D14, D17; stories 38-43, 49-50, 54-57, 60.)
 
 **Blocked by:** None (can start immediately).
+
+**Boundaries this slice preserves rather than proves:** Files touched and Debug
+events, including the Debug filter and its counts, are untouched — Debug
+events remains where every dropped event is still visible. The event polling
+contract (page size, render ceiling, backoff, terminal stop) and the existing
+normalizer and its tests are unchanged. That non-change is chain-level
+regression evidence, not slice acceptance. The per-item render conditionals
+the projection replaces are deleted in this slice, not deprecated.
 
 The node vocabulary is fixed by the spec (decision-bearing type shape, from
 the specification of record, not a working demo):
@@ -42,9 +49,9 @@ type StreamNode =
 
 `final` is a flag, not a fifth kind; `ToolCall` is the existing tool item
 shape unchanged. This slice declares all four kinds and produces `text` and
-`tools`; the `input` and `marker` producers land in slice 05 — the kinds exist
-now so the page renders nodes from day one and slice 05 adds producers, not a
-new vocabulary.
+`tools`; the `marker` producers land in slice 08 and the `input` producer in
+slice 09 — the kinds exist now so the page renders nodes from day one and
+those slices add producers, not a new vocabulary.
 
 - [ ] The projection is a pure function from raw Session events to nodes,
   files and counts, with no React and no network; a run of consecutive tool
@@ -54,18 +61,29 @@ new vocabulary.
 - [ ] Counts equal what the nodes contain for a mixed stream: messages is the
   number of text nodes, tool calls the sum of group entry counts, files the
   files list length — pure test.
+- [ ] Heartbeat, provider-status, model-started, raw provider and Runner stderr
+  events produce no node, an unknown event type produces no node, and a
+  malformed payload (null, number, string, array) contributes nothing and
+  nothing throws — pure tests holding the normalizer's defensive line through
+  the new projection.
 - [ ] A tools node renders one card with one line per call — icon, tool name,
   one-line summary, state tone — collapsed, with no arguments or result
   present in the markup; clicking a line expands that line's arguments and
   result inline and no other's — jsdom interaction test.
 - [ ] A failed call's line shows the first line of its result in the
   destructive colour in place of the summary — component test.
-- [ ] Text and final nodes render in the existing message card under the Agent
-  and Result headings respectively; the per-item render conditionals the
-  projection replaces are deleted, and the existing normalizer tests pass
-  unchanged.
-- [ ] The existing page-level stream tests — drain not counted as news,
-  auto-scroll priming, new-items control — pass with the counter counting
-  nodes, and the event-cap notice still renders on a capped stream.
-- [ ] New copy in both locale dictionaries; locale parity, sweep,
-  no-hard-coded-colour, lint and type checks green; no new icon dependency.
+- [ ] Text and final-output nodes render in the existing message card under the
+  Agent and Result headings respectively — component test on the node renderer.
+- [ ] The stream container's live behaviour is proved by new page-level tests
+  in the Sessions page test file rather than assumed, run against a web app
+  built first so the stylesheet regression guards resolve. The red anchor: with
+  the stream scrolled away from the bottom, a batch of consecutive tool events
+  arriving raises a new-items control counting projected nodes — one group, not
+  one per raw item — and activating it returns the view to the newest node. The
+  same tests also cover, in the same file, auto-scroll after priming when the
+  view is already at the bottom and the visible cap notice on a capped stream;
+  those two behaviours exist at the frozen base and are written here as the
+  regression net that proves the rewrite kept them.
+- [ ] The tool-line and node-renderer copy this slice introduces renders in
+  English and in Chinese — component test under each active locale using the
+  existing locale-switching test harness.

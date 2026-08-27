@@ -17,9 +17,14 @@ group, and a collapse control undoes it. Groups are ordered newest first and
 rows inside a group keep the existing newest-first order. The grouping logic
 lives in a new pure list module in the web app's lib layer — the seam the rest
 of the list work (filters, seen state) will extend. (Spec: L11-L14; stories
-16-22.)
+16-22, 61.)
 
 **Blocked by:** 01-list-row-hover-card.
+
+**Boundaries this slice preserves rather than proves:** grouping is a
+presentation change over the Sessions already loaded — the `GET /sessions`
+contract, its page size and the existing Load more are untouched, and that
+non-change is chain-level regression evidence.
 
 - [ ] The pure list module groups Sessions by local calendar day of
   `startedAt ?? requestedAt`, orders groups newest first and keeps rows inside
@@ -35,5 +40,6 @@ of the list work (filters, seen state) will extend. (Spec: L11-L14; stories
   test.
 - [ ] Expansion is component state keyed by day and resets when the Project
   scope changes — component test switching the scoped Project.
-- [ ] New copy in both locale dictionaries; locale parity, sweep,
-  no-hard-coded-colour, lint and type checks green.
+- [ ] The Today, Yesterday, expand and collapse labels, including the remaining
+  count, render in English and in Chinese — component test under each active
+  locale using the existing locale-switching test harness.
