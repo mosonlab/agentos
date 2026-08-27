@@ -40,6 +40,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     approvalGate: step.approvalGate,
     outputKind: step.outputKind,
     attachmentsFromPrevious: step.attachmentsFromPrevious,
+    priorOutputKinds: step.priorOutputKinds,
     opensPullRequest: step.opensPullRequest,
     baseFromStepIndex: step.baseFromStepIndex,
     spawnPolicy: step.spawnPolicy as PersistedTransitionStep["spawnPolicy"],
@@ -73,6 +74,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "implementation",
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
+    priorOutputKinds: [],
     opensPullRequest: true, baseFromStepIndex: null, spawnPolicy: null, prompt,
   }];
   const outgoing = stepsWith("the retired instruction");

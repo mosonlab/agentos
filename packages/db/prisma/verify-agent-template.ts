@@ -102,6 +102,9 @@ const main = async (): Promise<void> => {
       if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
         throw new Error(`${templateName} step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
       }
+      if (JSON.stringify(step.priorOutputKinds) !== JSON.stringify(expected.priorOutputKinds)) {
+        throw new Error(`${templateName} step ${step.stepIndex} priorOutputKinds differs from canonical Markdown source; expected ${JSON.stringify(expected.priorOutputKinds)}, found ${JSON.stringify(step.priorOutputKinds)}`);
+      }
     }
   }
 
