@@ -185,10 +185,10 @@ Only three places state the ordering, and all three agree with `AGENTS.md`:
   the latest `main`, running the merge gate, and performing the merge";
 - both regression prompts, at line 16 - acquire "before the first fetch".
 
-No code acquires the lease, so no call site can contradict them, and
-`docs/runbooks/merge-delivery.md` does not mention the lease at all. The live
-evidence matches: every regression run above acquired first and fetched second.
-There is nothing to correct here.
+No code acquires the lease, so no call site can contradict them, and the
+operator delivery runbook maintained outside this repository does not mention
+the lease at all. The live evidence matches: every regression run above
+acquired first and fetched second. There is nothing to correct here.
 
 The ordering is, however, what pulls the refresh and the whole semantic
 verification phase inside the lock - see finding E.
@@ -249,13 +249,14 @@ change - see the cost note below.
 
 ### Cost note: prompt fixes are not cheap
 
-`docs/runbooks/chain-template-changes.md` is explicit: once any task has been
-created from a step, `sync-canonical-prompts.ts` refuses to change that step's
-prompt at all. On a template with live history there is no prompt-only change; a
-prompt rewrite must ride a shape change that rolls the canonical row over, which
-means registering the outgoing graph in `canonical-template-transition.ts`,
-extending the name-plus-ordinal predicates, and moving
-`template-sources.ts`/`seed.ts` with it.
+The operator procedure for template changes, maintained outside this
+repository, is explicit: once any task has been created from a step,
+`sync-canonical-prompts.ts` refuses to change that step's prompt at all. On a
+template with live history there is no prompt-only change; a prompt rewrite
+must ride a shape change that rolls the canonical row over, which means
+registering the outgoing graph in `canonical-template-transition.ts`, extending
+the name-plus-ordinal predicates, and moving `template-sources.ts`/`seed.ts`
+with it.
 
 That asymmetry decides the sequencing below: control-plane fixes ship on their
 own, prompt fixes ride the next rollover.

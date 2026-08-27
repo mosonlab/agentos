@@ -44,11 +44,11 @@ must match `stepIndex`, and only these structural keys are accepted. Step
 display names remain seed-owned presentation metadata; all execution structure
 and prompt text live in the Markdown sources.
 
-Changing a template — including its shape — goes through
-[`docs/runbooks/chain-template-changes.md`](../docs/runbooks/chain-template-changes.md).
-There is no authoring API for template structure: the source here is the record,
-canonical sync's closed contract decides what may replace what, and a change
-reaches production as an ordinary pull request through the merge gate.
+The operator procedure for changing a template, including its shape, is
+maintained outside this repository. There is no authoring API for template
+structure: the source here is the record, canonical sync's closed contract
+decides what may replace what, and a change reaches production as an ordinary
+pull request through the merge gate.
 
 Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort. The canonical values are used for new or uncustomized Agents; an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `senior-dev-luna`, `implementation-plan-executioner`, `review-coordinator-opus`, `merge-resolver`).
 

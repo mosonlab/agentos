@@ -7,7 +7,17 @@ file says so where it does.
 
 ## Unreleased
 
-Nothing yet.
+### Documentation
+
+- Reduced the published documentation surface: the support note and evidence
+  status now live in the README, three operator runbooks are maintained outside
+  this repository, and the Simplified Chinese inner documentation pages have
+  been retired.
+
+### Snapshot safety
+
+- The public snapshot scanner now fails when an include glob matches no
+  git-tracked path.
 
 ## v0.3.0 — Developer Preview 3
 

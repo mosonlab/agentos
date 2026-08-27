@@ -5,7 +5,6 @@ import { execFileSync } from "node:child_process";
 const FAST_DOCUMENTS = new Set([
   "AGENTS.md",
   "SECURITY.md",
-  "SUPPORT.md",
   "THIRD_PARTY_NOTICES.md",
   "docs/BRIEF-TEMPLATE.md",
   "docs/governance/review-role-convergence-v1.md",

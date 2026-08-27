@@ -7,12 +7,12 @@
 你只写规格，剩下的交给一条 agent 链：计划、评审、实现、验证、合入。
 每一次 run 都可观察、可评审。
 
-[![status](https://img.shields.io/badge/status-developer%20preview-orange)](docs/status.zh-CN.md)
+[![status](https://img.shields.io/badge/status-developer%20preview-orange)](#支持状态)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](docs/status.zh-CN.md)
+[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](#支持状态)
 [![node](https://img.shields.io/badge/node-22.17.0-brightgreen)](.nvmrc)
 
-[安装](#快速开始) · [文档](#文档) · [支持状态](docs/status.zh-CN.md) · [English](README.md)
+[安装](#快速开始) · [文档](#文档) · [支持状态](#支持状态) · [English](README.md)
 
 <img src="docs/media/tasks.png" alt="任务看板：十二步模板链运行中，每张卡片展示逐 run 状态与成本" width="880">
 
@@ -42,7 +42,7 @@ AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、prov
 
 长时程自治还没接线。Goal 能存能编辑，但没有任何东西从 Goal 调度工作，所以链仍然
 由你或 webhook 触发启动，而不是由一个常驻目标驱动。见
-[支持状态](docs/status.zh-CN.md)。
+[支持状态](#支持状态)。
 
 <div align="center">
 
@@ -111,22 +111,47 @@ npm run db:migrate:release -- --fresh
 
 以上是简写形式。包含文件系统、端口、runner identity 与仓库 preflight 的逐字序列
 在 [`docs/release/developer-preview.md`](docs/release/developer-preview.md)，
-其余安装细节在 [`docs/install.zh-CN.md`](docs/install.zh-CN.md)。
+其余安装细节在英文页面 [`docs/install.md`](docs/install.md)。除本页外，内部文档仅
+提供英文版。
 
 ## 支持状态
 
-| 面 | 状态 |
-| --- | --- |
-| Codex CLI | 已验证 |
-| Claude Code | 已验证 / 认证为维护者验证 |
-| Pi | 已验证 |
-| macOS on Apple Silicon | 目标平台 |
-| Linux | 未验证 |
-| Windows | 不支持 |
+以下标签描述本仓库内记录的证据，不是 CLI provider 作出的兼容性承诺。
 
-上面的每个标签指的都是本仓库内记录的证据，而不是 CLI provider 的兼容性承诺。
-证据边界见 [`docs/status.zh-CN.md`](docs/status.zh-CN.md)，权威支持矩阵见
-[`docs/release/support-matrix.md`](docs/release/support-matrix.md)。
+- **已验证（Verified）**：所述路径已有实际运行或仓库证据。
+- **维护者已验证（Maintainer-verified）**：维护者已在指定平台实际运行，但全新
+  机器复现关卡仍未完成。
+- **实验性（Experimental）**：实现程度足够用于开发评估，但不构成支持承诺。
+- **待完成（Pending）**：所需证据尚未完成，不应据此推断已支持。
+- **未验证（Unverified）**：尚无符合要求的证据记录。
+- **不支持（Unsupported）**：不在支持目标内。
+
+### Provider 支持
+
+| Provider 运行时 | 状态 | 证据边界 |
+| --- | --- | --- |
+| Codex CLI | **已验证** | adapter/runtime 和订阅认证路径已验证；全新安装证据为 **待完成（OSS-B）**。 |
+| Claude Code | **已验证** / **维护者已验证** | adapter/runtime 已验证；Claude Pro/Max 认证已由维护者在 macOS Apple Silicon 上验证；全新安装关卡为 **待完成（OSS-B）**。 |
+| Pi | **已验证** | adapter/runtime 与订阅认证路径均已验证。Pi 走 Codex 那份登录。干净全新安装的证据仍为 **待完成（OSS-B）**。 |
+
+Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由
+用户负责。AgentOS 不提供 provider 凭据或使用资格。
+
+### 平台支持
+
+| 平台 | 状态 | 证据边界 |
+| --- | --- | --- |
+| Apple Silicon 上的 macOS | **目标平台** | 当前维护者证据包括 Claude Pro/Max 认证；完整的全新安装关卡仍为 **待完成（OSS-B）**。 |
+| Linux | **未验证** | 不应因为项目使用 Node.js 就推断已支持。 |
+| Windows | **不支持** | 当前 runner 依赖 POSIX 进程组、路径和命令行为。 |
+
+### 能力支持
+
+| 能力 | 状态 | 证据边界 |
+| --- | --- | --- |
+| Goals | **待完成** | 控制平面存储 Goal 及其 Definition of Done、进展日志和各项上限，控制台可以编辑它们。执行模型未接线：没有任何东西从 Goal 派发工作，没有任何东西统计它的花费，也没有任何东西按花费、时间或停滞把它停下。因此控制台不渲染花费数字，也不渲染已停止状态，因为服务端对这两者都没有写入方。 |
+
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md) 是权威支持声明。
 
 ## 认证与订阅
 
@@ -139,7 +164,7 @@ Pro/Max 登录，或各 CLI 自己的 API key 模式，完全按你已经配好�
 自己的账号，它走的是 Codex 那份登录。
 
 这一点你可以自己核实。runner 是为 provider 子进程构造环境，而不是整份复制
-宿主环境（[`docs/architecture.zh-CN.md`](docs/architecture.zh-CN.md)、
+宿主环境（[`docs/architecture.md`](docs/architecture.md)、
 `packages/runner/src/adapters/`）；发布检查会扫描这份 checkout 里的 token 变量、
 bearer header 与 `Authorization`（[`docs/release/security.md`](docs/release/security.md)）。
 
@@ -149,13 +174,20 @@ provider 作出兼容性承诺。
 
 ## 文档
 
-- [架构与安全模型](docs/architecture.zh-CN.md)：控制台、API、runner 与 provider
+除本页外，内部文档仅提供英文版。
+
+- [架构与安全模型](docs/architecture.md)：控制台、API、runner 与 provider
   CLI 如何拼在一起，以及 grant 约束了什么、没约束什么。
-- [安装细节与验证](docs/install.zh-CN.md)：环境文件、迁移、merge executor 与检查序列。
+- [安装细节与验证](docs/install.md)：环境文件、迁移、merge executor 与检查序列。
 - [安全](docs/release/security.md)：在把它指向任何你在乎的东西之前先读。
 - [迁移与恢复](docs/release/migration-and-recovery.md)：在往里放数据之前先读。
-- [发布说明](docs/release/v0.3.0-release-notes.md) · [支持](SUPPORT.md) ·
-  [贡献](CONTRIBUTING.md)
+- [发布说明](docs/release/v0.3.0-release-notes.md) · [贡献](CONTRIBUTING.md)
+
+## 支持
+
+AgentOS 是个人项目，不承诺提供支持或响应时间。安全报告请通过
+[`SECURITY.md`](SECURITY.md) 中的私密渠道提交；权威支持声明见
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md)。
 
 ## 致谢与许可证
 

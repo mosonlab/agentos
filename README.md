@@ -7,12 +7,12 @@
 You write the spec. A chain of agents takes it from there: plan, review,
 implement, verify, merge. Every run stays observable and reviewable.
 
-[![status](https://img.shields.io/badge/status-developer%20preview-orange)](docs/status.md)
+[![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](docs/status.md)
+[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](#status)
 [![node](https://img.shields.io/badge/node-22.17.0-brightgreen)](.nvmrc)
 
-[Install](#quick-start) · [Docs](#documentation) · [Status](docs/status.md) · [简体中文](README.zh-CN.md)
+[Install](#quick-start) · [Docs](#documentation) · [Status](#status) · [简体中文](README.zh-CN.md)
 
 <img src="docs/media/tasks.png" alt="AgentOS task board: a twelve-step template chain in flight, with per-run status and cost on each card" width="880">
 
@@ -51,7 +51,7 @@ of typing the implementation.
 
 Long-horizon autonomy is not wired yet. A Goal is stored and edited but nothing
 schedules work from it, so a chain is still started by you or by a webhook
-trigger, not by a standing objective. See [Status](docs/status.md).
+trigger, not by a standing objective. See [Status](#status).
 
 <div align="center">
 
@@ -129,19 +129,47 @@ with the remaining installation detail in [`docs/install.md`](docs/install.md).
 
 ## Status
 
-| Surface | Status |
-| --- | --- |
-| Codex CLI | Verified |
-| Claude Code | Verified / maintainer-verified auth |
-| Pi | Verified |
-| macOS on Apple Silicon | Target platform |
-| Linux | Unverified |
-| Windows | Unsupported |
+The labels below describe the evidence recorded in this repository; they are
+not compatibility promises by the CLI providers.
 
-Every label above means recorded evidence in this repository, not a promise by a
-CLI provider. The evidence boundaries are in [`docs/status.md`](docs/status.md)
-and the authoritative matrix in
-[`docs/release/support-matrix.md`](docs/release/support-matrix.md).
+- **Verified**: exercised runtime or repository evidence exists for the stated
+  path.
+- **Maintainer-verified**: a maintainer exercised the stated path on the named
+  platform, but the clean-machine reproduction gate is still open.
+- **Experimental**: implemented enough for development evaluation, without a
+  support commitment.
+- **Pending**: required evidence has not been completed. Do not infer support.
+- **Unverified**: no qualifying evidence has been recorded.
+- **Unsupported**: outside the supported target.
+
+### Provider support
+
+| Provider runtime | Status | Evidence boundary |
+| --- | --- | --- |
+| Codex CLI | **Verified** | Adapter/runtime and subscription authentication path are verified. Clean fresh-install evidence is **Pending (OSS-B)**. |
+| Claude Code | **Verified** / **Maintainer-verified** | Adapter/runtime is verified. Claude Pro/Max authentication is maintainer-verified on macOS Apple Silicon. The clean-install gate is **Pending (OSS-B)**. |
+| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. Clean fresh-install evidence is **Pending (OSS-B)**. |
+
+Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
+limits, models, and provider-side availability remain the user's responsibility.
+AgentOS does not supply provider credentials or entitlement.
+
+### Platform support
+
+| Platform | Status | Evidence boundary |
+| --- | --- | --- |
+| macOS on Apple Silicon | **Target platform** | Current maintainer evidence includes Claude Pro/Max authentication; the complete clean fresh-install gate remains **Pending (OSS-B)**. |
+| Linux | **Unverified** | Do not infer support from the Node.js codebase. |
+| Windows | **Unsupported** | The current runner relies on POSIX process-group, path, and command behavior. |
+
+### Feature surface
+
+| Feature | Status | Evidence boundary |
+| --- | --- | --- |
+| Goals | **Pending** | The control plane stores a Goal, its Definition of Done, its progress log, and its limits, and the console edits them. No execution model is wired: nothing schedules work from a Goal, nothing measures its spend, and nothing stops it on spend, time, or stall. The console therefore renders no spend figure and no stopped state, because the server has no writer for either. |
+
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md) is the
+authoritative support statement.
 
 ## Authentication and subscriptions
 
@@ -179,8 +207,15 @@ and makes no compatibility promise for a CLI provider.
   anything you care about.
 - [Migration and recovery](docs/release/migration-and-recovery.md): read
   before putting data in it.
-- [Release notes](docs/release/v0.3.0-release-notes.md) · [Support](SUPPORT.md) ·
+- [Release notes](docs/release/v0.3.0-release-notes.md) ·
   [Contributing](CONTRIBUTING.md)
+
+## Support
+
+AgentOS is a personal project with no support or response-time commitments. Send
+security reports through the private channel in [`SECURITY.md`](SECURITY.md),
+and see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) for
+the authoritative support statement.
 
 ## Credits and license
 

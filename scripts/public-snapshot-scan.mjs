@@ -436,6 +436,18 @@ export function scanRepository(
   const overlappingPaths = [];
   const scopeByPath = new Map();
 
+  for (const rule of manifest.include) {
+    if (!trackedPaths.some((path) => matches(rule.glob, path))) {
+      addFinding(findings, {
+        category: "snapshot-scope",
+        disposition: "blocker",
+        path: rule.glob,
+        count: 1,
+        reason: "include glob matches no git-tracked path",
+      });
+    }
+  }
+
   for (const path of paths) {
     const scope = scopeFor(path, manifest);
     scopeByPath.set(path, scope);

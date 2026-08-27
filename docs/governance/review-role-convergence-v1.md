@@ -74,8 +74,8 @@ implementation reviews concurrent and their join deterministic.
    case.
 7. Existing instantiated chains keep their captured assignments and prompts,
    except that a not-yet-started task's stored prompt is refreshed across a
-   prompt-only rollover (see `docs/runbooks/chain-template-changes.md`); new
-   canonical templates use the split review/adjudication graph.
+   prompt-only rollover under the operator procedure maintained outside this
+   repository; new canonical templates use the split review/adjudication graph.
 
 ## Risks and stopping conditions
 
