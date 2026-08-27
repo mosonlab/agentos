@@ -109,8 +109,8 @@ const failedPullRequestDelivery = (
   remote: string,
   operation: string,
   error: unknown,
-  reason: string = messageOf(error),
-  instructions: string = `Branch '${branch}' was pushed, but pull request delivery failed: ${reason}.`,
+  reason: string,
+  instructions: string,
 ): DeliveryResult => ({
   pushStatus: "FAILED",
   pushRemote: remote,
@@ -277,6 +277,7 @@ export const deliverWorkspace = async (
     // link looked like a transient failure of the *create* and earned it
     // another send.
     let lastCreateError: unknown;
+    let lastReadBackError: unknown;
     const creation = await confirmedWrite<{ url: string; number: number } | null>({
       resend: "after-confirmed-absent",
       attempts: NETWORK_ATTEMPTS,
@@ -317,12 +318,17 @@ export const deliverWorkspace = async (
           );
           return found ? { status: "applied", value: found } : { status: "absent" };
         } catch (probeError: unknown) {
+          lastReadBackError = probeError;
           return { status: "unreadable", reason: probeError instanceof Error ? probeError.message : String(probeError) };
         }
       },
     });
     if (creation.status !== "applied") {
-      const error = lastCreateError ?? new Error(creation.reason);
+      let error = lastCreateError ?? new Error(creation.reason);
+      if (creation.status === "indeterminate") {
+        error = lastReadBackError ?? error;
+        if (isCommandTimeout(lastCreateError) && !isCommandTimeout(lastReadBackError)) error = lastCreateError;
+      }
       const instructions = creation.status === "indeterminate"
         ? `Branch '${workspace.branch}' was pushed, but PR creation failed without a verdict: ${creation.reason}. A pull request may already have been created — check the head branch before retrying.`
         : `Branch '${workspace.branch}' was pushed, but PR creation failed: ${creation.reason}.`;
@@ -351,14 +357,15 @@ export const deliverWorkspace = async (
     // or output we could not parse. One lookup gets the identity.
     try {
       const created = await openPullRequest();
+      const missingPullRequest = "gh pr create succeeded without returning a pull request URL, and no open pull request was found";
       return created
         ? { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: created.url, pullRequestNumber: created.number }
         : failedPullRequestDelivery(
           workspace.branch,
           remote,
           "gh pr create",
-          new Error("gh pr create succeeded without returning a pull request URL, and no open pull request was found"),
-          "gh pr create succeeded without returning a pull request URL, and no open pull request was found",
+          new Error(missingPullRequest),
+          missingPullRequest,
           `Branch '${workspace.branch}' was pushed, but PR creation returned no URL and no open pull request was found.`,
         );
     } catch (lookupError: unknown) {

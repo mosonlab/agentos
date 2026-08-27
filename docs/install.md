@@ -16,8 +16,10 @@ also need
 - Git;
 - the official **Codex CLI, already installed and already signed in**, under the
   same macOS account that will run the AgentOS runner;
-- optionally, the GitHub CLI (`gh`), installed and authenticated under that
-  account, if AgentOS should open pull requests automatically.
+- the GitHub CLI (`gh`), installed and authenticated under that account, for
+  every GitHub-backed run configured to open a pull request. If `gh` cannot
+  record an open pull request, the run fails while preserving its already-pushed
+  branch.
 
 Codex is the only provider CLI this preview requires. The starter agent it
 installs runs on Codex; Claude Code and Pi are optional,
@@ -171,4 +173,3 @@ the reason it is there), and typescript-eslint checks the single type-aware rule
 `no-floating-promises`, plus the one syntactic selector that closes that rule's
 unavoidable `node:test` blind spot (`eslint.config.mjs`). It does not check
 formatting, and running it never rewrites a file.
-

@@ -193,19 +193,20 @@ test("an EOF after PR creation is resolved by head lookup without duplicate crea
   assert.equal(result.pushStatus, "SUCCEEDED");
 });
 
-test("a read-back that cannot be completed never authorises a second create", async () => {
+test("a read-back that cannot be completed preserves its typed failure and never authorises a second create", async () => {
   // The hole #139 closes. The create response was lost, so the pull request may
   // exist; the confirming lookup then failed too, so we cannot tell. The old
   // loop read that second failure as one more transient error and sent `gh pr
   // create` again — five more times — each send a candidate duplicate PR.
   let createCalls = 0;
   let listCalls = 0;
-  const createError = new Error("Post https://api.github.com/graphql: unexpected EOF");
+  const createError = new CommandTimeoutError("gh", ["pr", "create"], 20_000);
+  const readBackError = new CommandTimeoutError("gh", ["pr", "list"], 20_000);
   const fake: CommandExecutor = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       if (listCalls === 1) return "[]";
-      throw new Error("Get https://api.github.com/repos/acme/app/pulls: unexpected EOF");
+      throw readBackError;
     }
     if (executable === "gh" && args[1] === "create") {
       createCalls += 1;
@@ -219,7 +220,22 @@ test("a read-back that cannot be completed never authorises a second create", as
   assert.equal(result.pushedBranch, workspace.branch);
   assert.equal(result.pullRequestNumber, undefined);
   assert.equal(result.failure?.operation, "gh pr create");
-  assert.equal(result.failure?.error, createError);
+  assert.equal(result.failure?.error, readBackError);
+  assert.equal(completionEnvelope({
+    executionSucceeded: true,
+    evidence: {
+      exitCode: 0,
+      signal: null,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      terminationReason: null,
+      finalOutput: "done",
+      providerError: null,
+      stdout: "implemented",
+      stderr: "",
+    },
+    deliveryFailure: result.failure,
+  }).timedOut, true, "the API classification seam must receive the read-back timeout marker");
   // And the operator is told it is ambiguous, not told to go create one.
   assert.match(result.deliveryInstructions ?? "", /may already have been created/);
   assert.doesNotMatch(result.deliveryInstructions ?? "", /Run gh pr create manually/);
