@@ -103,4 +103,4 @@ discover it. `package.json`, configuration, the directory tree, and `--help`
 output are live authority — never cached here. One authoritative home per rule;
 an obsolete path is removed when its replacement lands.
 
-For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md).
+For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md). A change that adds, removes, or alters an HTTP route updates the handbook in the same change.
