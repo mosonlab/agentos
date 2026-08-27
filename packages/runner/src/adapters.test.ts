@@ -22,6 +22,7 @@ const claim: ClaimedTask = {
   executionMode: "agent",
   task: {
     id: "task-1",
+    chainId: "chain-1",
     name: "Ship it",
     description: "Do the work",
     repoId: "repo-1",
@@ -386,6 +387,24 @@ test("runner proxy environment wins over task secrets for Claude, Codex, and Pi"
     assert.equal(env.HTTPS_PROXY, "http://runner-https");
     assert.equal(env.NO_PROXY, "localhost");
   }
+});
+
+test("the regression script receives only platform-owned chain and base coordinates", () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    {
+      ...claim,
+      secrets: {
+        ...claim.secrets,
+        AGENTOS_CHAIN_ID: "task-secret-chain",
+        AGENTOS_PULL_REQUEST_BASE: "task-secret-base",
+      },
+    },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_CHAIN_ID, "chain-1");
+  assert.equal(env.AGENTOS_PULL_REQUEST_BASE, "main");
 });
 
 test("a credential-bearing runner proxy stays in env and out of run-as argv", () => {

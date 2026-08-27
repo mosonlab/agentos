@@ -145,7 +145,7 @@ export const buildPrompt = (claim: ClaimedTask): string => {
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent">,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => {
@@ -160,6 +160,8 @@ export const buildChildEnvironment = (
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
     AGENTOS_PI_EXPECTS_OPENAI_CODEX: _piExpectsOpenAICodex,
     AGENTOS_GATE_SERVER: _gateServer,
+    AGENTOS_CHAIN_ID: _chainId,
+    AGENTOS_PULL_REQUEST_BASE: _pullRequestBase,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -176,6 +178,8 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
+    ...(claim.task.chainId ? { AGENTOS_CHAIN_ID: claim.task.chainId } : {}),
+    AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
     AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
     ...RUNNER_DEFINITIONS[claim.runner].childEnvironment(claim, scratch),
     // Last on purpose, so no task secret can point a session back at the
