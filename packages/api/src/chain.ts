@@ -1,6 +1,14 @@
-import { AssigneeType, TaskStatus } from "@agentos/db";
+import {
+  ACTIVE_RUN_STATUSES,
+  AssigneeType,
+  isMergeReadinessStep,
+  lockAgentRepoGrant,
+  Prisma,
+  TaskStatus,
+} from "@agentos/db";
 
 import { runBudgetCeiling } from "./execution.js";
+import type { Refusal } from "./refusal.js";
 
 /**
  * The chain columns every consumer of this module needs, as a plain object.
@@ -21,7 +29,7 @@ export type ChainRow = {
   name: string;
   status: TaskStatus;
   archivedAt: Date | null;
-  templateStep: { name: string } | null;
+  templateStep: { name: string; stepIndex?: number; outputKind?: string } | null;
   /** A bound first task carries the predecessor id. The predecessor relation
    * is fetched only by the chain-detail route when that id is present; making
    * both fields optional keeps legacy board/progress callers unchanged. */
@@ -186,7 +194,7 @@ export const taskStartability = (
   row: StartableRow,
   facts: RunFacts,
   maxSessionsPerTask: number,
-  predecessorsDone = true,
+  predecessorsDone: boolean,
 ): TaskStartability => {
   const bindingResolved = dispatchBindingResolved(row);
   const checklist = {
@@ -207,33 +215,6 @@ export const taskStartability = (
   };
 };
 
-/**
- * May the operator press `Start now` on this step?
- *
- * The single source for both the API guard and the button's enabled state — the
- * web app reads this boolean rather than re-deriving it, so the two cannot
- * disagree. "Active run" is `ACTIVE_RUN_STATUSES`, which includes WAITING_INBOX.
- */
-export const startable = (row: StartableRow, facts: RunFacts, maxSessionsPerTask: number): boolean => {
-  return taskStartability(row, facts, maxSessionsPerTask).startable;
-};
-
-export type ChainDecisionRow = ChainRow & StartableRow & { maxSessionsPerTask: number };
-export type ChainStartAction = "start" | "recover" | null;
-export type ChainStartDecision = {
-  startable: boolean;
-  startAction: ChainStartAction;
-  currentExecution: boolean;
-  blockingPredecessor: { id: string; name: string } | null;
-};
-
-/** The earliest surviving row that still owns chain progress. Deleted rows are
- * absent; archived rows remain dependencies until they are DONE. */
-export const firstUnfinishedStep = <T extends Pick<ChainRow, "chainIndex" | "id" | "status">>(rows: T[]): T | null => (
-  [...rows].sort(byExecutionPosition)
-    .find((item) => item.status !== TaskStatus.DONE) ?? null
-);
-
 /** The first unfinished surviving row before target, or null when the ordered
  * prefix is complete. This is the predecessor named by the 409 response. */
 export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id" | "name" | "status"> & { chainLayer?: number | null }>(
@@ -250,32 +231,6 @@ export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id"
       ? itemLayer < targetLayer && item.status !== TaskStatus.DONE
       : item.id !== target.id && item.status !== TaskStatus.DONE;
   }) ?? null;
-};
-
-/** One dependency decision for the whole chain. Row-local capability remains
- * `startable`; chain position narrows it to the sole first-unfinished row. */
-export const chainStartDecisions = (
-  rows: ChainDecisionRow[],
-  factsByTask: ReadonlyMap<string, RunFacts>,
-): Map<string, ChainStartDecision> => {
-  const ordered = [...rows].sort(byExecutionPosition);
-  const first = firstUnfinishedStep(ordered);
-  const firstLayer = first ? executionLayer(first) : null;
-  return new Map(ordered.map((row) => {
-    const facts = factsByTask.get(row.id) ?? { total: 0, active: false };
-    // Siblings in one layer are eligible together. A completed sibling remains
-    // historical, while every unfinished sibling in the frontier is a start
-    // candidate; a same-layer sibling is never reported as a predecessor.
-    const isCandidate = firstLayer !== null && executionLayer(row) === firstLayer;
-    const allowed = taskStartability(row, facts, row.maxSessionsPerTask, isCandidate).startable;
-    const predecessor = blockingPredecessor(ordered, row.id);
-    return [row.id, {
-      startable: allowed,
-      startAction: allowed ? row.status === TaskStatus.BACKLOG ? "recover" : "start" : null,
-      currentExecution: facts.active,
-      blockingPredecessor: predecessor ? { id: predecessor.id, name: predecessor.name } : null,
-    }];
-  }));
 };
 
 /** One grouped run query → per-task facts. Constant in task count, which is what
@@ -305,4 +260,194 @@ export const runFactsByTask = (
     });
   }
   return facts;
+};
+
+const admissionTaskInclude = {
+  assigneeAgent: { select: { id: true, name: true, title: true, archivedAt: true } },
+  repo: { select: { id: true, name: true, defaultBranch: true } },
+  dispatchAfter: { select: { id: true, name: true, status: true } },
+  templateStep: {
+    select: {
+      stepIndex: true,
+      outputKind: true,
+      taskTemplate: { select: { name: true } },
+    },
+  },
+} as const satisfies Prisma.TaskInclude;
+
+export type StepAdmissionTask = Prisma.TaskGetPayload<{ include: typeof admissionTaskInclude }>;
+
+export type FoundStepAdmission = {
+  task: StepAdmissionTask;
+  facts: RunFacts;
+  verdict: TaskStartability;
+  blocker: { id: string; name: string } | null;
+  refusal: Refusal | null;
+};
+
+export type StepAdmission =
+  | FoundStepAdmission
+  | {
+    task: null;
+    facts: null;
+    verdict: null;
+    blocker: null;
+    refusal: Refusal;
+  };
+
+type ReadStepAdmissionOptions = { locked: boolean };
+
+const grantKey = (input: { projectId: string; agentId: string; repoId: string }): string => (
+  `${input.projectId}:${input.agentId}:${input.repoId}`
+);
+
+const chainRowsKey = (input: { projectId: string; chainId: string }): string => (
+  `${input.projectId}:${input.chainId}`
+);
+
+const refusalForStepAdmission = (
+  task: StepAdmissionTask,
+  verdict: TaskStartability,
+  blocker: { id: string; name: string } | null,
+): Refusal | null => {
+  if (!verdict.checklist.predecessorsDone) {
+    if (blocker) {
+      return { reason: "conflict", message: `Cannot start ${task.name}; predecessor ${blocker.name} is not done` };
+    }
+    const predecessorName = task.dispatchAfter?.name ?? task.dispatchAfterTaskId;
+    return {
+      reason: "conflict",
+      message: `Cannot start ${task.name}; bound predecessor ${predecessorName ?? "unknown"} is not done`,
+    };
+  }
+  if (task.archivedAt !== null) return { reason: "conflict", message: "Cannot start an archived task" };
+  if (task.status === TaskStatus.DONE) return { reason: "conflict", message: "Task is already done" };
+  if (task.assigneeType !== AssigneeType.AGENT) {
+    return { reason: "conflict", message: "Human steps cannot be started" };
+  }
+  if (isMergeReadinessStep(task.templateStep)) {
+    return { reason: "conflict", message: "Merge readiness is server-owned and cannot be started as a model run" };
+  }
+  if (!verdict.checklist.noActiveRun) {
+    return { reason: "conflict", message: "Task already has an active run" };
+  }
+  if (!verdict.checklist.budgetRemaining) return { reason: "conflict", message: "Run budget exhausted" };
+  if (task.status !== TaskStatus.TODO && task.status !== TaskStatus.BACKLOG) {
+    return { reason: "conflict", message: "Only Todo and Backlog steps can be started" };
+  }
+  if (!verdict.checklist.repoBound) return { reason: "invalid-request", message: "This task has no repository" };
+  if (!verdict.checklist.agentAssignee) return { reason: "invalid-request", message: "This task has no assignee" };
+  if (!verdict.checklist.repoAccessGrant) {
+    return { reason: "invalid-request", message: "Assignee has no grant for this Repo" };
+  }
+  if (task.assigneeAgent?.archivedAt) {
+    return {
+      reason: "archived-assignee",
+      message: `Task ${task.name} assignee ${task.assigneeAgent.name} is archived; unarchive the agent to queue this step`,
+    };
+  }
+  if (!verdict.startable) return { reason: "conflict", message: "This step cannot be started" };
+  return null;
+};
+
+/**
+ * Reads every fact that decides whether a Step may start and names the first
+ * refusal from the same checklist. Mutation callers hold the Task/Chain mutex
+ * before requesting `locked`; that mode also holds the exact Repo grant through
+ * Run creation, while read callers use an ordinary grant read.
+ */
+export const readStepAdmissions = async (
+  tx: Prisma.TransactionClient,
+  taskIds: string[],
+  options: ReadStepAdmissionOptions,
+): Promise<Map<string, FoundStepAdmission>> => {
+  const ids = [...new Set(taskIds)];
+  if (ids.length === 0) return new Map();
+  if (options.locked && ids.length !== 1) {
+    throw new Error("Locked Step admission reads exactly one Step");
+  }
+  const tasks = await tx.task.findMany({ where: { id: { in: ids } }, include: admissionTaskInclude });
+  const grantInputs = tasks.flatMap((task) => (
+    task.assigneeAgentId !== null && task.repoId !== null
+      ? [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }]
+      : []
+  ));
+  const chainInputs = [...new Map(tasks.flatMap((task) => (
+    task.chainId !== null && task.chainIndex !== null
+      ? [[chainRowsKey({ projectId: task.projectId, chainId: task.chainId }), {
+        projectId: task.projectId,
+        chainId: task.chainId,
+      }] as const]
+      : []
+  ))).values()];
+  const [runGroups, chainRows, grantRows] = await Promise.all([
+    tx.run.groupBy({
+      by: ["taskId", "status"],
+      where: { taskId: { in: ids } },
+      _count: { _all: true },
+      _max: { budgetGrants: true },
+    }),
+    chainInputs.length > 0
+      ? tx.task.findMany({
+        where: { OR: chainInputs },
+        select: { id: true, projectId: true, chainId: true, name: true, status: true, chainIndex: true, chainLayer: true },
+      })
+      : [],
+    grantInputs.length === 0
+      ? []
+      : options.locked
+        ? Promise.all(grantInputs.map(async (input) => (
+          await lockAgentRepoGrant(tx, input) ? input : null
+        ))).then((rows) => rows.filter((row): row is (typeof grantInputs)[number] => row !== null))
+        : tx.agentRepoAccess.findMany({
+          where: { OR: grantInputs },
+          select: { projectId: true, agentId: true, repoId: true },
+        }),
+  ]);
+  const factsByTask = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
+  const granted = new Set(grantRows.map(grantKey));
+  const rowsByChain = new Map<string, Array<(typeof chainRows)[number]>>();
+  for (const row of chainRows) {
+    if (row.chainId === null) continue;
+    const key = chainRowsKey({ projectId: row.projectId, chainId: row.chainId });
+    const rows = rowsByChain.get(key);
+    if (rows) rows.push(row); else rowsByChain.set(key, [row]);
+  }
+  return new Map(tasks.map((task): [string, FoundStepAdmission] => {
+    const facts = factsByTask.get(task.id) ?? { total: 0, active: false, budgetGrants: null };
+    const hasRepoGrant = task.assigneeAgentId !== null && task.repoId !== null
+      && granted.has(grantKey({ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }));
+    const chain = task.chainId !== null && task.chainIndex !== null
+      ? rowsByChain.get(chainRowsKey({ projectId: task.projectId, chainId: task.chainId })) ?? []
+      : [];
+    const blocker = blockingPredecessor(chain, task.id);
+    const baseVerdict = taskStartability(
+      { ...task, hasRepoGrant },
+      facts,
+      task.maxSessionsPerTask,
+      blocker === null,
+    );
+    const refused = refusalForStepAdmission(task, baseVerdict, blocker);
+    return [task.id, {
+      task,
+      facts,
+      verdict: { ...baseVerdict, startable: baseVerdict.startable && refused === null },
+      blocker: blocker ? { id: blocker.id, name: blocker.name } : null,
+      refusal: refused,
+    }];
+  }));
+};
+
+export const readStepAdmission = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  options: ReadStepAdmissionOptions,
+): Promise<StepAdmission> => (
+  await readStepAdmissions(tx, [taskId], options)
+).get(taskId) ?? {
+  task: null,
+  facts: null,
+  verdict: null,
+  blocker: null,
+  refusal: { reason: "not-found", message: "Task not found" },
 };
