@@ -4,7 +4,7 @@ layer: 8
 agent: librarian
 approvalGate: false
 outputKind: documentation
-priorOutputKinds: [implementation]
+priorOutputKinds: [implementation, fixed-implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null

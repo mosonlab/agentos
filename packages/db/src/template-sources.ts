@@ -10,6 +10,8 @@ import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
+/** Migration-only marker: pre-whitelist template rows retain the old all-output handoff. */
+export const LEGACY_ALL_PRIOR_OUTPUTS = "__legacy_all_prior_outputs__";
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   {
     name: INTEGRATOR_TEMPLATE_NAME,
@@ -191,6 +193,9 @@ export const loadTemplateStepSources = async (
     const nonPriorKind = step.priorOutputKinds.find((kind) => !earlierOutputKinds.has(kind));
     if (nonPriorKind) {
       throw new Error(`${templateRoot} step ${step.stepIndex} priorOutputKinds ${nonPriorKind} does not reference an earlier step`);
+    }
+    if (step.outputKind === "blind-findings" && step.priorOutputKinds.length > 0) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} blind-findings cannot declare priorOutputKinds`);
     }
   }
   for (let index = 1; index < steps.length; index += 1) {

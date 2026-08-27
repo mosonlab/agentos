@@ -58,6 +58,16 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   assert.equal(direct.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   for (const steps of [direct, full]) {
+    assert.deepEqual(
+      steps.find(({ outputKind }) => outputKind === "sol-findings")!.priorOutputKinds,
+      ["implementation"],
+    );
+    assert.deepEqual(
+      steps.find(({ outputKind }) => outputKind === "blind-findings")!.priorOutputKinds,
+      [],
+    );
+    const librarian = steps.find(({ outputKind }) => outputKind === "documentation");
+    if (librarian) assert.deepEqual(librarian.priorOutputKinds, ["implementation", "fixed-implementation"]);
     // The contract the removed adjudication node used to carry, now on the step that replaced it.
     const fix = steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
     assert.match(fix.prompt, /`sol-findings` and `blind-findings`/u);
@@ -113,6 +123,20 @@ test("prior output declarations are unique and reference only earlier steps", as
       "priorOutputKinds: [sol-findings]",
     )),
     (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /priorOutputKinds sol-findings does not reference an earlier step/u),
+  );
+});
+
+test("blind review steps cannot declare prior outputs", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-opus-blind.md", (source) => source.replace(
+      "priorOutputKinds: []",
+      "priorOutputKinds: [implementation]",
+    )),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /blind-findings cannot declare priorOutputKinds/u,
+    ),
   );
 });
 

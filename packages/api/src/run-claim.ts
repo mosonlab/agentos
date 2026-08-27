@@ -9,6 +9,7 @@ import {
   integratorBindingRefusal,
   isMergeReadinessStep,
   isPinnedBaseCommitError,
+  LEGACY_ALL_PRIOR_OUTPUTS,
   MERGE_TAIL_KIND,
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
@@ -395,6 +396,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       const declaredPriorOutputKinds = candidate.task.templateStep === null
         ? null
         : [...new Set(candidate.task.templateStep.priorOutputKinds)];
+      const legacyAllPriorOutputs = declaredPriorOutputKinds?.includes(LEGACY_ALL_PRIOR_OUTPUTS) === true;
       const priorOutputs = !blindReviewTask
         && candidate.task.chainId && candidate.task.chainIndex !== null
         ? await tx.taskStepOutput.findMany({
@@ -404,7 +406,9 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
               chainId: candidate.task.chainId,
               chainIndex: { lt: candidate.task.chainIndex },
             },
-            ...(declaredPriorOutputKinds === null ? {} : { kind: { in: declaredPriorOutputKinds } }),
+            ...(declaredPriorOutputKinds === null || legacyAllPriorOutputs
+              ? {}
+              : { kind: { in: declaredPriorOutputKinds } }),
           },
           select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
           orderBy: { task: { chainIndex: "asc" } },
@@ -412,7 +416,9 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         : [];
       if (declaredPriorOutputKinds !== null) {
         const presentKinds = new Set(priorOutputs.map(({ kind }) => kind));
-        const missingKinds = declaredPriorOutputKinds.filter((kind) => !presentKinds.has(kind));
+        const missingKinds = legacyAllPriorOutputs
+          ? []
+          : declaredPriorOutputKinds.filter((kind) => !presentKinds.has(kind));
         if (missingKinds.length > 0) {
           const reason = `Prior output claim refused: missing declared output kind${missingKinds.length === 1 ? "" : "s"}: ${missingKinds.join(", ")}`;
           await parkQueuedCandidate(candidate, {

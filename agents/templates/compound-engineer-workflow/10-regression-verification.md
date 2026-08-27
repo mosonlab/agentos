@@ -21,8 +21,8 @@ If Git reports a conflict, record both pre-refresh head SHAs,
 abort the merge so the workspace is deliverable, and finish with the
 `refresh-conflict` output below; do not resolve a hunk yourself.
 
-After a successful refresh, read both review reports and all preceding Step
-outputs from AgentOS, including the fixed implementation and its dispositions.
+After a successful refresh, read the implementation summary, both review reports,
+and the fixed implementation with its dispositions from AgentOS.
 Review the full refreshed diff as one unit, account for every finding id either
 report raised, and rerun relevant regressions. If an adopted finding remains
 open, a rejection is unsupported, or the fix introduces a defect, do not run the

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import { enqueueTaskRun, FailureClass, PrismaClient, RunStatus, TaskStatus } from "@agentos/db";
+import { buildPrompt } from "@agentos/runner/adapters";
+import type { ClaimedTask } from "@agentos/runner/api";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -122,18 +124,16 @@ test("a 12-step toy chain sends every claim exactly its declared prior outputs",
     outputKind,
     priorOutputKinds: declarations[index]!,
   })));
-  const outputs: Array<{ kind: string; body: string }> = [];
+  const outputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number } }> = [];
   let savedPromptBytes = 0;
+  const promptSizes: Array<{ step: number; filtered: number; unfiltered: number }> = [];
 
   for (const [index, task] of tasks.entries()) {
     const queued = await db.$transaction((tx) => enqueueTaskRun(tx as never, task.id));
     const response = await claim();
     const text = await response.text();
     assert.equal(response.status, 200, text);
-    const claimed = JSON.parse(text) as {
-      run: { id: string };
-      priorOutputs: Array<{ kind: string; body: string; task: { chainIndex: number | null } }>;
-    };
+    const claimed = JSON.parse(text) as ClaimedTask;
     assert.equal(claimed.run.id, queued.id);
     assert.deepEqual(claimed.priorOutputs.map(({ kind }) => kind), declarations[index]);
     assert.deepEqual(claimed.priorOutputs.map(({ task: source }) => source.chainIndex), declarations[index]!.map((kind) => kinds.indexOf(kind) + 1));
@@ -142,10 +142,18 @@ test("a 12-step toy chain sends every claim exactly its declared prior outputs",
       outputs.filter(({ kind }) => declarations[index]!.includes(kind)).map(({ body }) => body),
     );
 
-    const allPriorBytes = Buffer.byteLength(outputs.map(({ kind, body }) => `\n## ${kind}\n${body}`).join(""));
-    const selectedBytes = Buffer.byteLength(claimed.priorOutputs.map(({ kind, body }) => `\n## ${kind}\n${body}`).join(""));
-    if (declarations[index]!.length < outputs.length) assert.ok(selectedBytes < allPriorBytes);
-    savedPromptBytes += allPriorBytes - selectedBytes;
+    const prompt = buildPrompt(claimed);
+    for (const output of outputs) {
+      const marker = output.body.split("\n", 1)[0]!;
+      if (declarations[index]!.includes(output.kind)) assert.match(prompt, new RegExp(marker, "u"));
+      else assert.doesNotMatch(prompt, new RegExp(marker, "u"));
+    }
+    const unfilteredPrompt = buildPrompt({ ...claimed, priorOutputs: outputs });
+    const filteredBytes = Buffer.byteLength(prompt);
+    const unfilteredBytes = Buffer.byteLength(unfilteredPrompt);
+    if (declarations[index]!.length < outputs.length) assert.ok(filteredBytes < unfilteredBytes);
+    savedPromptBytes += unfilteredBytes - filteredBytes;
+    promptSizes.push({ step: index + 1, filtered: filteredBytes, unfiltered: unfilteredBytes });
 
     const body = `unique-marker-${index + 1}\n${"x".repeat(index === 0 ? 42_000 : 7_000)}`;
     const headSha = (index + 1).toString(16).padStart(40, "0");
@@ -162,10 +170,23 @@ test("a 12-step toy chain sends every claim exactly its declared prior outputs",
       endedAt: new Date(),
     } });
     await db.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE } });
-    outputs.push({ kind: kinds[index]!, body });
+    outputs.push({
+      kind: kinds[index]!,
+      body,
+      task: { name: `Toy step ${index + 1}`, chainIndex: index + 1 },
+    });
   }
 
-  assert.ok(savedPromptBytes >= 80_000, `expected at least 80 KB saved across the toy chain, got ${savedPromptBytes}`);
+  const tailReductions = promptSizes.slice(8).map(({ filtered, unfiltered }) => unfiltered - filtered);
+  assert.ok(
+    tailReductions.every((bytes) => bytes >= 40_000),
+    `expected every tail prompt to save at least 40 KB; sizes=${JSON.stringify(promptSizes)}`,
+  );
+  assert.ok(
+    savedPromptBytes >= 80_000,
+    `expected at least 80 KB saved across the toy chain; saved=${savedPromptBytes}; sizes=${JSON.stringify(promptSizes)}`,
+  );
+  console.log(JSON.stringify({ audit: "prior-output-prompt-sizes", promptSizes, savedPromptBytes }));
 });
 
 test("a missing declared prior output loudly refuses the claim", async () => {

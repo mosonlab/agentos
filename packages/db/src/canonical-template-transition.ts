@@ -102,7 +102,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
+      successorPromptDigest: "4bc4d5f6c52945efe767205d1205a3914e50d3d5ef74c85eca05b3704482adf9",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -172,7 +172,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
-      successorPromptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
+      successorPromptDigest: "f7635395085052a8f613a65a7e7c11f1389abd950fa624409eb52cac3133fa14",
       shape: [
         ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
         ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],

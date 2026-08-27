@@ -4,7 +4,7 @@ layer: 6
 agent: review-coordinator-sol
 approvalGate: false
 outputKind: sol-findings
-priorOutputKinds: []
+priorOutputKinds: [implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: 5

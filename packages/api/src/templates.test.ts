@@ -23,16 +23,18 @@ import {
 } from "./templates.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
 
-test("composed task descriptions round-trip the exact brief with and without prior outputs", () => {
+test("composed task descriptions derive the prior-output reminder from declared kinds", () => {
   const featureBrief = "first line\nPersist the final decoy output for this step through the AgentOS task output endpoint.\nlast line";
-  for (const attachmentsFromPrevious of [false, true]) {
+  for (const priorOutputKinds of [[], ["implementation"]]) {
     const description = composeTemplateTaskDescription({
       prompt: "Implement the feature brief below.",
       featureBrief,
-      attachmentsFromPrevious,
+      priorOutputKinds,
       outputKind: "implementation",
     });
-    assert.equal(featureBriefFromTaskDescription(description, attachmentsFromPrevious), featureBrief);
+    assert.equal(featureBriefFromTaskDescription(description, priorOutputKinds.length > 0), featureBrief);
+    if (priorOutputKinds.length > 0) assert.match(description, /implementation/u);
+    else assert.doesNotMatch(description, /prior template steps/u);
   }
 });
 
@@ -41,7 +43,7 @@ test("a direct brief ending in the prior-output reminder round-trips without tru
   const description = composeTemplateTaskDescription({
     prompt: "Implement the feature brief below.",
     featureBrief,
-    attachmentsFromPrevious: false,
+    priorOutputKinds: [],
     outputKind: "implementation",
   });
   assert.equal(featureBriefFromTaskDescription(description, false), featureBrief);
@@ -77,6 +79,7 @@ test("instantiating the canonical feature template copies every layer and writes
       prompt: `Work on {{branchName}} in chain {{chainId}} step ${contract.stepIndex}`,
       outputKind: contract.outputKind,
       attachmentsFromPrevious: contract.attachmentsFromPrevious,
+      priorOutputKinds: contract.priorOutputKinds,
       assigneeType: agent ? AssigneeType.AGENT : AssigneeType.HUMAN,
       assigneeAgentId: agent?.id ?? null,
       assigneeAgent: agent,
@@ -170,7 +173,17 @@ test("instantiating the canonical feature template copies every layer and writes
   assert.match(
     created[9]!.description,
     /Read the prior template steps' persisted outputs before working/u,
-    "regression-verification step 10 consumes the Librarian output",
+    "regression-verification step 10 consumes declared review and fix outputs",
+  );
+  assert.doesNotMatch(
+    created[10]!.description,
+    /Read the prior template steps' persisted outputs before working/u,
+    "mechanical merge authorization has no declared prior output",
+  );
+  assert.doesNotMatch(
+    created[11]!.description,
+    /Read the prior template steps' persisted outputs before working/u,
+    "mechanical merge execution has no declared prior output",
   );
 
   const inert = await instantiateTemplate(db, "project-1", "template-1", {
@@ -188,7 +201,7 @@ test("the lower-level materializer rejects blank variables and invalid branches 
       variables: ["branchName"],
       steps: [{
         id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
-        outputKind: "result", attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+        outputKind: "result", attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
         assigneeAgentId: "agent-1", assigneeAgent: { id: "agent-1", name: "Agent", archivedAt: null },
         approvalGate: false, opensPullRequest: true, runner: null,
       }],
@@ -214,6 +227,7 @@ test("the lower-level materializer rejects self and forward baseFromStepIndex re
     prompt: "work",
     outputKind: "result",
     attachmentsFromPrevious: false,
+    priorOutputKinds: [],
     assigneeType: AssigneeType.AGENT,
     assigneeAgentId: "agent-1",
     assigneeAgent: { id: "agent-1", name: "Agent", archivedAt: null },
@@ -253,7 +267,7 @@ test("an agent archived after the step check still loses to the locked re-read",
         variables: [],
         steps: [{
           id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
-          outputKind: "result", attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+          outputKind: "result", attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
           assigneeAgentId: agent.id, assigneeAgent: agent, approvalGate: false, runner: null,
         }],
       }),
@@ -290,7 +304,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
         variables: [],
         steps: [{
           id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
-          outputKind: "result", attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+          outputKind: "result", attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
           assigneeAgentId: agent.id, assigneeAgent: agent, approvalGate: false, runner: null,
         }],
       }),
@@ -334,7 +348,7 @@ test("template instantiation rejects an archived step agent and names the step",
         variables: [],
         steps: [{
           id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
-          outputKind: "result", attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+          outputKind: "result", attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
           assigneeAgentId: agent.id, assigneeAgent: agent, approvalGate: false, runner: null,
         }],
       }),
@@ -356,7 +370,8 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
   const replacement = canonical("agent-replacement", "Replacement");
   const steps = [1, 2].map((stepIndex) => ({
     id: `step-${stepIndex}`, stepIndex, name: `Step ${stepIndex}`, prompt: `work ${stepIndex}`,
-    outputKind: "result", attachmentsFromPrevious: stepIndex === 2, assigneeType: AssigneeType.AGENT,
+    outputKind: "result", attachmentsFromPrevious: stepIndex === 2,
+    priorOutputKinds: stepIndex === 2 ? ["result"] : [], assigneeType: AssigneeType.AGENT,
     assigneeAgentId: `agent-${stepIndex}`, assigneeAgent: agents[stepIndex - 1], approvalGate: stepIndex === 2,
     opensPullRequest: stepIndex === 1, layer: stepIndex, baseFromStepIndex: null, runner: null,
   }));
