@@ -54,6 +54,26 @@ export const runBudgetCeiling = (
   budgetGrants: number | null | undefined,
 ): number => maxSessionsPerTask + Math.max(0, budgetGrants ?? 0);
 
+export type WorkflowRefusalReason =
+  | "invalid-request"
+  | "conflict"
+  | "inbox-question-not-found"
+  | "approval-gate-decision-invalid"
+  | "inbox-choice-mismatch"
+  | "inbox-run-not-waiting"
+  | "approval-gate-rejection-target-missing";
+
+/** A caller-reachable workflow refusal whose classification must not depend on its prose. */
+export class WorkflowRefusalError extends Error {
+  constructor(readonly reason: WorkflowRefusalReason, message: string) {
+    super(message);
+    this.name = "WorkflowRefusalError";
+  }
+}
+
+export const isWorkflowRefusalError = (error: unknown): error is WorkflowRefusalError =>
+  error instanceof Error && error.name === "WorkflowRefusalError";
+
 // The runner rule moved to the pure `@agentos/db/model-routing` subpath, which
 // the browser can import without pulling in Prisma. Imported here beside its
 // re-export so this module's own callers and its importers read the same rule.
@@ -77,7 +97,7 @@ export const deriveRunConfig = (
   const runner = templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model);
   if (compoundExecutioner
     && (runner !== RunnerKind.CODEX || catalogRunnerForModel(agent.model) !== RunnerPreference.CODEX)) {
-    throw new Error("Compound implementation root requires a Codex gpt-* model");
+    throw new WorkflowRefusalError("invalid-request", "Compound implementation root requires a Codex gpt-* model");
   }
   return {
     runner,
@@ -986,6 +1006,8 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
     tx.task.findUniqueOrThrow({ where: { id: gateTaskId } }),
     tx.run.findUniqueOrThrow({ where: { id: sourceRunId }, include: { session: true } }),
   ]);
+  // A gate can only follow a completed Run, and every dispatched Run owns a
+  // Session. Missing one means persisted control-plane state is corrupt.
   if (!run.session) throw new Error(`Run ${sourceRunId} has no session for approval gate`);
   const thread = chatId ? await tx.inboxThread.upsert({
     where: { channel_externalChatId_sessionId: { channel: "FEISHU", externalChatId: chatId, sessionId: run.session.id } },
@@ -1265,6 +1287,8 @@ const dispatchBoundSuccessor = async (
       repo: true,
     },
   }) as BoundSuccessor | null;
+  // The binding foreign key and the successor chain mutex make disappearance
+  // an integrity violation rather than a caller-recoverable refusal.
   if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
 
   if (!predecessorTerminal) {
@@ -1671,7 +1695,7 @@ const activateChainSuccessorInternal = async (
 
   const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
   if (nextRows.some((row) => row.approvalGate) && nextRows.length > 1) {
-    throw new Error(`Approval gate is not allowed in multi-node chain layer ${nextLayer}`);
+    throw new WorkflowRefusalError("invalid-request", `Approval gate is not allowed in multi-node chain layer ${nextLayer}`);
   }
   if (nextRows.some((row) => row.approvalGate
       && (row.assigneeType !== AssigneeType.AGENT || !row.assigneeAgentId || !row.repoId))
@@ -1679,7 +1703,7 @@ const activateChainSuccessorInternal = async (
       || currentRows[0]!.assigneeType !== AssigneeType.AGENT
       || !currentRows[0]!.assigneeAgentId
       || !currentRows[0]!.repoId)) {
-    throw new Error("Server-owned approval gate must follow one executable predecessor");
+    throw new WorkflowRefusalError("invalid-request", "Server-owned approval gate must follow one executable predecessor");
   }
 
   let firstNextTaskId: string | null = null;
@@ -1843,6 +1867,9 @@ export const activateRecoveryIntegratorSuccessor = async (
   },
   now = new Date(),
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+  // Every failure below checks authority written by control-plane workers after
+  // their candidate was selected. A mismatch is an internal recovery invariant,
+  // not an operator input error, and therefore deliberately remains a 500.
   const identity = await tx.task.findUnique({
     where: { id: input.readinessTaskId },
     select: { projectId: true, chainId: true },
@@ -1985,7 +2012,9 @@ export const advanceTemplateTask = async (
             : { chainIndex: task.chainIndex }),
         },
       });
-      if (siblingCount > 1) throw new Error("Approval gate is not allowed in a multi-node chain layer");
+      if (siblingCount > 1) {
+        throw new WorkflowRefusalError("invalid-request", "Approval gate is not allowed in a multi-node chain layer");
+      }
     }
     if (expectedStatus) {
       const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.REVIEW } });
@@ -2155,17 +2184,24 @@ export const applyInboxDecisionTx = async (
       thread: true,
     },
   });
-  if (!question?.session?.run) throw new Error("No matching Inbox question");
+  if (!question?.session?.run) {
+    throw new WorkflowRefusalError("inbox-question-not-found", "No matching Inbox question");
+  }
   const gateDecision = Boolean(question.gateTaskId);
   if (gateDecision && input.decision !== "approve" && input.decision !== "reject") {
-    throw new Error("Approval gate decision must be approve or reject");
+    throw new WorkflowRefusalError(
+      "approval-gate-decision-invalid",
+      "Approval gate decision must be approve or reject",
+    );
   }
   if (!gateDecision && question.kind === InboxKind.MULTIPLE_CHOICE && !input.allowFreeText) {
     const choices = Array.isArray(question.choices) ? question.choices : [];
     const matchesChoice = choices.some((choice) => (
       typeof choice === "object" && choice !== null && "id" in choice && choice.id === input.decision
     ));
-    if (!matchesChoice) throw new Error("Decision must match an Inbox choice id");
+    if (!matchesChoice) {
+      throw new WorkflowRefusalError("inbox-choice-mismatch", "Decision must match an Inbox choice id");
+    }
   }
   // §D-P7. A stop question is answered long after its run ended, so it cannot
   // travel the WAITING_INBOX path — and it is not a gate card either, because a
@@ -2173,7 +2209,7 @@ export const applyInboxDecisionTx = async (
   // to the stop it answers by a server-written dedupeKey.
   const stopBinding = gateDecision ? null : parseStopQuestionKey(question.dedupeKey);
   if (!gateDecision && !stopBinding && question.session.run.status !== RunStatus.WAITING_INBOX) {
-    throw new Error("No matching waiting Inbox question");
+    throw new WorkflowRefusalError("inbox-run-not-waiting", "No matching waiting Inbox question");
   }
   if (stopBinding) {
     const claimedStop = await tx.inboxMessage.updateMany({
@@ -2264,7 +2300,12 @@ export const applyInboxDecisionTx = async (
         orderBy: { chainIndex: "desc" },
       });
     }
-    if (!rejectionTarget) throw new Error("Approval gate has no executable previous task to reject to");
+    if (!rejectionTarget) {
+      throw new WorkflowRefusalError(
+        "approval-gate-rejection-target-missing",
+        "Approval gate has no executable previous task to reject to",
+      );
+    }
   }
   const lockedRejectionTarget = rejectionTarget && rejectionTarget.id !== question.gateTaskId
     ? await lockTaskRow(tx, rejectionTarget.id)
@@ -2361,7 +2402,9 @@ export const applyInboxDecisionTx = async (
     where: { id: question.session.run.id, status: RunStatus.WAITING_INBOX },
     data: { status: RunStatus.QUEUED, readyAt: now, runnerId: null, fencingToken: null, leaseExpiresAt: null },
   });
-  if (queued.count !== 1) throw new Error("Waiting Run changed while applying Inbox decision");
+  if (queued.count !== 1) {
+    throw new WorkflowRefusalError("conflict", "Waiting Run changed while applying Inbox decision");
+  }
   await tx.session.update({ where: { id: question.session.id }, data: {
     executionStatus: SessionExecutionStatus.REQUESTED,
     waitingOnMessageId: null,
