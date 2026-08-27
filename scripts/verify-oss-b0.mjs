@@ -503,9 +503,9 @@ export const COMPUTED_ROWS = Object.freeze(["E16"]);
 /** Every document this project publishes about the release path. */
 export const OSS_B0_DOCUMENTS = Object.freeze([
   "README.md",
-  "docs/release/v0.1.0-developer-preview.md",
-  "docs/release/v0.1.0-migration-and-recovery.md",
-  "docs/release/v0.1.0-security.md",
+  "docs/release/developer-preview.md",
+  "docs/release/migration-and-recovery.md",
+  "docs/release/security.md",
 ]);
 
 const OVERCLAIM = /unconditionally enforced|cannot be bypassed|no way around|impossible to bypass/iu;
@@ -777,9 +777,9 @@ export const ACCEPTANCE_CHECKS = Object.freeze([
     // exists this is pending on that step, not green and not skipped; the
     // overclaim scan still runs across every OSS-B0 document already present.
     dependency: "step-7-release-documents",
-    dependencyPath: "docs/release/v0.1.0-migration-and-recovery.md",
+    dependencyPath: "docs/release/migration-and-recovery.md",
     assert: ({ documents }) => {
-      const published = documents["docs/release/v0.1.0-migration-and-recovery.md"];
+      const published = documents["docs/release/migration-and-recovery.md"];
       const guarded = ["db:migrate:release", "db:migrate-goal-execution"];
       const bypassing = ["npm run db:migrate", "prisma migrate deploy"];
       if (![...guarded, ...bypassing].every((command) => published.includes(command))) {

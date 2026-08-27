@@ -7,12 +7,90 @@ file says so where it does.
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.3.0 — Developer Preview 3
+
+The third preview. The headline is delivery: the merge tail now runs itself,
+from gate proof through review repair to a serialized exact-head merge, and
+chains execute in explicit layers that the API and the console both show. As
+with every 0.x minor, behaviour changes below are breaking-eligible, and there
+is still no upgrade path between previews other than a fresh install. This
+release adds ten migrations, including an expand/backfill/contract sequence over
+chain layers.
+
+### Merge delivery
+
+- The merge tail is autonomous: a repair loop that reads review severity,
+  recovers parked work, hands repair tasks the chain's context and a second
+  attempt, and binds the gate proof to the regression head it was produced
+  against.
+- Merge delivery is serialized on the exact head, recovers pre-merge base drift
+  automatically, and centralizes recovery authority instead of deciding it at
+  each call site.
+- The merge lease is parsed once and its release reports a typed outcome, and
+  the hold window is narrowed to the merge itself — see
+  [`docs/adr/0001-merge-lease-hold-window.md`](docs/adr/0001-merge-lease-hold-window.md).
+- Merge credentials are minted through a private GitHub App, and the
+  provisioning path for a self-hosted merge executor is public and documented in
+  [`docs/runbooks/merge-executor.md`](docs/runbooks/merge-executor.md).
+
+### Task chains and canonical agents
+
+- Chains have explicit execution layers. The schema expands with a legacy
+  backfill and then contracts onto the layered shape, the API exposes layers and
+  progress, and the console renders them with blocked-on markers.
+- Canonical templates are layered, their review sources split, and their prompts
+  now load from markdown rather than from inlined strings. A six-step direct
+  engineer workflow template ships alongside the full-assurance chain.
+- Blind review and adjudication are separate roles with their own authority
+  guard and physical isolation, and the review base is pinned in the schema
+  rather than inferred.
+- The spec and revise-plan approval gates are removed and the plan reviser
+  retiered; regression verification is streamlined, routed to Sol, and its
+  repair handoffs are bound to the run that produced them.
+- Chain prompts are aligned with the upstream mattpocock-skills baseline, both
+  senior-developer roles adopt its implement cadence, `senior-dev-luna` is the
+  direct chain's implementation default, the librarian moves onto the Pi runner,
+  and canonical model routing is re-pinned across the fleet.
+- Implementation runs on native Luna subagents, with configurable executioner
+  subprocess profiles and Codex service tiers.
+
+### Control plane and API
+
+- Task dispatch binding: a chain can be instantiated bound to a predecessor
+  task, terminal steps dispatch on that binding, and the start guard reports
+  chain detail.
+- Runs and the merge tail have explicit operator control, unclaimed queued runs
+  can be cancelled, and an archived task's Inbox messages are superseded rather
+  than left open.
+- Refusal-to-HTTP mapping is centralized, and `app.ts` is split into modules
+  along its own seams.
+- The board confirms task starts, orders cards by activity, shows an approval
+  gate's full artifact, and shows estimated cumulative run cost.
+- Model and runner choices saved in the Agents page are durable operator
+  overrides; canonical seed and prompt sync no longer replace them.
+
+### Runner
+
+- Workspaces are provisioned from a machine-local bare mirror instead of a fresh
+  network clone, and provisioned dependencies are cached safely.
+- Platform CLI configuration is isolated from the host's, and Pi per-message
+  usage is captured into the session columns.
+
 ### Development and operations
 
-- The help-only repository command-line interface is retired; the next minor
-  release will no longer build or ship an `agentos` binary.
-- Model and runner choices saved in the Agents page are now durable operator
-  overrides; canonical seed and prompt sync no longer replace them.
+- The help-only repository command-line interface is retired; this release no
+  longer builds or ships an `agentos` binary.
+- Production upgrades run in a quiet window without an operator at the keyboard.
+- The offshore merge-gate worker is revived with a per-repo layout and a slot
+  dispatcher, supports two slots per worker and primary-worker failover, and
+  classifies docs-only changes onto a shorter profile. The gate itself runs its
+  checks concurrently.
+- The README is a landing page again: the evidence tables, architecture, and
+  installation and verification detail moved into `docs/`, and the release
+  documents that are not tied to one version lost their `v0.1.0-` filename
+  prefix.
 
 ## v0.2.0 — Developer Preview 2
 

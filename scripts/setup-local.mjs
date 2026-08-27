@@ -269,7 +269,7 @@ export function renderEnvFile(values) {
 # values. There is no overwrite or rotation flag: regenerating is a deliberate
 # human recovery that preserves the existing file and establishes an empty
 # target first. Rotating AGENTOS_SECRET_ENCRYPTION_KEY while encrypted Secret
-# rows exist destroys them; docs/release/v0.1.0-security.md says what survives.
+# rows exist destroys them; docs/release/security.md says what survives.
 
 # PostgreSQL started by docker-compose.yml. Compose reads POSTGRES_PASSWORD from
 # this same file, so the literal below and the one inside DATABASE_URL are one

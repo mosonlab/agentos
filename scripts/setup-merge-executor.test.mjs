@@ -10,7 +10,7 @@ const WIZARD_PATH = "scripts/setup-merge-executor.sh";
 const RUNBOOK_PATH = "docs/runbooks/merge-executor.md";
 const wizard = readFileSync(WIZARD_PATH, "utf8");
 const runbook = readFileSync(RUNBOOK_PATH, "utf8");
-const readme = readFileSync("README.md", "utf8");
+const installDoc = readFileSync("docs/install.md", "utf8");
 const envExample = readFileSync(".env.example", "utf8");
 
 const CAPTURED = [
@@ -195,8 +195,8 @@ test("isolation, service, lifecycle, and public setup checklists stay present", 
     "root-execution",
   ]) assert.match(authoredStages, new RegExp(namedRefusal, "u"));
 
-  assert.match(readme, /\[operator runbook\]\(docs\/runbooks\/merge-executor\.md\)/u);
-  assert.match(readme, /bash scripts\/setup-merge-executor\.sh/u);
+  assert.match(installDoc, /\[operator runbook\]\(runbooks\/merge-executor\.md\)/u);
+  assert.match(installDoc, /bash scripts\/setup-merge-executor\.sh/u);
   assert.match(envExample, /docs\/runbooks\/merge-executor\.md/u);
   assert.match(envExample, /scripts\/setup-merge-executor\.sh/u);
   for (const name of CAPTURED) assert.match(envExample, new RegExp(`^${name}=`, "mu"), `${name} is absent from .env.example`);
@@ -208,7 +208,7 @@ test("health and platform claims match the implemented and evidenced surfaces", 
   assert.match(runbook, /`workspaceRoot: null` and `diskFreeBytes: null`/u);
   assert.match(runbook, /Run record[^.]*`adapterVersion`\s+and `cliVersion`[^.]*`merge-executor-v1`/u);
   assert.doesNotMatch(runbook, /Find the exact `MERGE_EXECUTOR_RUNNER_ID`, the `merge-executor-v1` adapter\/CLI identity/u);
-  assert.match(readme, /documented but unverified macOS\s+LaunchDaemon and Linux systemd profiles/u);
+  assert.match(installDoc, /documented but unverified macOS\s+LaunchDaemon and Linux systemd profiles/u);
   assert.match(runbook, /documented but unverified/u);
 });
 
