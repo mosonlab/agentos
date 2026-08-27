@@ -1,13 +1,13 @@
-# AgentOS v0.1.0 — license and asset provenance
+# AgentOS — license and asset provenance
 
-Every file the v0.1.0 snapshot publishes is accounted for here. The rule this
+Every file the snapshot publishes is accounted for here. The rule this
 page exists to enforce is simple: **nothing ships whose origin we cannot name.**
 An asset without provenance is removed from `public-snapshot.json`, not published
 with a shrug.
 
 ## The license
 
-AgentOS v0.1.0 is released under the **MIT License**.
+AgentOS is released under the **MIT License**.
 
 | | |
 | --- | --- |
@@ -136,7 +136,7 @@ than here.
 Its trust anchor, **`release-authority.pub`**, is an Ed25519 public key tracked
 and reviewed like any other file. Public key material is safe to publish; the
 private half is held outside every repository, and
-[`v0.1.0-migration-and-recovery.md`](v0.1.0-migration-and-recovery.md) describes
+[`migration-and-recovery.md`](migration-and-recovery.md) describes
 how both are provisioned.
 
 ## What is deliberately not published

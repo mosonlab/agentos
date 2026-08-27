@@ -4,18 +4,22 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const PUBLIC_EXISTING_MODE_DOCS = [
-  "README.md",
-  "README.zh-CN.md",
-  "docs/release/v0.1.0-migration-and-recovery.md",
-  "docs/release/v0.1.0-support-matrix.md",
+  "docs/install.md",
+  "docs/install.zh-CN.md",
+  "docs/release/migration-and-recovery.md",
+  "docs/release/support-matrix.md",
 ];
 
 const CURRENT_CLI_SURFACE_DOCS = [
   "README.md",
   "README.zh-CN.md",
+  "docs/architecture.md",
+  "docs/architecture.zh-CN.md",
+  "docs/install.md",
+  "docs/install.zh-CN.md",
   "CONTRIBUTING.md",
   "CHANGELOG.md",
-  "docs/release/v0.1.0-support-matrix.md",
+  "docs/release/support-matrix.md",
   "docs/release/v0.2.0-release-notes.md",
 ];
 
@@ -28,8 +32,11 @@ test("published docs do not advertise or require the retired repository CLI", ()
       path,
     );
   }
-  assert.match(readFileSync("README.md", "utf8"), /does not ship a repository command-line interface/u);
-  assert.match(readFileSync("README.zh-CN.md", "utf8"), /不再提供仓库命令行界面/u);
+  assert.match(
+    readFileSync("docs/architecture.md", "utf8"),
+    /does not ship a repository command-line interface/u,
+  );
+  assert.match(readFileSync("docs/architecture.zh-CN.md", "utf8"), /不再提供仓库命令行界面/u);
 });
 
 test("tagged release verification retains its historical CLI check", () => {

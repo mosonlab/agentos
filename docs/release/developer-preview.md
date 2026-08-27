@@ -1,4 +1,4 @@
-# AgentOS v0.1.0 Developer Preview — quickstart
+# AgentOS Developer Preview — quickstart
 
 > **Correction (2026-08-19).** The install sequence shipped with `v0.1.0`
 > omitted the required runtime build and did not state several prerequisites
@@ -10,7 +10,7 @@
 > **One platform, one shape of install.** This page is the supported sequence for
 > macOS on Apple Silicon, run by the machine's own operator, on loopback, against
 > repositories you are willing to have an agent write to.
-> [`v0.1.0-support-matrix.md`](v0.1.0-support-matrix.md) states what is supported
+> [`support-matrix.md`](support-matrix.md) states what is supported
 > and on what evidence; anything not in it is not supported.
 
 This is the exact sequence for bringing up the Developer Preview on the one
@@ -52,7 +52,7 @@ installation.
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.1.0
+git checkout v0.3.0
 ```
 
 Check out the exact tag or commit the release names. A branch tip is not a
@@ -198,7 +198,7 @@ tells you it was considered and refused.
 
 If it stops, it prints one line per condition, in the form
 `STOP release-migrate <condition>: <reason>` or `STOP preflight <condition>:
-<detail>`. [`v0.1.0-migration-and-recovery.md`](v0.1.0-migration-and-recovery.md)
+<detail>`. [`migration-and-recovery.md`](migration-and-recovery.md)
 lists every condition and what it means. Two are worth knowing before you start:
 
 `STOP preflight authority: GOAL5A0_MASTER_SHA (or argv[1]) must be a recorded
@@ -295,7 +295,7 @@ The API listens on `127.0.0.1:3000` and refuses to start on any other host. The
 web console is served at `http://127.0.0.1:5173`.
 
 The Inbox service (`npm run dev:inbox`) is optional and is not part of this
-sequence. No launchd definition is shipped or supported in v0.1.0. Remote
+sequence. No launchd definition is shipped or supported in this preview. Remote
 access, the Feishu integration, and internal task-chain templates are also
 outside this sequence.
 
@@ -355,7 +355,7 @@ delivery that opens a pull request.
 
 ## Operating the preview
 
-v0.1.0 ships no supported daemon or service-manager installation. The API, web
+This preview ships no supported daemon or service-manager installation. The API, web
 console, and runner are foreground development processes and stop when their
 terminals close. After a reboot, start PostgreSQL and wait for readiness, then
 start API, runner, and web in that order.
@@ -377,7 +377,7 @@ telling you something specific.
 | The wizard's Install button is inactive and the Codex step says the CLI was not found | The runner reported that `codex --version` did not answer. Check the fixed default `RUNNER_PATH` described in step 7, then set `CODEX_BINARY` or `RUNNER_PATH` and restart the runner. |
 | The wizard says Codex is not signed in | Run `codex login` yourself, in a terminal, then restart the runner. Nothing in AgentOS runs it for you or stores what it produces. |
 | The wizard says it is waiting for the local runner | Nothing has reported yet, or the last report is more than a minute old. Start `npm run dev:runner`; the screen updates on its own. This is not a failure and does not mean anything is missing. |
-| `STOP release-migrate …` or `STOP preflight …` | See [`v0.1.0-migration-and-recovery.md`](v0.1.0-migration-and-recovery.md), which lists every condition. |
+| `STOP release-migrate …` or `STOP preflight …` | See [`migration-and-recovery.md`](migration-and-recovery.md), which lists every condition. |
 | `AgentOS API startup configuration refused: <reasons>`, exit code 78 | The API read its environment and refused before doing anything at all — no socket bound, no database touched. Exit 78 is `EX_CONFIG`: restarting it changes nothing until a value does. The reasons are stable codes plus a variable name and never a value; see below. |
 
 ### Startup configuration refusals
@@ -421,9 +421,9 @@ match it.
 - It does not sandbox the agent. The provider adapters run with non-interactive
   permission-bypass flags, and AgentOS grants are a control-plane authorization
   and audit boundary, not host containment. See
-  [`v0.1.0-security.md`](v0.1.0-security.md).
+  [`security.md`](security.md).
 - It does not enforce network isolation, and it does not claim to.
 - It is loopback-only. Exposing any of these services beyond `127.0.0.1` is
   unsupported.
 - It has no down migration and no supported restore path. See
-  [`v0.1.0-migration-and-recovery.md`](v0.1.0-migration-and-recovery.md).
+  [`migration-and-recovery.md`](migration-and-recovery.md).

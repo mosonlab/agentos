@@ -1,6 +1,6 @@
 {
   "name": "@agentos/runner",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -22,9 +22,9 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@agentos/build-info": "0.2.0",
-    "@agentos/db": "0.2.0",
-    "@agentos/github-client": "0.2.0",
+    "@agentos/build-info": "0.3.0",
+    "@agentos/db": "0.3.0",
+    "@agentos/github-client": "0.3.0",
     "dotenv": "^17.2.3"
   },
   "devDependencies": {

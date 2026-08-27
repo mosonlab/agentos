@@ -4,16 +4,16 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.1.0 (Developer Preview) | Yes, on the target platform only — see [`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md) |
-| Anything earlier | There is nothing earlier. 0.1.0 is the first release. |
+| 0.3.0 (Developer Preview) | Yes, on the target platform only — see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) |
+| 0.2.0 and 0.1.0 | No. A developer preview is superseded by the next one; there is no backport path. |
 
-There is no patch stream and no backport path. A fix ships as `0.1.1`; published
+There is no patch stream and no backport path. A fix ships as the next release; published
 tags and release assets are immutable and are never rewritten in place.
 
 ## Read the boundaries before you report
 
-[`docs/release/v0.1.0-security.md`](docs/release/v0.1.0-security.md) states what
-the v0.1.0 boundaries are and — more usefully — where they stop. Several
+[`docs/release/security.md`](docs/release/security.md) states what
+the current boundaries are and — more usefully — where they stop. Several
 properties people reasonably expect are **not** claimed by this release, and are
 documented as absent rather than treated as defects:
 
@@ -34,7 +34,7 @@ documented as absent rather than treated as defects:
 A report that an agent could modify files it was pointed at, or that a service
 exposed on the network has no authentication, describes documented behaviour
 rather than a vulnerability. The known limitations sections of
-`docs/release/v0.1.0-security.md` and `CHANGELOG.md` list the gaps already known
+`docs/release/security.md` and `CHANGELOG.md` list the gaps already known
 to us, including the Files path-walk race.
 
 Findings that **are** in scope include: a way to reach a Files Root outside its

@@ -53,7 +53,7 @@ SOFTWARE.
 ```
 
 Every other file in the published set is first-party and covered by `LICENSE`.
-`docs/release/v0.1.0-license-and-assets.md` lists each one with its digest.
+`docs/release/license-and-assets.md` lists each one with its digest.
 
 ## Declared dependencies and their licenses
 

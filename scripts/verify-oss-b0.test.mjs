@@ -132,7 +132,7 @@ const documentsFor = () => ({
   "docs/reviews/2026-08-19-oss-b0-v0.1.0-independent-review.md": "# ledger\n",
   // Step 7's published page, read from the tree: the probe is checked against
   // the real document, not against a fixture that agrees with it.
-  "docs/release/v0.1.0-migration-and-recovery.md": fromTree("docs/release/v0.1.0-migration-and-recovery.md"),
+  "docs/release/migration-and-recovery.md": fromTree("docs/release/migration-and-recovery.md"),
 });
 
 /**
@@ -809,7 +809,7 @@ test("a list of claims a document refuses to make is read as the refusal it is",
   assert.deepEqual(overclaimingSentences(refusals), []);
 
   const publicGuide = readFileSync(
-    join(REPOSITORY_ROOT, "docs/release/v0.1.0-migration-and-recovery.md"), "utf8");
+    join(REPOSITORY_ROOT, "docs/release/migration-and-recovery.md"), "utf8");
   assert.deepEqual(overclaimingSentences(publicGuide), []);
 });
 
@@ -846,7 +846,7 @@ test("the refused-list exemption ends where the list does", () => {
 test("the probe refuses a published page that hides the bypassing commands", () => {
   const { statusOf, run } = fullRun({
     documents: {
-      "docs/release/v0.1.0-migration-and-recovery.md":
+      "docs/release/migration-and-recovery.md":
         "Use `npm run db:migrate:release`; it composes `npm run db:migrate-goal-execution`.",
     },
   });
@@ -860,7 +860,7 @@ test("the probe refuses a published page that overclaims, and reports no documen
   const claim = "The preflight is unconditionally enforced; migrations cannot be bypassed.";
   const { statusOf, run } = fullRun({
     documents: {
-      "docs/release/v0.1.0-migration-and-recovery.md": [
+      "docs/release/migration-and-recovery.md": [
         "`npm run db:migrate:release` and `npm run db:migrate-goal-execution` run the preflight.",
         "`npm run db:migrate` and `prisma migrate deploy` bypass it.",
         claim,
@@ -874,7 +874,7 @@ test("the probe refuses a published page that overclaims, and reports no documen
 
 test("E7b is pending, not green, while Step 7's page is unwritten", () => {
   const documents = documentsFor();
-  delete documents["docs/release/v0.1.0-migration-and-recovery.md"];
+  delete documents["docs/release/migration-and-recovery.md"];
   const stub = stubRunner({ root: cleanTree() });
   const run = runAcceptance({
     run: stub.run,
