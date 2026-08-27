@@ -57,6 +57,11 @@ export const clampLines = (text: string, maxLines: number): LineClamp => {
   return { text: lines.slice(0, maxLines).join("\n"), dropped: lines.length - maxLines };
 };
 
+/** The node carries a translation key rather than locale-bound copy: the
+ * projection remains a pure function of the event stream, while the renderer
+ * can use the active locale when it paints the resume boundary. */
+export const RESUME_MARKER_TEXT = "sessions.stream.resumed";
+
 const PRIMARY_ARG_MAX = 120;
 const ERROR_MESSAGE_MAX = 500;
 
@@ -352,9 +357,8 @@ export const normalize = (
  * should read. Normalization remains the payload-mapping contract: this pass
  * deliberately does not inspect provider payloads a second time. It only
  * turns text/final items into text nodes and folds adjacent tool items into a
- * single group. Error items have no node yet; the marker producer owns that
- * transition in the marker slice. The declared input/marker variants likewise
- * keep the type stable for their later producers.
+ * single group. Error and process-boundary items become marker nodes here, and
+ * the declared input variant keeps the type stable for its later producer.
  *
  * The result is intentionally pure. In particular, counts are calculated from
  * the returned nodes, so any grouping or future projection rule cannot make
@@ -374,6 +378,51 @@ export const projectStream = (
   const normalized = normalize(events.filter((event) => asRecord(event.payload) !== null), runner, terminal);
   const nodes: StreamNode[] = [];
   let tools: ToolCall[] = [];
+
+  type ProjectionEntry =
+    | { index: number; item: StreamItem }
+    | { index: number; marker: Extract<StreamNode, { kind: "marker" }> };
+
+  const eventIndexForItem = (item: StreamItem): number => {
+    // Tool ids are call ids rather than event ids, so anchor them at their
+    // first start/completion event. Other normalized items retain their source
+    // event id. Keeping this association here lets markers be interleaved in
+    // the original stream without making the normalizer carry presentation
+    // metadata.
+    if (item.kind === "tool") {
+      const toolIndex = events.findIndex((event) =>
+        (event.type === "TOOL_STARTED" || event.type === "TOOL_COMPLETED")
+        && (event.toolCallId ?? event.id) === item.id);
+      if (toolIndex >= 0) return toolIndex;
+    }
+    const directIndex = events.findIndex((event) => event.id === item.id);
+    return directIndex >= 0 ? directIndex : events.length;
+  };
+
+  const entries: ProjectionEntry[] = normalized.items
+    // `error` is represented by the marker entry below. Leaving it in this
+    // list would duplicate the marker or make malformed payloads observable.
+    .filter((item) => item.kind !== "error")
+    .map((item) => ({ index: eventIndexForItem(item), item }));
+
+  let processStarts = 0;
+  for (const [index, event] of events.entries()) {
+    if (event.type === "ADAPTER_ERROR" || event.type === "PROMPT_DELIVERY_FAILED") {
+      entries.push({
+        index,
+        marker: { kind: "marker", id: event.id, at: event.at, variant: "error", text: adapterErrorMessage(event.payload) },
+      });
+    } else if (event.type === "PROCESS_STARTED") {
+      processStarts += 1;
+      if (processStarts > 1) {
+        entries.push({
+          index,
+          marker: { kind: "marker", id: event.id, at: event.at, variant: "info", text: RESUME_MARKER_TEXT },
+        });
+      }
+    }
+  }
+  entries.sort((left, right) => left.index - right.index);
 
   const flushTools = (): void => {
     if (tools.length === 0) return;
@@ -403,7 +452,13 @@ export const projectStream = (
     nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final });
   };
 
-  for (const item of normalized.items) {
+  for (const entry of entries) {
+    if ("marker" in entry) {
+      flushTools();
+      nodes.push(entry.marker);
+      continue;
+    }
+    const item = entry.item;
     if (item.kind === "tool") {
       tools.push(item);
       continue;
@@ -417,7 +472,6 @@ export const projectStream = (
     } else if (item.kind === "final") {
       pushTextNode(item, true);
     }
-    // `error` is intentionally not projected until the marker producer lands.
   }
   flushTools();
 

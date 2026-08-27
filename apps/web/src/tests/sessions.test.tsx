@@ -150,6 +150,20 @@ test("text nodes clamp at the named line limit behind Show more", () => {
   assert.doesNotMatch(markup, /prose line 13/);
 });
 
+test("stream markers render muted resume copy in both locales and errors through ErrorNotice", () => {
+  const info = { kind: "marker" as const, id: "resume-1", at: "2026-08-16T00:00:00.000Z", variant: "info" as const, text: "sessions.stream.resumed" };
+  const error = { kind: "marker" as const, id: "error-1", at: "2026-08-16T00:00:00.000Z", variant: "error" as const, text: "stream disconnected" };
+
+  const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={info} /></LocaleProvider>);
+  const chinese = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={info} /></LocaleProvider>);
+  const errorMarkup = renderToStaticMarkup(<StreamNodeView node={error} />);
+  assert.match(english, /Session resumed/);
+  assert.match(chinese, /会话已恢复/);
+  assert.match(english, /text-muted-foreground/);
+  assert.match(errorMarkup, /stream disconnected/);
+  assert.match(errorMarkup, /var\(--destructive-bg\)/);
+});
+
 test("tool groups and text node headings are translated in English and Chinese", () => {
   try {
     const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={toolNode} /></LocaleProvider>);

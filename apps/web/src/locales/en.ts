@@ -611,6 +611,7 @@ export const en = {
   "sessions.stream.loading": "Loading events…",
   "sessions.stream.new": "{n} new ↓",
   "sessions.stream.result": "Result",
+  "sessions.stream.resumed": "Session resumed",
   "sessions.stream.title": "Stream",
   "sessions.table.agent": "Agent",
   "sessions.table.duration": "Duration",

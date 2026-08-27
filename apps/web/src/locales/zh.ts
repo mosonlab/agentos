@@ -608,6 +608,7 @@ export const zh = {
   "sessions.stream.loading": "正在加载事件…",
   "sessions.stream.new": "{n} 条新内容 ↓",
   "sessions.stream.result": "结果",
+  "sessions.stream.resumed": "会话已恢复",
   "sessions.stream.title": "流",
   "sessions.table.agent": "Agent",
   "sessions.table.duration": "时长",

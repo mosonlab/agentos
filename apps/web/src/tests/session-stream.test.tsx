@@ -326,6 +326,45 @@ test("projection drops a repeated final output but keeps a distinct final output
   }
 });
 
+test("projection turns adapter and prompt-delivery failures into error markers in stream order", () => {
+  const adapterError = event("ADAPTER_ERROR", { message: "stream disconnected" }, { source: "CLAUDE" });
+  const promptFailure = event("PROMPT_DELIVERY_FAILED", { message: "broken pipe", code: "EPIPE" }, { source: "RUNNER" });
+  const projection = projectStream([
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    adapterError,
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after error" }] } }),
+    promptFailure,
+  ], "CLAUDE", true);
+
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text", "marker", "text", "marker"]);
+  assert.equal(projection.nodes[1]?.kind, "marker");
+  assert.equal(projection.nodes[3]?.kind, "marker");
+  if (projection.nodes[1]?.kind === "marker" && projection.nodes[3]?.kind === "marker") {
+    assert.deepEqual(projection.nodes[1], {
+      kind: "marker", id: adapterError.id, at: adapterError.at, variant: "error", text: "stream disconnected",
+    });
+    assert.deepEqual(projection.nodes[3], {
+      kind: "marker", id: promptFailure.id, at: promptFailure.at, variant: "error", text: "broken pipe",
+    });
+  }
+});
+
+test("projection marks only the second and later process starts as resume boundaries", () => {
+  const starts = [
+    event("PROCESS_STARTED", {}, { source: "RUNNER" }),
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("PROCESS_STARTED", {}, { source: "RUNNER" }),
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "resumed" }] } }),
+  ];
+  const projection = projectStream(starts, "CLAUDE", true);
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text", "marker", "text"]);
+  assert.equal(projection.nodes[1]?.kind, "marker");
+  if (projection.nodes[1]?.kind === "marker") {
+    assert.equal(projection.nodes[1].variant, "info");
+    assert.equal(projection.nodes[1].text, "sessions.stream.resumed");
+  }
+});
+
 test("projection counts derive from the nodes it returns", () => {
   const events = [
     event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),

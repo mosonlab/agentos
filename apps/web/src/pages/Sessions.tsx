@@ -8,7 +8,7 @@ import { mergeBadge } from "../lib/merge-outcome";
 import { Link, navigate } from "../lib/router";
 import { useProjectScope } from "../lib/project";
 import {
-  clampLines, projectStream, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES,
+  clampLines, projectStream, RESUME_MARKER_TEXT, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES,
   type StreamNode, type ToolCall,
 } from "../lib/session-stream";
 import { useEventStream } from "../lib/use-event-stream";
@@ -367,11 +367,15 @@ const TextNodeBody = ({ text }: { text: string }): ReactNode => {
 export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
   const t = useT();
   if (node.kind === "tools") return <ToolGroup node={node} />;
-  // The marker and operator-input producers are deliberately owned by their
-  // later slices. Keeping their variants in the union now makes this renderer
-  // exhaustive without giving either producer an accidental implementation in
-  // the projection foundation.
-  if (node.kind === "input" || node.kind === "marker") return null;
+  if (node.kind === "marker") {
+    return node.variant === "error"
+      ? <ErrorNotice message={node.text} />
+      : <div className="text-[12px] text-muted-foreground">{t(node.text === RESUME_MARKER_TEXT ? RESUME_MARKER_TEXT : "sessions.stream.resumed")}</div>;
+  }
+  // Operator-input rendering is owned by the input slice. Keeping the variant
+  // in the union now makes this renderer exhaustive without producing an input
+  // node before its projection rule lands.
+  if (node.kind === "input") return null;
   return (
     <div className={MSG_CARD}>
       <div className={MSG_HEAD}>
