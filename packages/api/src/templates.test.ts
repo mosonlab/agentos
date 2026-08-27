@@ -47,6 +47,25 @@ test("a direct brief ending in the prior-output reminder round-trips without tru
   assert.equal(featureBriefFromTaskDescription(description, false), featureBrief);
 });
 
+test("mechanical cards retain only their canonical prompt while model cards retain generated context", () => {
+  const common = {
+    prompt: "Execute this step.",
+    featureBrief: "Build the feature",
+    attachmentsFromPrevious: true,
+  };
+  for (const outputKind of ["merge-authorization", "merge-result"]) {
+    assert.equal(
+      composeTemplateTaskDescription({ ...common, outputKind }),
+      common.prompt,
+      `${outputKind} is server-owned and must not receive model-only context`,
+    );
+  }
+  assert.equal(
+    composeTemplateTaskDescription({ ...common, outputKind: "regression-verification-v2" }),
+    `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.\nPersist the final regression-verification-v2 output for this step through the AgentOS task output endpoint.`,
+  );
+});
+
 test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {
   const canonicalTemplateSteps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
   const created: Array<Record<string, any>> = [];
