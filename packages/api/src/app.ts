@@ -567,7 +567,7 @@ const leaseIndependentCleanupInput = z.object({
   cleanupFailureReason: z.string().max(4000).optional(),
   workspaceRetained: z.boolean(),
 });
-const startInput = z.object({
+const mechanicalStartInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
   adapterVersion: z.string().min(1),
@@ -581,6 +581,11 @@ const startInput = z.object({
   branch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   runtimeHandle: z.string().nullable().optional(),
+});
+const startInput = mechanicalStartInput.extend({
+  // The runner computes this from the exact bytes handed to the provider.
+  // Requiring it prevents a start write from leaving a queued or prior hash.
+  promptHash: z.string().regex(/^[0-9a-f]{64}$/u),
 });
 // Envelopes are dispatched on `version` *before* any version's field schema is
 // applied. Only `version` itself is required to parse, and everything else is
@@ -3378,7 +3383,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.post("/runner/runs/:runId/start", async (context) => {
     const runId = id.parse(context.req.param("runId"));
-    const body = await readJson(context.req.raw, startInput);
+    const principal = context.get("principal");
+    // A mechanical run hands no bytes to a provider, so it has no dispatched
+    // prompt to hash. The independently authenticated executor alone receives
+    // that exemption; ordinary runner starts still require an exact hash.
+    const body = principal.kind === "merge-executor"
+      ? { ...await readJson(context.req.raw, mechanicalStartInput), promptHash: null }
+      : await readJson(context.req.raw, startInput);
     const now = new Date();
     // A run that has already started is not startable again, so this fence is
     // narrower than the live-lease set every other route uses.
@@ -3407,6 +3418,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           adapterVersion: body.adapterVersion,
           cliVersion: body.cliVersion,
           authMode: body.authMode ?? null,
+          promptHash: body.promptHash,
           manifest: jsonValue(body.manifest),
           workspacePath: body.workspacePath,
           branch: body.branch ?? null,

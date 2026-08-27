@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   AssigneeType,
   CodexServiceTier,
@@ -55,8 +53,6 @@ export const runBudgetCeiling = (
   budgetGrants: number | null | undefined,
 ): number => maxSessionsPerTask + Math.max(0, budgetGrants ?? 0);
 
-const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
-
 // The runner rule moved to the pure `@agentos/db/model-routing` subpath, which
 // the browser can import without pulling in Prisma. Imported here beside its
 // re-export so this module's own callers and its importers read the same rule.
@@ -68,8 +64,6 @@ export const deriveRunConfig = (
     runnerPreference: RunnerPreference;
     model: string;
     codexServiceTier: CodexServiceTier;
-    foundationalPrompt: string;
-    rolePrompt: string;
   },
   templateStep: {
     runner: RunnerKind | null;
@@ -77,8 +71,7 @@ export const deriveRunConfig = (
     outputKind?: string;
     taskTemplate?: { name: string } | null;
   } | null,
-  task: { name: string; description: string },
-): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier; promptHash: string } => {
+): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier } => {
   const compoundExecutioner = isCompoundImplementationStep(templateStep);
   const runner = templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model);
   if (compoundExecutioner
@@ -89,12 +82,6 @@ export const deriveRunConfig = (
     runner,
     model: agent.model,
     codexServiceTier: agent.codexServiceTier,
-    promptHash: promptHash([
-    agent.foundationalPrompt,
-    agent.rolePrompt,
-    task.name,
-    task.description,
-  ]),
   };
 };
 
@@ -887,17 +874,15 @@ export const openRun = async (
       codexServiceTier: prior.codexServiceTier,
       subagentModel: prior.subagentModel,
       subagentMaxConcurrent: prior.subagentMaxConcurrent,
-      promptHash: prior.promptHash,
     }
     : null;
   const configuration = intent.kind === "integrator-authorized"
     ? {
       runner: prior?.runner ?? RunnerKind.CLAUDE,
       model: lockedAgent.model,
-      promptHash: prior?.promptHash ?? "mechanical",
     }
     : preservedConfiguration ?? (() => {
-      const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
+      const derived = deriveRunConfig(lockedAgent, task.templateStep);
       return {
         ...derived,
         ...nativeImplementationSubagentRunConfig(derived.runner, task.templateStep),
@@ -914,6 +899,10 @@ export const openRun = async (
     runNumber,
     dedupeKey: `task:${task.id}:run:${runNumber}`,
     ...configuration,
+    // An exact prompt does not exist until a runner dispatches one. The start
+    // route fills this with the hash of those exact bytes, including resume
+    // continuation input; a queued or failed-to-start Run stays null.
+    promptHash: null,
     targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: intent.kind === "integrator-authorized" ? false : task.opensPullRequest,

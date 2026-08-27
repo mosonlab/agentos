@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { adapters, type CliAdapter } from "./adapters.js";
+import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
@@ -44,6 +45,7 @@ const cleanupTestSession = async (root: string): Promise<void> => {
 
 const mechanicalClaim: ClaimedTask = {
   executionMode: "mechanical",
+  specificationMaterialization: null,
   task: {
     id: "task-10",
     chainId: null,
@@ -750,7 +752,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     // Startup first, exactly as `index.ts` orders it: the claim below runs on a
     // process that has just reported two of three backends blocked.
     assert.deepEqual(await runStartupPreflight(configured), { CLAUDE: false, CODEX: true, PI: false });
-    await executeClaim(configured, {
+    const codexClaim = {
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
@@ -758,12 +760,16 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
-    });
+    } satisfies ClaimedTask;
+    await executeClaim(configured, codexClaim);
 
     const started = posts.find((post) => post.path.endsWith("/start"));
     assert.ok(started, "a blocked Claude and Pi must not keep a Codex run from starting");
     assert.equal(started.body.cliVersion, "codex-cli 0.147.0");
     assert.equal(started.body.authMode, "chatgpt");
+    const expectedPromptHash = createHash("sha256").update(buildPrompt(codexClaim)).digest("hex");
+    assert.equal(started.body.promptHash, expectedPromptHash);
+    assert.equal((started.body.manifest as Record<string, unknown>).promptHash, expectedPromptHash);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
     assert.equal(completion.body.terminalSuccess, true);

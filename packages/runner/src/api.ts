@@ -32,6 +32,12 @@ export type ClaimedTask = {
    * `@agentos/merge-executor`, a different process under a different OS user.
    */
   executionMode: "mechanical" | "agent";
+  /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */
+  specificationMaterialization: {
+    kind: "direct-implementation";
+    path: string;
+    body: string;
+  } | null;
   task: {
     id: string;
     chainId: string | null;
@@ -98,7 +104,7 @@ export type ClaimedTask = {
     /** Immutable review range exposed without revealing predecessor outputs. */
     implementationBaseSha: string | null;
     implementationHeadSha: string | null;
-    promptHash: string;
+    promptHash: string | null;
     workspacePath: string | null;
     branch: string | null;
     baseSha: string | null;
@@ -203,7 +209,7 @@ export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | nul
 export const startRun = async (
   config: RunnerConfig,
   claim: ClaimedTask,
-  snapshot: Record<string, unknown>,
+  snapshot: Record<string, unknown> & { promptHash: string },
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/start`, {
     method: "POST",

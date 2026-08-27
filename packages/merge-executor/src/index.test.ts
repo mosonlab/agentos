@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { Stats } from "node:fs";
 import { test } from "node:test";
 
-import type { MechanicalClaim } from "./agentos.js";
+import { makeAgentOsClient, type MechanicalClaim } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
 import { claimOnce, runClaim } from "./index.js";
@@ -52,6 +52,23 @@ test("an idle claim poll never enters the run-scoped mint path", async () => {
   const result = await claimOnce(config, "/private/app.pem", log, fetchImpl, async () => { runCalls += 1; });
   assert.equal(result, "idle");
   assert.equal(runCalls, 0);
+});
+
+test("the mechanical start request matches the promptless API contract", async () => {
+  let startBody: unknown;
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    startBody = JSON.parse(String(init?.body));
+    return new Response(null, { status: 204 });
+  };
+  await makeAgentOsClient(config, fetchImpl).start(claimed("contract-run"));
+  assert.deepEqual(startBody, {
+    runnerId: "merge-executor-1",
+    fencingToken: "fence-contract-run",
+    adapterVersion: "merge-executor-v1",
+    cliVersion: "merge-executor-v1",
+    workspacePath: null,
+    manifest: { executionMode: "mechanical", childProcessCount: 0 },
+  });
 });
 
 test("a persisted mechanical cancellation is acknowledged before GitHub authority is minted", async () => {

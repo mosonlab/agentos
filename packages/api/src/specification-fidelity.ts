@@ -1,5 +1,6 @@
 import {
   githubRepositoryFromRemote,
+  isDirectImplementationStep,
   Prisma,
   stepRole,
 } from "@agentos/db";
@@ -27,6 +28,41 @@ export type SpecificationRefusal = {
 
 /** The path the implementation step promises to materialize. */
 export const specificationPathForBranch = (branch: string): string => `.chain/${branch}/spec.md`;
+
+export type SpecificationMaterialization = {
+  kind: "direct-implementation";
+  path: string;
+  body: string;
+};
+
+/** Prepare the direct-chain brief for runner-owned workspace bootstrap. */
+export const specificationMaterializationForDirectImplementation = (
+  task: {
+    description: string;
+    templateId?: string | null;
+    chainId?: string | null;
+    templateStep?: {
+      stepIndex?: number;
+      outputKind?: string;
+      priorOutputKinds: readonly string[];
+      taskTemplate?: { name: string } | null;
+    } | null;
+  },
+  branch: string | null,
+): SpecificationMaterialization | null => {
+  if (!task.templateId || !task.chainId
+    || !isDirectImplementationStep(task.templateStep ?? null)
+    || !branch || !isValidBranchName(branch)) return null;
+  const body = featureBriefFromTaskDescription(
+    task.description,
+    (task.templateStep?.priorOutputKinds.length ?? 0) > 0,
+  );
+  return body === null ? null : {
+    kind: "direct-implementation",
+    path: specificationPathForBranch(branch),
+    body,
+  };
+};
 
 /** Narrow repository capability needed by review-claim verification. */
 export type SpecificationReader = {
@@ -98,7 +134,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 
 type AuthoritySource = {
   description: string;
-  templateStep: { outputKind: string; attachmentsFromPrevious: boolean } | null;
+  templateStep: { outputKind: string; priorOutputKinds: string[] } | null;
   stepOutput: { kind: string; body: string } | null;
 };
 
@@ -127,7 +163,7 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
   }
   const text = featureBriefFromTaskDescription(
     source.description,
-    source.templateStep.attachmentsFromPrevious,
+    source.templateStep.priorOutputKinds.length > 0,
   );
   return text === null
     ? { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain task brief is unavailable") }
@@ -151,7 +187,7 @@ const authorityFor = async (
     },
     select: {
       description: true,
-      templateStep: { select: { outputKind: true, attachmentsFromPrevious: true } },
+      templateStep: { select: { outputKind: true, priorOutputKinds: true } },
       stepOutput: { select: { kind: true, body: true } },
     },
   });

@@ -53,6 +53,7 @@ const UNREACHABLE_REMOTE = "/nonexistent/agentos-issue-113-no-such-repo.git";
 
 const claim = (remoteUrl: string): ClaimedTask => ({
   executionMode: "agent",
+  specificationMaterialization: null,
   task: {
     id: "task-113",
     chainId: null,

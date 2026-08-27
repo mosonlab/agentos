@@ -21,6 +21,7 @@ import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
 
 const claim: ClaimedTask = {
   executionMode: "agent",
+  specificationMaterialization: null,
   task: {
     id: "task-1",
     chainId: "chain-1",
@@ -824,12 +825,15 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
     const processStarted = started.events.find((event) => event.type === "PROCESS_STARTED");
     assert.equal(processStarted?.payload.promptTransport, "stdin");
     assert.equal(processStarted?.payload.promptBytes, Buffer.byteLength(prompt));
+    assert.equal(processStarted?.payload.promptHash, sha256(prompt));
     assert.equal((processStarted?.payload.args as string[]).some((arg) => arg.includes("Do the work")), false);
 
     const resumed = await launch(runner, claim, { providerConversationId: "thread-1", input: resumeInput });
     assert.equal(resumed.evidence.exitCode, 0);
     assert.equal(resumed.report.bytes, Buffer.byteLength(resumeInput));
     assert.equal(resumed.report.sha256, sha256(resumeInput), `${runner} altered the resume input on the way to stdin`);
+    const resumedProcessStarted = resumed.events.find((event) => event.type === "PROCESS_STARTED");
+    assert.equal(resumedProcessStarted?.payload.promptHash, sha256(resumeInput));
   }
 });
 

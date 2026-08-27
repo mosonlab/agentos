@@ -162,6 +162,27 @@ test("a rollover refuses a source that is not the successor it was registered to
   }
 });
 
+test("direct platform specification materialization is a registered prompt-only rollover", async () => {
+  const current = (await loadAllTemplateStepSources()).get("direct-engineer-workflow");
+  assert.ok(current);
+  const generation = generationOf("direct-engineer-workflow", "pre-platform-spec-materialization");
+  assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+  assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+  assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
+});
+
+test("every direct prompt-only generation can roll straight to the current source", async () => {
+  const current = (await loadAllTemplateStepSources()).get("direct-engineer-workflow");
+  assert.ok(current);
+  for (const marker of [
+    "pre-blind-review-retirement",
+    "pre-platform-spec-materialization",
+    "pre-regression-step-split",
+  ]) {
+    assert.equal(successorPromptDrift("direct-engineer-workflow", marker, current), null, marker);
+  }
+});
+
 test("a structural generation pins no successor and is unaffected", () => {
   const sources: { stepIndex: number; prompt: string }[] = [{ stepIndex: 1, prompt: "anything" }];
   assert.equal(successorPromptDrift("direct-engineer-workflow", "pre-adjudication", sources), null);

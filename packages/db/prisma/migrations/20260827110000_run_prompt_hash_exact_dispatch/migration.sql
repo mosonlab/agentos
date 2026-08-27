@@ -1,0 +1,1 @@
+ALTER TABLE "Run" ALTER COLUMN "promptHash" DROP NOT NULL;
