@@ -10,6 +10,6 @@
     }
   },
   "scripts": {
-    "test": "node --test *.test.mjs"
+    "test": "node --test *.test.mjs ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}"
   }
 }

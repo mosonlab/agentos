@@ -7,7 +7,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "pretest": "npm run build -w @agentos/db",
-    "test": "TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
+    "test": "TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\" ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}",
     "dev": "vite",
     "preview": "vite preview"
   },
