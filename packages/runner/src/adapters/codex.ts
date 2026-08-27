@@ -102,6 +102,9 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     ];
 };
 
+const isReconnectStatus = (message: string | null): boolean =>
+  /^Reconnecting\.\.\. \d+\/\d+$/u.test(message?.trim() ?? "");
+
 export const parseCodexEvent = (
   state: AdapterState,
   event: Record<string, unknown>,
@@ -138,8 +141,14 @@ export const parseCodexEvent = (
     // only item-level errors count as a run failure.
     if (item?.error) state.sawError = true;
   } else if (type === "error") {
-    state.sawError = true;
-    state.providerError = eventErrorMessage(event) ?? state.providerError;
+    const message = eventErrorMessage(event);
+    // Codex emits reconnect progress through the same `error` event used for
+    // terminal provider failures. Keep the latest message as evidence while
+    // the stream is disconnected, but do not make it an irreversible verdict:
+    // a later turn.completed proves the reconnect recovered. Every other error
+    // remains latched, including an unrecognised error with no message.
+    if (!isReconnectStatus(message)) state.sawError = true;
+    state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
   } else if (type === "turn.completed") {
     state.terminalEventSeen = true;
@@ -200,7 +209,14 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
 export const codexChildEnvironment = (
   _claim: Pick<ClaimedTask, "run">,
   scratch: AgentScratch,
-): NodeJS.ProcessEnv => ({ CODEX_HOME: scratch.configRoot });
+): NodeJS.ProcessEnv => ({
+  // Codex discovers user skills through both $CODEX_HOME/skills and the
+  // cross-agent $HOME/.agents/skills root. Keep both inside this session's
+  // provisioned config root; auth.json and the platform baseline already live
+  // there, so relocating HOME does not change the authentication channel.
+  HOME: scratch.configRoot,
+  CODEX_HOME: scratch.configRoot,
+});
 
 export const provisionCodexSessionConfig = (
   config: RunnerConfig,

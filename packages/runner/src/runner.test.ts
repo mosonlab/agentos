@@ -180,7 +180,30 @@ const SECRETS = [
   ["", "Users", "someone", ".codex", "auth.json"].join("/"),
 ] as const;
 
-const codexStub = (log: string, authFails = false, configReportPath?: string): string => [
+interface CodexStubOptions {
+  authFails?: boolean;
+  configReportPath?: string;
+  session?: {
+    lines: readonly string[];
+    exitCode: number;
+  };
+}
+
+const codexStub = (
+  log: string,
+  {
+    authFails = false,
+    configReportPath,
+    session = {
+      lines: [
+        'echo \'{"type":"thread.started","thread_id":"thread-6"}\'',
+        'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"installed"}}\'',
+        'echo \'{"type":"turn.completed"}\'',
+      ],
+      exitCode: 0,
+    },
+  }: CodexStubOptions = {},
+): string => [
   "#!/bin/sh",
   `echo "$@" >> ${log}`,
   ...(configReportPath ? [`if [ -n "$CODEX_HOME" ]; then printf '%s' "$CODEX_HOME" > ${configReportPath}; fi`] : []),
@@ -195,10 +218,8 @@ const codexStub = (log: string, authFails = false, configReportPath?: string): s
     : '  login) echo "Logged in using ChatGPT"; exit 0 ;;',
   "esac",
   "cat > /dev/null",
-  'echo \'{"type":"thread.started","thread_id":"thread-6"}\'',
-  'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"installed"}}\'',
-  'echo \'{"type":"turn.completed"}\'',
-  "exit 0",
+  ...session.lines,
+  `exit ${session.exitCode}`,
 ].join("\n");
 
 const failingCodexStub = (log: string, mutation = ":"): string => [
@@ -715,7 +736,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     const log = join(root, "codex-argv.log");
     const configReportPath = join(root, "successful-config-root.txt");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, codexStub(log, false, configReportPath));
+    await writeFile(binary, codexStub(log, { configReportPath }));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
@@ -754,12 +775,141 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
   }
 });
 
+test("Codex records success after reconnecting and reaching terminal completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-reconnect-recovered-"));
+  try {
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(join(root, "argv.log"), {
+      session: {
+        lines: [
+          'echo \'{"type":"error","message":"Reconnecting... 1/5"}\'',
+          'echo \'{"type":"error","message":"Reconnecting... 2/5"}\'',
+          'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"output persisted"}}\'',
+          'echo \'{"type":"turn.completed"}\'',
+        ],
+        exitCode: 0,
+      },
+    }));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    });
+
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal(completion.body.terminalSuccess, true);
+    assert.equal(completion.body.failureReason ?? null, null);
+    assert.equal(completion.body.output, "output persisted");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex preserves reconnect evidence when the stream ends before terminal completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-reconnect-interrupted-"));
+  try {
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(join(root, "argv.log"), {
+      session: {
+        lines: ['echo \'{"type":"error","message":"Reconnecting... 3/5"}\''],
+        exitCode: 1,
+      },
+    }));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    });
+
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal(completion.body.terminalSuccess, false);
+    assert.match(String(completion.body.failureReason), /Reconnecting\.\.\. 3\/5/u);
+    await removeRetainedSessionConfig({ body: completion.body });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex preserves reconnect evidence when terminal completion is followed by a nonzero exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-reconnect-nonzero-"));
+  try {
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(join(root, "argv.log"), {
+      session: {
+        lines: [
+          'echo \'{"type":"error","message":"Reconnecting... 2/5"}\'',
+          'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"not persisted"}}\'',
+          'echo \'{"type":"turn.completed"}\'',
+        ],
+        exitCode: 1,
+      },
+    }));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    });
+
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal(completion.body.terminalSuccess, false);
+    assert.match(String(completion.body.failureReason), /Reconnecting\.\.\. 2\/5/u);
+    await removeRetainedSessionConfig({ body: completion.body });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed first completion request restores and retains CODEX_HOME", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-completion-failure-"));
   try {
     const configReportPath = join(root, "config-root.txt");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, codexStub(join(root, "argv.log"), false, configReportPath));
+    await writeFile(binary, codexStub(join(root, "argv.log"), { configReportPath }));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
@@ -836,7 +986,7 @@ test("session-config cleanup failure does not turn delivered work into a failed 
   try {
     const configReportPath = join(root, "config-root.txt");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, codexStub(join(root, "argv.log"), false, configReportPath));
+    await writeFile(binary, codexStub(join(root, "argv.log"), { configReportPath }));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
@@ -1208,6 +1358,70 @@ test("successful execution with failed delivery salvages before removing the wor
   }
 });
 
+test("a pull-request failure after publication keeps the primary delivery evidence and skips salvage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pr-failure-after-push-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    const gh = join(root, "gh");
+    const githubRemote = "git@github.com:owner/name.git";
+    await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > delivered.txt'));
+    await chmod(binary, 0o755);
+    await writeFile(gh, [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "gh version 2.0.0"; exit 0; fi',
+      'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo "[]"; exit 0; fi',
+      'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then echo "GraphQL: Base branch was not found" 1>&2; exit 1; fi',
+      "exit 1",
+    ].join("\n"));
+    await chmod(gh, 0o755);
+    const remote = await seedRemote(root);
+    git(root, "config", "--file", join(root, ".gitconfig"), `url.${remote}.insteadOf`, githubRemote);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = {
+      ...codexOnly(workspaces, root, binary),
+      path: `${root}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      failedWorkspaceRetention: 0,
+    };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      session: testSession(root),
+      repo: { ...mechanicalClaim.repo, remoteUrl: githubRemote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: {
+        ...mechanicalClaim.run,
+        model: "gpt-5.6-sol",
+        maxRunsPerTask: 3,
+        opensPullRequest: true,
+        branch: "declared/head",
+      },
+    });
+
+    const publications = posts.filter((post) => post.path.endsWith("/publication"));
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.deepEqual(publications.map((post) => post.body.pushedBranch), ["declared/head"]);
+    assert.equal(completion?.body.terminalSuccess, false);
+    assert.equal(completion?.body.pushStatus, "FAILED");
+    assert.equal(completion?.body.pushedBranch, "declared/head");
+    assert.match(String(completion?.body.failureReason), /Base branch was not found/u);
+    assert.match(String(completion?.body.deliveryInstructions), /PR creation failed/u);
+    assert.equal((completion?.body.failureEnvelope as { phase?: string }).phase, "DELIVER");
+    assert.equal(git(root, `--git-dir=${remote}`, "branch", "--list", "agentos/task-10/run-1"), "");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a successful pinned review never publishes its dirty detached checkout", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-pinned-no-salvage-"));
   try {
@@ -1362,7 +1576,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     const log = join(root, "codex-argv.log");
     const configReportPath = join(root, "failed-config-root.txt");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, codexStub(log, true, configReportPath));
+    await writeFile(binary, codexStub(log, { authFails: true, configReportPath }));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
     await seedCodexAuth(root);

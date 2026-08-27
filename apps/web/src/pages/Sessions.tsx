@@ -1,24 +1,38 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compact, compactTokens, durationWithInboxWait, formatDateTime, formatT, money, repoWebUrl } from "../lib/format";
+import { compact, compactTokens, durationWithInboxWait, formatDate, formatDateTime, formatT, money, repoWebUrl, timeAgo } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
 import { Link, navigate } from "../lib/router";
 import { useProjectScope } from "../lib/project";
-import { normalize, type StreamItem } from "../lib/session-stream";
+import {
+  clampLines, projectStream, RESUME_MARKER_TEXT, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES,
+  type StreamNode, type ToolCall,
+} from "../lib/session-stream";
+import {
+  ALL_SESSION_FILTER, filterAndGroupSessions, isLiveStatus,
+  isSessionUnseen, markSessionOpened, readSessionSeenState,
+  SESSION_DAY_PAGE_SIZE, SESSION_STATUS_FILTERS, sessionAgentOptions, sessionDayLabelKind,
+  type SessionDayGroup, type SessionSeenState, type SessionStatusFilter,
+} from "../lib/session-list";
 import { useEventStream } from "../lib/use-event-stream";
 import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
-import { IconArrowLeft, IconChevron, IconRefresh } from "../components/icons";
+import {
+  IconArrowLeft, IconChevron, IconRefresh, IconToolDefault, IconToolEdit, IconToolRead, IconToolRun, IconToolSearch,
+  IconToolWeb,
+} from "../components/icons";
 import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
-  STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB,
-  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, Markdown, Page, Pill, Segmented, type PillTone,
+  STAT_PILL, STAT_PILLS,
+  Card, EmptyState, ErrorNotice, GapNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
+  type PillTone,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
+import { Select } from "../components/ui/select";
 import { cn } from "../lib/utils";
 
 /** `.eventLog` is the scroll container and `.eventRow` is the row grid — two
@@ -32,9 +46,7 @@ const BLOCK_MAX = 8_000;
 /** Auto-scroll only when the reader is already at the bottom (assumption A3). */
 const NEAR_BOTTOM_PX = 100;
 
-const LIVE_STATUSES: SessionExecutionStatus[] = ["REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX"];
-
-export const isLive = (status: SessionExecutionStatus): boolean => LIVE_STATUSES.includes(status);
+export const isLive = isLiveStatus;
 
 /** §4.1.1. Reuses the existing tone vocabulary; no new tones. */
 export const sessionPill = (
@@ -106,37 +118,131 @@ const SessionStatusPill = ({ status, mergeOutcome }: { status: SessionExecutionS
 
 /* -------------------------------------------------------------- the list */
 
-export const SessionRow = ({ session }: { session: Session }): ReactNode => {
+const SESSION_ROW = "flex min-w-0 items-center gap-[12px] border-b border-[color:var(--border-soft)] px-[20px] py-[13px] last:border-b-0 hover:bg-secondary";
+const SESSION_TITLE = "min-w-0 flex-1 rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]";
+const SESSION_DAY_HEADING = "flex items-baseline gap-[9px] border-b border-[color:var(--border-soft)] bg-secondary/45 px-[20px] py-[10px]";
+const SESSION_DAY_ROWS = "divide-y divide-[color:var(--border-soft)]";
+
+const sessionDotTone = (tone: PillTone): string | undefined => {
+  if (tone === "green") return DOT_TONE.green;
+  if (tone === "amber") return DOT_TONE.amber;
+  if (tone === "red") return DOT_TONE.red;
+  // The existing dot vocabulary intentionally has no coloured grey state;
+  // leaving the base DOT class in place preserves its faint/inert appearance.
+  return undefined;
+};
+
+const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boolean }): ReactNode => {
   const t = useT();
-  const target = session.task
-    ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link>
-    : session.goal
-      ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link>
-      : "—";
   return (
-    <TableRow
-      className="cursor-pointer"
+    <HoverCard openDelay={120} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <div data-session-title tabIndex={0} className={SESSION_TITLE}>
+          <div className={cn(
+            "overflow-hidden text-ellipsis whitespace-nowrap text-foreground hover:underline",
+            unseen ? "font-bold" : "font-normal",
+          )}>
+            {session.task
+              ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link>
+              : session.goal
+                ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link>
+                : session.id}
+          </div>
+          <div className="mt-[3px] overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] text-muted-foreground">
+            {session.agent?.title || session.agentId}
+          </div>
+        </div>
+      </HoverCardTrigger>
+      <HoverCardContent side="right" align="start" sideOffset={8} className="w-[320px] rounded-lg p-[14px]">
+        <KeyValue columns={2} items={[
+          { k: t("sessions.detail.started"), v: formatDateTime(session.startedAt ?? session.requestedAt) },
+          { k: t("sessions.detail.duration"), v: durationWithInboxWait(
+            session.startedAt,
+            session.endedAt,
+            session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
+          ) },
+          { k: t("sessions.hover.runner"), v: session.runner },
+          { k: t("sessions.hover.result"), v: resultWord(session) },
+          { k: t("sessions.detail.run"), v: session.run ? `#${session.run.runNumber}` : "—" },
+          ...(session.failureReason
+            ? [{ k: t("sessions.row.failureReason"), v: <span className="text-[color:var(--destructive-fg)] [overflow-wrap:anywhere]">{compact(session.failureReason, 200)}</span> }]
+            : []),
+        ]} />
+      </HoverCardContent>
+    </HoverCard>
+  );
+};
+
+export const SessionRow = ({ session, unseen = false }: { session: Session; unseen?: boolean }): ReactNode => {
+  const { tone } = sessionPill(session.executionStatus, session.mergeOutcome);
+  return (
+    <div
+      data-session-row
+      className={cn(SESSION_ROW, "cursor-pointer")}
       // Link calls preventDefault and navigates but does not stop propagation,
       // so without this guard clicking the Task cell would open the session.
       onClick={(event) => { if (!event.defaultPrevented) navigate(`/sessions/${session.id}`); }}
     >
-      <TableCell className={TABLE_NAME}>
-        {formatDateTime(session.startedAt ?? session.requestedAt)}
-        <span className={TABLE_SUB}>{session.run ? t("sessions.row.run", { n: session.run.runNumber }) : session.id}</span>
-      </TableCell>
-      <TableCell><AgentChip agent={null} name={session.agent?.title ?? session.agentId} /></TableCell>
-      <TableCell>{target}</TableCell>
-      <TableCell><Pill tone="grey">{session.runner}</Pill></TableCell>
-      <TableCell>{durationWithInboxWait(
-        session.startedAt,
-        session.endedAt,
-        session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
-      )}</TableCell>
-      <TableCell><SessionStatusPill status={session.executionStatus} mergeOutcome={session.mergeOutcome} /></TableCell>
-      <TableCell {...(session.failureReason === null ? {} : { title: compact(session.failureReason, 200) })}>
-        {resultWord(session)}
-      </TableCell>
-    </TableRow>
+      <span aria-hidden="true" data-session-status className={cn(DOT, sessionDotTone(tone))} />
+      <SessionHoverCard session={session} unseen={unseen} />
+      {unseen ? <span aria-hidden="true" data-session-unseen className={cn(DOT, DOT_TONE.green)} /> : null}
+      <span data-session-time className="shrink-0 text-[11.5px] text-muted-foreground">
+        {timeAgo(session.startedAt ?? session.requestedAt)}
+      </span>
+    </div>
+  );
+};
+
+const SessionDayGroupView = ({
+  group,
+  expanded,
+  onToggle,
+  seenState,
+}: {
+  group: SessionDayGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  seenState: SessionSeenState | null;
+}): ReactNode => {
+  const t = useT();
+  const kind = sessionDayLabelKind(group.key);
+  const heading = kind === "today"
+    ? t("sessions.day.today")
+    : kind === "yesterday"
+      ? t("sessions.day.yesterday")
+      : formatDate(group.at);
+  const remaining = Math.max(0, group.sessions.length - SESSION_DAY_PAGE_SIZE);
+  const visible = expanded ? group.sessions : group.sessions.slice(0, SESSION_DAY_PAGE_SIZE);
+  return (
+    <section data-session-day={group.key}>
+      <div className={SESSION_DAY_HEADING}>
+        <h2 className="text-[12.5px] font-bold text-foreground">{heading}</h2>
+        <span data-session-day-count className="text-[11.5px] text-muted-foreground">
+          {t("sessions.day.count", { n: group.sessions.length })}
+        </span>
+      </div>
+      <div className={SESSION_DAY_ROWS}>
+        {visible.map((session) => (
+          <SessionRow
+            key={session.id}
+            session={session}
+            unseen={seenState !== null && isSessionUnseen(session, seenState)}
+          />
+        ))}
+      </div>
+      {remaining > 0 ? (
+        <div className="border-t border-[color:var(--border-soft)] px-[20px] py-[9px]">
+          <button
+            type="button"
+            data-session-day-toggle
+            className="border-0 bg-transparent p-0 text-[12px] text-primary hover:underline"
+            onClick={onToggle}
+          >
+            {t(expanded ? "sessions.day.collapse" : "sessions.day.expand", expanded ? undefined : { n: remaining })}
+          </button>
+        </div>
+      ) : null}
+    </section>
   );
 };
 
@@ -151,14 +257,58 @@ export const SessionsPage = (): ReactNode => {
   const [exhausted, setExhausted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(() => new Set());
+  const [seenSnapshot, setSeenSnapshot] = useState<{ projectId: string; state: SessionSeenState } | null>(() => (
+    projectId === "" ? null : { projectId, state: readSessionSeenState(projectId) }
+  ));
+  const [agentFilter, setAgentFilter] = useState<string>(ALL_SESSION_FILTER);
+  const [statusFilter, setStatusFilter] = useState<SessionStatusFilter>(ALL_SESSION_FILTER);
   const t = useT();
-  useEffect(() => { setOlder([]); setExhausted(false); setMoreError(null); }, [projectId]);
+  const seenProjectAtMount = useRef(projectId);
+  useEffect(() => {
+    const changedProject = projectId !== seenProjectAtMount.current;
+    seenProjectAtMount.current = projectId;
+    setOlder([]);
+    setExhausted(false);
+    setMoreError(null);
+    setExpandedDays(new Set());
+    if (projectId === "") {
+      setSeenSnapshot(null);
+    } else if (changedProject) {
+      setSeenSnapshot({ projectId, state: readSessionSeenState(projectId) });
+    }
+    setAgentFilter(ALL_SESSION_FILTER);
+    setStatusFilter(ALL_SESSION_FILTER);
+  }, [projectId]);
 
   const sessions = useMemo(() => {
     const byId = new Map<string, Session>();
     for (const session of [...(head.data ?? []), ...older]) if (!byId.has(session.id)) byId.set(session.id, session);
     return [...byId.values()].sort((left, right) => right.requestedAt.localeCompare(left.requestedAt));
   }, [head.data, older]);
+
+  const dayGroups = useMemo(() => filterAndGroupSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
+  const agentOptions = useMemo(() => sessionAgentOptions(sessions, t("sessions.filter.all")), [sessions, t]);
+  const statusOptions = useMemo(() => {
+    const labels: Record<SessionStatusFilter, string> = {
+      all: t("sessions.filter.all"),
+      live: t("sessions.filter.live"),
+      done: t("sessions.filter.done"),
+      failed: t("sessions.filter.failed"),
+      cancelled: t("sessions.filter.cancelled"),
+    };
+    return SESSION_STATUS_FILTERS.map((value) => ({ value, label: labels[value] }));
+  }, [t]);
+  const filtersActive = agentFilter !== ALL_SESSION_FILTER || statusFilter !== ALL_SESSION_FILTER;
+  const seenState = seenSnapshot?.projectId === projectId ? seenSnapshot.state : null;
+
+  const toggleDay = (key: string): void => {
+    setExpandedDays((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
 
   const loadMore = async (): Promise<void> => {
     const oldest = sessions.at(-1);
@@ -190,7 +340,31 @@ export const SessionsPage = (): ReactNode => {
           <h1 className={PAGE_HEAD_H1}>{t("sessions.head.title")}</h1>
           <div className={PAGE_HEAD_SUBTITLE}>{t("sessions.head.subtitle", { project: project?.name ?? t("tasks.head.thisProject") })}</div>
         </div>
-        <div className={PAGE_ACTIONS}>
+        <div className={cn(PAGE_ACTIONS, "flex-wrap justify-end")}>
+          <label className="flex items-center gap-[6px] text-[12px] text-secondary-foreground">
+            <span>{t("sessions.filter.agent")}</span>
+            <Select
+              aria-label={t("sessions.filter.agent")}
+              data-session-filter-agent
+              className="w-[150px]"
+              value={agentFilter}
+              onChange={(event) => setAgentFilter(event.target.value)}
+            >
+              {agentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </Select>
+          </label>
+          <label className="flex items-center gap-[6px] text-[12px] text-secondary-foreground">
+            <span>{t("sessions.filter.status")}</span>
+            <Select
+              aria-label={t("sessions.filter.status")}
+              data-session-filter-status
+              className="w-[130px]"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as SessionStatusFilter)}
+            >
+              {statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </Select>
+          </label>
           <Button type="button" variant="legacy" size="legacy" onClick={head.reload}><IconRefresh />{t("common.refresh")}</Button>
         </div>
       </div>
@@ -198,20 +372,21 @@ export const SessionsPage = (): ReactNode => {
       <div className={STACK}>
         {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
         {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
+        {filtersActive ? <div data-session-filter-hint className={HINT}>{t("sessions.filter.loaded")}</div> : null}
         <Card flush>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t("sessions.table.started")}</TableHead><TableHead>{t("sessions.table.agent")}</TableHead><TableHead>{t("sessions.table.task")}</TableHead>
-                <TableHead>{t("sessions.table.runner")}</TableHead><TableHead>{t("sessions.table.duration")}</TableHead><TableHead>{t("sessions.table.status")}</TableHead><TableHead>{t("sessions.table.result")}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sessions.map((session) => <SessionRow key={session.id} session={session} />)}
-            </TableBody>
-          </Table>
-          {sessions.length === 0
-            ? <EmptyState>{t(head.loading ? "common.loading" : "sessions.empty")}</EmptyState>
+          <div data-session-list>
+            {dayGroups.map((group) => (
+              <SessionDayGroupView
+                key={group.key}
+                group={group}
+                expanded={expandedDays.has(group.key)}
+                seenState={seenState}
+                onToggle={() => toggleDay(group.key)}
+              />
+            ))}
+          </div>
+          {dayGroups.length === 0
+            ? <EmptyState>{t(head.loading ? "common.loading" : sessions.length > 0 && filtersActive ? "sessions.empty.filtered" : "sessions.empty")}</EmptyState>
             : null}
         </Card>
         {sessions.length >= PAGE_SIZE && !exhausted ? (
@@ -241,30 +416,80 @@ const TOOL_STATE_TONE: Record<string, string> = {
   ok: "text-muted-foreground",
 };
 
-const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): ReactNode => {
+type ToolKind = "read" | "edit" | "search" | "run" | "web" | "default";
+
+const TOOL_KIND_ICONS: Record<ToolKind, () => ReactNode> = {
+  read: IconToolRead,
+  edit: IconToolEdit,
+  search: IconToolSearch,
+  run: IconToolRun,
+  web: IconToolWeb,
+  default: IconToolDefault,
+};
+
+const toolKind = (name: string): ToolKind => {
+  const lower = name.toLowerCase();
+  if (/read|cat|view|open/u.test(lower)) return "read";
+  if (/edit|write|patch|replace|delete/u.test(lower)) return "edit";
+  if (/search|grep|glob|find/u.test(lower)) return "search";
+  if (/run|bash|shell|exec|command|terminal/u.test(lower)) return "run";
+  if (/web|http|fetch|browser|url/u.test(lower)) return "web";
+  return "default";
+};
+
+const jsonBlock = (value: unknown): string => JSON.stringify(value ?? null, null, 2) ?? "—";
+
+/** Apply the line budget before the existing byte backstop. The line notice is
+ *  appended after the byte truncator so both notices remain visible when a
+ *  single capped line is also over the character budget. */
+const cappedBlock = (
+  text: string,
+  t: ReturnType<typeof useT>,
+): string => {
+  const lineClamp = clampLines(text, TOOL_OUTPUT_MAX_LINES);
+  const byteClamp = truncateBlock(lineClamp.text);
+  return lineClamp.dropped === 0
+    ? byteClamp
+    : `${byteClamp}\n${t("sessions.tool.linesWithheld", { n: lineClamp.dropped })}`;
+};
+
+const ToolCallLine = ({ call }: { call: ToolCall }): ReactNode => {
   const [open, setOpen] = useState(false);
   const t = useT();
+  const kind = toolKind(call.name);
+  const Icon = TOOL_KIND_ICONS[kind];
+  const failedSummary = call.result?.split(/\r?\n/u)[0]?.trim() ?? "";
+  const summary = call.state === "error" ? (failedSummary || call.primaryArg || "") : call.primaryArg ?? "";
   return (
-    <div className="rounded-lg border border-[color:var(--border-soft)] bg-card">
-      <button type="button" className="flex w-full items-center gap-[8px] border-0 bg-transparent px-[14px] py-[9px] text-left text-[12px]" onClick={() => setOpen(!open)}>
-        <span className="text-muted-foreground"><IconChevron open={open} /></span>
-        <span className="text-foreground">{item.name}</span>
-        <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">{item.primaryArg ?? ""}</span>
-        <span className={cn("text-[11.5px]", TOOL_STATE_TONE[item.state] ?? "text-muted-foreground")}>{t(`sessions.tool.state.${item.state}`)}</span>
-        <span className={MSG_TIME}>{formatDateTime(item.at)}</span>
+    <div className="border-b border-[color:var(--border-soft)] last:border-b-0">
+      <button
+        type="button"
+        data-tool-line={call.id}
+        aria-expanded={open}
+        className="flex w-full items-center gap-[8px] border-0 bg-transparent px-[14px] py-[9px] text-left text-[12px]"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="text-muted-foreground" data-tool-kind={kind}><Icon /></span>
+        <span className="text-foreground">{call.name}</span>
+        <span className={cn(
+          "min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap",
+          call.state === "error" ? "text-[color:var(--destructive-fg)]" : "text-muted-foreground",
+        )}>{summary}</span>
+        <span className={cn("text-[11.5px]", TOOL_STATE_TONE[call.state] ?? "text-muted-foreground")}>{t(`sessions.tool.state.${call.state}`)}</span>
+        <span className={MSG_TIME}>{formatDateTime(call.at)}</span>
       </button>
       {open ? (
         <div className="grid gap-[10px] px-[14px] pb-[12px]">
-          {item.filePath === null ? null : (
-            <div className="text-[12px] text-secondary-foreground [overflow-wrap:anywhere]">{item.filePath}</div>
+          {call.filePath === null ? null : (
+            <div className="text-[12px] text-secondary-foreground [overflow-wrap:anywhere]">{call.filePath}</div>
           )}
           <div>
             <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.arguments")}</div>
-            <div className={CODE_BLOCK}>{truncateBlock(JSON.stringify(item.args ?? null, null, 2))}</div>
+            <div className={CODE_BLOCK}>{cappedBlock(jsonBlock(call.args), t)}</div>
           </div>
           <div>
             <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.result")}</div>
-            <div className={CODE_BLOCK}>{item.result === null ? "—" : truncateBlock(item.result)}</div>
+            <div className={CODE_BLOCK}>{cappedBlock(call.result === null ? "—" : call.result, t)}</div>
           </div>
         </div>
       ) : null}
@@ -272,17 +497,48 @@ const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): Re
   );
 };
 
-export const StreamItemView = ({ item }: { item: StreamItem }): ReactNode => {
+export const ToolGroup = ({ node }: { node: Extract<StreamNode, { kind: "tools" }> }): ReactNode => {
   const t = useT();
-  if (item.kind === "tool") return <ToolItem item={item} />;
-  if (item.kind === "error") return <ErrorNotice message={item.message} />;
+  return (
+    <div className="rounded-lg border border-[color:var(--border-soft)] bg-card">
+      <div className="px-[14px] pt-[10px] text-[11.5px] text-muted-foreground">{t("sessions.tool.group")}</div>
+      <div className="mt-[3px]">
+        {node.calls.map((call) => <ToolCallLine key={call.id} call={call} />)}
+      </div>
+    </div>
+  );
+};
+
+const TextNodeBody = ({ text }: { text: string }): ReactNode => {
+  return <MarkdownClamp text={text} lines={TEXT_NODE_MAX_LINES} maxHeightClass="max-h-[300px]" />;
+};
+
+export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
+  const t = useT();
+  if (node.kind === "tools") return <ToolGroup node={node} />;
+  if (node.kind === "marker") {
+    return node.variant === "error"
+      ? <ErrorNotice message={node.text} />
+      : <div className="text-[12px] text-muted-foreground">{t(RESUME_MARKER_TEXT)}</div>;
+  }
+  if (node.kind === "input") {
+    return (
+      <div className={MSG_CARD}>
+        <div className={MSG_HEAD}>
+          <span className="text-foreground">{t("sessions.stream.operator")}</span>
+          <span className={MSG_TIME}>{formatDateTime(node.at)}</span>
+        </div>
+        <TextNodeBody text={node.text} />
+      </div>
+    );
+  }
   return (
     <div className={MSG_CARD}>
       <div className={MSG_HEAD}>
-        <span className="text-foreground">{t(item.kind === "final" ? "sessions.stream.result" : "sessions.stream.agent")}</span>
-        <span className={MSG_TIME}>{formatDateTime(item.at)}</span>
+        <span className="text-foreground">{t(node.final ? "sessions.stream.result" : "sessions.stream.agent")}</span>
+        <span className={MSG_TIME}>{formatDateTime(node.at)}</span>
       </div>
-      <Markdown text={item.text} />
+      <TextNodeBody text={node.text} />
     </div>
   );
 };
@@ -367,9 +623,17 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   const terminal = session ? !isLive(session.executionStatus) : false;
   const stream = useEventStream(session?.runId ?? null, terminal);
 
+  // The list is unmounted by hash navigation, so the detail page is the one
+  // place that can acknowledge an open. Including terminal in the dependency
+  // list acknowledges the same Session again when it finishes while watched.
+  useEffect(() => {
+    if (session === null || session.id !== sessionId) return;
+    markSessionOpened(session.projectId, session.id);
+  }, [session?.id, session?.projectId, sessionId, terminal]);
+
   const scroller = useRef<HTMLDivElement | null>(null);
   const [unseen, setUnseen] = useState(0);
-  const lastCount = useRef(0);
+  const lastNodeRevisions = useRef(new Map<string, string>());
   /** The initial drain is history, not news, and it arrives over several pages.
    *  Without this the page opens claiming every event is new (seen in the
    *  browser against a real 771-event session: the stream rendered `98 new ↓`
@@ -378,7 +642,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   const drained = useRef(false);
 
   useEffect(() => {
-    lastCount.current = 0;
+    lastNodeRevisions.current = new Map();
     primed.current = false;
     drained.current = false;
     setUnseen(0);
@@ -387,8 +651,8 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   // Keyed on the event count and the runner, not on array identity, so an empty
   // poll does not re-normalize 20 000 events.
   const runner = session?.runner ?? "CLAUDE";
-  const { items, files, counts } = useMemo(
-    () => normalize(stream.events, runner, terminal),
+  const { nodes, files, counts } = useMemo(
+    () => projectStream(stream.events, runner, terminal),
     [stream.events.length, runner, terminal],
   );
 
@@ -400,8 +664,12 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   }, []);
 
   useEffect(() => {
-    const added = items.length - lastCount.current;
-    lastCount.current = items.length;
+    const current = new Map(nodes.map((node) => [node.id, JSON.stringify(node)]));
+    const added = [...current].reduce(
+      (count, [id, revision]) => count + (lastNodeRevisions.current.get(id) === revision ? 0 : 1),
+      0,
+    );
+    lastNodeRevisions.current = current;
     if (added <= 0) return;
     const node = scroller.current;
     if (!node) return;
@@ -409,7 +677,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= NEAR_BOTTOM_PX;
     if (atBottom) scrollToBottom();
     else setUnseen((current) => current + added);
-  }, [items.length, scrollToBottom]);
+  }, [nodes, scrollToBottom]);
 
   // The drain is over on the `loading` true → false *transition*, not on a bare
   // `loading === false`: the hook starts with `loading` false while `runId` is
@@ -485,15 +753,15 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
           ]} />
         </Card>
 
-        <Card title={t("sessions.stream.title")} extra={<span className={COUNT}>{items.length}{plus}</span>}>
+        <Card title={t("sessions.stream.title")} extra={<span className={COUNT}>{nodes.length}{plus}</span>}>
           <div className={STACK}>
             {stream.capped ? (
               <div className={HINT}>{t("sessions.stream.capped", { shown: stream.events.length, total: stream.total })}</div>
             ) : null}
             {stream.error === null ? null : <ErrorNotice message={`${stream.error.status} ${stream.error.message}`} onRetry={stream.reload} />}
-            {items.length === 0 ? <EmptyState>{t(stream.loading ? "sessions.stream.loading" : "sessions.stream.empty")}</EmptyState> : (
+            {nodes.length === 0 ? <EmptyState>{t(stream.loading ? "sessions.stream.loading" : "sessions.stream.empty")}</EmptyState> : (
               <div ref={scroller} className="max-h-[720px] overflow-auto [&>*+*]:mt-[12px]">
-                {items.map((item) => <StreamItemView key={`${item.kind}-${item.id}`} item={item} />)}
+                {nodes.map((node) => <StreamNodeView key={`${node.kind}-${node.id}`} node={node} />)}
               </div>
             )}
             {unseen > 0 ? (

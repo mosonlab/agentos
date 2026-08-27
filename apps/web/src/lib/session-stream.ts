@@ -23,8 +23,44 @@ export type StreamItem =
   | { kind: "error"; id: string; at: string; message: string }
   | { kind: "final"; id: string; at: string; text: string };
 
+/** A completed tool call as it appears in the normalized stream. The
+ * projection keeps this shape intact and only changes its container: a
+ * maximal run of these calls becomes one `tools` node. */
+export type ToolCall = Extract<StreamItem, { kind: "tool" }>;
+
+/** The stable vocabulary consumed by the Session stream renderer. `input` and
+ * `marker` are declared here even though their producers arrive in later
+ * slices; adding those producers must not widen the renderer's contract. */
+export type StreamNode =
+  | { kind: "input"; id: string; at: string; text: string }
+  | { kind: "text"; id: string; at: string; text: string; final: boolean }
+  | { kind: "tools"; id: string; at: string; calls: ToolCall[] }
+  | { kind: "marker"; id: string; at: string; variant: "info" | "error"; text: string };
+
 export type FileTouch = { path: string; count: number };
 export type StreamCounts = { messages: number; toolCalls: number; files: number };
+export type StreamProjection = { nodes: StreamNode[]; files: FileTouch[]; counts: StreamCounts };
+
+/** The line budgets keep an expanded tool call or a prose card from taking over
+ *  the page. They live with the stream contract so the renderer and its tests
+ *  cannot drift to different defaults. */
+export const TOOL_OUTPUT_MAX_LINES = 40;
+export const TEXT_NODE_MAX_LINES = 12;
+
+export type LineClamp = { text: string; dropped: number };
+
+/** Keep the first `maxLines` lines and report what was withheld. A short value
+ *  is returned byte-for-byte so callers can compose this with other caps. */
+export const clampLines = (text: string, maxLines: number): LineClamp => {
+  const lines = text.split(/\r?\n/u);
+  if (lines.length <= maxLines) return { text, dropped: 0 };
+  return { text: lines.slice(0, maxLines).join("\n"), dropped: lines.length - maxLines };
+};
+
+/** The node carries a translation key rather than locale-bound copy: the
+ * projection remains a pure function of the event stream, while the renderer
+ * can use the active locale when it paints the resume boundary. */
+export const RESUME_MARKER_TEXT = "sessions.stream.resumed";
 
 const PRIMARY_ARG_MAX = 120;
 const ERROR_MESSAGE_MAX = 500;
@@ -312,6 +348,176 @@ export const normalize = (
       messages: items.filter((item) => item.kind === "text").length,
       toolCalls: items.filter((item) => item.kind === "tool").length,
       files: files.length,
+    },
+  };
+};
+
+/**
+ * Projects normalized stream items into the small set of things the operator
+ * should read. Normalization remains the payload-mapping contract: this pass
+ * deliberately does not inspect provider payloads a second time. It only
+ * turns text/final items into text nodes and folds adjacent tool items into a
+ * single group. Error and process-boundary items become marker nodes here, and
+ * the declared input variant keeps the type stable for its later producer.
+ *
+ * The result is intentionally pure. In particular, counts are calculated from
+ * the returned nodes, so any grouping or future projection rule cannot make
+ * the stat bar disagree with the stream that is actually rendered.
+ */
+export const projectStream = (
+  events: SessionEvent[],
+  runner: RunnerKind,
+  terminal: boolean,
+): StreamProjection => {
+  const normalized = normalize(events, runner, terminal);
+  const nodes: StreamNode[] = [];
+  let tools: ToolCall[] = [];
+
+  type ProjectionEntry =
+    | { index: number; item: StreamItem }
+    | { index: number; marker: Extract<StreamNode, { kind: "marker" }> }
+    | { index: number; input: Extract<StreamNode, { kind: "input" }> };
+
+  const eventIndexes = new Map<string, number>();
+  const toolIndexes = new Map<string, number>();
+  for (const [index, event] of events.entries()) {
+    if (!eventIndexes.has(event.id)) eventIndexes.set(event.id, index);
+    if (event.type === "TOOL_STARTED" || event.type === "TOOL_COMPLETED") {
+      const toolId = event.toolCallId ?? event.id;
+      if (!toolIndexes.has(toolId)) toolIndexes.set(toolId, index);
+    }
+  }
+
+  const eventIndexForItem = (item: StreamItem): number => {
+    // Tool ids are call ids rather than event ids, so anchor them at their
+    // first start/completion event. Other normalized items retain their source
+    // event id. Keeping this association here lets markers be interleaved in
+    // the original stream without making the normalizer carry presentation
+    // metadata.
+    if (item.kind === "tool") {
+      const toolIndex = toolIndexes.get(item.id);
+      if (toolIndex !== undefined) return toolIndex;
+    }
+    return eventIndexes.get(item.id) ?? events.length;
+  };
+
+  const entries: ProjectionEntry[] = normalized.items
+    // `error` is represented by the marker entry below. Leaving it in this
+    // list would duplicate the marker or make malformed payloads observable.
+    .filter((item) => item.kind !== "error")
+    .map((item) => ({ index: eventIndexForItem(item), item }));
+
+  let processStarts = 0;
+  for (const [index, event] of events.entries()) {
+    if (asRecord(event.payload) === null) continue;
+    if (event.type === "ADAPTER_ERROR" || event.type === "PROMPT_DELIVERY_FAILED") {
+      entries.push({
+        index,
+        marker: { kind: "marker", id: event.id, at: event.at, variant: "error", text: adapterErrorMessage(event.payload) },
+      });
+    } else if (event.type === "PROCESS_STARTED") {
+      processStarts += 1;
+      if (processStarts > 1) {
+        entries.push({
+          index,
+          marker: { kind: "marker", id: event.id, at: event.at, variant: "info", text: RESUME_MARKER_TEXT },
+        });
+      }
+    }
+  }
+  const piInputSeen = new Set<string>();
+  for (const [index, event] of events.entries()) {
+    if (runner !== "PI" || event.type !== "MODEL_COMPLETED") continue;
+    const message = asRecord(asRecord(event.payload)?.message);
+    if (asString(message?.role) !== "user") continue;
+    const content = message?.content;
+    const text = Array.isArray(content) ? contentText(content) : asString(content) ?? "";
+    if (text.trim().length === 0) continue;
+
+    // PI may repeat a completed message on `turn_end`, just as it repeats
+    // assistant messages. Use its provider identity where available, while
+    // preserving anonymous user messages rather than guessing they are dupes.
+    const timestamp = message?.timestamp;
+    const identity = typeof timestamp === "number" || typeof timestamp === "string"
+      ? String(timestamp)
+      : textSignatureId(content);
+    if (identity !== null) {
+      if (piInputSeen.has(identity)) continue;
+      piInputSeen.add(identity);
+    }
+
+    entries.push({ index, input: { kind: "input", id: event.id, at: event.at, text } });
+  }
+  entries.sort((left, right) => left.index - right.index);
+
+  const flushTools = (): void => {
+    if (tools.length === 0) return;
+    const first = tools[0]!;
+    nodes.push({ kind: "tools", id: first.id, at: first.at, calls: tools });
+    tools = [];
+  };
+
+  const lastTextConstituent = new Map<string, string>();
+
+  const pushTextNode = (item: Extract<StreamItem, { kind: "text" | "final" }>, final: boolean): void => {
+    // Empty output is not a message. In particular, ignoring it before
+    // flushing tools means a provider's empty delta cannot split a tool run.
+    if (item.text.trim().length === 0) return;
+
+    const previous = nodes.at(-1);
+    if (final) {
+      // CODEX's final output repeats its last agent message. Keep the original
+      // node (and its Agent heading) rather than showing the same prose twice.
+      if (previous?.kind === "text"
+        && (previous.text === item.text || lastTextConstituent.get(previous.id) === item.text)) return;
+    } else if (previous?.kind === "text" && !previous.final) {
+      // Streaming boundaries are not reader-visible boundaries. The first
+      // node owns the id and timestamp, while each message remains separated
+      // by a blank line inside the same prose card.
+      previous.text = `${previous.text}\n\n${item.text}`;
+      lastTextConstituent.set(previous.id, item.text);
+      return;
+    }
+
+    nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final });
+    if (!final) lastTextConstituent.set(item.id, item.text);
+  };
+
+  for (const entry of entries) {
+    if ("marker" in entry) {
+      flushTools();
+      nodes.push(entry.marker);
+      continue;
+    }
+    if ("input" in entry) {
+      flushTools();
+      nodes.push(entry.input);
+      continue;
+    }
+    const item = entry.item;
+    if (item.kind === "tool") {
+      tools.push(item);
+      continue;
+    }
+
+    if ((item.kind === "text" || item.kind === "final") && item.text.trim().length === 0) continue;
+
+    flushTools();
+    if (item.kind === "text") {
+      pushTextNode(item, false);
+    } else if (item.kind === "final") {
+      pushTextNode(item, true);
+    }
+  }
+  flushTools();
+
+  return {
+    nodes,
+    files: normalized.files,
+    counts: {
+      messages: nodes.filter((node) => node.kind === "text").length,
+      toolCalls: nodes.reduce((count, node) => count + (node.kind === "tools" ? node.calls.length : 0), 0),
+      files: normalized.files.length,
     },
   };
 };

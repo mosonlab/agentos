@@ -518,7 +518,10 @@ export const executeClaim = async (
       !succeeded && config.failedWorkspaceRetention > 0,
       // Pinned review/verification checkouts are disposable at every outcome;
       // their stale scratch state must never become chain publication evidence.
-      succeeded || Boolean(workspace.pinnedBaseSha),
+      // A failed PR operation can follow a successful, acknowledged push. That
+      // branch is already durable even though the run must fail, so salvaging it
+      // would publish a second ref and replace the primary delivery evidence.
+      succeeded || Boolean(workspace.pinnedBaseSha) || Boolean(primaryDelivery?.pushedBranch),
     );
     if (!succeeded && cleaned.salvage) {
       delivery = cleaned.salvage;
