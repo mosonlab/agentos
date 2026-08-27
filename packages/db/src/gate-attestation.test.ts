@@ -46,14 +46,14 @@ test("outcomes other than pass attest nothing", () => {
     summary: "unit tests",
   });
   assert.equal(deriveGateAttestation(V2, gateFail), null);
-  const authorityResign = JSON.stringify({
+  const refreshConflict = JSON.stringify({
     schemaVersion: 2,
-    outcome: "authority-resign",
+    outcome: "refresh-conflict",
     headSha: HEAD,
     baseHeadSha: BASE,
-    summary: "release authority must be re-signed",
+    summary: "the branch no longer refreshes cleanly onto its base",
   });
-  assert.equal(deriveGateAttestation(V2, authorityResign), null);
+  assert.equal(deriveGateAttestation(V2, refreshConflict), null);
 });
 
 test("the frozen v1 generation attests nothing, whatever it reports", () => {

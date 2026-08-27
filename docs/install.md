@@ -32,8 +32,6 @@ npm ci
 npm run setup:local
 npm run build
 docker compose up -d --wait --wait-timeout 60 postgres
-export GOAL5A0_MASTER_SHA=8d69ee8544196a3310b3d63caf8ce5ec9a0e023b
-export GOAL5A0_CONTROL_PLANE_A_SHA=29f8dd354cb99d671c2e2e4e9e23716fd8004f3d
 npm run db:migrate:release -- --fresh
 ```
 
@@ -64,10 +62,9 @@ before putting data in it.
 is documented in `CONTRIBUTING.md`, not as an installation command. The guarded
 release path above runs `npm run db:migrate:release -- --fresh`, which takes an
 exclusive maintenance lock before it inspects schema state and holds it through
-the guarded migration. An export without a valid `release-authority.json`
-attestation stops rather than defaulting to trusted. `--existing` separately
-implements the verified-bundle consumer, but this repository does not ship the
-backup producer needed to create a conforming bundle. The supported release
+the guarded migration. `--existing` separately implements the verified-bundle
+consumer, but this repository does not ship the backup producer needed to
+create a conforming bundle. The supported release
 workflow therefore remains fresh-only; `--existing` does not emit a synthetic
 "interface unavailable" refusal and must not be treated as an end-to-end
 supported migration path. The exact implemented sequence and refusal conditions

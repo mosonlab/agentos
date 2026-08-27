@@ -8,16 +8,11 @@ import { MergeRecoveryStatus } from "@prisma/client";
 import {
   defenseListReason,
   defenseTriggers,
-  isTestPath,
   isMergeReadinessStep,
   mergeRecoveryPhase,
   mergeRecoveryTransitionAllowed,
-  MAX_REVIEW_FINDINGS,
-  MAX_REVIEW_FINDING_TEXT,
-  parseIndependentReviewDecision,
   parseResolverResult,
   parseRegressionVerdict,
-  resolutionTestTriggers,
 } from "./merge-tail.js";
 
 const A = "a".repeat(40);
@@ -127,11 +122,17 @@ test("merge-resolver results are versioned and head-bound", () => {
   })]) assert.equal(parseResolverResult(body).status, "invalid");
 });
 
+/** Test sources are not merge-tail machinery, so the inventory below skips them. */
+const isTestSource = (path: string): boolean => (
+  /(?:^|\/)(?:tests?|__tests__)(?:\/|$)/u.test(path)
+  || /(?:\.(?:dbtest|test|spec)|-test)\.[^.]+$/u.test(path)
+);
+
 test("the defense list covers tracked merge-tail machinery", () => {
   const tracked = execFileSync("git", ["-C", "../..", "ls-files"], { encoding: "utf8" })
     .trim().split("\n");
   const sourcePaths = tracked.filter((path) => (
-    /^(?:packages\/api|packages\/db)\/src\/.*\.ts$/u.test(path) && !isTestPath(path)
+    /^(?:packages\/api|packages\/db)\/src\/.*\.ts$/u.test(path) && !isTestSource(path)
   ));
   const sourcePatterns = [
     /import\s*(?:type\s*)?\{[^}]*\}\s*from "\.\/merge-tail\.js"/su,
@@ -160,110 +161,10 @@ test("the defense list covers tracked merge-tail machinery", () => {
   assert.equal(defenseListReason("apps/web/src/app.tsx"), null);
 });
 
-test("resolution review triggers only when existing test lines changed", () => {
-  assert.deepEqual(resolutionTestTriggers([{ filename: "src/a.test.ts", previousFilename: null, patch: "@@ -1,0 +2 @@\n+added" }]), []);
-  assert.deepEqual(resolutionTestTriggers([{ filename: "src/a.test.ts", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]), [
-    { path: "src/a.test.ts", reason: "existing-test-lines-modified" },
-  ]);
-  assert.deepEqual(resolutionTestTriggers([{ filename: "src/a.ts", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]), []);
-  assert.deepEqual(resolutionTestTriggers([{ filename: "src/a.test.ts", previousFilename: null, patch: null }]), [
-    { path: "src/a.test.ts", reason: "existing-test-lines-unverifiable" },
-  ]);
-  assert.deepEqual(resolutionTestTriggers([{
-    filename: "scripts/renamed.mjs", previousFilename: "scripts/merge-integrator-system-test.mjs",
-    patch: "@@ -1 +1 @@\n-old\n+new",
-  }]), [{ path: "scripts/merge-integrator-system-test.mjs", reason: "existing-test-lines-modified" }]);
-});
-
-test("the test-path predicate covers the repository's tracked test inventory", () => {
-  const tracked = execFileSync("git", ["-C", "../..", "ls-files"], { encoding: "utf8" })
-    .trim().split("\n")
-    .filter((path) => /(?:^|\/)(?:tests?|__tests__)(?:\/|$)|(?:\.(?:dbtest|test|spec)|-test)\.[^.]+$/u.test(path));
-  assert.ok(tracked.includes("scripts/merge-integrator-system-test.mjs"));
-  for (const path of tracked) assert.equal(isTestPath(path), true, path);
-});
-
 test("renames preserve guarded source identities", () => {
   assert.deepEqual(defenseTriggers([{
     filename: "packages/api/src/reader.ts",
     previousFilename: "packages/api/src/merge-readiness-worker.ts",
     patch: null,
   }]), [{ path: "packages/api/src/merge-readiness-worker.ts", reason: "merge-tail-machinery" }]);
-});
-
-const reviewBody = (findings: unknown[], headSha = A) => JSON.stringify({ schemaVersion: 1, headSha, findings });
-
-const blocking = {
-  severity: "blocking",
-  title: "rollback loses the predecessor row",
-  detail: "the compensating write runs outside the transaction",
-  reachability: "reached whenever the second write fails after the first commits",
-};
-const followUp = { severity: "follow-up", title: "spec drift", detail: "the comment names a field that no caller reads" };
-
-test("an empty findings array is the approval", () => {
-  const parsed = parseIndependentReviewDecision(reviewBody([]), A);
-  assert.equal(parsed.status, "ok");
-  assert.equal(parsed.status === "ok" && parsed.decision.outcome, "approved");
-  assert.equal(parsed.status === "ok" && parsed.decision.blockingSummary, "");
-});
-
-test("only follow-up findings accept the head with follow-ups instead of rejecting it", () => {
-  const parsed = parseIndependentReviewDecision(reviewBody([followUp, followUp]), A);
-  assert.equal(parsed.status === "ok" && parsed.decision.outcome, "accepted-with-followups");
-  assert.equal(parsed.status === "ok" && parsed.decision.findings.length, 2);
-});
-
-test("one blocking finding rejects the head and its summary carries every blocking finding", () => {
-  const parsed = parseIndependentReviewDecision(reviewBody([followUp, blocking]), A);
-  assert.equal(parsed.status === "ok" && parsed.decision.outcome, "rejected");
-  assert.equal(
-    parsed.status === "ok" && parsed.decision.blockingSummary,
-    `${blocking.title}: ${blocking.detail}`,
-  );
-});
-
-test("a blocking finding without a reachability argument voids the decision", () => {
-  const { reachability, ...unproven } = blocking;
-  assert.equal(reachability.length > 0, true);
-  const parsed = parseIndependentReviewDecision(reviewBody([unproven]), A);
-  assert.equal(parsed.status, "invalid");
-  assert.match(parsed.status === "invalid" ? parsed.reason : "", /reachability/u);
-});
-
-test("a decision bound to another head, or with no findings array, is invalid", () => {
-  assert.equal(parseIndependentReviewDecision(reviewBody([], B), A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision(JSON.stringify({ schemaVersion: 1, headSha: A }), A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision(JSON.stringify({ schemaVersion: 2, headSha: A, findings: [] }), A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision("not json", A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision(null, A).status, "invalid");
-});
-
-test("a finding with an unknown severity or an empty title is invalid", () => {
-  assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, severity: "must-fix" }]), A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, title: "  " }]), A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, detail: "" }]), A).status, "invalid");
-});
-
-test("a decision with more findings than one range can carry, or an over-long field, is invalid", () => {
-  const many = Array.from({ length: MAX_REVIEW_FINDINGS + 1 }, () => followUp);
-  assert.equal(parseIndependentReviewDecision(reviewBody(many), A).status, "invalid");
-  assert.equal(parseIndependentReviewDecision(reviewBody(Array.from({ length: MAX_REVIEW_FINDINGS }, () => followUp)), A).status, "ok");
-  const long = { ...followUp, detail: "d".repeat(MAX_REVIEW_FINDING_TEXT + 1) };
-  assert.equal(parseIndependentReviewDecision(reviewBody([long]), A).status, "invalid");
-});
-
-test("an authority-resign verdict is a first-class outcome and still needs its summary", () => {
-  const parsed = parseRegressionVerdict(JSON.stringify({
-    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B,
-    summary: "added packages/db/prisma/migrations/20260826000000_x/migration.sql",
-  }));
-  assert.equal(parsed.status, "ok");
-  assert.equal(parsed.status === "ok" ? parsed.verdict.outcome : null, "authority-resign");
-  assert.equal(parseRegressionVerdict(JSON.stringify({
-    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B, summary: "   ",
-  })).status, "invalid");
-  assert.equal(parseRegressionVerdict(JSON.stringify({
-    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B,
-  })).status, "invalid");
 });

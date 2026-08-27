@@ -1,13 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  AUTHORITY_RESIGN_DEDUPE_PREFIX,
-  AUTHORITY_RESIGN_OPEN_PREFIX,
   enqueueTaskRun,
-  type IndependentReviewFinding,
-  lockAgentRepoGrant,
-  lockAgentRow,
-  MAX_AUTHORITY_RESIGN_ROUNDS,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MergeRecoveryStatus,
   parseRegressionVerdict,
@@ -15,7 +9,6 @@ import {
   readMarkerHistory,
   type RecoveryContext,
   recoveryContext,
-  RELEASE_AUTHORITY_FILE,
   TaskStatus,
   writeMarker,
 } from "@agentos/db";
@@ -60,6 +53,39 @@ export const openMergeTailStopNotice = async (
   }, update: {} });
 };
 
+/**
+ * The audit trail a merge leaves when its diff moved defence-list paths.
+ *
+ * The merge is not held for it: the message records what moved and why the path
+ * is on the list, so the change is reviewable after the fact rather than
+ * blocking beforehand. Keyed by readiness task and exact head, and upserted for
+ * the same reason the stop notice is — a readiness tick that re-evaluates the
+ * same head must not raise P2002 inside its caller's transaction.
+ */
+export const openDefenseAuditNotice = async (
+  tx: DbTx,
+  input: {
+    readinessTaskId: string;
+    headSha: string;
+    baseSha: string;
+    triggers: Array<{ path: string; reason: string }>;
+  },
+): Promise<void> => {
+  const dedupeKey = `defense-audit:${input.readinessTaskId}:${input.headSha}`;
+  const body = [
+    "Merge proceeded with defense-list changes",
+    `Exact range ${input.baseSha}..${input.headSha}.`,
+    input.triggers.map((trigger) => `- ${trigger.path} (${trigger.reason})`).join("\n"),
+  ].join("\n\n");
+  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
+    from: "AGENT",
+    taskId: input.readinessTaskId,
+    kind: "TEXT",
+    body,
+    dedupeKey,
+  }, update: {} });
+};
+
 export const baseDriftRecoveryContext = async (
   tx: DbTx,
   regressionTaskId: string,
@@ -81,7 +107,7 @@ export const baseDriftRecoveryContext = async (
 export const stopBaseDriftRecoveryTail = async (
   tx: DbTx,
   context: RecoveryContext,
-  phase: "regression" | "independent-review",
+  phase: "regression",
   reason: string,
 ): Promise<void> => {
   const body = `Automatic base-drift recovery ${context.attempt} stopped at ${phase}: ${reason}`;
@@ -105,8 +131,8 @@ export const stopBaseDriftRecoveryTail = async (
 };
 
 /**
- * Resolves the agent that repairs what this chain's independent review found:
- * the chain's own fix step assignee, or `senior-dev` when the chain has none.
+ * Resolves the agent that repairs what this chain's merge tail found: the
+ * chain's own fix step assignee, or `senior-dev` when the chain has none.
  */
 export const mergeTailFixAgentName = async (
   tx: DbTx,
@@ -123,131 +149,6 @@ export const mergeTailFixAgentName = async (
     select: { assigneeAgent: { select: { name: true } } },
   });
   return fixTask?.assigneeAgent?.name ?? "senior-dev";
-};
-
-/**
- * Parks one follow-up finding as a backlog card.
- *
- * A follow-up is by contract not a reachable behavioural defect, so it never
- * holds the merge; the card is what keeps it from being lost instead.
- */
-export const createReviewFollowUpCard = async (
-  tx: DbTx,
-  input: {
-    projectId: string;
-    repoId: string | null;
-    agentName: string;
-    reviewTaskId: string;
-    headSha: string;
-    finding: IndependentReviewFinding;
-  },
-): Promise<{ taskId: string } | { refusal: string }> => {
-  if (!input.repoId) return { refusal: "independent review task has no repository" };
-  const named = await tx.agent.findFirst({
-    where: { projectId: input.projectId, name: input.agentName },
-    select: { id: true },
-  });
-  if (!named) return { refusal: `follow-up agent ${input.agentName} is absent` };
-  // A card assigned to an agent archived a moment later, or pointing at a
-  // revoked grant, is a card nothing can ever run. Both facts are therefore
-  // taken under the same mutexes the archive and revoke paths take.
-  const agent = await lockAgentRow(tx, named.id);
-  if (!agent || agent.archivedAt) return { refusal: `follow-up agent ${input.agentName} is absent or archived` };
-  const grant = await lockAgentRepoGrant(tx, {
-    projectId: input.projectId, agentId: agent.id, repoId: input.repoId,
-  });
-  if (!grant) return { refusal: `follow-up agent ${input.agentName} has no repository grant` };
-  const task = await tx.task.create({ data: {
-    projectId: input.projectId,
-    repoId: input.repoId,
-    name: `Merge tail follow-up: ${input.finding.title}`,
-    description: [
-      input.finding.detail,
-      `Raised as a follow-up by the autonomous merge tail independent review ${input.reviewTaskId} at exact head ${input.headSha}. It did not block that merge.`,
-    ].join("\n\n"),
-    assigneeType: "AGENT",
-    assigneeAgentId: agent.id,
-    approvalGate: false,
-    opensPullRequest: false,
-    status: TaskStatus.BACKLOG,
-  } });
-  await writeMarker(tx, task.id, "reviewObligation", {
-    actorType: "control-plane",
-    body: `Follow-up finding from independent review ${input.reviewTaskId} at ${input.headSha}`,
-    metadata: {
-      state: "follow-up",
-      reviewTaskId: input.reviewTaskId,
-      headSha: input.headSha,
-      title: input.finding.title,
-    },
-  });
-  return { taskId: task.id };
-};
-
-/**
- * The one operator action the autonomous merge tail asks for, and the reason it
- * cannot ask an agent instead: `release-authority.json` is signed with a key
- * that lives outside every checkout, so a chain that moves an attested
- * release-path file can only be unblocked by whoever holds it.
- *
- * The message is written to be run, not interpreted: the two recorded SHAs come
- * out of the attestation already in the checkout, so nothing here has to be
- * filled in by hand. Nothing else in the chain is blocked while it waits, and
- * the resign worker resumes this step on its own once the signature is pushed.
- */
-/**
- * A branch name may legally contain `$`, a backtick or a semicolon, and this
- * message is written to be pasted into a shell that will be holding the release
- * signing key. Every interpolated value is quoted, including the embedded single
- * quote a refname may also carry.
- */
-export const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
-export const openAuthorityResignNotice = async (
-  tx: DbTx,
-  input: {
-    taskId: string;
-    agentId: string;
-    sessionId?: string;
-    branch: string;
-    headSha: string;
-    summary: string;
-    round: number;
-  },
-): Promise<void> => {
-  const body = [
-    `Autonomous merge tail: ${RELEASE_AUTHORITY_FILE} must be re-signed before this chain can merge.`,
-    `Branch ${input.branch} moved attested release-path files at head ${input.headSha}, so the migration preflight refuses this tree and the merge gate cannot pass. The signing key never enters a chain, so this is yours to run (request ${input.round} of ${MAX_AUTHORITY_RESIGN_ROUNDS}).`,
-    `What moved:\n${input.summary}`,
-    [
-      "Run this in the checkout that holds the private revalidation document, with the signing key at hand:",
-      "",
-      `  git fetch origin ${shellQuote(input.branch)}`,
-      `  git switch --detach ${shellQuote(input.headSha)}`,
-      "  RELEASE_AUTHORITY_KEY=~/.agentos-keys/release-authority.ed25519 \\",
-      `  GOAL5A0_MASTER_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').masterSha")" \\`,
-      `  GOAL5A0_CONTROL_PLANE_A_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').controlPlaneASha")" \\`,
-      "    npm run snapshot:authority",
-      `  npm run db:authority-check -w @agentos/db`,
-      `  git add ${RELEASE_AUTHORITY_FILE}`,
-      `  git commit -m ${shellQuote(`chore(release): re-sign the release authority for ${input.branch}`)}`,
-      `  git push origin ${shellQuote(`HEAD:${input.branch}`)}`,
-    ].join("\n"),
-    `Nothing else is needed. The server watches the pull request and re-runs regression verification as soon as the re-signed ${RELEASE_AUTHORITY_FILE} is on ${input.branch}.`,
-  ].join("\n\n");
-  await tx.inboxMessage.upsert({
-    where: { dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.taskId}:${input.headSha}` },
-    create: {
-      from: "AGENT",
-      agentId: input.agentId,
-      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      taskId: input.taskId,
-      kind: "TEXT",
-      body,
-      dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.taskId}:${input.headSha}`,
-    },
-    update: {},
-  });
 };
 
 export const createMergeTailRepairTask = async (
@@ -410,74 +311,6 @@ export const handleRegressionCompletion = async (
     return "advance";
   }
 
-  if (verdict.outcome === "authority-resign") {
-    // Rounds are counted from the notices this function itself wrote, not from
-    // the activity log: `actorType` and `metadata` are caller-supplied on the
-    // activity route, and an inbox `dedupeKey` is written nowhere else. The
-    // bound is anti-thrash — a repeat means the last signature did not cover
-    // this tree, and a chain that keeps asking is not progressing.
-    const round = await tx.inboxMessage.count({
-      where: { taskId: input.task.id, dedupeKey: { startsWith: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.task.id}:` } },
-    }) + 1;
-    const exhausted = round > MAX_AUTHORITY_RESIGN_ROUNDS;
-    const branch = input.run.branch;
-    if (exhausted || !branch) {
-      const reason = exhausted
-        ? `release authority re-signature round ${round} exceeds ${MAX_AUTHORITY_RESIGN_ROUNDS} at ${verdict.headSha}: ${verdict.summary}`
-        : `release authority re-signature is required at ${verdict.headSha} but this run names no chain branch`;
-      const bounded = truncateFailureReason(reason, FAILURE_REASON_LIMIT);
-      if (recovery) {
-        await stopBaseDriftRecoveryTail(tx, recovery, "regression", bounded);
-        return "handled";
-      }
-      return stop(bounded);
-    }
-    // A step an operator has already taken over is not re-parked under it: the
-    // completion holds the chain mutex only from here, so the row is claimed
-    // rather than overwritten.
-    const parked = await tx.task.updateMany({
-      where: { id: input.task.id, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
-      data: { status: TaskStatus.REVIEW, failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${verdict.headSha}` },
-    });
-    if (parked.count !== 1) {
-      await writeMarker(tx, input.task.id, "authorityResign", {
-        actorType: "control-plane",
-        body: `Release authority re-signature is required at ${verdict.headSha} but this step is no longer the tail's to park`,
-        metadata: {
-          state: "park-skipped",
-          headSha: verdict.headSha,
-          summary: verdict.summary,
-        },
-      });
-      return "handled";
-    }
-    await writeMarker(tx, input.task.id, "authorityResign", {
-      actorType: "control-plane",
-      body: `Release authority re-signature requested at ${verdict.headSha}: ${verdict.summary}`,
-      metadata: {
-        state: "open",
-        headSha: verdict.headSha,
-        baseHeadSha: verdict.baseHeadSha,
-        branch,
-        round,
-        summary: verdict.summary,
-      },
-    });
-    await openAuthorityResignNotice(tx, {
-      taskId: input.task.id,
-      agentId: input.run.agentId,
-      sessionId: input.run.sessionId,
-      branch,
-      headSha: verdict.headSha,
-      summary: verdict.summary,
-      round,
-    });
-    // A base-drift recovery that reaches this needs the same signature as any
-    // other chain, and the resign worker resumes the same step for it. The
-    // recovery aggregate keeps its own state; nothing about it is decided here.
-    return "handled";
-  }
-
   if (recovery) {
     await stopBaseDriftRecoveryTail(
       tx,
@@ -497,10 +330,7 @@ export const handleRegressionCompletion = async (
 
   // The whole history, not the recent-state window: the automatic attempt
   // budget per repair kind is the rule, and an attempt pushed past the window
-  // by later activity would license an extra one. The count includes the
-  // review-fix repairs the independent-review rejection path opened on this
-  // task, which is what makes a chain that has already been repaired reach this
-  // ceiling sooner; that path keeps its own separate round ceiling.
+  // by later activity would license an extra one.
   const attempts = await readMarkerHistory(tx, input.task.id);
   const repairKind = verdict.outcome === "refresh-conflict"
     ? "refresh-conflict"

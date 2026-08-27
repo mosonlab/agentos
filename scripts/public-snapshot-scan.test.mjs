@@ -475,21 +475,3 @@ test("every workspace manifest records the same first-party version", () => {
   assert.equal(lock.version, releaseVersion, "the lockfile must record the same root version");
 });
 
-test("the release trust anchor is tracked, classified included, and actually published", () => {
-  // The anchor is what the second authority path rests on: a published snapshot
-  // that ships `release-authority.json` without the key it verifies against is
-  // a snapshot whose readers stop at `authority`. Its include glob predates the
-  // key, so until now it matched nothing and no test could tell the difference
-  // between "published" and "not there".
-  const anchor = "release-authority.pub";
-  assert.equal(
-    execFileSync("git", ["ls-files", anchor]).toString("utf8").trim(),
-    anchor,
-    "the trust anchor must be a tracked file, reviewed and gated like any other source",
-  );
-  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
-  assert.equal(scopeFor(anchor, manifest).classification, "included");
-
-  const { includedPaths } = scanRepository(undefined, { requireClean: false });
-  assert.equal(includedPaths.includes(anchor), true, "the trust anchor must be on the published surface");
-});

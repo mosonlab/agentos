@@ -26,7 +26,6 @@ export type Marker = {
   state: string | null;
   regressionTaskId: string | null;
   readinessTaskId: string | null;
-  reviewTaskId: string | null;
   repairKind: string | null;
   headSha: string | null;
   baseHeadSha: string | null;
@@ -54,7 +53,6 @@ const asMarker = (metadata: Prisma.JsonValue | null | undefined): Marker | null 
     state: text(raw, "state"),
     regressionTaskId: text(raw, "regressionTaskId"),
     readinessTaskId: text(raw, "readinessTaskId"),
-    reviewTaskId: text(raw, "reviewTaskId"),
     repairKind: text(raw, "repairKind"),
     headSha: text(raw, "headSha"),
     baseHeadSha: text(raw, "baseHeadSha"),
@@ -100,11 +98,6 @@ export const readMarkerHistory = async (tx: Tx, taskId: string): Promise<Marker[
 /** The newest marker of `kind`, optionally restricted to one `state`. */
 export const latestMarker = (markers: Marker[], kind: MarkerKind, state?: string): Marker | null => (
   markers.find((marker) => marker.kind === kind && (state === undefined || marker.state === state)) ?? null
-);
-
-/** The independent review a task is still waiting on, if any. */
-export const openReviewObligation = (markers: Marker[]): Marker | null => (
-  latestMarker(markers, "reviewObligation", "open")
 );
 
 export type MarkerWrite = {

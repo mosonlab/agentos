@@ -45,7 +45,7 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { AUTHORITY_RESIGN_OPEN_PREFIX, INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
@@ -1712,35 +1712,9 @@ const activateChainSuccessorInternal = async (
       } });
       continue;
     }
-    // A merge-readiness step parked on an open independent review is not
-    // stalled: the review owns that park and hands the step back when it
-    // resolves. Resuming it here would race the worker into re-parking a step
-    // whose review has already finished, which is the stall this recovery
-    // exists to prevent.
-    const reviewOwnedPark = successor.status === TaskStatus.REVIEW
-      && (successor.failureReason?.startsWith(INDEPENDENT_REVIEW_OPEN_PREFIX) ?? false);
-    if (reviewOwnedPark) {
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: "Predecessor layer completed; successor is held by an open independent review",
-      } });
-      continue;
-    }
-    // The same reasoning for the other owned park: the resign worker returns a
-    // regression step to the queue once the re-signed attestation is on the
-    // branch, and resuming it before then only buys a gate the migration
-    // preflight will refuse.
-    const resignOwnedPark = successor.status === TaskStatus.REVIEW
-      && (successor.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX) ?? false);
-    if (resignOwnedPark) {
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: "Predecessor layer completed; successor is held by an open release authority re-signature",
-      } });
-      continue;
-    }
+    // A REVIEW successor at dispatch time is a stalled chain rather than a
+    // decision anyone made, so it is returned to the queue under a bounded
+    // ceiling instead of being resumed unconditionally.
     if (successor.status === TaskStatus.REVIEW && !await resumeParkedSuccessor(tx, current, successor)) continue;
 
     const successorStep = successor.templateStepId

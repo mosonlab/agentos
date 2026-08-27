@@ -7,7 +7,6 @@ import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import {
   MERGE_TAIL_MARKER_SCAN,
   latestMarker,
-  openReviewObligation,
   readMarkerHistory,
   readMarkers,
   recoveryContext,
@@ -77,32 +76,31 @@ test("both reads keep only merge-tail markers and narrow their persisted fields"
     { metadata: null },
     { metadata: ["not", "an", "object"] },
     { metadata: { kind: "mergeIntegrator.result", outcome: "stopped" } },
-    { metadata: { kind: "mergeTail.reviewObligation", state: 7, headSha: null, regressionTaskId: "reg-1" } },
+    { metadata: { kind: "mergeTail.repairAttempt", state: 7, headSha: null, regressionTaskId: "reg-1" } },
   ]);
   const markers = await readMarkers(tx, "task-1");
 
   assert.equal(markers.length, 1);
-  const review = markers[0]!;
-  assert.equal(review.kind, "reviewObligation");
+  const repair = markers[0]!;
+  assert.equal(repair.kind, "repairAttempt");
   // A field whose persisted value is not a string reads as absent rather than
   // reaching the caller as an unknown — this is the guard callers used to write.
-  assert.equal(review.state, null);
-  assert.equal(review.headSha, null);
-  assert.equal(review.regressionTaskId, "reg-1");
-  assert.equal(review.raw.state, 7);
+  assert.equal(repair.state, null);
+  assert.equal(repair.headSha, null);
+  assert.equal(repair.regressionTaskId, "reg-1");
+  assert.equal(repair.raw.state, 7);
 });
 
-test("latestMarker and openReviewObligation select from the newest end", () => {
+test("latestMarker selects from the newest end", () => {
   const markers: Marker[] = [
-    { kind: "reviewObligation", state: "rejected", regressionTaskId: "reg-2", raw: {} } as Marker,
-    { kind: "repairAttempt", state: null, regressionTaskId: "reg-1", raw: {} } as Marker,
-    { kind: "reviewObligation", state: "open", regressionTaskId: "reg-0", raw: {} } as Marker,
+    { kind: "repairResult", state: "failed", regressionTaskId: "reg-2", raw: {} } as Marker,
+    { kind: "readiness", state: null, regressionTaskId: "reg-1", raw: {} } as Marker,
+    { kind: "repairResult", state: "queued", regressionTaskId: "reg-0", raw: {} } as Marker,
   ];
 
-  assert.equal(latestMarker(markers, "reviewObligation")?.state, "rejected");
-  assert.equal(latestMarker(markers, "reviewObligation", "open")?.regressionTaskId, "reg-0");
-  assert.equal(latestMarker(markers, "authorityResign"), null);
-  assert.equal(openReviewObligation(markers)?.regressionTaskId, "reg-0");
+  assert.equal(latestMarker(markers, "repairResult")?.state, "failed");
+  assert.equal(latestMarker(markers, "repairResult", "queued")?.regressionTaskId, "reg-0");
+  assert.equal(latestMarker(markers, "repairAttempt"), null);
 });
 
 test("writeMarker owns the kind and the schema version", async () => {
@@ -180,15 +178,12 @@ test("completion-path sites read the recent-state window (app.ts success and fai
 
 test("mergeTailLeaseChainId reads the same window as the completion path (merge-lease.ts)", async () => {
   const { tx, reads } = recordingTx([
-    marker("reviewObligation", { state: "open", regressionTaskId: "reg-9" }),
+    marker("repairAttempt", { repairKind: "gate-fix", regressionTaskId: "reg-9" }),
   ]);
-  const markers = await readMarkers(tx, "review-task");
+  const markers = await readMarkers(tx, "repair-task");
 
   assert.equal(reads[0]!.take, MERGE_TAIL_MARKER_SCAN);
-  assert.equal(
-    latestMarker(markers, "repairAttempt")?.regressionTaskId ?? openReviewObligation(markers)?.regressionTaskId,
-    "reg-9",
-  );
+  assert.equal(latestMarker(markers, "repairAttempt")?.regressionTaskId, "reg-9");
 });
 
 test("alreadyAttempted sees an attempt buried past the recent-state window (app.ts:639)", async () => {
@@ -206,51 +201,4 @@ test("alreadyAttempted sees an attempt buried past the recent-state window (app.
   // The failure this site's window exists to prevent: with take 20 the older
   // attempt is invisible and a second automatic repair would be created.
   assert.equal(attempted(recent), false);
-});
-
-test("alreadyRejected is order-independent over the full history (app.ts:6233)", async () => {
-  const rows = [
-    ...Array.from({ length: 25 }, () => marker("readiness", { state: "queued" })),
-    marker("reviewObligation", { state: "rejected", reviewTaskId: "review-1" }),
-  ];
-  const { tx, reads } = recordingTx(rows);
-  const history = await readMarkerHistory(tx, "readiness-task");
-
-  assert.equal(reads[0]!.take, undefined);
-  assert.equal(latestMarker(history, "reviewObligation", "rejected") !== null, true);
-  assert.equal(latestMarker([...history].reverse(), "reviewObligation", "rejected") !== null, true);
-});
-
-test("latestReviewState takes the newest matching obligation (merge-readiness-worker.ts:212)", async () => {
-  const rows = [
-    marker("reviewObligation", { state: "approved", headSha: "head-1", baseSha: "base-1" }),
-    marker("reviewObligation", { state: "open", headSha: "head-1", baseSha: "base-1" }),
-    marker("reviewObligation", { state: "open", headSha: "head-0", baseSha: "base-0" }),
-  ];
-  const { tx, reads } = recordingTx(rows);
-  const history = await readMarkerHistory(tx, "readiness-task");
-  const matching = history.find((entry) => (
-    entry.kind === "reviewObligation" && entry.headSha === "head-1" && entry.baseSha === "base-1"
-  ));
-
-  assert.equal(reads[0]!.take, undefined);
-  // Newest first, so the approval wins over the open row it answered.
-  assert.equal(matching?.state, "approved");
-});
-
-test("refresh-conflict resolutions are re-proved from the whole history (merge-readiness-worker.ts:509)", async () => {
-  const rows = [
-    ...Array.from({ length: 25 }, () => marker("regression", {})),
-    marker("repairResult", { repairKind: "refresh-conflict", startHeadSha: "s1", resolvedHeadSha: "r1" }),
-    marker("repairResult", { repairKind: "refresh-conflict", startHeadSha: 7, resolvedHeadSha: "r0" }),
-  ];
-  const { tx, reads } = recordingTx(rows);
-  const history = await readMarkerHistory(tx, "regression-task");
-  const resolutions = history.filter((entry) => (
-    entry.kind === "repairResult" && entry.repairKind === "refresh-conflict"
-  ));
-
-  assert.equal(reads[0]!.take, undefined);
-  assert.equal(resolutions.length, 2);
-  assert.deepEqual(resolutions.map((entry) => entry.startHeadSha), ["s1", null]);
 });

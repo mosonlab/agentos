@@ -549,12 +549,11 @@ describe("releaseMigrate --fresh", () => {
   });
 
   it("hands the migration command exactly the gated URL", async () => {
-    const host = fakeHost({ lock: true, processEnv: { PATH: "/usr/bin", GOAL5A0_MASTER_SHA: "a".repeat(40) } });
+    const host = fakeHost({ lock: true, processEnv: { PATH: "/usr/bin" } });
     assert.equal(await releaseMigrate(["--fresh"], host), 0);
     const first = host.spawned[0];
     assert.ok(first);
     assert.equal(first.env["DATABASE_URL"], GATED_URL);
-    assert.equal(first.env["GOAL5A0_MASTER_SHA"], "a".repeat(40), "authority evidence must reach the composed preflight");
   });
 
   it("declares the first run to the composed preflight, naming the schema it proved empty", async () => {
@@ -1177,20 +1176,9 @@ describe("composed Goal 5a0 preflight", () => {
     assert.match(result.output, /STOP preflight fresh-declaration/u);
   });
 
-  it("stops with the authority condition when the recorded SHAs are absent or malformed", () => {
-    const result = runPreflight({
-      DATABASE_URL: urlFor({ port: 1, database: "absent" }),
-      GOAL5A0_MASTER_SHA: "not-a-sha",
-      GOAL5A0_CONTROL_PLANE_A_SHA: "",
-    });
-    assert.notEqual(result.status, 0);
-    assert.match(result.output, /STOP preflight authority/u);
-  });
-
   it("keeps every condition name the migrator's documentation quotes", () => {
     const source = readFileSync(`${packageRoot}/prisma/preflight-goal-execution.ts`, "utf8");
     for (const condition of [
-      "authority",
       "pgcrypto",
       "ambiguous-goal",
       "mixed-lineage",

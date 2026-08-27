@@ -112,8 +112,6 @@
     { "glob": "packages/runner/src/**/*.ts", "purpose": "runner TypeScript source and tests" },
     { "glob": "packages/runner/tsconfig.json", "purpose": "runner TypeScript configuration" },
     { "glob": "public-snapshot.json", "purpose": "closed snapshot scope" },
-    { "glob": "release-authority.pub", "purpose": "release authority trust anchor: the Ed25519 public key the migration preflight verifies release-authority.json against. Public key material, tracked and reviewed on purpose — the attestation it verifies is generated, and that asymmetry is what makes it worth anything." },
-    { "glob": "release-authority.json", "purpose": "release authority attestation: the migration set's internal-review record, minted at an exact commit by `npm run snapshot:authority` because the snapshot excludes docs/reviews. It names two public commit object IDs and a content digest; it carries no review text." },
     { "glob": "scripts/check-frozen-docs.sh", "purpose": "frozen-record append-only gate check" },
     { "glob": "scripts/build-layers.mjs", "purpose": "derives the merge gate's concurrent build order from the root build script" },
     { "glob": "scripts/build-layers.test.mjs", "purpose": "build layer ordering fixtures" },

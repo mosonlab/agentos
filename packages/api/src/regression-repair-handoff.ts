@@ -2,7 +2,6 @@ import {
   asJsonObject,
   isRegressionVerificationOutputKind,
   MERGE_TAIL_KIND,
-  parseIndependentReviewDecision,
   parseRegressionVerdict,
   Prisma,
   PushStatus,
@@ -22,10 +21,10 @@ export type RegressionRepairHandoffSelection =
 const EXACT_SHA = /^[0-9a-f]{40}$/u;
 
 /**
- * Selects the durable evidence that crosses into a fresh Regression Session.
- * A prior negative Regression verdict and a later independent-review rejection
- * share the same repair binding, but the trigger remains explicit so the new
- * verifier does not have to infer why the repair exists.
+ * Selects the durable evidence that crosses into a fresh Regression Session:
+ * the prior negative Regression verdict, and the repair that answered it. The
+ * trigger stays explicit so the new verifier does not have to infer why the
+ * repair exists.
  */
 export const regressionRepairHandoffForClaim = async (
   tx: DbTx,
@@ -53,105 +52,17 @@ export const regressionRepairHandoffForClaim = async (
     reason: `regression repair handoff is invalid: ${reason}`,
   });
 
-  // A re-signature request creates no repair task, so there is no repair run to
-  // hand the prior verdict to. The re-run reads the tree itself.
-  if (parsed.verdict.outcome === "authority-resign") return { status: "none" };
+  // A PASS opens no repair task, so a fresh Session has nothing to inherit.
+  if (parsed.verdict.outcome === "pass") return { status: "none" };
 
-  let trigger: RegressionRepairHandoff["trigger"];
-  let repairKind: RegressionRepairKind;
-  let evidenceAt = priorOutput.updatedAt;
-  if (parsed.verdict.outcome !== "pass") {
-    repairKind = parsed.verdict.outcome === "review-fail"
-      ? "review-fix"
-      : parsed.verdict.outcome === "gate-fail" ? "gate-fix" : "refresh-conflict";
-    trigger = { kind: "regression-verdict", verdict: parsed.verdict };
-  } else {
-    const regressionTask = await tx.task.findUnique({
-      where: { id: input.taskId },
-      select: { chainId: true, templateId: true },
-    });
-    if (!regressionTask?.chainId || !regressionTask.templateId) return { status: "none" };
-    const readinessTask = await tx.task.findFirst({
-      where: {
-        projectId: input.projectId,
-        chainId: regressionTask.chainId,
-        templateId: regressionTask.templateId,
-        templateStep: { outputKind: "merge-authorization" },
-      },
-      select: { id: true },
-    });
-    if (!readinessTask) return { status: "none" };
-    const reviewRows = await tx.taskActivity.findMany({
-      where: {
-        taskId: readinessTask.id,
-        actorType: "control-plane",
-        createdAt: { gte: priorOutput.updatedAt },
-        metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.reviewObligation },
-      },
-      select: { id: true, createdAt: true, metadata: true },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 50,
-    });
-    const rejectedRow = reviewRows.find((row) => {
-      const metadata = asJsonObject(row.metadata);
-      return metadata?.state === "rejected" && metadata.headSha === parsed.verdict.headSha;
-    });
-    if (!rejectedRow) return { status: "none" };
-    const rejected = asJsonObject(rejectedRow.metadata)!;
-    const reviewTaskId = typeof rejected.reviewTaskId === "string" ? rejected.reviewTaskId : null;
-    const summary = typeof rejected.summary === "string" ? rejected.summary : null;
-    const open = reviewRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
-      metadata?.state === "open"
-      && metadata.reviewTaskId === reviewTaskId
-      && metadata.headSha === parsed.verdict.headSha
-    ));
-    const baseHeadSha = typeof rejected.baseSha === "string"
-      ? rejected.baseSha
-      : typeof open?.baseSha === "string" ? open.baseSha : null;
-    if (!reviewTaskId || !summary || baseHeadSha !== parsed.verdict.baseHeadSha) {
-      return invalid("independent-review rejection lacks an exact task, summary, or Regression-bound base/head");
-    }
-    const reviewTask = await tx.task.findFirst({
-      where: { id: reviewTaskId, projectId: input.projectId, repoId: input.repoId, status: TaskStatus.DONE },
-      select: {
-        stepOutput: {
-          select: {
-            kind: true,
-            body: true,
-            commitSha: true,
-            run: { select: { status: true, headSha: true } },
-          },
-        },
-      },
-    });
-    const reviewOutput = reviewTask?.stepOutput;
-    if (!reviewOutput?.run
-      || reviewOutput.run.status !== RunStatus.SUCCEEDED
-      || reviewOutput.commitSha !== parsed.verdict.headSha
-      || reviewOutput.run.headSha !== parsed.verdict.headSha) {
-      return invalid(`independent-review task ${reviewTaskId} is not bound to successful head ${parsed.verdict.headSha}`);
-    }
-    const decision = parseIndependentReviewDecision(reviewOutput.body, parsed.verdict.headSha);
-    if (decision.status === "invalid"
-      || decision.decision.outcome !== "rejected"
-      || decision.decision.blockingSummary !== summary) {
-      return invalid(`independent-review task ${reviewTaskId} output does not match its rejection record`);
-    }
-    trigger = {
-      kind: "independent-review-rejection",
-      verdict: parsed.verdict,
-      review: {
-        taskId: reviewTaskId,
-        headSha: parsed.verdict.headSha,
-        baseHeadSha,
-        summary,
-        outputKind: reviewOutput.kind,
-        outputBody: reviewOutput.body,
-      },
-    };
-    repairKind = "review-fix";
-    evidenceAt = rejectedRow.createdAt;
-  }
+  const repairKind: RegressionRepairKind = parsed.verdict.outcome === "review-fail"
+    ? "review-fix"
+    : parsed.verdict.outcome === "gate-fail" ? "gate-fix" : "refresh-conflict";
+  const trigger: RegressionRepairHandoff["trigger"] = {
+    kind: "regression-verdict",
+    verdict: parsed.verdict,
+  };
+  const evidenceAt = priorOutput.updatedAt;
 
   const expectedHeadSha = trigger.verdict.headSha;
   const expectedBaseHeadSha = trigger.verdict.baseHeadSha;

@@ -1,7 +1,6 @@
 import {
   activateChainSuccessor,
   type ClaimantClass,
-  AUTHORITY_RESIGN_OPEN_PREFIX,
   ACTIVE_RUN_STATUSES,
   advanceTemplateTask,
   enqueueTaskRun,
@@ -13,7 +12,6 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   isIntegratorStoppedError,
-  INDEPENDENT_REVIEW_OPEN_PREFIX,
   INTEGRATOR_TEMPLATE_NAME,
   isIntegratorStep,
   isMergeReadinessStep,
@@ -23,17 +21,13 @@ import {
   LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
   lockChainRows,
   lockRunRow,
-  MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   mechanicalPrincipalRefusal,
   openRun,
-  openReviewObligation,
-  parseIndependentReviewDecision,
   parseMergeResult,
   parseResolverResult,
   Prisma,
   type PrismaClient,
-  readMarkerHistory,
   readMarkers,
   recordIntegratorStop,
   runBudgetCeiling,
@@ -59,15 +53,9 @@ import {
   jsonValue,
   retryDelayMs,
 } from "./execution.js";
-import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import {
-  baseDriftRecoveryContext,
-  createMergeTailRepairTask,
-  createReviewFollowUpCard,
   handleRegressionCompletion,
-  mergeTailFixAgentName,
   openMergeTailStopNotice,
-  stopBaseDriftRecoveryTail,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
 import type { Refusal } from "./refusal.js";
@@ -125,33 +113,12 @@ const activateMergeTailTarget = async (
     return;
   }
   if (isMergeReadinessStep(target.templateStep)) {
-    // Readiness runs on the server worker, which only claims TODO/DOING. The
-    // obligation parked this step in REVIEW while the review ran, so resolving
-    // the review has to hand it back; anything else in REVIEW is a real stop
-    // and stays stopped.
-    const resumed = await tx.task.updateMany({
-      where: { id: taskId, status: TaskStatus.REVIEW, failureReason: { startsWith: INDEPENDENT_REVIEW_OPEN_PREFIX } },
-      data: { status: TaskStatus.TODO, failureReason: null },
-    });
+    // Readiness runs on the server worker, which only claims TODO/DOING.
     await tx.taskActivity.create({ data: {
       taskId,
       actorType: "control-plane",
-      body: resumed.count === 1
-        ? "Independent review resolved; readiness target returned to the server worker"
-        : "Merge-tail readiness target queued for server worker",
+      body: "Merge-tail readiness target queued for server worker",
       metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
-    } });
-    return;
-  }
-  if (target.status === TaskStatus.REVIEW && target.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX)) {
-    // A park the resign worker owns. Re-queueing this step now would spend a
-    // gate on a tree the migration preflight still refuses, and would lose the
-    // park the operator's inbox message points at.
-    await tx.taskActivity.create({ data: {
-      taskId,
-      actorType: "control-plane",
-      body: "Merge-tail target is held by an open release authority re-signature",
-      metadata: { kind: MERGE_TAIL_KIND.authorityResign, schemaVersion: 1, state: "held" },
     } });
     return;
   }
@@ -376,17 +343,16 @@ export const completeRun = async (
     const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, refunded);
     // One marker read for both completion outcomes; this handler used to
     // declare `tailRows` twice and scan twice. The success path consults it
-    // only for a standalone auxiliary task — an automatic repair or an
-    // independent review, neither of which is a chain step — while the
-    // failure path consults it only for a failure that is not about to be
-    // retried, which is why the ceiling is computed above the read.
+    // only for a standalone auxiliary task — an automatic repair, which is not
+    // a chain step — while the failure path consults it only for a failure
+    // that is not about to be retried, which is why the ceiling is computed
+    // above the read.
     const failureIsFinal = !succeeded && !(retryable && run.runNumber < budgetCeiling);
     const tailMarkers = run.task && (failureIsFinal || (succeeded && !run.task.templateId && !run.task.chainId))
       ? await readMarkers(tx, run.task.id)
       : [];
     const succeededMarkers = succeeded ? tailMarkers : [];
     const repairMarker = latestMarker(succeededMarkers, "repairAttempt");
-    const reviewMarker = openReviewObligation(succeededMarkers);
     const repairRegression = repairMarker?.regressionTaskId
       ? await tx.task.findUnique({
           where: { id: repairMarker.regressionTaskId },
@@ -397,12 +363,6 @@ export const completeRun = async (
             chainIndex: true,
             templateStep: { select: { stepIndex: true, taskTemplate: { select: { name: true } } } },
           },
-        })
-      : null;
-    const reviewRegression = reviewMarker?.regressionTaskId
-      ? await tx.task.findUnique({
-          where: { id: reviewMarker.regressionTaskId },
-          select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
         })
       : null;
     // The ordinals are the Full Assurance graph's, and the renamed
@@ -433,12 +393,10 @@ export const completeRun = async (
         })
       : null;
     // An auxiliary task is one whose own marker names the Regression it serves.
-    const mergeTailAuxiliary = Boolean(
-      repairMarker?.regressionTaskId || (reviewMarker?.readinessTaskId && reviewMarker.regressionTaskId),
-    );
+    const mergeTailAuxiliary = Boolean(repairMarker?.regressionTaskId);
     const auxiliaryTargetTaskId = repairMarker?.regressionTaskId
       ? repairDocumentationTask?.id ?? repairMarker.regressionTaskId
-      : reviewMarker?.readinessTaskId ?? null;
+      : null;
     // The same refund, recorded apart from the ceiling it produced. The gates
     // an operator can reach read this rather than `maxRunsPerTask`, because
     // only this can still be told apart from the configured budget after that
@@ -446,7 +404,7 @@ export const completeRun = async (
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
     const budgetGrants = run.budgetGrants + refunded;
-    const tailLeaseChainId = run.task?.chainId ?? repairRegression?.chainId ?? reviewRegression?.chainId ?? null;
+    const tailLeaseChainId = run.task?.chainId ?? repairRegression?.chainId ?? null;
     let releaseMergeLeaseTask: string | null = null;
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
@@ -560,10 +518,7 @@ export const completeRun = async (
       let canonicalOutputFailure: string | null = null;
       if (!succeeded && !retryCreated && run.task) {
         // The same markers the success path above read, from the same scan.
-        // A failed auxiliary task closes the obligation it was carrying, so
-        // its review obligation counts in any state, not only `open`.
         const failedRepair = latestMarker(tailMarkers, "repairAttempt");
-        const failedReview = latestMarker(tailMarkers, "reviewObligation");
         if (failedRepair?.regressionTaskId) {
           const reason = `${failedRepair.repairKind} repair ${run.taskId} failed without closing the repair at ${failedRepair.headSha}`;
           await tx.task.update({ where: { id: failedRepair.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
@@ -580,11 +535,6 @@ export const completeRun = async (
             },
           });
           await openMergeTailStopNotice(tx, { taskId: failedRepair.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-        } else if (failedReview?.readinessTaskId && failedReview.regressionTaskId) {
-          const reason = `independent review ${run.taskId} failed without an exact-head decision for ${failedReview.headSha}`;
-          await tx.task.update({ where: { id: failedReview.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-          await tx.task.update({ where: { id: failedReview.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-          await openMergeTailStopNotice(tx, { taskId: failedReview.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
         }
       }
       // §4.0 outcome branching. The executor's own fenced write is the only
@@ -700,179 +650,6 @@ export const completeRun = async (
         }
       } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
         let repairUnable = false;
-        let reviewRejected = false;
-        if (reviewMarker?.readinessTaskId && reviewMarker.regressionTaskId && reviewMarker.headSha) {
-          const readinessTaskId = reviewMarker.readinessTaskId;
-          const regressionTaskId = reviewMarker.regressionTaskId;
-          const reviewHeadSha = reviewMarker.headSha;
-          const reviewBaseSha = reviewMarker.baseSha;
-          // Review evidence is run-scoped even though TaskStepOutput is not.
-          // An earlier attempt's decision is not this attempt's decision, and
-          // a decision not bound to the reviewed head is not evidence about
-          // it: either one would let an unreviewed head through.
-          const persistedReview = await tx.taskStepOutput.findUnique({
-            where: { taskId: run.taskId }, select: { body: true, runId: true, commitSha: true },
-          });
-          const reviewOutput = persistedReview?.runId === run.id && persistedReview.commitSha === reviewHeadSha
-            ? persistedReview
-            : null;
-          const parsedReview = reviewOutput
-            ? parseIndependentReviewDecision(reviewOutput.body, reviewHeadSha)
-            : {
-              status: "invalid" as const,
-              reason: persistedReview
-                ? `decision is bound to run ${persistedReview.runId ?? "none"} at ${persistedReview.commitSha ?? "no head"}, not this run at ${reviewHeadSha}`
-                : "missing independent review output",
-            };
-          const reviewSessionId = run.session.id;
-          // A finding's own text reaches these reasons, so every one of them
-          // is bounded exactly where a client-supplied reason would be.
-          const stopTail = async (unbounded: string): Promise<void> => {
-            const reason = truncateFailureReason(unbounded, FAILURE_REASON_LIMIT);
-            await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await tx.task.update({ where: { id: regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: reviewSessionId, reason });
-          };
-          if (parsedReview.status === "invalid") {
-            reviewRejected = true;
-            const reason = `independent review returned an unusable decision for ${reviewHeadSha}: ${parsedReview.reason}`;
-            await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
-            await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-          } else if (parsedReview.decision.outcome !== "rejected") {
-            // Follow-up findings never hold the merge. Each becomes a backlog
-            // card, so the merge proceeds with the work recorded instead of
-            // with the finding lost.
-            const followUpCardIds: string[] = [];
-            let followUpRefusal: string | null = null;
-            const followUpAgentName = await mergeTailFixAgentName(tx, await tx.task.findUnique({
-              where: { id: regressionTaskId },
-              select: { projectId: true, chainId: true, templateId: true },
-            }));
-            for (const finding of parsedReview.decision.findings) {
-              const card = await createReviewFollowUpCard(tx, {
-                projectId: run.task.projectId,
-                repoId: run.task.repoId,
-                agentName: followUpAgentName,
-                reviewTaskId: run.taskId,
-                headSha: reviewHeadSha,
-                finding,
-              });
-              if ("refusal" in card) { followUpRefusal = card.refusal; break; }
-              followUpCardIds.push(card.taskId);
-            }
-            if (followUpRefusal) {
-              reviewRejected = true;
-              const reason = `independent review follow-up card could not be created: ${followUpRefusal}`;
-              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
-              await stopTail(reason);
-            } else {
-              await writeMarker(tx, readinessTaskId, "reviewObligation", {
-                actorType: "control-plane",
-                body: followUpCardIds.length === 0
-                  ? `Independent review approved exact head ${reviewHeadSha}`
-                  : `Independent review accepted exact head ${reviewHeadSha} with ${followUpCardIds.length} follow-up card(s)`,
-                metadata: {
-                  state: parsedReview.decision.outcome,
-                  reviewTaskId: run.taskId,
-                  headSha: reviewHeadSha,
-                  baseSha: reviewBaseSha,
-                  followUpCardIds,
-                },
-              });
-            }
-          } else {
-            reviewRejected = true;
-            const summary = parsedReview.decision.blockingSummary;
-            // The whole history, not the recent-state window: the blocking-round
-            // ceiling counts every rejection this readiness ever took, and one
-            // pushed past the window by later activity would reset the count.
-            const prior = await readMarkerHistory(tx, readinessTaskId);
-            const round = prior.filter((marker) => (
-              marker.kind === "reviewObligation" && marker.state === "rejected"
-            )).length + 1;
-            await writeMarker(tx, readinessTaskId, "reviewObligation", {
-              actorType: "control-plane",
-              body: `Independent review rejected exact head ${reviewHeadSha} on blocking round ${round}`,
-              metadata: {
-                state: "rejected",
-                reviewTaskId: run.taskId,
-                headSha: reviewHeadSha,
-                baseSha: reviewBaseSha,
-                summary,
-                blockingRound: round,
-              },
-            });
-            await tx.task.update({ where: { id: run.taskId }, data: {
-              status: TaskStatus.DONE,
-              failureReason: truncateFailureReason(`independent review rejected: ${summary}`, FAILURE_REASON_LIMIT),
-            } });
-            const driftRecovery = await baseDriftRecoveryContext(
-              tx,
-              regressionTaskId,
-              undefined,
-              reviewMarker.recoverySourceStopId ?? "no-recovery-context",
-            );
-            if (driftRecovery) {
-              await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewHeadSha}: ${summary}`);
-            } else if (round >= MAX_BLOCKING_REVIEW_ROUNDS) {
-              // The ceiling is an exception path, not an approval gate: three
-              // blocking rounds mean the repair loop is not converging, so the
-              // tail stops and says so instead of spending a fourth round.
-              await stopTail(`independent review rejected ${reviewHeadSha} on blocking round ${round} of ${MAX_BLOCKING_REVIEW_ROUNDS}; automatic repair is exhausted: ${summary}`);
-            } else if (!reviewBaseSha) {
-              await stopTail(`independent review rejected ${reviewHeadSha} but its base head is unavailable for automatic repair`);
-            } else {
-              // The chain mutex is held now; the Regression row read before it
-              // may already be stale, and a repair bound to a stale repository
-              // or target branch cannot hand off to the fresh Regression run.
-              const lockedRegression = await tx.task.findUnique({
-                where: { id: regressionTaskId },
-                select: { projectId: true, repoId: true, templateId: true, chainId: true, chainIndex: true, targetBranch: true },
-              });
-              // Claiming the park this review owns is what makes the repair
-              // automatic without overruling anyone: an operator who moved
-              // readiness out of it while the review ran keeps that decision,
-              // and no repair run starts behind their back.
-              const claimedPark = await tx.task.updateMany({
-                where: { id: readinessTaskId, status: TaskStatus.REVIEW, failureReason: { startsWith: INDEPENDENT_REVIEW_OPEN_PREFIX } },
-                data: { failureReason: `review-fix: automatic repair queued at ${reviewHeadSha}` },
-              });
-              if (!lockedRegression) {
-                await stopTail(`independent review rejected ${reviewHeadSha} but its Regression task is gone`);
-              } else if (claimedPark.count !== 1) {
-                await writeMarker(tx, readinessTaskId, "reviewObligation", {
-                  actorType: "control-plane",
-                  body: `Independent review rejected ${reviewHeadSha}, but readiness is no longer parked on that review; automatic repair was not started`,
-                  metadata: {
-                    state: "repair-skipped",
-                    reviewTaskId: run.taskId,
-                    headSha: reviewHeadSha,
-                  },
-                });
-              } else {
-                const repair = await createMergeTailRepairTask(tx, {
-                  regressionTask: { id: regressionTaskId, ...lockedRegression },
-                  sourceRun: { id: run.id, branch: run.branch },
-                  agentName: await mergeTailFixAgentName(tx, lockedRegression),
-                  repairKind: "review-fix",
-                  headSha: reviewHeadSha,
-                  baseHeadSha: reviewBaseSha,
-                  summary,
-                  now,
-                });
-                if ("refusal" in repair) {
-                  await stopTail(`independent review rejected ${reviewHeadSha} and automatic repair was refused: ${repair.refusal}`);
-                } else {
-                  await tx.task.update({
-                    where: { id: readinessTaskId },
-                    data: { status: TaskStatus.REVIEW, failureReason: `review-fix: automatic repair ${repair.taskId} queued at ${reviewHeadSha}` },
-                  });
-                }
-              }
-            }
-          }
-        }
         if (repairMarker?.regressionTaskId) {
           const repairOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
           let reportedUnable = false;
@@ -943,7 +720,7 @@ export const completeRun = async (
             }
           }
         }
-        if (repairUnable || reviewRejected) {
+        if (repairUnable) {
           // The failed repair owns the stop; never activate its follow-up.
           releaseMergeLeaseTask = tailLeaseChainId;
         } else if (run.task.approvalGate) {

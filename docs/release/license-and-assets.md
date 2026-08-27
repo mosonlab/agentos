@@ -121,24 +121,6 @@ is the part worth writing down:
   apart. Its credential-bearing URLs are likewise synthetic refusal cases; the
   snapshot scan classifies them as reviewed placeholders rather than findings.
 
-## Minted artifacts
-
-One published file is not in the source repository and is created per export:
-
-**`release-authority.json`** — the signed release attestation the migration
-preflight verifies, minted at the exact commit being exported by `npm run
-snapshot:authority`. It is listed in `public-snapshot.json`'s `mintedArtifacts`,
-so its absence from the source tree is a recorded fact rather than an unclassified
-gap. It carries commit object ids and content digests; it carries no review text.
-Its digest is therefore per-release and is recorded in the release evidence rather
-than here.
-
-Its trust anchor, **`release-authority.pub`**, is an Ed25519 public key tracked
-and reviewed like any other file. Public key material is safe to publish; the
-private half is held outside every repository, and
-[`migration-and-recovery.md`](migration-and-recovery.md) describes
-how both are provisioned.
-
 ## What is deliberately not published
 
 `public-snapshot.json`'s `exclude` rules name each held-back file with a reason,

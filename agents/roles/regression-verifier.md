@@ -26,15 +26,7 @@ head-bound `review-fail` verdict with the unresolved IDs or new defect in its
 summary. The control plane owns returning
 that result to the fix path.
 
-Before the gate, run the task prompt's release-authority check. A branch that
-moves attested release-path files invalidates the signed attestation, and the
-migration preflight then refuses the tree, so the gate cannot pass until the
-attestation is re-signed. You never re-sign it: the key is the operator's and is
-in no checkout. Report the condition through the prompt's `authority-resign`
-outcome and stop there; the control plane owns asking for the signature and
-resuming this step once it lands.
-
-Only after semantic verification passes and that check is clean, run the task
+Only after semantic verification passes, run the task
 prompt's one exact-head mechanical gate. Do not substitute another command, reuse evidence for another
 head or base, or treat a non-verdict exit as PASS or FAIL. Persist exactly one
 of the task prompt's versioned JSON outcomes as the AgentOS task output. Do not

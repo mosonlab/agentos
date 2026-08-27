@@ -22,8 +22,8 @@ When the user requests a chain:
 - Keep the direct template's implementation assignee when the brief enumerates
   its change points. Assign `senior-dev` before the chain starts only when the
   work touches persisted data or a defense-list path. Defense-list paths are
-  the merge gate, gate worker, migrations, release authority, and merge
-  automation. A surface too large or cross-cutting for the brief to enumerate
+  the merge gate, gate worker, migrations, and merge automation. A surface
+  too large or cross-cutting for the brief to enumerate
   is not an escalation reason: that work belongs to the full assurance chain.
   When classification against these two criteria is uncertain, use
   `senior-dev`. Keep the review-fix step's template assignee, raising it to

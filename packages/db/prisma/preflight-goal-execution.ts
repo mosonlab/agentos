@@ -11,43 +11,22 @@
  * It prints IDs and counts and nothing else: no prompt, output, token, or secret
  * ever reaches its stdout.
  *
- *   DATABASE_URL=... GOAL5A0_MASTER_SHA=... GOAL5A0_CONTROL_PLANE_A_SHA=... \
- *     npm run db:preflight-goal-execution
+ *   DATABASE_URL=... npm run db:preflight-goal-execution
  *
  * A first run has no Goal lineage to be ambiguous about, because it has no
  * tables at all. Set `GOAL5A0_FRESH_TARGET` to the schema `DATABASE_URL` names
  * to declare that, and this script confirms the schema really is empty before
  * it treats the data conditions as vacuous. Both halves are required: the
  * declaration alone proves nothing, and an empty schema nobody declared is more
- * likely a wrong target than a fresh install. Every other condition — authority,
- * pgcrypto, the explicit schema — runs exactly as it does on an existing
- * database.
+ * likely a wrong target than a fresh install. Every other condition — pgcrypto and
+ * the explicit schema — runs exactly as it does on an existing database.
  *
  * Exit 0 means, and only means, that the conditions checked here are all
  * negative. It grants no authority to migrate a production database; that is a
  * separate, human decision recorded in the runbook.
  */
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { PrismaClient } from "@prisma/client";
 
-import {
-  bindingOf,
-  type GitProbe,
-  hashFile,
-  parseReleaseAuthority,
-  readFileManifest,
-  readMigrationSet,
-  readPublicKey,
-  RELEASE_AUTHORITY_FILE,
-  RELEASE_AUTHORITY_PUBLIC_KEY,
-  REVALIDATION_DOCUMENT_PATH,
-  verifyReleaseAuthority,
-  verifyRevalidationDocument,
-} from "../src/release-authority.js";
 import {
   censusFromRow,
   type CensusRow,
@@ -58,153 +37,13 @@ import {
   schemaIsEmpty,
 } from "../src/schema-census.js";
 
-// Resolved from this file, not from the working directory: the npm script runs
-// with the workspace as its cwd, so a repository-relative path would never find
-// the evidence and the authority check would stop for the wrong reason.
-const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const REVALIDATION_DOCUMENT = join(repositoryRoot, REVALIDATION_DOCUMENT_PATH);
-// The second path, for trees the revalidation document cannot reach: the public
-// snapshot excludes all of `docs/reviews`. See `src/release-authority.ts`.
-const AUTHORITY_ATTESTATION = join(repositoryRoot, RELEASE_AUTHORITY_FILE);
-// The trust anchor: tracked, reviewed and gated source, unlike the attestation
-// it verifies. That asymmetry is what the second path rests on.
-const AUTHORITY_PUBLIC_KEY = join(repositoryRoot, RELEASE_AUTHORITY_PUBLIC_KEY);
-const SHA_PATTERN = /^[0-9a-f]{40}$/u;
-
 interface Failure { condition: string; detail: string }
 
 const failures: Failure[] = [];
-/** Which evidence answered for this run — printed, so the log says which. */
-let authorityPath = "none";
-let attestationBinding = "";
 const fail = (condition: string, detail: string): void => { failures.push({ condition, detail }); };
 const count = (rows: Array<{ count: bigint }>): number => Number(rows[0]?.count ?? 0n);
 /** IDs only, capped, so a large corrupt set never turns the report into a dump. */
 const ids = (rows: Array<{ id: string }>): string => rows.slice(0, 20).map((row) => row.id).join(",");
-
-const argument = (name: string, index: number): string | undefined =>
-  process.env[name] ?? process.argv[2 + index];
-
-// `stderr: "pipe"` rather than the default inherit: several of these are
-// questions whose "no" is a normal answer — a published snapshot is *expected*
-// not to hold the attested commit — and git says no by printing `fatal:`. That
-// belongs in this function's return value, not in the operator's log above a
-// line that says PASS.
-const git = (...args: string[]): { ok: boolean; out: string } => {
-  try {
-    return {
-      ok: true,
-      out: execFileSync("git", args, { cwd: repositoryRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(),
-    };
-  } catch (error) {
-    return { ok: false, out: error instanceof Error ? error.message : String(error) };
-  }
-};
-
-const gitProbe: GitProbe = {
-  commitExists: (sha) => git("cat-file", "-e", `${sha}^{commit}`).ok,
-  isAncestor: (ancestor, descendant) => git("merge-base", "--is-ancestor", ancestor, descendant).ok,
-  treeOf: (sha) => { const result = git("rev-parse", `${sha}^{tree}`); return result.ok ? result.out : null; },
-  blobAt: (path) => { const result = git("rev-parse", `HEAD:${path}`); return result.ok ? result.out : null; },
-};
-
-/** A checkout with history, or null — an exported tree has none. */
-const historyProbe = (): GitProbe | null => (git("rev-parse", "--git-dir").ok ? gitProbe : null);
-
-/** Condition 5: authority evidence, ancestry, and the current HEAD. */
-const checkAuthority = (): void => {
-  const masterSha = argument("GOAL5A0_MASTER_SHA", 0);
-  const controlPlaneASha = argument("GOAL5A0_CONTROL_PLANE_A_SHA", 1);
-  if (!masterSha || !SHA_PATTERN.test(masterSha)) {
-    fail("authority", "GOAL5A0_MASTER_SHA (or argv[1]) must be a recorded 40-hex commit");
-    return;
-  }
-  if (!controlPlaneASha || !SHA_PATTERN.test(controlPlaneASha)) {
-    fail("authority", "GOAL5A0_CONTROL_PLANE_A_SHA (or argv[2]) must be a recorded 40-hex commit");
-    return;
-  }
-
-  // Two evidence paths, neither optional when present. The revalidation
-  // document is the private tree's; the attestation is the snapshot's. A tree
-  // carrying both must satisfy both — having one more form of evidence has
-  // never been a reason to check less of it.
-  const documentPresent = existsSync(REVALIDATION_DOCUMENT);
-  const attestationPresent = existsSync(AUTHORITY_ATTESTATION);
-  if (!documentPresent && !attestationPresent) {
-    fail("authority",
-      `no authority evidence in this checkout: neither ${REVALIDATION_DOCUMENT} nor ${AUTHORITY_ATTESTATION}`,
-    );
-    return;
-  }
-
-  if (documentPresent) {
-    for (const detail of verifyRevalidationDocument({
-      documentText: readFileSync(REVALIDATION_DOCUMENT, "utf8"),
-      masterSha,
-      controlPlaneASha,
-      git: gitProbe,
-    })) {
-      fail("authority", detail);
-    }
-  }
-
-  if (attestationPresent) checkAttestation(masterSha, controlPlaneASha);
-
-  authorityPath = documentPresent
-    ? (attestationPresent ? "revalidation-document+attestation" : "revalidation-document")
-    : "attestation";
-};
-
-/**
- * Condition 5, second path: `release-authority.json` at the repository root.
- *
- * Strict and closed. The attestation must parse with no unknown field, must
- * carry a signature that verifies against this tree's tracked
- * `release-authority.pub`, must record the same two SHAs the operator declared,
- * and must account for exactly the release-path files and migrations this tree
- * holds — every digest recomputed here, never read back from the file it is
- * checking. On top of that, whichever object-id binding this checkout can carry
- * is required of it: the private ancestry in the lineage the attestation was
- * minted in, and a committed release path in a published snapshot, which is
- * that export committed into a fresh repository. The printed `binding=` says
- * which one answered.
- */
-const checkAttestation = (masterSha: string, controlPlaneASha: string): void => {
-  const parsed = parseReleaseAuthority(readFileSync(AUTHORITY_ATTESTATION, "utf8"));
-  if (!parsed.ok) {
-    fail("authority", `${RELEASE_AUTHORITY_FILE} ${parsed.reason}`);
-    return;
-  }
-  const { authority } = parsed;
-
-  const publicKey = existsSync(AUTHORITY_PUBLIC_KEY)
-    ? readPublicKey(readFileSync(AUTHORITY_PUBLIC_KEY, "utf8"))
-    : null;
-
-  let manifest;
-  let migrations;
-  try {
-    manifest = readFileManifest(repositoryRoot);
-    migrations = readMigrationSet(repositoryRoot);
-  } catch {
-    fail("authority", `${RELEASE_AUTHORITY_FILE} cannot be checked: this tree has no migration set to hash`);
-    return;
-  }
-
-  const evidenceOnDisk = new Map<string, string>();
-  for (const entry of authority.evidence) {
-    const absolute = join(repositoryRoot, entry.path);
-    if (existsSync(absolute)) evidenceOnDisk.set(entry.path, hashFile(absolute));
-  }
-
-  const history = historyProbe();
-  for (const detail of verifyReleaseAuthority({
-    authority, masterSha, controlPlaneASha, publicKey, manifest, migrations, evidenceOnDisk, git: history,
-  })) {
-    fail("authority", detail);
-  }
-  attestationBinding = bindingOf(authority, history);
-};
 
 /** Step 2.6: pgcrypto must be usable in schema public, or installable there. */
 const checkPgcrypto = async (db: PrismaClient): Promise<void> => {
@@ -360,8 +199,6 @@ const main = async (): Promise<number> => {
     fail("fresh-declaration", `GOAL5A0_FRESH_TARGET names ${declaration}, but DATABASE_URL targets ${schema}`);
   }
 
-  checkAuthority();
-
   const db = new PrismaClient({ datasources: { db: { url: rawUrl } } });
   let counts: Record<string, number> = {};
   let mode = "existing";
@@ -400,7 +237,6 @@ const main = async (): Promise<number> => {
   }
 
   console.log(`preflight schema=${schema}`);
-  console.log(`preflight authority=${authorityPath}${attestationBinding === "" ? "" : ` binding=${attestationBinding}`}`);
   console.log(`preflight mode=${mode}${mode === "first-run" ? " target=confirmed-empty" : ""}`);
   for (const [key, value] of Object.entries(counts)) console.log(`preflight count ${key}=${value}`);
   for (const failure of failures) console.error(`STOP preflight ${failure.condition}: ${failure.detail}`);

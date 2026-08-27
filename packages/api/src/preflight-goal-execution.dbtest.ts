@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
@@ -18,28 +15,10 @@ import { preKernelRun, preKernelSeed, stageAtPreviousMigration } from "./goal-ex
  */
 
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
-const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const isolatedCheckout = mkdtempSync(join(tmpdir(), "agentos-public-lineage-"));
-
-// Linked worktrees can share private objects with this public lineage. Build
-// the isolated history by fetching exactly what this repository's HEAD reaches,
-// so the preflight sees the history a standalone public clone sees, without
-// weakening the production authority checks. Fetching HEAD rather than a named
-// branch is what lets the gate worker's detached checkout run this file: both
-// resolve to the same lineage, and a branch name does not exist there.
-execFileSync("git", ["init", "--quiet", isolatedCheckout]);
-execFileSync("git", ["-C", isolatedCheckout, "fetch", "--quiet", repositoryRoot, "HEAD"]);
-execFileSync("git", ["-C", isolatedCheckout, "update-ref", "refs/heads/public-lineage", "FETCH_HEAD"]);
-execFileSync("git", ["-C", isolatedCheckout, "symbolic-ref", "HEAD", "refs/heads/public-lineage"]);
-// The authority the recorded revalidation names; the preflight refuses to pass
-// without them, so these are the real values, not placeholders.
-const MASTER_SHA = "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b";
-const CONTROL_PLANE_A_SHA = "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d";
 
 let fixture: ReturnType<typeof stageAtPreviousMigration>;
 after(() => {
   fixture?.cleanup();
-  rmSync(isolatedCheckout, { recursive: true, force: true });
 });
 
 const stage = (rows: string[]): void => {
@@ -54,19 +33,14 @@ const runPreflight = (environment: Record<string, string | undefined> = {}): Pre
   const env = {
     ...process.env,
     DATABASE_URL: fixture.url,
-    GOAL5A0_MASTER_SHA: MASTER_SHA,
-    GOAL5A0_CONTROL_PLANE_A_SHA: CONTROL_PLANE_A_SHA,
-    GIT_DIR: join(isolatedCheckout, ".git"),
-    GIT_WORK_TREE: repositoryRoot,
     PATH: `${dbDirectory}/node_modules/.bin:${process.env.PATH ?? ""}`,
     ...environment,
   } as NodeJS.ProcessEnv;
   for (const [key, value] of Object.entries(environment)) if (value === undefined) delete env[key];
   try {
     // Run exactly as `npm run db:preflight-goal-execution` runs it: from the db
-    // workspace, not from the repository root. The authority evidence and the
-    // git checks must resolve from the script's own location, or the wired
-    // script stops for the wrong reason every time.
+    // workspace, not from the repository root, so the script resolves its own
+    // dependencies exactly as the wired script does.
     const stdout = execFileSync("npx", ["tsx", "prisma/preflight-goal-execution.ts"], {
       cwd: dbDirectory,
       env,
@@ -141,16 +115,8 @@ test("a Goal/Run project disagreement cannot even be created on the pre-kernel s
   );
 });
 
-test("missing authority evidence and an unnamed schema both stop the preflight", () => {
+test("an unnamed schema stops the preflight", () => {
   stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
-
-  const noMaster = runPreflight({ GOAL5A0_MASTER_SHA: undefined });
-  assert.equal(noMaster.code, 1);
-  assert.match(noMaster.stderr, /STOP preflight authority/u);
-
-  const wrongAncestry = runPreflight({ GOAL5A0_CONTROL_PLANE_A_SHA: "0".repeat(40) });
-  assert.equal(wrongAncestry.code, 1);
-  assert.match(wrongAncestry.stderr, /STOP preflight authority/u);
 
   const url = new URL(fixture.url);
   url.searchParams.delete("schema");

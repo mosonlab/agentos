@@ -37,8 +37,8 @@ export type GateAttestation = {
 /**
  * The attestation an output carries, or null when it carries none. Only a v2
  * Regression verification that passed the gate attests: a review failure, a
- * gate failure, a refresh conflict and an authority-resign report all describe
- * a head the gate did *not* sign off.
+ * gate failure and a refresh conflict all describe a head the gate did *not*
+ * sign off.
  */
 export const deriveGateAttestation = (
   kind: string,

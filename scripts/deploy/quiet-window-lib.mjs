@@ -122,12 +122,11 @@ export const runLocked = async (host, work) => {
 
 /** Dry-run deliberately has no mutating host methods in its interface. */
 export const dryRunDecision = async (host) => {
-  const [revisions, runs, repository, services, authority, backup] = await Promise.all([
+  const [revisions, runs, repository, services, backup] = await Promise.all([
     host.revisions(),
     host.blockingRuns(),
     host.repositoryState(),
     host.serviceState(),
-    host.authorityState(),
     host.backupState(),
   ]);
   const quiet = quietWindowIsOpen(runs);
@@ -135,9 +134,9 @@ export const dryRunDecision = async (host) => {
     `DRY-RUN revisions from=${revisions.from} source=${revisions.source} target=${revisions.to}`,
     `DRY-RUN quiet-window=${quiet ? "open" : "holding"} blockers=${runs.length}`,
     `DRY-RUN repository branch=${repository.branch} dirty=${repository.dirty} fast-forward=${repository.fastForward}`,
-    `DRY-RUN services=${services.ok ? "ready" : "not-ready"} authority=${authority.ok ? "valid" : "invalid"}`,
+    `DRY-RUN services=${services.ok ? "ready" : "not-ready"}`,
     `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
   for (const step of DEPLOY_STEPS) lines.push(`DRY-RUN plan step=${step} mutation=skipped`);
-  return { quiet, revisions, runs, repository, services, authority, backup, lines };
+  return { quiet, revisions, runs, repository, services, backup, lines };
 };

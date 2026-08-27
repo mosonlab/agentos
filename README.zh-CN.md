@@ -79,8 +79,6 @@ npm ci
 npm run setup:local
 npm run build
 docker compose up -d --wait --wait-timeout 60 postgres
-export GOAL5A0_MASTER_SHA=8d69ee8544196a3310b3d63caf8ce5ec9a0e023b
-export GOAL5A0_CONTROL_PLANE_A_SHA=29f8dd354cb99d671c2e2e4e9e23716fd8004f3d
 npm run db:migrate:release -- --fresh
 ```
 

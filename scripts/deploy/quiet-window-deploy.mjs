@@ -420,14 +420,6 @@ const persistAndNotifyFailure = async (failure, from, to) => {
   }
 };
 
-const readAuthority = (root = REPOSITORY_ROOT) => {
-  const authority = readJson(join(root, "release-authority.json"), "release-authority-invalid");
-  if (!SHA.test(authority.masterSha ?? "") || !SHA.test(authority.controlPlaneASha ?? "")) {
-    fail("release-authority-invalid", "authority-shas-missing-or-malformed");
-  }
-  return authority;
-};
-
 const parseArgs = (args) => {
   const allowed = new Set(["--dry-run", "--clear-escalation"]);
   const unknown = args.find((argument) => !allowed.has(argument));
@@ -486,9 +478,6 @@ const dryRun = async () => {
     blockingRuns,
     repositoryState: () => repositoryState(to),
     serviceState,
-    authorityState: async () => {
-      try { readAuthority(); return { ok: true }; } catch (error) { return { ok: false, reason: error.reason ?? "invalid" }; }
-    },
     backupState: async () => {
       const requested = loadBinaries().backup;
       try {
@@ -504,7 +493,7 @@ const dryRun = async () => {
     },
   });
   for (const line of result.lines) log(line);
-  return result.repository.branch !== "main" || result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.authority.ok || !result.backup.ok ? 1 : 0;
+  return result.repository.branch !== "main" || result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.backup.ok ? 1 : 0;
 };
 
 const main = async () => {
@@ -616,14 +605,8 @@ const main = async () => {
       guardedMigration: async () => {
         copyFileSync(join(REPOSITORY_ROOT, ".env"), join(stage, ".env"));
         chmodSync(join(stage, ".env"), 0o600);
-        const authority = readAuthority(stage);
         await checked("guarded-migration-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:migrate-goal-execution"], {
           cwd: stage,
-          env: {
-            ...process.env,
-            GOAL5A0_MASTER_SHA: authority.masterSha,
-            GOAL5A0_CONTROL_PLANE_A_SHA: authority.controlPlaneASha,
-          },
         });
       },
       syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:sync-canonical-prompts"], { cwd: stage }),

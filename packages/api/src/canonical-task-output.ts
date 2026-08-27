@@ -377,11 +377,6 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
       baseHeadSha: commitSha,
       summary: nonEmptyString,
     }),
-    canonicalEnvelope.extend({
-      outcome: z.literal("authority-resign"),
-      baseHeadSha: commitSha,
-      summary: nonEmptyString,
-    }),
   ]),
   [REGRESSION_VERIFICATION_OUTPUT_KIND]: z.discriminatedUnion("outcome", [
     canonicalEnvelope.extend({
@@ -408,12 +403,6 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
     canonicalEnvelope.extend({
       schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
       outcome: z.literal("refresh-conflict"),
-      baseHeadSha: commitSha,
-      summary: nonEmptyString,
-    }),
-    canonicalEnvelope.extend({
-      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
-      outcome: z.literal("authority-resign"),
       baseHeadSha: commitSha,
       summary: nonEmptyString,
     }),

@@ -6,7 +6,6 @@ import {
   executionModeFor,
   isRegressionVerificationOutputKind,
   latestMarker,
-  openReviewObligation,
   readMarkers,
   type Prisma,
 } from "@agentos/db";
@@ -129,8 +128,8 @@ const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): v
  * The chain whose merge lease a Task's run holds, or null when that Task is not
  * part of the merge tail. This mirrors the completion path's `tailLeaseChainId`:
  * only the mechanical merge step, the Regression step, and the merge-tail
- * auxiliary tasks (automatic repair attempts and independent reviews) ever run
- * under the lease, and an auxiliary task answers for the lease of the Regression
+ * auxiliary tasks (automatic repair attempts) ever run under the lease, and an
+ * auxiliary task answers for the lease of the Regression
  * chain it serves rather than for a chain of its own. It reads the same marker
  * window the completion path reads because it is the same question, which is
  * why the window no longer needs restating here.
@@ -153,9 +152,7 @@ export const mergeTailLeaseChainId = async (
   });
   if (!task) return null;
   const markers = await readMarkers(tx, taskId);
-  const auxiliaryRegressionTaskId = latestMarker(markers, "repairAttempt")?.regressionTaskId
-    ?? openReviewObligation(markers)?.regressionTaskId
-    ?? null;
+  const auxiliaryRegressionTaskId = latestMarker(markers, "repairAttempt")?.regressionTaskId ?? null;
   const tail = executionModeFor(task.templateStep) === "mechanical"
     || isRegressionVerificationOutputKind(task.templateStep?.outputKind)
     || auxiliaryRegressionTaskId !== null;

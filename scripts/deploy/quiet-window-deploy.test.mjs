@@ -466,11 +466,10 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
     blockingRuns: async () => { calls.push("runs"); return [{ id: "r1", status: "waiting-inbox" }]; },
     repositoryState: async () => { calls.push("repository"); return { branch: "main", dirty: false, fastForward: "yes" }; },
     serviceState: async () => { calls.push("services"); return { ok: true }; },
-    authorityState: async () => { calls.push("authority"); return { ok: true }; },
     backupState: async () => { calls.push("backup"); return { ok: true, mode: "container" }; },
   });
   assert.equal(result.quiet, true);
-  assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "authority", "backup"]));
+  assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "backup"]));
   assert.ok(result.lines.includes("DRY-RUN backup=ready mode=container"));
   assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 10);
 });
@@ -586,7 +585,6 @@ test("dry-run reports a refused container backup contract as a named decision", 
     blockingRuns: async () => [],
     repositoryState: async () => ({ branch: "main", dirty: false, fastForward: "yes" }),
     serviceState: async () => ({ ok: true }),
-    authorityState: async () => ({ ok: true }),
     backupState: async () => ({
       ok: false,
       mode: "container",

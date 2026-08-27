@@ -79,11 +79,7 @@ happens.
 > before it inspects any schema state and holds it across the emptiness census,
 > the migration-set check, the preflight, the deploy, the status check and the
 > drift check, so `maintenance-lock-unavailable` means a real contention or a
-> lost lock rather than an unimplemented interface. Its one remaining
-> precondition is the preflight's `authority` condition, described below: the
-> checkout has to carry evidence that this migration set passed review, which a
-> private checkout does as its own review record and a published release does as
-> a signed attestation.
+> lost lock rather than an unimplemented interface.
 
 ## Reading a refusal
 
@@ -105,7 +101,7 @@ STOP preflight <condition>: <detail>
 | `compose-identity`, `server-identity` | The database answering is not the Compose database this checkout defines. |
 | `backup-bundle`, `backup-target`, `backup-wal` | Existing mode, and the bundle is unreadable/invalid, names another target, or no longer matches the target's WAL fingerprint. These are real consumer checks; this release does not ship the producer needed to create a supported bundle. |
 | `target-not-empty` | Fresh mode, and the schema already holds migration history or user objects. The line above it reports the census. |
-| `migration-tail` | This checkout's migration set is not the recorded release candidate — shorter or longer. Authority evidence describes a specific set; a different one is not covered by it. |
+| `migration-tail` | This checkout's migration set is not the recorded release candidate — shorter or longer. |
 | `migration-state`, `files-precheck` | Existing mode, and migration history cannot be proven compatible or the owned-files precheck fails. |
 | `maintenance-lock-unavailable` | The exclusive maintenance lock could not be taken, was already held by another session or an active service, or was lost while the migration ran. |
 | `migrate-goal-execution`, `migrate-status`, `drift-check` | The composed migration, the status check, or the drift check exited non-zero. |
@@ -125,83 +121,11 @@ STOP release-migrate arguments: existing-mode-requires---backup-bundle
 
 ### Preflight conditions
 
-`authority`, `pgcrypto`, `active-run`, `ambiguous-goal`, `mixed-lineage`,
-`orphan-goal`, `orphan-run`, `project-disagreement`, `session-disagreement`,
+`pgcrypto`, `active-run`, `ambiguous-goal`, `mixed-lineage`, `orphan-goal`,
+`orphan-run`, `project-disagreement`, `session-disagreement`,
 `first-run-undeclared`, `fresh-declaration`, `fresh-target-not-empty`, `query`.
 
-Two deserve explanation:
-
-**`authority`.** The preflight refuses to start a migration without evidence
-that this migration set passed review, and it reads that evidence from the
-checkout. There are two ways a checkout can carry it.
-
-The first is the private review record itself, which a public snapshot does not
-publish. The second is `release-authority.json`: a signed attestation, minted
-per export at the exact commit being exported, verified against the Ed25519
-public key `release-authority.pub` that the repository tracks like any other
-reviewed file. A snapshot carrying a valid one satisfies `authority` on its own;
-a snapshot carrying both gets the stronger binding, because the preflight then
-checks the attestation against the record rather than in place of it.
-
-**The trust anchor is provisioned on this release candidate.**
-`release-authority.pub` is tracked at the repository root — Ed25519, fingerprint
-`632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5`. Its private
-half belongs to the release owner, lives outside every checkout, and is in no
-repository, log or pull request. What that buys is availability, not automatic
-passage: a snapshot published *without* an attestation still stops at
-`authority`, and an attestation that is absent, altered or signed for another key
-refuses rather than defaulting to trusted.
-
-On a published snapshot the operator supplies the two recorded commit object ids
-and the tree supplies the rest:
-
-```sh
-export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
-export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
-npm run db:migrate:release -- --fresh
-```
-
-The attestation can only agree or disagree with those two, never supply them.
-Neither is written by `npm run setup:local` and neither is in `.env.example`, so
-without the exports the run stops at `authority: GOAL5A0_MASTER_SHA (or argv[1])
-must be a recorded 40-hex commit`.
-
-A run that gets past `authority` prints which evidence answered and how tightly
-it was bound:
-
-```text
-preflight authority=attestation binding=signature-content-and-published-tree
-```
-
-`published-tree` is what a cloned public repository can prove. It has history —
-its own — but not the lineage the attestation was minted in, so the private
-ancestry is not a question it can answer at all. In its place the preflight
-requires every release-path file to be committed *there*, at `HEAD`, with the
-attested bytes: an export dropped inside an unrelated checkout, or a release file
-left loose rather than committed, is refused. Signature, trust anchor, closed
-file manifest, migration-set digest, private evidence digests and the two
-declared SHAs are checked exactly as they are in a private checkout.
-
-Minting stays a maintainer action, once per export, from a clean private checkout
-at the exact commit being exported:
-
-```sh
-RELEASE_AUTHORITY_KEY=<the signing key, outside any checkout> \
-GOAL5A0_MASTER_SHA=<40-hex> GOAL5A0_CONTROL_PLANE_A_SHA=<40-hex> \
-  npm run snapshot:authority
-```
-
-Minting refuses unless the worktree matches `HEAD` byte for byte, every attested
-file is in that commit, the signing key is the private half of the tracked public
-key, and the private review record is present and passes the same check the
-preflight runs — so the attestation records a check that passed rather than
-replacing one.
-
-One publishing step is easy to lose: `.gitignore` is itself part of the published
-set and it lists `release-authority.json`, so committing an export into the public
-repository needs `git add --force release-authority.json`. Without it the public
-repository carries the trust anchor and not the thing the anchor exists to verify,
-and every reader's install stops at `authority`.
+One deserves explanation:
 
 **`pgcrypto`.** The migration needs `pgcrypto` usable in schema `public`.
 `CREATE EXTENSION IF NOT EXISTS … WITH SCHEMA public` does **not** relocate a

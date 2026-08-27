@@ -35,7 +35,6 @@
     "db:migrate:release": "tsx prisma/release-migrate.ts",
     "db:migrate-status": "dotenv -e ../../.env -- prisma migrate status",
     "db:drift-check": "node scripts/check-drift.mjs",
-    "db:authority-check": "node --import tsx prisma/check-release-authority.ts",
     "db:preflight-goal-execution": "dotenv -e ../../.env -- tsx prisma/preflight-goal-execution.ts",
     "db:migrate-goal-execution": "npm run db:preflight-goal-execution && dotenv -e ../../.env -- prisma migrate deploy",
     "db:verify-starter-onboarding": "dotenv -e ../../.env -- tsx prisma/verify-starter-onboarding.ts",
@@ -48,9 +47,7 @@
     "db:validate": "dotenv -e ../../.env -- prisma validate",
     "db:seed": "dotenv -e ../../.env -- prisma db seed",
     "db:sync-canonical-prompts": "tsx prisma/sync-canonical-prompts.ts",
-    "db:fixture": "dotenv -e ../../.env -- tsx prisma/acceptance-fixture.ts",
-    "snapshot:authority": "node --import tsx prisma/write-release-authority.ts",
-    "snapshot:authority-keygen": "node --import tsx prisma/keygen-release-authority.ts"
+    "db:fixture": "dotenv -e ../../.env -- tsx prisma/acceptance-fixture.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

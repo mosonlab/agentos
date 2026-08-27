@@ -1,6 +1,5 @@
 import {
   defenseTriggers,
-  resolutionTestTriggers,
   type ChangedFile,
   type MergeEvidence,
 } from "@agentos/db";
@@ -29,15 +28,6 @@ type RegressionPass = {
   baseHeadSha: string;
 };
 
-type ReviewState = {
-  state: string | null;
-  reviewTaskId: string | null;
-} | null;
-
-type ResolutionRead =
-  | { status: "unverifiable" }
-  | { status: "read"; comparison: Comparison };
-
 export type ReadinessInput = ReadinessContext & (
   | { stage: "claim-lost" | "regression-pending" }
   | { stage: "missing-regression-evidence" }
@@ -57,9 +47,6 @@ export type ReadinessInput = ReadinessContext & (
       target: { repository: string; prNumber: number };
       snapshot: PullRequestSnapshot;
       comparison: Comparison | null;
-      resolutions: ResolutionRead[];
-      review: ReviewState;
-      branch: string | null;
       evidence: MergeEvidence | { error: string } | null;
     }
 );
@@ -71,21 +58,13 @@ export type ReadinessDecision =
       repository: string;
       prNumber: number;
       issuedAt: string;
-    }
-  | {
-      kind: "review";
-      action: "park";
-      reviewTaskId: string | null;
       baseSha: string;
       headSha: string;
-    }
-  | {
-      kind: "review";
-      action: "open";
-      branch: string;
-      baseSha: string;
-      headSha: string;
-      triggers: Array<{ path: string; reason: string }>;
+      /**
+       * The defence-list paths this diff moved. They no longer hold the merge;
+       * the worker records them as an audit message against the readiness task.
+       */
+      auditTriggers: Array<{ path: string; reason: string }>;
     }
   | {
       kind: "requeue-regression";
@@ -164,38 +143,6 @@ export const readinessDecision = (input: ReadinessInput): ReadinessDecision => {
     };
   }
 
-  const triggers = defenseTriggers(comparison.files);
-  for (const resolution of input.resolutions) {
-    if (resolution.status === "unverifiable" || !resolution.comparison.filesComplete) {
-      triggers.push({ path: "<resolution-range>", reason: "existing-test-lines-unverifiable" });
-      continue;
-    }
-    triggers.push(...resolutionTestTriggers(resolution.comparison.files));
-  }
-  const reviewCleared = input.review?.state === "approved"
-    || input.review?.state === "accepted-with-followups";
-  if (triggers.length > 0 && !reviewCleared) {
-    if (input.review?.state === "open") {
-      return {
-        kind: "review",
-        action: "park",
-        reviewTaskId: input.review.reviewTaskId,
-        baseSha: snapshot.baseSha,
-        headSha: regression.headSha,
-      };
-    }
-    if (!input.branch) {
-      return stop("chain-branch-missing", "chain branch is unavailable for independent review");
-    }
-    return {
-      kind: "review",
-      action: "open",
-      branch: input.branch,
-      baseSha: snapshot.baseSha,
-      headSha: regression.headSha,
-      triggers,
-    };
-  }
   if (!input.evidence) {
     return stop("readiness-facts-incomplete", "merge evidence facts are unavailable");
   }
@@ -208,5 +155,8 @@ export const readinessDecision = (input: ReadinessInput): ReadinessDecision => {
     repository: input.target.repository,
     prNumber: input.target.prNumber,
     issuedAt: input.now.toISOString(),
+    baseSha: snapshot.baseSha,
+    headSha: regression.headSha,
+    auditTriggers: defenseTriggers(comparison.files),
   };
 };

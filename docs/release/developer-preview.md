@@ -176,17 +176,8 @@ not point AgentOS at an unknown PostgreSQL instance.
 ### 6. Create the schema
 
 ```sh
-export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
-export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
 npm run db:migrate:release -- --fresh
 ```
-
-Those two commit ids are the review evidence this migration set is covered by,
-and the release notes for this version record the same pair. They are read only
-from the environment (or from `argv`); `npm run setup:local` does not write them
-and `.env.example` does not contain them, so omitting them is the most common way
-to see the first refusal below. The attestation in your clone can only agree or
-disagree with them — it can never supply them.
 
 This is the release-facing migration path, and the only one this page uses. It
 proves the target is this checkout's own Compose database, proves that database
@@ -199,26 +190,7 @@ tells you it was considered and refused.
 If it stops, it prints one line per condition, in the form
 `STOP release-migrate <condition>: <reason>` or `STOP preflight <condition>:
 <detail>`. [`migration-and-recovery.md`](migration-and-recovery.md)
-lists every condition and what it means. Two are worth knowing before you start:
-
-`STOP preflight authority: GOAL5A0_MASTER_SHA (or argv[1]) must be a recorded
-40-hex commit` — you did not export the two values above, or exported something
-that is not a full 40-character commit id.
-
-`STOP preflight authority: …` naming a missing or unverifiable attestation — the
-preflight refuses to migrate without evidence that this migration set passed
-review, and it reads that evidence from the checkout. A published release clone
-carries it as two files at the repository root: `release-authority.pub`, the
-Ed25519 public key that is tracked and reviewed like any other file, and
-`release-authority.json`, the signed attestation minted for that exact export. If
-both are present and the signature, the file digests and the migration set all
-agree, the condition passes and the migration runs — the run prints
-`preflight authority=attestation binding=signature-content-and-published-tree`,
-which names which evidence answered and how tightly it was bound. If the release
-you cloned was exported without an attestation, or a release-path file in your
-clone is not committed at `HEAD` with the attested bytes, this stops — and
-stopping is correct: an absent or disagreeing attestation refuses rather than
-defaulting to trusted.
+lists every condition and what it means.
 
 The command holds an exclusive maintenance lock from before it first looks at the
 schema through the emptiness census, the migration-set check, the preflight, the

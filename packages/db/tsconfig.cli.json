@@ -20,8 +20,6 @@
     "prisma/preflight-goal-execution.ts",
     "prisma/release-migrate.ts",
     "prisma/sync-canonical-prompts.ts",
-    "prisma/keygen-release-authority.ts",
-    "prisma/write-release-authority.ts",
     "prisma/verify-starter-onboarding.ts"
   ]
 }

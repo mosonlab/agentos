@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
-  AUTHORITY_RESIGN_OPEN_PREFIX,
   AUTHORIZED_MERGE_METHOD,
   applyInboxDecisionTx,
   enqueueTaskRun,
@@ -587,37 +586,6 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
   } }), 0);
 });
 
-test("a recovery regression that needs a re-signature parks and asks instead of stopping the tail", async () => {
-  const seeded = await seedStopped("canonical-compound-readiness", "tail-resign");
-  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
-  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
-  const body = {
-    schemaVersion: 1, outcome: "authority-resign", headSha: HEAD, baseHeadSha: BASE_2,
-    summary: "added packages/db/prisma/migrations/20260826000000_probe/migration.sql",
-  };
-  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
-    taskId: seeded.gateTask.id, runId: run.id, kind: "regression-verification", body: JSON.stringify(body), commitSha: HEAD,
-  }, update: { runId: run.id, body: JSON.stringify(body), commitSha: HEAD } });
-
-  await db.$transaction((tx) => handleRegressionCompletion(tx, {
-    task: seeded.gateTask,
-    run: { id: run.id, agentId: run.agentId, branch: "agentos/chain/demo", headSha: HEAD, sessionId: seeded.gateSession.id },
-    now: new Date(),
-  }));
-
-  // A recovery needs the same signature as any other chain, and the resign
-  // worker resumes the same step for it: this is not a dead end.
-  const gate = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
-  assert.equal(gate.status, TaskStatus.REVIEW);
-  assert.equal(gate.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
-  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.gateTask.id } });
-  assert.match(notice.body, /must be re-signed/u);
-  assert.equal(await db.task.count({ where: { name: { startsWith: "Autonomous merge tail:" } } }), 0);
-  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
-    where: { integratorTaskId: seeded.integratorTask!.id },
-  })).status, "REPAIRING");
-});
-
 test("a recovery regression conflict, semantic failure, or gate failure stops without an auxiliary repair task", async () => {
   for (const outcome of ["refresh-conflict", "review-fail", "gate-fail"] as const) {
     const seeded = await seedStopped("canonical-compound-readiness", `tail-stop-${outcome}`);
@@ -682,75 +650,4 @@ test("a recovery-cycle readiness failure restores the integrator stop guard", as
   } }), 1);
   await assertIntegratorGuarded(seeded.integratorTask!.id);
   assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 1);
-});
-
-test("a recovery-cycle independent-review rejection stops once without a review-fix task", async () => {
-  const seeded = await seedStopped("canonical-compound-readiness", "tail-review-reject");
-  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
-  const regressionRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
-  await db.run.update({ where: { id: regressionRun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
-  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
-    taskId: seeded.gateTask.id, runId: regressionRun.id, kind: "regression-verification",
-    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE_2, gateVerdict: "PASS" }), commitSha: HEAD,
-  }, update: {
-    runId: regressionRun.id,
-    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE_2, gateVerdict: "PASS" }), commitSha: HEAD,
-  } });
-  await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
-  const reviewer = await db.agent.create({ data: {
-    projectId: seeded.project.id, environmentId: seeded.environment.id, name: "review-coordinator", title: "Reviewer",
-    model: "gpt-5.6-sol:medium", foundationalPrompt: "foundation", rolePrompt: "review",
-  } });
-  await db.agentRepoAccess.create({ data: {
-    projectId: seeded.project.id, agentId: reviewer.id, repoId: seeded.repo.id,
-    mountPath: "/repo", permissions: "GIT_WRITE",
-  } });
-  const readiness = await readinessTick(db, reader(snapshot(BASE_2), [{
-    filename: "packages/api/src/app.ts", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new",
-  }]), new Date(), 5, releaseChainLease, runWithMergeLease);
-  assert.equal(readiness.reviewing, 1);
-  const reviewTask = await db.task.findFirstOrThrow({ where: { name: "Autonomous merge tail: independent review" } });
-  const reviewRun = await db.run.findFirstOrThrow({ where: { taskId: reviewTask.id } });
-  const fence = `1:${reviewTask.id}:1`;
-  const session = await db.session.create({ data: {
-    runId: reviewRun.id, projectId: seeded.project.id, taskId: reviewTask.id,
-    agentId: reviewer.id, runner: reviewRun.runner, executionStatus: "RUNNING",
-  } });
-  await db.run.update({ where: { id: reviewRun.id }, data: {
-    status: "RUNNING", runnerId: "runner-review", fencingToken: fence,
-    leaseExpiresAt: new Date(Date.now() + 600_000), headSha: HEAD,
-  } });
-  await db.task.update({ where: { id: reviewTask.id }, data: { status: TaskStatus.DOING } });
-  await db.taskStepOutput.create({ data: {
-    taskId: reviewTask.id, runId: reviewRun.id, kind: "review",
-    body: JSON.stringify({ schemaVersion: 1, headSha: HEAD, findings: [{
-      severity: "blocking",
-      title: "must fix",
-      detail: "the recovery head reintroduces the defect",
-      reachability: "every merge of this head reaches it",
-    }] }), commitSha: HEAD,
-  } });
-  const priorToken = process.env.RUNNER_TOKEN;
-  process.env.RUNNER_TOKEN = "review-runner-token";
-  try {
-    const response = await createApp(db).request(`/runner/runs/${reviewRun.id}/complete`, {
-      method: "POST",
-      headers: { Authorization: "Bearer review-runner-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId: "runner-review", fencingToken: fence, exitCode: 0, terminalEventSeen: true,
-        terminalSuccess: true, cleanupStatus: "SUCCEEDED", pushStatus: "NOT_REQUESTED",
-        workspaceRetained: false, headSha: HEAD, branch: reviewRun.branch,
-      }),
-    });
-    assert.equal(response.status, 200);
-  } finally {
-    if (priorToken === undefined) delete process.env.RUNNER_TOKEN;
-    else process.env.RUNNER_TOKEN = priorToken;
-  }
-  assert.equal(session.executionStatus, "RUNNING");
-  assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: review-fix" } }), 0);
-  assert.equal(await db.inboxMessage.count({ where: {
-    taskId: seeded.gateTask.id, dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
-  } }), 1);
-  await assertIntegratorGuarded(seeded.integratorTask!.id);
 });

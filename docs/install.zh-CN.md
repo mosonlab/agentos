@@ -29,8 +29,6 @@ npm ci
 npm run setup:local
 npm run build
 docker compose up -d --wait --wait-timeout 60 postgres
-export GOAL5A0_MASTER_SHA=8d69ee8544196a3310b3d63caf8ce5ec9a0e023b
-export GOAL5A0_CONTROL_PLANE_A_SHA=29f8dd354cb99d671c2e2e4e9e23716fd8004f3d
 npm run db:migrate:release -- --fresh
 ```
 
@@ -56,9 +54,8 @@ systemd profile，见公开的
 `npm run db:migrate` 就是 `prisma migrate dev`，**只用于开发**；它只在
 `CONTRIBUTING.md` 中作为开发命令说明，不是安装命令。上面的有闸发布路径运行
 `npm run db:migrate:release -- --fresh`。该命令在读取 schema 状态前取得排他维护锁，
-并在有闸迁移全程持有它。没有有效 `release-authority.json` attestation 的导出会停下，
-不会默认为可信。`--existing` 已实现 verified-bundle consumer，但本仓库不交付用于生成
-合规 bundle 的 backup producer。因此受支持的发布流程仍只有 fresh；`--existing` 不会
+并在有闸迁移全程持有它。`--existing` 已实现 verified-bundle consumer，但本仓库不交付
+用于生成合规 bundle 的 backup producer。因此受支持的发布流程仍只有 fresh；`--existing` 不会
 发出虚构的 “interface unavailable” refusal，也不能被视为受支持的端到端迁移路径。实际
 实现的完整流程与拒绝条件见发布 quickstart 和迁移指南。打包、公证与自动更新同样不属于
 本发布候选范围。

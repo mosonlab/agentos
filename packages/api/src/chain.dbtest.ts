@@ -7,8 +7,6 @@ import {
   activateChainSuccessor,
   applyInboxDecisionTx,
   CHAIN_AUTO_RESUME_KIND,
-  AUTHORITY_RESIGN_OPEN_PREFIX,
-  INDEPENDENT_REVIEW_OPEN_PREFIX,
   MAX_AUTOMATIC_SUCCESSOR_RESUMES,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   Prisma,
@@ -1199,36 +1197,6 @@ test("a stalled REVIEW successor is automatically returned to the queue", { time
   assert.equal(await db.taskActivity.count({ where: {
     taskId: successor.id, metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
   } }), 1);
-});
-
-test("a successor held by an open release authority re-signature is left to the resign worker", { timeout: 20_000 }, async () => {
-  const { predecessor, successor } = await seedExecutableChain();
-  await db.task.update({ where: { id: successor.id }, data: {
-    status: "REVIEW", failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${"a".repeat(40)}`,
-  } });
-  await activateOnParkedSuccessor(predecessor);
-  const held = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
-  assert.equal(held.status, "REVIEW");
-  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
-  assert.equal(await db.taskActivity.count({ where: {
-    taskId: successor.id, metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
-  } }), 0);
-  assert.match(await latestActivity(successor.id), /held by an open release authority re-signature/u);
-});
-
-test("a successor held by an open independent review is left to that review", { timeout: 20_000 }, async () => {
-  const { predecessor, successor } = await seedExecutableChain();
-  await db.task.update({ where: { id: successor.id }, data: {
-    status: "REVIEW", failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}review-task-id:${"a".repeat(40)}`,
-  } });
-  await activateOnParkedSuccessor(predecessor);
-  const held = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
-  assert.equal(held.status, "REVIEW");
-  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
-  assert.equal(await db.taskActivity.count({ where: {
-    taskId: successor.id, metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
-  } }), 0);
-  assert.match(await latestActivity(successor.id), /held by an open independent review/u);
 });
 
 test("a successor that keeps returning to REVIEW stops the chain and opens an inbox notice", { timeout: 20_000 }, async () => {

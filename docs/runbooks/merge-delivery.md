@@ -6,15 +6,11 @@ silently changes from one path to the other.
 ## Autonomous tail
 
 Regression records an exact-head `MERGE GATE: PASS`, merge readiness validates
-the current pull-request head and any defense-list review obligations, and the
-native merge executor performs the mechanical merge. An independent-review
-rejection stops at an Inbox decision. The operator may create one repair task,
-adopt the current exact head for a fresh Regression run, or park the tail for
-operator takeover.
-
-Adopting a head authorizes only a fresh Regression run. It is not merge
-authorization: readiness and the native executor still have to validate their
-own exact-head contracts.
+the current pull-request head, and the native merge executor performs the
+mechanical merge. A diff that touches the defense list no longer blocks the
+merge: readiness writes one audit Inbox message on the readiness task
+("Merge proceeded with defense-list changes") naming the triggered paths and
+reasons, and the merge proceeds unblocked.
 
 ## Operator direct merge
 

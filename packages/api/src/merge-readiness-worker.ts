@@ -1,31 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
-  AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   MergeRecoveryStatus,
   Prisma,
-  RunnerPreference,
   TaskStatus,
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   enqueueTaskRun,
-  INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
   parseRegressionVerdict,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
-  readMarkerHistory,
   recoveryContext,
   resolveChainTarget,
-  runnerFor,
   writeMarker,
   type PrismaClient,
-  type Marker,
   type RecoveryContext,
 } from "@agentos/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
+import { openDefenseAuditNotice } from "./merge-tail-actions.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
 import { createGitHubReader, GitHubReadError, type PullRequestReader } from "./github-read.js";
 import {
@@ -198,133 +193,7 @@ const stopReadiness = async (
   return true;
 };
 
-// The whole history, newest first: a review obligation for this exact head can
-// sit arbitrarily far back once the readiness task has accumulated activity,
-// and missing it would reopen a review that is already answered.
-const latestReviewState = async (
-  db: PrismaClient | Prisma.TransactionClient,
-  readinessTaskId: string,
-  headSha: string,
-  recoveryBaseSha: string | null,
-): Promise<Marker | null> => (
-  (await readMarkerHistory(db, readinessTaskId)).find((marker) => (
-    marker.kind === "reviewObligation"
-    && marker.headSha === headSha
-    && (recoveryBaseSha === null || marker.baseSha === recoveryBaseSha)
-  )) ?? null
-);
-
-const createReviewObligation = async (
-  db: PrismaClient,
-  input: {
-    readinessTask: { id: string; projectId: string; repoId: string | null };
-    regressionTaskId: string;
-    branch: string;
-    baseSha: string;
-    headSha: string;
-    triggers: Array<{ path: string; reason: string }>;
-    recovery: RecoveryContext | null;
-    claimReason: string;
-  },
-): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; lost: true }> => db.$transaction(async (tx) => {
-  await lockTaskMutationRows(tx, input.readinessTask.id);
-  // The claim is only evidence until it is re-read under the chain mutex. A
-  // worker whose lease expired while it read GitHub has already been replaced,
-  // and opening a second obligation for the same head would double every
-  // decision the tail makes from it: two repairs, two backlog cards, two
-  // blocking rounds off the ceiling.
-  const held = await tx.task.count({
-    where: { id: input.readinessTask.id, status: TaskStatus.DOING, failureReason: input.claimReason },
-  });
-  if (held !== 1) return { ok: false as const, lost: true as const };
-  const open = await latestReviewState(tx, input.readinessTask.id, input.headSha, input.recovery ? input.baseSha : null);
-  if (open?.state === "open") return { ok: false as const, lost: true as const };
-  if (!input.readinessTask.repoId) return { ok: false as const, reason: "readiness task has no repository" };
-  const agent = await tx.agent.findFirst({ where: { projectId: input.readinessTask.projectId, name: "review-coordinator", archivedAt: null } });
-  if (!agent) return { ok: false as const, reason: "review-coordinator is absent or archived" };
-  const grant = await tx.agentRepoAccess.findFirst({ where: { projectId: input.readinessTask.projectId, repoId: input.readinessTask.repoId, agentId: agent.id } });
-  if (!grant) return { ok: false as const, reason: "review-coordinator has no repository grant" };
-  const task = await tx.task.create({ data: {
-    projectId: input.readinessTask.projectId,
-    repoId: input.readinessTask.repoId,
-    name: "Autonomous merge tail: independent review",
-    description: [
-      `Blindly review the exact diff ${input.baseSha}..${input.headSha}.`,
-      `The server-side trigger set is ${JSON.stringify(input.triggers)}.`,
-      "Do not read prior review outputs. Find defects in the triggered merge-tail surface, run focused checks, then persist exactly one JSON object:",
-      `{"schemaVersion":1,"headSha":"${input.headSha}","findings":[{"severity":"blocking"|"follow-up","title":"<short>","detail":"<what is wrong and where>","reachability":"<required for blocking>"}]}`,
-      [
-        "Severity is the whole decision and the server derives the verdict from it; you do not state a verdict.",
-        "Mark a finding `blocking` only when it is a reachable behavioural defect — correctness, data integrity, or security — and prove reachability in `reachability`: name the concrete inputs, state, or interleaving that reaches it. A blocking finding without that argument voids the whole decision.",
-        "Everything else is `follow-up`: specification inconsistency no caller can reach, style, naming, defensive hardening, and any concern you cannot show a caller reaching. Each follow-up becomes a backlog card and the merge proceeds.",
-        "An empty `findings` array is the approval.",
-      ].join("\n"),
-    ].join("\n\n"),
-    assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: agent.id,
-    approvalGate: false,
-    opensPullRequest: false,
-    status: TaskStatus.TODO,
-    targetBranch: input.branch,
-    maxSessionsPerTask: 1,
-  } });
-  const run = await enqueueTaskRun(tx, task.id);
-  await tx.run.update({ where: { id: run.id }, data: {
-    branch: input.branch,
-    targetBranch: input.branch,
-    model: "gpt-5.6-sol:medium",
-    runner: runnerFor(RunnerPreference.CODEX, "gpt-5.6-sol:medium"),
-  } });
-  // Two rows, deliberately not the same one. The readiness task's copy names
-  // the review task it is waiting on; the review task's copy names the tail it
-  // answers for, which is what the completion path reads back from it.
-  await writeMarker(tx, input.readinessTask.id, "reviewObligation", {
-    actorType: "control-plane",
-    body: `Independent review obligation opened for ${input.headSha}`,
-    metadata: {
-      state: "open",
-      headSha: input.headSha,
-      baseSha: input.baseSha,
-      reviewTaskId: task.id,
-      triggers: input.triggers,
-      recoverySourceStopId: input.recovery?.sourceStopId ?? null,
-    },
-  });
-  await writeMarker(tx, task.id, "reviewObligation", {
-    actorType: "control-plane",
-    body: `Blind review obligation for readiness task ${input.readinessTask.id}`,
-    metadata: {
-      state: "open",
-      readinessTaskId: input.readinessTask.id,
-      regressionTaskId: input.regressionTaskId,
-      headSha: input.headSha,
-      baseSha: input.baseSha,
-      recoverySourceStopId: input.recovery?.sourceStopId ?? null,
-    },
-  });
-  await tx.task.update({ where: { id: input.readinessTask.id }, data: {
-    status: TaskStatus.REVIEW,
-    failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${task.id}:${input.headSha}`,
-  } });
-  return { ok: true as const };
-});
-
-export type ReadinessTickResult = { claimed: number; authorized: number; reviewing: number; requeued: number; stopped: number };
-
-/**
- * Hand the lease back for the length of an independent review. The review
- * neither produces nor consumes the exact-head gate proof -- it reads a diff on
- * GitHub -- so holding the lease across it charges an agent session, and
- * however many runner losses and retries that session takes, to every other
- * delivery line's queue. The merge Lease module owns reporting when the
- * adapter cannot carry out that handback.
- */
-const releaseForReview = async (
-  releaseChainLease: ReleaseMergeLease,
-  chainId: string | null,
-): Promise<void> => {
-  await releaseChainLease(chainId);
-};
+export type ReadinessTickResult = { claimed: number; authorized: number; requeued: number; stopped: number };
 
 const requeueRegression = async (
   db: PrismaClient,
@@ -513,9 +382,6 @@ const readReadiness = async (
       target: { repository: target.repository, prNumber: target.prNumber },
       snapshot,
       comparison: null,
-      resolutions: [],
-      review: null,
-      branch: null,
       evidence: null,
       ...values,
     });
@@ -536,43 +402,8 @@ const readReadiness = async (
         || comparison.behindBy !== 0)) {
       return readyInput({ comparison });
     }
-    const markers = await readMarkerHistory(db, regression.id);
-    const resolutions: Extract<ReadinessInput, { stage: "ready" }>["resolutions"] = [];
-    for (const marker of markers) {
-      if (marker.kind !== "repairResult" || marker.repairKind !== "refresh-conflict") continue;
-      if (!marker.startHeadSha || !marker.resolvedHeadSha) {
-        resolutions.push({ status: "unverifiable" });
-        continue;
-      }
-      resolutions.push({
-        status: "read",
-        comparison: await reader.compareCommits(
-          target.repository,
-          marker.startHeadSha,
-          marker.resolvedHeadSha,
-          controller.signal,
-        ),
-      });
-    }
-    const review = await latestReviewState(
-      db,
-      readiness.id,
-      verdict.verdict.headSha,
-      recovery ? snapshot.baseSha : null,
-    );
-    const branchRun = await db.run.findFirst({
-      where: {
-        task: { projectId: readiness.projectId, chainId: readiness.chainId },
-        branch: { not: null },
-      },
-      select: { branch: true },
-      orderBy: { createdAt: "desc" },
-    });
     return readyInput({
       comparison,
-      resolutions,
-      review: review ? { state: review.state, reviewTaskId: review.reviewTaskId } : null,
-      branch: branchRun?.branch ?? null,
       evidence: evidenceFromSnapshot(snapshot, randomUUID()),
     });
   } catch (error: unknown) {
@@ -657,55 +488,6 @@ const applyReadinessDecision = async (
     case "requeue-regression":
       await requeue(decision);
       return;
-    case "review": {
-      if (decision.action === "park") {
-        // The obligation is re-read inside the mutex before the park is
-        // written. Between the read and here the review can have completed and
-        // handed this Step back; parking on that stale read would strand it.
-        const parked = await db.$transaction(async (tx) => {
-          await lockTaskMutationRows(tx, readiness.id);
-          const current = await latestReviewState(
-            tx,
-            readiness.id,
-            decision.headSha,
-            recovery ? decision.baseSha : null,
-          );
-          if (current?.state !== "open") return false;
-          const reparked = await tx.task.updateMany({
-            where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
-            data: {
-              status: TaskStatus.REVIEW,
-              failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${String(current.reviewTaskId)}`,
-            },
-          });
-          return reparked.count === 1;
-        });
-        if (parked) await releaseForReview(releaseChainLease, readiness.chainId);
-        result.reviewing += 1;
-        return;
-      }
-      const opened = await createReviewObligation(db, {
-        readinessTask: readiness,
-        regressionTaskId: regression.id,
-        branch: decision.branch,
-        baseSha: decision.baseSha,
-        headSha: decision.headSha,
-        triggers: decision.triggers,
-        recovery,
-        claimReason,
-      });
-      if (opened.ok) {
-        await releaseForReview(releaseChainLease, readiness.chainId);
-        result.reviewing += 1;
-      } else if ("lost" in opened) {
-        // Another worker owns this readiness Step now. Leaving its state alone
-        // is the whole point of noticing.
-        result.reviewing += 1;
-      } else {
-        await stop(opened.reason);
-      }
-      return;
-    }
     case "authorize":
       break;
   }
@@ -791,6 +573,17 @@ const applyReadinessDecision = async (
         },
       });
       await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
+      // The defence list no longer holds a merge. What it still does is say
+      // which of these paths a human would want to have seen move, so the
+      // merge leaves an audit message behind instead of a review obligation.
+      if (decision.auditTriggers.length > 0) {
+        await openDefenseAuditNotice(tx, {
+          readinessTaskId: readiness.id,
+          headSha: decision.headSha,
+          baseSha: decision.baseSha,
+          triggers: decision.auditTriggers,
+        });
+      }
       await writeMarker(tx, readiness.id, "readiness", {
         actorType: "control-plane",
         body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
@@ -835,7 +628,7 @@ export const readinessTick = async (
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
 ): Promise<ReadinessTickResult> => {
-  const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
+  const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
   const pageSize = Math.max(limit * 20, 100);
   for await (const readiness of readinessCandidates(db, pageSize)) {
     if (result.claimed >= limit) break;

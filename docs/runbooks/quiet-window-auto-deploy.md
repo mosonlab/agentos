@@ -22,9 +22,6 @@ The checkout must have:
   `postgres:16-alpine` image);
 - all nine service labels above already loaded.
 
-The job reads `masterSha` and `controlPlaneASha` from the tracked
-`release-authority.json`; do not add those values to a plist or `.env`.
-
 ## Appliance checkout
 
 The production checkout is a dedicated clone owned by the loaded AgentOS
@@ -85,8 +82,8 @@ node scripts/deploy/quiet-window-deploy.mjs --dry-run
 ```
 
 The output names the deployed, source, and remote revisions; the blocking Run
-count; repository fast-forward state; loaded service state; authority state;
-the verified host/container backup contract; and every skipped mutation in
+count; repository fast-forward state; loaded service state; the verified
+host/container backup contract; and every skipped mutation in
 execution order. Container verification runs read-only `docker inspect` and
 `docker exec ... test -x` checks. `claimed`, `provisioning`, and `running`
 block. `queued` and `waiting-inbox` do not.
@@ -168,8 +165,7 @@ The job then performs exactly this sequence and stops at the first failure:
    `agentos-postgres-1`; stream its stdout to a mode-0600 temporary file on the
    host under `.agentos-deploy/backups/`, fsync it, and rename it to `.dump`
    only after a zero exit and non-empty output;
-5. run `npm run db:migrate-goal-execution` from staging with the two authority
-   SHAs read from that revision's `release-authority.json`;
+5. run `npm run db:migrate-goal-execution` from staging;
 6. run `npm run db:sync-canonical-prompts`; structural drift outside an
    explicitly source-declared assignee or review-base transition is a terminal
    refusal and is never changed with SQL. Operator model and runner overrides

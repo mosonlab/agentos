@@ -16,11 +16,8 @@
  *     npm run test:db -w @agentos/db
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 
@@ -35,26 +32,6 @@ import {
 } from "./schema-census.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
-const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const isolatedCheckout = mkdtempSync(join(tmpdir(), "agentos-public-lineage-"));
-
-// Linked worktrees can share private objects with this public lineage. Build
-// the isolated history by fetching exactly what this repository's HEAD reaches,
-// so the preflight sees the history a standalone public clone sees, without
-// weakening the production authority checks. Fetching HEAD rather than a named
-// branch is what lets the gate worker's detached checkout run this file: both
-// resolve to the same lineage, and a branch name does not exist there.
-execFileSync("git", ["init", "--quiet", isolatedCheckout]);
-execFileSync("git", ["-C", isolatedCheckout, "fetch", "--quiet", repositoryRoot, "HEAD"]);
-execFileSync("git", ["-C", isolatedCheckout, "update-ref", "refs/heads/public-lineage", "FETCH_HEAD"]);
-execFileSync("git", ["-C", isolatedCheckout, "symbolic-ref", "HEAD", "refs/heads/public-lineage"]);
-
-// The recorded authority evidence, so these cases stop on the condition they are
-// about rather than on `authority`. The preflight checks both the signed
-// attestation content and that its commits are ancestors of HEAD.
-const MASTER_SHA = "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b";
-const CONTROL_PLANE_A_SHA = "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d";
-
 /**
  * The scratch server, proven scratch before anything connects. 5432 is where
  * `docker-compose.yml` puts the operator's local database, and a test that
@@ -96,10 +73,6 @@ const runPreflight = (schema: string, extra: Record<string, string> = {}): Outco
     env: {
       ...process.env,
       DATABASE_URL: urlFor(schema),
-      GOAL5A0_MASTER_SHA: MASTER_SHA,
-      GOAL5A0_CONTROL_PLANE_A_SHA: CONTROL_PLANE_A_SHA,
-      GIT_DIR: join(isolatedCheckout, ".git"),
-      GIT_WORK_TREE: repositoryRoot,
       ...extra,
     },
   });
@@ -135,7 +108,6 @@ before(async () => {
 after(async () => {
   for (const schema of schemas) await sql(`DROP SCHEMA IF EXISTS ${quoted(schema)} CASCADE`);
   await admin.$disconnect();
-  rmSync(isolatedCheckout, { recursive: true, force: true });
 });
 
 describe("first run: declared and confirmed empty", () => {

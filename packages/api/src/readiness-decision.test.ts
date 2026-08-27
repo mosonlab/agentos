@@ -58,9 +58,6 @@ const ready = (overrides: Partial<Extract<ReadinessInput, { stage: "ready" }>> =
   target: { repository: "mosonlab/agentos", prNumber: 42 },
   snapshot: snapshot(),
   comparison: { status: "ahead", behindBy: 0, filesComplete: true, files: [] },
-  resolutions: [],
-  review: null,
-  branch: "readiness-decision",
   evidence,
   ...overrides,
 });
@@ -72,29 +69,15 @@ test("authorize carries the exact head evidence into apply", () => {
     repository: "mosonlab/agentos",
     prNumber: 42,
     issuedAt: NOW.toISOString(),
-  });
-});
-
-test("review parks an already-open blind review", () => {
-  const decision = readinessDecision(ready({
-    comparison: {
-      status: "ahead",
-      behindBy: 0,
-      filesComplete: true,
-      files: [{ filename: "packages/api/src/app.ts", previousFilename: null, patch: null }],
-    },
-    review: { state: "open", reviewTaskId: "review-1" },
-  }));
-  assert.deepEqual(decision, {
-    kind: "review",
-    action: "park",
-    reviewTaskId: "review-1",
     baseSha: BASE,
     headSha: HEAD,
+    auditTriggers: [],
   });
 });
 
-test("review opens a blind review for a newly triggered defense path", () => {
+test("a defense-list path authorizes the merge and is reported as audit triggers", () => {
+  // The defence list used to hold the merge for a blind review. It now only
+  // names what a human would want to have seen move, and the merge proceeds.
   const decision = readinessDecision(ready({
     comparison: {
       status: "ahead",
@@ -103,8 +86,10 @@ test("review opens a blind review for a newly triggered defense path", () => {
       files: [{ filename: "packages/api/src/app.ts", previousFilename: null, patch: null }],
     },
   }));
-  assert.equal(decision.kind, "review");
-  assert.equal(decision.action, "open");
+  assert.equal(decision.kind, "authorize");
+  assert.deepEqual(decision.kind === "authorize" ? decision.auditTriggers : null, [
+    { path: "packages/api/src/app.ts", reason: "merge-tail-machinery" },
+  ]);
 });
 
 test("head drift requeues Regression", () => {
