@@ -2,8 +2,8 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 import {
-  fetchReclaimPlan, reportReclaimOutcomes,
-  type ReclaimOffer, type ReclaimResult,
+  controlPlane as defaultControlPlane,
+  type ControlPlane, type ReclaimOffer, type ReclaimResult,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { disposeWorkspace } from "./dispose-workspace.js";
@@ -36,6 +36,7 @@ const empty: ReclaimSweep = { offered: 0, removed: 0, refused: 0, failed: 0, set
 
 export type ReclaimDeps = {
   listDirectories?: (root: string) => Promise<string[]>;
+  controlPlane?: ControlPlane;
 };
 
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -139,6 +140,7 @@ export const reclaimWorkspaces = async (
 ): Promise<ReclaimSweep> => {
   const root = resolve(config.workspaceRoot);
   const list = deps.listDirectories ?? listRunDirectories;
+  const controlPlane = deps.controlPlane ?? defaultControlPlane;
   // Pinned once, re-checked before every removal. A root that cannot be
   // resolved has not been provisioned yet, and an unreadable root is not
   // evidence that anything under it is gone — in both cases the sweep asks
@@ -150,7 +152,7 @@ export const reclaimWorkspaces = async (
   });
   if (physicalRoot === null) return { ...empty };
   const directories = await list(physicalRoot);
-  const plan = await fetchReclaimPlan(config, { runnerId: config.runnerId, workspaceRoot: root, directories });
+  const plan = await controlPlane.fetchReclaimPlan(config, { runnerId: config.runnerId, workspaceRoot: root, directories });
   // An API too old to know the route answers 404. Nothing is reclaimed, nothing
   // is deleted, and the directories stay until an API that speaks the protocol
   // asks for them — leaking beats guessing.
@@ -208,7 +210,7 @@ export const reclaimWorkspaces = async (
       }, {
         alreadyDurable: offer.pushedBranch !== null,
         retain: false,
-      });
+      }, controlPlane);
       if (disposed.cleanupStatus !== "SUCCEEDED") {
         throw new Error(disposed.cleanupFailureReason ?? `Workspace disposal returned ${disposed.cleanupStatus}`);
       }
@@ -250,6 +252,8 @@ export const reclaimWorkspaces = async (
     results.push({ runId: offer.runId, outcome: "REMOVED" });
   }
 
-  if (results.length > 0) await reportReclaimOutcomes(config, { runnerId: config.runnerId, workspaceRoot: root, results });
+  if (results.length > 0) {
+    await controlPlane.reportReclaimOutcomes(config, { runnerId: config.runnerId, workspaceRoot: root, results });
+  }
   return sweep;
 };

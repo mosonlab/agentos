@@ -178,6 +178,9 @@ const execHelpIsCompatible = (help: string, resumeHelp: string): boolean => [
 
 const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
+  if (spec.model === null) {
+    return { ok: false, cliVersion: null, authMode: null, capabilities, error: PREFLIGHT_REASONS.unsupportedModel };
+  }
   const version = await capturePreflight(spec.config, "CODEX", ["--version"], spec.env);
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };

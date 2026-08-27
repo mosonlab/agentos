@@ -56,6 +56,7 @@ import {
 import {
   handleRegressionCompletion,
   openMergeTailStopNotice,
+  stopMergeTail,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
 import {
@@ -530,20 +531,19 @@ export const completeRun = async (
         const failedRepair = latestMarker(tailMarkers, "repairAttempt");
         if (failedRepair?.regressionTaskId) {
           const reason = `${failedRepair.repairKind} repair ${run.taskId} failed without closing the repair at ${failedRepair.headSha}`;
-          await tx.task.update({ where: { id: failedRepair.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-          await writeMarker(tx, failedRepair.regressionTaskId, "repairResult", {
-            actorType: "control-plane",
-            body: `Automatic ${failedRepair.repairKind} attempt failed: ${failedRepair.headSha} -> ${body.headSha ?? "no-delivered-head"}`,
-            metadata: {
-              repairKind: failedRepair.repairKind,
-              repairTaskId: run.taskId,
-              startHeadSha: failedRepair.headSha,
-              targetHeadSha: failedRepair.baseHeadSha,
-              resolvedHeadSha: body.headSha ?? null,
-              state: "failed",
-            },
+          await stopMergeTail(tx, {
+            phase: "repair",
+            regressionTaskId: failedRepair.regressionTaskId,
+            repairTaskId: run.taskId,
+            repairKind: failedRepair.repairKind,
+            startHeadSha: failedRepair.headSha,
+            targetHeadSha: failedRepair.baseHeadSha,
+            resolvedHeadSha: body.headSha ?? null,
+            reason,
+            at: now,
+            agentId: run.agentId,
+            sessionId: run.session.id,
           });
-          await openMergeTailStopNotice(tx, { taskId: failedRepair.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
         }
       }
       // §4.0 outcome branching. The executor's own fenced write is the only

@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { afterEach } from "node:test";
+import test from "node:test";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
   disposeWorkspace, type WorkspaceDisposalIdentity,
 } from "./dispose-workspace.js";
+import { createControlPlaneDouble } from "./test-control-plane.js";
 
 const config = (workspaceRoot: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
@@ -28,9 +29,6 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   runAsPrefix: [],
   binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
 });
-
-const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
 
 const cases: Array<{ label: string; identity: WorkspaceDisposalIdentity }> = [
   {
@@ -57,9 +55,7 @@ for (const { label, identity } of cases) {
     const workspacePath = join(root, "workspace");
     await mkdir(workspacePath);
     await writeFile(join(workspacePath, "review.txt"), "scratch only\n");
-    globalThis.fetch = (async () => {
-      throw new Error("pinned disposal must not acknowledge a publication");
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble();
 
     const result = await disposeWorkspace(config(root), identity, {
       path: workspacePath,
@@ -69,13 +65,15 @@ for (const { label, identity } of cases) {
     }, {
       alreadyDurable: false,
       retain: false,
-    });
+    }, controlPlane.controlPlane);
 
     assert.deepEqual(result, {
       cleanupStatus: "SUCCEEDED",
       workspaceRetained: false,
       salvage: null,
     });
+    assert.deepEqual(controlPlane.publishedBranches, []);
+    assert.deepEqual(controlPlane.reclaimPublications, []);
     await assert.rejects(access(workspacePath));
   });
 }

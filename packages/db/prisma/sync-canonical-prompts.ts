@@ -407,7 +407,7 @@ const main = async (): Promise<void> => {
         updatedSteps,
         updatedRoles,
       };
-    }, { timeout: 30_000 });
+    }, { timeout: 120_000 });
     const updated = result.createdCanonicalTemplates + result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
       + result.adoptedPriorOutputDeclarations
       + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
