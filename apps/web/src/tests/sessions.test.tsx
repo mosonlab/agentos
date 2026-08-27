@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -28,7 +28,7 @@ for (const [key, value] of Object.entries({
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
 
 const {
-  DebugEvents, FilesTouched, SessionRow, StreamNodeView, WaitingNotice, fileTrackingHint, lifecycleStat,
+  DebugEvents, FilesTouched, SessionRow, SessionsPage, StreamNodeView, WaitingNotice, fileTrackingHint, lifecycleStat,
   sessionPill, truncateBlock,
 } = await import("../pages/Sessions");
 preloadDom.window.close();
@@ -266,6 +266,124 @@ test("a session row title falls back from Task to Goal to Session id", () => {
     task: null, taskId: null, goal: null, goalId: null,
   })} />);
   assert.match(id, />session-1</);
+});
+
+test("sessions are grouped by day, capped at five, and expandable in both locales", async () => {
+  const localIso = (offset: number, hour: number): string => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset, hour, 0, 0, 0).toISOString();
+  };
+  const today = Array.from({ length: 6 }, (_, index) => {
+    const at = localIso(0, 8 + index);
+    return session({ id: `today-${index}`, requestedAt: at, startedAt: at });
+  });
+  const yesterdayAt = localIso(-1, 12);
+  const yesterday = session({ id: "yesterday", requestedAt: yesterdayAt, startedAt: yesterdayAt });
+  const sessions = [...today, yesterday];
+
+  const { ProjectProvider } = await import("../lib/project");
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const locale of ["en", "zh"] as const) {
+      const dom = jsdom();
+      const container = dom.window.document.querySelector("#root");
+      assert.ok(container);
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        value: async (input: string) => {
+          const path = String(input);
+          const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }] : sessions;
+          return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+        },
+      });
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(<LocaleProvider initialLocale={locale}><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
+        });
+        for (let turn = 0; turn < 20; turn += 1) await act(async () => { await Promise.resolve(); });
+
+        const dayGroups = [...dom.window.document.querySelectorAll<HTMLElement>("[data-session-day]")];
+        assert.equal(dayGroups.length, 2, container.innerHTML);
+        const dayText = dayGroups.map((group) => group.textContent ?? "");
+        assert.match(dayText[0]!, locale === "en" ? /Today/ : /今天/);
+        assert.match(dayText[1]!, locale === "en" ? /Yesterday/ : /昨天/);
+        assert.match(dayText[0]!, locale === "en" ? /6 sessions/ : /6 个会话/);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 6);
+
+        const expand = dom.window.document.querySelector<HTMLButtonElement>("[data-session-day-toggle]");
+        assert.ok(expand, container.innerHTML);
+        assert.match(expand.textContent ?? "", locale === "en" ? /Show 1 more/ : /再显示 1 个/);
+        await click(dom, expand);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
+        assert.match(expand.textContent ?? "", locale === "en" ? /Show fewer/ : /显示更少/);
+        await click(dom, expand);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 6);
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
+test("day expansion resets when the Project scope changes", async () => {
+  const localIso = (offset: number, hour: number): string => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset, hour, 0, 0, 0).toISOString();
+  };
+  const sessionsFor = (projectId: string): Session[] => Array.from({ length: 6 }, (_, index) => {
+    const at = localIso(0, 8 + index);
+    return session({ id: `${projectId}-${index}`, projectId, requestedAt: at, startedAt: at });
+  });
+  const byProject = { p1: sessionsFor("p1"), p2: sessionsFor("p2") };
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/projects")
+        ? [{ id: "p1", name: "One" }, { id: "p2", name: "Two" }]
+        : path.includes("projectId=p2") ? byProject.p2 : byProject.p1;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { ProjectProvider, useProjectScope } = await import("../lib/project");
+  const ScopeProbe = (): ReactNode => {
+    const scope = useProjectScope();
+    return <button type="button" data-switch-project onClick={() => scope.select("p2")}>Switch project</button>;
+  };
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><ScopeProbe /><SessionsPage /></ProjectProvider></LocaleProvider>);
+    });
+    await flush();
+    const expand = dom.window.document.querySelector<HTMLButtonElement>("[data-session-day-toggle]");
+    assert.ok(expand, container.innerHTML);
+    await click(dom, expand);
+    assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 6);
+
+    const switchProject = dom.window.document.querySelector<HTMLButtonElement>("[data-switch-project]");
+    assert.ok(switchProject);
+    await click(dom, switchProject);
+    await flush();
+    assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 5, "new project starts collapsed");
+    assert.match(dom.window.document.querySelector("[data-session-day-toggle]")?.textContent ?? "", /Show 1 more/);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {
@@ -563,10 +681,14 @@ test("Load more keeps page one and dedupes it against the live head", async () =
   // getter throws, which lib/storage.ts already degrades to its in-memory map.
   const dom = jsdom();
 
-  const head = (ids: string[]) => ids.map((id, index) =>
-    session({ id, requestedAt: `2026-08-16T02:${String(index).padStart(2, "0")}:00.000Z` }));
-  const older = Array.from({ length: 50 }, (_, index) =>
-    session({ id: `old-${index}`, requestedAt: `2026-08-15T01:${String(index).padStart(2, "0")}:00.000Z` }));
+  const head = (ids: string[]) => ids.map((id, index) => {
+    const at = new Date(Date.UTC(2026, 7, 16 - index, 2, 0, 0)).toISOString();
+    return session({ id, requestedAt: at, startedAt: at });
+  });
+  const older = Array.from({ length: 50 }, (_, index) => {
+    const at = new Date(Date.UTC(2026, 1, 15 - index, 1, 0, 0)).toISOString();
+    return session({ id: `old-${index}`, requestedAt: at, startedAt: at });
+  });
 
   let headRows = head(Array.from({ length: 50 }, (_, index) => `new-${index}`));
   const requests: string[] = [];
@@ -821,8 +943,10 @@ test("a capped stream keeps the visible event-cap notice", async () => {
 
 test("a failed Load more tells the operator instead of vanishing into the console", async () => {
   const dom = jsdom();
-  const headRows = Array.from({ length: 50 }, (_, index) =>
-    session({ id: `new-${index}`, requestedAt: `2026-08-16T02:${String(index).padStart(2, "0")}:00.000Z` }));
+  const headRows = Array.from({ length: 50 }, (_, index) => {
+    const at = new Date(Date.UTC(2026, 7, 16 - index, 2, 0, 0)).toISOString();
+    return session({ id: `new-${index}`, requestedAt: at, startedAt: at });
+  });
 
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,

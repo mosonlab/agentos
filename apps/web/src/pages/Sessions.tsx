@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compact, compactTokens, durationWithInboxWait, formatDateTime, formatT, money, repoWebUrl, timeAgo } from "../lib/format";
+import { compact, compactTokens, durationWithInboxWait, formatDate, formatDateTime, formatT, money, repoWebUrl, timeAgo } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -11,6 +11,9 @@ import {
   clampLines, projectStream, RESUME_MARKER_TEXT, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES,
   type StreamNode, type ToolCall,
 } from "../lib/session-stream";
+import {
+  groupSessionsByDay, SESSION_DAY_PAGE_SIZE, sessionDayLabelKind, type SessionDayGroup,
+} from "../lib/session-list";
 import { useEventStream } from "../lib/use-event-stream";
 import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 import {
@@ -115,6 +118,8 @@ const SessionStatusPill = ({ status, mergeOutcome }: { status: SessionExecutionS
 
 const SESSION_ROW = "flex min-w-0 items-center gap-[12px] border-b border-[color:var(--border-soft)] px-[20px] py-[13px] last:border-b-0 hover:bg-secondary";
 const SESSION_TITLE = "min-w-0 flex-1 rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]";
+const SESSION_DAY_HEADING = "flex items-baseline gap-[9px] border-b border-[color:var(--border-soft)] bg-secondary/45 px-[20px] py-[10px]";
+const SESSION_DAY_ROWS = "divide-y divide-[color:var(--border-soft)]";
 
 const sessionDotTone = (tone: PillTone): string | undefined => {
   if (tone === "green") return DOT_TONE.green;
@@ -182,6 +187,51 @@ export const SessionRow = ({ session }: { session: Session }): ReactNode => {
   );
 };
 
+const SessionDayGroupView = ({
+  group,
+  expanded,
+  onToggle,
+}: {
+  group: SessionDayGroup;
+  expanded: boolean;
+  onToggle: () => void;
+}): ReactNode => {
+  const t = useT();
+  const kind = sessionDayLabelKind(group.key);
+  const heading = kind === "today"
+    ? t("sessions.day.today")
+    : kind === "yesterday"
+      ? t("sessions.day.yesterday")
+      : formatDate(group.at);
+  const remaining = Math.max(0, group.sessions.length - SESSION_DAY_PAGE_SIZE);
+  const visible = expanded ? group.sessions : group.sessions.slice(0, SESSION_DAY_PAGE_SIZE);
+  return (
+    <section data-session-day={group.key}>
+      <div className={SESSION_DAY_HEADING}>
+        <h2 className="text-[12.5px] font-bold text-foreground">{heading}</h2>
+        <span data-session-day-count className="text-[11.5px] text-muted-foreground">
+          {t("sessions.day.count", { n: group.sessions.length })}
+        </span>
+      </div>
+      <div className={SESSION_DAY_ROWS}>
+        {visible.map((session) => <SessionRow key={session.id} session={session} />)}
+      </div>
+      {remaining > 0 ? (
+        <div className="border-t border-[color:var(--border-soft)] px-[20px] py-[9px]">
+          <button
+            type="button"
+            data-session-day-toggle
+            className="border-0 bg-transparent p-0 text-[12px] text-primary hover:underline"
+            onClick={onToggle}
+          >
+            {t(expanded ? "sessions.day.collapse" : "sessions.day.expand", expanded ? undefined : { n: remaining })}
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+};
+
 export const SessionsPage = (): ReactNode => {
   const { projectId, project } = useProjectScope();
   const path = projectId === "" ? null : `/sessions?projectId=${encodeURIComponent(projectId)}&limit=${PAGE_SIZE}`;
@@ -193,14 +243,30 @@ export const SessionsPage = (): ReactNode => {
   const [exhausted, setExhausted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(() => new Set());
   const t = useT();
-  useEffect(() => { setOlder([]); setExhausted(false); setMoreError(null); }, [projectId]);
+  useEffect(() => {
+    setOlder([]);
+    setExhausted(false);
+    setMoreError(null);
+    setExpandedDays(new Set());
+  }, [projectId]);
 
   const sessions = useMemo(() => {
     const byId = new Map<string, Session>();
     for (const session of [...(head.data ?? []), ...older]) if (!byId.has(session.id)) byId.set(session.id, session);
     return [...byId.values()].sort((left, right) => right.requestedAt.localeCompare(left.requestedAt));
   }, [head.data, older]);
+
+  const dayGroups = useMemo(() => groupSessionsByDay(sessions), [sessions]);
+
+  const toggleDay = (key: string): void => {
+    setExpandedDays((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
 
   const loadMore = async (): Promise<void> => {
     const oldest = sessions.at(-1);
@@ -242,7 +308,14 @@ export const SessionsPage = (): ReactNode => {
         {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
         <Card flush>
           <div data-session-list>
-            {sessions.map((session) => <SessionRow key={session.id} session={session} />)}
+            {dayGroups.map((group) => (
+              <SessionDayGroupView
+                key={group.key}
+                group={group}
+                expanded={expandedDays.has(group.key)}
+                onToggle={() => toggleDay(group.key)}
+              />
+            ))}
           </div>
           {sessions.length === 0
             ? <EmptyState>{t(head.loading ? "common.loading" : "sessions.empty")}</EmptyState>
