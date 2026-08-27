@@ -47,9 +47,13 @@
      9.1 light / 8.4 dark, worst adjacent normal-vision deltaE 19.6 / 19.3. Three
      light slots sit under 3:1 against the light card, so the Costs page ships the
      same figures as a table beside the chart, which is the relief that permits
-     them. */
+     them.
+     `--series-other` is not a seventh hue. It is deliberately achromatic, which
+     is how a reader tells a fold from a series, and it is checked against the
+     only slot it can ever touch - slot 6, since the fold always sits at the top
+     of a stack: CVD deltaE 8.4 light / 13.5 dark, normal-vision 17.1 / 21.5. */
   --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a;
-  --series-4:#eda100; --series-5:#e87ba4; --series-6:#008300; --series-other:#8d8874;
+  --series-4:#eda100; --series-5:#e87ba4; --series-6:#008300; --series-other:#7a7466;
   --radius:8px; --radius-card:10px;
   --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
 }
@@ -72,7 +76,7 @@
   --primary-badge-background:#362c10; --event-line:#1e1b11; --badge-foreground:#ffffff; --radio-border:#56502f;
   --scrim:rgba(4,4,2,.68); --modal-shadow:rgba(0,0,0,.55);
   --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70;
-  --series-4:#c98500; --series-5:#d55181; --series-6:#008300; --series-other:#6b6655;
+  --series-4:#c98500; --series-5:#d55181; --series-6:#008300; --series-other:#9a9482;
 }
 
 /* Everything the retired stylesheet did that was not a class rule, moved into

@@ -173,6 +173,8 @@ export const zh = {
   "costs.byAgent.title": "按 Agent",
   "costs.chart.aria": "{n} 天内按 Agent 分组的每日花费，单日峰值 {amount}。",
   "costs.chart.empty": "该区间内没有任何花费。",
+  "costs.chart.other": "其他（{n} 个 Agent）",
+  "costs.chart.otherShort": "其他",
   "costs.chart.title": "每日花费",
   "costs.chart.tooltip": "{agent} · {date} · {amount}",
   "costs.gap.what": "成本看板",

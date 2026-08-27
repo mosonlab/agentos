@@ -24,13 +24,45 @@ export type CostsRange = typeof COSTS_RANGES[number];
 const RANGE_KEY = "agentos.costs.days";
 
 /** Categorical slots defined in `styles.css`. Identity is assigned in fixed
- *  order by total spend and never cycled: the seventh agent and everything after
- *  it share the neutral `--series-other` rather than repeating slot 1, which
- *  would read as "these two are the same agent". */
+ *  order by total spend and never cycled. */
 export const SERIES_SLOTS = 6;
+
+/** The folded remainder. A `\u0000` prefix cannot collide with an agent title,
+ *  which is what lets the chart carry the fold as an ordinary series. */
+export const OTHER_SERIES = "\u0000other";
 
 export const seriesColor = (rank: number): string =>
   `var(--series-${rank < SERIES_SLOTS ? rank + 1 : "other"})`;
+
+/**
+ * The series the chart draws, in stacking order.
+ *
+ * Past six agents the tail is *summed into one* neutral series rather than
+ * drawn as many bands that happen to share a colour — this project runs
+ * nineteen agents in a ninety-day window, and thirteen identical grey bands
+ * would claim an identity the colour cannot deliver. The by-agent table below
+ * the chart is where every agent still appears by name.
+ */
+export const chartSeries = (byAgent: CostsReport["byAgent"]): string[] =>
+  byAgent.length <= SERIES_SLOTS
+    ? byAgent.map((entry) => entry.agent)
+    : [...byAgent.slice(0, SERIES_SLOTS).map((entry) => entry.agent), OTHER_SERIES];
+
+/** Re-buckets each day against the folded series list. */
+export const foldDaily = (daily: CostsReport["daily"], series: readonly string[]): CostsReport["daily"] => {
+  if (!series.includes(OTHER_SERIES)) return daily;
+  const named = new Set(series);
+  return daily.map((bucket) => {
+    const folded: Record<string, string> = {};
+    let other = 0;
+    for (const [agent, usd] of Object.entries(bucket.byAgent)) {
+      if (named.has(agent)) folded[agent] = usd;
+      else other += Number(usd);
+    }
+    if (other > 0) folded[OTHER_SERIES] = String(other);
+    return { date: bucket.date, byAgent: folded };
+  });
+};
 
 /* ------------------------------------------------------------------- chart */
 
@@ -145,11 +177,14 @@ export const DailySpendChart = ({ daily, order, colors }: {
       role="img"
       aria-label={t("costs.chart.aria", { amount: usageMoney(max), n: daily.length })}
     >
-      {/* Recessive: the grid states the scale and then gets out of the way. */}
+      {/* Recessive: the grid states the scale and then gets out of the way.
+          `--border-soft` is very nearly `--card` in the dark theme, so a scale
+          line drawn in it would simply not exist there; `--border` is the
+          quietest token still visible against both surfaces. */}
       <line x1={PAD_LEFT} y1={PAD_TOP} x2={VIEW_WIDTH - PAD_RIGHT} y2={PAD_TOP}
-        stroke="var(--border-soft)" strokeWidth="1" />
-      <line x1={PAD_LEFT} y1={baseline} x2={VIEW_WIDTH - PAD_RIGHT} y2={baseline}
         stroke="var(--border)" strokeWidth="1" />
+      <line x1={PAD_LEFT} y1={baseline} x2={VIEW_WIDTH - PAD_RIGHT} y2={baseline}
+        stroke="var(--border)" strokeWidth="1.5" />
       <text x={PAD_LEFT - 8} y={PAD_TOP + 4} textAnchor="end" fontSize="13" fill="var(--faint)">
         {usageMoney(max)}
       </text>
@@ -157,7 +192,7 @@ export const DailySpendChart = ({ daily, order, colors }: {
       {segments.map((segment) => (
         <path key={segment.key} d={segmentPath(segment)} fill={colors(segment.agent)}>
           <title>{t("costs.chart.tooltip", {
-            agent: segment.agent,
+            agent: segment.agent === OTHER_SERIES ? t("costs.chart.otherShort") : segment.agent,
             date: segment.date,
             amount: usageMoney(segment.usd),
           })}</title>
@@ -179,19 +214,24 @@ export const DailySpendChart = ({ daily, order, colors }: {
   );
 };
 
-export const ChartLegend = ({ order, colors }: {
+export const ChartLegend = ({ order, colors, folded }: {
   order: readonly string[];
   colors: (agent: string) => string;
-}): ReactNode => (
-  <div className={`${ROW_WRAP} mt-[12px]`}>
-    {order.map((agent) => (
-      <span key={agent} className="inline-flex items-center gap-[6px] text-[11.5px] text-muted-foreground">
-        <span className="size-[9px] rounded-[2px]" style={{ background: colors(agent) }} aria-hidden="true" />
-        {agent}
-      </span>
-    ))}
-  </div>
-);
+  /** How many agents the neutral series stands for. */
+  folded: number;
+}): ReactNode => {
+  const t = useT();
+  return (
+    <div className={`${ROW_WRAP} mt-[12px]`}>
+      {order.map((agent) => (
+        <span key={agent} className="inline-flex items-center gap-[6px] text-[11.5px] text-muted-foreground">
+          <span className="size-[9px] rounded-[2px]" style={{ background: colors(agent) }} aria-hidden="true" />
+          {agent === OTHER_SERIES ? t("costs.chart.other", { n: folded }) : agent}
+        </span>
+      ))}
+    </div>
+  );
+};
 
 /* -------------------------------------------------------------------- page */
 
@@ -215,11 +255,13 @@ export const CostsPage = (): ReactNode => {
   /* Identity is assigned once, by total spend across the window, and every
    * surface on the page reads the same map — so narrowing the range repaints
    * nothing that survived it for a reason other than its own rank changing. */
-  const order = useMemo(() => (report?.byAgent ?? []).map((entry) => entry.agent), [report]);
+  const order = useMemo(() => chartSeries(report?.byAgent ?? []), [report]);
   const colors = useMemo(() => {
     const assigned = new Map(order.map((agent, rank) => [agent, seriesColor(rank)]));
     return (agent: string): string => assigned.get(agent) ?? "var(--series-other)";
   }, [order]);
+  const daily = useMemo(() => foldDaily(report?.daily ?? [], order), [report, order]);
+  const folded = (report?.byAgent.length ?? 0) - order.filter((agent) => agent !== OTHER_SERIES).length;
 
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
@@ -271,8 +313,8 @@ export const CostsPage = (): ReactNode => {
             </div>
 
             <Card title={t("costs.chart.title")}>
-              <DailySpendChart daily={report.daily} order={order} colors={colors} />
-              {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
+              <DailySpendChart daily={daily} order={order} colors={colors} />
+              {order.length > 1 ? <ChartLegend order={order} colors={colors} folded={folded} /> : null}
             </Card>
 
             <Card title={t("costs.byAgent.title")} flush>
@@ -325,8 +367,18 @@ export const CostsPage = (): ReactNode => {
                         {report.topRuns.map((run) => (
                           <TableRow key={run.runId}>
                             <TableCell className={TABLE_NAME}>
-                              {run.taskName ?? t("costs.topRuns.noTask")}
-                              <span className={TABLE_SUB}>{run.runId}</span>
+                              {/* Task names run long enough to push the four
+                                  columns after them past the table's width. The
+                                  bound goes on a block inside the cell, not the
+                                  cell: an auto-layout table treats a `<td>`
+                                  max-width as advice and widens the column
+                                  anyway. `TableCell` is `whitespace-nowrap`, so
+                                  the block has to re-enable wrapping or the
+                                  bound clips nothing. */}
+                              <div className="max-w-[420px] whitespace-normal">
+                                {run.taskName ?? t("costs.topRuns.noTask")}
+                                <span className={TABLE_SUB}>{run.runId}</span>
+                              </div>
                             </TableCell>
                             <TableCell>{run.agent}</TableCell>
                             <TableCell>{run.model}</TableCell>

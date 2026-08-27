@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { installDom, reactDom } from "./dom-harness";
+
 import {
-  ChartLegend, DailySpendChart, SERIES_SLOTS, axisDates, chartSegments, seriesColor,
+  ChartLegend, DailySpendChart, OTHER_SERIES, SERIES_SLOTS, axisDates, chartSegments, chartSeries,
+  foldDaily, seriesColor,
 } from "../pages/Costs";
 import type { CostsReport } from "../lib/types";
 
@@ -105,7 +109,150 @@ test("a window with no spend says so instead of drawing an empty box", () => {
 
 test("the legend names every series, so identity is never colour alone", () => {
   const order = ["Dev", "Reviewer", "Integrator"];
-  const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} />);
+  const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} folded={0} />);
   for (const agent of order) assert.ok(markup.includes(agent), agent);
   assert.equal(markup.match(/var\(--series-\d\)/g)?.length, 3);
+});
+
+/* -------------------------------------------------------------------- fold */
+
+const agents = (count: number): CostsReport["byAgent"] =>
+  Array.from({ length: count }, (_, index) => ({
+    agent: `Agent ${index}`, usd: String(count - index), runs: 1, avgUsd: String(count - index),
+  }));
+
+test("six agents or fewer are each their own series", () => {
+  const series = chartSeries(agents(SERIES_SLOTS));
+  assert.equal(series.length, SERIES_SLOTS);
+  assert.ok(!series.includes(OTHER_SERIES));
+});
+
+test("past six agents the tail becomes one folded series, not repeated colours", () => {
+  const series = chartSeries(agents(19));
+  assert.equal(series.length, SERIES_SLOTS + 1);
+  assert.equal(series.at(-1), OTHER_SERIES);
+  // The named six are the six biggest spenders, in rank order.
+  assert.deepEqual(series.slice(0, SERIES_SLOTS), agents(19).slice(0, SERIES_SLOTS).map((entry) => entry.agent));
+  // Nothing beyond the fold reuses a numbered slot.
+  assert.equal(new Set(series.map((_, rank) => seriesColor(rank))).size, SERIES_SLOTS + 1);
+});
+
+test("folding sums the tail into one amount per day rather than dropping it", () => {
+  const daily = [bucket("2026-08-26", {
+    "Agent 0": "6", "Agent 1": "5", "Agent 2": "4", "Agent 3": "3",
+    "Agent 4": "2", "Agent 5": "1", "Agent 6": "0.5", "Agent 7": "0.25",
+  })];
+  const series = chartSeries(agents(8));
+  const folded = foldDaily(daily, series);
+  assert.equal(folded[0]?.byAgent[OTHER_SERIES], "0.75");
+  assert.equal(folded[0]?.byAgent["Agent 0"], "6");
+  assert.ok(!("Agent 6" in (folded[0]?.byAgent ?? {})));
+  // The day's total survives the fold exactly.
+  const sum = (entry: Record<string, string>): number =>
+    Object.values(entry).reduce((total, usd) => total + Number(usd), 0);
+  assert.equal(sum(folded[0]?.byAgent ?? {}), sum(daily[0]?.byAgent ?? {}));
+});
+
+test("an unfolded window is passed through untouched", () => {
+  const daily = [bucket("2026-08-26", { Dev: "2" })];
+  assert.equal(foldDaily(daily, ["Dev"]), daily);
+});
+
+test("the folded series is labelled with how many agents it stands for", () => {
+  const order = [...agents(SERIES_SLOTS).map((entry) => entry.agent), OTHER_SERIES];
+  const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} folded={13} />);
+  assert.ok(markup.includes("Other (13 agents)"));
+  // The sentinel itself is never shown to a reader.
+  assert.ok(!markup.includes(OTHER_SERIES));
+});
+
+/* ---------------------------------------------------------------- the page */
+
+const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
+  days: 30,
+  since: "2026-07-29T00:00:00.000Z",
+  totalUsd: "2489.211742",
+  estimatedUsd: "1321.851742",
+  runCount: 688,
+  costUnavailableRuns: 153,
+  avgUsd: "4.653387",
+  daily: [bucket("2026-08-26", { "Senior Developer": "600", Planner: "45.87" })],
+  byAgent: [
+    { agent: "Senior Developer", usd: "1800", runs: 400, avgUsd: "4.5" },
+    { agent: "Planner", usd: "689.211742", runs: 288, avgUsd: "2.393096" },
+  ],
+  topRuns: [{
+    runId: "run-1", taskName: "Costs dashboard page: Implementation", agent: "Senior Developer",
+    model: "openai-codex/gpt-5.6-sol", usd: "36.5", estimated: true, startedAt: "2026-08-26T09:00:00.000Z",
+  }],
+  ...overrides,
+});
+
+const settle = async (): Promise<void> => {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+};
+
+/** Mounts the page against a scripted control plane, reads it, and unmounts.
+ *  The unmount is not tidiness: `usePoll` holds a `setInterval`, and a root left
+ *  mounted keeps the test process alive forever. */
+const readPage = async (body: CostsReport): Promise<{ text: string; requested: string[] }> => {
+  const { container } = installDom("http://127.0.0.1:5173/costs");
+  const [{ createRoot }, { CostsPage }, { ProjectProvider }] = await Promise.all([
+    reactDom(), import("../pages/Costs"), import("../lib/project"),
+  ]);
+  const requested: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input).replace(/^.*\/api/, "");
+    requested.push(url);
+    if (url === "/projects") {
+      return new Response(JSON.stringify([{ id: "p1", name: "AgentOS Example", slug: "agentos" }]), { status: 200 });
+    }
+    if (url.startsWith("/projects/p1/costs")) return new Response(JSON.stringify(body), { status: 200 });
+    return new Response("[]", { status: 200 });
+  }) as typeof fetch;
+  const root = createRoot(container);
+  try {
+    act(() => root.render(<ProjectProvider><CostsPage /></ProjectProvider>));
+    // Two settles: the first resolves `/projects`, which is what gives the page
+    // a project id to ask for costs with.
+    await settle();
+    await settle();
+    return { text: container.textContent ?? "", requested };
+  } finally {
+    act(() => root.unmount());
+  }
+};
+
+test("the page reads the default window and shows the three tiles", async () => {
+  const { text, requested } = await readPage(report());
+  assert.ok(requested.some((url) => url === "/projects/p1/costs?days=30"), requested.join(" "));
+  assert.match(text, /Total spend/);
+  assert.match(text, /\$2489\.21/);
+  assert.match(text, /Runs/);
+  assert.match(text, /688/);
+  assert.match(text, /Avg per run/);
+  assert.match(text, /\$4\.65/);
+});
+
+test("the tiles never imply the total is complete when it is not", async () => {
+  const { text } = await readPage(report());
+  // Both caveats are on screen: what was priced by us, and what could not be
+  // priced at all. Without them the tiles read as a full ledger.
+  assert.match(text, /\$1321\.85 of this total is priced from token counts/);
+  assert.match(text, /153 settled runs reported no cost/);
+});
+
+test("a window where every run reported a cost says so instead of staying silent", async () => {
+  const { text } = await readPage(report({ costUnavailableRuns: 0, estimatedUsd: "0" }));
+  assert.match(text, /Every settled run in this window reported a cost/);
+  assert.ok(!/priced from token counts/.test(text));
+});
+
+test("both tables render, and an estimated run cost is labelled as one", async () => {
+  const { text } = await readPage(report());
+  assert.match(text, /By agent/);
+  assert.match(text, /Senior Developer/);
+  assert.match(text, /Top runs/);
+  assert.match(text, /Costs dashboard page: Implementation/);
+  assert.match(text, /\$36\.50 est\./);
 });

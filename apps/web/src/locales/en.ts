@@ -174,6 +174,8 @@ export const en = {
   "costs.byAgent.title": "By agent",
   "costs.chart.aria": "Daily spend by agent over {n} days, peaking at {amount} in a day.",
   "costs.chart.empty": "Nothing was spent in this window.",
+  "costs.chart.other": "Other ({n} agents)",
+  "costs.chart.otherShort": "Other",
   "costs.chart.title": "Daily spend",
   "costs.chart.tooltip": "{agent} · {date} · {amount}",
   "costs.gap.what": "the cost dashboard",
