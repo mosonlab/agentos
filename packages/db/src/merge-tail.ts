@@ -214,6 +214,7 @@ export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean =>
 const DEFENSE_EXACT = new Set([
   "scripts/merge-gate.sh",
   "scripts/merge-lease.sh",
+  "scripts/regression-verification.sh",
   "packages/db/src/workflow.ts",
   "packages/db/src/merge-integrator.ts",
   "packages/db/src/gate-attestation.ts",

@@ -127,7 +127,7 @@ record_failure() {
   local message="$1" request
   request="$(node -e '
 const [fencingToken, body] = process.argv.slice(1);
-process.stdout.write(JSON.stringify({ fencingToken, actorType: "runner", body }));
+process.stdout.write(JSON.stringify({ fencingToken, actorType: "agent", body }));
 ' "$AGENTOS_FENCING_TOKEN" "$message")"
   api_request POST /activity "$request" >/dev/null 2>&1 || true
 }

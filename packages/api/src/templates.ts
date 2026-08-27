@@ -129,6 +129,10 @@ const isMechanicalTemplateStep = (outputKind: string): boolean => {
   return role === "readiness" || role === "integrator";
 };
 
+const outputIsPlatformAuthored = (outputKind: string): boolean => (
+  isMechanicalTemplateStep(outputKind) || outputKind === "regression-verification-v2"
+);
+
 export const composeTemplateTaskDescription = (input: {
   prompt: string;
   featureBrief?: string | undefined;
@@ -143,7 +147,9 @@ export const composeTemplateTaskDescription = (input: {
     input.prompt,
     input.featureBrief ? `${FEATURE_BRIEF_PREFIX}${input.featureBrief}` : "",
     input.attachmentsFromPrevious ? PRIOR_OUTPUTS_REMINDER : "",
-    `${PERSIST_OUTPUT_PREFIX}${input.outputKind}${PERSIST_OUTPUT_SUFFIX}`,
+    outputIsPlatformAuthored(input.outputKind)
+      ? ""
+      : `${PERSIST_OUTPUT_PREFIX}${input.outputKind}${PERSIST_OUTPUT_SUFFIX}`,
   ].join("");
 };
 
@@ -153,9 +159,10 @@ export const featureBriefFromTaskDescription = (
   attachmentsFromPrevious: boolean,
 ): string | null => {
   const startMarker = description.indexOf(FEATURE_BRIEF_PREFIX);
-  const endMarker = description.lastIndexOf(PERSIST_OUTPUT_PREFIX);
-  if (startMarker < 0 || endMarker < startMarker) return null;
+  const persistMarker = description.lastIndexOf(PERSIST_OUTPUT_PREFIX);
+  if (startMarker < 0) return null;
   const start = startMarker + FEATURE_BRIEF_PREFIX.length;
+  const endMarker = persistMarker >= start ? persistMarker : description.length;
   const reminderStart = endMarker - PRIOR_OUTPUTS_REMINDER.length;
   const end = attachmentsFromPrevious
     && reminderStart >= start

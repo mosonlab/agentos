@@ -66,12 +66,13 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
     assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
     const regression = steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
-    assert.match(regression.prompt, /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
-    assert.ok(regression.prompt.indexOf("semantic verification passes") < regression.prompt.indexOf("merge-lease.sh acquire"));
-    assert.match(regression.prompt, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
-    assert.match(regression.prompt, /"schemaVersion":2/u);
-    assert.match(regression.prompt, /retry it up to three times/u);
-    assert.match(regression.prompt, /exits 75 or 76[\s\S]*up to two[\s\S]*more times/u);
+    assert.match(regression.prompt, /regression-verification\.sh prepare/u);
+    assert.match(regression.prompt, /regression-verification\.sh review-fail/u);
+    assert.match(regression.prompt, /regression-verification\.sh finalize/u);
+    assert.match(regression.prompt, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+    assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
+    assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
+    assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
   }
 });
 

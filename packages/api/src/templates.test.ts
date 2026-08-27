@@ -62,7 +62,16 @@ test("mechanical cards retain only their canonical prompt while model cards reta
   }
   assert.equal(
     composeTemplateTaskDescription({ ...common, outputKind: "regression-verification-v2" }),
-    `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.\nPersist the final regression-verification-v2 output for this step through the AgentOS task output endpoint.`,
+    `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.`,
+  );
+  const regressionDescription = composeTemplateTaskDescription({
+    ...common,
+    outputKind: "regression-verification-v2",
+  });
+  assert.equal(
+    featureBriefFromTaskDescription(regressionDescription, true),
+    common.featureBrief,
+    "a platform-authored regression output must not make its brief unreadable",
   );
 });
 
