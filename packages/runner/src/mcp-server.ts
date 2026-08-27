@@ -13,6 +13,8 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+import { requestFor, toolsFor, type SessionToolRequest } from "./session-tool-contract.js";
+
 type JsonRpcRequest = {
   jsonrpc: "2.0";
   id?: string | number | null;
@@ -87,124 +89,20 @@ const asRecord = (value: unknown): Record<string, unknown> =>
 
 const asString = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value : null;
 
-export const TOOLS = [
-  {
-    name: "task_activity_log",
-    title: "Append to the task activity log",
-    description: "Record notable progress on the current AgentOS task. This is the routine progress channel — "
-      + "it never interrupts a human. Use it whenever you finish a meaningful step or make a decision worth auditing.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        body: { type: "string", description: "What happened, in one or two sentences." },
-        metadata: { type: "object", description: "Optional structured detail stored alongside the entry.", additionalProperties: true },
-      },
-      required: ["body"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "task_output",
-    title: "Persist the task output",
-    description: "Persist this step's deliverable as the AgentOS task output. Later steps in the chain read it, and "
-      + "the approval gate shows it to the human. Canonical steps may require a phase-specific write sequence from the task contract. "
-      + "A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        kind: { type: "string", description: "Output kind, e.g. spec, plan, review, result." },
-        body: { type: "string", description: "The deliverable itself, in full." },
-        metadata: { type: "object", description: "Optional structured detail, e.g. branch or commit.", additionalProperties: true },
-      },
-      required: ["kind", "body"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "task_status",
-    title: "Read the task and run status",
-    description: "Read the current AgentOS task and run: name, status, approval gate, run number and budget, branch, "
-      + "and whether an output has already been persisted.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "inbox_ask",
-    title: "Ask the human a question",
-    description: "Ask the human a question through the AgentOS Inbox. This SUSPENDS the session until they answer, and "
-      + "you resume in place with their reply — so finish everything that does not depend on the answer first. "
-      + "Routine progress belongs in task_activity_log, not here.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        body: { type: "string", description: "The question, with enough context for a human to answer it cold." },
-        choices: {
-          type: "array",
-          description: "Optional fixed choices. Omit for a free-text question.",
-          items: {
-            type: "object",
-            properties: { id: { type: "string" }, label: { type: "string" } },
-            required: ["id", "label"],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ["body"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "files_list",
-    title: "List files",
-    description: "List one granted Files Root directory non-recursively.",
-    inputSchema: {
-      type: "object",
-      properties: { dir: { type: "string", description: "Files-Root-relative POSIX directory path; empty means root." } },
-      required: ["dir"], additionalProperties: false,
-    },
-  },
-  {
-    name: "files_read",
-    title: "Read a file",
-    description: "Read one granted file; binary content is returned with encoding base64.",
-    inputSchema: {
-      type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false,
-    },
-  },
-  {
-    name: "files_write",
-    title: "Write a file",
-    description: "Write one granted file, creating parent directories as needed.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string" }, content: { type: "string" }, encoding: { type: "string", enum: ["utf8", "base64"] },
-      },
-      required: ["path", "content"], additionalProperties: false,
-    },
-  },
-  {
-    name: "files_delete",
-    title: "Delete a file",
-    description: "Delete one granted file or empty directory.",
-    inputSchema: {
-      type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false,
-    },
-  },
-] as const;
+export const TOOLS = toolsFor("mcp-stdio").map(({ name, title, description, inputSchema }) => ({
+  name, title, description, inputSchema,
+}));
 
 const call = async (
   credentials: SessionCredentials,
-  method: "GET" | "POST" | "PUT" | "DELETE",
-  path: string,
-  body?: Record<string, unknown>,
-  query?: Record<string, string>,
+  request: SessionToolRequest,
 ): Promise<unknown> => {
-  const url = new URL(`/session/runs/${credentials.runId}${path}`, credentials.apiUrl);
-  for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+  const url = new URL(`/session/runs/${credentials.runId}${request.path}`, credentials.apiUrl);
+  for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);
   const response = await fetch(url, {
-    method,
+    method: request.method,
     headers: { Authorization: `Bearer ${credentials.sessionToken}`, "Content-Type": "application/json" },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    ...(request.body ? { body: JSON.stringify(request.body) } : {}),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`AgentOS API ${response.status}: ${text.slice(0, 500)}`);
@@ -217,28 +115,19 @@ export const invokeTool = async (
   rawArguments: Record<string, unknown>,
 ): Promise<ToolResult> => {
   const text = (value: string): ToolResult => ({ content: [{ type: "text", text: value }] });
+  const request = requestFor(name, rawArguments, {
+    fencingToken: credentials.fencingToken,
+    ...(name === "task_output" ? { commitSha: workspaceHead(credentials) } : {}),
+    ...(name === "inbox_ask" ? { requestIdPrefix: `mcp:${credentials.runId}` } : {}),
+  });
+  const result = await call(credentials, request);
   if (name === "task_activity_log") {
-    const body = asString(rawArguments.body);
-    if (!body) throw new Error("task_activity_log requires a non-empty body");
-    await call(credentials, "POST", "/activity", {
-      fencingToken: credentials.fencingToken,
-      actorType: "agent",
-      body,
-      ...(rawArguments.metadata ? { metadata: asRecord(rawArguments.metadata) } : {}),
-    });
     return text("Activity recorded.");
   }
   if (name === "task_output") {
-    const kind = asString(rawArguments.kind);
-    const body = asString(rawArguments.body);
-    if (!kind || !body) throw new Error("task_output requires kind and body");
-    const persisted = await call(credentials, "PUT", "/output", {
-      fencingToken: credentials.fencingToken,
-      kind,
-      body,
-      commitSha: workspaceHead(credentials),
-      ...(rawArguments.metadata ? { metadata: asRecord(rawArguments.metadata) } : {}),
-    }) as { predecessorOutputs?: unknown } | null;
+    const body = rawArguments.body as string;
+    const kind = rawArguments.kind as string;
+    const persisted = result as { predecessorOutputs?: unknown } | null;
     const predecessorOutputs = persisted?.predecessorOutputs;
     return text([
       `Output persisted as '${kind}' (${body.length} characters).`,
@@ -248,51 +137,22 @@ export const invokeTool = async (
     ].join("\n\n"));
   }
   if (name === "task_status") {
-    return text(JSON.stringify(await call(credentials, "GET", "/status"), null, 2));
+    return text(JSON.stringify(result, null, 2));
   }
   if (name === "inbox_ask") {
-    const body = asString(rawArguments.body);
-    if (!body) throw new Error("inbox_ask requires a non-empty body");
-    const choices = Array.isArray(rawArguments.choices)
-      ? rawArguments.choices.flatMap((choice) => {
-        const record = asRecord(choice);
-        const choiceId = asString(record.id);
-        const label = asString(record.label);
-        return choiceId && label ? [{ id: choiceId, label }] : [];
-      })
-      : [];
-    await call(credentials, "POST", "/inbox/questions", {
-      fencingToken: credentials.fencingToken,
-      // Idempotency key: a retried tool call must not queue a second question.
-      requestId: `mcp:${credentials.runId}:${body.slice(0, 80)}`,
-      body,
-      choices,
-    });
     return text("Question sent. This session is suspended until the human answers; you will resume with their reply.");
   }
   if (name === "files_list") {
-    const dir = typeof rawArguments.dir === "string" ? rawArguments.dir : null;
-    if (dir === null) throw new Error("files_list requires dir");
-    return text(JSON.stringify(await call(credentials, "GET", "/files", undefined, { dir }), null, 2));
+    return text(JSON.stringify(result, null, 2));
   }
   if (name === "files_read") {
-    const path = asString(rawArguments.path);
-    if (!path) throw new Error("files_read requires path");
-    return text(JSON.stringify(await call(credentials, "GET", "/files/content", undefined, { path }), null, 2));
+    return text(JSON.stringify(result, null, 2));
   }
   if (name === "files_write") {
-    const path = asString(rawArguments.path);
-    const content = typeof rawArguments.content === "string" ? rawArguments.content : null;
-    const encoding = rawArguments.encoding === undefined ? "utf8" : rawArguments.encoding;
-    if (!path || content === null || (encoding !== "utf8" && encoding !== "base64")) {
-      throw new Error("files_write requires path, content, and optional encoding utf8 or base64");
-    }
-    return text(JSON.stringify(await call(credentials, "PUT", "/files/content", { path, content, encoding }), null, 2));
+    return text(JSON.stringify(result, null, 2));
   }
   if (name === "files_delete") {
-    const path = asString(rawArguments.path);
-    if (!path) throw new Error("files_delete requires path");
-    return text(JSON.stringify(await call(credentials, "DELETE", "/files", undefined, { path }), null, 2));
+    return text(JSON.stringify(result, null, 2));
   }
   throw new Error(`Unknown tool ${name}`);
 };

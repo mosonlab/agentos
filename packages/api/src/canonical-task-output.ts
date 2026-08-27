@@ -1,4 +1,8 @@
 import {
+  canonicalClosedReviewArtifactSchema as closedReviewArtifact,
+  canonicalFixedImplementationArtifactSchema as fixedImplementationArtifact,
+  canonicalOutputSchema,
+  canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
   Prisma,
   recordGateAttestation,
@@ -6,9 +10,11 @@ import {
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
   RunStatus,
   stepRole,
+  type CanonicalClosedReviewArtifact,
+  type CanonicalFixedImplementationArtifact,
+  type CanonicalReviewArtifact,
   type TaskStepOutput,
 } from "@agentos/db";
-import { z } from "zod";
 
 import {
   fenceRefusalResponse,
@@ -93,54 +99,8 @@ const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | unde
   return typeof phase === "string" ? phase : null;
 };
 
-const commitSha = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
-const nonEmptyString = z.string().trim().min(1);
-const passGateProof = z.string().regex(/^MERGE GATE: PASS [0-9a-f]{40}$/u);
-const failGateProof = z.string().regex(/^MERGE GATE: FAIL \(.+\)$/u);
-const stringList = z.array(nonEmptyString);
-const canonicalEnvelope = z.object({ schemaVersion: z.literal(1), headSha: commitSha });
-const reviewFinding = z.object({
-  id: nonEmptyString,
-  severity: z.enum(["P0", "P1", "P2"]),
-  file: nonEmptyString,
-  line: z.number().int().positive(),
-  title: nonEmptyString,
-  evidence: nonEmptyString,
-  requiredFix: nonEmptyString,
-});
-const reviewArtifact = canonicalEnvelope.extend({
-  reviewedBase: commitSha,
-  reviewedHead: commitSha,
-  findings: z.array(reviewFinding),
-});
-const closedReviewArtifact = reviewArtifact.extend({
-  dispositions: z.array(z.object({
-    id: nonEmptyString,
-    disposition: z.enum(["ADOPTED", "REJECTED", "MERGED"]),
-    reason: nonEmptyString,
-  })),
-  mustFixIds: stringList,
-});
-
-/**
- * The adjudication node the canonical graphs used to carry. No current
- * template has one, but the `must-fix` kind is still the registered contract
- * for the renamed rows that do, so the schema stays.
- */
-const adjudicationArtifact = canonicalEnvelope.extend({
-  reviewedBase: commitSha,
-  reviewedHead: commitSha,
-  dispositions: z.array(z.object({
-    id: nonEmptyString,
-    disposition: z.enum(["ADOPTED", "REJECTED", "MERGED"]),
-    reason: nonEmptyString,
-  })),
-  mustFixIds: stringList,
-  findings: z.array(reviewFinding).optional(),
-});
-
-type ReviewArtifact = z.infer<typeof reviewArtifact>;
-type ClosedReviewArtifact = z.infer<typeof closedReviewArtifact>;
+type ReviewArtifact = CanonicalReviewArtifact;
+type ClosedReviewArtifact = CanonicalClosedReviewArtifact;
 
 const duplicateValues = (values: string[]): string[] => {
   const seen = new Set<string>();
@@ -202,24 +162,7 @@ const closedReviewRunRefusal = (
  * both immutable reports and decides each finding itself, so its output is the
  * only place that record can live.
  */
-const fixedImplementationArtifact = canonicalEnvelope.extend({
-  sourceHead: commitSha,
-  dispositions: z.array(z.object({
-    id: nonEmptyString,
-    disposition: z.enum(["ADOPTED", "REJECTED", "MERGED"]),
-    reason: nonEmptyString,
-  })),
-  closedFindings: z.array(z.object({
-    id: nonEmptyString,
-    status: z.literal("CLOSED"),
-    codeEvidence: nonEmptyString,
-    testEvidence: nonEmptyString,
-  })),
-  testsRun: stringList,
-  residualRisks: z.array(z.string()),
-});
-
-type FixedImplementationArtifact = z.infer<typeof fixedImplementationArtifact>;
+type FixedImplementationArtifact = CanonicalFixedImplementationArtifact;
 
 const fixedImplementationSelfRefusal = (artifact: FixedImplementationArtifact): string | null => {
   const duplicateDispositions = duplicateValues(artifact.dispositions.map(({ id }) => id));
@@ -337,96 +280,13 @@ const fixedImplementationPersistenceRefusal = async (
   return null;
 };
 
-const canonicalOutputSchemas: Record<string, z.ZodType> = {
-  spec: canonicalEnvelope.extend({ spec: nonEmptyString }),
-  plan: canonicalEnvelope.extend({ summary: nonEmptyString, sliceIds: stringList }),
-  "plan-review": canonicalEnvelope.extend({ findings: z.array(reviewFinding) }),
-  "revised-plan": canonicalEnvelope.extend({
-    summary: nonEmptyString,
-    addressedFindingIds: stringList,
-    declinedFindings: z.array(z.object({ id: nonEmptyString, reason: nonEmptyString })),
-  }),
-  implementation: canonicalEnvelope.extend({
-    baseSha: commitSha,
-    summary: nonEmptyString,
-    testsRun: stringList,
-  }),
-  "sol-findings": reviewArtifact.extend({ commandsRun: stringList }),
-  "blind-findings": reviewArtifact,
-  "must-fix": adjudicationArtifact,
-  "fixed-implementation": fixedImplementationArtifact,
-  "regression-verification": z.discriminatedUnion("outcome", [
-    canonicalEnvelope.extend({
-      outcome: z.literal("pass"),
-      baseHeadSha: commitSha,
-      gateVerdict: z.literal("PASS"),
-    }),
-    canonicalEnvelope.extend({
-      outcome: z.literal("review-fail"),
-      baseHeadSha: commitSha,
-      summary: nonEmptyString,
-    }),
-    canonicalEnvelope.extend({
-      outcome: z.literal("gate-fail"),
-      baseHeadSha: commitSha,
-      gateVerdict: z.literal("FAIL"),
-      summary: nonEmptyString,
-    }),
-    canonicalEnvelope.extend({
-      outcome: z.literal("refresh-conflict"),
-      baseHeadSha: commitSha,
-      summary: nonEmptyString,
-    }),
-  ]),
-  [REGRESSION_VERIFICATION_OUTPUT_KIND]: z.discriminatedUnion("outcome", [
-    canonicalEnvelope.extend({
-      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
-      outcome: z.literal("pass"),
-      baseHeadSha: commitSha,
-      gateVerdict: z.literal("PASS"),
-      gateProof: passGateProof,
-    }),
-    canonicalEnvelope.extend({
-      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
-      outcome: z.literal("review-fail"),
-      baseHeadSha: commitSha,
-      summary: nonEmptyString,
-    }),
-    canonicalEnvelope.extend({
-      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
-      outcome: z.literal("gate-fail"),
-      baseHeadSha: commitSha,
-      gateVerdict: z.literal("FAIL"),
-      gateProof: failGateProof,
-      summary: nonEmptyString,
-    }),
-    canonicalEnvelope.extend({
-      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
-      outcome: z.literal("refresh-conflict"),
-      baseHeadSha: commitSha,
-      summary: nonEmptyString,
-    }),
-  ]).superRefine((verdict, context) => {
-    if (verdict.outcome === "pass" && verdict.gateProof !== `MERGE GATE: PASS ${verdict.headSha}`) {
-      context.addIssue({
-        code: "custom",
-        path: ["gateProof"],
-        message: "gate proof oid must match headSha",
-      });
-    }
-  }),
-  documentation: canonicalEnvelope.extend({
-    summary: nonEmptyString,
-    changes: z.array(z.object({ path: nonEmptyString, action: z.enum(["ADDED", "UPDATED", "DELETED"]) })),
-  }),
-};
-
 const canonicalBodyRefusal = (
-  kind: string,
+  step: TemplateStepIdentity,
   body: string,
   authoredHead: string | null,
   phase: string | null,
 ): string | null => {
+  const kind = step.outputKind;
   let value: unknown;
   try {
     value = JSON.parse(body);
@@ -438,7 +298,7 @@ const canonicalBodyRefusal = (
     : kind === "must-fix"
       && (phase === BLIND_REVIEW_PHASE.independent || phase === BLIND_REVIEW_PHASE.evidenceUnlocked)
       ? reviewArtifact
-      : canonicalOutputSchemas[kind];
+      : canonicalOutputSchema(step);
   if (!schema) return `canonical output kind ${kind} has no versioned JSON contract`;
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
@@ -483,7 +343,7 @@ export const canonicalOutputRefusal = (
     return `${step.outputKind} task output is bound to ${output.commitSha ?? "no commit"}, not completion head ${completionHeadSha}`;
   }
   const bodyRefusal = canonicalBodyRefusal(
-    output.kind,
+    step,
     output.body,
     output.commitSha,
     metadataPhase(output.metadata),
@@ -564,8 +424,8 @@ export const persistSessionTaskOutput = async (
   if (immutableReviewOutput && existing) {
     return { ok: false, reason: `${step?.outputKind ?? input.kind} task output is immutable once persisted` };
   }
-  if (isCanonicalAgentStep(step)) {
-    const bodyRefusal = canonicalBodyRefusal(input.kind, input.body, input.commitSha, phase);
+  if (step && isCanonicalAgentStep(step)) {
+    const bodyRefusal = canonicalBodyRefusal(step, input.body, input.commitSha, phase);
     if (bodyRefusal) return { ok: false, reason: bodyRefusal };
   }
   if (isCanonicalFixStep(step)) {

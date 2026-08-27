@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
+import { z } from "zod";
 
 import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
+import { canonicalOutputSchema } from "./canonical-output-schema.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
   loadTemplateStepSources,
@@ -38,6 +40,26 @@ const updateFrontmatter = async (
 ): Promise<void> => {
   const path = join(root, templateName, filename);
   await writeFile(path, replace(await readFile(path, "utf8")));
+};
+
+type PromptContract = {
+  format: "json" | "field-list";
+  keys: string[];
+};
+
+const promptContract = (prompt: string): PromptContract | null => {
+  const jsonLiteral = prompt.match(/`(\{"schemaVersion":[^`]+\})`/u)?.[1];
+  if (jsonLiteral) {
+    const parsed = JSON.parse(jsonLiteral) as unknown;
+    assert.ok(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+    return { format: "json", keys: Object.keys(parsed).sort() };
+  }
+  const fieldList = prompt.match(/Persist exactly one immutable `blind-findings` JSON object with([\s\S]+?);/u)?.[1];
+  if (!fieldList) return null;
+  return {
+    format: "field-list",
+    keys: [...fieldList.matchAll(/`([a-z][A-Za-z]+)`/gu)].map((match) => match[1]!).sort(),
+  };
 };
 
 test("canonical sources expose the exact layered Direct and Full graphs", async () => {
@@ -84,6 +106,25 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
+  }
+});
+
+test("nine authored Full Assurance output contracts match their canonical schemas", async () => {
+  const steps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
+  const contracts = steps
+    .map((step) => ({ step, contract: promptContract(step.prompt) }))
+    .filter((entry): entry is { step: typeof entry.step; contract: PromptContract } => entry.contract !== null);
+
+  assert.equal(contracts.length, 9);
+  assert.equal(contracts.filter(({ contract }) => contract.format === "json").length, 8);
+  assert.deepEqual(
+    contracts.filter(({ contract }) => contract.format === "field-list").map(({ step }) => step.outputKind),
+    ["blind-findings"],
+  );
+  for (const { step, contract } of contracts) {
+    const schema = canonicalOutputSchema(step);
+    assert.ok(schema instanceof z.ZodObject, `${step.outputKind} must resolve to an object schema`);
+    assert.deepEqual(contract.keys, Object.keys(schema.shape).sort(), step.outputKind);
   }
 });
 
