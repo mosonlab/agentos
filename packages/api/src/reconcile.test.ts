@@ -17,6 +17,9 @@ test("database reconciliation active status query remains limited to three execu
       if (typeof where.status === "object") statuses = where.status.in;
       return [];
     } },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      taskActivity: { findMany: async () => [] },
+    }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database), 0);
   assert.deepEqual(statuses, [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING]);
@@ -131,7 +134,7 @@ test("database reconciliation times out expired Inbox waits and makes retained w
       session: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "session", data }); return { count: 1 }; } },
       inboxMessage: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "message", data }); return { count: 1 }; } },
       task: { update: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "task", data }); return {}; } },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: { findMany: async () => [], create: async () => ({}) },
     }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
@@ -156,6 +159,9 @@ test("startup reconciliation does not fail when archived notice persistence fail
     inboxMessage: { findMany: async () => [], updateMany: async () => ({ count: 0 }) },
     taskActivity: { findMany: async () => [] },
     taskTemplate: { findMany: async () => [] },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      taskActivity: { findMany: async () => [] },
+    }),
   } as unknown as PrismaClient;
   const originalError = console.error;
   let logged = "";

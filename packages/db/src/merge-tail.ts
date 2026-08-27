@@ -22,6 +22,7 @@ export const LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX = 7;
 export const LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX = 12;
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
+  leaseHandoff: "mergeTail.leaseHandoff",
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",

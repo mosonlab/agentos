@@ -58,6 +58,12 @@ import {
   openMergeTailStopNotice,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
+import {
+  commitWithLeaseDisposition,
+  settleLease,
+  type LeaseSettlementOutcome,
+  type ReleaseMergeLease,
+} from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
 import { lockTask, lockTaskMutationRows } from "./task-write.js";
 
@@ -184,7 +190,6 @@ export type RunCompletion = {
   succeeded: boolean;
   retryCreated: boolean;
   failureClass: FailureClass | null;
-  releaseMergeLeaseTask: string | null;
 };
 
 /** Why a completion wrote nothing. Three distinct answers the route used to
@@ -213,6 +218,7 @@ export type CompleteRunInput = {
 export const completeRun = async (
   db: PrismaClient,
   { runId, body, claimantClass }: CompleteRunInput,
+  releaseMergeLease?: ReleaseMergeLease,
 ): Promise<RunCompletion | CompleteRunRefusal> => {
   const now = new Date();
   const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: now };
@@ -234,7 +240,7 @@ export const completeRun = async (
     );
     if (refusal) return { reason: "forbidden", message: refusal };
   }
-  const result = await db.$transaction(async (tx) => {
+  const result = await commitWithLeaseDisposition(db, async (tx) => {
     // Run owns fencing, cancellation, and terminalization. Take that mutex
     // before Task so completion, cancellation, and canonical output writes
     // cannot deadlock by entering the same two rows in opposite orders.
@@ -404,8 +410,7 @@ export const completeRun = async (
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
     const budgetGrants = run.budgetGrants + refunded;
-    const tailLeaseChainId = run.task?.chainId ?? repairRegression?.chainId ?? null;
-    let releaseMergeLeaseTask: string | null = null;
+    let leaseOutcome: LeaseSettlementOutcome = "continue";
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
     // for every outcome rather than only the branches that may retry or
@@ -517,7 +522,7 @@ export const completeRun = async (
     if (!succeeded && !retryCreated && (mechanical
       || isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
       || mergeTailAuxiliary)) {
-      releaseMergeLeaseTask = tailLeaseChainId;
+      leaseOutcome = "stop";
     }
     if (run.taskId) {
       const budgetExhausted = !succeeded && retryable && !retryCreated && !retryRefusal;
@@ -548,7 +553,7 @@ export const completeRun = async (
       // may touch it, because a synthesized body would read as a merge that
       // never happened.
       if (succeeded && mechanical && run.task) {
-        releaseMergeLeaseTask = tailLeaseChainId;
+        leaseOutcome = "stop";
         const persisted = await tx.taskStepOutput.findUnique({
           where: { taskId: run.taskId }, select: { kind: true, body: true },
         });
@@ -622,7 +627,7 @@ export const completeRun = async (
             },
           } });
           if (isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)) {
-            releaseMergeLeaseTask = tailLeaseChainId;
+            leaseOutcome = "stop";
           }
         }
         canonicalOutputFailure = outputRefusal;
@@ -649,7 +654,7 @@ export const completeRun = async (
           if (result === "advance") {
             await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
           } else {
-            releaseMergeLeaseTask = tailLeaseChainId;
+            leaseOutcome = "stop";
           }
         } else {
           await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
@@ -728,7 +733,7 @@ export const completeRun = async (
         }
         if (repairUnable) {
           // The failed repair owns the stop; never activate its follow-up.
-          releaseMergeLeaseTask = tailLeaseChainId;
+          leaseOutcome = "stop";
         } else if (run.task.approvalGate) {
           const claimed = await tx.task.updateMany({
             where: { id: run.taskId, status: completionTaskStatus! },
@@ -831,11 +836,15 @@ export const completeRun = async (
         update: { consecutiveAuthFailures: 0 },
       });
     }
-    return { taskId: run.taskId, succeeded, retryCreated, failureClass, releaseMergeLeaseTask };
+    const lease = await settleLease(tx, { taskId: run.taskId, outcome: leaseOutcome });
+    return {
+      value: { taskId: run.taskId, succeeded, retryCreated, failureClass },
+      lease,
+    };
   // ReadCommitted lets successor CAS losers observe count=0 instead of
   // surfacing a serialization failure to runners. Every task status write
   // above has its own status CAS so concurrent operator decisions win.
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  }, releaseMergeLease, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   // Why the transaction refused, answered here rather than by the caller: a
   // caller that had to re-query the run to tell "suspended for Inbox" from
   // "stale fence" would be re-deriving a distinction this action already made.
