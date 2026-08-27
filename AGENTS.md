@@ -101,3 +101,5 @@ its owning document, with a trigger-first pointer here only when agents must
 discover it. `package.json`, configuration, the directory tree, and `--help`
 output are live authority — never cached here. One authoritative home per rule;
 an obsolete path is removed when its replacement lands.
+
+For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md).

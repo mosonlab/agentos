@@ -47,6 +47,7 @@
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/architecture.md", "purpose": "README-linked architecture, task workflow and security-defaults detail" },
     { "glob": "docs/install.md", "purpose": "README-linked installation detail and the repository verification sequence" },
+    { "glob": "docs/operator-api.md", "purpose": "operator-facing HTTP API route and request handbook referenced by AGENTS.md" },
     { "glob": "docs/demos/templates-release-demo.md", "purpose": "templates release-demo operator contract" },
     { "glob": "docs/demos/templates-release-evidence.schema.json", "purpose": "templates release-demo verification schema" },
     { "glob": "docs/governance/task-routing-v1.md", "purpose": "public task-routing contract" },

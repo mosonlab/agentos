@@ -188,6 +188,7 @@ const claim = async () => {
       implementationHeadSha: string | null;
     };
     priorOutputs: Array<{ body: string }>;
+    operatorNotes: string[];
     sessionToken: string;
     fencingToken: string;
   }>;
@@ -298,7 +299,29 @@ test("blind session cannot read Sol evidence before or after its immutable repor
   assert.equal(status.status, 200, await status.text());
 });
 
+test("retried blind-findings claims do not receive operator activity as prompt notes", async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const blind = await queueCanonicalStep(template, repo.id, 7);
+  const task = blind.chain.tasks.find((candidate) => candidate.chainIndex === 7);
+  assert.ok(task);
+  await db.run.update({ where: { id: blind.run.id }, data: { status: "SUCCEEDED", endedAt: new Date() } });
+  await db.task.update({ where: { id: task.id }, data: { status: "REVIEW" } });
 
+  const note = await createApp(db).request(`/tasks/${task.id}/activity`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ body: "This must not reach an independent blind review." }),
+  });
+  assert.equal(note.status, 201, await note.text());
+  const retry = await createApp(db).request(`/tasks/${task.id}/retry`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
+  });
+  assert.equal(retry.status, 201, await retry.text());
+
+  const claimed = await claim();
+  assert.deepEqual(claimed.operatorNotes, []);
+});
 
 test("the fix step claims both immutable reports and cannot rewrite either", async () => {
   const { template, repo } = await seedCanonicalTemplate();
