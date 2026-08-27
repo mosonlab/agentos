@@ -21,7 +21,7 @@
 
 import { decodeStrictBase64 } from "./base64.js";
 
-/** The only deployment shape v0.1.0 supports. Anything else is refused rather
+/** The only deployment shape the developer preview supports. Anything else is refused rather
  *  than silently treated as this one. */
 export const DEVELOPER_PREVIEW = "developer-preview";
 
@@ -266,7 +266,7 @@ const checkDatabase = (reasons: string[], env: NodeJS.ProcessEnv): void => {
 const checkBrowserExposure = (reasons: string[], env: NodeJS.ProcessEnv): void => {
   // Vite inlines every `VITE_*` variable into the bundle it ships to the
   // browser. A credential-shaped one is a credential in the browser whatever it
-  // holds, and v0.1.0's browser path is the proxy, which needs none.
+  // holds, and the preview's browser path is the proxy, which needs none.
   for (const variable of Object.keys(env)) {
     if (/^VITE_.*TOKEN/u.test(variable)) reasons.push(`browser-exposed-token:${variable}`);
   }

@@ -308,7 +308,7 @@
     {
       "category": "binary-material",
       "glob": "docs/media/agents.png",
-      "reason": "reviewed README screenshot of the agents list, published with v0.2.0"
+      "reason": "reviewed README screenshot of the agents list, published with v0.3.0"
     },
     {
       "category": "binary-material",
