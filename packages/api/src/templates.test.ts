@@ -159,7 +159,7 @@ test("instantiating the canonical feature template copies every layer and writes
   assert.equal(executionModeFor(created[11]!.templateStep), "mechanical");
   assert.deepEqual(created.map((task) => task.outputKind ?? task.templateStep.outputKind), canonicalTemplateSteps.map((step) => step.outputKind));
   assert.equal(runs.length, 1);
-  assert.equal(runs[0]!.runner, RunnerKind.CODEX);
+  assert.equal(runs[0]!.runner, RunnerKind.CLAUDE);
   assert.equal(runs[0]!.branch, "feature/twelve-steps");
   assert.equal(runs.some((run) => run.taskId === created[11]!.id), false, "step 12 waits for server-side readiness and never queues at instantiation");
   assert.doesNotMatch(
