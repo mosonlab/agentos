@@ -306,6 +306,11 @@
   "approvedFindings": [
     {
       "category": "binary-material",
+      "glob": "docs/media/agents.png",
+      "reason": "reviewed README screenshot of the agents list, published with v0.2.0"
+    },
+    {
+      "category": "binary-material",
       "glob": "docs/media/chain.png",
       "reason": "reviewed README screenshot of the assurance chain, published with v0.2.0"
     },
