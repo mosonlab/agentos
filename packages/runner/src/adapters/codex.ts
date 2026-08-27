@@ -209,7 +209,14 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
 export const codexChildEnvironment = (
   _claim: Pick<ClaimedTask, "run">,
   scratch: AgentScratch,
-): NodeJS.ProcessEnv => ({ CODEX_HOME: scratch.configRoot });
+): NodeJS.ProcessEnv => ({
+  // Codex discovers user skills through both $CODEX_HOME/skills and the
+  // cross-agent $HOME/.agents/skills root. Keep both inside this session's
+  // provisioned config root; auth.json and the platform baseline already live
+  // there, so relocating HOME does not change the authentication channel.
+  HOME: scratch.configRoot,
+  CODEX_HOME: scratch.configRoot,
+});
 
 export const provisionCodexSessionConfig = (
   config: RunnerConfig,

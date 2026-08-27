@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import type { RunnerConfig } from "../config.js";
 
 const runnerProxyVariables = [
@@ -24,6 +26,10 @@ export const workspaceEnvironment = (
 ): NodeJS.ProcessEnv => ({
   PATH: config.path,
   HOME: config.home,
+  // Codex and PI relocate HOME to isolate user-level skill discovery. Keep
+  // Git's runner-account configuration (identity, credential helpers, URL
+  // rewrites, and signing policy) on its original absolute path.
+  GIT_CONFIG_GLOBAL: join(config.home, ".gitconfig"),
   LANG: "C.UTF-8",
   GIT_TERMINAL_PROMPT: "0",
   ...(config.gateServer ? { AGENTOS_GATE_SERVER: config.gateServer } : {}),
