@@ -26,11 +26,11 @@ import {
 } from "@agentos/db";
 
 import { createGitHubReader, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import { stopMergeTail } from "./merge-tail-actions.js";
 
 type DbReader = PrismaClient | Prisma.TransactionClient;
 
 const SHA = /^[0-9a-f]{40}$/u;
-const RECOVERY_NOTIFICATION_PREFIX = "merge-base-drift-recovery";
 
 export const baseDriftRecoveryPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS);
@@ -245,10 +245,6 @@ const snapshotRefusal = (candidate: RecoveryCandidate, snapshot: PullRequestSnap
   return null;
 };
 
-const notificationBody = (state: "ineligible" | "exhausted", stopId: string, reason: string): string => (
-  `Automatic pre-merge base-drift recovery ${state} for stop ${stopId}: ${reason}. No regression run or re-authorization was created.`
-);
-
 const openAbandonQuestion = async (
   tx: Prisma.TransactionClient,
   integratorTaskId: string,
@@ -282,31 +278,25 @@ const settleIneligibleLocked = async (
   identity?: Partial<RecoveryIdentity>,
 ): Promise<void> => {
   const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
-  await tx.mergeRecoveryAttempt.update({ where: { id: attempt.id }, data: {
-    status: MergeRecoveryStatus.FAILED,
-    failureReason: reason,
-    endedAt: new Date(),
-    ...(identity?.repository ? { repository: identity.repository } : {}),
-    ...(identity?.prNumber ? { prNumber: identity.prNumber } : {}),
-    ...(identity?.targetBranch ? { targetBranch: identity.targetBranch } : {}),
-    ...(identity?.authorizedHeadSha ? { authorizedHeadSha: identity.authorizedHeadSha } : {}),
-    ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
-    ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
-  } });
-  await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body: `Automatic pre-merge base-drift recovery refused: ${reason}`,
-    metadata: { state: "ineligible", ...identity, integratorTaskId, sourceStopId: stopId, reason },
+  await stopMergeTail(tx, {
+    phase: "recovery-validation",
+    aggregateId: attempt.id,
+    integratorTaskId,
+    sourceStopId: stopId,
+    reason,
+    at: new Date(),
+    attempt: attempt.attempt,
+    recoveryData: {
+      ...(identity?.repository ? { repository: identity.repository } : {}),
+      ...(identity?.prNumber ? { prNumber: identity.prNumber } : {}),
+      ...(identity?.targetBranch ? { targetBranch: identity.targetBranch } : {}),
+      ...(identity?.authorizedHeadSha ? { authorizedHeadSha: identity.authorizedHeadSha } : {}),
+      ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
+      ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
+    },
+    markerMetadata: { ...identity },
   });
-  const dedupeKey = `${RECOVERY_NOTIFICATION_PREFIX}:ineligible:${stopId}`;
-  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
-    from: "AGENT", taskId: integratorTaskId, kind: "TEXT",
-    body: notificationBody("ineligible", stopId, reason), dedupeKey,
-  }, update: {} });
   await openAbandonQuestion(tx, integratorTaskId, stopId);
-  await tx.task.update({ where: { id: integratorTaskId }, data: {
-    status: TaskStatus.REVIEW, failureReason: `Automatic base-drift recovery refused: ${reason}`,
-  } });
 };
 
 const settleIneligible = async (
@@ -414,36 +404,30 @@ const queueRecovery = async (
   };
   if (attempts >= MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) {
     const reason = `automatic recovery limit ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES} reached for ${expected.repository}#${expected.prNumber} targeting ${expected.targetBranch}`;
-    await tx.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
-      status: MergeRecoveryStatus.FAILED,
-      failureReason: reason,
-      endedAt: now,
-      boundSourceRunId: expected.sourceRunId,
-      authorizationActivityId: expected.authorizationActivityId,
-      readinessTaskId: expected.readinessTaskId,
-      regressionTaskId: expected.regressionTaskId,
-      repository: expected.repository,
-      prNumber: expected.prNumber,
-      targetBranch: expected.targetBranch,
-      authorizedHeadSha: expected.authorizedHeadSha,
-      authorizedBaseSha: expected.authorizedBaseSha,
-      observedBaseSha: expected.observedBaseSha,
-      currentBaseSha,
-    } });
-    await writeMarker(tx, expected.integratorTaskId, "baseDriftRecovery", {
-      actorType: "control-plane",
-      body: `Automatic pre-merge base-drift recovery exhausted at attempt ${attempt}`,
-      metadata: { ...common, state: "exhausted", reason },
+    await stopMergeTail(tx, {
+      phase: "recovery-exhausted",
+      aggregateId: aggregate.id,
+      integratorTaskId: expected.integratorTaskId,
+      sourceStopId: expected.stopId,
+      reason,
+      at: now,
+      attempt,
+      recoveryData: {
+        boundSourceRunId: expected.sourceRunId,
+        authorizationActivityId: expected.authorizationActivityId,
+        readinessTaskId: expected.readinessTaskId,
+        regressionTaskId: expected.regressionTaskId,
+        repository: expected.repository,
+        prNumber: expected.prNumber,
+        targetBranch: expected.targetBranch,
+        authorizedHeadSha: expected.authorizedHeadSha,
+        authorizedBaseSha: expected.authorizedBaseSha,
+        observedBaseSha: expected.observedBaseSha,
+        currentBaseSha,
+      },
+      markerMetadata: common,
     });
-    const dedupeKey = `${RECOVERY_NOTIFICATION_PREFIX}:exhausted:${expected.stopId}`;
-    await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
-      from: "AGENT", taskId: expected.integratorTaskId, kind: "TEXT",
-      body: notificationBody("exhausted", expected.stopId, reason), dedupeKey,
-    }, update: {} });
     await openAbandonQuestion(tx, expected.integratorTaskId, expected.stopId);
-    await tx.task.update({ where: { id: expected.integratorTaskId }, data: {
-      status: TaskStatus.REVIEW, failureReason: reason,
-    } });
     return "exhausted";
   }
 
