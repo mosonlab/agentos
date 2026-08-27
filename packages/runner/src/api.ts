@@ -254,6 +254,47 @@ export const acknowledgeCancellation = async (
   });
 };
 
+export type SessionTaskOutputStatus = {
+  outputKind: string | null;
+  outputRequired: boolean;
+  outputRemediationAllowed: boolean;
+  outputPersisted: boolean;
+};
+
+/** Read the output fact through the Run's session principal. Completion is too
+ * late for recovery: by then the provider process and workspace are gone. */
+export const readSessionTaskOutputStatus = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+): Promise<SessionTaskOutputStatus | null> => {
+  const response = await request(config, `/session/runs/${claim.run.id}/status`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${claim.sessionToken}` },
+  });
+  const payload = await response.json() as {
+    task?: {
+      outputKind?: unknown;
+      outputRequired?: unknown;
+      outputRemediationAllowed?: unknown;
+      outputPersisted?: unknown;
+    } | null;
+  };
+  if (payload.task === null) return null;
+  if (!payload.task
+    || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
+    || typeof payload.task.outputRequired !== "boolean"
+    || typeof payload.task.outputRemediationAllowed !== "boolean"
+    || typeof payload.task.outputPersisted !== "boolean") {
+    throw new Error(`AgentOS API returned an invalid task output status for Run ${claim.run.id}`);
+  }
+  return {
+    outputKind: payload.task.outputKind,
+    outputRequired: payload.task.outputRequired,
+    outputRemediationAllowed: payload.task.outputRemediationAllowed,
+    outputPersisted: payload.task.outputPersisted,
+  };
+};
+
 /** Durably acknowledge the exact ref immediately after git accepts the push.
  * Terminal completion is intentionally not the first write of this fact: PR
  * work, cleanup, or process loss may happen after publication. */

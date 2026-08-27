@@ -78,7 +78,9 @@ import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import {
   isCanonicalBlindFindingsStep,
   isCanonicalSolFindingsStep,
+  outputIsImmutableOncePersisted,
   persistSessionTaskOutput,
+  requiredOutputKind,
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import {
@@ -3794,7 +3796,21 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
     const run = await db.run.findUnique({
       where: { id: runId },
-      include: { task: { include: { stepOutput: true, templateStep: { select: { name: true, outputKind: true } } } } },
+      include: {
+        task: {
+          include: {
+            stepOutput: true,
+            templateStep: {
+              select: {
+                name: true,
+                stepIndex: true,
+                outputKind: true,
+                taskTemplate: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
     });
     if (!run) return context.json({ error: "Run not found" }, 404);
     return context.json({
@@ -3817,7 +3833,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         chainIndex: run.task.chainIndex,
         stepName: run.task.templateStep?.name ?? null,
         outputKind: run.task.templateStep?.outputKind ?? null,
-        outputPersisted: run.task.stepOutput !== null,
+        outputRequired: requiredOutputKind(run.task.templateStep) !== null,
+        outputRemediationAllowed:
+          !(run.task.stepOutput && outputIsImmutableOncePersisted(run.task.templateStep)),
+        // A retry must not mistake an earlier Run's artifact for its own. This
+        // is the same run-scoped fact completion validates before it advances.
+        outputPersisted: run.task.stepOutput?.runId === run.id,
       } : null,
     });
   });

@@ -21,6 +21,7 @@ import {
   claimTask,
   completeRun,
   heartbeat as sendHeartbeat,
+  readSessionTaskOutputStatus,
   recordPublishedBranch,
   recordLeaseIndependentCleanup,
   reportCliAvailability,
@@ -70,6 +71,13 @@ const retainedSessionConfigPath = async (runner: RunnerKind, scratch: AgentScrat
 
 const appendRetainedSessionConfig = (reason: string, path: string | null): string =>
   `${reason}${path ? `; session CLI config retained at ${path}` : ""}`;
+
+const missingOutputRemediationInput = (outputKind: string): string => [
+  `AgentOS detected that this Run finished its work but did not persist its required '${outputKind}' task output.`,
+  "Do not redo the task, edit files, commit, push, open a PR, or run delivery steps.",
+  `Using the work and evidence already produced in this conversation, call task_output with kind '${outputKind}' and a body that satisfies the task's exact output contract and current HEAD binding.`,
+  "If the write is rejected, correct the body and retry. Then call task_status and finish only after it reports outputPersisted: true for this Run.",
+].join("\n");
 
 const cleanup = async (
   config: RunnerConfig,
@@ -432,14 +440,16 @@ export const executeClaim = async (
     // heartbeat timer renew the lease while later flushes retry it.
     void flushEvents().catch(observeEventFlush);
 
+    const executionStartedAt = handle.startedAt;
     heartbeatTimer = setInterval(() => {
       if (!handle || heartbeatBusy || fencingRejected) return;
+      const heartbeatHandle = handle;
       heartbeatBusy = true;
       void (async () => {
-        const snapshot = await adapter.heartbeat(handle!);
+        const snapshot = await adapter.heartbeat(heartbeatHandle);
         const decision = evaluateBudget({
           now: new Date(),
-          startedAt: handle!.startedAt,
+          startedAt: executionStartedAt,
           maxDurationMs: claim.run.maxDurationMin * 60_000,
           currentRunNumber: claim.run.runNumber,
           maxRuns: claim.run.maxRunsPerTask,
@@ -451,7 +461,7 @@ export const executeClaim = async (
         });
         if (!decision.allowed && snapshot.processAlive) {
           budgetReason = `${decision.gate}: ${decision.reason}`;
-          await adapter.kill(handle!, budgetReason);
+          await adapter.kill(heartbeatHandle, budgetReason);
         }
         try {
           const result = await sendHeartbeat(config, claim, {
@@ -475,8 +485,70 @@ export const executeClaim = async (
       }).finally(() => { heartbeatBusy = false; });
     }, config.heartbeatIntervalMs);
 
-    const evidence = await handle.exit;
+    const completedHandle = handle;
+    const evidence = await completedHandle.exit;
     producedOutput = outputTail(evidence);
+    if (adapterExecutionSucceeded(evidence)
+      && claim.task.templateStep?.outputKind
+      && !fencingRejected) {
+      let outputStatus: Awaited<ReturnType<typeof readSessionTaskOutputStatus>> = null;
+      try {
+        outputStatus = await readSessionTaskOutputStatus(config, claim);
+      } catch (error: unknown) {
+        sink({
+          source: "RUNNER",
+          type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
+          payload: { message: errorMessage(error) },
+        });
+      }
+      if (outputStatus?.outputRequired
+        && outputStatus.outputRemediationAllowed
+        && !outputStatus.outputPersisted) {
+        const outputKind = outputStatus.outputKind;
+        const providerConversationId = completedHandle.providerConversationId;
+        if (outputKind && providerConversationId && !fencingRejected) {
+          sink({
+            source: "RUNNER",
+            type: "TASK_OUTPUT_REMEDIATION_STARTED",
+            payload: { outputKind },
+          });
+          handle = await adapter.resume({
+            ...spec,
+            providerConversationId,
+            input: missingOutputRemediationInput(outputKind),
+          }, sink);
+          const remediationEvidence = await handle.exit;
+          let remediated = false;
+          try {
+            remediated = (await readSessionTaskOutputStatus(config, claim))?.outputPersisted === true;
+          } catch (error: unknown) {
+            sink({
+              source: "RUNNER",
+              type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
+              payload: { message: errorMessage(error) },
+            });
+          }
+          sink({
+            source: "RUNNER",
+            type: "TASK_OUTPUT_REMEDIATION_FINISHED",
+            payload: {
+              outputKind,
+              outputPersisted: remediated,
+              terminalSuccess: adapterExecutionSucceeded(remediationEvidence),
+            },
+          });
+        } else {
+          sink({
+            source: "RUNNER",
+            type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
+            payload: {
+              outputKind,
+              providerConversationIdAvailable: providerConversationId !== null,
+            },
+          });
+        }
+      }
+    }
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (cancellation) {
       await cancellationPromise;

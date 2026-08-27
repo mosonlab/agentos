@@ -469,6 +469,11 @@ test("a run that authored nothing is re-queued even when a prior run's output is
   assert.equal(retried.status, 201, JSON.stringify(retried.body));
   const secondRunId = retried.body.id as string;
   const claimed = await claimRun(secondRunId, "prior-output-runner-2");
+  const status = await call("GET", `/session/runs/${secondRunId}/status`, claimed.sessionToken);
+  assert.equal(status.status, 200, JSON.stringify(status.body));
+  assert.equal(status.body.task.outputRequired, true);
+  assert.equal(status.body.task.outputRemediationAllowed, true);
+  assert.equal(status.body.task.outputPersisted, false, "the prior Run's output is not this Run's deliverable");
 
   const completed = await call(
     "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,

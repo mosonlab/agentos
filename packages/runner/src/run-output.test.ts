@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -61,6 +61,28 @@ const succeedingAgent = [
   "cat > /dev/null",
   'echo \'{"type":"result","is_error":false,"terminal_reason":"completed",'
   + '"result":"inverted the lock ordering in reconcile.ts and added the regression test"}\'',
+  "exit 0",
+].join("\n");
+
+const remediatingAgent = (remediationPrompt: string): string => [
+  "#!/bin/sh",
+  'case "$1" in',
+  '  --version) echo "1.2.3-stub"; exit 0 ;;',
+  '  --help) echo "--setting-sources"; exit 0 ;;',
+  '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
+  "esac",
+  'case " $* " in',
+  '  *" --resume conversation-114 "*)',
+  `    cat > ${JSON.stringify(remediationPrompt)}`,
+  '    echo \'{"type":"system","session_id":"conversation-114"}\'',
+  '    echo \'{"type":"result","is_error":false,"terminal_reason":"completed","session_id":"conversation-114","result":"task output persisted"}\'',
+  "    ;;",
+  "  *)",
+  "    cat > /dev/null",
+  '    echo \'{"type":"system","session_id":"conversation-114"}\'',
+  '    echo \'{"type":"result","is_error":false,"terminal_reason":"completed","session_id":"conversation-114","result":"implemented the requested change"}\'',
+  "    ;;",
+  "esac",
   "exit 0",
 ].join("\n");
 
@@ -223,6 +245,66 @@ test("a successful run's completion carries its final output as the same tail", 
       completion.body.output,
       "inverted the lock ordering in reconcile.ts and added the regression test",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a successful run remediates its missing required output in the same provider session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "remediating-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt));
+    await chmod(agentBinary, 0o755);
+
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let statusReads = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      if (path.endsWith("/status")) {
+        statusReads += 1;
+        return new Response(JSON.stringify({
+          task: {
+            outputKind: "implementation",
+            outputRequired: true,
+            outputRemediationAllowed: true,
+            outputPersisted: statusReads >= 2,
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    const baseClaim = claim(remote);
+    await executeClaim(config(join(root, "workspaces"), agentBinary), {
+      ...baseClaim,
+      task: {
+        ...baseClaim.task,
+        templateStep: { name: "Implementation", outputKind: "implementation" },
+      },
+    });
+
+    assert.equal(
+      statusReads,
+      2,
+      `runner must confirm both the miss and its repair; calls: ${posts.map(({ path }) => path).join(", ")}`,
+    );
+    const prompt = await readFile(remediationPrompt, "utf8");
+    assert.match(prompt, /call task_output with kind 'implementation'/u);
+    assert.match(prompt, /Do not redo the task/u);
+    const eventTypes = posts
+      .filter((post) => post.path.endsWith("/events"))
+      .flatMap((post) => (post.body.events as Array<{ type: string }> | undefined) ?? [])
+      .map(({ type }) => type);
+    assert.ok(eventTypes.includes("TASK_OUTPUT_REMEDIATION_STARTED"));
+    assert.ok(eventTypes.includes("TASK_OUTPUT_REMEDIATION_FINISHED"));
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal(completion.body.terminalSuccess, true);
+    assert.equal(completion.body.output, "implemented the requested change");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
