@@ -639,6 +639,7 @@ const main = async () => {
           cwd: stage,
         });
       },
+      generatePrismaClient: () => checked("prisma-client-generation-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:generate"], { cwd: stage }),
       syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:sync-canonical-prompts"], { cwd: stage }),
       verifyRuntimePrismaClient: async () => {
         if (!generatedPrismaClientIsComplete(stage)) {
