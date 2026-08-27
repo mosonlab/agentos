@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.3
+Version: 1.4 (2026-08-27: the tier list names only the two chain tiers, matching the rule that in-session work sits outside them; wording is English throughout)
 
 Status: Active
 
@@ -38,11 +38,10 @@ SPEC and Plan are optional. The Product Contract is not.
 
 Work done directly in the current session is outside these tiers and does not require a Product Contract. The tiers apply only after the human user explicitly requests a task chain.
 
-Choose the shortest tier that satisfies the Product Contract. This contract defines three tiers:
+Choose the shortest tier that satisfies the Product Contract. This contract defines two chain tiers:
 
-- 顺手小活：本窗直接做，不上看板。
-- Direct：没有 spec/plan；从任务 brief 直接实现，经并行盲评审、终裁、修复、回归与机械合并交付。
-- Full Assurance：全链；specification 与 plan 阶段拥有分解权。
+- Direct: no specification or plan; implementation proceeds straight from the task brief and is delivered through parallel reviews, a self-adjudicating fix step, regression, and the mechanical merge tail.
+- Full Assurance: the full chain; its specification and plan stages own decomposition.
 
 Direct is a formal chain route, not an exemption from review or exact-head mechanical authorization. Full Assurance is required when the Product Contract calls for specification, planning, plan review, or revised-plan implementation authorization.
 
@@ -78,7 +77,7 @@ Direct has no planning gates. Gate selection is recorded at dispatch; an active 
 Record this block when creating or materially rerouting a chain:
 
 ```text
-Routing Contract: v1.3
+Routing Contract: v1.4
 Tier: Direct
 Implementation Agent: senior-dev-luna
 Critical: no
