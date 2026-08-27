@@ -75,3 +75,24 @@ export const IconLock = (): ReactNode => (
 export const IconBolt = ({ size = 16 }: { size?: number } = {}): ReactNode => (
   <Svg size={size}><path d="M8.9 1.8 3.4 9.1h3.9l-.8 5.1 5.5-7.3H8.1z" /></Svg>
 );
+
+/** Tool-line glyphs stay in the hand-authored icon set: the stream renderer
+ * picks one by tool name without adding an icon dependency. */
+export const IconToolRead = (): ReactNode => (
+  <Svg size={14}><path d="M3 2.5h7l3 3v8H3z" /><path d="M10 2.5v3h3M5.5 8h5M5.5 10.5h5" /></Svg>
+);
+export const IconToolEdit = (): ReactNode => (
+  <Svg size={14}><path d="m3 11.8-.5 2.2 2.2-.5L12.8 5.4a1.5 1.5 0 0 0-2.2-2.2z" /><path d="m9.6 4 2.2 2.2" /></Svg>
+);
+export const IconToolSearch = (): ReactNode => (
+  <Svg size={14}><circle cx="6.4" cy="6.4" r="3.7" /><path d="m9.2 9.2 3.5 3.5" /></Svg>
+);
+export const IconToolRun = (): ReactNode => (
+  <Svg size={14}><path d="m5.2 3.5 5 4.5-5 4.5z" /><path d="M2.5 13.5h11" /></Svg>
+);
+export const IconToolWeb = (): ReactNode => (
+  <Svg size={14}><circle cx="8" cy="8" r="5.7" /><path d="M2.6 8h10.8M8 2.3c1.5 1.6 2.2 3.5 2.2 5.7S9.5 12.1 8 13.7C6.5 12.1 5.8 10.2 5.8 8S6.5 3.9 8 2.3z" /></Svg>
+);
+export const IconToolDefault = (): ReactNode => (
+  <Svg size={14}><circle cx="4" cy="8" r=".9" fill="currentColor" stroke="none" /><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none" /><circle cx="12" cy="8" r=".9" fill="currentColor" stroke="none" /></Svg>
+);
