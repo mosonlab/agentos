@@ -187,7 +187,7 @@ const claim = async () => {
       implementationBaseSha: string | null;
       implementationHeadSha: string | null;
     };
-    priorOutputs: Array<{ body: string }>;
+    priorOutputs: Array<{ kind: string; body: string }>;
     operatorNotes: string[];
     sessionToken: string;
     fencingToken: string;
@@ -297,6 +297,15 @@ test("blind session cannot read Sol evidence before or after its immutable repor
     headers: { Authorization: `Bearer ${claimed.sessionToken}` },
   });
   assert.equal(status.status, 200, await status.text());
+});
+
+test("Sol review receives the implementation output while its blind sibling remains isolated", async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const sol = await queueCanonicalStep(template, repo.id, 6);
+  const claimed = await claim();
+  assert.equal(claimed.run.id, sol.run.id);
+  assert.deepEqual(claimed.priorOutputs.map(({ kind }) => kind), ["implementation"]);
+  assert.match(claimed.priorOutputs[0]!.body, /implemented before exact-head recovery/u);
 });
 
 test("retried blind-findings claims do not receive operator activity as prompt notes", async () => {
