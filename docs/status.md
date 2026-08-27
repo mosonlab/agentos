@@ -19,7 +19,7 @@ not compatibility promises by the CLI providers.
 | --- | --- | --- |
 | Codex CLI | **Verified** | Adapter/runtime and subscription authentication path are verified. Clean fresh-install evidence is **Pending (OSS-B)**. |
 | Claude Code | **Verified** / **Maintainer-verified** | Adapter/runtime is verified. Claude Pro/Max authentication is maintainer-verified on macOS Apple Silicon. The clean-install gate is **Pending (OSS-B)**. |
-| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Clean fresh-install evidence is **Pending (OSS-B)**. |
+| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login; it does not accept a Claude Code login. Clean fresh-install evidence is **Pending (OSS-B)**. |
 
 Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
 limits, models, and provider-side availability remain the user's responsibility.
