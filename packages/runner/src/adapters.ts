@@ -90,7 +90,7 @@ export const buildPrompt = (claim: ClaimedTask): string => {
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
-  ...(claim.operatorNotes && claim.operatorNotes.length > 0 ? [
+  ...(claim.operatorNotes.length > 0 ? [
     "",
     "Operator notes:",
     ...claim.operatorNotes.map((note) => `- ${note}`),

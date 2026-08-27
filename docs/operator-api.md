@@ -6,7 +6,7 @@ Examples use `$BASE_URL` (for example, `http://127.0.0.1:3000`) and placeholder
 IDs such as `$PROJECT_ID`; replace them with values from your installation.
 JSON request bodies require `Content-Type: application/json`.
 
-The route list and input requirements below are kept in the same order and
+The route list and input requirements below use the same method and path
 spelling as the route definitions in `packages/api/src/app.ts`. Fields called
 “optional (default …)” are filled by the API when omitted. A body described as
 “at least one” is validated by a patch schema and must contain one or more of
@@ -1021,6 +1021,12 @@ curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOK
 - Required JSON field: `body`.
 - Optional JSON fields: `actorType` (default `operator`; the operator route
   records the actor as operator), `actorId`, and `metadata`.
+- The route records a direct operator note. Notes posted after the task is
+  created can reach its first Run if it has not been claimed yet; thereafter,
+  notes written after the previous Run are appended to the next Run's prompt
+  under `Operator notes`. At most the 10 newest whole notes and 4,000 characters
+  are delivered. A note does not reach a Run that is already in flight, and
+  canonical `blind-findings` steps receive no activity notes.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/activity" \

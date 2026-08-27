@@ -62,6 +62,7 @@ const claim: ClaimedTask = {
   sessionToken: "agos_session_secret",
   secrets: { ALLOWED_SECRET: "secret" },
   priorOutputs: [],
+  operatorNotes: [],
   previousRunHandoff: null,
   regressionRepairHandoff: null,
 };
