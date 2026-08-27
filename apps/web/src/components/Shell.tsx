@@ -17,7 +17,7 @@ import {
 import { RunnerRow } from "./runner-status";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
-  IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
+  IconAgents, IconChevron, IconConnections, IconCosts, IconGoals, IconInbox,
   IconProjects, IconSecrets, IconSessions, IconSettings, IconTasks,
 } from "./icons";
 
@@ -27,6 +27,7 @@ const NAV: Array<{ to: string; labelKey: string; icon: ReactNode; match: string[
   { to: "/inbox", labelKey: "sidebar.nav.inbox", icon: <IconInbox />, match: ["/inbox"] },
   { to: "/tasks", labelKey: "sidebar.nav.tasks", icon: <IconTasks />, match: ["/tasks", "/automations", "/triggers", "/archived"] },
   { to: "/sessions", labelKey: "sidebar.nav.sessions", icon: <IconSessions />, match: ["/sessions"] },
+  { to: "/costs", labelKey: "sidebar.nav.costs", icon: <IconCosts />, match: ["/costs"] },
   { to: "/goals", labelKey: "sidebar.nav.goals", icon: <IconGoals />, match: ["/goals"] },
   { to: "/agents", labelKey: "sidebar.nav.agents", icon: <IconAgents />, match: ["/agents"] },
   { to: "/projects", labelKey: "sidebar.nav.projects", icon: <IconProjects />, match: ["/projects", "/"] },

@@ -162,6 +162,7 @@ const main = async (): Promise<void> => {
     database,
     { createApp },
     { createGitHubReader },
+    { createMirrorBackedSpecificationReader },
     { reconcileAtStartup },
     { startScheduler },
     { startEvidenceWorker },
@@ -173,6 +174,7 @@ const main = async (): Promise<void> => {
     import("@agentos/db"),
     import("./app.js"),
     import("./github-read.js"),
+    import("./specification-reader.js"),
     import("./reconcile.js"),
     import("./scheduler.js"),
     import("./merge-evidence-worker.js"),
@@ -196,7 +198,7 @@ const main = async (): Promise<void> => {
   await ensureStartupActive();
 
   const githubReader = createGitHubReader();
-  const specificationReader = githubReader;
+  const specificationReader = createMirrorBackedSpecificationReader(githubReader);
   const app = createApp(prisma, { ownership, specificationReader });
   const { host: hostname, port } = startup;
   const activeServer = serve({ fetch: app.fetch, hostname, port });
