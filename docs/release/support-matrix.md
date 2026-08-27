@@ -73,7 +73,7 @@ the CLI vendor.
 | --- | --- | --- |
 | Codex CLI 0.148.0 | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol AgentOS uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor. Entitlement still requires the deterministic smoke task. |
 | Claude Code | **Verified** / **Maintainer-verified** | Adapter and runtime are verified. Claude Pro/Max subscription authentication is maintainer-verified on macOS Apple Silicon. |
-| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login; it does not accept a Claude Code login. Clean fresh-install evidence is **Pending (OSS-B)**. |
+| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. Clean fresh-install evidence is **Pending (OSS-B)**. |
 
 ## Feature surface
 

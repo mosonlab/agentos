@@ -114,7 +114,7 @@ Codex CLI、Claude Code 与 Pi——认证状态留在各个 CLI 自己的配置
 
 因此这些 CLI 支持哪种认证，AgentOS 就跑在哪种之上：ChatGPT 订阅登录、Claude
 Pro/Max 登录，或各 CLI 自己的 API key 模式，完全按你已经配好的样子。Pi 同样没有
-自己的账号：它走的是 Codex 那份登录，不接受 Claude Code 的登录。
+自己的账号，它走的是 Codex 那份登录。
 
 这一点你可以自己核实，不必只听我们说。runner 是为 provider 子进程构造环境，而不
 是整份复制宿主环境（[`docs/architecture.zh-CN.md`](docs/architecture.zh-CN.md)、

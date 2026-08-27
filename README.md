@@ -131,8 +131,7 @@ API proxy and no key to paste in.
 Whatever authentication those CLIs support is therefore what AgentOS runs on: a
 ChatGPT subscription login, a Claude Pro/Max login, or each CLI's own API-key
 mode, exactly as you already configured it. Pi carries no account of its own
-either: it authenticates through the Codex login, and it does not accept a
-Claude Code login.
+either: it authenticates through the Codex login.
 
 You can check this instead of taking it on faith. The runner constructs the
 child environment for the provider process rather than copying the host
