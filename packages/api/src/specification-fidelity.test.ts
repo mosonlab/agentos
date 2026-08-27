@@ -30,6 +30,7 @@ test("faithful pinned materialization accepts normalized line endings and passes
   const verification = {
     key: "key",
     repository: "acme/repo",
+    remoteUrl: "https://github.com/acme/repo.git",
     path: specificationPathForBranch("feature/spec-check"),
     implementationHeadSha: "a".repeat(40),
     authoritativeBytes: bytes(authoritative),
@@ -56,6 +57,7 @@ test("faithful pinned materialization accepts one final LF absent from authority
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "a".repeat(40),
       authoritativeBytes: bytes("authoritative"),
@@ -71,6 +73,7 @@ test("tampered materialization returns one stable operator-visible reason", asyn
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeBytes: bytes("authoritative"),
@@ -89,6 +92,7 @@ test("a transient repository failure retries with backoff and then accepts faith
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeBytes: bytes("authoritative"),
@@ -112,6 +116,7 @@ test("persistent transient repository failure reports retry count and last failu
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeBytes: bytes("authoritative"),
@@ -135,6 +140,7 @@ test("a read deadline overrun is transient and exhausts the bounded retry schedu
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeBytes: bytes("authoritative"),
@@ -159,6 +165,7 @@ test("a permanent repository response failure refuses without retrying", async (
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeBytes: bytes("authoritative"),
@@ -181,6 +188,7 @@ test("a content mismatch refuses immediately without retrying", async () => {
     {
       key: "key",
       repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeBytes: bytes("authoritative"),

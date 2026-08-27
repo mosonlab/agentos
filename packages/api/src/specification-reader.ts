@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 
 import { githubRepositoryFromRemote } from "@agentos/db";
 
+import { controlledGitEnvironment, prefixedCommand, splitRunAsPrefix } from "./git-launch.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
 
 /**
@@ -16,10 +17,10 @@ import type { SpecificationReader } from "./specification-fidelity.js";
  * GitHub URLs.
  */
 export const repoMirrorRoot = (
-  options: { home?: string; mirrorRoot?: string } = {},
+  options: { mirrorRoot?: string } = {},
 ): string => options.mirrorRoot
   ?? process.env.RUNNER_REPO_MIRROR_ROOT
-  ?? join(options.home ?? process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty", ".agentos", "repo-mirrors");
+  ?? join(process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty", ".agentos", "repo-mirrors");
 
 export const repoMirrorPath = (root: string, remoteUrl: string): string => (
   join(root, `${createHash("sha256").update(remoteUrl).digest("hex")}.git`)
@@ -27,6 +28,7 @@ export const repoMirrorPath = (root: string, remoteUrl: string): string => (
 
 export type MirrorGitResult = {
   code: number | null;
+  signal: NodeJS.Signals | null;
   stdout: Uint8Array;
   stderr: string;
 };
@@ -41,8 +43,6 @@ export type MirrorGitCommand = (
 export type MirrorSpecificationReaderOptions = {
   /** Test/in-process override; production uses RUNNER_REPO_MIRROR_ROOT. */
   mirrorRoot?: string;
-  /** Test/in-process override for the runner account's home. */
-  home?: string;
   /** Matches the runner's optional account-switching prefix. */
   runAsPrefix?: readonly string[];
   /** Injectable command boundary for focused tests. */
@@ -68,33 +68,66 @@ const isAbortError = (error: unknown): boolean => (
   error instanceof Error && error.name === "AbortError"
 );
 
-const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
+const mirrorAbortError = (): Error => {
+  const error = new Error("local repository mirror read aborted");
+  error.name = "AbortError";
+  return error;
+};
 
-const defaultGit = (prefix: readonly string[]): MirrorGitCommand => (mirrorPath, args, signal, input) => new Promise((resolveResult, reject) => {
-  const executable = prefix[0] ?? "git";
-  const executableArgs = prefix.length > 0 ? [...prefix.slice(1), "git", ...args] : args;
-  const child = spawn(executable, executableArgs, {
+const terminateProcessGroup = (
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+): void => {
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // The process may have exited between the pid check and the signal.
+    }
+  }
+  child.kill(signal);
+};
+
+/** Git launcher used at the API-to-runner principal boundary. */
+export const createMirrorGitCommand = (
+  prefix: readonly string[],
+  runnerHome: string = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
+): MirrorGitCommand => (mirrorPath, args, signal, input) => new Promise((resolveResult, reject) => {
+  if (signal.aborted) {
+    reject(mirrorAbortError());
+    return;
+  }
+  const launched = prefixedCommand("git", ["--no-replace-objects", ...args], prefix);
+  const child = spawn(launched.executable, launched.args, {
     cwd: process.cwd(),
     env: {
-      ...process.env,
-      PATH: process.env.RUNNER_PATH ?? process.env.PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      HOME: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
+      ...controlledGitEnvironment(runnerHome),
       GIT_DIR: mirrorPath,
-      GIT_TERMINAL_PROMPT: "0",
+      GIT_NO_REPLACE_OBJECTS: "1",
     },
+    detached: true,
     stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let settled = false;
   let aborted = false;
+  let escalation: ReturnType<typeof setTimeout> | undefined;
   const onAbort = (): void => {
+    if (aborted || settled) return;
     aborted = true;
-    child.kill("SIGTERM");
+    terminateProcessGroup(child, "SIGTERM");
+    escalation = setTimeout(() => {
+      terminateProcessGroup(child, "SIGKILL");
+      finish(() => reject(mirrorAbortError()));
+    }, 1_000);
+    escalation.unref();
   };
   const finish = (action: () => void): void => {
     if (settled) return;
     settled = true;
+    if (escalation) clearTimeout(escalation);
     signal.removeEventListener("abort", onAbort);
     action();
   };
@@ -105,56 +138,59 @@ const defaultGit = (prefix: readonly string[]): MirrorGitCommand => (mirrorPath,
   signal.addEventListener("abort", onAbort, { once: true });
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  child.once("error", (error: unknown) => finish(() => reject(error)));
-  child.once("close", (code) => {
+  child.once("error", (error: unknown) => finish(() => reject(aborted ? mirrorAbortError() : error)));
+  child.once("close", (code, terminatingSignal) => {
     if (aborted || signal.aborted) {
-      const error = new Error("local repository mirror read aborted");
-      error.name = "AbortError";
-      finish(() => reject(error));
+      finish(() => reject(mirrorAbortError()));
       return;
     }
     finish(() => resolveResult({
       code,
+      signal: terminatingSignal,
       stdout: Buffer.concat(stdout),
       stderr: Buffer.concat(stderr).toString("utf8"),
     }));
   });
   if (input !== undefined && child.stdin) {
+    child.stdin.on("error", () => {});
     child.stdin.end(Buffer.from(input));
   }
   if (signal.aborted) onAbort();
 });
 
-const missing = (result: MirrorGitResult): boolean => result.code !== 0 && result.code !== null;
+const missing = (result: MirrorGitResult): boolean => result.code !== 0;
+
+type MirrorReadRequest = {
+  root: string;
+  repository: string;
+  path: string;
+  commitSha: string;
+  remoteUrl: string;
+};
+
+const gitObjectId = (type: "blob" | "commit", bytes: Uint8Array, expected: string): string | null => {
+  const algorithm = expected.length === 40 ? "sha1" : expected.length === 64 ? "sha256" : null;
+  if (!algorithm) return null;
+  const header = new TextEncoder().encode(`${type} ${bytes.length}\0`);
+  return createHash(algorithm).update(header).update(bytes).digest("hex");
+};
 
 const readMirrorAtPath = async (
-  root: string,
-  mirror: string,
-  repository: string,
-  path: string,
-  commitSha: string,
-  remoteUrl: string | undefined,
+  request: MirrorReadRequest,
   signal: AbortSignal,
   runGit: MirrorGitCommand,
 ): Promise<Uint8Array | null> => {
+  const { root, repository, path, commitSha, remoteUrl } = request;
+  if (githubRepositoryFromRemote(remoteUrl) !== repository) return null;
+  const mirror = repoMirrorPath(root, remoteUrl);
   let bare: MirrorGitResult;
-  let configured: MirrorGitResult;
   try {
     bare = await runGit(mirror, ["rev-parse", "--is-bare-repository"], signal);
-    configured = await runGit(mirror, ["config", "--get", "remote.origin.url"], signal);
   } catch (error: unknown) {
     if (signal.aborted || isAbortError(error)) throw error;
     return null;
   }
   if (missing(bare) || outputText(bare.stdout).trim() !== "true") return null;
-  if (missing(configured)) return null;
-  const configuredRemote = outputText(configured.stdout).trim();
-  if (remoteUrl && configuredRemote !== remoteUrl) return null;
-  if (githubRepositoryFromRemote(configuredRemote) !== repository) return null;
-  // A mirror's basename is part of the runner contract. If a caller did not
-  // provide the original URL, this check prevents accepting a mirror keyed by
-  // a different spelling of the same GitHub repository.
-  if (repoMirrorPath(root, configuredRemote) !== mirror) return null;
 
   const probeInput = new TextEncoder().encode(`${commitSha}\n${commitSha}:${path}\n`);
   let probe: MirrorGitResult;
@@ -170,47 +206,33 @@ const readMirrorAtPath = async (
     return null;
   }
   if (missing(probe)) return null;
-  const lines = outputText(probe.stdout).split("\n");
+  const lines = outputText(probe.stdout).trimEnd().split("\n");
   if (lines.length < 2 || lines[0]!.endsWith(" missing") || lines[1]!.endsWith(" missing")) return null;
-  const commitType = lines[0]!.split(" ")[1];
-  const pathType = lines[1]!.split(" ")[1];
-  if (commitType !== "commit" || pathType !== "blob") return null;
+  const [resolvedCommit, commitType] = lines[0]!.split(" ");
+  const [blobId, pathType] = lines[1]!.split(" ");
+  if (resolvedCommit !== commitSha || commitType !== "commit" || !blobId || pathType !== "blob") return null;
 
+  let commitContent: MirrorGitResult;
   let content: MirrorGitResult;
   try {
-    content = await runGit(mirror, ["cat-file", "blob", `${commitSha}:${path}`], signal);
+    commitContent = await runGit(mirror, ["cat-file", "commit", commitSha], signal);
+    content = await runGit(mirror, ["cat-file", "blob", blobId], signal);
   } catch (error: unknown) {
     if (signal.aborted || isAbortError(error)) throw error;
     return null;
   }
-  return missing(content) ? null : content.stdout;
+  if (missing(commitContent) || missing(content)) return null;
+  if (gitObjectId("commit", commitContent.stdout, commitSha) !== commitSha) return null;
+  if (gitObjectId("blob", content.stdout, blobId) !== blobId) return null;
+  return content.stdout;
 };
 
-const localMirrorRead = async (
-  root: string,
-  repository: string,
-  path: string,
-  commitSha: string,
-  remoteUrl: string | undefined,
-  signal: AbortSignal,
-  runGit: MirrorGitCommand,
-): Promise<Uint8Array | null> => {
-  // Prepared claims always carry the exact URL used by the runner's mirror
-  // hash. A four-argument test double or other caller simply misses locally.
-  if (!remoteUrl) return null;
-  // Do not lstat either root or mirror: RUNNER_HOME and its 0700 parents may be
-  // traversable only by the account selected by RUNNER_RUN_AS_PREFIX. Git runs
-  // at that boundary and a nonzero result is the ordinary mirror miss.
-  return readMirrorAtPath(
-    root,
-    repoMirrorPath(root, remoteUrl),
-    repository,
-    path,
-    commitSha,
-    remoteUrl,
-    signal,
-    runGit,
-  );
+const reportedMirrorMisses = new Set<string>();
+
+const reportMirrorMiss = (mirrorPath: string): void => {
+  if (reportedMirrorMisses.has(mirrorPath)) return;
+  reportedMirrorMisses.add(mirrorPath);
+  console.warn(JSON.stringify({ audit: "specification-mirror", event: "miss", mirrorPath }));
 };
 
 /**
@@ -226,19 +248,28 @@ export const createMirrorBackedSpecificationReader = (
   options: MirrorSpecificationReaderOptions = {},
 ): SpecificationReader => {
   const root = resolve(repoMirrorRoot(options));
-  const runGit = options.runGit ?? defaultGit(options.runAsPrefix ?? splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? ""));
+  const prefix = options.runAsPrefix ?? splitRunAsPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
+  const runGit = options.runGit ?? createMirrorGitCommand(prefix);
   return {
     readFileAtCommit: async (repository, path, commitSha, signal, remoteUrl) => {
+      const mirrorPath = repoMirrorPath(root, remoteUrl);
       let local: Uint8Array | null;
       try {
-        local = await localMirrorRead(root, repository, path, commitSha, remoteUrl, signal, runGit);
+        // Do not lstat either root or mirror: RUNNER_HOME and its 0700 parents
+        // may be traversable only by RUNNER_RUN_AS_PREFIX's account.
+        local = await readMirrorAtPath(
+          { root, repository, path, commitSha, remoteUrl },
+          signal,
+          runGit,
+        );
       } catch (error: unknown) {
         if (signal.aborted || isAbortError(error)) throw error;
         local = null;
       }
       if (local !== null) return local;
+      reportMirrorMiss(mirrorPath);
       if (!githubReader) {
-        throw new MirrorSpecificationReadError(root, "mirror-miss-and-github-reader-unavailable");
+        throw new MirrorSpecificationReadError(mirrorPath, "mirror-miss-and-github-reader-unavailable");
       }
       // Preserve the supplied reader's error type (notably GitHubReadError's
       // timeout/transport/permission classification) so claim-side retry
@@ -247,6 +278,3 @@ export const createMirrorBackedSpecificationReader = (
     },
   };
 };
-
-/** Short alias for callers that name the local layer first. */
-export const createLocalMirrorSpecificationReader = createMirrorBackedSpecificationReader;

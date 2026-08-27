@@ -247,6 +247,9 @@ if [ -f "$api_plist" ]; then
   # FilesystemGrant has no OS backstop — but the patch script always writes it, so
   # its absence means the API plist was patched by something else, or not at all.
   check_env "$api_plist" "$API_LABEL" RUNNER_RUN_AS_PREFIX "$(expected_prefix "$(account_for 1)")"
+  # Claim-side pinned-spec reads use runner 1's local repository mirror.
+  check_env "$api_plist" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$(account_for 1)"
+  check_env "$api_plist" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors"
   if ! is_loaded "$API_LABEL"; then
     if [ "$STAGED" = 1 ]; then
       warn "$API_LABEL is not loaded (allowed by --staged)"

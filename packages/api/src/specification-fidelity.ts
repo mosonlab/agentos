@@ -4,6 +4,7 @@ import {
   stepRole,
 } from "@agentos/db";
 
+import { abortableDelay, abortReason } from "./abortable-delay.js";
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
 import { isValidBranchName } from "./branch-name.js";
 import { GitHubReadError } from "./github-read.js";
@@ -34,8 +35,8 @@ export type SpecificationReader = {
     path: string,
     commitSha: string,
     signal: AbortSignal,
-    /** The original Repo.remoteUrl, when the caller has it. */
-    remoteUrl?: string,
+    /** The exact original Repo.remoteUrl used to key the runner mirror. */
+    remoteUrl: string,
   ) => Promise<Uint8Array>;
 };
 
@@ -179,7 +180,7 @@ export type SpecificationVerification = {
   key: string;
   repository: string;
   /** Exact remote URL used by the runner mirror's hash key. */
-  remoteUrl?: string;
+  remoteUrl: string;
   path: string;
   implementationHeadSha: string;
   authoritativeBytes: Uint8Array;
@@ -281,28 +282,6 @@ type SpecificationReadRetryOptions = {
 const SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS = [1_200, 1_200, 1_200] as const;
 const SPECIFICATION_READ_RETRY_DELAYS_MS = [100, 300] as const;
 
-const abortReason = (signal: AbortSignal): unknown => (
-  signal.reason ?? new DOMException("The operation was aborted", "AbortError")
-);
-
-const waitForSpecificationRetry = (delayMs: number, signal: AbortSignal): Promise<void> => new Promise(
-  (resolve, reject) => {
-    if (signal.aborted) {
-      reject(abortReason(signal));
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", aborted);
-      resolve();
-    }, delayMs);
-    const aborted = (): void => {
-      clearTimeout(timer);
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", aborted, { once: true });
-  },
-);
-
 const failureDetail = (error: unknown): string => (
   error instanceof Error ? error.message : "repository content read failed"
 );
@@ -317,14 +296,14 @@ export const verifyPreparedSpecification = async (
   if (!reader) return specificationUnreadableRefusal("server-side repository content reader is unavailable");
   const retryDelaysMs = options.retryDelaysMs ?? SPECIFICATION_READ_RETRY_DELAYS_MS;
   const attemptTimeoutsMs = options.attemptTimeoutsMs ?? SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS;
-  const wait = options.wait ?? waitForSpecificationRetry;
+  const wait = options.wait ?? abortableDelay;
   let materialized: Uint8Array | undefined;
   for (let attempt = 0; materialized === undefined; attempt += 1) {
     signal.throwIfAborted();
     const attemptDeadline = new AbortController();
     const abortFromRequest = (): void => attemptDeadline.abort(abortReason(signal));
     signal.addEventListener("abort", abortFromRequest, { once: true });
-    const timeoutMs = attemptTimeoutsMs[attempt] ?? attemptTimeoutsMs.at(-1) ?? 4_000;
+    const timeoutMs = attemptTimeoutsMs[Math.min(attempt, attemptTimeoutsMs.length - 1)] ?? 4_000;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
