@@ -146,3 +146,5 @@ here only when agents must discover it. Treat `package.json`, configuration,
 the directory tree, and command `--help` output as live authority instead of
 caching them here. Keep every rule in one authoritative place and remove an
 obsolete path when its replacement lands.
+
+For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md).
