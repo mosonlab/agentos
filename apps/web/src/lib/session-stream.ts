@@ -382,17 +382,40 @@ export const projectStream = (
     tools = [];
   };
 
+  const pushTextNode = (item: Extract<StreamItem, { kind: "text" | "final" }>, final: boolean): void => {
+    // Empty output is not a message. In particular, ignoring it before
+    // flushing tools means a provider's empty delta cannot split a tool run.
+    if (item.text.trim().length === 0) return;
+
+    const previous = nodes.at(-1);
+    if (final) {
+      // CODEX's final output repeats its last agent message. Keep the original
+      // node (and its Agent heading) rather than showing the same prose twice.
+      if (previous?.kind === "text" && previous.text === item.text) return;
+    } else if (previous?.kind === "text" && !previous.final) {
+      // Streaming boundaries are not reader-visible boundaries. The first
+      // node owns the id and timestamp, while each message remains separated
+      // by a blank line inside the same prose card.
+      previous.text = `${previous.text}\n\n${item.text}`;
+      return;
+    }
+
+    nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final });
+  };
+
   for (const item of normalized.items) {
     if (item.kind === "tool") {
       tools.push(item);
       continue;
     }
 
+    if ((item.kind === "text" || item.kind === "final") && item.text.trim().length === 0) continue;
+
     flushTools();
     if (item.kind === "text") {
-      nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final: false });
+      pushTextNode(item, false);
     } else if (item.kind === "final") {
-      nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final: true });
+      pushTextNode(item, true);
     }
     // `error` is intentionally not projected until the marker producer lands.
   }

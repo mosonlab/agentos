@@ -261,6 +261,71 @@ test("the projection groups only maximal consecutive tool runs", () => {
   if (nodes[2]?.kind === "tools") assert.deepEqual(nodes[2].calls.map((call) => call.name), ["Edit"]);
 });
 
+test("projection merges consecutive assistant prose with the earliest timestamp", () => {
+  const first = event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT, { at: "2026-08-15T10:00:00.000Z" });
+  const second = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "second paragraph" }] },
+  }, { at: "2026-08-15T10:00:01.000Z" });
+
+  const { nodes, counts } = projectStream([first, second], "CLAUDE", false);
+  assert.equal(nodes.length, 1);
+  assert.deepEqual(nodes[0], {
+    kind: "text", id: first.id, at: first.at, text: "3\n\nsecond paragraph", final: false,
+  });
+  assert.deepEqual(counts, { messages: 1, toolCalls: 0, files: 0 });
+});
+
+test("projection does not merge prose separated by a tool call", () => {
+  const first = event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT);
+  const tool = event("TOOL_STARTED", {
+    type: "tool_use", id: "read-between", name: "Read", input: { file_path: "/a.ts" },
+  }, { toolCallId: "read-between" });
+  const second = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after tool" }] },
+  });
+
+  const { nodes } = projectStream([first, tool, second], "CLAUDE", false);
+  assert.deepEqual(nodes.map((node) => node.kind), ["text", "tools", "text"]);
+  assert.equal(nodes[0]?.kind, "text");
+  assert.equal(nodes[2]?.kind, "text");
+  if (nodes[0]?.kind === "text" && nodes[2]?.kind === "text") {
+    assert.equal(nodes[0].text, "3");
+    assert.equal(nodes[2].text, "after tool");
+  }
+});
+
+test("projection drops empty and whitespace-only assistant prose", () => {
+  const events = [
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "   \n\t" }] } }),
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "" }] } }),
+  ];
+  const { nodes } = projectStream(events, "CLAUDE", false);
+  assert.deepEqual(nodes.map((node) => node.kind), ["text"]);
+  if (nodes[0]?.kind === "text") assert.equal(nodes[0].text, "3");
+});
+
+test("projection drops a repeated final output but keeps a distinct final output", () => {
+  const repeated = projectStream([
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("FINAL_OUTPUT", { type: "result", result: "3" }),
+  ], "CLAUDE", true);
+  assert.deepEqual(repeated.nodes.map((node) => node.kind), ["text"]);
+  assert.equal(repeated.nodes[0]?.kind, "text");
+  if (repeated.nodes[0]?.kind === "text") assert.equal(repeated.nodes[0].final, false);
+
+  const distinct = projectStream([
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("FINAL_OUTPUT", { type: "result", result: "all done" }),
+  ], "CLAUDE", true);
+  assert.deepEqual(distinct.nodes.map((node) => node.kind), ["text", "text"]);
+  assert.equal(distinct.nodes[1]?.kind, "text");
+  if (distinct.nodes[1]?.kind === "text") {
+    assert.equal(distinct.nodes[1].text, "all done");
+    assert.equal(distinct.nodes[1].final, true);
+  }
+});
+
 test("projection counts derive from the nodes it returns", () => {
   const events = [
     event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
