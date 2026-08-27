@@ -133,6 +133,7 @@ test("every live provider status exposes one idempotent cancellation through hea
     assert.equal(run.status, RunStatus.CANCELLED);
     assert.equal(run.workspacePath, seeded.run.workspacePath);
     assert.equal(run.workspaceRetained, true);
+    assert.equal(run.worktreeContainmentViolations, null);
     assert.ok(run.cancelAcknowledgedAt);
     assert.equal(task.status, TaskStatus.REVIEW);
     assert.equal(successor.status, TaskStatus.TODO);
@@ -451,6 +452,7 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
     workspacePath: "/scratch/reconciled-first",
     branch: "codex/reconciled-first",
     baseSha: "b".repeat(40),
+    worktreeContainmentViolations: ["/operator/worktrees/reconciled-first"],
   });
   assert.equal(response.status, 200);
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
@@ -459,6 +461,7 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
   assert.equal(run.workspacePath, "/scratch/reconciled-first");
   assert.equal(run.branch, "codex/reconciled-first");
   assert.equal(run.baseSha, "b".repeat(40));
+  assert.deepEqual(run.worktreeContainmentViolations, ["/operator/worktrees/reconciled-first"]);
 
   const conflicting = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
     runnerId: RUNNER_ID,
@@ -467,12 +470,34 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
     workspacePath: "/scratch/must-not-overwrite",
     branch: "codex/must-not-overwrite",
     baseSha: "c".repeat(40),
+    worktreeContainmentViolations: ["/operator/worktrees/must-not-overwrite"],
   });
   assert.equal(conflicting.status, 200);
   const preserved = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(preserved.workspacePath, "/scratch/reconciled-first");
   assert.equal(preserved.branch, "codex/reconciled-first");
   assert.equal(preserved.baseSha, "b".repeat(40));
+  assert.deepEqual(preserved.worktreeContainmentViolations, ["/operator/worktrees/reconciled-first"]);
+});
+
+test("cancellation acknowledgement persists containment evidence without changing cancellation", async () => {
+  const seeded = await seed(RunStatus.RUNNING);
+  const requestId = "cancel-with-containment";
+  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId, reason: "stop after worktree escape",
+  })).status, 200);
+  const violations = ["/operator/worktrees/one", "/operator/worktrees/two"];
+  const acknowledged = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+    runnerId: RUNNER_ID,
+    fencingToken: seeded.run.fencingToken,
+    requestId,
+    worktreeContainmentViolations: violations,
+  });
+  assert.equal(acknowledged.status, 200);
+  assert.equal(acknowledged.body.status, RunStatus.CANCELLED);
+  const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+  assert.equal(run.status, RunStatus.CANCELLED);
+  assert.deepEqual(run.worktreeContainmentViolations, violations);
 });
 
 test("reconciliation re-reads cancellation after its stale candidate snapshot", { timeout: 20_000 }, async () => {

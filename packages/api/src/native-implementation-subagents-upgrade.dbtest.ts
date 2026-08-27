@@ -94,10 +94,11 @@ test("the native-subagent migration backfills only active canonical implementati
 
     const client = new PrismaClient({ datasources: { db: { url } } });
     try {
-      const runs = await client.run.findMany({ orderBy: { id: "asc" } });
-      assert.deepEqual(runs.map(({ id, subagentModel, subagentMaxConcurrent }) => ({
-        id, subagentModel, subagentMaxConcurrent,
-      })), [
+      const runs = await client.run.findMany({
+        select: { id: true, subagentModel: true, subagentMaxConcurrent: true },
+        orderBy: { id: "asc" },
+      });
+      assert.deepEqual(runs, [
         { id: "r-compound-active", subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 },
         { id: "r-compound-failed", subagentModel: null, subagentMaxConcurrent: null },
         { id: "r-direct-active", subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 },

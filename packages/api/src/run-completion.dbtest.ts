@@ -130,3 +130,35 @@ test("an accepted completion returns what it did rather than a response", async 
   });
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.SUCCEEDED);
 });
+
+test("completion persists outside-workspace worktree observations without changing the outcome", async () => {
+  const { run } = await seed();
+  const violations = ["/operator/worktrees/one", "/operator/worktrees/two"];
+  const result = await completeRun(db, {
+    runId: run.id,
+    body: { ...completion(run.fencingToken!), worktreeContainmentViolations: violations },
+    claimantClass: "runner",
+  });
+  assert.equal((result as { succeeded?: boolean }).succeeded, true);
+  const closed = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.deepEqual(closed.worktreeContainmentViolations, violations);
+  assert.equal(closed.status, RunStatus.SUCCEEDED);
+});
+
+test("omitted and empty containment observations remain absent on compliant completion", async () => {
+  for (const violations of [undefined, []] as const) {
+    const { run } = await seed();
+    const result = await completeRun(db, {
+      runId: run.id,
+      body: {
+        ...completion(run.fencingToken!),
+        ...(violations === undefined ? {} : { worktreeContainmentViolations: [...violations] }),
+      },
+      claimantClass: "runner",
+    });
+    assert.equal((result as { succeeded?: boolean }).succeeded, true);
+    const closed = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    assert.equal(closed.worktreeContainmentViolations, null);
+    assert.equal(closed.status, RunStatus.SUCCEEDED);
+  }
+});

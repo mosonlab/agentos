@@ -474,6 +474,12 @@ export const completeRun = async (
         pullRequestNumber: body.pullRequestNumber ?? null,
         deliveryInstructions: body.deliveryInstructions ?? null,
         workspaceRetained: body.workspaceRetained,
+        // Report-only runner observation. Keep compliant and legacy
+        // completions NULL so absence of an entry means no observation rather
+        // than manufacturing a fact for a runner that did not send one.
+        worktreeContainmentViolations: body.worktreeContainmentViolations?.length
+          ? jsonValue(body.worktreeContainmentViolations)
+          : Prisma.DbNull,
         maxRunsPerTask: budgetCeiling,
         budgetGrants,
       },

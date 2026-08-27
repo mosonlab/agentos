@@ -150,6 +150,20 @@ test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
+test("buildPrompt injects runner-owned worktree containment into every session", () => {
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const prompt = buildPrompt({
+      ...claim,
+      runner,
+      run: { ...claim.run, pinnedBaseSha: "a".repeat(40) },
+    });
+    assert.match(prompt, /Runner-owned run workspace containment:/u);
+    assert.match(prompt, /Any git worktree this session creates must live inside the run workspace using a relative path/u);
+    assert.match(prompt, /\.\/\.agentos\/worktrees\/<name>/u);
+    assert.match(prompt, /This rule overrides any contrary repository documentation/u);
+  }
+});
+
 test("buildPrompt appends operator notes after the task context", () => {
   const prompt = buildPrompt({
     ...claim,
