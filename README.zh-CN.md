@@ -14,7 +14,7 @@
 
 [安装](#快速开始) · [文档](#文档) · [支持状态](#支持状态) · [English](README.md)
 
-<img src="docs/media/tasks.png" alt="任务看板：十二步模板链运行中，每张卡片展示逐 run 状态与成本" width="880">
+<img src="docs/media/tasks.png" alt="任务看板：模板链运行中，每张卡片展示所处步骤、run 状态、模型与成本" width="880">
 
 </div>
 
@@ -71,6 +71,14 @@ AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个�
 | 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Claude | Claude Opus 5 · medium |
 | 11 | 合并就绪 | — | 重算 head，要求每份未结评审清空，签发精确 head 的合并授权 | — | 机械步，不跑模型 |
 | 12 | 执行合并 | `merge-integrator` | 对着线上 PR 重新校验每一项前置条件，然后合并 | — | 机械步，不跑模型 |
+
+<div align="center">
+
+<img src="docs/media/chain.png" alt="任务详情：十二步链的每一步及其角色与状态，上方是已完成的 run，下方是任务提示词" width="880">
+
+<sub>运行中的一条链：第 4 步执行中，第 6、7 步作为并行同层等待。</sub>
+
+</div>
 
 第 6、7 步是并行同层：盲评看不到对方的输出，由第 8 步一并裁决。第 5 步的根会话
 派发原生子代理，档位钉死在 Luna max，最多八个并发。
