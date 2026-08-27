@@ -104,6 +104,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   specificationMaterialization: null,
   task: {
     id: "task-114",
+    chainId: null,
     name: "Find the inbox deadlock",
     description: "work",
     repoId: "repo-1",

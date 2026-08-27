@@ -7,38 +7,11 @@ repository.
 ## Work directly
 
 Work in the current session by default; create or dispatch a task chain only
-when the human user explicitly requests one.
-
-When the user requests a chain:
-
-- Direct chain: one implementation context window can deliver a brief whose
-  change points are enumerable. Its `description` is the specification of
-  record — write it from [`docs/BRIEF-TEMPLATE.md`](docs/BRIEF-TEMPLATE.md)
-  before instantiating.
-- Full assurance chain: the work exceeds one implementation window or
-  decomposes into independently demonstrable slices; its spec and plan stages
-  own that decomposition. A surface too large for a brief to enumerate belongs
-  here, not to an assignee escalation.
-- Implementation assignee: keep the direct template's default. Assign
-  `senior-dev` (same rule for the review-fix step) only when the work touches
-  persisted data or a defense-list path — merge gate, gate worker, migrations,
-  merge automation — or when that classification is uncertain. Assign
-  `frontend-dev` when the work is primarily a new or redesigned web page or UI
-  surface (Leo 2026-08-27); the defense-list rule above still wins when both
-  apply.
-- A backlog card that needs a non-default implementation assignee states it as
-  the machine-readable line `Route: implementation=senior-dev` (or
-  `=frontend-dev`) in its description; the dispatcher copies it into
-  `stepOverrides`. Only the implementation step is routable this way.
-- Chain-to-chain sequencing: pass `afterTaskId` (the predecessor chain's final
-  task) to the instantiate endpoint; the bound chain dispatches when the
-  predecessor completes. Incompatible with `autoStart`; one successor per
-  predecessor task. Dependency qualification in
-  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md)
-  precedes every instantiation; ordering preferences stay in the backlog.
-- Dispatching, gating, rerouting, and the backlog card lifecycle (create,
-  route, archive at instantiation) follow
-  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
+when the human user explicitly requests one. Everything about chains — tier
+selection, the brief, implementation-assignee routing, chain-to-chain
+sequencing, and the backlog card lifecycle — is owned by
+[`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md);
+qualify dependencies there before every instantiation.
 
 Before changing canonical Agents, roles, or task templates, read
 [`agents/README.md`](agents/README.md); it and the contract files it names own
@@ -74,28 +47,22 @@ on one of those surfaces.
 ## Deliver an exact head
 
 `scripts/merge-gate.sh` is the only CI; a merge requires
-`MERGE GATE: PASS <oid>` for the exact commit being merged
-(`scripts/merge-gate.sh --expect-head <oid>`). When another gate might be
-running, dispatch through `scripts/gate-worker/gate-dispatch.sh <oid>`; read
-[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
-a remote worker.
+`MERGE GATE: PASS <oid>` for the exact commit being merged. The delivery
+procedure — gate dispatch, merge lease, pull-request timing, and worktree
+isolation — is owned by the "Delivering to main" section of
+[`CONTRIBUTING.md`](CONTRIBUTING.md). Never switch branches or commit feature
+work in the shared checkout: deliver from an isolated worktree on your own
+branch, and remove the worktree once merged.
 
-Every delivery that advances `main` acquires `scripts/merge-lease.sh` before
-running the merge gate for the final integrated head and holds it until the
-merge consumes that proof. Writing code, pushing a feature branch, and opening
-a PR need no lease. Pass `--task <id>` to both `acquire` and `release`: the
-default holder `user@host` is shared by every agent window on one machine, so
-a release without a task id cannot tell its own lease from a sibling's.
+## Platform runs
 
-Open the PR right after pushing the feature branch, before dispatching the
-gate: once the exact-head fast-forward lands, GitHub refuses a PR from a branch
-main already contains, while one opened beforehand flips to merged on its own.
-
-Several agent windows share one checkout. Deliver from a dedicated worktree
-under `~/Documents/claude_projects/agentos-public-worktrees/<task-name>/` on
-your own branch, stage only the paths you changed, and remove the worktree once
-merged — a branch switch in the shared checkout carries away another window's
-uncommitted work.
+For an agent executing inside an AgentOS run: your checkout is exclusive to
+this run. Create any worktree you need inside your own run workspace (a
+relative path such as `./worktrees/<name>`), never outside it — host-window
+rules elsewhere in this file do not move your work off the run workspace.
+Gates, merge leases, and merges belong to the mechanical merge tail, not to
+implementation or review steps. Never operate on a production or appliance
+checkout.
 
 ## Editing these instructions
 

@@ -179,9 +179,9 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   assert.equal(frontmatterValue(regressionVerification, "runner"), "claude");
   assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
   assert.match(regressionVerification, /complete persisted review package/u);
-  assert.match(regressionVerification, /entire fix diff as one unit/u);
-  assert.match(regressionVerification, /do not run the full\s+gate/u);
-  assert.match(regressionVerification, /one exact-head\s+mechanical gate/u);
+  assert.match(regressionVerification, /Review the whole fix diff/u);
+  assert.match(regressionVerification, /platform script prepares the refreshed tree/u);
+  assert.match(regressionVerification, /never[\s\S]*operate the merge lease[\s\S]*author the final task output/u);
   assert.doesNotMatch(regressionVerification, /blind reports mechanically/u);
 });
 
@@ -227,14 +227,13 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundFix, /No adjudication step stands between the reviews and this one/u);
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
-  assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
-  assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
-  assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
-  assert.ok(compoundRegression.indexOf("semantic verification passes") < compoundRegression.indexOf("merge-lease.sh acquire"));
-  assert.match(compoundRegression, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
-  assert.match(compoundRegression, /fetch `origin\/<run\.pullRequestBase>` again/u);
-  assert.match(compoundRegression, /all preceding Step\s+outputs/u);
-  assert.match(compoundRegression, /"gateProof":"MERGE GATE: PASS <same 40 hex as headSha>"/u);
+  assert.match(compoundRegression, /platform script owns refresh\/merge[\s\S]*final `regression-verification-v2`/u);
+  assert.match(compoundRegression, /regression-verification\.sh prepare/u);
+  assert.match(compoundRegression, /regression-verification\.sh review-fail/u);
+  assert.match(compoundRegression, /regression-verification\.sh finalize/u);
+  assert.match(compoundRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+  assert.match(compoundRegression, /all\s+preceding Step outputs/u);
+  assert.doesNotMatch(compoundRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directRegression = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))
     .find((step) => step.stepIndex === 5)!.prompt;
   assert.equal(compoundRegression, directRegression);
@@ -292,11 +291,11 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directFix, /Read both immutable review outputs from the preceding layer/u);
   assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
-  assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
-  assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
-  assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
-  assert.ok(directRegression.indexOf("semantic verification passes") < directRegression.indexOf("merge-lease.sh acquire"));
-  assert.match(directRegression, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
+  assert.match(directRegression, /regression-verification\.sh prepare/u);
+  assert.match(directRegression, /regression-verification\.sh review-fail/u);
+  assert.match(directRegression, /regression-verification\.sh finalize/u);
+  assert.match(directRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+  assert.doesNotMatch(directRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directImplementation = directTemplateSteps[0]!.prompt;
   assert.match(directImplementation, /brief is the specification of record/u);
   assert.doesNotMatch(directImplementation, /Copy the brief verbatim/u);

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { stepRole } from "@agentos/db";
+
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { InFlightTool } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -145,10 +147,15 @@ export const buildPrompt = (claim: ClaimedTask): string => {
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent">,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => {
+  const outputKind = claim.task.templateStep?.outputKind;
+  const regressionStep = outputKind !== undefined && stepRole({ outputKind }) === "regression";
+  if (regressionStep && !claim.task.chainId) {
+    throw new Error("regression-verification task is missing its platform chain id");
+  }
   // These names are runner-owned. In particular, a task secret must never be
   // able to reintroduce the host Codex home or the CLAUDE_CONFIG_DIR path that
   // this chain deliberately does not use.
@@ -176,6 +183,10 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
+    ...(regressionStep ? {
+      AGENTOS_CHAIN_ID: claim.task.chainId!,
+      AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
+    } : {}),
     AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
     ...RUNNER_DEFINITIONS[claim.runner].childEnvironment(claim, scratch),
     // Last on purpose, so no task secret can point a session back at the

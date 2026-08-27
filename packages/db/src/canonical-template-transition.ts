@@ -104,7 +104,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "3826487bd356bca1539efc62cb5d2722d75fcee73cdae41737380cff270b189f",
+      successorPromptDigest: "e3aa0891ed24b265a0d8843881396d115457885ec3f1d2be37f53c788a48a459",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -118,7 +118,23 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
     {
       marker: "pre-platform-spec-materialization",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "3826487bd356bca1539efc62cb5d2722d75fcee73cdae41737380cff270b189f",
+      successorPromptDigest: "e3aa0891ed24b265a0d8843881396d115457885ec3f1d2be37f53c788a48a459",
+      shape: [
+        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 4],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+      ],
+    },
+    {
+      // Prompt-only rollover: regression now delegates mechanical work to the
+      // platform script while keeping the template graph unchanged.
+      marker: "pre-regression-step-split",
+      promptDigest: "3826487bd356bca1539efc62cb5d2722d75fcee73cdae41737380cff270b189f",
+      successorPromptDigest: "e3aa0891ed24b265a0d8843881396d115457885ec3f1d2be37f53c788a48a459",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -189,6 +205,27 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
       successorPromptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
+      shape: [
+        ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
+        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
+        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
+        ["plan-reviser", AssigneeType.AGENT, false, "revised-plan", true, false, null, 4],
+        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
+        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification-v2", true, false, null, 9],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+      ],
+    },
+    {
+      // Prompt-only rollover: regression now delegates mechanical work to the
+      // platform script while keeping the template graph unchanged.
+      marker: "pre-regression-step-split",
+      promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
+      successorPromptDigest: "6429815e3f22bcb05a0912548fa1a470ab0c056ae746a21590ab5aa2b748f808",
       shape: [
         ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
         ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
