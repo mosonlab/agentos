@@ -1,3 +1,4 @@
+
 Goal: let the runner host cap Node test-runner parallelism per session without changing default behavior anywhere else.
 
 Problem: every package test script runs `node --test`, which defaults its file-level concurrency to (cores - 1). On the production runner host, up to 8 concurrent agent sessions each bursting ~9 test processes drives load average to 2x the core count and causes heavy swapping. Capping globally is wrong: interactive developer runs and gate workers on idle machines should keep full parallelism.
@@ -14,5 +15,3 @@ Acceptance:
 1. All workspace test scripts that invoke `node --test` honor TEST_CONCURRENCY as described.
 2. Unset variable produces unchanged behavior (explicitly demonstrated for at least one package).
 3. `npm run lint` passes; full `npm run test` (unset) passes.
-
-Persist the final
