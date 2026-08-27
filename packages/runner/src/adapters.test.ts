@@ -1211,6 +1211,32 @@ test("Codex structured errors take precedence over stderr warnings", () => {
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
 });
 
+test("Codex clears recovered reconnect evidence after successful terminal completion", () => {
+  const state = parseCodexTranscript([
+    { type: "error", message: "Reconnecting... 1/5" },
+    { type: "error", message: "Reconnecting... 2/5" },
+    { type: "item.completed", item: { type: "agent_message", text: "implementation persisted" } },
+    { type: "turn.completed" },
+  ]);
+  const evidence = evidenceFromState(state);
+
+  assert.equal(evidence.terminalEventSeen, true);
+  assert.equal(evidence.terminalSuccess, true);
+  assert.equal(evidence.providerError, null);
+  assert.equal(adapterExecutionSucceeded(evidence), true);
+});
+
+test("Codex preserves reconnect evidence when the stream ends before completion", () => {
+  const reconnectMessage = "Reconnecting... 3/5";
+  const state = parseCodexTranscript([{ type: "error", message: reconnectMessage }]);
+  const evidence = evidenceFromState(state, 1);
+
+  assert.equal(evidence.terminalEventSeen, false);
+  assert.equal(evidence.terminalSuccess, false);
+  assert.equal(adapterExecutionSucceeded(evidence), false);
+  assert.equal(failureReasonFromEvidence(evidence), reconnectMessage);
+});
+
 test("PI terminal success follows the final provider attempt after an internal retry", () => {
   const state = parsePiTranscript([
     { type: "turn_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" } },

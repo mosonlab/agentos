@@ -180,7 +180,17 @@ const SECRETS = [
   ["", "Users", "someone", ".codex", "auth.json"].join("/"),
 ] as const;
 
-const codexStub = (log: string, authFails = false, configReportPath?: string): string => [
+const codexStub = (
+  log: string,
+  authFails = false,
+  configReportPath?: string,
+  sessionLines: string[] = [
+    'echo \'{"type":"thread.started","thread_id":"thread-6"}\'',
+    'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"installed"}}\'',
+    'echo \'{"type":"turn.completed"}\'',
+  ],
+  exitCode = 0,
+): string => [
   "#!/bin/sh",
   `echo "$@" >> ${log}`,
   ...(configReportPath ? [`if [ -n "$CODEX_HOME" ]; then printf '%s' "$CODEX_HOME" > ${configReportPath}; fi`] : []),
@@ -195,10 +205,8 @@ const codexStub = (log: string, authFails = false, configReportPath?: string): s
     : '  login) echo "Logged in using ChatGPT"; exit 0 ;;',
   "esac",
   "cat > /dev/null",
-  'echo \'{"type":"thread.started","thread_id":"thread-6"}\'',
-  'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"installed"}}\'',
-  'echo \'{"type":"turn.completed"}\'',
-  "exit 0",
+  ...sessionLines,
+  `exit ${exitCode}`,
 ].join("\n");
 
 const failingCodexStub = (log: string, mutation = ":"): string => [
@@ -751,6 +759,67 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     await assert.rejects(stat(configRoot), /ENOENT/u, "successful Codex runs must remove CODEX_HOME");
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex reconnect evidence is cleared only after successful terminal completion", async () => {
+  const scenarios = [
+    {
+      name: "recovered",
+      sessionLines: [
+        'echo \'{"type":"error","message":"Reconnecting... 1/5"}\'',
+        'echo \'{"type":"error","message":"Reconnecting... 2/5"}\'',
+        'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"output persisted"}}\'',
+        'echo \'{"type":"turn.completed"}\'',
+      ],
+      exitCode: 0,
+    },
+    {
+      name: "interrupted",
+      sessionLines: ['echo \'{"type":"error","message":"Reconnecting... 3/5"}\''],
+      exitCode: 1,
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const root = await mkdtemp(join(tmpdir(), `runner-codex-reconnect-${scenario.name}-`));
+    try {
+      const binary = join(root, "codex.sh");
+      await writeFile(binary, codexStub(join(root, "argv.log"), false, undefined, [...scenario.sessionLines], scenario.exitCode));
+      await chmod(binary, 0o755);
+      const remote = await seedRemote(root);
+      await seedCodexAuth(root);
+      const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+
+      await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
+        ...mechanicalClaim,
+        executionMode: "agent",
+        runner: "CODEX",
+        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+        session: testSession(root),
+      });
+
+      const completion = posts.find((post) => post.path.endsWith("/complete"));
+      assert.ok(completion);
+      if (scenario.name === "recovered") {
+        assert.equal(completion.body.terminalSuccess, true);
+        assert.equal(completion.body.failureReason ?? null, null);
+        assert.equal(completion.body.output, "output persisted");
+      } else {
+        assert.equal(completion.body.terminalSuccess, false);
+        assert.match(String(completion.body.failureReason), /Reconnecting\.\.\. 3\/5/u);
+        await removeRetainedSessionConfig({ body: completion.body });
+      }
+    } finally {
+      await cleanupTestSession(root);
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 

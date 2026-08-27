@@ -102,6 +102,9 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     ];
 };
 
+const isReconnectStatus = (message: string | null): boolean =>
+  /^Reconnecting\.\.\. [1-5]\/5$/u.test(message?.trim() ?? "");
+
 export const parseCodexEvent = (
   state: AdapterState,
   event: Record<string, unknown>,
@@ -138,12 +141,19 @@ export const parseCodexEvent = (
     // only item-level errors count as a run failure.
     if (item?.error) state.sawError = true;
   } else if (type === "error") {
-    state.sawError = true;
-    state.providerError = eventErrorMessage(event) ?? state.providerError;
+    const message = eventErrorMessage(event);
+    // Codex emits reconnect progress through the same `error` event used for
+    // terminal provider failures. Keep the latest message as evidence while
+    // the stream is disconnected, but do not make it an irreversible verdict:
+    // a later turn.completed proves the reconnect recovered. Every other error
+    // remains latched, including an unrecognised error with no message.
+    if (!isReconnectStatus(message)) state.sawError = true;
+    state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
   } else if (type === "turn.completed") {
     state.terminalEventSeen = true;
     state.terminalSuccess = !state.sawError;
+    if (state.terminalSuccess && isReconnectStatus(state.providerError)) state.providerError = null;
     emitAdapterEvent(state, sink, "FINAL_OUTPUT", event);
   } else emitAdapterEvent(state, sink, "PROVIDER_STATUS", event);
 };
