@@ -34,6 +34,8 @@ export type SpecificationReader = {
     path: string,
     commitSha: string,
     signal: AbortSignal,
+    /** The original Repo.remoteUrl, when the caller has it. */
+    remoteUrl?: string,
   ) => Promise<Uint8Array>;
 };
 
@@ -176,6 +178,8 @@ const authorityFor = async (
 export type SpecificationVerification = {
   key: string;
   repository: string;
+  /** Exact remote URL used by the runner mirror's hash key. */
+  remoteUrl?: string;
   path: string;
   implementationHeadSha: string;
   authoritativeBytes: Uint8Array;
@@ -223,8 +227,16 @@ export const prepareSpecificationVerification = async (
   return {
     status: "ready",
     verification: {
-      key: [candidate.task.id, repository, implementationHeadSha, candidate.branch, authority.text].join("\0"),
+      key: [
+        candidate.task.id,
+        repository,
+        candidate.repo.remoteUrl,
+        implementationHeadSha,
+        candidate.branch,
+        authority.text,
+      ].join("\0"),
       repository,
+      remoteUrl: candidate.repo.remoteUrl,
       path,
       implementationHeadSha,
       authoritativeBytes,
@@ -325,6 +337,7 @@ export const verifyPreparedSpecification = async (
         verification.path,
         verification.implementationHeadSha,
         attemptDeadline.signal,
+        verification.remoteUrl,
       );
       continue;
     } catch (error: unknown) {
