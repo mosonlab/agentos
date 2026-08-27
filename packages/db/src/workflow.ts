@@ -18,6 +18,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
+import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
 import { requireGateAttestation } from "./gate-attestation.js";
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
@@ -95,7 +96,8 @@ export type CompoundImplementationStepShape = {
 } | null;
 
 export const isCompoundImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
-  templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
+  templateStep?.taskTemplate?.name !== undefined
+  && canonicalTemplateIdentity(templateStep.taskTemplate.name)?.canonicalName === INTEGRATOR_TEMPLATE_NAME
   && templateStep.outputKind !== undefined
   && stepRole({ outputKind: templateStep.outputKind }) === "implementation";
 
@@ -134,7 +136,8 @@ export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-5.6-luna:max";
 export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
 
 export const isDirectImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
-  templateStep?.taskTemplate?.name === DIRECT_TEMPLATE_NAME
+  templateStep?.taskTemplate?.name !== undefined
+  && canonicalTemplateIdentity(templateStep.taskTemplate.name)?.canonicalName === DIRECT_TEMPLATE_NAME
   && templateStep.outputKind !== undefined
   && stepRole({ outputKind: templateStep.outputKind }) === "implementation";
 
