@@ -71,7 +71,7 @@ the CLI vendor.
 | The five-screen installation wizard and one-transaction install | **Verified** | Server-side refusal of a false acknowledgement is independent of the browser. |
 | Local runner: fenced lease, per-run workspace, run branch | **Verified** | Wall-clock and stall bounds apply to every run. |
 | Git delivery: branch push | **Verified** | Requires non-interactive clone/push authentication and a configured Git author identity for the runner account. |
-| Automatic GitHub pull request | **Optional** | Requires the `gh` CLI installed and authenticated as the runner account. Without it, delivery succeeds after pushing the branch and returns manual PR instructions. |
+| Automatic GitHub pull request | **Optional** | Requires the `gh` CLI installed and authenticated as the runner account. A run required to open a pull request fails after preserving its pushed branch when `gh` cannot record one; a non-GitHub remote instead returns manual PR instructions because automatic creation is impossible by design. |
 | Repository and filesystem grants | **Verified as a control-plane boundary** | They authorize and audit AgentOS's own APIs. They are not host containment, and the repository access level does not gate delivery's push. |
 | Stored secrets (AES-256-GCM) | **Verified** | Neither plaintext nor ciphertext appears in the API's secret representations. There is no rotation command. |
 | Scheduling, webhook triggers, automations | **Verified** | |

@@ -4,6 +4,7 @@ layer: 9
 agent: regression-verifier
 approvalGate: false
 outputKind: regression-verification-v2
+priorOutputKinds: [implementation, sol-findings, blind-findings, fixed-implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null
@@ -15,12 +16,12 @@ task output. Do not perform or restate those mechanical operations yourself.
 
 Run `scripts/regression-verification.sh prepare`. If it reports
 `refresh-conflict`, the final output is already persisted: record the outcome
-in the activity log and finish. Otherwise read both review reports and all
-preceding Step outputs, including the fixed implementation and its
-dispositions. Review the entire refreshed fix diff as one unit, account for
-every finding id, rerun focused regressions, and verify that the approved
-specification is preserved without a new defect. Do not modify code or repair a
-failure.
+in the activity log and finish. Otherwise read the implementation summary,
+both review reports, and the fixed implementation with its dispositions from
+AgentOS. Review the entire refreshed fix diff as one unit, account for every
+finding id, rerun focused regressions, and verify that the approved
+specification is preserved without a new defect. Do not modify code or repair
+a failure.
 
 If an adopted finding remains open, a rejection is unsupported, or a new
 defect exists, run

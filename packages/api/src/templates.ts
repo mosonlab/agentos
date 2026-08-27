@@ -52,6 +52,7 @@ type EffectiveTemplateStep = {
     assigneeAgent: { id: string; name: string; projectId: string; archivedAt: Date | null } | null;
     prompt: string;
     attachmentsFromPrevious: boolean;
+    priorOutputKinds: string[];
     approvalGate: boolean;
     opensPullRequest: boolean;
     layer: number;
@@ -137,7 +138,7 @@ const outputIsPlatformAuthored = (outputKind: string): boolean => {
 export const composeTemplateTaskDescription = (input: {
   prompt: string;
   featureBrief?: string | undefined;
-  attachmentsFromPrevious: boolean;
+  priorOutputKinds: readonly string[];
   outputKind: string;
 }): string => {
   // Readiness and merge execution are server-owned mechanical steps. Their
@@ -147,7 +148,7 @@ export const composeTemplateTaskDescription = (input: {
   return [
     input.prompt,
     input.featureBrief ? `${FEATURE_BRIEF_PREFIX}${input.featureBrief}` : "",
-    input.attachmentsFromPrevious ? PRIOR_OUTPUTS_REMINDER : "",
+    input.priorOutputKinds.length > 0 ? PRIOR_OUTPUTS_REMINDER : "",
     outputIsPlatformAuthored(input.outputKind)
       ? ""
       : `${PERSIST_OUTPUT_PREFIX}${input.outputKind}${PERSIST_OUTPUT_SUFFIX}`,
@@ -522,7 +523,7 @@ export const instantiateTemplate = async (
           const context = composeTemplateTaskDescription({
             prompt: interpolate(step.prompt, promptVariables),
             featureBrief: input.description,
-            attachmentsFromPrevious: step.attachmentsFromPrevious,
+            priorOutputKinds: step.priorOutputKinds,
             outputKind: step.outputKind,
           });
           tasks.push(await tx.task.create({ data: {
