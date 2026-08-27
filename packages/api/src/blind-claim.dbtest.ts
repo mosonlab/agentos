@@ -16,6 +16,10 @@ const execFileAsync = promisify(execFile);
 const DB_DIRECTORY = fileURLToPath(new URL("../../db", import.meta.url));
 const RUNNER_TOKEN = "blind-claim-runner-token";
 const OPERATOR_TOKEN = "blind-claim-operator-token";
+const SPECIFICATION_BRIEF = "Blind-claim specification fixture brief.";
+const specificationReader = {
+  readFileAtCommit: async (): Promise<Uint8Array> => new TextEncoder().encode(SPECIFICATION_BRIEF),
+};
 /** The head both reviews were bound to, and the head the fix starts from. */
 const REVIEWED_HEAD = "e".repeat(40);
 const UNIQUE_PREDECESSOR_FINDING = {
@@ -94,6 +98,7 @@ const queueCanonicalStep = async (
   const chain = await instantiateTemplate(db, template.projectId, template.id, {
     repoId,
     variables: { branchName: `blind-claim-step-${stepIndex}` },
+    description: SPECIFICATION_BRIEF,
     autoStart: true,
   });
   await db.run.deleteMany({ where: { taskId: { in: chain.tasks.map((task) => task.id) } } });
@@ -145,12 +150,30 @@ const queueCanonicalStep = async (
       commitSha: headSha,
     };
   }) });
+  if (template.name === INTEGRATOR_TEMPLATE_NAME) {
+    const specificationTask = chain.tasks.find((task) => task.chainIndex === 1);
+    assert.ok(specificationTask);
+    await db.taskStepOutput.upsert({
+      where: { taskId: specificationTask.id },
+      create: {
+        taskId: specificationTask.id,
+        kind: "spec",
+        body: JSON.stringify({ schemaVersion: 1, headSha: REVIEWED_HEAD, spec: SPECIFICATION_BRIEF }),
+        commitSha: REVIEWED_HEAD,
+      },
+      update: {
+        kind: "spec",
+        body: JSON.stringify({ schemaVersion: 1, headSha: REVIEWED_HEAD, spec: SPECIFICATION_BRIEF }),
+        commitSha: REVIEWED_HEAD,
+      },
+    });
+  }
   const run = await db.$transaction((tx) => enqueueTaskRun(tx as never, target.id));
   return { run, chain };
 };
 
 const claim = async () => {
-  const response = await createApp(db).request("/runner/tasks/claim", {
+  const response = await createApp(db, { specificationReader }).request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ runnerId: "blind-claim-runner", leaseSeconds: 60 }),

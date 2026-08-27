@@ -65,3 +65,90 @@ test("permission failures never retry", async () => {
   assert.equal(calls, 1);
   assert.deepEqual(waits, []);
 });
+
+test("readFileAtCommit reads exact bytes from a commit-pinned Contents request", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const reader = createGitHubReader("read-token", async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify({
+      type: "file",
+      encoding: "base64",
+      // Contents responses may wrap base64 in newlines.
+      content: "AP8K\n",
+    }), { status: 200 });
+  })!;
+
+  const bytes = await reader.readFileAtCommit(
+    "owner/repo",
+    "docs/spec file.md",
+    "0123456789abcdef0123456789abcdef01234567",
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(bytes, Buffer.from([0, 255, 10]));
+  assert.equal(
+    calls[0]?.url,
+    "https://api.github.com/repos/owner/repo/contents/docs/spec%20file.md?ref=0123456789abcdef0123456789abcdef01234567",
+  );
+  assert.equal(calls[0]?.init.method, "GET");
+  assert.deepEqual(calls[0]?.init.headers, {
+    Authorization: "Bearer read-token",
+    Accept: "application/vnd.github+json",
+  });
+});
+
+test("readFileAtCommit preserves a zero-byte repository file", async () => {
+  const reader = createGitHubReader("read-token", async () => new Response(JSON.stringify({
+    type: "file",
+    encoding: "base64",
+    content: "",
+  }), { status: 200 }))!;
+
+  const bytes = await reader.readFileAtCommit(
+    "owner/repo",
+    "spec.md",
+    "commit",
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(bytes, Buffer.alloc(0));
+});
+
+test("readFileAtCommit refuses malformed JSON, file metadata, and base64", async () => {
+  const responses = [
+    new Response("{", { status: 200 }),
+    new Response(JSON.stringify({ type: "directory", encoding: "base64", content: "" }), { status: 200 }),
+    new Response(JSON.stringify({ type: "file", encoding: "base64", content: "not base64!" }), { status: 200 }),
+  ];
+
+  for (const response of responses) {
+    const reader = createGitHubReader("read-token", async () => response)!;
+    await assert.rejects(
+      reader.readFileAtCommit("owner/repo", "spec.md", "commit", new AbortController().signal),
+      (error: unknown) => error instanceof GitHubReadError && error.kind === "response" && /malformed/u.test(error.message),
+    );
+  }
+});
+
+test("readFileAtCommit names a missing file and surfaces other HTTP errors", async () => {
+  let missingCalls = 0;
+  const missingReader = createGitHubReader("read-token", async () => {
+    missingCalls += 1;
+    return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+  })!;
+  await assert.rejects(
+    missingReader.readFileAtCommit("owner/repo", "spec.md", "commit", new AbortController().signal),
+    (error: unknown) => error instanceof GitHubReadError
+      && error.kind === "response"
+      && /repository file is missing/u.test(error.message),
+  );
+  assert.equal(missingCalls, 1);
+
+  const errorReader = createGitHubReader("read-token", async () => new Response("bad request", { status: 422 }))!;
+  await assert.rejects(
+    errorReader.readFileAtCommit("owner/repo", "spec.md", "commit", new AbortController().signal),
+    (error: unknown) => error instanceof GitHubReadError
+      && error.kind === "response"
+      && /returned 422/u.test(error.message),
+  );
+});
