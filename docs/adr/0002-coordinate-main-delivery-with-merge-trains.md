@@ -93,6 +93,7 @@ of the complete delivery tail as observed by a caller.
 | Lane B, PR #194 | 15:19:54 | 5m44s |
 | Independent follow-up, PR #195 | 15:24:25 | 4m31s |
 | Lane H, PR #196 | 15:36:44 | 12m19s |
+| Lane A stage 1, PR #200 | 15:55:21 | 18m37s |
 
 Lane H's first gate found a real recovery PATCH regression; it fixed the defect,
 added coverage, and passed a second full gate. That event is evidence that the
@@ -101,6 +102,16 @@ full gate must remain authoritative, not an argument for a path-selective gate.
 At 15:37:13 UTC, immediately after H released, lane A acquired the lease for PR
 #200. At that point three remote gate slots existed, but only A could dispatch a
 gate because every other candidate had to wait for the global merge lease.
+
+PR #200's first two full-gate attempts failed on two different runner timing
+tests; each failing test passed immediately when repeated alone. The unchanged
+exact head passed when the existing `AGENTOS_GATE_HOST_SHARE=2` profile reduced
+the gate from ten host lanes to five, then merged at 15:55:21 UTC. This does not
+prove that host oversubscription caused either failure, but it does establish a
+second capacity constraint: a train coordinator must respect worker-local host
+share as well as the number of cross-candidate gate slots. Raising train
+concurrency while oversubscribing each worker could exchange queue latency for
+noisy gate retries.
 
 The steady green portion of the sample delivered roughly one candidate every
 five to six minutes. Six independent green candidates therefore consume roughly
@@ -393,6 +404,7 @@ Worker utilization is not the only metric. The implementation must record:
 - queue wait before train admission;
 - time to build each prefix;
 - gate slot wait, run time, and outcome;
+- effective worker host share and concurrent jobs on that worker;
 - time from first PASS to publication;
 - wasted gate minutes after an earlier prefix fails or drifts;
 - publication hold duration;
@@ -442,6 +454,8 @@ If that operational cost is unacceptable, skip directly from Phase 1 to Phase 3.
 - Consume only the longest contiguous passing prefix.
 - Rebuild from the first failed, conflicting, or drifting entry.
 - Use the measured worker slot inventory without exposing slot policy to callers.
+- Cap per-worker execution with the worker's proven host-share profile; train
+  width and intra-gate lane count are separate controls.
 
 ### Phase 4: remove the old authority path
 
