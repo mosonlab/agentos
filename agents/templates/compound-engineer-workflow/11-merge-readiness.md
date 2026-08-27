@@ -4,6 +4,7 @@ layer: 10
 agent: review-coordinator
 approvalGate: false
 outputKind: merge-authorization
+priorOutputKinds: []
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null

@@ -4,6 +4,7 @@ layer: 3
 agent: review-coordinator
 approvalGate: false
 outputKind: plan-review
+priorOutputKinds: [spec, plan]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null

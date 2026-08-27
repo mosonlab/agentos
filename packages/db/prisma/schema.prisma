@@ -484,6 +484,7 @@ model TaskTemplateStep {
   prompt                  String
   approvalGate            Boolean      @default(false)
   attachmentsFromPrevious Boolean      @default(false)
+  priorOutputKinds        String[]     @default([])
   spawnPolicy             Json?
   runner                  RunnerKind?
   outputKind              String       @default("result")

@@ -4,6 +4,7 @@ layer: 4
 agent: plan-reviser
 approvalGate: false
 outputKind: revised-plan
+priorOutputKinds: [spec, plan, plan-review]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null
