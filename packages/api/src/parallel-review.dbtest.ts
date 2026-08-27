@@ -412,6 +412,38 @@ test("a faithful direct spec with one conventional final newline remains claimab
   assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
+test("a repository change between verification and claim triggers verification against the new repository", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "repository-change-implementation");
+  const repositoriesRead: string[] = [];
+  const response = await createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async (repository) => {
+        repositoriesRead.push(repository);
+        if (repositoriesRead.length === 1) {
+          await db.repo.update({
+            where: { id: fixture.repoId },
+            data: { remoteUrl: "https://github.com/example/replaced-review.git" },
+          });
+        }
+        return new TextEncoder().encode(SPECIFICATION_BRIEF);
+      },
+    },
+  }).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "repository-change-review", leaseSeconds: 120 }),
+  });
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  const reviewed = JSON.parse(responseText) as Claim;
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
+  assert.deepEqual(repositoriesRead, [
+    "example/parallel-review",
+    "example/replaced-review",
+  ]);
+});
+
 test("a faithful rolled-over compound chain still resolves the approved specification", async () => {
   const fixture = await instantiateFullAtReviewFrontier();
   await db.taskTemplate.update({

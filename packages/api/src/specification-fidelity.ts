@@ -222,7 +222,7 @@ export const prepareSpecificationVerification = async (
   return {
     status: "ready",
     verification: {
-      key: [candidate.task.id, implementationHeadSha, candidate.branch, authority.text].join("\0"),
+      key: [candidate.task.id, repository, implementationHeadSha, candidate.branch, authority.text].join("\0"),
       repository,
       path,
       implementationHeadSha,
