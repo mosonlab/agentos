@@ -197,10 +197,21 @@ test("the projection drops the Run and Session columns the board never reads", (
     }],
   }), null);
   assert.deepEqual(card.latestRun, {
-    id: "r1", runNumber: 3, status: "FAILED", costUsd: "1.25",
+    id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", costUsd: "1.25",
     startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"),
   });
   assert.equal(card.taskCost?.costUsd, "1.25");
+});
+
+test("the latest run carries its own claimed model, not the assignee's current one", () => {
+  // The board card labels the run line with this; a re-tiered agent must not
+  // relabel a run that already happened.
+  const card = boardCard(row({
+    assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" },
+    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", session: null }],
+  }), null);
+  assert.equal(card.latestRun?.model, "claude-opus-5:medium");
+  assert.equal(card.assigneeAgent?.model, "gpt-5.6-sol:high");
 });
 
 test("a task with no runs reports no latest run rather than an empty one", () => {
@@ -230,7 +241,7 @@ test("task cost sums every run including failures and marks an estimated summand
     }) },
     { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", session: session({ costUsd: "1.25" }) },
   ] }), null);
-  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null });
+  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", costUsd: null, startedAt: null, endedAt: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
 });
