@@ -546,7 +546,7 @@ export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
           <span className="text-foreground">{t("sessions.stream.operator")}</span>
           <span className={MSG_TIME}>{formatDateTime(node.at)}</span>
         </div>
-        <Markdown text={node.text} />
+        <TextNodeBody text={node.text} />
       </div>
     );
   }

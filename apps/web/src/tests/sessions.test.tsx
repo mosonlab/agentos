@@ -7,10 +7,10 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { setFormatLocale } from "../lib/format";
+import { formatDate, setFormatLocale, timeAgo } from "../lib/format";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
-import { sessionSeenKey } from "../lib/session-list";
+import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
 import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
@@ -193,6 +193,16 @@ test("operator input renders in the message card under a translated Operator hea
   assert.match(chinese, /continue with the repair/);
 });
 
+test("operator input uses the same line clamp and Show more control as agent prose", () => {
+  const text = Array.from({ length: TEXT_NODE_MAX_LINES + 2 }, (_, index) => `operator line ${index + 1}`).join("\n");
+  const markup = renderToStaticMarkup(<StreamNodeView node={{
+    kind: "input", id: "long-input", at: "2026-08-16T00:00:00.000Z", text,
+  }} />);
+  assert.match(markup, /Show more/);
+  assert.match(markup, /operator line 12/);
+  assert.doesNotMatch(markup, /operator line 13/);
+});
+
 test("tool groups and text node headings are translated in English and Chinese", () => {
   try {
     const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={toolNode} /></LocaleProvider>);
@@ -255,6 +265,13 @@ test("a session row leads with its title and status, not table columns", () => {
   assert.doesNotMatch(markup, /<table|Started|Runner|Duration|Result/);
 });
 
+test("a queued row uses requestedAt for its relative time when it has not started", () => {
+  const requestedAt = new Date(Date.now() - 2_000).toISOString();
+  const markup = renderToStaticMarkup(<SessionRow session={session({ startedAt: null, requestedAt })} />);
+  const renderedTime = /data-session-time="true"[^>]*>([^<]*)</u.exec(markup)?.[1];
+  assert.equal(renderedTime, timeAgo(requestedAt));
+});
+
 test("a session row title falls back from Task to Goal to Session id", () => {
   const task = renderToStaticMarkup(<SessionRow session={session()} />);
   assert.match(task, />Batch 4</);
@@ -281,7 +298,9 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
   });
   const yesterdayAt = localIso(-1, 12);
   const yesterday = session({ id: "yesterday", requestedAt: yesterdayAt, startedAt: yesterdayAt });
-  const sessions = [...today, yesterday];
+  const olderAt = localIso(-2, 15);
+  const older = session({ id: "older", requestedAt: olderAt, startedAt: olderAt });
+  const sessions = [...today, yesterday, older];
 
   const { ProjectProvider } = await import("../lib/project");
   const originalFetch = globalThis.fetch;
@@ -306,21 +325,24 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
         for (let turn = 0; turn < 20; turn += 1) await act(async () => { await Promise.resolve(); });
 
         const dayGroups = [...dom.window.document.querySelectorAll<HTMLElement>("[data-session-day]")];
-        assert.equal(dayGroups.length, 2, container.innerHTML);
+        assert.equal(dayGroups.length, 3, container.innerHTML);
         const dayText = dayGroups.map((group) => group.textContent ?? "");
         assert.match(dayText[0]!, locale === "en" ? /Today/ : /今天/);
         assert.match(dayText[1]!, locale === "en" ? /Yesterday/ : /昨天/);
+        assert.ok(dayText[2]?.includes(formatDate(olderAt)), `${dayText[2]} does not include ${formatDate(olderAt)}`);
         assert.match(dayText[0]!, locale === "en" ? /6 sessions/ : /6 个会话/);
-        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 6);
+        assert.equal(dom.window.document.querySelectorAll("table").length, 0);
+        assert.doesNotMatch(container.textContent ?? "", /Started|Runner|Duration|Result/u);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
 
         const expand = dom.window.document.querySelector<HTMLButtonElement>("[data-session-day-toggle]");
         assert.ok(expand, container.innerHTML);
         assert.match(expand.textContent ?? "", locale === "en" ? /Show 1 more/ : /再显示 1 个/);
         await click(dom, expand);
-        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 8);
         assert.match(expand.textContent ?? "", locale === "en" ? /Show fewer/ : /显示更少/);
         await click(dom, expand);
-        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 6);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
       } finally {
         await act(async () => root.unmount());
         dom.window.close();
@@ -403,6 +425,10 @@ test("an unseen terminal row has a trailing green dot and bold title, while a se
 test("agent and status filters show loaded-only copy and localized choices", async () => {
   const sessions = [
     session({ id: "live-match", task: { id: "task-live", name: "Live match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "RUNNING" }),
+    ...Array.from({ length: 5 }, (_, index) => session({
+      id: `live-match-${index}`, task: { id: `task-live-${index}`, name: `Live match ${index}` },
+      agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "RUNNING",
+    })),
     session({ id: "done-other", task: { id: "task-done", name: "Done other" }, agentId: "agent-other", agent: { id: "agent-other", title: "Agent Other" }, executionStatus: "SUCCEEDED" }),
     session({ id: "failed-match", task: { id: "task-failed", name: "Failed match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "FAILED" }),
   ];
@@ -450,7 +476,9 @@ test("agent and status filters show loaded-only copy and localized choices", asy
         assert.match(container.textContent ?? "", locale === "en" ? /Agent.*Status/u : /Agent.*状态/u);
 
         await choose("[data-session-filter-agent]", "agent-match");
-        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 2);
+        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 5, "the filtered group still caps at five rows");
+        assert.match(dom.window.document.querySelector("[data-session-day-count]")?.textContent ?? "", locale === "en" ? /7 sessions/u : /7 个会话/u);
+        assert.match(dom.window.document.querySelector("[data-session-day-toggle]")?.textContent ?? "", locale === "en" ? /Show 2 more/u : /再显示 2 个/u);
         assert.ok(dom.window.document.querySelector("[data-session-filter-hint]"));
         assert.match(container.textContent ?? "", locale === "en" ? /Filters apply to loaded Sessions only\./u : /筛选仅适用于已加载的会话。/u);
 
@@ -601,15 +629,20 @@ test("a Session finishing while its detail page is open is marked opened again",
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
     await flush();
     const initial = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
-    assert.ok(initial?.opened[detail.id], "mount records the live Session too");
+    const initialStamp = initial?.opened[detail.id];
+    assert.ok(initialStamp, "mount records the live Session too");
 
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 2));
     detail = { ...detail, executionStatus: "SUCCEEDED", endedAt: "2026-08-21T01:00:00.000Z" };
     const refresh = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
     assert.ok(refresh, container.innerHTML);
     await click(dom, refresh);
     await flush();
-    const transitioned = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
-    assert.ok(transitioned?.opened[detail.id], "terminal transition writes another opened stamp");
+    const transitioned = JSON.parse(storage.get(seenKey) ?? "null") as { since: string; opened: Record<string, string> } | null;
+    const transitionedStamp = transitioned?.opened[detail.id];
+    assert.ok(transitionedStamp, "terminal transition writes another opened stamp");
+    assert.ok(new Date(transitionedStamp!).getTime() > new Date(initialStamp!).getTime(), "terminal transition writes a newer stamp");
+    assert.equal(isSessionUnseen(detail, transitioned!), false, "the watched Session remains seen after finishing");
   } finally {
     await act(async () => root.unmount());
     dom.window.close();

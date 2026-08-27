@@ -294,6 +294,45 @@ test("projection does not merge prose separated by a tool call", () => {
   }
 });
 
+test("projection does not merge prose separated by a marker or operator input", () => {
+  const beforeMarker = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "before marker" }] },
+  });
+  const marker = event("ADAPTER_ERROR", { message: "stream disconnected" });
+  const afterMarker = event("MODEL_DELTA", {
+    type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after marker" }] },
+  });
+  const markerNodes = projectStream([beforeMarker, marker, afterMarker], "CLAUDE", true).nodes;
+  assert.deepEqual(markerNodes.map((node) => node.kind), ["text", "marker", "text"]);
+  assert.equal(markerNodes[0]?.kind, "text");
+  assert.equal(markerNodes[2]?.kind, "text");
+  if (markerNodes[0]?.kind === "text" && markerNodes[2]?.kind === "text") {
+    assert.equal(markerNodes[0].text, "before marker");
+    assert.equal(markerNodes[2].text, "after marker");
+  }
+
+  const beforeInput = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "before input" }], timestamp: 1 },
+  }, { source: "PI" });
+  const input = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "user", content: [{ type: "text", text: "operator input" }], timestamp: 2 },
+  }, { source: "PI" });
+  const afterInput = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "after input" }], timestamp: 3 },
+  }, { source: "PI" });
+  const inputNodes = projectStream([beforeInput, input, afterInput], "PI", false).nodes;
+  assert.deepEqual(inputNodes.map((node) => node.kind), ["text", "input", "text"]);
+  assert.equal(inputNodes[0]?.kind, "text");
+  assert.equal(inputNodes[2]?.kind, "text");
+  if (inputNodes[0]?.kind === "text" && inputNodes[2]?.kind === "text") {
+    assert.equal(inputNodes[0].text, "before input");
+    assert.equal(inputNodes[2].text, "after input");
+  }
+});
+
 test("projection drops empty and whitespace-only assistant prose", () => {
   const events = [
     event("MODEL_DELTA", { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "   \n\t" }] } }),
@@ -324,6 +363,26 @@ test("projection drops a repeated final output but keeps a distinct final output
     assert.equal(distinct.nodes[1].text, "all done");
     assert.equal(distinct.nodes[1].final, true);
   }
+});
+
+test("projection message count follows merging and final-output dropping in a mixed stream", () => {
+  const events = [
+    event("MODEL_DELTA", {
+      type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "first paragraph" }] },
+    }),
+    event("MODEL_DELTA", {
+      type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "second paragraph" }] },
+    }),
+    event("FINAL_OUTPUT", { type: "result", result: "first paragraph\n\nsecond paragraph" }),
+  ];
+  const projection = projectStream(events, "CLAUDE", true);
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text"]);
+  assert.equal(projection.nodes[0]?.kind, "text");
+  if (projection.nodes[0]?.kind === "text") {
+    assert.equal(projection.nodes[0].text, "first paragraph\n\nsecond paragraph");
+    assert.equal(projection.nodes[0].final, false);
+  }
+  assert.equal(projection.counts.messages, 1);
 });
 
 test("projection turns adapter and prompt-delivery failures into error markers in stream order", () => {

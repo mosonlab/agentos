@@ -99,6 +99,52 @@ test("opening prunes to the 500 newest entries and malformed records recover", (
   const recovered = readSessionSeenState(malformedId);
   assert.deepEqual(recovered.opened, {});
   assert.deepEqual(JSON.parse(storage.get(sessionSeenKey(malformedId))!), recovered);
+
+  const wrongShapeId = "seen-wrong-shape-project";
+  storage.set(sessionSeenKey(wrongShapeId), JSON.stringify({ since: 42, opened: {} }));
+  assert.doesNotThrow(() => readSessionSeenState(wrongShapeId));
+  const recoveredWrongShape = readSessionSeenState(wrongShapeId);
+  assert.match(recoveredWrongShape.since, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(recoveredWrongShape.opened, {});
+});
+
+test("marking one Session opened clears only that Session", () => {
+  const projectId = "seen-one-project";
+  const first = row("first", "2026-08-21T00:00:00.000Z");
+  const second = row("second", "2026-08-22T00:00:00.000Z");
+  const state = { since: "2026-08-20T00:00:00.000Z", opened: {} };
+  storage.set(sessionSeenKey(projectId), JSON.stringify(state));
+  const opened = markSessionOpened(projectId, first.id, "2026-08-23T00:00:00.000Z");
+
+  assert.equal(isSessionUnseen({ ...first, executionStatus: "SUCCEEDED", endedAt: first.requestedAt } as Session, opened), false);
+  assert.equal(isSessionUnseen({ ...second, executionStatus: "SUCCEEDED", endedAt: second.requestedAt } as Session, opened), true);
+  assert.deepEqual(Object.keys(opened.opened), [first.id]);
+});
+
+test("seen state works through the storage wrapper's degraded path", () => {
+  const projectId = "seen-degraded-project";
+  const key = sessionSeenKey(projectId);
+  const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const blockedWindow = {};
+  Object.defineProperty(blockedWindow, "localStorage", {
+    configurable: true,
+    get: () => { throw new Error("storage blocked"); },
+  });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: blockedWindow });
+  try {
+    const initial = readSessionSeenState(projectId);
+    const opened = markSessionOpened(projectId, "degraded-session", "2026-08-23T00:00:00.000Z");
+    assert.equal(opened.opened["degraded-session"], "2026-08-23T00:00:00.000Z");
+    assert.equal(storage.get(key) !== null, true);
+    assert.equal(isSessionUnseen({
+      ...row("degraded-session", "2026-08-22T00:00:00.000Z"),
+      executionStatus: "SUCCEEDED", endedAt: "2026-08-22T00:00:00.000Z",
+    } as Session, opened), false);
+    assert.notEqual(initial.since, undefined);
+  } finally {
+    if (priorWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+    else Object.defineProperty(globalThis, "window", priorWindow);
+  }
 });
 
 test("status filters map each lifecycle bucket without overlap", () => {
