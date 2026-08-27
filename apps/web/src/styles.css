@@ -40,6 +40,16 @@
   --toggle-knob:#fffdf7; --toggle-knob-active:#4c3b00; --check-border:#9a8c68; --row-hover:#eee6d5;
   --primary-badge-background:#f1df9b; --event-line:#ddd3bd; --badge-foreground:#ffffff; --radio-border:#9a8c68;
   --scrim:rgba(37,33,22,.45); --modal-shadow:rgba(37,33,22,.25);
+  /* Categorical chart series. Identity, not magnitude: slots are assigned in
+     fixed order and never cycled — a seventh series folds into `--series-other`
+     rather than reusing slot 1. Both columns are selected for their own surface
+     (`--card`), not flipped, and validated as a set: worst adjacent CVD deltaE
+     9.1 light / 8.4 dark, worst adjacent normal-vision deltaE 19.6 / 19.3. Three
+     light slots sit under 3:1 against the light card, so the Costs page ships the
+     same figures as a table beside the chart, which is the relief that permits
+     them. */
+  --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a;
+  --series-4:#eda100; --series-5:#e87ba4; --series-6:#008300; --series-other:#8d8874;
   --radius:8px; --radius-card:10px;
   --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
 }
@@ -61,6 +71,8 @@
   --toggle-knob:#d9d4c2; --toggle-knob-active:#2a2208; --check-border:#4a4429; --row-hover:#221e13;
   --primary-badge-background:#362c10; --event-line:#1e1b11; --badge-foreground:#ffffff; --radio-border:#56502f;
   --scrim:rgba(4,4,2,.68); --modal-shadow:rgba(0,0,0,.55);
+  --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70;
+  --series-4:#c98500; --series-5:#d55181; --series-6:#008300; --series-other:#6b6655;
 }
 
 /* Everything the retired stylesheet did that was not a class rule, moved into

@@ -392,6 +392,34 @@ export type UsageCost = {
   outputTokens: number | null;
 };
 
+/** `GET /projects/:projectId/costs`. Every amount is a decimal string, as every
+ *  other money field on the wire is. */
+export type CostsReport = {
+  days: number;
+  since: string;
+  totalUsd: string;
+  /** The part of `totalUsd` the control plane priced itself rather than read
+   *  from a provider. */
+  estimatedUsd: string;
+  runCount: number;
+  /** Settled runs whose cost could not be established at all. They are in
+   *  `runCount` and in no total, so the page states the count rather than
+   *  letting the tiles imply those runs were free. */
+  costUnavailableRuns: number;
+  avgUsd: string;
+  daily: Array<{ date: string; byAgent: Record<string, string> }>;
+  byAgent: Array<{ agent: string; usd: string; runs: number; avgUsd: string }>;
+  topRuns: Array<{
+    runId: string;
+    taskName: string | null;
+    agent: string;
+    model: string;
+    usd: string;
+    estimated: boolean;
+    startedAt: string;
+  }>;
+};
+
 export type TaskStartability = {
   startable: boolean;
   checklist: {

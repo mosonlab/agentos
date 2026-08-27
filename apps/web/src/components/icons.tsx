@@ -36,6 +36,10 @@ export const IconSecrets = (): ReactNode => (
 export const IconSessions = (): ReactNode => (
   <Svg><path d="M2 3.4a1 1 0 0 1 1-1h7.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H5.4L3 10.8V8.6a1 1 0 0 1-1-1z" /><path d="M11.2 5.6h1.8a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1v2.2l-2.4-2.2H6.6" /></Svg>
 );
+/** Stacked bars behind a coin — the page is spend over time, not a price tag. */
+export const IconCosts = (): ReactNode => (
+  <Svg><path d="M2.4 13.6h11.2" /><path d="M4.2 13.6V9.4M7.4 13.6V6.4M10.6 13.6V10.2M13.4 13.6V4.2" /></Svg>
+);
 export const IconSettings = (): ReactNode => (
   <Svg><circle cx="8" cy="8" r="2.2" /><path d="M8 1.7v1.5M8 12.8v1.5M1.7 8h1.5M12.8 8h1.5M3.5 3.5l1 1M11.5 11.5l1 1M12.5 3.5l-1 1M4.5 11.5l-1 1" /></Svg>
 );
