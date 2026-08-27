@@ -264,9 +264,17 @@ const notify = async ({ outcome, reason, detail = "", from, to }) => {
     if (!chatId) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
     const thread = await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
       ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } });
+    // A successful deploy needs no operator action, so it lands already closed:
+    // the delivery worker only picks up `open`, so the record is archived
+    // without a Feishu push and without joining the awaiting-reply queue. The
+    // Inbox reads the newest one to show when production last moved.
+    const archived = outcome === "success";
     await db.inboxMessage.upsert({
       where: { dedupeKey },
-      create: { from: "AGENT", kind: "TEXT", body, dedupeKey, threadId: thread.id },
+      create: {
+        from: "AGENT", kind: "TEXT", body, dedupeKey, threadId: thread.id,
+        ...(archived ? { status: "CLOSED", answeredAt: new Date() } : {}),
+      },
       update: {},
     });
     if (outcome === "success") throwIfInterrupted();

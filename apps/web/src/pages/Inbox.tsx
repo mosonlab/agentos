@@ -7,6 +7,7 @@ import { useT, useTNodes } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { cn } from "../lib/utils";
+import { type DeployNotice, isNotice, latestDeploy, needsReply } from "../lib/inbox";
 import type { Agent, InboxMessage, TaskStepOutput } from "../lib/types";
 import { IconArrowLeft, IconQuestion, IconRobot, IconUser } from "../components/icons";
 import {
@@ -23,9 +24,18 @@ const LIST = "grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 
 /** `.inboxItem` and `.choice` stay raw `<button>`s: they are full-width cards
  *  that happen to be clickable, not `.btn`s, so they take no Button variant
- *  (plan §2.5) and never had a box-shadow. */
-const INBOX_ITEM = "flex w-full cursor-pointer gap-[14px] rounded-xl border border-border bg-card px-[16px] py-[13px] text-left hover:border-[color:var(--border-hover)]";
+ *  (plan §2.5) and never had a box-shadow. A notice row carries its own Dismiss
+ *  `.btn`, and a button cannot nest in a button, so the card frame is a plain
+ *  container and the row's own hit area is the `<button>` inside it. */
+const INBOX_ITEM = "flex w-full gap-[14px] rounded-xl border border-border bg-card px-[16px] py-[13px] text-left hover:border-[color:var(--border-hover)]";
+const INBOX_ITEM_HIT = "flex min-w-0 flex-1 cursor-pointer gap-[14px] text-left";
+
 const CHOICE = "flex w-full items-start gap-[11px] rounded-lg border border-border bg-secondary px-[14px] py-[12px] text-left text-foreground hover:border-[color:var(--primary-soft)]";
+
+/** The one line reporting where production is. A successful deploy is archived
+ *  on write — no push, no badge — so without this strip the operator would have
+ *  no answer to "did it ship, and when". */
+const DEPLOY_STRIP = "flex items-center gap-[8px] rounded-xl border px-[16px] py-[11px] text-[12.5px]";
 
 /** `.msgCard + .msgCard { margin-top: 12px }` — every card but the first; here
  *  every child of the container is a card, so the sibling combinator is exact. */
@@ -46,12 +56,53 @@ const senderName = (message: InboxMessage, names: Map<string, string>): string =
     : message.agentId === null ? formatT("inbox.sender.system")
       : names.get(message.agentId) ?? formatT("inbox.sender.agent");
 
+const DEPLOY_TONE: Record<DeployNotice["outcome"], string> = {
+  success: "border-border bg-card text-muted-foreground",
+  failure: "border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] text-[color:var(--status-amber-fg)]",
+};
+
+const DeployStrip = ({ deploy }: { deploy: DeployNotice }): ReactNode => {
+  const t = useT();
+  return (
+    <div className={cn(DEPLOY_STRIP, DEPLOY_TONE[deploy.outcome])}>
+      {deploy.outcome === "success"
+        ? t("inbox.deploy.success", { revision: deploy.revision, when: timeAgo(deploy.at) })
+        : t("inbox.deploy.failure", { revision: deploy.revision, when: timeAgo(deploy.at), reason: deploy.reason })}
+    </div>
+  );
+};
+
+type InboxFilter = "active" | "notices" | "answered";
+
+const LANE: Record<InboxFilter, (message: InboxMessage) => boolean> = {
+  active: needsReply,
+  notices: (message) => message.status === "OPEN" && isNotice(message),
+  answered: (message) => message.status !== "OPEN",
+};
+
+const EMPTY: Record<InboxFilter, string> = {
+  active: "inbox.empty.active",
+  notices: "inbox.empty.notices",
+  answered: "inbox.empty.answered",
+};
+
 export const InboxPage = (): ReactNode => {
   const { data, loading, error, reload } = usePoll<InboxMessage[]>("/inbox/messages");
   const names = useAgentNames();
-  const [filter, setFilter] = useState<"active" | "answered">("active");
+  const [filter, setFilter] = useState<InboxFilter>("active");
+  const { pending, error: actionError, run } = useAction();
   const t = useT();
-  const messages = (data ?? []).filter((message) => (filter === "active" ? message.status === "OPEN" : message.status !== "OPEN"));
+  const all = data ?? [];
+  const messages = all.filter(LANE[filter]);
+  const deploy = latestDeploy(all);
+  const noticeCount = all.filter(LANE.notices).length;
+
+  const dismiss = (messageId: string): void => {
+    void run(async () => {
+      await api.post(`/inbox/messages/${messageId}/close`, { requestId: `${messageId}:close` });
+      reload();
+    });
+  };
 
   return (
     <Page>
@@ -63,44 +114,54 @@ export const InboxPage = (): ReactNode => {
       </div>
 
       {/* Reference puts the Active/Archived switch on the left under the title
-          (inboxes-list-t0885.jpg), not in the header action slot. */}
+          (inboxes-list-t0885.jpg), not in the header action slot. Notices sit
+          between them: open, but nobody is blocked on them. */}
       <div className={TOOLBAR}>
         <Segmented
           accent
           value={filter}
           onChange={setFilter}
-          options={[{ value: "active", label: t("inbox.filter.active") }, { value: "answered", label: t("inbox.filter.answered") }]}
+          options={[
+            { value: "active", label: t("inbox.filter.active") },
+            { value: "notices", label: noticeCount === 0 ? t("inbox.filter.notices") : `${t("inbox.filter.notices")} ${noticeCount}` },
+            { value: "answered", label: t("inbox.filter.answered") },
+          ]}
         />
       </div>
 
       <div className={STACK}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
+        {actionError === null ? null : <ErrorNotice message={actionError} />}
+        {deploy === null ? null : <DeployStrip deploy={deploy} />}
         <div className={LIST}>
           {messages.map((message) => (
-            <button type="button" className={INBOX_ITEM} key={message.id} onClick={() => navigate(`/inbox/${message.id}`)}>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-[8px] text-[12.5px] font-bold text-foreground">
-                  {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
-                  {senderName(message, names)}
-                  {message.status === "OPEN" ? <InboxPill status={message.status} /> : null}
-                  {message.gateTaskId === null ? null : <Pill tone="violet">{t("inbox.approvalGate")}</Pill>}
+            <div className={INBOX_ITEM} key={message.id}>
+              <button type="button" className={INBOX_ITEM_HIT} onClick={() => navigate(`/inbox/${message.id}`)}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-[8px] text-[12.5px] font-bold text-foreground">
+                    {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
+                    {senderName(message, names)}
+                    {message.status === "OPEN" ? <InboxPill status={message.status} /> : null}
+                    {message.gateTaskId === null ? null : <Pill tone="violet">{t("inbox.approvalGate")}</Pill>}
+                  </div>
+                  <div className="mt-[5px] flex items-center gap-[8px] text-[13px] text-foreground">
+                    {message.status === "OPEN" ? <span className="size-[7px] flex-none rounded-full bg-primary" /> : null}
+                    {firstLine(message.body)}
+                  </div>
+                  <div className="mt-[4px] overflow-hidden text-[12px] text-ellipsis whitespace-nowrap text-muted-foreground">{restLines(message.body) || "—"}</div>
                 </div>
-                <div className="mt-[5px] flex items-center gap-[8px] text-[13px] text-foreground">
-                  {message.status === "OPEN" ? <span className="size-[7px] flex-none rounded-full bg-primary" /> : null}
-                  {firstLine(message.body)}
+                <div className="flex-none text-right text-[11.5px] text-muted-foreground">
+                  {timeAgo(message.createdAt)}
+                  <div className="mt-[5px] text-[color:var(--faint)]">{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</div>
                 </div>
-                <div className="mt-[4px] overflow-hidden text-[12px] text-ellipsis whitespace-nowrap text-muted-foreground">{restLines(message.body) || "—"}</div>
-              </div>
-              <div className="flex-none text-right text-[11.5px] text-muted-foreground">
-                {timeAgo(message.createdAt)}
-                <div className="mt-[5px] text-[color:var(--faint)]">{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</div>
-              </div>
-            </button>
+              </button>
+              {filter === "notices"
+                ? <Button type="button" variant="legacy" size="legacySmall" className="flex-none self-center shadow-none" disabled={pending} onClick={() => dismiss(message.id)}>{t("inbox.dismiss")}</Button>
+                : null}
+            </div>
           ))}
         </div>
-        {messages.length === 0
-          ? <EmptyState>{t(loading ? "common.loading" : filter === "active" ? "inbox.empty.active" : "inbox.empty.answered")}</EmptyState>
-          : null}
+        {messages.length === 0 ? <EmptyState>{t(loading ? "common.loading" : EMPTY[filter])}</EmptyState> : null}
       </div>
     </Page>
   );
@@ -163,13 +224,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
 
   const choices = message.choices ?? [];
   const open = message.status === "OPEN";
-  const detachedNotification = message.from === "AGENT"
-    && message.kind === "TEXT"
-    && message.taskId === null
-    && message.goalId === null
-    && message.sessionId === null
-    && message.gateTaskId === null
-    && message.replyToMessageId === null;
+  const detachedNotification = isNotice(message);
 
   return (
     <Page>
