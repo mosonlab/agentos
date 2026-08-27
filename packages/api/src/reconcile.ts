@@ -12,8 +12,6 @@ import {
 } from "@agentos/db";
 
 import { mergeTailLeaseChainId, releaseMergeLease, type ReleaseMergeLease } from "./merge-lease.js";
-import { reconcileRetiredMergeTailParks, type RetiredParkReconciliation } from "./retired-merge-tail-parks.js";
-import { reconcileRolledPromptDescriptions, type RolledPromptDescriptionReconciliation } from "./rolled-prompt-descriptions.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
@@ -367,15 +365,6 @@ export const reconcileDatabaseRuns = async (
  * whether anything is waiting on a runner that is not answering — with no
  * runner asking, workspaces leak, and leaking is the direction this side of
  * the boundary is allowed to fail in.
- *
- * `retiredParks` is the upgrade sweep for the two merge-tail parks whose owning
- * mechanisms were deleted. It is not wrapped in a catch: a park this sweep
- * cannot resolve leaves a merge tail invisible to every worker, which is worse
- * than refusing to start, so it fails loudly like the run reconciliation above.
- *
- * `rolledPrompts` refreshes the frozen prompt copy on tasks a prompt-only
- * template rollover left behind, and is loud for the same reason: a task
- * carrying a retired prompt runs commands that no longer exist.
  */
 export const reconcileAtStartup = async (
   db: PrismaClient,
@@ -383,12 +372,8 @@ export const reconcileAtStartup = async (
   runs: number;
   openReclaimIntents: number;
   archivedNotices: number;
-  retiredParks: RetiredParkReconciliation;
-  rolledPrompts: RolledPromptDescriptionReconciliation;
 }> => ({
   runs: await reconcileDatabaseRuns(db),
-  retiredParks: await reconcileRetiredMergeTailParks(db),
-  rolledPrompts: await reconcileRolledPromptDescriptions(db),
   openReclaimIntents: await openReclaimIntentCount(db).catch((error: unknown) => {
     console.error("Open reclaim intent count failed", error);
     return 0;
