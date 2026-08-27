@@ -6,25 +6,21 @@ import {
   isMergeConfirmationError,
   isMergeEvidenceError,
   isPinnedBaseCommitError,
+  isWorkflowRefusalError,
+  type WorkflowRefusalReason,
 } from "@agentos/db";
 
 export type RefusalReason =
-  | "invalid-request"
+  | WorkflowRefusalReason
   | "forbidden"
   | "not-found"
-  | "conflict"
   | "compound-implementation-assignee"
   | "archived-assignee"
   | "archived-task"
   | "integrator-stopped"
   | "pinned-base-commit"
   | "merge-evidence"
-  | "merge-confirmation"
-  | "inbox-question-not-found"
-  | "approval-gate-decision-invalid"
-  | "inbox-choice-mismatch"
-  | "inbox-run-not-waiting"
-  | "approval-gate-rejection-target-missing";
+  | "merge-confirmation";
 
 export type RefusalValue =
   | string
@@ -46,14 +42,6 @@ export type RefusalResponse = {
   body: Readonly<{ error: string } & Record<string, RefusalValue>>;
   status: 400 | 403 | 404 | 409;
 };
-
-const inboxReasonByMessage = {
-  "No matching Inbox question": "inbox-question-not-found",
-  "Approval gate decision must be approve or reject": "approval-gate-decision-invalid",
-  "Decision must match an Inbox choice id": "inbox-choice-mismatch",
-  "No matching waiting Inbox question": "inbox-run-not-waiting",
-  "Approval gate has no executable previous task to reject to": "approval-gate-rejection-target-missing",
-} as const satisfies Readonly<Record<string, RefusalReason>>;
 
 export const refusalResponse = (refusal: Refusal): RefusalResponse => {
   let status: RefusalResponse["status"];
@@ -96,6 +84,7 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
 };
 
 export const refusalFor = (error: unknown): Refusal | null => {
+  if (isWorkflowRefusalError(error)) return { reason: error.reason, message: error.message };
   if (isCompoundImplementationAssigneeError(error)) {
     return {
       reason: "compound-implementation-assignee",
@@ -109,7 +98,5 @@ export const refusalFor = (error: unknown): Refusal | null => {
   if (isPinnedBaseCommitError(error)) return { reason: "pinned-base-commit", message: error.message };
   if (isMergeEvidenceError(error)) return { reason: "merge-evidence", message: error.message };
   if (isMergeConfirmationError(error)) return { reason: "merge-confirmation", message: error.message };
-  if (!(error instanceof Error)) return null;
-  const reason = inboxReasonByMessage[error.message as keyof typeof inboxReasonByMessage];
-  return reason === undefined ? null : { reason, message: error.message };
+  return null;
 };
