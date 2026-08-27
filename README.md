@@ -191,5 +191,12 @@ An independent build inspired by Danny Postma's video *How I Built My Own
 AgentOS on Claude's Agent SDK (So You Can Too)* (2026), written from scratch
 from the ideas in it.
 
+The chain's role and step prompts are a different kind of debt: five skills from
+[mattpocock/skills](https://github.com/mattpocock/skills) supply their working
+text, carried verbatim and wrapped in paragraphs written here for this
+platform's contracts. That work is MIT-licensed, `Copyright (c) 2026 Matt
+Pocock`, and the notice is in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 This snapshot is licensed under the [MIT License](LICENSE); the snapshot
 boundary is defined by [`public-snapshot.json`](public-snapshot.json).
