@@ -213,6 +213,97 @@ test("startability endpoint exposes the shared checklist and dependency verdict"
   assert.equal(blocked.body.checklist.predecessorsDone, false);
 });
 
+test("every false admission checklist fact drives the matching start refusal", async () => {
+  type SeededTask = Awaited<ReturnType<typeof seedTask>>;
+  type ChecklistKey = "repoBound" | "agentAssignee" | "repoAccessGrant" | "budgetRemaining" | "noActiveRun" | "predecessorsDone";
+  const cases: Array<{
+    key: ChecklistKey;
+    arrange: (context: SeededTask) => Promise<void>;
+    status: number;
+    error: RegExp;
+  }> = [
+    {
+      key: "repoBound",
+      arrange: async (context) => { await db.task.update({ where: { id: context.task.id }, data: { repoId: null } }); },
+      status: 400,
+      error: /no repository/u,
+    },
+    {
+      key: "agentAssignee",
+      arrange: async (context) => { await db.task.update({ where: { id: context.task.id }, data: { assigneeAgentId: null } }); },
+      status: 400,
+      error: /no assignee/u,
+    },
+    {
+      key: "repoAccessGrant",
+      arrange: async (context) => {
+        await db.agentRepoAccess.delete({ where: { agentId_repoId: { agentId: context.agent.id, repoId: context.repo.id } } });
+      },
+      status: 400,
+      error: /no grant/u,
+    },
+    {
+      key: "budgetRemaining",
+      arrange: async (context) => {
+        await db.task.update({ where: { id: context.task.id }, data: { maxSessionsPerTask: 1 } });
+        await seedRun(context, 1, "FAILED");
+      },
+      status: 409,
+      error: /budget exhausted/u,
+    },
+    {
+      key: "noActiveRun",
+      arrange: async (context) => { await seedRun(context, 1, "WAITING_INBOX"); },
+      status: 409,
+      error: /active run/u,
+    },
+    {
+      key: "predecessorsDone",
+      arrange: async (context) => {
+        const chainId = `admission-predecessor-${Date.now()}-${context.task.id}`;
+        await db.task.create({ data: {
+          projectId: context.project.id,
+          name: "Admission blocker",
+          description: "work",
+          status: "TODO",
+          chainId,
+          chainIndex: 0,
+          chainLayer: 0,
+        } });
+        await db.task.update({
+          where: { id: context.task.id },
+          data: { chainId, chainIndex: 1, chainLayer: 1 },
+        });
+      },
+      status: 409,
+      error: /predecessor Admission blocker is not done/u,
+    },
+  ];
+
+  for (const item of cases) {
+    const context = await seedTask(`admission-${item.key}`);
+    await item.arrange(context);
+    const beforeRuns = await db.run.count({ where: { taskId: context.task.id } });
+    const read = await call("GET", `/tasks/${context.task.id}/startability`);
+    assert.equal(read.status, 200, item.key);
+    assert.equal(read.body.startable, false, item.key);
+    assert.equal(read.body.checklist[item.key], false, item.key);
+
+    const write = await call("POST", `/tasks/${context.task.id}/start`);
+    assert.equal(write.status, item.status, item.key);
+    assert.match(write.body.error, item.error, item.key);
+    assert.equal(await db.run.count({ where: { taskId: context.task.id } }), beforeRuns, item.key);
+  }
+});
+
+test("startability and start accept the same admission snapshot", async () => {
+  const context = await seedTask("admission-consistency");
+  const read = await call("GET", `/tasks/${context.task.id}/startability`);
+  assert.equal(read.status, 200);
+  assert.equal(read.body.startable, true);
+  assert.equal((await call("POST", `/tasks/${context.task.id}/start`)).status, 201);
+});
+
 test("unfinished chain predecessor blocks every future start with zero side effects", async () => {
   const chainId = `safe-chain-${Date.now()}`;
   const context = await seedTask("chain-block", { chainId, chainIndex: 0, name: "Step 1", status: "DONE" });
