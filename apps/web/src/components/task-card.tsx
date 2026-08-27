@@ -245,10 +245,6 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         </div>
       )}
       <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
-      {/* The run's own model snapshot, because this line sits under the run line
-          and reads as the model that run used. The assignee's configured model
-          is only a fallback for a task that has not run yet: re-tiering an agent
-          must not relabel a finished run. */}
       {model === null ? null : (
         <div className={TASK_META_ROW}>
           <span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model })}>

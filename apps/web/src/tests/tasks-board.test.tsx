@@ -512,6 +512,15 @@ test("a task with no runs still shows the agent's configured model", () => {
   assert.match(markup, /gpt-5\.6-sol:high/);
 });
 
+test("an unassigned task with a run still shows the run's model snapshot", () => {
+  const markup = card({
+    assigneeAgent: null,
+    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+  });
+  assert.match(markup, /claude-opus-5:medium/);
+  assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
+});
+
 test("a card with neither a run nor an assignee has no model line", () => {
   assert.equal(cardModel(task()), null);
 });
