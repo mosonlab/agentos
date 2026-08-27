@@ -8,9 +8,12 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  DebugEvents, FilesTouched, SessionRow, StreamItemView, WaitingNotice, fileTrackingHint, lifecycleStat,
+  DebugEvents, FilesTouched, SessionRow, StreamNodeView, WaitingNotice, fileTrackingHint, lifecycleStat,
   sessionPill, truncateBlock,
 } from "../pages/Sessions";
+import { setFormatLocale } from "../lib/format";
+import { LocaleProvider } from "../lib/i18n";
+import { translate } from "../lib/i18n-core";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 
 const STATUSES: SessionExecutionStatus[] = [
@@ -32,6 +35,8 @@ const event = (overrides: Partial<SessionEvent> = {}): SessionEvent => ({
   id: "e1", sessionId: "session-1", runId: "run-1", seq: 1, at: "2026-08-16T00:00:00.000Z",
   source: "RUNNER", type: "PROCESS_STARTED", toolCallId: null, payload: {}, ...overrides,
 });
+
+const CLAUDE_TEXT_ASSISTANT = { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "3" }] } };
 
 /* ------------------------------------------------------------ pure mappings */
 
@@ -74,15 +79,81 @@ test("blocks truncate at 8 000 characters and say how much is left", () => {
 /* --------------------------------------------------------- initial markup */
 
 test("a collapsed tool row is one line and hides its Arguments and Result", () => {
-  const markup = renderToStaticMarkup(<StreamItemView item={{
-    kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Read",
-    primaryArg: "/Users/dev/repo/src/adapters.ts", filePath: "/Users/dev/repo/src/adapters.ts",
-    args: { file_path: "/Users/dev/repo/src/adapters.ts" }, result: "ok", state: "ok",
+  const markup = renderToStaticMarkup(<StreamNodeView node={{
+    kind: "tools", id: "group-0", at: "2026-08-16T00:00:00.000Z", calls: [{
+      kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Read",
+      primaryArg: "/Users/dev/repo/src/adapters.ts", filePath: "/Users/dev/repo/src/adapters.ts",
+      args: { file_path: "/Users/dev/repo/src/adapters.ts" }, result: "ok", state: "ok",
+    }],
   }} />);
   assert.match(markup, /Read/);
   assert.match(markup, /\/Users\/dev\/repo\/src\/adapters\.ts/);
   assert.doesNotMatch(markup, />Arguments</);
   assert.doesNotMatch(markup, />Result</);
+});
+
+const toolNode = {
+  kind: "tools" as const,
+  id: "group-1",
+  at: "2026-08-16T00:00:00.000Z",
+  calls: [
+    {
+      kind: "tool" as const, id: "read-1", at: "2026-08-16T00:00:00.000Z", name: "Read",
+      primaryArg: "/repo/a.ts", filePath: "/repo/a.ts", args: { file_path: "/repo/a.ts" }, result: "READ_RESULT_UNIQUE", state: "ok" as const,
+    },
+    {
+      kind: "tool" as const, id: "run-1", at: "2026-08-16T00:00:01.000Z", name: "Bash",
+      primaryArg: "npm test", filePath: null, args: { command: "npm test" }, result: "RUN_RESULT_UNIQUE", state: "running" as const,
+    },
+  ],
+};
+
+test("a tools node is one card of collapsed one-line calls", () => {
+  const markup = renderToStaticMarkup(<StreamNodeView node={toolNode} />);
+  assert.match(markup, /Tool calls/);
+  assert.equal((markup.match(/data-tool-line=/g) ?? []).length, 2);
+  assert.match(markup, /Read/);
+  assert.match(markup, /Bash/);
+  assert.match(markup, /\/repo\/a\.ts/);
+  assert.match(markup, /npm test/);
+  assert.doesNotMatch(markup, /READ_RESULT_UNIQUE|RUN_RESULT_UNIQUE/);
+  assert.doesNotMatch(markup, />Arguments</);
+  assert.doesNotMatch(markup, />Result</);
+});
+
+test("a failed tool line shows the first result line in the destructive tone", () => {
+  const failed = {
+    ...toolNode,
+    calls: [{ ...toolNode.calls[0]!, state: "error" as const, result: "first failure line\nsecond failure line" }],
+  };
+  const markup = renderToStaticMarkup(<StreamNodeView node={failed} />);
+  assert.match(markup, /first failure line/);
+  assert.doesNotMatch(markup, /second failure line/);
+  assert.match(markup, /text-destructive/);
+});
+
+test("text nodes keep the existing Agent and Result message headings", () => {
+  const agent = renderToStaticMarkup(<StreamNodeView node={{ kind: "text", id: "m1", at: "2026-08-16T00:00:00.000Z", text: "agent prose", final: false }} />);
+  const result = renderToStaticMarkup(<StreamNodeView node={{ kind: "text", id: "m2", at: "2026-08-16T00:00:00.000Z", text: "final prose", final: true }} />);
+  assert.match(agent, />Agent</);
+  assert.match(agent, /agent prose/);
+  assert.match(result, />Result</);
+  assert.match(result, /final prose/);
+});
+
+test("tool groups and text node headings are translated in English and Chinese", () => {
+  try {
+    const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={toolNode} /></LocaleProvider>);
+    const chinese = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={toolNode} /></LocaleProvider>);
+    const englishText = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={{ kind: "text", id: "m1", at: toolNode.at, text: "agent prose", final: false }} /></LocaleProvider>);
+    const chineseText = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={{ kind: "text", id: "m1", at: toolNode.at, text: "agent prose", final: false }} /></LocaleProvider>);
+    assert.match(english, /Tool calls/);
+    assert.match(chinese, /工具调用/);
+    assert.match(englishText, />Agent</);
+    assert.match(chineseText, />Agent</);
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
 });
 
 test("Files touched and Debug events render collapsed by default", () => {
@@ -206,9 +277,11 @@ test("clicking a collapsed tool row reveals Arguments and Result", async () => {
   assert.ok(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<StreamItemView item={{
-      kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Bash", primaryArg: "printf 3",
-      filePath: null, args: { command: "printf 3" }, result: "3", state: "ok",
+    root.render(<StreamNodeView node={{
+      kind: "tools", id: "group-0", at: "2026-08-16T00:00:00.000Z", calls: [{
+        kind: "tool", id: "t1", at: "2026-08-16T00:00:00.000Z", name: "Bash", primaryArg: "printf 3",
+        filePath: null, args: { command: "printf 3" }, result: "3", state: "ok",
+      }],
     }} />);
   });
   assert.doesNotMatch(container.innerHTML, />Arguments</);
@@ -218,6 +291,24 @@ test("clicking a collapsed tool row reveals Arguments and Result", async () => {
   await click(dom, toggle);
   assert.match(container.innerHTML, />Arguments</);
   assert.match(container.innerHTML, />Result</);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});
+
+test("clicking one tool line expands only that call", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  await act(async () => { root.render(<StreamNodeView node={toolNode} />); });
+
+  const lines = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button[data-tool-line]")];
+  assert.equal(lines.length, 2);
+  assert.doesNotMatch(container.innerHTML, /READ_RESULT_UNIQUE|RUN_RESULT_UNIQUE/);
+  await click(dom, lines[0]!);
+  assert.match(container.innerHTML, /READ_RESULT_UNIQUE/);
+  assert.doesNotMatch(container.innerHTML, /RUN_RESULT_UNIQUE/);
 
   await act(async () => root.unmount());
   dom.window.close();
@@ -357,6 +448,157 @@ test("the detail page does not call the initial drain `N new`", async () => {
   } finally {
     // The page polls forever on real timers; without an unmount on the failure
     // path the runner never sees the event loop drain and the file hangs.
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("the live stream counts a newly arrived tool group as one new node", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
+  Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
+
+  const initial = event({
+    id: "initial", seq: 1, source: "CLAUDE", type: "MODEL_DELTA",
+    payload: CLAUDE_TEXT_ASSISTANT,
+  });
+  const calls = [
+    event({ id: "tool-1-start", seq: 2, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-1", payload: { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/a.ts" } } }),
+    event({ id: "tool-1-end", seq: 3, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-1", payload: { tool_use_id: "tool-1", content: "a", is_error: false } }),
+    event({ id: "tool-2-start", seq: 4, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-2", payload: { type: "tool_use", id: "tool-2", name: "Bash", input: { command: "npm test" } } }),
+    event({ id: "tool-2-end", seq: 5, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-2", payload: { tool_use_id: "tool-2", content: "ok", is_error: false } }),
+  ];
+  let current = [initial];
+  const detail = session({ executionStatus: "RUNNING" });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? path.includes("afterSeq=1")
+          ? { events: calls, nextAfterSeq: 5, hasMore: false, total: 5 }
+          : { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
+    assert.ok(scroller, container.innerHTML);
+    scroller.scrollTop = 0;
+    current = [initial, ...calls];
+    const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+
+    assert.match(container.textContent ?? "", /1 new ↓/u, "one projected tools node is new");
+    assert.equal((container.textContent?.match(/Tool calls/gu) ?? []).length, 1);
+    const news = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "1 new ↓");
+    assert.ok(news, container.innerHTML);
+    await click(dom, news);
+    assert.equal(scroller.scrollTop, 5_000);
+    assert.doesNotMatch(container.textContent ?? "", /1 new ↓/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a live stream at the bottom auto-scrolls after its initial drain", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
+  Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
+  const initial = event({
+    id: "initial-bottom", seq: 1, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT,
+  });
+  let current = [initial];
+  const detail = session({ executionStatus: "RUNNING" });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
+    assert.ok(scroller, container.innerHTML);
+    assert.equal(scroller.scrollTop, 5_000);
+    current = [initial, event({ id: "new-bottom", seq: 2, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT })];
+    const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+    assert.equal(scroller.scrollTop, 5_000);
+    assert.doesNotMatch(container.textContent ?? "", /new ↓/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a capped stream keeps the visible event-cap notice", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  const detail = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-16T00:10:00.000Z" });
+  let seq = 0;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      if (!path.includes("/runs/")) {
+        return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(detail) } as unknown as Response;
+      }
+      seq += 1;
+      const row = event({
+        id: `capped-${seq}`, seq, source: "CLAUDE", type: "MODEL_DELTA",
+        payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `event ${seq}` }] } },
+      });
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({
+        events: [row], nextAfterSeq: seq, hasMore: true, total: 100,
+      }) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    for (let turn = 0; turn < 100 && seq < 40; turn += 1) {
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
+    }
+    assert.equal(seq, 40);
+    assert.match(container.textContent ?? "", /Showing the first 40 of 100 events/u);
+  } finally {
     await act(async () => root.unmount());
     dom.window.close();
   }

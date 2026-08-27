@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalize } from "../lib/session-stream";
+import { normalize, projectStream } from "../lib/session-stream";
 import type { RunnerKind, SessionEvent } from "../lib/types";
 
 /* Fixtures are pasted from spikes/cli-capabilities/samples/, so the mapping is
@@ -229,4 +229,64 @@ test("files are alphabetical and carry per-path touch counts", () => {
     event("TOOL_STARTED", { type: "tool_use", id: "3", name: "Edit", input: { file_path: "/a.ts" } }, { toolCallId: "3" }),
   ], "CLAUDE");
   assert.deepEqual(files, [{ path: "/a.ts", count: 2 }, { path: "/z.ts", count: 1 }]);
+});
+
+test("the projection groups only maximal consecutive tool runs", () => {
+  const first = event("TOOL_STARTED", { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/a.ts" } }, {
+    toolCallId: "read-1", at: "2026-08-15T10:00:00.000Z",
+  });
+  const second = event("TOOL_COMPLETED", { tool_use_id: "read-1", content: "a", is_error: false }, {
+    toolCallId: "read-1", at: "2026-08-15T10:00:01.000Z",
+  });
+  const third = event("TOOL_STARTED", { type: "tool_use", id: "run-1", name: "Bash", input: { command: "npm test" } }, {
+    toolCallId: "run-1", at: "2026-08-15T10:00:02.000Z",
+  });
+  const fourth = event("TOOL_COMPLETED", { tool_use_id: "run-1", content: "ok", is_error: false }, {
+    toolCallId: "run-1", at: "2026-08-15T10:00:03.000Z",
+  });
+  const message = event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT, { at: "2026-08-15T10:00:04.000Z" });
+  const fifth = event("TOOL_STARTED", { type: "tool_use", id: "edit-1", name: "Edit", input: { file_path: "/b.ts" } }, {
+    toolCallId: "edit-1", at: "2026-08-15T10:00:05.000Z",
+  });
+
+  const { nodes } = projectStream([first, second, third, fourth, message, fifth], "CLAUDE", false);
+  assert.deepEqual(nodes.map((node) => node.kind), ["tools", "text", "tools"]);
+  assert.equal(nodes[0]?.kind, "tools");
+  if (nodes[0]?.kind === "tools") {
+    assert.equal(nodes[0].calls.length, 2);
+    assert.equal(nodes[0].at, first.at);
+    assert.deepEqual(nodes[0].calls.map((call) => call.name), ["Read", "Bash"]);
+  }
+  assert.equal(nodes[2]?.kind, "tools");
+  if (nodes[2]?.kind === "tools") assert.deepEqual(nodes[2].calls.map((call) => call.name), ["Edit"]);
+});
+
+test("projection counts derive from the nodes it returns", () => {
+  const events = [
+    event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),
+    event("TOOL_STARTED", { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/a.ts" } }, { toolCallId: "read-1" }),
+    event("TOOL_COMPLETED", { tool_use_id: "read-1", content: "a", is_error: false }, { toolCallId: "read-1" }),
+    event("TOOL_STARTED", { type: "tool_use", id: "edit-1", name: "Edit", input: { file_path: "/b.ts" } }, { toolCallId: "edit-1" }),
+    event("TOOL_COMPLETED", { tool_use_id: "edit-1", content: "b", is_error: false }, { toolCallId: "edit-1" }),
+    event("FINAL_OUTPUT", { type: "result", result: "done" }),
+  ];
+  const projection = projectStream(events, "CLAUDE", true);
+  assert.deepEqual(projection.counts, { messages: 2, toolCalls: 2, files: 2 });
+  assert.equal(projection.nodes.filter((node) => node.kind === "text").length, projection.counts.messages);
+  assert.equal(projection.nodes.filter((node) => node.kind === "tools").reduce((sum, node) => sum + node.calls.length, 0), projection.counts.toolCalls);
+  assert.equal(projection.files.length, projection.counts.files);
+});
+
+test("projection drops noise, unknown events and malformed payloads without throwing", () => {
+  const noise = ["MODEL_STARTED", "PROVIDER_STATUS", "PROVIDER_RAW", "STDERR", "TOOL_PROGRESS", "PROCESS_STARTED", "NOT_A_REAL_EVENT"];
+  const malformed = [null, 42, "text", []];
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const events = noise.map((type) => event(type, { unexpected: true }));
+    for (const payload of malformed) events.push(event("MODEL_DELTA", payload));
+    events.push(event("MODEL_COMPLETED", null), event("TOOL_STARTED", null), event("TOOL_COMPLETED", null), event("FINAL_OUTPUT", null));
+    assert.doesNotThrow(() => projectStream(events, runner, true), runner);
+    const projection = projectStream(events, runner, true);
+    assert.deepEqual(projection.nodes, [], runner);
+    assert.deepEqual(projection.counts, { messages: 0, toolCalls: 0, files: 0 }, runner);
+  }
 });

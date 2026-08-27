@@ -7,10 +7,13 @@ import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
 import { Link, navigate } from "../lib/router";
 import { useProjectScope } from "../lib/project";
-import { normalize, type StreamItem } from "../lib/session-stream";
+import { projectStream, type StreamNode, type ToolCall } from "../lib/session-stream";
 import { useEventStream } from "../lib/use-event-stream";
 import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
-import { IconArrowLeft, IconChevron, IconRefresh } from "../components/icons";
+import {
+  IconArrowLeft, IconChevron, IconRefresh, IconToolDefault, IconToolEdit, IconToolRead, IconToolRun, IconToolSearch,
+  IconToolWeb,
+} from "../components/icons";
 import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
@@ -241,30 +244,66 @@ const TOOL_STATE_TONE: Record<string, string> = {
   ok: "text-muted-foreground",
 };
 
-const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): ReactNode => {
+type ToolKind = "read" | "edit" | "search" | "run" | "web" | "default";
+
+const TOOL_KIND_ICONS: Record<ToolKind, () => ReactNode> = {
+  read: IconToolRead,
+  edit: IconToolEdit,
+  search: IconToolSearch,
+  run: IconToolRun,
+  web: IconToolWeb,
+  default: IconToolDefault,
+};
+
+const toolKind = (name: string): ToolKind => {
+  const lower = name.toLowerCase();
+  if (/read|cat|view|open/u.test(lower)) return "read";
+  if (/edit|write|patch|replace|delete/u.test(lower)) return "edit";
+  if (/search|grep|glob|find/u.test(lower)) return "search";
+  if (/run|bash|shell|exec|command|terminal/u.test(lower)) return "run";
+  if (/web|http|fetch|browser|url/u.test(lower)) return "web";
+  return "default";
+};
+
+const jsonBlock = (value: unknown): string => JSON.stringify(value ?? null, null, 2) ?? "—";
+
+const ToolCallLine = ({ call }: { call: ToolCall }): ReactNode => {
   const [open, setOpen] = useState(false);
   const t = useT();
+  const kind = toolKind(call.name);
+  const Icon = TOOL_KIND_ICONS[kind];
+  const failedSummary = call.result?.split(/\r?\n/u)[0]?.trim() ?? "";
+  const summary = call.state === "error" ? failedSummary : call.primaryArg ?? "";
   return (
-    <div className="rounded-lg border border-[color:var(--border-soft)] bg-card">
-      <button type="button" className="flex w-full items-center gap-[8px] border-0 bg-transparent px-[14px] py-[9px] text-left text-[12px]" onClick={() => setOpen(!open)}>
-        <span className="text-muted-foreground"><IconChevron open={open} /></span>
-        <span className="text-foreground">{item.name}</span>
-        <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">{item.primaryArg ?? ""}</span>
-        <span className={cn("text-[11.5px]", TOOL_STATE_TONE[item.state] ?? "text-muted-foreground")}>{t(`sessions.tool.state.${item.state}`)}</span>
-        <span className={MSG_TIME}>{formatDateTime(item.at)}</span>
+    <div className="border-b border-[color:var(--border-soft)] last:border-b-0">
+      <button
+        type="button"
+        data-tool-line={call.id}
+        aria-expanded={open}
+        className="flex w-full items-center gap-[8px] border-0 bg-transparent px-[14px] py-[9px] text-left text-[12px]"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="text-muted-foreground" data-tool-kind={kind}><Icon /></span>
+        <span className="text-foreground">{call.name}</span>
+        <span className={cn(
+          "min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap",
+          call.state === "error" ? "text-destructive" : "text-muted-foreground",
+        )}>{summary}</span>
+        <span className={cn("text-[11.5px]", TOOL_STATE_TONE[call.state] ?? "text-muted-foreground")}>{t(`sessions.tool.state.${call.state}`)}</span>
+        <span className={MSG_TIME}>{formatDateTime(call.at)}</span>
       </button>
       {open ? (
         <div className="grid gap-[10px] px-[14px] pb-[12px]">
-          {item.filePath === null ? null : (
-            <div className="text-[12px] text-secondary-foreground [overflow-wrap:anywhere]">{item.filePath}</div>
+          {call.filePath === null ? null : (
+            <div className="text-[12px] text-secondary-foreground [overflow-wrap:anywhere]">{call.filePath}</div>
           )}
           <div>
             <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.arguments")}</div>
-            <div className={CODE_BLOCK}>{truncateBlock(JSON.stringify(item.args ?? null, null, 2))}</div>
+            <div className={CODE_BLOCK}>{truncateBlock(jsonBlock(call.args))}</div>
           </div>
           <div>
             <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.result")}</div>
-            <div className={CODE_BLOCK}>{item.result === null ? "—" : truncateBlock(item.result)}</div>
+            <div className={CODE_BLOCK}>{call.result === null ? "—" : truncateBlock(call.result)}</div>
           </div>
         </div>
       ) : null}
@@ -272,17 +311,33 @@ const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): Re
   );
 };
 
-export const StreamItemView = ({ item }: { item: StreamItem }): ReactNode => {
+export const ToolGroup = ({ node }: { node: Extract<StreamNode, { kind: "tools" }> }): ReactNode => {
   const t = useT();
-  if (item.kind === "tool") return <ToolItem item={item} />;
-  if (item.kind === "error") return <ErrorNotice message={item.message} />;
+  return (
+    <div className="rounded-lg border border-[color:var(--border-soft)] bg-card">
+      <div className="px-[14px] pt-[10px] text-[11.5px] text-muted-foreground">{t("sessions.tool.group")}</div>
+      <div className="mt-[3px]">
+        {node.calls.map((call) => <ToolCallLine key={call.id} call={call} />)}
+      </div>
+    </div>
+  );
+};
+
+export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
+  const t = useT();
+  if (node.kind === "tools") return <ToolGroup node={node} />;
+  // The marker and operator-input producers are deliberately owned by their
+  // later slices. Keeping their variants in the union now makes this renderer
+  // exhaustive without giving either producer an accidental implementation in
+  // the projection foundation.
+  if (node.kind === "input" || node.kind === "marker") return null;
   return (
     <div className={MSG_CARD}>
       <div className={MSG_HEAD}>
-        <span className="text-foreground">{t(item.kind === "final" ? "sessions.stream.result" : "sessions.stream.agent")}</span>
-        <span className={MSG_TIME}>{formatDateTime(item.at)}</span>
+        <span className="text-foreground">{t(node.final ? "sessions.stream.result" : "sessions.stream.agent")}</span>
+        <span className={MSG_TIME}>{formatDateTime(node.at)}</span>
       </div>
-      <Markdown text={item.text} />
+      <Markdown text={node.text} />
     </div>
   );
 };
@@ -387,8 +442,8 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   // Keyed on the event count and the runner, not on array identity, so an empty
   // poll does not re-normalize 20 000 events.
   const runner = session?.runner ?? "CLAUDE";
-  const { items, files, counts } = useMemo(
-    () => normalize(stream.events, runner, terminal),
+  const { nodes, files, counts } = useMemo(
+    () => projectStream(stream.events, runner, terminal),
     [stream.events.length, runner, terminal],
   );
 
@@ -400,8 +455,8 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   }, []);
 
   useEffect(() => {
-    const added = items.length - lastCount.current;
-    lastCount.current = items.length;
+    const added = nodes.length - lastCount.current;
+    lastCount.current = nodes.length;
     if (added <= 0) return;
     const node = scroller.current;
     if (!node) return;
@@ -409,7 +464,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= NEAR_BOTTOM_PX;
     if (atBottom) scrollToBottom();
     else setUnseen((current) => current + added);
-  }, [items.length, scrollToBottom]);
+  }, [nodes.length, scrollToBottom]);
 
   // The drain is over on the `loading` true → false *transition*, not on a bare
   // `loading === false`: the hook starts with `loading` false while `runId` is
@@ -485,15 +540,15 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
           ]} />
         </Card>
 
-        <Card title={t("sessions.stream.title")} extra={<span className={COUNT}>{items.length}{plus}</span>}>
+        <Card title={t("sessions.stream.title")} extra={<span className={COUNT}>{nodes.length}{plus}</span>}>
           <div className={STACK}>
             {stream.capped ? (
               <div className={HINT}>{t("sessions.stream.capped", { shown: stream.events.length, total: stream.total })}</div>
             ) : null}
             {stream.error === null ? null : <ErrorNotice message={`${stream.error.status} ${stream.error.message}`} onRetry={stream.reload} />}
-            {items.length === 0 ? <EmptyState>{t(stream.loading ? "sessions.stream.loading" : "sessions.stream.empty")}</EmptyState> : (
+            {nodes.length === 0 ? <EmptyState>{t(stream.loading ? "sessions.stream.loading" : "sessions.stream.empty")}</EmptyState> : (
               <div ref={scroller} className="max-h-[720px] overflow-auto [&>*+*]:mt-[12px]">
-                {items.map((item) => <StreamItemView key={`${item.kind}-${item.id}`} item={item} />)}
+                {nodes.map((node) => <StreamNodeView key={`${node.kind}-${node.id}`} node={node} />)}
               </div>
             )}
             {unseen > 0 ? (

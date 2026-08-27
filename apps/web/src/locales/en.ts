@@ -620,6 +620,7 @@ export const en = {
   "sessions.table.status": "Status",
   "sessions.table.task": "Task",
   "sessions.tool.arguments": "Arguments",
+  "sessions.tool.group": "Tool calls",
   "sessions.tool.result": "Result",
   "sessions.tool.state.error": "error",
   "sessions.tool.state.incomplete": "incomplete",

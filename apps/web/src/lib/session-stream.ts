@@ -23,8 +23,23 @@ export type StreamItem =
   | { kind: "error"; id: string; at: string; message: string }
   | { kind: "final"; id: string; at: string; text: string };
 
+/** A completed tool call as it appears in the normalized stream. The
+ * projection keeps this shape intact and only changes its container: a
+ * maximal run of these calls becomes one `tools` node. */
+export type ToolCall = Extract<StreamItem, { kind: "tool" }>;
+
+/** The stable vocabulary consumed by the Session stream renderer. `input` and
+ * `marker` are declared here even though their producers arrive in later
+ * slices; adding those producers must not widen the renderer's contract. */
+export type StreamNode =
+  | { kind: "input"; id: string; at: string; text: string }
+  | { kind: "text"; id: string; at: string; text: string; final: boolean }
+  | { kind: "tools"; id: string; at: string; calls: ToolCall[] }
+  | { kind: "marker"; id: string; at: string; variant: "info" | "error"; text: string };
+
 export type FileTouch = { path: string; count: number };
 export type StreamCounts = { messages: number; toolCalls: number; files: number };
+export type StreamProjection = { nodes: StreamNode[]; files: FileTouch[]; counts: StreamCounts };
 
 const PRIMARY_ARG_MAX = 120;
 const ERROR_MESSAGE_MAX = 500;
@@ -315,3 +330,70 @@ export const normalize = (
     },
   };
 };
+
+/**
+ * Projects normalized stream items into the small set of things the operator
+ * should read. Normalization remains the payload-mapping contract: this pass
+ * deliberately does not inspect provider payloads a second time. It only
+ * turns text/final items into text nodes and folds adjacent tool items into a
+ * single group. Error items have no node yet; the marker producer owns that
+ * transition in the marker slice. The declared input/marker variants likewise
+ * keep the type stable for their later producers.
+ *
+ * The result is intentionally pure. In particular, counts are calculated from
+ * the returned nodes, so any grouping or future projection rule cannot make
+ * the stat bar disagree with the stream that is actually rendered.
+ */
+export const projectStream = (
+  events: SessionEvent[],
+  runner: RunnerKind,
+  terminal: boolean,
+): StreamProjection => {
+  // The normalizer intentionally gives an orphan tool completion a useful
+  // fallback item. A projection has a stricter boundary: primitive/array
+  // payloads are malformed input and must not turn into a visible tool line.
+  // Keep the normalizer itself unchanged (its defensive contract and fixtures
+  // remain the source of truth) and discard only those impossible payloads at
+  // this pass.
+  const normalized = normalize(events.filter((event) => asRecord(event.payload) !== null), runner, terminal);
+  const nodes: StreamNode[] = [];
+  let tools: ToolCall[] = [];
+
+  const flushTools = (): void => {
+    if (tools.length === 0) return;
+    const first = tools[0]!;
+    nodes.push({ kind: "tools", id: first.id, at: first.at, calls: tools });
+    tools = [];
+  };
+
+  for (const item of normalized.items) {
+    if (item.kind === "tool") {
+      tools.push(item);
+      continue;
+    }
+
+    flushTools();
+    if (item.kind === "text") {
+      nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final: false });
+    } else if (item.kind === "final") {
+      nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final: true });
+    }
+    // `error` is intentionally not projected until the marker producer lands.
+  }
+  flushTools();
+
+  return {
+    nodes,
+    files: normalized.files,
+    counts: {
+      messages: nodes.filter((node) => node.kind === "text").length,
+      toolCalls: nodes.reduce((count, node) => count + (node.kind === "tools" ? node.calls.length : 0), 0),
+      files: normalized.files.length,
+    },
+  };
+};
+
+/** Short alias for callers that treat the stream module as the projection
+ * boundary. Keep the descriptive export above for call sites that have more
+ * than one kind of projection in scope. */
+export const project = projectStream;
