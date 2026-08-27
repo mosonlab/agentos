@@ -118,7 +118,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "a9b6e7a8824f5bca60932bcf32118b3a6788e4deb4053c0c2baaaeed8094fbc6",
+      successorPromptDigest: "1a168fbd8197bb438b350e5d120a9333ad86880474e8bc83346585cbab48671e",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -209,7 +209,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
-      successorPromptDigest: "fe8de99d1248d7faf59f1dc82681b62f7d0e5c4cbe1bae05892adbf46a6e1a77",
+      successorPromptDigest: "6429815e3f22bcb05a0912548fa1a470ab0c056ae746a21590ab5aa2b748f808",
       shape: [
         ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
         ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],

@@ -19,6 +19,7 @@ type Fixture = {
   requests: string;
   leaseLog: string;
   gateLog: string;
+  argvLog: string;
 };
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, {
@@ -65,29 +66,33 @@ const fixture = (): Fixture => {
   const requests = join(root, "requests.ndjson");
   const leaseLog = join(root, "lease.log");
   const gateLog = join(root, "gate.log");
-  for (const path of [requests, leaseLog, gateLog]) writeFileSync(path, "");
+  const argvLog = join(root, "argv.log");
+  for (const path of [requests, leaseLog, gateLog, argvLog]) writeFileSync(path, "");
+  executable(join(bin, "node"), `#!/bin/sh
+printf 'node %s\\n' "$*" >> "$REGRESSION_FIXTURE_ARGV_LOG"
+exec "$REGRESSION_FIXTURE_NODE" "$@"
+`);
   executable(join(bin, "merge-lease"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_LEASE_LOG"
 exit 0
 `);
   executable(join(bin, "gate-dispatch"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_GATE_LOG"
+[ -z "${"$"}{REGRESSION_FIXTURE_GATE_NOISE:-}" ] || printf '%s\\n' "$REGRESSION_FIXTURE_GATE_NOISE"
 printf '%s\\n' "${"$"}{REGRESSION_FIXTURE_GATE_PROOF:-MERGE GATE: PASS $1}"
 exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
 `);
   executable(join(bin, "api"), `#!/bin/sh
-body=
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--data-binary" ]; then shift; body="$1"; fi
-  shift
-done
+printf 'api %s\\n' "$*" >> "$REGRESSION_FIXTURE_ARGV_LOG"
+body="$(cat)"
 printf '%s\\n' "$body" >> "$REGRESSION_FIXTURE_REQUESTS"
 printf '{"ok":true}\\n'
 `);
   return {
-    root, work, origin, baseSha, branchSha, requests, leaseLog, gateLog,
+    root, work, origin, baseSha, branchSha, requests, leaseLog, gateLog, argvLog,
     env: {
       ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
       AGENTOS_API_URL: "http://agentos.invalid",
       AGENTOS_SESSION_TOKEN: "session-token",
       AGENTOS_RUN_ID: "run-1",
@@ -101,6 +106,8 @@ printf '{"ok":true}\\n'
       REGRESSION_FIXTURE_REQUESTS: requests,
       REGRESSION_FIXTURE_LEASE_LOG: leaseLog,
       REGRESSION_FIXTURE_GATE_LOG: gateLog,
+      REGRESSION_FIXTURE_ARGV_LOG: argvLog,
+      REGRESSION_FIXTURE_NODE: process.execPath,
       GIT_AUTHOR_NAME: "regression-fixture",
       GIT_AUTHOR_EMAIL: "regression@example.invalid",
       GIT_COMMITTER_NAME: "regression-fixture",
@@ -131,6 +138,7 @@ test("prepare refreshes before semantic review without acquiring the merge lease
 test("finalize persists the dispatch PASS line verbatim and retains the lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = "verbose gate detail that stays platform-side";
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
   const headSha = git(seeded.work, "rev-parse", "HEAD");
@@ -150,6 +158,35 @@ test("finalize persists the dispatch PASS line verbatim and retains the lease", 
   });
   assert.equal(request?.kind, "regression-verification-v2");
   assert.equal(request?.commitSha, headSha);
+  assert.equal(finalized.stdout, `REGRESSION FINALIZE: pass ${headSha}\n`);
+  assert.doesNotMatch(finalized.stdout, /verbose gate detail/u);
+});
+
+test("session and fencing credentials stay out of every spawned argv", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  assert.equal(run(seeded, "review-fail", "review summary").status, 0);
+  const argv = readFileSync(seeded.argvLog, "utf8");
+  assert.doesNotMatch(argv, /session-token|fence-1/u);
+});
+
+test("an unreachable target fails prepare and finalize without persisting output", () => {
+  const prepareFixture = fixture();
+  git(prepareFixture.work, "remote", "set-url", "origin", join(prepareFixture.root, "missing.git"));
+  const prepared = run(prepareFixture, "prepare");
+  assert.notEqual(prepared.status, 0);
+  assert.match(prepared.stderr, /target fetch failed after 3 attempts/u);
+  assert.doesNotMatch(prepared.stdout, /refresh-conflict/u);
+  assert.equal(readFileSync(prepareFixture.requests, "utf8"), "");
+
+  const finalizeFixture = fixture();
+  assert.equal(run(finalizeFixture, "prepare").status, 0);
+  git(finalizeFixture.work, "remote", "set-url", "origin", join(finalizeFixture.root, "missing.git"));
+  const finalized = run(finalizeFixture, "finalize");
+  assert.notEqual(finalized.status, 0);
+  assert.match(finalized.stderr, /target fetch failed after 3 attempts/u);
+  assert.doesNotMatch(finalized.stdout, /refresh-conflict/u);
+  assert.equal(readFileSync(finalizeFixture.requests, "utf8"), "");
 });
 
 test("finalize refreshes drift outside the lease and requires semantic recheck", () => {
@@ -232,4 +269,41 @@ test("prepare emits refresh-conflict mechanically and leaves a deliverable works
   assert.equal(verdict.outcome, "refresh-conflict");
   assert.equal(verdict.headSha, preRefreshHead);
   assert.equal(verdict.summary, "base.txt");
+});
+
+test("a non-conflict merge failure aborts loudly without persisting output", () => {
+  const seeded = fixture();
+  const main = join(seeded.root, "main-hook-failure");
+  git(seeded.root, "clone", "--branch", "main", seeded.origin, main);
+  writeFileSync(join(main, "drift.txt"), "drift\n");
+  git(main, "add", "drift.txt");
+  git(main, "commit", "-m", "drift");
+  git(main, "push", "origin", "main");
+  executable(join(seeded.work, ".git", "hooks", "pre-merge-commit"), "#!/bin/sh\nprintf 'fixture hook refused merge\\n' >&2\nexit 1\n");
+
+  const prepared = run(seeded, "prepare");
+  assert.notEqual(prepared.status, 0);
+  assert.match(prepared.stderr, /fixture hook refused merge/u);
+  assert.match(prepared.stderr, /merge failed without conflicts/u);
+  assert.equal(readFileSync(seeded.requests, "utf8"), "");
+  assert.equal(git(seeded.work, "status", "--porcelain"), "");
+});
+
+test("a gate without a verdict records failure, releases the lease, and dies loudly", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "gate exited before verdict";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "143";
+
+  const finalized = run(seeded, "finalize");
+  assert.notEqual(finalized.status, 0);
+  assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 1 attempt\(s\) \(exit 143\)/u);
+  assert.doesNotMatch(finalized.stdout, /gate exited before verdict/u);
+  assert.deepEqual(readFileSync(seeded.leaseLog, "utf8").trim().split("\n"), [
+    "acquire --task chain-1 --reason chain merge tail chain-1",
+    "release --task chain-1",
+  ]);
+  const [request] = requestBodies(seeded);
+  assert.equal(request?.actorType, "agent");
+  assert.match(String(request?.body), /no admissible verdict after attempt 1 \(exit 143\)/u);
 });

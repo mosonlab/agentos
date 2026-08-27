@@ -389,22 +389,43 @@ test("runner proxy environment wins over task secrets for Claude, Codex, and Pi"
   }
 });
 
-test("the regression script receives only platform-owned chain and base coordinates", () => {
-  const env = buildChildEnvironment(
+test("only regression steps reserve platform-owned chain and base coordinates", () => {
+  const secrets = {
+    ...claim.secrets,
+    AGENTOS_CHAIN_ID: "task-secret-chain",
+    AGENTOS_PULL_REQUEST_BASE: "task-secret-base",
+  };
+  const regressionEnv = buildChildEnvironment(
     { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
     {
       ...claim,
-      secrets: {
-        ...claim.secrets,
-        AGENTOS_CHAIN_ID: "task-secret-chain",
-        AGENTOS_PULL_REQUEST_BASE: "task-secret-base",
-      },
+      task: { ...claim.task, templateStep: { name: "Regression", outputKind: "regression-verification-v2" } },
+      secrets,
     },
     scratch,
     "/work",
   );
-  assert.equal(env.AGENTOS_CHAIN_ID, "chain-1");
-  assert.equal(env.AGENTOS_PULL_REQUEST_BASE, "main");
+  assert.equal(regressionEnv.AGENTOS_CHAIN_ID, "chain-1");
+  assert.equal(regressionEnv.AGENTOS_PULL_REQUEST_BASE, "main");
+  assert.throws(() => buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    {
+      ...claim,
+      task: { ...claim.task, chainId: null, templateStep: { name: "Regression", outputKind: "regression-verification-v2" } },
+      secrets,
+    },
+    scratch,
+    "/work",
+  ), /regression-verification task is missing its platform chain id/u);
+
+  const ordinaryEnv = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { ...claim, secrets },
+    scratch,
+    "/work",
+  );
+  assert.equal(ordinaryEnv.AGENTOS_CHAIN_ID, "task-secret-chain");
+  assert.equal(ordinaryEnv.AGENTOS_PULL_REQUEST_BASE, "task-secret-base");
 });
 
 test("a credential-bearing runner proxy stays in env and out of run-as argv", () => {

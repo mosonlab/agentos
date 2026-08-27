@@ -60,10 +60,12 @@ test("mechanical cards retain only their canonical prompt while model cards reta
       `${outputKind} is server-owned and must not receive model-only context`,
     );
   }
-  assert.equal(
-    composeTemplateTaskDescription({ ...common, outputKind: "regression-verification-v2" }),
-    `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.`,
-  );
+  for (const outputKind of ["regression-verification", "regression-verification-v2", "regression-verification-v3"]) {
+    assert.equal(
+      composeTemplateTaskDescription({ ...common, outputKind }),
+      `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.`,
+    );
+  }
   const regressionDescription = composeTemplateTaskDescription({
     ...common,
     outputKind: "regression-verification-v2",

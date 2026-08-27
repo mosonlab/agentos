@@ -129,9 +129,10 @@ const isMechanicalTemplateStep = (outputKind: string): boolean => {
   return role === "readiness" || role === "integrator";
 };
 
-const outputIsPlatformAuthored = (outputKind: string): boolean => (
-  isMechanicalTemplateStep(outputKind) || outputKind === "regression-verification-v2"
-);
+const outputIsPlatformAuthored = (outputKind: string): boolean => {
+  const role = stepRole({ outputKind });
+  return role === "readiness" || role === "integrator" || role === "regression";
+};
 
 export const composeTemplateTaskDescription = (input: {
   prompt: string;

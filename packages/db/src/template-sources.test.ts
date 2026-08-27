@@ -70,6 +70,7 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(regression.prompt, /regression-verification\.sh review-fail/u);
     assert.match(regression.prompt, /regression-verification\.sh finalize/u);
     assert.match(regression.prompt, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+    assert.match(regression.prompt, /finalize exit 0[\s\S]*`pass`, `gate-fail`,\s+or `refresh-conflict`/u);
     assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");

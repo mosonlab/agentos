@@ -27,8 +27,10 @@ defect exists, run
 `scripts/regression-verification.sh review-fail '<concise finding IDs or defect>'`
 and finish. Otherwise run `scripts/regression-verification.sh finalize`.
 
-A finalize exit 77 means the script integrated a newer target head outside the
-lease. Repeat the full semantic verification against that refreshed tree, then
-run either `review-fail` or `finalize` again. Any other nonzero script exit
-fails the run loudly. The script persists the one allowed v2 outcome; never
-call `task_output` for this step or write a report file.
+A finalize exit 0 means the script persisted exactly one of `pass`, `gate-fail`,
+or `refresh-conflict`; report the bounded `REGRESSION FINALIZE` status line it
+printed. A finalize exit 77 means the script integrated a newer target head
+outside the lease. Repeat the full semantic verification against that refreshed
+tree, then run either `review-fail` or `finalize` again. Any other nonzero script
+exit fails the run loudly. The script persists the one allowed v2 outcome;
+never call `task_output` for this step or write a report file.

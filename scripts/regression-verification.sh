@@ -38,11 +38,13 @@ API_CLIENT="${REGRESSION_API_CLIENT:-curl}"
 LEASE_HELD=false
 RETAIN_LEASE=false
 GATE_LOG=""
+API_HEADERS=""
 # shellcheck source=scripts/gate-worker/lib.sh
 . "$SCRIPT_ROOT/scripts/gate-worker/lib.sh"
 
 cleanup() {
   [ -z "$GATE_LOG" ] || rm -f -- "$GATE_LOG"
+  [ -z "$API_HEADERS" ] || rm -f -- "$API_HEADERS"
   if [ "$LEASE_HELD" = true ] && [ "$RETAIN_LEASE" != true ]; then
     "$MERGE_LEASE" release --task "$AGENTOS_CHAIN_ID" >/dev/null 2>&1 || true
   fi
@@ -53,18 +55,19 @@ valid_sha() { [[ "$1" =~ $SHA_RE ]]; }
 
 head_sha() {
   local head
-  head="$(git rev-parse HEAD)" || die "cannot resolve workspace HEAD"
-  valid_sha "$head" || die "workspace HEAD is not a 40-hex commit: $head"
+  head="$(git rev-parse HEAD)" || return 1
+  valid_sha "$head" || return 1
   printf '%s' "$head"
 }
 
 fetch_base() {
   local attempt
   for attempt in 1 2 3; do
-    if GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$AGENTOS_PULL_REQUEST_BASE"; then
+    if GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$AGENTOS_PULL_REQUEST_BASE" \
+      >/dev/null 2>&1; then
       local fetched
-      fetched="$(git rev-parse FETCH_HEAD)" || die "cannot resolve fetched target"
-      valid_sha "$fetched" || die "target head is not a 40-hex commit: $fetched"
+      fetched="$(git rev-parse FETCH_HEAD)" || return 1
+      valid_sha "$fetched" || return 1
       printf '%s' "$fetched"
       return 0
     fi
@@ -73,7 +76,8 @@ fetch_base() {
       sleep 1
     fi
   done
-  die "target fetch failed after 3 attempts"
+  printf 'regression-verification: target fetch failed after 3 attempts\n' >&2
+  return 1
 }
 
 write_state() {
@@ -104,31 +108,50 @@ process.stdout.write(JSON.stringify(value));
 }
 
 api_request() {
-  local method="$1" path="$2" body="$3"
-  "$API_CLIENT" --fail-with-body --silent --show-error \
+  local method="$1" path="$2" body="$3" status
+  umask 077
+  API_HEADERS="$(mktemp "${TMPDIR:-/tmp}/regression-api-headers.XXXXXX")" \
+    || die "cannot create API header file"
+  printf 'Authorization: Bearer %s\nContent-Type: application/json\n' \
+    "$AGENTOS_SESSION_TOKEN" > "$API_HEADERS" \
+    || { rm -f -- "$API_HEADERS"; API_HEADERS=""; die "cannot write API header file"; }
+  printf '%s' "$body" | "$API_CLIENT" --fail-with-body --silent --show-error \
     -X "$method" \
-    -H "Authorization: Bearer $AGENTOS_SESSION_TOKEN" \
-    -H 'Content-Type: application/json' \
-    --data-binary "$body" \
+    --header "@$API_HEADERS" \
+    --data-binary @- \
     "${AGENTOS_API_URL%/}/session/runs/$AGENTOS_RUN_ID$path"
+  status=$?
+  rm -f -- "$API_HEADERS"
+  API_HEADERS=""
+  return "$status"
 }
 
 persist_output() {
   local verdict="$1" commit_sha="$2" request
-  request="$(node -e '
-const [fencingToken, kind, body, commitSha] = process.argv.slice(1);
+  request="$(printf '%s\0%s\0%s\0%s' "$AGENTOS_FENCING_TOKEN" "$OUTPUT_KIND" "$verdict" "$commit_sha" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+const [fencingToken, kind, body, commitSha] = input.split("\0");
 process.stdout.write(JSON.stringify({ fencingToken, kind, body, commitSha }));
-' "$AGENTOS_FENCING_TOKEN" "$OUTPUT_KIND" "$verdict" "$commit_sha")"
+});
+')" || die "cannot encode regression output request"
   api_request PUT /output "$request" >/dev/null \
     || die "AgentOS rejected the mechanical regression output"
 }
 
 record_failure() {
   local message="$1" request
-  request="$(node -e '
-const [fencingToken, body] = process.argv.slice(1);
+  request="$(printf '%s\0%s' "$AGENTOS_FENCING_TOKEN" "$message" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+const [fencingToken, body] = input.split("\0");
 process.stdout.write(JSON.stringify({ fencingToken, actorType: "agent", body }));
-' "$AGENTOS_FENCING_TOKEN" "$message")"
+});
+')" || return 1
   api_request POST /activity "$request" >/dev/null 2>&1 || true
 }
 
@@ -140,7 +163,9 @@ release_lease() {
 
 persist_refresh_conflict() {
   local pre_head="$1" target_head="$2" conflicts="$3" acquired="${4:-false}" verdict display_mode
-  [ -n "$conflicts" ] || conflicts="unknown conflicted paths"
+  valid_sha "$pre_head" && valid_sha "$target_head" \
+    || die "refusing malformed refresh-conflict verdict"
+  [ -n "$conflicts" ] || die "refusing refresh-conflict verdict without unmerged paths"
   verdict="$(json_verdict refresh-conflict "$pre_head" "$target_head" "$conflicts")"
   persist_output "$verdict" "$pre_head"
   if [ "$acquired" = true ]; then release_lease; fi
@@ -148,35 +173,42 @@ persist_refresh_conflict() {
   printf 'REGRESSION %s: refresh-conflict %s\n' "$display_mode" "$conflicts"
 }
 
-merge_base() {
-  local target_head="$1" acquired="${2:-false}" pre_head conflicts
-  pre_head="$(head_sha)"
-  if git merge --no-edit "$target_head" >/dev/null; then
+refresh_onto_target() {
+  local target_head="$1" acquired="${2:-false}" pre_head conflicts merge_output merge_status
+  valid_sha "$target_head" || die "refusing to merge malformed target head: $target_head"
+  pre_head="$(head_sha)" || die "cannot resolve a valid workspace HEAD"
+  merge_output="$(git merge --no-edit "$target_head" 2>&1)"
+  merge_status=$?
+  if [ "$merge_status" -eq 0 ]; then
     return 0
   fi
   conflicts="$(git diff --name-only --diff-filter=U | paste -sd, -)"
   git merge --abort >/dev/null 2>&1 || true
-  persist_refresh_conflict "$pre_head" "$target_head" "$conflicts" "$acquired"
-  return 2
+  if [ -n "$conflicts" ]; then
+    persist_refresh_conflict "$pre_head" "$target_head" "$conflicts" "$acquired"
+    return 2
+  fi
+  [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+  die "target refresh merge failed without conflicts (exit $merge_status)"
 }
 
 prepare() {
   local base_head result prepared_head
-  base_head="$(fetch_base)"
-  merge_base "$base_head" false
+  base_head="$(fetch_base)" || die "cannot refresh target head"
+  refresh_onto_target "$base_head" false
   result=$?
   [ "$result" -eq 0 ] || return 0
-  prepared_head="$(head_sha)"
+  prepared_head="$(head_sha)" || die "cannot resolve prepared workspace HEAD"
   write_state "$prepared_head" "$base_head"
   printf 'REGRESSION PREPARE: ready %s %s\n' "$prepared_head" "$base_head"
 }
 
 semantic_stale() {
   local target_head="$1" acquired="${2:-false}" result refreshed_head
-  merge_base "$target_head" "$acquired"
+  refresh_onto_target "$target_head" "$acquired"
   result=$?
   [ "$result" -eq 0 ] || return 0
-  refreshed_head="$(head_sha)"
+  refreshed_head="$(head_sha)" || die "cannot resolve refreshed workspace HEAD"
   write_state "$refreshed_head" "$target_head"
   if [ "$acquired" = true ]; then release_lease; fi
   printf 'REGRESSION FINALIZE: semantic-stale %s %s\n' "$refreshed_head" "$target_head"
@@ -187,7 +219,7 @@ review_fail() {
   local summary="$1" current verdict
   [ -n "$summary" ] || die "review-fail requires a non-empty summary"
   read_state
-  current="$(head_sha)"
+  current="$(head_sha)" || die "cannot resolve review-fail workspace HEAD"
   [ "$current" = "$VERIFIED_HEAD_SHA" ] || die "workspace HEAD changed after prepare; rerun prepare and semantic verification"
   verdict="$(json_verdict review-fail "$current" "$BASE_HEAD_SHA" "$summary")"
   persist_output "$verdict" "$current"
@@ -197,12 +229,12 @@ review_fail() {
 finalize() {
   local current latest result acquired_latest gate_log gate_status gate_proof attempt verdict
   read_state
-  current="$(head_sha)"
+  current="$(head_sha)" || die "cannot resolve finalize workspace HEAD"
   [ "$current" = "$VERIFIED_HEAD_SHA" ] || die "workspace HEAD changed after semantic verification"
 
   # Most drift is discovered and integrated before acquire, so no other chain
   # queues behind a tree that still needs another model pass.
-  latest="$(fetch_base)"
+  latest="$(fetch_base)" || die "cannot refresh target head"
   if [ "$latest" != "$BASE_HEAD_SHA" ]; then
     semantic_stale "$latest" false
     return $?
@@ -215,24 +247,22 @@ finalize() {
 
   # Close the fetch/acquire race. A changed tree is integrated mechanically,
   # but the lease is released before asking the model to verify it again.
-  acquired_latest="$(fetch_base)"
+  acquired_latest="$(fetch_base)" || die "cannot refresh target head after lease acquire"
   if [ "$acquired_latest" != "$BASE_HEAD_SHA" ]; then
     semantic_stale "$acquired_latest" true
     return $?
   fi
 
-  current="$(head_sha)"
+  current="$(head_sha)" || die "cannot resolve gated workspace HEAD"
   gate_log="$(mktemp "${TMPDIR:-/tmp}/regression-gate.XXXXXX")" \
     || { release_lease; die "cannot create gate output file"; }
   GATE_LOG="$gate_log"
   gate_status=76
   for attempt in 1 2 3; do
     : > "$gate_log"
-    set +e
-    "$GATE_DISPATCH" "$current" --master "$BASE_HEAD_SHA" > "$gate_log" 2>&1
-    gate_status=$?
-    set -e
-    cat "$gate_log"
+    gate_status=0
+    "$GATE_DISPATCH" "$current" --master "$BASE_HEAD_SHA" > "$gate_log" 2>&1 \
+      || gate_status=$?
     case "$gate_status" in
       75|76)
         [ "$attempt" -lt 3 ] && continue
@@ -240,7 +270,7 @@ finalize() {
       *) break ;;
     esac
   done
-  gate_proof="$(gate_verdict_read "$gate_log")"
+  gate_proof="$(gate_verdict_read "$gate_log")" || gate_proof=""
 
   case "$gate_proof" in
     "MERGE GATE: PASS $current")

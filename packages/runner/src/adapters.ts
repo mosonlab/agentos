@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { stepRole } from "@agentos/db";
+
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { InFlightTool } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -149,6 +151,11 @@ export const buildChildEnvironment = (
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => {
+  const outputKind = claim.task.templateStep?.outputKind;
+  const regressionStep = outputKind !== undefined && stepRole({ outputKind }) === "regression";
+  if (regressionStep && !claim.task.chainId) {
+    throw new Error("regression-verification task is missing its platform chain id");
+  }
   // These names are runner-owned. In particular, a task secret must never be
   // able to reintroduce the host Codex home or the CLAUDE_CONFIG_DIR path that
   // this chain deliberately does not use.
@@ -160,8 +167,6 @@ export const buildChildEnvironment = (
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
     AGENTOS_PI_EXPECTS_OPENAI_CODEX: _piExpectsOpenAICodex,
     AGENTOS_GATE_SERVER: _gateServer,
-    AGENTOS_CHAIN_ID: _chainId,
-    AGENTOS_PULL_REQUEST_BASE: _pullRequestBase,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -178,8 +183,10 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
-    ...(claim.task.chainId ? { AGENTOS_CHAIN_ID: claim.task.chainId } : {}),
-    AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
+    ...(regressionStep ? {
+      AGENTOS_CHAIN_ID: claim.task.chainId!,
+      AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
+    } : {}),
     AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
     ...RUNNER_DEFINITIONS[claim.runner].childEnvironment(claim, scratch),
     // Last on purpose, so no task secret can point a session back at the
