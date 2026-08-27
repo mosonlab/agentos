@@ -3,38 +3,18 @@ import { PrismaClient, Prisma, RunnerPreference, TaskStatus } from "@prisma/clie
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
-  legacyTemplateName,
-  matchedLegacyGeneration,
-  successorPromptDrift,
-  TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES,
-  templateRolloverBlockerCount,
-  type PersistedTransitionStep,
-} from "../src/canonical-template-transition.js";
+  applyCanonicalInstallation,
+  planCanonicalInstallation,
+  type CanonicalInstallationRow,
+} from "../src/canonical-template-installation.js";
 import {
   loadAllTemplateStepSources,
   LEGACY_ALL_PRIOR_OUTPUTS,
   templateStepStructureDifferences,
-  type CanonicalTemplateName,
-  type TemplateStepSource,
 } from "../src/template-sources.js";
 
 const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
-const CANONICAL_TEMPLATE_DESCRIPTIONS = new Map([
-  ["compound-engineer-workflow", "Twelve-step Full Assurance workflow with parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution."],
-  ["direct-engineer-workflow", "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution."],
-]);
-const CANONICAL_STEP_NAMES = new Map([
-  ["compound-engineer-workflow", [
-    "Write a spec", "Plan", "Plan review", "Revise plan", "Implementation", "Code review (Sol)",
-    "Code review (Opus blind)", "Apply review fixes", "Librarian",
-    "Regression verification", "Merge authorization", "Merge execution",
-  ]],
-  ["direct-engineer-workflow", [
-    "Implementation", "Code review (Sol)", "Code review (Opus blind)",
-    "Apply review fixes", "Regression verification", "Merge authorization", "Merge execution",
-  ]],
-]);
 type AssigneeTransition = { from: readonly string[]; to: string };
 const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
   ["compound-engineer-workflow:10", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
@@ -58,156 +38,15 @@ const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPr
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
 
-type CanonicalTransaction = Prisma.TransactionClient;
-type CanonicalSources = Map<CanonicalTemplateName, TemplateStepSource[]>;
-
 const transitionStepInclude = {
   assigneeAgent: { select: { name: true } },
   _count: { select: { tasks: true } },
 } as const;
 
-const readCanonicalTemplateRows = async (tx: CanonicalTransaction, name: string) => tx.taskTemplate.findMany({
+const readCanonicalTemplateRows = async (tx: Prisma.TransactionClient, name: string) => tx.taskTemplate.findMany({
   where: { name },
   include: { steps: { orderBy: { stepIndex: "asc" }, include: transitionStepInclude } },
 });
-
-/**
- * Validate every named row before the transition begins. A row with the old
- * exact shape is the only row eligible for a fixed legacy-v1 rename. A row
- * with the current count is checked in the normal canonical sync loop below,
- * which retains its narrow, named adoption rules for already-reviewed source
- * edits. Any other count or an unrecognized old shape is a structural refusal.
- */
-const preflightCanonicalTemplateRows = async (
-  tx: CanonicalTransaction,
-  templateSources: CanonicalSources,
-): Promise<void> => {
-  for (const [templateName, steps] of templateSources) {
-    const rows = await readCanonicalTemplateRows(tx, templateName);
-    if (rows.length === 0) throw new Error(`Template ${templateName} was not found`);
-    for (const row of rows) {
-      const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
-      const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
-      if (legacyMarker !== null) {
-        const legacyName = legacyTemplateName(templateName, legacyMarker, row.id);
-        const existingLegacy = await tx.taskTemplate.findUnique({
-          where: { projectId_name: { projectId: row.projectId, name: legacyName } },
-          select: { id: true },
-        });
-        if (existingLegacy) {
-          throw new Error(`Canonical template ${templateName} on project ${row.projectId} cannot rename to ${legacyName}: target already exists`);
-        }
-        continue;
-      }
-      if (persistedSteps.length !== steps.length) {
-        throw new Error(`Canonical template ${templateName} on project ${row.projectId} has structural drift: expected ${steps.length} steps, found ${persistedSteps.length}`);
-      }
-      const duplicateIndexes = new Set<number>();
-      for (const step of persistedSteps) {
-        if (duplicateIndexes.has(step.stepIndex)) {
-          throw new Error(`Canonical template ${templateName} on project ${row.projectId} has structural drift: duplicate stepIndex ${step.stepIndex}`);
-        }
-        duplicateIndexes.add(step.stepIndex);
-      }
-    }
-  }
-};
-
-const createCanonicalTemplate = async (
-  tx: CanonicalTransaction,
-  projectId: string,
-  templateName: string,
-  steps: readonly TemplateStepSource[],
-): Promise<void> => {
-  const description = CANONICAL_TEMPLATE_DESCRIPTIONS.get(templateName);
-  const stepNames = CANONICAL_STEP_NAMES.get(templateName);
-  if (!description || !stepNames) throw new Error(`No canonical template metadata is defined for ${templateName}`);
-  const template = await tx.taskTemplate.create({
-    data: {
-      projectId,
-      name: templateName,
-      description,
-      variables: ["branchName"],
-    },
-  });
-  for (const step of steps) {
-    const name = stepNames[step.stepIndex - 1];
-    if (!name) throw new Error(`Missing canonical template step name ${templateName}:${step.stepIndex}`);
-    const assigneeAgentId = step.agentName
-      ? (await tx.agent.findFirst({
-        where: { projectId, name: step.agentName, archivedAt: null },
-        select: { id: true },
-      }))?.id ?? null
-      : null;
-    if (step.agentName && !assigneeAgentId) {
-      throw new Error(`Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found in project ${projectId}`);
-    }
-    await tx.taskTemplateStep.create({
-      data: {
-        taskTemplateId: template.id,
-        stepIndex: step.stepIndex,
-        layer: step.layer,
-        name,
-        assigneeAgentId,
-        assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
-        runner: null,
-        approvalGate: step.approvalGate,
-        outputKind: step.outputKind,
-        prompt: step.prompt,
-        opensPullRequest: step.opensPullRequest,
-        attachmentsFromPrevious: step.attachmentsFromPrevious,
-        priorOutputKinds: step.priorOutputKinds,
-        baseFromStepIndex: step.baseFromStepIndex,
-        spawnPolicy: step.spawnPolicy ?? Prisma.JsonNull,
-      },
-    });
-  }
-};
-
-const transitionCanonicalTemplateRows = async (
-  tx: CanonicalTransaction,
-  templateSources: Awaited<ReturnType<typeof loadAllTemplateStepSources>>,
-): Promise<number> => {
-  let created = 0;
-  for (const [templateName, steps] of templateSources) {
-    const rows = await readCanonicalTemplateRows(tx, templateName);
-    for (const row of rows) {
-      const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
-      const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
-      if (legacyMarker === null) continue;
-      // The registration names both ends of the transition. Renaming a row on
-      // the strength of the outgoing digest alone would let prompts edited
-      // after the entry was written ride in on its authority, so the source has
-      // to be the successor this rollover was registered to install.
-      const drift = successorPromptDrift(templateName, legacyMarker, steps);
-      if (drift) throw new Error(drift);
-      const rolloverTasks = await tx.task.findMany({
-        where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
-        select: {
-          chainId: true,
-          _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
-        },
-      });
-      const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
-        chainId: task.chainId,
-        activeRunCount: task._count.runs,
-      })));
-      if (blockers > 0) {
-        throw new Error(`${templateName} ${row.id} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
-      }
-      if (row.webhookSecretId !== null || row.webhookRepoId !== null
-        || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
-        || row.webhookReplayWindowSec !== null) {
-        throw new Error(`${templateName} ${row.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
-      }
-      const legacyName = legacyTemplateName(templateName, legacyMarker, row.id);
-      await tx.taskTemplate.update({ where: { id: row.id }, data: { name: legacyName } });
-      await createCanonicalTemplate(tx, row.projectId, templateName, steps);
-      created += 1;
-    }
-  }
-  return created;
-};
 
 // Every canonical template, every step of each, and every role under agents/
 // is synced. Omitting any source here would let a prompt edit silently miss
@@ -225,7 +64,17 @@ const main = async (): Promise<void> => {
         select: { id: true },
       });
       if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
-      await preflightCanonicalTemplateRows(tx, templateSources);
+      const installationRows: CanonicalInstallationRow[] = [];
+      for (const templateName of templateSources.keys()) {
+        const rows = await readCanonicalTemplateRows(tx, templateName);
+        if (rows.length === 0) throw new Error(`Template ${templateName} was not found`);
+        installationRows.push(...rows.map((row) => ({
+          ...row,
+          name: templateName,
+          steps: row.steps as unknown as CanonicalInstallationRow["steps"],
+        })));
+      }
+      const installationPlan = planCanonicalInstallation(installationRows, templateSources);
       let createdAgents = 0;
       let createdAgentRepoGrants = 0;
       const regressionRole = rolesByName.get(REGRESSION_AGENT_NAME);
@@ -270,7 +119,7 @@ const main = async (): Promise<void> => {
         }
         createdAgents = 1;
       }
-      const createdCanonicalTemplates = await transitionCanonicalTemplateRows(tx, templateSources);
+      const createdCanonicalTemplates = (await applyCanonicalInstallation(tx, installationPlan, templateSources)).created;
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;

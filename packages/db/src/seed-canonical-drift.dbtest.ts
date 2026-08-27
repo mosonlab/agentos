@@ -66,6 +66,34 @@ after(async () => {
   }
 });
 
+test("seed rolls a registered canonical generation over inside its installation transaction", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const outgoing = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
+  });
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: outgoing.id, outputKind: "regression-verification-v2" },
+    data: { outputKind: "regression-verification" },
+  });
+
+  const rolled = seed();
+  assert.equal(rolled.status, 0, rolled.output);
+
+  const legacyName = `direct-engineer-workflow-legacy-pre-narrow-regression-lease-${outgoing.id}`;
+  const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: legacyName } },
+  });
+  const current = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
+  });
+  assert.equal(legacy.id, outgoing.id);
+  assert.notEqual(current.id, outgoing.id);
+  assert.equal(await prisma.taskTemplateStep.count({
+    where: { taskTemplateId: current.id, outputKind: "regression-verification-v2" },
+  }), 1);
+  await prisma.taskTemplate.delete({ where: { id: legacy.id } });
+});
+
 /**
  * A half-migrated graph — the zero-gate transition applied to step 1 but not
  * to step 4 — has the current step count and contiguous indexes, yet it is no
