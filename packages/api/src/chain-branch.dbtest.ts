@@ -957,6 +957,100 @@ test("T19: a PATCH does not change a run that is already queued", async () => {
   assert.equal(retried.body.opensPullRequest, false);
 });
 
+test("operator notes posted before the first claim reach run 1 while generated activity stays out", async () => {
+  const seed = await seedProject("first-run-operator-notes");
+  const created = await postTask(seed.project.id, {
+    name: "First-run operator notes", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: created.body.id } });
+
+  const note = "Read this before starting the first attempt.";
+  const response = await operatorRequest(`/tasks/${created.body.id}/activity`, {
+    method: "POST", body: JSON.stringify({ body: note }),
+  });
+  assert.equal(response.status, 201, JSON.stringify(response.body));
+  await db.taskActivity.createMany({ data: [
+    { taskId: created.body.id, actorType: "operator", body: "Task status changed by the control plane" },
+    { taskId: created.body.id, actorType: "runner", body: "runner-authored activity" },
+    { taskId: created.body.id, actorType: "agent", body: "agent-authored activity" },
+  ] });
+
+  const firstClaim = await claimRun(firstRun.id);
+  assert.deepEqual(firstClaim.operatorNotes, [note]);
+});
+
+test("operator notes reach the next run while generated activity stays out and the newest-ten bound holds", async () => {
+  const seed = await seedProject("operator-notes");
+  const created = await postTask(seed.project.id, {
+    name: "Operator notes", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: created.body.id } });
+  const firstClaim = await claimRun(firstRun.id);
+
+  // Exercise both fenced activity writers while the first run owns its lease.
+  // Their actor types are intentionally different from the operator route's
+  // actorType and must never become instructions for a later attempt.
+  const runnerActivity = await createApp(db).request(`/runner/runs/${firstRun.id}/activity`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fencingToken: firstClaim.fencingToken, body: "runner-authored activity" }),
+  });
+  assert.equal(runnerActivity.status, 201);
+  const sessionActivity = await createApp(db).request(`/session/runs/${firstRun.id}/activity`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${firstClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fencingToken: firstClaim.fencingToken, body: "agent-authored activity" }),
+  });
+  assert.equal(sessionActivity.status, 201);
+
+  const completed = await completeRunViaRoute(firstClaim);
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const operatorNotes = Array.from({ length: 12 }, (_, index) => `operator-note-${index}-${"x".repeat(200)}`);
+  for (const body of operatorNotes) {
+    const response = await operatorRequest(`/tasks/${created.body.id}/activity`, {
+      method: "POST", body: JSON.stringify({ body }),
+    });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+  }
+
+  const retried = await operatorRequest(`/tasks/${created.body.id}/retry`, { method: "POST" });
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const nextClaim = await claimRun(retried.body.id);
+  assert.deepEqual(nextClaim.operatorNotes, operatorNotes.slice(-10), "only the ten newest direct comments are selected");
+  assert.ok(
+    nextClaim.operatorNotes.reduce((total: number, note: string) => total + note.length, 0) <= 4_000,
+    "the claim must carry at most 4000 note characters",
+  );
+  assert.doesNotMatch(JSON.stringify(nextClaim.operatorNotes), /runner-authored activity|agent-authored activity/u);
+  assert.doesNotMatch(JSON.stringify(nextClaim.operatorNotes), /queued by operator retry/u);
+});
+
+test("operator note character bounds never inject a partial note", async () => {
+  const seed = await seedProject("operator-note-character-bound");
+  const created = await postTask(seed.project.id, {
+    name: "Operator note character bound", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: created.body.id } });
+  const firstClaim = await claimRun(firstRun.id);
+  assert.equal((await completeRunViaRoute(firstClaim)).status, 200);
+
+  const notes = [
+    `oldest-does-not-fit-${"o".repeat(499)}`,
+    ...Array.from({ length: 9 }, (_, index) => `newer-note-${index}-${"n".repeat(384)}`),
+  ];
+  for (const body of notes) {
+    assert.equal((await operatorRequest(`/tasks/${created.body.id}/activity`, {
+      method: "POST", body: JSON.stringify({ body }),
+    })).status, 201);
+  }
+  const retried = await operatorRequest(`/tasks/${created.body.id}/retry`, { method: "POST" });
+  const nextClaim = await claimRun(retried.body.id);
+  assert.deepEqual(nextClaim.operatorNotes, notes.slice(1), "a note that cannot fit is omitted whole");
+  assert.ok(nextClaim.operatorNotes.every((note: string) => notes.includes(note)), "every delivered note is byte-identical");
+});
+
 test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots", async () => {
   const seed = await seedProject("t19b");
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1054,4 +1148,3 @@ test("T20: a template step's PR flag reaches the task it instantiates", async ()
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false]);
 });
-

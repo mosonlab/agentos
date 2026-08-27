@@ -14,7 +14,7 @@ implement, verify, merge. Every run stays observable and reviewable.
 
 [Install](#quick-start) · [Docs](#documentation) · [Status](#status) · [简体中文](README.zh-CN.md)
 
-<img src="docs/media/tasks.png" alt="AgentOS task board: a twelve-step template chain in flight, with per-run status and cost on each card" width="880">
+<img src="docs/media/tasks.png" alt="AgentOS task board: template chains in flight, each card showing its step, run status, model and cost" width="880">
 
 </div>
 
@@ -81,6 +81,14 @@ and every role carries its own runner, model and reasoning effort.
 | 11 | Merge readiness | — | Recomputes the head, requires every open review to clear, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
 
+<div align="center">
+
+<img src="docs/media/chain.png" alt="Task detail: the twelve-step chain with each step's role and status, above the completed run and the task prompt" width="880">
+
+<sub>A chain in flight: step 4 running, steps 6 and 7 waiting as parallel siblings.</sub>
+
+</div>
+
 Steps 6 and 7 are parallel siblings: the blind review never sees the other's
 output, and step 8 adjudicates both. Step 5's root session dispatches native
 subagents pinned to Luna at maximum effort, at most eight concurrent.
@@ -129,47 +137,18 @@ with the remaining installation detail in [`docs/install.md`](docs/install.md).
 
 ## Status
 
-The labels below describe the evidence recorded in this repository; they are
-not compatibility promises by the CLI providers.
+Developer Preview. What is supported, and the evidence behind every claim, is
+recorded in [`docs/release/support-matrix.md`](docs/release/support-matrix.md),
+the authoritative support statement. It describes evidence held in this
+repository, not compatibility promises by the CLI providers.
 
-- **Verified**: exercised runtime or repository evidence exists for the stated
-  path.
-- **Maintainer-verified**: a maintainer exercised the stated path on the named
-  platform, but the clean-machine reproduction gate is still open.
-- **Experimental**: implemented enough for development evaluation, without a
-  support commitment.
-- **Pending**: required evidence has not been completed. Do not infer support.
-- **Unverified**: no qualifying evidence has been recorded.
-- **Unsupported**: outside the supported target.
-
-### Provider support
-
-| Provider runtime | Status | Evidence boundary |
-| --- | --- | --- |
-| Codex CLI | **Verified** | Adapter/runtime and subscription authentication path are verified. Clean fresh-install evidence is **Pending (OSS-B)**. |
-| Claude Code | **Verified** / **Maintainer-verified** | Adapter/runtime is verified. Claude Pro/Max authentication is maintainer-verified on macOS Apple Silicon. The clean-install gate is **Pending (OSS-B)**. |
-| Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. Clean fresh-install evidence is **Pending (OSS-B)**. |
+AgentOS targets macOS on Apple Silicon. Linux is unverified, and Windows is
+unsupported by design: the runner relies on POSIX process-group, path and
+command behavior.
 
 Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
-limits, models, and provider-side availability remain the user's responsibility.
-AgentOS does not supply provider credentials or entitlement.
-
-### Platform support
-
-| Platform | Status | Evidence boundary |
-| --- | --- | --- |
-| macOS on Apple Silicon | **Target platform** | Current maintainer evidence includes Claude Pro/Max authentication; the complete clean fresh-install gate remains **Pending (OSS-B)**. |
-| Linux | **Unverified** | Do not infer support from the Node.js codebase. |
-| Windows | **Unsupported** | The current runner relies on POSIX process-group, path, and command behavior. |
-
-### Feature surface
-
-| Feature | Status | Evidence boundary |
-| --- | --- | --- |
-| Goals | **Pending** | The control plane stores a Goal, its Definition of Done, its progress log, and its limits, and the console edits them. No execution model is wired: nothing schedules work from a Goal, nothing measures its spend, and nothing stops it on spend, time, or stall. The console therefore renders no spend figure and no stopped state, because the server has no writer for either. |
-
-[`docs/release/support-matrix.md`](docs/release/support-matrix.md) is the
-authoritative support statement.
+limits, models, and provider-side availability remain yours. AgentOS supplies no
+provider credential and no entitlement.
 
 ## Authentication and subscriptions
 

@@ -155,7 +155,7 @@ import {
   reactivationBlocked,
 } from "./task-write.js";
 import { patchTask } from "./task-patch.js";
-import { claimRun } from "./run-claim.js";
+import { claimRun, OPERATOR_NOTE_METADATA_FIELD } from "./run-claim.js";
 import { completeRun } from "./run-completion.js";
 import { withoutUndefined } from "./without-undefined.js";
 import { versionPayload } from "./version.js";
@@ -3031,7 +3031,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         actorType: "operator",
         actorId: body.actorId ?? null,
         body: body.body,
-        ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+        metadata: jsonValue({
+          ...body.metadata,
+          [OPERATOR_NOTE_METADATA_FIELD]: true,
+        }),
       },
     }), 201);
   });

@@ -22,12 +22,22 @@ When the user requests a chain:
 - Implementation assignee: keep the direct template's default. Assign
   `senior-dev` (same rule for the review-fix step) only when the work touches
   persisted data or a defense-list path — merge gate, gate worker, migrations,
-  merge automation — or when that classification is uncertain.
+  merge automation — or when that classification is uncertain. Assign
+  `frontend-dev` when the work is primarily a new or redesigned web page or UI
+  surface (Leo 2026-08-27); the defense-list rule above still wins when both
+  apply.
 - A backlog card that needs a non-default implementation assignee states it as
-  the machine-readable line `Route: implementation=senior-dev` in its
-  description; the dispatcher copies it into `stepOverrides`. Only the
-  implementation step is routable this way.
-- Dispatching, gating, or rerouting a chain follows
+  the machine-readable line `Route: implementation=senior-dev` (or
+  `=frontend-dev`) in its description; the dispatcher copies it into
+  `stepOverrides`. Only the implementation step is routable this way.
+- Chain-to-chain sequencing: pass `afterTaskId` (the predecessor chain's final
+  task) to the instantiate endpoint; the bound chain dispatches when the
+  predecessor completes. Incompatible with `autoStart`; one successor per
+  predecessor task. Dependency qualification in
+  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md)
+  precedes every instantiation; ordering preferences stay in the backlog.
+- Dispatching, gating, rerouting, and the backlog card lifecycle (create,
+  route, archive at instantiation) follow
   [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
 
 Before changing canonical Agents, roles, or task templates, read
@@ -94,3 +104,5 @@ its owning document, with a trigger-first pointer here only when agents must
 discover it. `package.json`, configuration, the directory tree, and `--help`
 output are live authority — never cached here. One authoritative home per rule;
 an obsolete path is removed when its replacement lands.
+
+For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md). A change that adds, removes, or alters an HTTP route updates the handbook in the same change.

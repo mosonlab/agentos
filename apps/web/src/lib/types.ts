@@ -369,6 +369,9 @@ export type BoardTask = {
     id: string;
     runNumber: number;
     status: RunStatus;
+    /** The model the run was claimed with, which is what the card labels the run
+     *  with; the assignee's current model is a different, later fact. */
+    model: string;
     costUsd: string | null;
     startedAt: string | null;
     endedAt: string | null;
