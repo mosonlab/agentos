@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { controlledGitEnvironment, prefixedCommand, splitRunAsPrefix } from "./git-launch.js";
 import type { OnboardingInput } from "./onboarding.js";
 
 export type RepositoryPreflightFailure =
@@ -32,18 +33,10 @@ export type RepositoryPreflightCommand = (
 const COMMAND_TIMEOUT_MS = 60_000;
 const OUTPUT_LIMIT = 64 * 1024;
 
-const controlledGitEnvironment = (): NodeJS.ProcessEnv => ({
-  PATH: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-  HOME: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
-  LANG: "C.UTF-8",
-  GIT_TERMINAL_PROMPT: "0",
-});
-
-const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
-
 const runCommand: RepositoryPreflightCommand = (executable, args, cwd, env) => new Promise((resolve, reject) => {
-  const prefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
-  const child = spawn(prefix[0] ?? executable, prefix.length > 0 ? [...prefix.slice(1), executable, ...args] : args, {
+  const prefix = splitRunAsPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
+  const launched = prefixedCommand(executable, args, prefix);
+  const child = spawn(launched.executable, launched.args, {
     cwd,
     env,
     detached: true,

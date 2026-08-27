@@ -24,6 +24,7 @@
 import { isDeterministicRefusal } from "@agentos/github-client";
 import type { ChangedFile } from "@agentos/db";
 
+import { abortableDelay } from "./abortable-delay.js";
 import { decodeStrictBase64 } from "./base64.js";
 
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
@@ -119,12 +120,10 @@ export type GitHubReader = {
 export type PullRequestReader = Pick<GitHubReader, "readPullRequest" | "compareCommits">;
 
 type GitHubReadRetryOptions = {
-  wait?: (delayMs: number) => Promise<void>;
+  wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>;
 };
 
 const GITHUB_READ_RETRY_DELAYS_MS = [250, 1_000] as const;
-const waitForRetry = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs));
-
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asObject = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -270,8 +269,22 @@ export const createGitHubReader = (
   retryOptions: GitHubReadRetryOptions = {},
 ): GitHubReader | null => {
   if (!token) return null;
-  const wait = retryOptions.wait ?? waitForRetry;
-  const request = async (url: string, init: RequestInit, options: { missingMessage?: string } = {}): Promise<Response> => {
+  const wait = retryOptions.wait ?? abortableDelay;
+  const waitBeforeRetry = async (delayMs: number, signal?: AbortSignal | null): Promise<void> => {
+    try {
+      await wait(delayMs, signal);
+    } catch (error: unknown) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
+      }
+      throw error;
+    }
+  };
+  const request = async (
+    url: string,
+    init: RequestInit,
+    options: { missingMessage?: string; retry?: boolean } = {},
+  ): Promise<Response> => {
     for (let attempt = 0; ; attempt += 1) {
       let response: Response;
       try {
@@ -282,9 +295,9 @@ export const createGitHubReader = (
         }
         const message = error instanceof Error ? error.message : "unknown";
         if (isDeterministicRefusal(error)) throw new GitHubReadError(`GitHub read failed: ${message}`, "permission");
-        const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
+        const delay = options.retry === false ? undefined : GITHUB_READ_RETRY_DELAYS_MS[attempt];
         if (delay === undefined) throw new GitHubReadError(`GitHub read failed: ${message}`, "transport");
-        await wait(delay);
+        await waitBeforeRetry(delay, init.signal);
         continue;
       }
       if (response.status === 401 || response.status === 403) {
@@ -294,10 +307,10 @@ export const createGitHubReader = (
         throw new GitHubReadError(options.missingMessage, "response");
       }
       if (response.ok) return response;
-      const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
+      const delay = options.retry === false ? undefined : GITHUB_READ_RETRY_DELAYS_MS[attempt];
       const transientStatus = response.status === 429 || response.status >= 500;
       if (transientStatus && delay !== undefined) {
-        await wait(delay);
+        await waitBeforeRetry(delay, init.signal);
         continue;
       }
       throw new GitHubReadError(
@@ -388,7 +401,12 @@ export const createGitHubReader = (
           signal,
           headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
         },
-        { missingMessage: `repository file is missing at ${repository}@${commitSha}:${path}` },
+        {
+          missingMessage: `repository file is missing at ${repository}@${commitSha}:${path}`,
+          // Claim-side specification verification owns the complete retry and
+          // deadline policy so its evidence counts actual HTTP attempts.
+          retry: false,
+        },
       );
 
       let payload: unknown;
