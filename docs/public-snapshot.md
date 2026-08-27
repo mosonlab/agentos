@@ -52,7 +52,7 @@ would have gone out: it is the maintainer's own evidence form, filled at one
 release-candidate commit, and not a document a reader follows. It is excluded by
 name, with a reason, so the scan classifies it as held back rather than as a file
 nobody looked at, and a scanner test asserts that the open list is exactly the
-eight paths above and that none of them is a directory glob.
+paths named above and that none of them is a directory glob.
 
 These pages were written as public artifacts rather than moved from internal
 documentation. Plans, reviews, specifications, and unlisted runbooks stay

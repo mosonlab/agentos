@@ -23,7 +23,6 @@
     { "glob": "THIRD_PARTY_NOTICES.md", "purpose": "third-party notices: the vendored shadcn/ui grant and the license index for declared dependencies" },
     { "glob": "agents/*.md", "purpose": "reviewed agent documentation" },
     { "glob": "agents/roles/*.md", "purpose": "reviewed agent role definitions" },
-    { "glob": "agents/skills/*.md", "purpose": "reviewed agent skill definitions" },
     { "glob": "agents/templates/compound-engineer-workflow/*.md", "purpose": "reviewed step prompts for the twelve-step compound engineering chain: spec, plan, plan review, revision, implementation, two review passes, fix application, regression verification, librarian, human PR review and merge execution" },
     { "glob": "agents/templates/direct-engineer-workflow/*.md", "purpose": "reviewed step prompts for the eight-step direct engineering chain, which carries no spec or plan phase and takes the feature brief as its specification of record" },
     { "glob": "apps/web/components.json", "purpose": "web component configuration" },
