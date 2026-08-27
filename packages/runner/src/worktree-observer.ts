@@ -53,40 +53,38 @@ const resolvedPath = async (path: string): Promise<ResolvedPath> => {
   const absolute = resolve(path);
   try {
     return { path: await realpath(absolute), physical: true };
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path: absolute, physical: false };
-    throw error;
+  } catch {
+    // A stale, unreadable, or otherwise unresolvable registration still has a
+    // lexical location worth reporting. One path's errno must never erase the
+    // independently observable violations that follow it.
+    return { path: absolute, physical: false };
   }
 };
 
 /**
- * Reports registered worktrees whose resolved path lies outside `workspaceRoot`.
+ * Reports registered worktrees whose resolved path lies outside `workspacePath`.
  *
- * The current checkout is included in Git's inventory, so it is deliberately
- * not exempted. Returned paths are normalized absolute paths, in Git's listed
- * order. This is report-only: an outside path is data, never a reason to
- * mutate or throw. Callers should invoke it while `checkoutPath` is available,
- * before disposing the run workspace, and decide separately how to persist the
- * returned observation.
+ * Returned paths are normalized absolute paths, in Git's listed order. This is
+ * report-only: an outside path is data, never a reason to mutate or throw.
+ * Callers should invoke it while the workspace is available, before disposing
+ * it, and decide separately how to persist the returned observation.
  */
 export const observeExternalWorktrees = async (
   config: RunnerConfig,
-  checkoutPath: string,
-  workspaceRoot: string,
+  workspacePath: string,
   execute: WorktreeObserverCommandExecutor = command,
 ): Promise<string[]> => {
   const output = await execute(
     config,
     "git",
     ["worktree", "list", "--porcelain", "-z"],
-    checkoutPath,
+    workspacePath,
     workspaceEnvironment(config),
   );
-  const checkout = resolve(checkoutPath);
-  const lexicalRoot = resolve(workspaceRoot);
+  const lexicalRoot = resolve(workspacePath);
   const root = await resolvedPath(lexicalRoot);
   const worktrees = await Promise.all(listedWorktreePaths(output).map(
-    (listedPath) => resolvedPath(resolve(checkout, listedPath)),
+    (listedPath) => resolvedPath(resolve(lexicalRoot, listedPath)),
   ));
   return worktrees
     .filter((worktree) => {

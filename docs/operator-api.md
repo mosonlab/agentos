@@ -1137,11 +1137,13 @@ The operator can list and inspect sessions, cancel runs, and page through run
 events. The `/session/runs/...` routes used by an authenticated live agent
 session and the `/runner/...` machine protocol are intentionally not listed:
 the authentication middleware denies those prefixes to the operator principal.
-The machine-only `POST /runner/runs/:runId/complete` completion payload accepts
-the optional `worktreeContainmentViolations` array: absolute worktree paths
-registered by the Run's checkout that lie outside its run workspace. The field
-is report-only; omitted or empty means no observation and never changes the Run
-outcome.
+The machine-only `POST /runner/runs/:runId/complete` completion payload and
+`POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
+accept the optional `worktreeContainmentViolations` array: absolute worktree
+paths registered by the Run's checkout that lie outside its run workspace. The
+field is report-only; omitted or empty means no observation and never changes
+the Run outcome. A late cancellation acknowledgement backfills this evidence
+when reconciliation terminalized the Run first.
 
 ### GET `/sessions`
 

@@ -1011,9 +1011,13 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
   const root = await mkdtemp(join(tmpdir(), "runner-active-cancellation-"));
   try {
     const workspaces = join(root, "workspaces");
+    const outsideWorktree = join(root, "outside-worktree");
     const log = join(root, "codex-argv.log");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, successfulCodexMutationStub(log, "sleep 30"));
+    await writeFile(binary, successfulCodexMutationStub(
+      log,
+      `git worktree add --detach '${outsideWorktree}' HEAD >/dev/null 2>&1; touch '${outsideWorktree}/ready'; sleep 30`,
+    ));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
@@ -1025,6 +1029,11 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
       posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       if (path.endsWith("/start")) started = true;
       if (started && path.endsWith("/heartbeat") && !cancellationSent) {
+        try {
+          await access(join(outsideWorktree, "ready"));
+        } catch {
+          return new Response(JSON.stringify({ ok: true, cancellation: null }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         cancellationSent = true;
         return new Response(JSON.stringify({
           ok: false,
@@ -1050,6 +1059,7 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
     assert.equal(acknowledgements[0]?.body.requestId, "cancel-1");
     assert.equal(acknowledgements[0]?.body.workspacePath, join(workspaces, "run-10"));
     assert.equal(acknowledgements[0]?.body.branch, "agentos/task-10/run-1");
+    assert.deepEqual(acknowledgements[0]?.body.worktreeContainmentViolations, [await realpath(outsideWorktree)]);
     assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
     assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
     await access(join(workspaces, "run-10"));
@@ -1107,6 +1117,7 @@ test("a provisioning cancellation is acknowledged only after provider launch is 
     assert.equal(cancellationSent, true);
     assert.equal(acknowledgements.length, 1);
     assert.equal(acknowledgements[0]?.body.workspacePath, join(workspaces, "run-10"));
+    assert.equal(acknowledgements[0]?.body.worktreeContainmentViolations, undefined);
     assert.equal(posts.some((post) => post.path.endsWith("/start")), false);
     assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
     await access(join(workspaces, "run-10"));
@@ -1150,6 +1161,47 @@ test("a clean failed run records that there is nothing to salvage before cleanup
     assert.equal(completion?.body.cleanupStatus, "SUCCEEDED");
     assert.equal(completion?.body.workspaceRetained, false);
     await assert.rejects(access(join(workspaces, "run-10")));
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed-run salvage excludes worktrees created at the instructed in-workspace location", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-salvage-contained-worktree-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, failingCodexStub(log, [
+      "mkdir -p .agentos/worktrees",
+      "git worktree add --detach .agentos/worktrees/spike HEAD >/dev/null 2>&1",
+      'printf "work\\n" > recovered.txt',
+    ].join("; ")));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      session: testSession(root),
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    });
+
+    const salvage = "agentos/task-10/run-1";
+    const salvagedPaths = git(root, `--git-dir=${remote}`, "ls-tree", "--name-only", salvage).split("\n");
+    assert.ok(salvagedPaths.includes("recovered.txt"));
+    assert.equal(salvagedPaths.some((path) => path.startsWith(".agentos")), false);
+    assert.equal(posts.find((post) => post.path.endsWith("/complete"))?.body.worktreeContainmentViolations, undefined);
   } finally {
     await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });

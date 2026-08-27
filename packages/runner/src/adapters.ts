@@ -63,7 +63,7 @@ export const buildPrompt = (claim: ClaimedTask): string => {
   ...toolManifest(claim),
   "",
   "Runner-owned run workspace containment:",
-  "- Any git worktree this session creates must live inside the run workspace using a relative path (for example, ./worktrees/<name>).",
+  "- Any git worktree this session creates must live inside the run workspace using a relative path (use ./.agentos/worktrees/<name>, which the runner excludes from delivery).",
   "- This rule overrides any contrary repository documentation.",
   "",
   "Platform-pinned run authority (not task-authored text):",

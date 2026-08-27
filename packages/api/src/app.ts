@@ -544,6 +544,7 @@ const cancelRunInput = z.object({
   reason: z.string().trim().min(1).pipe(failureReasonText(FAILURE_REASON_LIMIT)),
   parkTask: z.boolean().default(false),
 });
+const worktreeContainmentViolationsInput = z.array(z.string().min(1).max(4096)).max(5000);
 const cancelAcknowledgeInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
@@ -551,6 +552,7 @@ const cancelAcknowledgeInput = z.object({
   workspacePath: z.string().min(1).optional(),
   branch: z.string().min(1).optional(),
   baseSha: z.string().min(1).optional(),
+  worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
 });
 const publicationInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -638,7 +640,7 @@ const completionInput = z.object({
   // Report-only completion evidence. An omitted or empty list means that the
   // runner observed no worktree outside its run workspace; it never changes
   // terminal outcome classification.
-  worktreeContainmentViolations: z.array(z.string().min(1).max(4096)).max(5000).optional(),
+  worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
   failureEnvelope: versionedEnvelopeInput.optional(),
 });
 export type CompletionInput = z.infer<typeof completionInput>;
@@ -890,6 +892,7 @@ const settleCancellation = async (
     workspacePath?: string;
     branch?: string;
     baseSha?: string;
+    worktreeContainmentViolations?: string[];
   },
 ): Promise<CancellationSettlement> => {
   await lockRunRow(tx, input.runId);
@@ -898,6 +901,7 @@ const settleCancellation = async (
     select: {
       id: true, taskId: true, runNumber: true, status: true, runnerId: true, fencingToken: true,
       cancelRequestId: true, cancelReason: true, cancelAcknowledgedAt: true,
+      worktreeContainmentViolations: true,
       session: { select: { id: true, waitingOnMessageId: true } },
     },
   });
@@ -920,6 +924,12 @@ const settleCancellation = async (
     if (input.baseSha !== undefined) await tx.run.updateMany({
       where: { id: run.id, baseSha: null }, data: { baseSha: input.baseSha },
     });
+    if (input.worktreeContainmentViolations?.length && run.worktreeContainmentViolations === null) {
+      await tx.run.update({
+        where: { id: run.id },
+        data: { worktreeContainmentViolations: jsonValue(input.worktreeContainmentViolations) },
+      });
+    }
     if (!run.cancelAcknowledgedAt && input.runnerId !== undefined) {
       await tx.run.update({
         where: { id: run.id },
@@ -965,6 +975,9 @@ const settleCancellation = async (
       ...(input.workspacePath === undefined ? {} : { workspacePath: input.workspacePath }),
       ...(input.branch === undefined ? {} : { branch: input.branch }),
       ...(input.baseSha === undefined ? {} : { baseSha: input.baseSha }),
+      ...(input.worktreeContainmentViolations?.length
+        ? { worktreeContainmentViolations: jsonValue(input.worktreeContainmentViolations) }
+        : {}),
     },
   });
   if (settled.count !== 1) return refusal("conflict", `Run is already ${run.status}`);
@@ -3468,6 +3481,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ...(body.workspacePath === undefined ? {} : { workspacePath: body.workspacePath }),
       ...(body.branch === undefined ? {} : { branch: body.branch }),
       ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
+      ...(body.worktreeContainmentViolations === undefined
+        ? {}
+        : { worktreeContainmentViolations: body.worktreeContainmentViolations }),
     }));
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...settlement } = result;

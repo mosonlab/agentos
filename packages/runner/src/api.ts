@@ -240,6 +240,7 @@ export const acknowledgeCancellation = async (
   claim: ClaimedTask,
   cancellation: CancellationRequest,
   workspace?: { path: string; branch: string; baseSha: string } | null,
+  containment: { worktreeContainmentViolations?: string[] } = {},
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/cancel/acknowledge`, {
     method: "POST",
@@ -248,6 +249,7 @@ export const acknowledgeCancellation = async (
       fencingToken: claim.fencingToken,
       requestId: cancellation.requestId,
       ...(workspace ? { workspacePath: workspace.path, branch: workspace.branch, baseSha: workspace.baseSha } : {}),
+      ...containment,
     }),
   });
 };

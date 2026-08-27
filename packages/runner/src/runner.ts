@@ -165,7 +165,6 @@ export const executeClaim = async (
         worktreeContainmentViolations = await observeExternalWorktrees(
           config,
           workspace.path,
-          workspace.path,
         );
       } catch (error: unknown) {
         await appendActivity(
@@ -241,7 +240,13 @@ export const executeClaim = async (
         const killed = await adapter.kill(handle, request.reason);
         if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
       }
-      await acknowledgeCancellation(config, claim, request, workspace);
+      await acknowledgeCancellation(
+        config,
+        claim,
+        request,
+        workspace,
+        await worktreeContainmentReport(),
+      );
     })();
     await cancellationPromise;
   };

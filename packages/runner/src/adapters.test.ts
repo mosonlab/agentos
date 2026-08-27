@@ -158,6 +158,7 @@ test("buildPrompt injects runner-owned worktree containment into every session",
     });
     assert.match(prompt, /Runner-owned run workspace containment:/u);
     assert.match(prompt, /Any git worktree this session creates must live inside the run workspace using a relative path/u);
+    assert.match(prompt, /\.\/\.agentos\/worktrees\/<name>/u);
     assert.match(prompt, /This rule overrides any contrary repository documentation/u);
   }
 });
