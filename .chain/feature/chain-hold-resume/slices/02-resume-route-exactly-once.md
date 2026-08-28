@@ -3,7 +3,7 @@ id: 02-resume-route-exactly-once
 title: Resume route with exactly-once activation
 blocked_by:
   - 01-chain-control-authority-and-hold
-risk: false
+risk: true
 ---
 
 # 02: Resume route with exactly-once activation
@@ -49,6 +49,24 @@ distinct name in code and events so the two are never conflated.
       activation routine's existing parked-skip narration; verified by dbtest.
 - [ ] Resume on a chainless Task returns 409 and on an unknown Task 404;
       verified by dbtest.
+- [ ] Controlled concurrent completion-versus-Resume dbtests cover both mutex
+      winners: Resume releases before the final completion, and final completion
+      observes the hold before Resume releases it. Each settled state has one
+      release event, exactly one Run per Step of one eligible layer, and no
+      duplicate queue narration.
+- [ ] A successful release updates current state with released state, release
+      timestamp, release request identifier, and the held generation; its event
+      contains released kind, held layer, authenticated actor, request
+      identifier, null reason, timestamp, and resulting generation. Real-database
+      route tests assert every field and valid timestamps, while no-op Resume
+      leaves all current and event fields unchanged.
 - [ ] Three Hold/Resume cycles produce exactly three held and three released
-      events in order, with their layers and request identifiers, interleaved
-      no-op calls producing no events, and no extra Runs; verified by dbtest.
+      events in order, with exact actors, layers, request identifiers, reasons or
+      null, timestamps, and generations; interleaved no-op calls produce no
+      events and no extra Runs, verified by dbtest.
+- [ ] Replaying a previously accepted Hold request after its release does not
+      create a new hold, and replaying a previously accepted Resume request after
+      a later Hold does not release that hold. Both return a deduplicated success
+      without changing current authority, and concurrent replay tests prove the
+      durable event uniqueness creates no second transition, event, activity, or
+      Run.

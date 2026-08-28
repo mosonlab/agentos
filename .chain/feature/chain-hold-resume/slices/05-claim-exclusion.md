@@ -33,5 +33,7 @@ are claimed exactly as at the frozen base, in the same order.
       created; verified by dbtest.
 - [ ] The merge-executor claim lane refuses a queued merge-tail Run above the
       held layer and hands it out after release; verified by dbtest.
-- [ ] Claim ordering and candidate ranking for Runs the barrier does not bar are
-      unchanged (existing claim-ordering and blind-claim dbtests stay green).
+- [ ] In a mixed poll containing barred and allowed held-Chain candidates, the
+      allowed Runs retain their ordinary relative ranking after barred Runs are
+      filtered; a focused dbtest covers the new mixed state while existing
+      claim-ordering and blind-claim suites remain regression verification.

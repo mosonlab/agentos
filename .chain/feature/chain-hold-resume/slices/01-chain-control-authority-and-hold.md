@@ -21,36 +21,44 @@ DONE, is refused with 409; an unknown Task with 404. Hold provably interrupts
 nothing: it writes no Run row, no cancellation intent, touches no Task.status,
 and never reads or writes the merge lease.
 
+Idempotency survives changes to current state: the event store enforces one
+accepted request identifier per Chain and transition kind, and route logic
+consults that durable history. A delayed network replay therefore cannot become
+a new transition after an intervening release; the matching Resume proof lands
+with the Resume route in slice 02.
+
 This slice is also the prefactor that unblocks every other backend slice: it
-ships the Prisma models (`ChainControl` with a `@@unique([projectId, chainId])`,
-`ChainControlEvent` as its append-only child), the migration, and a shared
+ships the Prisma models (`ChainControl` with a uniqueness constraint on its
+project-and-Chain key, and `ChainControlEvent` as its append-only child), the
+migration, and a shared
 ChainControl reader in the db package — a function that, given
 `(projectId, chainId)` pairs, returns the current hold state with absence and
 released treated identically — exported for use by the activation routine
 (same package), the admission read, and the claim query (api package). The
 enforcement slices consume that reader; they do not each invent a lookup.
+They cover successor activation, operator admission, claim selection, and the
+shared Run-open path used by the scheduler and every other Run producer.
 
-The state machine, distilled from the spec, that the row implements:
-
-```
-absent ──hold──▶ held(generation=1)
-held(g) ──hold──▶ held(g)            [no-op success, no event]
-held(g) ──resume(CAS on g)──▶ released(g)
-released(g) ──resume──▶ released(g)  [no-op success, no event]
-released(g) ──hold──▶ held(g+1)
-```
+The state machine begins absent, creates held generation one on the first Hold,
+treats Hold while held and Resume while released as event-free successes,
+releases only by compare-and-set on the held generation, and increments the
+generation when a released Chain is held again.
 
 Resume itself lands in slice 02; this slice ships the release-side columns and
 generation semantics so the schema never needs a second migration.
 
 **Blocked by:** None (can start immediately).
 
-- [ ] A new migration adds `ChainControl` and `ChainControlEvent`; the API
-      package's existing migration dbtests still pass, and a new dbtest asserts
-      the `(projectId, chainId)` uniqueness rejects a duplicate row.
+- [ ] A new migration adds `ChainControl` and `ChainControlEvent`; a new dbtest
+      proves one authority per project-and-Chain and durable uniqueness of an
+      accepted request identifier per transition kind, while the existing
+      migration dbtests stay green.
 - [ ] `POST /tasks/:taskId/chain/hold` under the Chain mutex creates the held
-      `ChainControl` row with the correct held layer and exactly one held event;
-      verified by a new dbtest through `createApp` against a real database.
+      authority with state, held layer, hold request identifier, reason or null,
+      hold timestamp, null release facts, and generation; its one event contains
+      kind, layer, authenticated actor, the same request identifier, reason or
+      null, timestamp, and resulting generation. A new real-database HTTP dbtest
+      asserts every field and valid timestamps.
 - [ ] Repeating Hold on a held Chain (same and different `requestId`) returns
       200 reporting the original hold's requestId and writes no second event and
       no state change; verified in the same dbtest file.
@@ -63,10 +71,14 @@ generation semantics so the schema never needs a second migration.
 - [ ] A hold on one Chain leaves a second Chain in the same project, and a Chain
       with the same chainId in another project, entirely unaffected; verified by
       dbtest.
+- [ ] Moving one Chain Step to BACKLOG through the HTTP API creates no authority
+      for a never-held Chain, leaves an existing authority byte-identical, parks
+      only that Step, and leaves the task-list Chain progress projection
+      unchanged; verified in the authority dbtest with held and unheld fixtures.
 - [ ] The shared ChainControl reader in the db package returns 'not held' for
       both an absent row and a released row, and the held layer for a held row;
       covered by a unit or dbtest at its package.
 - [ ] Hold placed while no Run is active (layer done, next not yet started)
-      persists a held layer that still bars the next layer; the barrier effect
-      itself is asserted in slices 03-05, but the persisted layer value is
-      asserted here.
+      persists a held layer that still bars the next layer; the barrier effects
+      are asserted at their owning seams in slices 03-06, while the persisted
+      layer value is asserted here.

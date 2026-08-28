@@ -3,7 +3,7 @@ id: 03-activation-barrier
 title: Activation barrier at chain successor activation
 blocked_by:
   - 01-chain-control-authority-and-hold
-risk: false
+risk: true
 ---
 
 # 03: Activation barrier at chain successor activation
@@ -46,5 +46,7 @@ Chain past the barrier.
 - [ ] A Step with an approval gate completing under a hold opens its Inbox card;
       answering the gate marks the Step done and activates nothing while the
       hold stands; verified by dbtest.
-- [ ] Completions within layers at or below the held layer behave exactly as at
-      the frozen base (existing activation dbtests stay green).
+- [ ] With a held authority present, completions within layers at or below the
+      held layer still persist output, status, and ordinary same-layer behavior;
+      a focused held-Chain dbtest turns this new boundary case green while the
+      existing activation suite remains regression verification.

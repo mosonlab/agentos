@@ -3,7 +3,8 @@ id: 07-read-contract-and-ui
 title: Chain read control object and the Chain card UI
 blocked_by:
   - 02-resume-route-exactly-once
-risk: false
+  - 04-admission-refusal
+risk: true
 ---
 
 # 07: Chain read control object and the Chain card UI
@@ -23,7 +24,7 @@ English and Chinese locales; the card keeps polling so a layer finishing under
 the hold surfaces without a manual refresh, and a held Chain whose current
 layer has completed reads as waiting on the operator.
 
-**Blocked by:** 02-resume-route-exactly-once.
+**Blocked by:** 02-resume-route-exactly-once and 04-admission-refusal.
 
 - [ ] The Chain read route returns the full `control` object for a held Chain,
       the released facts for a released one, and `null` for a never-held one,
@@ -34,10 +35,19 @@ layer has completed reads as waiting on the operator.
       static-markup tests on the Chain list component using dictionary lookups,
       never literal strings.
 - [ ] Steps above the held layer render a disabled Start control with the
-      hold-naming hint; verified by static-markup tests.
+      hold-naming hint; verified by static-markup tests consuming the actual
+      held-aware Chain response shape delivered by admission.
+- [ ] Localized component cases distinguish a held layer that is still running
+      from a held layer whose every Step is DONE and no execution remains; only
+      the latter says the Chain is waiting on the operator, in both English and
+      Chinese.
 - [ ] The task-detail page wires the toggle to POST hold/resume with a generated
-      requestId and reloads the chain after either call, and the chain data
-      stays on the existing polling path; verified by the component tests'
-      existing page-wiring assertions.
+      requestId and reloads the chain after either call; a component test feeds
+      successive polling responses for running-under-hold and completed-under-
+      hold and proves the rendered state updates without remount or manual
+      refresh.
+- [ ] A parked Step's board card and Chain marker contain no held-Chain wording,
+      while the held badge remains exclusive to the Chain card; verified in the
+      existing static board and Chain-list component suites.
 - [ ] All new strings exist in both locale dictionaries and the i18n key-parity
       and no-hardcoded-string sweeps stay green.
