@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+
 import {
   ADAPTER_VERSION,
   adapterExecutionSucceeded,
@@ -44,6 +46,7 @@ import {
 } from "./envelope.js";
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
+import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
@@ -528,9 +531,32 @@ export const executeClaim = async (
     const completedHandle = handle;
     const evidence = await completedHandle.exit;
     producedOutput = outputTail(evidence);
+    let regressionHandoffPersisted = false;
+    if (!fencingRejected) {
+      try {
+        const handoff = await readRegressionOutputHandoff(config, claim, workspace);
+        if (handoff) {
+          await controlPlane.persistSessionTaskOutput(config, claim, handoff);
+          regressionHandoffPersisted = true;
+          sink({
+            source: "RUNNER",
+            type: "REGRESSION_OUTPUT_HANDOFF_PERSISTED",
+            payload: { kind: handoff.kind, commitSha: handoff.commitSha },
+          });
+        }
+      } catch (error: unknown) {
+        remediationFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        sink({
+          source: "RUNNER",
+          type: "REGRESSION_OUTPUT_HANDOFF_FAILED",
+          payload: { message: errorMessage(error) },
+        });
+      }
+    }
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
-      && !fencingRejected) {
+      && !fencingRejected
+      && remediationFailureReason === null) {
       let outputStatus: SessionTaskOutputStatus | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
@@ -544,7 +570,19 @@ export const executeClaim = async (
       if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
         const outputKind = outputStatus.outputKind;
         const providerConversationId = completedHandle.providerConversationId;
-        if (outputStatus.outputSatisfiedByPriorRun) {
+        if (claim.task.templateStep.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND) {
+          remediationFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
+          sink({
+            source: "RUNNER",
+            type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
+            payload: {
+              outputKind,
+              outputRemediationAllowed: false,
+              providerConversationIdAvailable: providerConversationId !== null,
+              reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent",
+            },
+          });
+        } else if (outputStatus.outputSatisfiedByPriorRun) {
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_SKIPPED",
@@ -692,7 +730,13 @@ export const executeClaim = async (
       });
       return;
     }
-    const executionSucceeded = adapterExecutionSucceeded(evidence)
+    // A validated, fenced Regression handoff is the step's terminal product.
+    // Provider diagnostics that arrive after it must remain observable without
+    // turning the completed verification into another model retry.
+    const regressionMechanicallySettled = regressionHandoffPersisted
+      && remediationFailureReason === null
+      && budgetReason === null;
+    const executionSucceeded = (adapterExecutionSucceeded(evidence) || regressionMechanicallySettled)
       && remediationFailureReason === null
       && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
@@ -779,20 +823,30 @@ export const executeClaim = async (
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     lease.close();
+    const acceptedEvidence = regressionMechanicallySettled
+      ? {
+        ...evidence,
+        exitCode: 0,
+        signal: null,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        terminationReason: null,
+      }
+      : evidence;
     // The primary provider may have ended cleanly while the required
     // remediation protocol failed afterwards. Reflect that protocol failure in
     // the structured envelope too; otherwise the API correctly distrusts the
     // runner's asserted class and would classify the clean primary evidence as
     // TASK_FAILED instead of PROTOCOL_ERROR.
     const completionEvidence = remediationFailureReason
-      ? { ...evidence, terminalSuccess: false }
-      : evidence;
+      ? { ...acceptedEvidence, terminalSuccess: false }
+      : acceptedEvidence;
     await controlPlane.completeRun(config, claim, {
-      exitCode: evidence.exitCode,
-      signal: evidence.signal,
-      terminalEventSeen: evidence.terminalEventSeen,
-      terminalSuccess: succeeded && evidence.terminalSuccess,
-      terminationReason: budgetReason ?? evidence.terminationReason,
+      exitCode: completionEvidence.exitCode,
+      signal: completionEvidence.signal,
+      terminalEventSeen: completionEvidence.terminalEventSeen,
+      terminalSuccess: succeeded && completionEvidence.terminalSuccess,
+      terminationReason: budgetReason ?? completionEvidence.terminationReason,
       ...(classified ? { failureClass: classified.failureClass, retryable: classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
       ...(!succeeded ? {
@@ -815,7 +869,7 @@ export const executeClaim = async (
           evidence: completionEvidence,
           deliveryFailure,
           runnerClass: classified?.failureClass ?? null,
-          terminationReason: budgetReason ?? evidence.terminationReason,
+          terminationReason: budgetReason ?? completionEvidence.terminationReason,
         }),
       }),
       ...gitResult,
