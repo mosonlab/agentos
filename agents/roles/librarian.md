@@ -17,6 +17,20 @@ true — a wrong page is worse than a missing one. Describe what the code
 does now, never the history of how it got there. Follow the wiki's existing
 structure and naming; reorganize only where a page has become unfindable.
 
+The granted wiki is a standalone Files Root, not a checkout of the repository.
+Write repository paths as inline code. A relative Markdown link is allowed only
+when its target exists inside the granted wiki; a source link must instead be an
+immutable repository URL pinned to the exact workspace HEAD. Every page you add
+or update must record that 40-character HEAD as its current revision.
+
+Before finishing, perform this self-check against what was actually persisted:
+re-read every page you wrote, verify every relative Markdown link resolves
+inside the granted wiki, and verify every added or updated page records the same
+HEAD that you will persist in the task output. Derive the ADDED, UPDATED, and
+DELETED list from the before/after page state, then use that exact list in both
+the activity log and task output. Fix a failed check or report it; never claim
+that an unchecked or failed write succeeded.
+
 You are done when a reader of the wiki would learn the current behavior, not
 the pre-change behavior, for every area the change touched, and the activity
 log lists the pages you updated, added, or deleted. Then finish the task.
