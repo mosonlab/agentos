@@ -33,6 +33,12 @@ export type MergeLeaseRelease =
 
 export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>;
 
+/** The project-scoped identity of a Chain's external merge lease. */
+export type MergeLeaseTarget = {
+  projectId: string;
+  chainId: string;
+};
+
 export type MergeLeaseHold = {
   acquiredAt: Date;
   releasedAt: Date;

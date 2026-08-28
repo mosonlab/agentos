@@ -9,19 +9,14 @@ import {
 import {
   mergeLeaseHold,
   type MergeLeaseRelease,
+  type MergeLeaseTarget,
 } from "./merge-lease.js";
-
-/** The identity needed to attribute one external merge lease to a chain. */
-export type MergeLeaseTarget = {
-  projectId: string;
-  chainId: string;
-};
 
 /** Backward-compatible name for the canonical release result. */
 export type MergeLeaseReleaseForHold = MergeLeaseRelease;
 
 export { mergeLeaseHold } from "./merge-lease.js";
-export type { MergeLeaseHold } from "./merge-lease.js";
+export type { MergeLeaseHold, MergeLeaseTarget } from "./merge-lease.js";
 
 export type MergeLeaseHoldRecordResult = "recorded" | "already-recorded" | "ignored";
 
