@@ -856,7 +856,8 @@ also have a project-local `assigneeAgentId` and `repoId`, and the assignee must
 have access to that repository. `scheduleKind` is `NOW`, `AT`, or `CRON`:
 `AT` requires `runAt` and an agent/repository; `CRON` requires `cron` (five
 fields, no macros) and computes the next `runAt`; `timezone` is an optional IANA
-timezone. The task body also supports `approvalGate`, `opensPullRequest`,
+timezone. The task body also supports `status` (`TODO` or `BACKLOG` at
+creation), `approvalGate`, `opensPullRequest`,
 `maxDurationMin`, `stallTimeoutMin`, `maxSessionsPerTask`, `workingDirectory`,
 `targetBranch`, and paired `chainId`/`chainIndex` fields.
 
@@ -880,7 +881,9 @@ curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=full&archived=false" -H "Author
   `assigneeType` (`AGENT`), `assigneeAgentId` (`null`), `approvalGate`
   (`false`), `opensPullRequest` (`true`), `maxDurationMin` (`240`),
   `stallTimeoutMin` (`10`), `maxSessionsPerTask` (`5`), `scheduleKind`
-  (`NOW`), `runAt` (`null`), `cron` (`null`), and `timezone` (`null`).
+  (`NOW`), `runAt` (`null`), `cron` (`null`), `timezone` (`null`), and `status`
+  (`TODO`). At creation, `status` may be `TODO` or `BACKLOG`; `DOING`,
+  `REVIEW`, and `DONE` are rejected rather than normalized.
   `chainId` and `chainIndex` are optional but must be supplied together.
   For the default `AGENT` type, `repoId` and `assigneeAgentId` are required by
   the route's project/access checks.
