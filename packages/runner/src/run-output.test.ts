@@ -317,7 +317,7 @@ test("a successful run's completion carries its final output as the same tail", 
   }
 });
 
-test("a negative Regression verdict persists even when provider transport fails afterwards", async () => {
+test("a negative Regression verdict settles mechanically when provider transport fails afterwards", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-regression-transport-failure-"));
   try {
     const remote = await seedRemote(root);
@@ -347,7 +347,12 @@ test("a negative Regression verdict persists even when provider transport fails 
       baseHeadSha: "b".repeat(40),
       summary: "RF-2 remains open",
     });
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, false);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, true);
+    assert.equal(completion?.exitCode, 0);
+    assert.equal(completion?.signal, null);
+    assert.equal(completion?.terminalEventSeen, true);
+    assert.equal(completion?.terminationReason, null);
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
     assert.equal(
       controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"),
