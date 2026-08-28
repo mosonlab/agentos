@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RunStatus, RunnerKind, type PrismaClient } from "@agentos/db";
+import { RunStatus, RunnerKind, type PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { createRunnerRegistry, RUNNER_MAX_ENTRIES } from "./runners.js";

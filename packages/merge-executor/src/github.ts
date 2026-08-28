@@ -12,14 +12,14 @@
  * caller — this module's job is to report exactly what came back, never to
  * paper over it.
  *
- * The transport and the did-it-land classification are `@agentos/github-client`'s
+ * The transport and the did-it-land classification are `@anneal/github-client`'s
  * (#139), so this process and the runner answer "was the response lost?" the
  * same way. That package holds no credential, opens no socket of its own and
  * spawns nothing — asserted by its own suite and by `isolation.test.ts` here —
  * so importing it does not widen §D-P1's custody surface.
  */
 
-import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace } from "@agentos/github-client";
+import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace } from "@anneal/github-client";
 
 /** Every mutating request this package can construct. Enumerated so the
  *  no-bypass test can assert the complete list and a new write cannot be added
@@ -135,7 +135,7 @@ const asString = (value: unknown): string | null => typeof value === "string" ? 
 
 /** Re-exported so this module stays the executor's single platform seam even
  *  though the transport itself is now shared. */
-export type { Http, HttpResponse } from "@agentos/github-client";
+export type { Http, HttpResponse } from "@anneal/github-client";
 
 export type GitHubClientOptions = {
   restUrl: string;

@@ -23,7 +23,7 @@ test("the default workspace root matches the API's definition of it", () => {
     if (previous !== undefined) process.env.RUNNER_WORKSPACE_ROOT = previous;
   }
 
-  // The runner cannot import from @agentos/api, so this default exists twice. Two
+  // The runner cannot import from @anneal/api, so this default exists twice. Two
   // independent definitions of one path is the exact shape of the three-way default bug
   // this batch fixed, so pin them against each other by source: the API side is
   // workspace-root.ts's defaultWorkspaceRoot, and if either moves, this fails loudly instead

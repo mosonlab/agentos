@@ -28,7 +28,7 @@ this prose:
 - `GET /projects/:projectId/agents` returns this row as `assignable: false`, so
   it never appears in an operator's agent picker.
 
-The work itself is performed by `@agentos/merge-executor`, a separate package,
+The work itself is performed by `@anneal/merge-executor`, a separate package,
 process, and OS principal that holds the merge credential and speaks GitHub's
 REST and GraphQL APIs directly. See
 the merge-integrator runbook the operator maintains outside this repository.

@@ -1,6 +1,6 @@
 import { statfs } from "node:fs/promises";
 
-import type { RegressionRepairHandoff } from "@agentos/db";
+import type { RegressionRepairHandoff } from "@anneal/db";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import type { FailureEnvelope } from "./envelope.js";
@@ -64,7 +64,7 @@ export type ClaimedTask = {
    * would put a merge step in front of a model CLI.
    *
    * The ordinary runner refuses `"mechanical"` outright. It is claimed by
-   * `@agentos/merge-executor`, a different process under a different OS user.
+   * `@anneal/merge-executor`, a different process under a different OS user.
    */
   executionMode: "mechanical" | "agent";
   /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */

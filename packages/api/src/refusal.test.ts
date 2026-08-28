@@ -11,7 +11,7 @@ import {
   PinnedBaseCommitError,
   WorkflowRefusalError,
   type WorkflowRefusalReason,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import {
   type Refusal,

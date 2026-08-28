@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sharedChainBranch } from "@agentos/db";
+import { sharedChainBranch } from "@anneal/db";
 
 import { chainKey } from "./chain.js";
 
@@ -52,8 +52,8 @@ test("one chain id in two projects yields two branches (R2, S8)", () => {
 });
 
 test("the fingerprint is a hash of chainKey, so the duplicated key string cannot drift", () => {
-  // `sharedChainBranch` lives in @agentos/db and cannot import `chainKey` from
-  // @agentos/api (the dependency runs the other way), so the key string
+  // `sharedChainBranch` lives in @anneal/db and cannot import `chainKey` from
+  // @anneal/api (the dependency runs the other way), so the key string
   // `${projectId}:${chainId}` is written in both packages. This test is what
   // stops the two spellings from drifting apart silently.
   const pair = { projectId: "proj_abc", chainId: "batch-4-fixes" };

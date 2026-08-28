@@ -585,10 +585,10 @@ const buildCacheFixture = (root, revision, buildKey) => {
   }
   writeFileSync(join(root, "builds", buildKey, "READY"), `${buildKey}\n`);
   writeFileSync(join(tree, "packages/api/dist/build-info.json"), JSON.stringify({
-    packageName: "@agentos/api", commit: revision, dirty: false,
+    packageName: "@anneal/api", commit: revision, dirty: false,
   }));
   writeFileSync(join(tree, "packages/runner/dist/build-info.json"), JSON.stringify({
-    packageName: "@agentos/runner", commit: revision, dirty: false,
+    packageName: "@anneal/runner", commit: revision, dirty: false,
   }));
 };
 

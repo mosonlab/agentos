@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DIRECT_TEMPLATE_NAME, MERGE_TAIL_KIND, PrismaClient, RunStatus, TaskStatus } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, MERGE_TAIL_KIND, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
 
 import type { ReleaseMergeLease } from "./merge-lease.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";

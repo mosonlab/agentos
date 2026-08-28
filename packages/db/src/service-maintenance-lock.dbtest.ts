@@ -9,7 +9,7 @@
  * whose `test:db` the merge gate runs, and because the lock protocol being
  * tested is this package's. The runner is spawned by path; nothing is imported
  * from it, and the dependency runs the other way (the runner depends on
- * `@agentos/db/service-lock`).
+ * `@anneal/db/service-lock`).
  *
  * The runner needs no schema: it takes the lock and polls a control plane. So
  * the key here is a schema name that exists only as a hash — which is also what
@@ -17,7 +17,7 @@
  *
  *   AGENTOS_ALLOW_SCRATCH_DATABASES=1 \
  *   TEST_DATABASE_URL=postgresql://...:55777/...?schema=... \
- *     npm run test:db -w @agentos/db
+ *     npm run test:db -w @anneal/db
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";

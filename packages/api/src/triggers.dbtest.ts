@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { encryptSecret } from "./secrets.js";

@@ -329,7 +329,7 @@ cleanup() {
   # and neither can run inside a hermetic gate, so a green gate is silent about
   # them and must not be read as endorsing them.
   printf 'Not covered by this gate: the \xc2\xa7D-P6 GraphQL schema gate against the live GitHub schema\n'
-  printf '  (npm run schema-gate -w @agentos/merge-executor, needs GITHUB_SCHEMA_GATE_TOKEN; it fails without one),\n'
+  printf '  (npm run schema-gate -w @anneal/merge-executor, needs GITHUB_SCHEMA_GATE_TOKEN; it fails without one),\n'
   printf '  and the Step 9/10 [real] direction harnesses, which need a scratch repository and a\n'
   printf '  non-production deployment. Run those separately before a release.\n'
   exit 0

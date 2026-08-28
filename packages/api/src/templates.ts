@@ -13,7 +13,7 @@ import {
   TaskSource,
   TaskStatus,
   type TriggerFireSource,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { isValidBranchName } from "./branch-name.js";
 import { composeBrief } from "./task-brief.js";

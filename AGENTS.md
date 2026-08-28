@@ -29,7 +29,7 @@ acceptance criterion or caller requires it.
   temporary directory; a hand-built `RunnerConfig` also pins `home` to one.
   Runner tests provision real workspaces.
 - Local pre-gate verification is targeted: run only the test files your change
-  touches (`npm run test:db -w @agentos/api -- src/<file>.dbtest.ts` runs a
+  touches (`npm run test:db -w @anneal/api -- src/<file>.dbtest.ts` runs a
   subset). The merge gate runs the full suite.
 - Spawn the real API entrypoint in tests through
   `packages/api/src/test-startup-environment.ts`: the entrypoint loads the root

@@ -34,7 +34,7 @@ import {
   RunStatus,
   TaskStatus,
   writeMarker,
-} from "@agentos/db";
+} from "@anneal/db";
 import { z } from "zod";
 
 import type { CompletionInput } from "./app.js";

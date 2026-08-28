@@ -5,7 +5,7 @@ import {
   RunStatus,
   TaskStatus,
   type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import {
   leaseHandoffsWithoutConsumer,

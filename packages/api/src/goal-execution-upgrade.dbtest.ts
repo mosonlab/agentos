@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 
 import { preKernelRun, preKernelSeed, stageAtPreviousMigration } from "./goal-execution-fixture.js";
 

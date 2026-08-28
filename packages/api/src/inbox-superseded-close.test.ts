@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { InboxStatus, type PrismaClient } from "@agentos/db";
+import { InboxStatus, type PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 

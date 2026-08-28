@@ -7,7 +7,7 @@ import {
   RunStatus,
   SessionExecutionStatus,
   type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
 import {

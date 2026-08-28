@@ -13,7 +13,7 @@
  * could not give.
  */
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient } from "@anneal/db";
 import {
   EVIDENCE_PLACEHOLDER_BODY,
   EVIDENCE_UNAVAILABLE_MARKER,
@@ -23,7 +23,7 @@ import {
   type PendingEvidenceRequest,
   parseEvidenceRequest,
   serializeEvidence,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { checkConclusionFor, createGitHubReader, GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 

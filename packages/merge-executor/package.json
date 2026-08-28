@@ -1,20 +1,20 @@
 {
-  "name": "@agentos/merge-executor",
+  "name": "@anneal/merge-executor",
   "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build -w @agentos/github-client && npm run build -w @agentos/db",
+    "pretest": "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
     "test": "node --import tsx --test src/*.test.ts",
     "start": "node dist/index.js",
-    "preschema-gate": "npm run build -w @agentos/github-client",
+    "preschema-gate": "npm run build -w @anneal/github-client",
     "schema-gate": "MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED=1 node --import tsx --test src/schema-gate.test.ts"
   },
   "dependencies": {
-    "@agentos/db": "0.3.0",
-    "@agentos/github-client": "0.3.0",
+    "@anneal/db": "0.3.0",
+    "@anneal/github-client": "0.3.0",
     "dotenv": "^17.2.3"
   },
   "devDependencies": {

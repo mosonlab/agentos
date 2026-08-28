@@ -6,7 +6,7 @@
  * than against the absence of a code path someone believed was absent.
  */
 
-import type { AuthorizationPayload } from "@agentos/db/merge-integrator";
+import type { AuthorizationPayload } from "@anneal/db/merge-integrator";
 
 import type { ChainEnvelope, Deps, IntentRecord } from "./decision-table.js";
 import type { DisarmResult, MergeResponse, ReadResult, RepositorySnapshot } from "./github.js";

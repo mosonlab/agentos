@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { defenseTriggers, type MergeEvidence } from "@agentos/db";
+import { defenseTriggers, type MergeEvidence } from "@anneal/db";
 
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
 import { GitHubReadError, type PullRequestReader } from "./github-read.js";

@@ -3,7 +3,7 @@ import {
   isDirectImplementationStep,
   Prisma,
   stepRole,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { abortableDelay, abortReason } from "./abortable-delay.js";
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";

@@ -7,7 +7,7 @@ import {
   INTEGRATOR_SENTINEL_MODEL,
   PrismaClient,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {

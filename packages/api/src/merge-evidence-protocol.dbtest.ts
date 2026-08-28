@@ -20,7 +20,7 @@ import {
   parseEvidence,
   Prisma,
   PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { type PullRequestSnapshot } from "./github-read.js";

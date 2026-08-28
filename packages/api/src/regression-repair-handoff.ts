@@ -8,7 +8,7 @@ import {
   type RegressionRepairHandoff,
   RunStatus,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 type DbTx = Prisma.TransactionClient;
 type RegressionRepairKind = RegressionRepairHandoff["repair"]["kind"];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Prisma } from "@agentos/db";
+import type { Prisma } from "@anneal/db";
 
 import {
   commitWithLeaseDisposition,

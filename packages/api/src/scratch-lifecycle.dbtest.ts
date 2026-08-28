@@ -7,7 +7,7 @@ import test from "node:test";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 
 import { derivedMaintenanceUrl, provisioningAvailable } from "./dbtest-plan.js";
 import { ScratchDatabaseManager, scratchNameOwnerPid } from "./testdb.js";

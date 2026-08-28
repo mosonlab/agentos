@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CleanupStatus, RunStatus, SessionExecutionStatus, TaskStatus, type PrismaClient } from "@agentos/db";
+import { CleanupStatus, RunStatus, SessionExecutionStatus, TaskStatus, type PrismaClient } from "@anneal/db";
 
 import {
   createArchivedRunNoticeScheduler,

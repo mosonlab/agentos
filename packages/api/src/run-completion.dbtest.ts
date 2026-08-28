@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { CleanupStatus, PrismaClient, PushStatus, RunStatus, SessionExecutionStatus, TaskStatus } from "@agentos/db";
+import { CleanupStatus, PrismaClient, PushStatus, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
 
 import { completeRun } from "./run-completion.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";

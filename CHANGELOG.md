@@ -130,7 +130,7 @@ is no upgrade path between previews other than a fresh install.
 - The task-claim API now honours a step's `attachmentsFromPrevious=false`, so
   the blind review step really does start blind instead of receiving prior
   step outputs.
-- `npm run db:sync-canonical-prompts -w @agentos/db` synchronises every
+- `npm run db:sync-canonical-prompts -w @anneal/db` synchronises every
   canonical step prompt and role prompt from the repository into an existing
   installation, idempotently.
 - Seeded skills are retired. The runner never injected them, so the `agents/`

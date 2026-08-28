@@ -78,7 +78,7 @@ test("no source file in this package can spawn a child process", async () => {
 
 test("nor can the shared GitHub client the executor now loads", async () => {
   // §D-P1's custody claim is about the *process*, not about this directory, and
-  // as of #139 the process also loads @agentos/github-client. A package that
+  // as of #139 the process also loads @anneal/github-client. A package that
   // spawned anything would put the merge token in a child environment through
   // an import the tests above cannot see, so the same assertion is made here
   // against that package's shipped source. It is credential-free and its
@@ -97,16 +97,16 @@ test("nor can the shared GitHub client the executor now loads", async () => {
 
 test("the daemon's reachable module graph contains no adapter, workspace, delivery or Prisma code", async () => {
   const { files, externals } = await reachableGraph(join(sourceRoot, "index.ts"));
-  const forbiddenExternals = ["@prisma/client", "@agentos/db", "@agentos/runner", "@agentos/api", "@agentos/inbox"];
+  const forbiddenExternals = ["@prisma/client", "@anneal/db", "@anneal/runner", "@anneal/api", "@anneal/inbox"];
   for (const specifier of externals) {
-    // The one permitted `@agentos/db` entry point is its PURE record-convention
+    // The one permitted `@anneal/db` entry point is its PURE record-convention
     // subpath, which imports nothing at all — not the package index, which would
     // pull in Prisma and every control-plane query.
-    if (specifier === "@agentos/db/merge-integrator") continue;
-    // `@agentos/github-client` is permitted and is not on the list: it has no
+    if (specifier === "@anneal/db/merge-integrator") continue;
+    // `@anneal/github-client` is permitted and is not on the list: it has no
     // runtime dependencies, holds no credential, and spawns nothing — the test
     // above asserts the last of those against its actual source.
-    if (specifier === "@agentos/github-client") continue;
+    if (specifier === "@anneal/github-client") continue;
     assert.equal(forbiddenExternals.includes(specifier), false, `the executor must not import ${specifier}`);
   }
   for (const file of files) {

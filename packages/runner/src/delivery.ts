@@ -1,4 +1,4 @@
-import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@agentos/github-client";
+import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@anneal/github-client";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -422,7 +422,7 @@ export const deliverWorkspace = async (
  * reports `Run.branch` as the workspace branch (runner.ts spreads the workspace
  * result before this one), so a salvaged run still *looks* like a push to the
  * shared branch in that column. `pushedBranch` is the column that tells the
- * truth, and it is the only one @agentos/db's resolveRunBranches trusts. Keep
+ * truth, and it is the only one @anneal/db's resolveRunBranches trusts. Keep
  * them in sync: whatever ref is handed to `git push` is the ref reported as
  * `pushedBranch`.
  */

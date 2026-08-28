@@ -25,7 +25,7 @@ import {
   RunnerPreference,
   TaskStatus,
   type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { noteArchivedQueuedRuns } from "./reconcile.js";

@@ -11,7 +11,7 @@
  *   has run `npm run setup:local` the check runs against real generated secrets
  *   rather than against a shape.
  *
- * It fails closed on a missing bundle: `npm run build -w @agentos/web` comes
+ * It fails closed on a missing bundle: `npm run build -w @anneal/web` comes
  * first, and a scan that silently skips the artefact it exists to inspect
  * reports a green that means nothing.
  *
@@ -180,7 +180,7 @@ if (isCli) {
   } else {
     console.error(`secret-hygiene refused: ${result.findings.join(", ")}`);
     if (result.findings.some((finding) => finding.startsWith("bundle-"))) {
-      console.error("Build the web bundle first: npm run build -w @agentos/web");
+      console.error("Build the web bundle first: npm run build -w @anneal/web");
     }
     process.exitCode = 1;
   }

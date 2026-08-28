@@ -14,7 +14,7 @@ const stamped = (overrides = {}) => ({
   stamped: true,
   commit: OID,
   dirty: false,
-  packageName: "@agentos/api",
+  packageName: "@anneal/api",
   version: "0.0.0",
   builtAt: "2026-08-18T00:00:00.000Z",
   ...overrides,
@@ -43,7 +43,7 @@ test("a stamp round-trips through the reader", () => {
     assert.equal(info.stamped, true);
     assert.equal(info.commit, OID);
     assert.equal(info.dirty, false);
-    assert.equal(info.packageName, "@agentos/api");
+    assert.equal(info.packageName, "@anneal/api");
     assert.equal(info.builtAt, "2026-08-18T00:00:00.000Z");
   });
 });
@@ -83,7 +83,7 @@ test("a dirty build never renders as the bare commit", () => {
 test("the startup line names the sha, the package and when it was built", () => {
   assert.equal(
     formatBuildLine(stamped()),
-    `sha=${OID} package=@agentos/api@0.0.0 builtAt=2026-08-18T00:00:00.000Z`,
+    `sha=${OID} package=@anneal/api@0.0.0 builtAt=2026-08-18T00:00:00.000Z`,
   );
   assert.equal(formatBuildLine(UNSTAMPED), "sha=unbuilt package=unknown@unknown builtAt=unknown");
 });
@@ -118,8 +118,8 @@ test("an expected commit that is not a full object id is refused, not prefix-mat
 });
 
 test("the wrong package is refused even when the commit is right", () => {
-  assert.equal(reconcile(stamped(), OID, "@agentos/api").ok, true);
-  const swapped = reconcile(stamped(), OID, "@agentos/runner");
+  assert.equal(reconcile(stamped(), OID, "@anneal/api").ok, true);
+  const swapped = reconcile(stamped(), OID, "@anneal/runner");
   assert.equal(swapped.ok, false);
   assert.match(swapped.reason, /holds a @agentos\/api build, expected @agentos\/runner/);
   // Unbound is still allowed, and says so rather than implying it checked.
@@ -127,10 +127,10 @@ test("the wrong package is refused even when the commit is right", () => {
 });
 
 test("a running service's version document reads back into the same shape as a stamp", () => {
-  const document = { service: "@agentos/api", version: "0.0.0", buildSha: OID, commit: OID, dirty: false, stamped: true, builtAt: "t" };
+  const document = { service: "@anneal/api", version: "0.0.0", buildSha: OID, commit: OID, dirty: false, stamped: true, builtAt: "t" };
   assert.deepEqual(buildInfoFromVersionDocument(document), {
-    service: "@agentos/api",
-    info: { stamped: true, commit: OID, dirty: false, packageName: "@agentos/api", version: "0.0.0", builtAt: "t" },
+    service: "@anneal/api",
+    info: { stamped: true, commit: OID, dirty: false, packageName: "@anneal/api", version: "0.0.0", builtAt: "t" },
   });
 
   // A process running from source, and anything malformed, read as unstamped —

@@ -20,7 +20,7 @@ import {
   SessionExecutionStatus,
   taskIsIntegratorStep,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import type { ClaimInput } from "./app.js";
 import { issueSessionToken } from "./auth.js";

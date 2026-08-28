@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 
 import { CONTROL_PLANE_OWNERSHIP_EXIT_CODE } from "./control-plane-ownership.js";
 import { controlPlaneOwnerFilename } from "./control-plane-state.js";

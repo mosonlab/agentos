@@ -8,7 +8,7 @@ import {
   DEPLOY_BARRIER_KEY,
   deployBarrierAllowsClaim,
   PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 

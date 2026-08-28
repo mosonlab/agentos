@@ -35,8 +35,8 @@ const repoRoot = resolve(fileURLToPath(import.meta.url), "../../..");
  *  that silently verifies fewer things than the operator assumes is worse than
  *  no check. */
 export const DEFAULT_DISTS = [
-  { dist: "packages/api/dist", packageName: "@agentos/api", base: "repo" },
-  { dist: "packages/runner/dist", packageName: "@agentos/runner", base: "repo" },
+  { dist: "packages/api/dist", packageName: "@anneal/api", base: "repo" },
+  { dist: "packages/runner/dist", packageName: "@anneal/runner", base: "repo" },
 ];
 
 export const parseArguments = (argv) => {

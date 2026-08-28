@@ -18,7 +18,7 @@ import { ScratchDatabaseManager } from "./testdb.js";
  * the API's own `build` script, because none of them run it.
  *
  * This one starts from the artefacts the real build produced — `pretest:db`
- * runs `npm run build -w @agentos/api` and `-w @agentos/runner` before this
+ * runs `npm run build -w @anneal/api` and `-w @anneal/runner` before this
  * file is loaded — and follows the commit all the way to a real process
  * answering a real port:
  *
@@ -101,8 +101,8 @@ test("build provenance survives the whole path from the build script to /version
   // --- the real build stamped both artefacts -------------------------------
 
   const [apiStamp, runnerStamp] = await Promise.all([readStamp(apiDist), readStamp(runnerDist)]);
-  assert.equal(apiStamp.packageName, "@agentos/api");
-  assert.equal(runnerStamp.packageName, "@agentos/runner");
+  assert.equal(apiStamp.packageName, "@anneal/api");
+  assert.equal(runnerStamp.packageName, "@anneal/runner");
   for (const stamp of [apiStamp, runnerStamp]) {
     assert.equal(stamp.commit, head, "the stamp names the commit this worktree is at");
     assert.equal(stamp.dirty, worktreeIsDirty, "the stamp agrees with git about uncommitted work");
@@ -155,10 +155,10 @@ test("build provenance survives the whole path from the build script to /version
     ["stale", await mutated("stale", (stamp) => ({ ...stamp, commit: "f".repeat(40) })), /built from f{40}/],
     ["dirty", await mutated("dirty", (stamp) => ({ ...stamp, dirty: true })), /uncommitted changes/],
     ["unstamped", await mutated("unstamped", () => null), /never built/],
-    ["wrong package", await mutated("swapped", (stamp) => ({ ...stamp, packageName: "@agentos/runner" })), /holds a @agentos\/runner build/],
+    ["wrong package", await mutated("swapped", (stamp) => ({ ...stamp, packageName: "@anneal/runner" })), /holds a @agentos\/runner build/],
   ];
   for (const [label, directory, reason] of refusals) {
-    const verdict = runVerify(["--expected", head, "--dist", directory, "--package", "@agentos/api"]);
+    const verdict = runVerify(["--expected", head, "--dist", directory, "--package", "@anneal/api"]);
     assert.equal(verdict.status, 1, `${label}: ${verdict.output}`);
     assert.match(verdict.output, reason, label);
   }
@@ -194,7 +194,7 @@ test("build provenance survives the whole path from the build script to /version
   // Printed before ownership, the database or the port could have failed.
   assert.match(
     ready,
-    new RegExp(`^AgentOS API build: sha=${expectedSha} package=@agentos/api@${apiStamp.version} builtAt=${apiStamp.builtAt}`, "u"),
+    new RegExp(`^AgentOS API build: sha=${expectedSha} package=@anneal/api@${apiStamp.version} builtAt=${apiStamp.builtAt}`, "u"),
   );
 
   const port = Number(ready.match(/AgentOS API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
@@ -206,7 +206,7 @@ test("build provenance survives the whole path from the build script to /version
   const response = await fetch(`${base}/version`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
-    service: "@agentos/api",
+    service: "@anneal/api",
     version: apiStamp.version,
     buildSha: expectedSha,
     commit: apiStamp.commit,
@@ -217,11 +217,11 @@ test("build provenance survives the whole path from the build script to /version
 
   // The last hop the restart script itself takes: ask the running process, not
   // the directory, whether it is the approved commit.
-  const running = runVerify(["--expected", head, "--url", base, "--package", "@agentos/api"]);
+  const running = runVerify(["--expected", head, "--url", base, "--package", "@anneal/api"]);
   assert.equal(running.status, worktreeIsDirty ? 1 : 0, running.output);
   assert.match(running.output, worktreeIsDirty ? /uncommitted changes/ : /every artefact is/);
 
-  const runningWrongCommit = runVerify(["--expected", "0".repeat(40), "--url", base, "--package", "@agentos/api"]);
+  const runningWrongCommit = runVerify(["--expected", "0".repeat(40), "--url", base, "--package", "@anneal/api"]);
   assert.equal(runningWrongCommit.status, 1);
 
   child.kill("SIGTERM");

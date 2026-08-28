@@ -10,7 +10,7 @@
  * `import-graph.test.ts` precisely so that stays true.
  */
 
-import type { MergeOutcome } from "@agentos/db/merge-integrator";
+import type { MergeOutcome } from "@anneal/db/merge-integrator";
 
 import type { ExecutorConfig } from "./config.js";
 import type { ChainEnvelope, IntentRecord } from "./decision-table.js";

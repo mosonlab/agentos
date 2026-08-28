@@ -1,4 +1,4 @@
-/** Batch 0 fixture. Run db:seed first, then `npm run db:fixture -w @agentos/db`.
+/** Batch 0 fixture. Run db:seed first, then `npm run db:fixture -w @anneal/db`.
  * Re-running deletes and recreates all fixture-owned records. */
 import { createCipheriv, randomBytes } from "node:crypto";
 import {

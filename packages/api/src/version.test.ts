@@ -2,8 +2,8 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type BuildInfo } from "@agentos/build-info";
-import type { PrismaClient } from "@agentos/db";
+import { type BuildInfo } from "@anneal/build-info";
+import type { PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { API_SERVICE, apiBuildLine, versionPayload } from "./version.js";
@@ -24,7 +24,7 @@ test("the version endpoint answers without a token and without touching Prisma",
   const response = await createApp({} as PrismaClient).request("/version");
   assert.equal(response.status, 200);
   const body = await response.json() as Record<string, unknown>;
-  assert.equal(body.service, "@agentos/api");
+  assert.equal(body.service, "@anneal/api");
   assert.deepEqual(Object.keys(body).sort(), ["buildSha", "builtAt", "commit", "dirty", "service", "stamped", "version"]);
 });
 
@@ -40,7 +40,7 @@ test("a process running from source says so instead of naming a commit", async (
 
 test("a built process reports the commit its dist was built from", () => {
   assert.deepEqual(versionPayload(built()), {
-    service: "@agentos/api",
+    service: "@anneal/api",
     version: "0.0.0",
     buildSha: OID,
     commit: OID,
@@ -67,7 +67,7 @@ test("the version document carries provenance and nothing else", () => {
 test("the startup line names the service and the build in one greppable line", () => {
   assert.equal(
     apiBuildLine(built()),
-    `AgentOS API build: sha=${OID} package=@agentos/api@0.0.0 builtAt=2026-08-18T00:00:00.000Z`,
+    `AgentOS API build: sha=${OID} package=@anneal/api@0.0.0 builtAt=2026-08-18T00:00:00.000Z`,
   );
   assert.match(apiBuildLine(), /^AgentOS API build: sha=unbuilt /);
 });

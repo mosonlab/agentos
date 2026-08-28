@@ -24,7 +24,7 @@ import {
   type DecisionRow,
   type PrismaClient,
   type MergeRecoveryAttempt,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { createGitHubReader, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 import {

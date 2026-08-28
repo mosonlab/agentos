@@ -13,7 +13,7 @@
  * What it creates is fixed, not configurable (plan Fixed Decisions 3 and 4):
  *
  *   1 Project, 1 Environment (`OPEN`, no allowed hosts), 1 Agent (the canonical
- *   CODEX `default` starter, read from `agents/` through @agentos/db so no model
+ *   CODEX `default` starter, read from `agents/` through @anneal/db so no model
  *   or prompt is duplicated here), 1 Repo with no credential secret, and 1
  *   `GIT_WRITE` `AgentRepoAccess`.
  *
@@ -37,7 +37,7 @@ import {
   STARTER_MOUNT_PATH,
   type StarterAgentSource,
   loadStarterAgentSource,
-} from "@agentos/db";
+} from "@anneal/db";
 import { z } from "zod";
 
 import { isValidBranchName } from "./branch-name.js";
@@ -166,7 +166,7 @@ export const parseRepoRemote = (raw: string): RemoteVerdict => {
 
 /**
  * Plan Step 4 fixes the created shape down to one mount, so `STARTER_MOUNT_PATH`
- * (@agentos/db, shared with the verifier) is a constant rather than a validated
+ * (@anneal/db, shared with the verifier) is a constant rather than a validated
  * input: an installation that mounted the starter repo somewhere else would
  * satisfy every count the verifier makes and still not be the shape the release
  * evidence describes. The request may still carry `mountPath`, because the

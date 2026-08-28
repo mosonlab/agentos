@@ -12,7 +12,7 @@
  *
  *   AGENTOS_ALLOW_SCRATCH_DATABASES=1 \
  *   TEST_DATABASE_URL=postgresql://...:55777/...?schema=... \
- *     npm run test:db -w @agentos/db
+ *     npm run test:db -w @anneal/db
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";

@@ -12,7 +12,7 @@ import {
   recoveryContext,
   TaskStatus,
   writeMarker,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { settleLease } from "./merge-lease.js";

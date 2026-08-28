@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma, type PrismaClient } from "@agentos/db";
+import { Prisma, type PrismaClient } from "@anneal/db";
 
 import {
   isSerializationConflict,

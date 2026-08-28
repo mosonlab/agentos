@@ -1,9 +1,9 @@
-import { formatBuildLine, readBuildInfo } from "@agentos/build-info";
+import { formatBuildLine, readBuildInfo } from "@anneal/build-info";
 import {
   holdSharedServiceMaintenanceLock,
   ServiceMaintenanceLockError,
   SERVICE_LOCK_CONTENTION_EXIT_CODE,
-} from "@agentos/db/service-lock";
+} from "@anneal/db/service-lock";
 import { config as loadEnvironment } from "dotenv";
 
 loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true });

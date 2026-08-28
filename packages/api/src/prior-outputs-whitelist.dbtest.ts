@@ -3,9 +3,9 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, FailureClass, PrismaClient, RunStatus, TaskStatus } from "@agentos/db";
-import { buildPrompt } from "@agentos/runner/adapters";
-import type { ClaimedTask } from "@agentos/runner/api";
+import { enqueueTaskRun, FailureClass, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import { buildPrompt } from "@anneal/runner/adapters";
+import type { ClaimedTask } from "@anneal/runner/api";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";

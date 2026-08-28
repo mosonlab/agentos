@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
  *
  * This is a build regression test, so it reads `apps/web/dist` and refuses to
  * run without it: a suite that silently skips when the build is missing reports
- * a green that means nothing. `npm run build -w @agentos/web` comes first, and
+ * a green that means nothing. `npm run build -w @anneal/web` comes first, and
  * `npm run verify:secret-hygiene` applies the same rules across the whole
  * repository from outside the workspace.
  */
@@ -19,7 +19,7 @@ const distDirectory = fileURLToPath(new URL("../../dist/", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 
 if (!existsSync(distDirectory)) {
-  throw new Error("Build apps/web before running the bundle secret-hygiene test (npm run build -w @agentos/web)");
+  throw new Error("Build apps/web before running the bundle secret-hygiene test (npm run build -w @anneal/web)");
 }
 
 const bundleFiles = (): Array<{ path: string; text: string }> => {

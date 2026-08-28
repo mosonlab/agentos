@@ -1,11 +1,11 @@
 /**
- * The model catalog and the runner rule live in `@agentos/db/model-routing`,
+ * The model catalog and the runner rule live in `@anneal/db/model-routing`,
  * a subpath that imports nothing at all, so the console reads the same rule the
  * control plane runs instead of a hand copy of it. This module re-exports that
  * surface and adds the one question only the console asks.
  */
 
-import { runnerFor, splitModel } from "@agentos/db/model-routing";
+import { runnerFor, splitModel } from "@anneal/db/model-routing";
 import type { RunnerPreference } from "./types";
 
 export {
@@ -18,8 +18,8 @@ export {
   splitModel,
   TOOL_KEYS,
   validateModelPair,
-} from "@agentos/db/model-routing";
-export type { CatalogModel, ModelPairIssue } from "@agentos/db/model-routing";
+} from "@anneal/db/model-routing";
+export type { CatalogModel, ModelPairIssue } from "@anneal/db/model-routing";
 
 /** Whether the pair exposes the Codex service tier. A console control: the
  *  field exists on every agent, and this decides where it is worth showing. */

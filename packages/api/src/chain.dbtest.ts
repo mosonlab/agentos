@@ -11,7 +11,7 @@ import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   Prisma,
   PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { instantiateTemplate } from "./templates.js";

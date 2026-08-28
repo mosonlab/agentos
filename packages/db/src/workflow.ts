@@ -74,7 +74,7 @@ export class WorkflowRefusalError extends Error {
 export const isWorkflowRefusalError = (error: unknown): error is WorkflowRefusalError =>
   error instanceof Error && error.name === "WorkflowRefusalError";
 
-// The runner rule moved to the pure `@agentos/db/model-routing` subpath, which
+// The runner rule moved to the pure `@anneal/db/model-routing` subpath, which
 // the browser can import without pulling in Prisma. Imported here beside its
 // re-export so this module's own callers and its importers read the same rule.
 import { runnerFor } from "./model-routing.js";
@@ -1020,7 +1020,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
   // §D-P3 Phase A. A gate whose successor executes mechanically opens a
   // placeholder card and asks the evidence worker to fill it, rather than
   // reading GitHub here: this function runs inside applyInboxDecisionTx in the
-  // separate @agentos/inbox process, which can reach neither the API's GitHub
+  // separate @anneal/inbox process, which can reach neither the API's GitHub
   // client nor its configuration (MF-3). The read also must not happen inside
   // this lock-holding transaction (SF-2). Chains without a mechanical successor never enter
   // this branch and are byte-for-byte unchanged.
@@ -2065,7 +2065,7 @@ export type MergeAuthorizationResult = {
  * disagree with what the human read.
  *
  * It performs no network I/O and reads no field that was not already persisted,
- * so it runs unchanged in the @agentos/inbox process and inside the API's PATCH
+ * so it runs unchanged in the @anneal/inbox process and inside the API's PATCH
  * transaction, and it holds no lock across a remote call.
  */
 export const produceMergeAuthorization = async (

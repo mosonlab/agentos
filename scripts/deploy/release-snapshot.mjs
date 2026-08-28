@@ -124,8 +124,8 @@ const validateBuildEntry = (cacheRoot, revision, buildKey, expectedFiles = null)
   if (readFileSync(ready, "utf8").trim() !== buildKey) invalid("build-entry-ready-mismatch");
   const tree = join(entry, "tree");
   assertDirectory(tree, "build-entry-tree");
-  assertBuildStamp(tree, "packages/api/dist/build-info.json", revision, "@agentos/api");
-  assertBuildStamp(tree, "packages/runner/dist/build-info.json", revision, "@agentos/runner");
+  assertBuildStamp(tree, "packages/api/dist/build-info.json", revision, "@anneal/api");
+  assertBuildStamp(tree, "packages/runner/dist/build-info.json", revision, "@anneal/runner");
   const files = inventoryBuildOutputs(tree);
   if (expectedFiles !== null && JSON.stringify(files) !== JSON.stringify(expectedFiles)) {
     invalid("build-entry-content-mismatch");

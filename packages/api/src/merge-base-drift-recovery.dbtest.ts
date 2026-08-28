@@ -16,7 +16,7 @@ import {
   writeMarker,
   recordIntegratorStop,
   type StopCondition,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";

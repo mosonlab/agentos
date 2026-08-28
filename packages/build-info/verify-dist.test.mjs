@@ -29,18 +29,18 @@ const withDeployment = (stamps, callback) => {
 const stamp = (overrides = {}) => ({
   commit: OID,
   dirty: false,
-  packageName: "@agentos/api",
+  packageName: "@anneal/api",
   version: "0.0.0",
   builtAt: "2026-08-18T00:00:00.000Z",
   ...overrides,
 });
 
-const runnerStamp = (overrides = {}) => stamp({ packageName: "@agentos/runner", ...overrides });
+const runnerStamp = (overrides = {}) => stamp({ packageName: "@anneal/runner", ...overrides });
 
 test("the api and the runner are both checked, each bound to the package it must hold", () => {
   assert.deepEqual(DEFAULT_DISTS, [
-    { dist: "packages/api/dist", packageName: "@agentos/api", base: "repo" },
-    { dist: "packages/runner/dist", packageName: "@agentos/runner", base: "repo" },
+    { dist: "packages/api/dist", packageName: "@anneal/api", base: "repo" },
+    { dist: "packages/runner/dist", packageName: "@anneal/runner", base: "repo" },
   ]);
   assert.deepEqual(parseArguments(["--expected", OID]).dists, DEFAULT_DISTS);
   assert.match(parseArguments([]).error, /--expected/);
@@ -49,18 +49,18 @@ test("the api and the runner are both checked, each bound to the package it must
 });
 
 test("a caller-named target is anchored to the caller and unbound until --package says otherwise", () => {
-  assert.deepEqual(parseArguments([`--expected=${OID}`, "--dist=a", "--dist", "b", "--package", "@agentos/runner"]), {
+  assert.deepEqual(parseArguments([`--expected=${OID}`, "--dist=a", "--dist", "b", "--package", "@anneal/runner"]), {
     expected: OID,
     dists: [
       { dist: "a", packageName: null, base: "cwd" },
-      { dist: "b", packageName: "@agentos/runner", base: "cwd" },
+      { dist: "b", packageName: "@anneal/runner", base: "cwd" },
     ],
     urls: [],
   });
-  assert.deepEqual(parseArguments(["--expected", OID, "--url", "http://x/", "--package", "@agentos/api"]).urls, [
-    { url: "http://x", packageName: "@agentos/api" },
+  assert.deepEqual(parseArguments(["--expected", OID, "--url", "http://x/", "--package", "@anneal/api"]).urls, [
+    { url: "http://x", packageName: "@anneal/api" },
   ]);
-  assert.match(parseArguments(["--expected", OID, "--package", "@agentos/api"]).error, /must follow the --dist or --url/);
+  assert.match(parseArguments(["--expected", OID, "--package", "@anneal/api"]).error, /must follow the --dist or --url/);
   assert.match(parseArguments(["--expected", OID, "--dist", "a", "--package", "x", "--package", "y"]).error, /given twice/);
 });
 
@@ -140,12 +140,12 @@ test("the CLI's exit code is the verdict", () => {
 });
 
 test("a running service is asked the same question as a directory", async () => {
-  const document = { service: "@agentos/api", version: "0.0.0", buildSha: OID, commit: OID, dirty: false, stamped: true, builtAt: "x" };
+  const document = { service: "@anneal/api", version: "0.0.0", buildSha: OID, commit: OID, dirty: false, stamped: true, builtAt: "x" };
   const respond = (body, status = 200) => async () => ({ ok: status < 400, status, json: async () => body });
 
   const [matched] = await verifyUrls({
     expected: OID,
-    urls: [{ url: "http://api", packageName: "@agentos/api" }],
+    urls: [{ url: "http://api", packageName: "@anneal/api" }],
     fetchImplementation: respond(document),
   });
   assert.equal(matched.ok, true);
@@ -153,7 +153,7 @@ test("a running service is asked the same question as a directory", async () => 
 
   const [stale] = await verifyUrls({
     expected: OTHER,
-    urls: [{ url: "http://api", packageName: "@agentos/api" }],
+    urls: [{ url: "http://api", packageName: "@anneal/api" }],
     fetchImplementation: respond(document),
   });
   assert.equal(stale.ok, false);
@@ -163,15 +163,15 @@ test("a running service is asked the same question as a directory", async () => 
   // expected to be on that port, not against its own claim.
   const [impostor] = await verifyUrls({
     expected: OID,
-    urls: [{ url: "http://api", packageName: "@agentos/api" }],
-    fetchImplementation: respond({ ...document, service: "@agentos/runner" }),
+    urls: [{ url: "http://api", packageName: "@anneal/api" }],
+    fetchImplementation: respond({ ...document, service: "@anneal/runner" }),
   });
   assert.equal(impostor.ok, false);
   assert.match(impostor.reason, /holds a @agentos\/runner build/);
 
   const [unbuilt] = await verifyUrls({
     expected: OID,
-    urls: [{ url: "http://api", packageName: "@agentos/api" }],
+    urls: [{ url: "http://api", packageName: "@anneal/api" }],
     fetchImplementation: respond({ ...document, stamped: false, commit: null }),
   });
   assert.equal(unbuilt.ok, false);
@@ -179,7 +179,7 @@ test("a running service is asked the same question as a directory", async () => 
 
   const [errored] = await verifyUrls({
     expected: OID,
-    urls: [{ url: "http://api", packageName: "@agentos/api" }],
+    urls: [{ url: "http://api", packageName: "@anneal/api" }],
     fetchImplementation: respond({}, 503),
   });
   assert.equal(errored.ok, false);
@@ -187,7 +187,7 @@ test("a running service is asked the same question as a directory", async () => 
 
   const [unreachable] = await verifyUrls({
     expected: OID,
-    urls: [{ url: "http://api", packageName: "@agentos/api" }],
+    urls: [{ url: "http://api", packageName: "@anneal/api" }],
     fetchImplementation: async () => { throw new Error("ECONNREFUSED"); },
   });
   assert.equal(unreachable.ok, false);
