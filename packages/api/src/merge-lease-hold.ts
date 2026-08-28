@@ -6,6 +6,11 @@ import {
   type Prisma,
   type PrismaClient,
 } from "@anneal/db";
+import {
+  mergeLeaseHold,
+  type MergeLeaseHold,
+  type MergeLeaseRelease,
+} from "./merge-lease.js";
 
 /** The identity needed to attribute one external merge lease to a chain. */
 export type MergeLeaseTarget = {
@@ -13,46 +18,13 @@ export type MergeLeaseTarget = {
   chainId: string;
 };
 
-/**
- * The release result consumed by the recorder. Keeping the non-release arms in
- * this type makes the guard at the persistence boundary explicit: only a
- * release that confirmed deletion and returned the blob timestamp is evidence
- * of a held lease.
- */
-export type MergeLeaseReleaseForHold =
-  | { outcome: "released"; ref: string; sha: string; acquiredAt: string }
-  | { outcome: "not-held" }
-  | { outcome: "skipped"; heldFor: string }
-  | { outcome: "refused"; heldBy: string }
-  | { outcome: "unreachable"; detail: string };
+/** Backward-compatible name for the canonical release result. */
+export type MergeLeaseReleaseForHold = MergeLeaseRelease;
 
-export type MergeLeaseHold = {
-  acquiredAt: Date;
-  releasedAt: Date;
-  heldForSeconds: number;
-};
+export { mergeLeaseHold } from "./merge-lease.js";
+export type { MergeLeaseHold } from "./merge-lease.js";
 
 export type MergeLeaseHoldRecordResult = "recorded" | "already-recorded" | "ignored";
-
-/**
- * Calculate whole elapsed seconds from the timestamp persisted in a lease blob.
- * Invalid timestamps produce no evidence, and a clock adjustment is clamped to
- * zero so a hold record never claims a negative duration.
- */
-export const mergeLeaseHold = (
-  acquiredAt: string,
-  releasedAt: Date,
-): MergeLeaseHold | null => {
-  if (typeof acquiredAt !== "string") return null;
-  const acquiredAtMs = Date.parse(acquiredAt);
-  const releasedAtMs = releasedAt.getTime();
-  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
-  return {
-    acquiredAt: new Date(acquiredAtMs),
-    releasedAt: new Date(releasedAtMs),
-    heldForSeconds: Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000)),
-  };
-};
 
 /**
  * Stable primary key for a hold marker. TaskActivity has no semantic unique
