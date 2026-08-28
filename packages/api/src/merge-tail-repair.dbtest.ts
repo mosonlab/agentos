@@ -491,7 +491,7 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
   });
 });
 
-test("a repaired Regression retry pins the prior same-task published head without rewriting repair evidence", async () => {
+test("a repaired Regression retry pins a failed prior Run's published head without rewriting repair evidence", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");
   await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
@@ -507,7 +507,8 @@ test("a repaired Regression retry pins the prior same-task published head withou
   await db.run.update({
     where: { id: firstBody.run.id },
     data: {
-      status: "SUCCEEDED",
+      status: "FAILED",
+      failureReason: "mechanical output handoff failed after the verdict was published",
       headSha: continuationHead,
       pushedBranch: BRANCH,
       pushStatus: "SUCCEEDED",

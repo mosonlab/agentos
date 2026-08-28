@@ -124,7 +124,6 @@ export const regressionRepairHandoffForClaim = async (
     where: {
       taskId: input.taskId,
       runNumber: { gt: 1, lt: input.runNumber },
-      status: RunStatus.SUCCEEDED,
       pushStatus: PushStatus.SUCCEEDED,
       pushedBranch: input.branch,
       headSha: { not: null },

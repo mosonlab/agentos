@@ -363,6 +363,39 @@ test("a negative Regression verdict settles mechanically when provider transport
   }
 });
 
+test("a Regression mechanical output handoff retries a transient control-plane failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-output-retry-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "regression-agent.sh");
+    await writeFile(agentBinary, regressionFailureAgent);
+    await chmod(agentBinary, 0o755);
+    let attempts = 0;
+    const controlPlane = createControlPlaneDouble({
+      persistSessionTaskOutput: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new ControlPlaneError(500, "transaction expired");
+      },
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      regressionOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    assert.equal(attempts, 2);
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    const retrying = controlPlane.eventBatches.flat()
+      .find(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_RETRYING");
+    assert.equal(retrying?.payload.attempt, 1);
+    assert.equal(retrying?.payload.attempts, 3);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Regression v2 never resumes the model to remediate an absent mechanical handoff", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-regression-no-model-remediation-"));
   try {
