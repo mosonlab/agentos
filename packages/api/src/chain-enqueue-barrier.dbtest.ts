@@ -96,16 +96,66 @@ test("a due AT task at the held layer queues exactly once, and a released held c
   assert.deepEqual(await schedulerTick(db, due), { cronFired: 0, atFired: 0, quarantined: 0 });
   assert.equal(await db.run.count({ where: { taskId: current.id } }), 1);
 
+  // A cancelled predecessor is terminal state, not a provider conversation
+  // that Resume may resurrect. Keep its complete database facts so the
+  // release assertion proves the old Run and Session remain byte-stable.
+  const cancelledRun = await db.run.create({ data: {
+    projectId: seed.project.id,
+    taskId: later.id,
+    agentId: seed.agent.id,
+    repoId: seed.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${later.id}:run:1`,
+    runner: "CLAUDE",
+    model: "claude",
+    status: "CANCELLED",
+    cancelRequestId: "cancelled-before-release",
+    cancelReason: "operator cancelled before hold release",
+    cancelRequestedAt: new Date(due.getTime() - 30_000),
+    cancelAcknowledgedAt: new Date(due.getTime() - 29_000),
+    terminationReason: "operator cancelled before hold release",
+    endedAt: new Date(due.getTime() - 28_000),
+  } });
+  const cancelledSession = await db.session.create({ data: {
+    runId: cancelledRun.id,
+    projectId: seed.project.id,
+    taskId: later.id,
+    agentId: seed.agent.id,
+    runner: "CLAUDE",
+    executionStatus: "CANCELLED",
+    providerConversationId: "cancelled-provider-conversation",
+    terminationReason: "operator cancelled before hold release",
+    endedAt: new Date(due.getTime() - 28_000),
+  } });
+  const cancelledRunBeforeRelease = await db.run.findUniqueOrThrow({ where: { id: cancelledRun.id } });
+  const cancelledSessionBeforeRelease = await db.session.findUniqueOrThrow({ where: { id: cancelledSession.id } });
+
   await db.chainControl.update({
     where: { projectId_chainId: { projectId: seed.project.id, chainId: current.chainId! } },
     data: { state: ChainControlState.RELEASED, releasedAt: new Date(due.getTime() + 1_000), releaseRequestId: "resume-test" },
   });
   assert.deepEqual(await schedulerTick(db, due), { cronFired: 0, atFired: 1, quarantined: 0 });
-  assert.equal(await db.run.count({ where: { taskId: later.id } }), 1, "release makes the existing due schedule eligible");
-  assert.equal(await db.run.count({ where: { taskId: later.id, status: "CANCELLED" } }), 0);
-  assert.equal(await db.session.count({ where: { taskId: later.id } }), 0, "release creates a fresh queued Run, not a provider session");
+  const laterRuns = await db.run.findMany({
+    where: { taskId: later.id },
+    orderBy: { runNumber: "asc" },
+    include: { session: true },
+  });
+  assert.equal(laterRuns.length, 2, "release creates exactly one new Run");
+  const [cancelledAfterRelease, freshRun] = laterRuns;
+  assert.ok(cancelledAfterRelease);
+  assert.ok(freshRun);
+  assert.equal(cancelledAfterRelease.id, cancelledRun.id);
+  assert.equal(cancelledAfterRelease.status, "CANCELLED");
+  assert.equal(freshRun.id !== cancelledRun.id, true, "release does not reuse the cancelled Run");
+  assert.equal(freshRun.runNumber, 2);
+  assert.equal(freshRun.status, "QUEUED");
+  assert.equal(freshRun.session, null, "release creates a fresh queued Run, not a provider session");
+  assert.equal(await db.session.count({ where: { runId: freshRun.id } }), 0, "the fresh Run has no provider conversation attachment");
+  assert.deepEqual(await db.run.findUniqueOrThrow({ where: { id: cancelledRun.id } }), cancelledRunBeforeRelease, "the cancelled Run remains byte-stable");
+  assert.deepEqual(await db.session.findUniqueOrThrow({ where: { id: cancelledSession.id } }), cancelledSessionBeforeRelease, "the cancelled provider Session remains byte-stable");
+  assert.equal((await db.session.findUniqueOrThrow({ where: { id: cancelledSession.id } })).providerConversationId, "cancelled-provider-conversation");
   assert.deepEqual(await schedulerTick(db, due), { cronFired: 0, atFired: 0, quarantined: 0 });
-  assert.equal(await db.run.count({ where: { taskId: later.id } }), 1, "the released schedule is still one-shot");
+  assert.equal(await db.run.count({ where: { taskId: later.id } }), 2, "the released schedule is still one-shot");
 });
 
 test("the shared producer gate preserves unheld, released, and chainless scheduled tasks", async () => {

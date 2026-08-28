@@ -5,6 +5,7 @@ import {
   INTEGRATOR_AGENT_NAME,
   Prisma,
   type PrismaClient,
+  RunStatus,
   ScheduleKind,
   type Task,
   TaskSource,
@@ -196,7 +197,11 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       if (!locked) return false;
       const current = await tx.task.findUniqueOrThrow({
         where: { id: task.id },
-        select: { status: true, archivedAt: true, _count: { select: { runs: true } } },
+        select: {
+          status: true,
+          archivedAt: true,
+          _count: { select: { runs: { where: { status: { not: RunStatus.CANCELLED } } } } },
+        },
       });
       if (current.archivedAt !== null || current.status !== TaskStatus.TODO) return false;
       // An AT task fires exactly once — the same predicate the poll uses. Before
@@ -230,7 +235,10 @@ export const schedulerTick = async (db: PrismaClient, now = new Date()): Promise
       scheduleKind: ScheduleKind.AT,
       status: TaskStatus.TODO,
       runAt: { lte: now },
-      runs: { none: {} },
+      // A cancelled predecessor is terminal and cannot be resumed. It does
+      // not consume the AT definition's one fresh enqueue, while every other
+      // prior Run status keeps the original one-shot behavior.
+      runs: { none: { status: { not: RunStatus.CANCELLED } } },
       assigneeType: AssigneeType.AGENT,
       archivedAt: null,
     } }),
