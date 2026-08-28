@@ -1,6 +1,6 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
-import { COLUMNS, type Counts } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type Counts } from "../lib/board";
 import { useT } from "../lib/i18n";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -28,6 +28,7 @@ const TAB_ON = "border-border bg-accent text-foreground";
 const LIST = "mt-[14px] grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 const LIST_EMPTY = "px-0 py-[40px] text-center text-[12.5px] text-[color:var(--faint)]";
 const LIST_TOOLBAR = "mt-[14px] flex items-center gap-[10px]";
+const LIST_PAGER = "flex items-center justify-center gap-[8px]";
 
 export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArchiveDone, actions, listRef }: {
   tab: TaskStatus;
@@ -40,6 +41,17 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
   listRef: React.RefObject<HTMLDivElement | null>;
 }): ReactNode => {
   const t = useT();
+  const [page, setPage] = useState(0);
+  const lastPage = Math.max(0, Math.ceil(tasks.length / CARD_PAGE_SIZE) - 1);
+  const visiblePage = Math.min(page, lastPage);
+  const start = visiblePage * CARD_PAGE_SIZE;
+  const visibleTasks = tasks.slice(start, start + CARD_PAGE_SIZE);
+  const nextCount = Math.min(CARD_PAGE_SIZE, Math.max(0, tasks.length - start - CARD_PAGE_SIZE));
+  const previousCount = Math.min(CARD_PAGE_SIZE, start);
+  useEffect(() => { setPage(0); }, [tab]);
+  useEffect(() => {
+    if (page > lastPage) setPage(lastPage);
+  }, [lastPage, page]);
   return <>
     {/* A tablist, not five buttons: it is the page's primary navigation and the
         arrow keys are what a screen reader user reaches for. */}
@@ -90,7 +102,21 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
     >
       {/* No `draggable`: HTML5 drag does not fire on touch, and a card that
           looks draggable and is not is worse than one that does not (K15). */}
-      {tasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} />)}
+      {visibleTasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} />)}
+      {previousCount > 0 || nextCount > 0 ? (
+        <div className={LIST_PAGER}>
+          {previousCount > 0 ? (
+            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage - 1)}>
+              {t("tasks.column.previous", { n: previousCount })}
+            </Button>
+          ) : null}
+          {nextCount > 0 ? (
+            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage + 1)}>
+              {t("tasks.column.more", { n: nextCount })}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       {tasks.length === 0 ? <div className={LIST_EMPTY}>{t(loading ? "common.loading" : "tasks.column.nothing")}</div> : null}
     </div>
   </>;

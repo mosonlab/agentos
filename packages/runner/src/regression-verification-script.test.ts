@@ -83,10 +83,13 @@ printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_GATE_LOG"
 printf '%s\\n' "${"$"}{REGRESSION_FIXTURE_GATE_PROOF:-MERGE GATE: PASS $1}"
 exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
 `);
+  const inheritedEnvironment = { ...process.env };
+  delete inheritedEnvironment.AGENTOS_SESSION_TOKEN;
+  delete inheritedEnvironment.AGENTOS_FENCING_TOKEN;
   return {
     root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog,
     env: {
-      ...process.env,
+      ...inheritedEnvironment,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       AGENTOS_RUN_ID: "run-1",
       AGENTOS_WORKSPACE_PATH: work,
