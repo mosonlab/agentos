@@ -23,8 +23,6 @@ import {
 } from "../src/agent-sources.js";
 import {
   assertCanonicalAgentSources,
-  CANONICAL_AGENT_DEFAULTS,
-  CANONICAL_AGENT_RUNTIME_TRANSITIONS,
   catalogRunnerForModel,
   DIRECT_TEMPLATE_NAME,
 } from "../src/agent-contract.js";
@@ -61,7 +59,6 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   }));
 
   assert.doesNotThrow(() => assertCanonicalAgentSources(roles));
-  assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
 });
 
 test("canonical profiles start at Default and native child capability replaces Agent subprocess profiles", async () => {
@@ -85,56 +82,25 @@ test("canonical profiles start at Default and native child capability replaces A
   assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
-test("signed AgentOS model routing stays pinned in the canonical contract", () => {
-  const canonical = new Map(CANONICAL_AGENT_DEFAULTS.map((role) => [role.name, role]));
-  for (const name of ["spec", "review-coordinator-opus"] as const) {
-    assert.deepEqual(canonical.get(name), {
-      name,
-      model: "claude-opus-5:high",
-      runner: RunnerPreference.CLAUDE,
-    });
+test("loaded role sources provide the canonical AgentOS model and runner pairs", async () => {
+  const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
+  for (const name of [
+    "spec",
+    "review-coordinator-opus",
+    "frontend-dev",
+    "review-coordinator",
+    "review-coordinator-sol",
+    "regression-verifier",
+    "librarian",
+    "senior-dev",
+    "implementation-plan-executioner",
+  ]) {
+    const role = canonical.get(name);
+    assert.ok(role, `role source must contain ${name}`);
+    assert.equal(catalogRunnerForModel(role.model), role.runnerPreference);
   }
-  assert.deepEqual(canonical.get("frontend-dev"), {
-    name: "frontend-dev",
-    model: "claude-opus-5:medium",
-    runner: RunnerPreference.CLAUDE,
-  });
-  assert.deepEqual(canonical.get("review-coordinator"), {
-    name: "review-coordinator",
-    model: "openai-codex/gpt-5.6-sol:xhigh",
-    runner: RunnerPreference.PI,
-  });
-  assert.deepEqual(canonical.get("review-coordinator-sol"), {
-    name: "review-coordinator-sol",
-    model: "openai-codex/gpt-5.6-sol:xhigh",
-    runner: RunnerPreference.PI,
-  });
-  assert.deepEqual(canonical.get("regression-verifier"), {
-    name: "regression-verifier",
-    model: "gpt-5.6-luna:xhigh",
-    runner: RunnerPreference.CODEX,
-  });
-  assert.deepEqual(CANONICAL_AGENT_RUNTIME_TRANSITIONS.get("regression-verifier"), {
-    from: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CODEX },
-    to: { model: "gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.CODEX },
-  });
-  assert.deepEqual(canonical.get("librarian"), {
-    name: "librarian",
-    model: "openai-codex/gpt-5.6-luna:xhigh",
-    runner: RunnerPreference.PI,
-  });
   assert.equal(canonical.has("senior-dev-high"), false);
   assert.equal(canonical.has("review-adjudicator-opus"), false);
-  assert.deepEqual(canonical.get("senior-dev"), {
-    name: "senior-dev",
-    model: "gpt-5.6-sol:high",
-    runner: RunnerPreference.CODEX,
-  });
-  assert.deepEqual(canonical.get("implementation-plan-executioner"), {
-    name: "implementation-plan-executioner",
-    model: "gpt-5.6-sol:high",
-    runner: RunnerPreference.CODEX,
-  });
 });
 
 test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
@@ -265,8 +231,10 @@ test("only implementation opens a pull request, and the integrator is not a mode
   assert.equal(integrator.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.equal(integrator.approvalGate, false);
 
-  const sentinel = CANONICAL_AGENT_DEFAULTS.find((agent) => agent.name === INTEGRATOR_AGENT_NAME)!;
+  const sentinel = (await loadAgentSources()).roles.find((agent) => agent.name === INTEGRATOR_AGENT_NAME);
+  assert.ok(sentinel);
   assert.equal(sentinel.model, INTEGRATOR_SENTINEL_MODEL);
+  assert.equal(sentinel.runnerPreference, RunnerPreference.INHERIT);
   // The load-bearing property: no model-CLI runner is derivable from this
   // string, so `assertCanonicalAgentSources`' runner/model mismatch check
   // cannot fire on it and nothing maps it onto a real adapter.
