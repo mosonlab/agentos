@@ -1454,6 +1454,67 @@ test("Agent API does not mark unchanged runtime fields as an operator override",
   });
 });
 
+test("reset-runtime-config restores canonical runtime values and refuses non-canonical or archived agents", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const canonical = lockedAgent({
+      id: "agent-default",
+      name: "default",
+      model: "custom-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      runtimeConfigCustomized: true,
+      runtimeConfigDriftNoticeFingerprint: "stale-fingerprint",
+    });
+    const tx = {
+      $queryRaw: async (_strings: unknown, agentId: string) => agentId === "missing" ? [] : [{ id: agentId }],
+      agent: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          if (where.id === "agent-custom") return lockedAgent({
+            id: "agent-custom",
+            name: "operator-agent",
+            model: "custom-model",
+            runnerPreference: RunnerPreference.CLAUDE,
+          });
+          if (where.id === "agent-archived") return lockedAgent({
+            id: "agent-archived",
+            name: "default",
+            archivedAt: new Date(),
+            model: canonical!.model,
+            runnerPreference: canonical!.runnerPreference,
+          });
+          if (where.id === canonical!.id) return canonical;
+          return null;
+        },
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          updates.push(data);
+          return { ...canonical, ...data };
+        },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const request = (agentId: string) => app.request(`/agents/${agentId}/reset-runtime-config`, {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal((await request("missing")).status, 404);
+    assert.equal((await request("agent-custom")).status, 400);
+    assert.equal((await request("agent-archived")).status, 409);
+    const reset = await request(canonical!.id);
+    assert.equal(reset.status, 200);
+    assert.deepEqual(updates, [{
+      model: "gpt-5.6-sol:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      runtimeConfigCustomized: false,
+      runtimeConfigDriftNoticeFingerprint: null,
+    }]);
+  });
+});
+
 test("operator retry rejects an archived assignee with a named 409", async () => {
   await withTokens(async () => {
     const { response, created } = await retryRequest({

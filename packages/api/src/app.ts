@@ -61,6 +61,7 @@ import {
   type DecisionRow,
   mergeRecoveryPhase,
   type MergeRecoveryAttempt,
+  loadAgentSources,
 } from "@anneal/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -1370,6 +1371,46 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             ? { runtimeConfigCustomized: true }
             : {}),
         } as Prisma.AgentUncheckedUpdateInput,
+      }) };
+    });
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result.agent);
+  });
+  app.post("/agents/:agentId/reset-runtime-config", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    // Load the complete role contract before opening the write transaction. A
+    // missing or malformed source is a release error and must not turn into a
+    // best-effort reset that guesses at the canonical values.
+    const sources = await loadAgentSources();
+    const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+    const result = await db.$transaction(async (tx) => {
+      const before = await lockAgentRow(tx, agentId);
+      if (!before) return refusal("not-found", "Agent not found");
+      if (before.archivedAt) return refusal("conflict", "Cannot reset runtime configuration for an archived Agent");
+      const role = rolesByName.get(before.name);
+      if (!role) return refusal("invalid-request", `Agent ${before.name} has no canonical role source`);
+      const modelRefusal = runnerModelRefusal(role);
+      if (modelRefusal) return refusal("invalid-request", modelRefusal);
+      const executionerRefusal = executionerRuntimeRefusal({
+        name: before.name,
+        model: role.model,
+        runnerPreference: role.runnerPreference,
+      });
+      if (executionerRefusal) return refusal("invalid-request", executionerRefusal);
+      const tierRefusal = codexServiceTierRefusal({
+        model: role.model,
+        runnerPreference: role.runnerPreference,
+        codexServiceTier: before.codexServiceTier,
+      });
+      if (tierRefusal) return refusal("invalid-request", tierRefusal);
+      return { agent: await tx.agent.update({
+        where: { id: agentId },
+        data: {
+          model: role.model,
+          runnerPreference: role.runnerPreference,
+          runtimeConfigCustomized: false,
+          runtimeConfigDriftNoticeFingerprint: null,
+        },
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
