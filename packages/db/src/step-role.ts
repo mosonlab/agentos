@@ -2,6 +2,7 @@ import { legacyGenerationMarkerForTemplateName } from "./canonical-template-tran
 
 export type StepRole =
   | "spec"
+  | "revalidation"
   | "plan"
   | "plan-review"
   | "revised-plan"
@@ -23,6 +24,7 @@ export type TemplateStepLike = {
 
 const OUTPUT_KIND_ROLES: Readonly<Record<string, StepRole>> = {
   spec: "spec",
+  revalidation: "revalidation",
   plan: "plan",
   "plan-review": "plan-review",
   "revised-plan": "revised-plan",

@@ -57,10 +57,13 @@ question to simulate one. The Full Assurance template's gate placement and
 shorter-route rules live only in the routing contract.
 
 The seed installs two templates over these roles: the twelve-step Full
-Assurance chain, and the seven-step direct chain (`direct-engineer-workflow`) —
-implementation by `senior-dev-luna` from the task brief, parallel Sol and blind
-review siblings whose findings the fix step adjudicates itself, exact-head
-regression, server-side readiness, and mechanical merge. Both step contracts live in their
+Assurance chain, and the eight-step bound-capable direct chain
+(`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
+`senior-dev-luna` from the task brief, parallel Sol and blind review siblings
+whose findings the fix step adjudicates itself, exact-head regression,
+server-side readiness, and mechanical merge. Unbound direct instantiation
+omits the revalidation row and retains the historical seven-step prompts. Both
+step contracts live in their
 Markdown directories under `templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the

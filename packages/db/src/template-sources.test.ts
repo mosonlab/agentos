@@ -66,8 +66,32 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   const full = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
 
-  assert.equal(direct.length, 7);
-  assert.deepEqual(direct.map(({ layer }) => layer), [1, 2, 2, 3, 4, 5, 6]);
+  assert.equal(direct.length, 8);
+  assert.deepEqual(direct.map(({ layer }) => layer), [1, 2, 3, 3, 4, 5, 6, 7]);
+  assert.deepEqual(
+    direct.slice(0, 2).map(({ stepIndex, name, agentName, outputKind, opensPullRequest }) => ({
+      stepIndex, name, agentName, outputKind, opensPullRequest,
+    })),
+    [
+      {
+        stepIndex: 1,
+        name: "Revalidate specification",
+        agentName: "spec-revalidator",
+        outputKind: "revalidation",
+        opensPullRequest: false,
+      },
+      {
+        stepIndex: 2,
+        name: "Implementation",
+        agentName: "senior-dev-luna",
+        outputKind: "implementation",
+        opensPullRequest: true,
+      },
+    ],
+  );
+  assert.ok(canonicalOutputSchema(direct[0]!) instanceof z.ZodObject);
+  assert.match(direct[0]!.prompt, /minimal task-PATCH authorization/u);
+  assert.match(direct[0]!.prompt, /inbox_ask/u);
   assert.equal(full.length, 12);
   assert.deepEqual(full.map(({ layer }) => layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
   for (const templateName of [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME]) {
@@ -131,7 +155,7 @@ test("nine authored Full Assurance output contracts match their canonical schema
 test("missing layer frontmatter is refused by the source loader", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace("layer: 2\n", "")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("layer: 3\n", "")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*layer/u,
@@ -142,7 +166,7 @@ test("missing layer frontmatter is refused by the source loader", async () => {
 test("missing prior output declaration frontmatter is refused by the source loader", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*\n/mu, "")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*\n/mu, "")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*priorOutputKinds/u,
@@ -172,7 +196,7 @@ test("prior output declarations are unique and reference only earlier steps", as
 test("blind review steps cannot declare prior outputs", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-opus-blind.md", (source) => source.replace(
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace(
       "priorOutputKinds: []",
       "priorOutputKinds: [implementation]",
     )),
@@ -202,13 +226,13 @@ test("inserting a duplicate outputKind into a canonical template is refused", as
 test("source layers must be non-decreasing and bases must cross to a lower layer", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-opus-blind.md", (source) => source.replace("layer: 2\n", "layer: 1\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace("layer: 3\n", "layer: 1\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /layer values must be non-decreasing/u),
   );
 
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-opus-blind.md", (source) => source.replace("baseFromStepIndex: 1\n", "baseFromStepIndex: 2\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace("baseFromStepIndex: 2\n", "baseFromStepIndex: 3\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /must reference a strictly lower layer/u),
   );
 });
@@ -216,7 +240,7 @@ test("source layers must be non-decreasing and bases must cross to a lower layer
 test("only the exact canonical graphs may contain a multi-node layer", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-apply-review-fixes.md", (source) => source.replace("layer: 3\n", "layer: 2\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "05-apply-review-fixes.md", (source) => source.replace("layer: 4\n", "layer: 3\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /multi-node layer outside the exact canonical graph/u),
   );
 });
@@ -230,12 +254,12 @@ test("parallel nodes share one non-null base and never open a pull request", asy
 
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace("opensPullRequest: false\n", "opensPullRequest: true\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("opensPullRequest: false\n", "opensPullRequest: true\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /cannot contain a step with opensPullRequest/u),
   );
 
   for (const [templateName, filename] of [
-    [DIRECT_TEMPLATE_NAME, "02-code-review-sol.md"],
+    [DIRECT_TEMPLATE_NAME, "03-code-review-sol.md"],
     [INTEGRATOR_TEMPLATE_NAME, "06-code-review-sol.md"],
   ] as const) {
     await withTemplateCopy(
@@ -247,7 +271,7 @@ test("parallel nodes share one non-null base and never open a pull request", asy
 });
 
 test("layer is a structural field in canonical prompt drift comparison", async () => {
-  const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[1]!;
+  const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[2]!;
   const persisted: PersistedTemplateStepStructure = {
     name: expected.name,
     assigneeAgent: { name: expected.agentName! },

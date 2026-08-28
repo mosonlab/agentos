@@ -40,10 +40,19 @@ export type LegacyStepRecord = Readonly<{
  * prompt still delegated exact specification transcription to the model.
  * `pre-internal-npm-scope-rename`: the graphs whose merge prompts still named
  * the retired first-party npm scope.
+ * `pre-revalidate-step`: the direct graph before bound chains gained their
+ * read-only revalidation node.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
   shape: readonly LegacyStepRecord[];
+  /**
+   * Structural successor ordinals for a generation whose replacement graph
+   * has a different shape. Prompt-only transitions derive current ordinals
+   * from their own shape; structural transitions state the replacement
+   * explicitly so routing never reuses retired positions.
+   */
+  successorStepOrdinals?: CanonicalStepOrdinals;
   /**
    * The prompt generation this entry retires, as a digest over its ordered step
    * prompts, or absent when the structure alone identifies it.
@@ -111,7 +120,7 @@ const legacyTemplateGenerations = {
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "59e536c565390df23ce0ed2934f53145c717f5c0d3aec592815624a6923abca8",
+      successorPromptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -125,7 +134,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-platform-spec-materialization",
       promptDigest: "c1a9ec1f8e783c3c814c0d0f5f4a9b91d5759b9dc39473dc200447aeb96677c5",
-      successorPromptDigest: "59e536c565390df23ce0ed2934f53145c717f5c0d3aec592815624a6923abca8",
+      successorPromptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -141,7 +150,7 @@ const legacyTemplateGenerations = {
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "59e536c565390df23ce0ed2934f53145c717f5c0d3aec592815624a6923abca8",
+      successorPromptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -155,7 +164,33 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-internal-npm-scope-rename",
       promptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
-      successorPromptDigest: "59e536c565390df23ce0ed2934f53145c717f5c0d3aec592815624a6923abca8",
+      successorPromptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
+      shape: [
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+      ],
+    },
+    {
+      // Structural rollover: the bound direct graph adds a read-only
+      // revalidation node ahead of the historical seven-step graph. Existing
+      // task and step rows stay under the renamed legacy template; only new
+      // bound chains use the successor ordinals below.
+      marker: "pre-revalidate-step",
+      successorStepOrdinals: {
+        revalidation: 1,
+        implementation: 2,
+        "sol-findings": 3,
+        "blind-findings": 4,
+        "fixed-implementation": 5,
+        regression: 6,
+        readiness: 7,
+        integrator: 8,
+      },
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -321,10 +356,10 @@ export const canonicalTemplateIdentity = (templateName: string): CanonicalTempla
 };
 
 /**
- * Derive Step role ordinals from one registered graph. The current graph is
- * derivable only when the newest registry entry is a prompt-only transition:
- * its shape is then also the successor's shape. A future structural rollover
- * must extend this interface rather than silently reusing stale ordinals.
+ * Derive Step role ordinals from one registered graph. Prompt-only current
+ * graphs derive their ordinals from the latest entry's shape. A structural
+ * transition carries explicit successor ordinals so the current graph can
+ * advance without silently reusing retired positions.
  */
 export const canonicalStepOrdinals = (
   canonicalName: CanonicalTemplateRegistryName,
@@ -335,6 +370,7 @@ export const canonicalStepOrdinals = (
     ? generations.at(-1)
     : generations.find((candidate) => candidate.marker === generation);
   if (!registered) return null;
+  if (generation === null && registered.successorStepOrdinals !== undefined) return registered.successorStepOrdinals;
   if (generation === null && (registered.promptDigest === undefined || registered.successorPromptDigest === undefined)) {
     throw new Error(`Current ${canonicalName} Step ordinals are not derivable from its latest structural transition`);
   }

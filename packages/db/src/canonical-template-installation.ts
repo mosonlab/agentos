@@ -60,13 +60,17 @@ const adoptionDifferenceAllowed = (
   }
   if (difference === "agent") {
     const from = actual.assigneeAgent?.name;
-    return source.agentName === "regression-verifier"
-      && (from === "review-coordinator-opus" || from === "review-coordinator-sol");
+    return (source.agentName === "regression-verifier"
+      && (from === "review-coordinator-opus" || from === "review-coordinator-sol"))
+      || (templateName === "direct-engineer-workflow"
+        && actual.stepIndex === 1
+        && from === undefined
+        && source.agentName === "spec-revalidator");
   }
   if (difference === "baseFromStepIndex") {
     return actual.baseFromStepIndex === null
       && ((templateName === "compound-engineer-workflow" && actual.stepIndex === 6 && source.baseFromStepIndex === 5)
-        || (templateName === "direct-engineer-workflow" && actual.stepIndex === 2 && source.baseFromStepIndex === 1));
+        || (templateName === "direct-engineer-workflow" && actual.stepIndex === 3 && source.baseFromStepIndex === 2));
   }
   return false;
 };

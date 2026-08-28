@@ -1,6 +1,6 @@
 ---
-stepIndex: 1
-layer: 1
+stepIndex: 2
+layer: 2
 agent: senior-dev-luna
 approvalGate: false
 outputKind: implementation

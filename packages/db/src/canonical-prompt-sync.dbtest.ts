@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
-import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
+import { PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { loadAgentSources } from "./agent-sources.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
@@ -114,8 +114,32 @@ const ADJUDICATION_STEPS = {
   "compound-engineer-workflow": { stepIndex: 8, layer: 7, baseFromStepIndex: 5 },
 } as const;
 
+const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): Promise<void> => {
+  const template = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId, name: "direct-engineer-workflow" } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  const revalidation = template.steps.find(({ stepIndex }) => stepIndex === 1);
+  assert.equal(revalidation?.outputKind, "revalidation");
+  await prisma.taskTemplateStep.delete({ where: { id: revalidation!.id } });
+  for (const step of template.steps.filter(({ stepIndex }) => stepIndex > 1)) {
+    await prisma.taskTemplateStep.update({
+      where: { id: step.id },
+      data: {
+        stepIndex: step.stepIndex - 1,
+        layer: step.layer - 1,
+        baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+      },
+    });
+  }
+};
+
 test("sync rolls parked and not-yet-started v1 chains forward without changing them", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  // The canonical source is now eight-step for bound chains. Reconstruct the
+  // exact seven-step direct row that a pre-revalidation chain persisted so the
+  // rollover proves those task and prompt rows remain untouched.
+  await downgradeDirectTemplateToHistoricalSevenStep(project.id);
   const templates = await prisma.taskTemplate.findMany({
     where: { projectId: project.id, name: { in: ["direct-engineer-workflow", "compound-engineer-workflow"] } },
     include: { steps: { orderBy: { stepIndex: "asc" } } },
@@ -220,6 +244,8 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
 
 test("sync rolls the exact adjudication-era graphs forward without touching instantiated evidence", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  // The direct adjudication generation predates the revalidation node too.
+  await downgradeDirectTemplateToHistoricalSevenStep(project.id);
   const agents = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
   const source = agents.get("review-coordinator-opus")!;
   const adjudicator = await prisma.agent.create({ data: {
@@ -330,7 +356,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
   }
   const direct = await prisma.taskTemplate.findUniqueOrThrow({ where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } }, include: { steps: { orderBy: { stepIndex: "asc" } } } });
   const full = await prisma.taskTemplate.findUniqueOrThrow({ where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } }, include: { steps: { orderBy: { stepIndex: "asc" } } } });
-  assert.deepEqual(direct.steps.map(({ layer }) => layer), [1, 2, 2, 3, 4, 5, 6]);
+  assert.deepEqual(direct.steps.map(({ layer }) => layer), [1, 2, 3, 3, 4, 5, 6, 7]);
   assert.deepEqual(full.steps.map(({ layer }) => layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
 
   const legacyDirect = await prisma.taskTemplate.findUniqueOrThrow({
@@ -732,6 +758,67 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   }), 2);
 });
 
+test("sync recreates a missing spec revalidator with read-only repository coverage", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const source = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+  });
+  const existingRevalidator = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "spec-revalidator" } },
+  });
+  const revalidationSteps = await prisma.taskTemplateStep.findMany({
+    where: { outputKind: "revalidation", taskTemplate: { projectId: project.id } },
+    select: { id: true },
+  });
+  assert.ok(revalidationSteps.length > 0);
+  await prisma.taskTemplateStep.updateMany({
+    where: { id: { in: revalidationSteps.map(({ id }) => id) } },
+    data: { assigneeAgentId: null },
+  });
+
+  const repo = await prisma.repo.create({
+    data: {
+      projectId: project.id,
+      name: `canonical-sync-revalidator-${randomBytes(4).toString("hex")}`,
+      remoteUrl: "file:///tmp/agentos-canonical-sync-revalidator.git",
+      mountPath: "/workspace/canonical-sync-revalidator",
+    },
+  });
+  await prisma.agentRepoAccess.create({
+    data: {
+      agentId: source.id,
+      repoId: repo.id,
+      projectId: project.id,
+      mountPath: repo.mountPath,
+      permissions: RepoPermission.GIT_WRITE,
+    },
+  });
+  t.after(async () => {
+    await prisma.repo.delete({ where: { id: repo.id } });
+  });
+
+  await prisma.agent.delete({ where: { id: existingRevalidator.id } });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdAgents":1/u);
+  assert.match(synced.output, /"createdAgentRepoGrants":1/u);
+
+  const revalidator = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "spec-revalidator" } },
+  });
+  assert.equal(revalidator.model, "openai-codex/gpt-5.6-luna:xhigh");
+  assert.equal(revalidator.runnerPreference, RunnerPreference.PI);
+  assert.equal(revalidator.inboxAccess, true);
+  assert.equal(await prisma.taskTemplateStep.count({
+    where: { id: { in: revalidationSteps.map(({ id }) => id) }, assigneeAgentId: revalidator.id },
+  }), revalidationSteps.length);
+  assert.deepEqual(await prisma.agentRepoAccess.findMany({
+    where: { agentId: revalidator.id, repoId: repo.id },
+    select: { mountPath: true, permissions: true },
+  }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
+});
+
 test("sync refuses canonical step drift when instantiated tasks would be mutated", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const source = await prisma.agent.findUniqueOrThrow({
@@ -766,7 +853,7 @@ test("sync refuses canonical step drift when instantiated tasks would be mutated
   await prisma.taskTemplateStep.update({ where: { id: step.id }, data: { assigneeAgentId: canonicalRegression.id } });
 });
 
-test("sync refuses a seven-step canonical shape with structural drift before mutation", async () => {
+test("sync refuses an eight-step canonical shape with structural drift before mutation", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const template = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
