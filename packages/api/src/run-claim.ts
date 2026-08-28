@@ -439,6 +439,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         runId: candidate.id,
         runNumber: candidate.runNumber,
         branch: candidate.branch,
+        targetBranch: candidate.targetBranch,
         outputKind: candidate.task.templateStep?.outputKind ?? null,
       });
       if (regressionRepairHandoff.status === "invalid") {

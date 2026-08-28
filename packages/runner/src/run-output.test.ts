@@ -363,6 +363,39 @@ test("a negative Regression verdict settles mechanically when provider transport
   }
 });
 
+test("a Regression mechanical output handoff retries a transient control-plane failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-output-retry-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "regression-agent.sh");
+    await writeFile(agentBinary, regressionFailureAgent);
+    await chmod(agentBinary, 0o755);
+    let attempts = 0;
+    const controlPlane = createControlPlaneDouble({
+      persistSessionTaskOutput: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new ControlPlaneError(500, "transaction expired");
+      },
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      regressionOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    assert.equal(attempts, 2);
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    const retrying = controlPlane.eventBatches.flat()
+      .find(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_RETRYING");
+    assert.equal(retrying?.payload.attempt, 1);
+    assert.equal(retrying?.payload.attempts, 3);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Regression v2 never resumes the model to remediate an absent mechanical handoff", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-regression-no-model-remediation-"));
   try {
@@ -708,8 +741,14 @@ test("output the agent already produced survives a delivery-phase failure", asyn
         if (existsSync(sentinel)) throw new Error("connection reset by peer");
       },
     });
+    // The drain retries the flush until the delivery deadline, so this test's
+    // wall clock is that deadline and nothing else. A 60s lease makes it 35s;
+    // a short one floors it at MIN_DELIVERY_BUDGET_MS instead. The loop is
+    // exercised identically either way — it exhausts its budget with events
+    // still pending — and the gate's critical path keeps the other 25 seconds.
+    const configured = { ...config(join(root, "workspaces"), agentBinary), leaseSeconds: 26 };
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote), { controlPlane: controlPlane.controlPlane });
+    await executeClaim(configured, claim(remote), { controlPlane: controlPlane.controlPlane });
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must still be completed");
