@@ -236,10 +236,11 @@ const stubDatabase = (payloads: unknown[], columns: SessionColumns) => {
 };
 
 test("extractUsage reads the real CLAUDE result payload across every model it used", () => {
-  // 545 = 541 (haiku) + 4 (opus); 98 = 21 + 77. The top-level `usage` block
-  // reports only opus's 4 / 77, which is the under-count this batch fixes.
+  // 9313 = 545 uncached + 8768 cached (541 + 4 model input, plus each model's
+  // cache read/creation); 98 = 21 + 77. The top-level `usage` block reports
+  // only opus's 4 / 77, which is the under-count this batch fixes.
   const usage = extractUsage(CLAUDE_RESULT);
-  assert.equal(usage.inputTokens, 545);
+  assert.equal(usage.inputTokens, 9313);
   assert.equal(usage.outputTokens, 98);
   assert.equal(usage.cachedInputTokens, 8768);
   assert.equal(usage.costUsd?.toString(), "0.049117");
@@ -247,7 +248,7 @@ test("extractUsage reads the real CLAUDE result payload across every model it us
 
 test("extractUsage reads the second real CLAUDE capture the same way", () => {
   const usage = extractUsage(CLAUDE_RESULT_SAFE_MODE);
-  assert.equal(usage.inputTokens, 535);
+  assert.equal(usage.inputTokens, 3504);
   assert.equal(usage.outputTokens, 20);
   assert.equal(usage.cachedInputTokens, 2969);
   assert.equal(usage.costUsd?.toString(), "0.030392999999999996");
@@ -262,6 +263,15 @@ test("the modelUsage branch is exclusive: the primary model is never counted twi
     extractUsage({ usage: { input_tokens: 100, output_tokens: 200 }, modelUsage: { m: { inputTokens: 5, outputTokens: 7 } } }),
     { inputTokens: 5, outputTokens: 7 },
   );
+});
+
+test("CLAUDE modelUsage includes each cached input component exactly once", () => {
+  const usage = extractUsage({ modelUsage: {
+    primary: { inputTokens: 5, outputTokens: 7, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 },
+    secondary: { inputTokens: 11, cacheReadInputTokens: 2 },
+  } });
+  assert.deepEqual(usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 9 });
+  assert.equal(deriveUsageColumns(usage).totalTokens, 32);
 });
 
 test("an unusable modelUsage falls back to the top-level usage block", () => {
@@ -281,6 +291,21 @@ test("absence survives the modelUsage branch: a missing field is absent, not zer
   assert.equal("cachedInputTokens" in usage, false);
 });
 
+test("cached input does not invent an absent uncached input field", () => {
+  assert.deepEqual(
+    extractUsage({ modelUsage: { a: { cacheReadInputTokens: 4 } } }),
+    { cachedInputTokens: 4 },
+  );
+  assert.deepEqual(
+    extractUsage({ usage: { cache_read_input_tokens: 4 } }),
+    { cachedInputTokens: 4 },
+  );
+  assert.deepEqual(
+    extractUsage({ agentosPiUsage: { cacheRead: 4 } }),
+    { cachedInputTokens: 4 },
+  );
+});
+
 test("extractUsage reads the real CODEX turn.completed payload and finds no cost", () => {
   const usage: SessionUsage = extractUsage(CODEX_TURN_COMPLETED);
   // CODEX reports no cost, and reasoning_output_tokens is deliberately excluded
@@ -288,27 +313,29 @@ test("extractUsage reads the real CODEX turn.completed payload and finds no cost
   assert.equal(usage.costUsd, undefined);
   assert.equal(usage.outputTokens, 253);
   assert.deepEqual(usage, { inputTokens: 40764, outputTokens: 253, cachedInputTokens: 35072 });
+  // CODEX's input_tokens already contains cached_input_tokens; adding the
+  // subset again would inflate both the input and total columns.
+  const columns = deriveUsageColumns(usage);
+  assert.equal(columns.inputTokens, 40764);
+  assert.equal(columns.totalTokens, 41017);
 });
 
 test("extractUsage finds nothing in PI's empty terminal event", () => {
   assert.deepEqual(extractUsage(PI_AGENT_SETTLED), {});
 });
 
-test("extractUsage reads the runner's PI aggregate, cache disjoint from input", () => {
+test("extractUsage reads the runner's PI aggregate with cached input included", () => {
   const usage: SessionUsage = extractUsage(PI_AGENT_SETTLED_WITH_USAGE);
   assert.deepEqual(usage, {
-    inputTokens: 5688,
+    inputTokens: 9272,
     outputTokens: 24,
     // cacheRead + cacheWrite, the same fold CLAUDE's read/creation pair gets.
     cachedInputTokens: 3584,
     costUsd: new Prisma.Decimal("0.00123808"),
   });
-  // The caliber, asserted rather than left to the comment: PI's `input` excludes
-  // cache reads, so totalTokens is uncached input + output and 3584 cached
-  // tokens are NOT in it. CODEX's totalTokens, whose input_tokens already
-  // contains its cached figure, does include them — the two are not comparable.
+  // PI's persisted input uses the same cached-inclusive caliber as CODEX.
   const derived = deriveUsageColumns(usage);
-  assert.equal(derived.totalTokens, 5712);
+  assert.equal(derived.totalTokens, 9296);
   assert.equal(derived.cachedInputTokens, 3584);
   assert.equal(derived.costUsd?.toString(), "0.0012");
   const codex = deriveUsageColumns(extractUsage(CODEX_TURN_COMPLETED));
@@ -321,7 +348,7 @@ test("the PI aggregate is exclusive of the provider vocabularies it replaces", (
   // carries `usage` today; this is the guard that keeps that assumption honest
   // if the shape ever changes.
   const usage = extractUsage({ ...PI_AGENT_SETTLED_WITH_USAGE, usage: { input_tokens: 99 }, total_cost_usd: 7 });
-  assert.equal(usage.inputTokens, 5688);
+  assert.equal(usage.inputTokens, 9272);
   assert.equal(usage.costUsd?.toString(), "0.00123808");
   assert.equal(usage.costUsd?.equals(new Prisma.Decimal("0.00123808")), true);
 });
@@ -364,7 +391,7 @@ test("PI sessions accumulate across attempts the way every other runner does", (
   // lease, so there is no event this adapter could emit that would still be
   // accepted. Closing that needs a control-plane change, not a parser change.
   const total = sumUsage([PI_AGENT_SETTLED_WITH_USAGE, PI_AGENT_SETTLED_WITH_USAGE].map(extractUsage));
-  assert.equal(total.inputTokens, 11376);
+  assert.equal(total.inputTokens, 18544);
   assert.equal(total.costUsd?.toString(), "0.00247616");
 });
 
@@ -397,10 +424,10 @@ test("recomputeSessionUsage writes absolute values once and is a no-op on replay
 
   assert.equal(await recomputeSessionUsage(database, "session-1"), true);
   assert.equal(updates.length, 1);
-  assert.equal(columns.inputTokens, 545);
+  assert.equal(columns.inputTokens, 9313);
   assert.equal(columns.outputTokens, 98);
   assert.equal(columns.cachedInputTokens, 8768);
-  assert.equal(columns.totalTokens, 643);
+  assert.equal(columns.totalTokens, 9411);
   assert.equal(columns.costUsd?.toString(), "0.0491");
 
   // Same events in, same columns out: the second call must not write.
@@ -437,10 +464,10 @@ test("recomputeSessionUsage accumulates across resume attempts", async () => {
     "session-1",
   );
 
-  assert.equal(twoRows.inputTokens, 17);
+  assert.equal(twoRows.inputTokens, 167);
   assert.equal(twoRows.outputTokens, 14);
   assert.equal(twoRows.cachedInputTokens, 150);
-  assert.equal(twoRows.totalTokens, 31);
+  assert.equal(twoRows.totalTokens, 181);
   // Accumulation is a property of the stored rows, not of write ordering.
   assert.equal(twoRows.inputTokens, oneCombinedRow.inputTokens);
   assert.equal(twoRows.outputTokens, oneCombinedRow.outputTokens);
