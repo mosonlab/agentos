@@ -189,6 +189,11 @@
   ],
   "exclude": [
     {
+      "glob": "records/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal migration audits and operator cutover plans are evidence about host state rather than product source"
+    },
+    {
       "glob": ".chain/**",
       "disposition": "later-release-follow-up",
       "reason": "internal agent-chain specifications, session identifiers, plans, and review records are operator workflow state rather than product source"
