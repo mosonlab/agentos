@@ -19,6 +19,7 @@ import {
 
 import { sharedChainBranch } from "./chain-branch.js";
 import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
+import { readChainControl } from "./chain-control.js";
 import { requireGateAttestation } from "./gate-attestation.js";
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
@@ -200,6 +201,24 @@ export class IntegratorStoppedError extends Error {
     this.name = "IntegratorStoppedError";
   }
 }
+
+/** A Run producer reached the single Run-birth seam while its Chain barrier
+ * was still held above the Task's execution layer. The transaction caller may
+ * safely roll this refusal back and retry after the operator releases it. */
+export class ChainHeldError extends Error {
+  constructor(
+    readonly taskId: string,
+    readonly chainId: string,
+    readonly taskLayer: number,
+    readonly heldLayer: number,
+  ) {
+    super(`Chain ${chainId} is held after layer ${heldLayer}; Task ${taskId} at layer ${taskLayer} cannot queue a Run`);
+    this.name = "ChainHeldError";
+  }
+}
+
+export const isChainHeldError = (error: unknown): error is ChainHeldError =>
+  error instanceof Error && error.name === "ChainHeldError";
 
 export const isIntegratorStoppedError = (error: unknown): error is IntegratorStoppedError =>
   error instanceof Error && error.name === "IntegratorStoppedError";
@@ -693,12 +712,16 @@ export type OpenRunRefusal = {
     | "compound-implementation-assignee"
     | "archived-assignee"
     | "archived-task"
-    | "integrator-stopped";
+    | "integrator-stopped"
+    | "chain-held";
   message: string;
   detail?: Readonly<Record<string, string | number | boolean | null>>;
   context?: Readonly<{
     taskId?: string;
     taskName?: string;
+    chainId?: string;
+    taskLayer?: number;
+    heldLayer?: number;
     agentName?: string;
     condition?: string;
     code?: string;
@@ -860,6 +883,26 @@ export const openRun = async (
     return openRunRefusal("conflict", "Run budget exhausted");
   }
 
+  // `chainLayer` is the post-expand authority, with `chainIndex` as the
+  // compatibility fallback for legacy chain rows. Keep the read inside this
+  // transaction and before any Run-birth work so a held successor produces no
+  // Run or queue activity. A malformed chain row has no comparable layer and
+  // retains the pre-hold behavior; the activation/admission seams handle the
+  // same malformed-row policy independently.
+  const taskLayer = task.chainLayer ?? task.chainIndex;
+  if (task.chainId && typeof taskLayer === "number") {
+    const control = await readChainControl(tx, { projectId: task.projectId, chainId: task.chainId });
+    if (control.held && control.heldLayer !== null && taskLayer > control.heldLayer) {
+      const error = new ChainHeldError(task.id, task.chainId, taskLayer, control.heldLayer);
+      return openRunRefusal(
+        "chain-held",
+        error.message,
+        { chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
+        { taskId: task.id, chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
+      );
+    }
+  }
+
   const branches = intent.kind === "integrator-authorized"
     ? { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch }
     : !task.repo
@@ -960,6 +1003,14 @@ const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
     return new IntegratorStoppedError(
       String(refusal.context?.taskId ?? "unknown"),
       String(refusal.context?.condition ?? "unknown"),
+    );
+  }
+  if (refusal.reason === "chain-held") {
+    return new ChainHeldError(
+      String(refusal.context?.taskId ?? "unknown"),
+      String(refusal.context?.chainId ?? "unknown"),
+      Number(refusal.context?.taskLayer ?? 0),
+      Number(refusal.context?.heldLayer ?? 0),
     );
   }
   if (refusal.reason === "compound-implementation-assignee") {

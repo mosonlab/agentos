@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  isChainHeldError,
   enqueueTaskRun,
   INTEGRATOR_AGENT_NAME,
   Prisma,
@@ -207,7 +208,11 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       return true;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   } catch (error: unknown) {
-    if (uniqueConflict(error)) return false;
+    // A held successor is intentionally left due: the scheduler must be able
+    // to try it again after Resume releases the live Chain authority. The
+    // shared Run-open seam has already rolled the transaction back, so this is
+    // an ordinary no-fire result rather than a quarantinable schedule error.
+    if (uniqueConflict(error) || isChainHeldError(error)) return false;
     throw error;
   }
 };

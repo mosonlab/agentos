@@ -223,6 +223,7 @@ test("a later chain step runs on the chain's shared branch so the chain lands in
       findUnique: async () => task,
       findFirst: async () => null,
     },
+    chainControl: { findMany: async () => [] },
     run: {
       findFirst: async () => null,
       create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1", ...data }; },

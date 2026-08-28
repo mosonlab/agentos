@@ -1,6 +1,7 @@
 import {
   isArchivedAssigneeError,
   isArchivedTaskError,
+  isChainHeldError,
   isCompoundImplementationAssigneeError,
   isIntegratorStoppedError,
   isMergeConfirmationError,
@@ -17,6 +18,7 @@ export type RefusalReason =
   | "compound-implementation-assignee"
   | "archived-assignee"
   | "archived-task"
+  | "chain-held"
   | "integrator-stopped"
   | "pinned-base-commit"
   | "merge-evidence"
@@ -59,6 +61,7 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
     case "compound-implementation-assignee":
     case "archived-assignee":
     case "archived-task":
+    case "chain-held":
     case "integrator-stopped":
     case "pinned-base-commit":
     case "merge-evidence":
@@ -94,6 +97,17 @@ export const refusalFor = (error: unknown): Refusal | null => {
   }
   if (isArchivedAssigneeError(error)) return { reason: "archived-assignee", message: error.message };
   if (isArchivedTaskError(error)) return { reason: "archived-task", message: error.message };
+  if (isChainHeldError(error)) {
+    return {
+      reason: "chain-held",
+      message: error.message,
+      detail: {
+        chainId: error.chainId,
+        taskLayer: error.taskLayer,
+        heldLayer: error.heldLayer,
+      },
+    };
+  }
   if (isIntegratorStoppedError(error)) return { reason: "integrator-stopped", message: error.message };
   if (isPinnedBaseCommitError(error)) return { reason: "pinned-base-commit", message: error.message };
   if (isMergeEvidenceError(error)) return { reason: "merge-evidence", message: error.message };
