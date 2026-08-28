@@ -203,6 +203,37 @@ test("Chain and standalone startability agree on held layers while the admission
   }
 });
 
+test("admission reads ChainControl for a malformed chain row with a null chainIndex", async () => {
+  const chain = await seedChain("admission-null-index", 2);
+  const target = chain.tasks[1]!;
+  // The contracted schema prevents new partial identities. Temporarily remove
+  // that fence to exercise the admission reader's defensive legacy-row path,
+  // then restore both the row and constraint before this test returns.
+  await db.$executeRawUnsafe('ALTER TABLE "Task" DROP CONSTRAINT "Task_chain_identity_all_or_none_check"');
+  try {
+    await db.task.update({ where: { id: target.id }, data: { chainIndex: null } });
+    await seedControl(chain, ChainControlState.HELD, 1);
+
+    const startability = await call("GET", `/tasks/${target.id}/startability`);
+    assert.equal(startability.status, 200);
+    assert.equal(startability.body.startable, false);
+
+    const chainRead = await call("GET", `/tasks/${target.id}/chain`);
+    assert.equal(chainRead.status, 200);
+    assert.equal(chainRead.body.steps.length, 1);
+    assert.equal(chainRead.body.steps[0].startable, false);
+    assert.match(chainRead.body.steps[0].holdRefusal, /Chain is held after layer 1/u);
+  } finally {
+    await db.task.update({ where: { id: target.id }, data: { chainIndex: 1 } });
+    await db.$executeRawUnsafe(`ALTER TABLE "Task"
+      ADD CONSTRAINT "Task_chain_identity_all_or_none_check" CHECK (
+        ("chainId" IS NULL AND "chainIndex" IS NULL AND "chainLayer" IS NULL)
+        OR
+        ("chainId" IS NOT NULL AND "chainIndex" IS NOT NULL AND "chainLayer" IS NOT NULL)
+      )`);
+  }
+});
+
 test("unheld, released, and chainless Tasks retain ordinary admission", async () => {
   const unheld = await seedChain("admission-unheld", 2);
   const unheldRead = await call("GET", `/tasks/${unheld.tasks[1]!.id}/startability`);

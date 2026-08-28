@@ -247,6 +247,26 @@ test("Resume leaves a BACKLOG successor parked and preserves the parked-skip nar
   assert.ok(activity, "activation records the existing BACKLOG park narration");
 });
 
+test("Resume releases the hold when a human BACKLOG successor needs no source Run", async () => {
+  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DONE, TaskStatus.BACKLOG] });
+  await db.task.update({ where: { id: chain.second.id }, data: {
+    assigneeType: AssigneeType.HUMAN,
+    assigneeAgentId: null,
+    repoId: null,
+    approvalGate: true,
+  } });
+
+  const resumed = await resume(chain.first.id, "resume-human-backlog");
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.duplicate, false);
+  assert.equal(resumed.body.control.state, "released");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.BACKLOG);
+  assert.equal(await db.run.count({ where: { taskId: chain.second.id } }), 0);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: chain.second.id, body: { contains: "parked in Backlog" } },
+  }), 1);
+});
+
 test("chainless and unknown Resume addresses are rejected without creating control state", async () => {
   const chain = await seedBasicChain(db, { control: null });
   const chainless = await db.task.create({

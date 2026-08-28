@@ -904,7 +904,12 @@ const resumeActivationNeedsSourceRun = (
     .sort((left, right) => left - right)[0];
   if (nextLayer === undefined) return false;
   return rows
-    .filter((row) => executionLayer(row) === nextLayer && row.status !== TaskStatus.DONE)
+    // Activation handles an operator-parked successor before it considers
+    // assignee shape. Resume must preserve that ordering instead of demanding
+    // a source session for work that will remain parked.
+    .filter((row) => executionLayer(row) === nextLayer
+      && row.status !== TaskStatus.DONE
+      && row.status !== TaskStatus.BACKLOG)
     .some((row) => row.assigneeType !== AssigneeType.AGENT || row.assigneeAgentId === null || row.repoId === null);
 };
 

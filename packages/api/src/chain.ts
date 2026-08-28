@@ -414,8 +414,11 @@ export const readStepAdmissions = async (
       ? [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }]
       : []
   ));
+  // A partial legacy identity still belongs to its persisted Chain control.
+  // Key on chainId alone so a null chainIndex cannot bypass a held barrier;
+  // refusalForHeldChainStep will fail closed when no execution layer exists.
   const chainInputs = [...new Map(tasks.flatMap((task) => (
-    task.chainId !== null && task.chainIndex !== null
+    task.chainId !== null
       ? [[chainKey({ projectId: task.projectId, chainId: task.chainId }), {
         projectId: task.projectId,
         chainId: task.chainId,
@@ -465,10 +468,10 @@ export const readStepAdmissions = async (
     const facts = factsByTask.get(task.id) ?? { total: 0, active: false, budgetGrants: null };
     const hasRepoGrant = task.assigneeAgentId !== null && task.repoId !== null
       && granted.has(grantKey({ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }));
-    const chain = task.chainId !== null && task.chainIndex !== null
+    const chain = task.chainId !== null
       ? rowsByChain.get(chainKey({ projectId: task.projectId, chainId: task.chainId })) ?? []
       : [];
-    const control = task.chainId !== null && task.chainIndex !== null
+    const control = task.chainId !== null
       ? controls.get(chainKey({ projectId: task.projectId, chainId: task.chainId }))
       : undefined;
     const blocker = blockingPredecessor(chain, task.id);
