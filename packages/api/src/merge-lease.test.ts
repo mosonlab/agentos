@@ -7,14 +7,16 @@ import {
   commitWithLeaseDisposition,
   leaseHandoffsWithoutConsumer,
   leaseHolderFor,
-  mergeLeaseHold,
   readMergeLeaseRelease,
   settleLease,
   withMergeLease,
   type MergeLeaseAcquirer,
-  type MergeLeaseRelease,
   type MergeLeaseReleaser,
 } from "./merge-lease.js";
+import {
+  mergeLeaseHold,
+  type MergeLeaseRelease,
+} from "./merge-lease-hold.js";
 
 const acquired: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
 const released: MergeLeaseRelease = {
@@ -219,6 +221,27 @@ test("a callback exception still releases the merge Lease", async () => {
     /authorization failed/u,
   );
   assert.deepEqual(releasedFor, ["chain-3"]);
+});
+
+test("a release-recording failure preserves the callback exception", async () => {
+  const callbackFailure = new Error("authorization failed first");
+  const recordingFailure = new Error("hold recording failed second");
+  const failingDb = {
+    task: { findFirst: async () => ({ id: "tail-task" }) },
+    taskActivity: { createMany: async () => { throw recordingFailure; } },
+  } as unknown as PrismaClient;
+
+  await assert.rejects(
+    withMergeLease(leaseTarget("chain-double-failure"), async () => {
+      throw callbackFailure;
+    }, failingDb, {
+      acquire: acquired,
+      release: async () => released,
+    }),
+    (error: unknown) => error instanceof AggregateError
+      && error.errors[0] === callbackFailure
+      && error.errors[1] === recordingFailure,
+  );
 });
 
 test("a contended merge Lease does not run the callback", async () => {

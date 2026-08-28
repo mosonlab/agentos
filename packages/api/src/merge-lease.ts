@@ -12,7 +12,11 @@ import {
   type Prisma,
   type PrismaClient,
 } from "@anneal/db";
-import { recordMergeLeaseHold } from "./merge-lease-hold.js";
+import {
+  recordMergeLeaseHold,
+  type MergeLeaseRelease,
+  type MergeLeaseTarget,
+} from "./merge-lease-hold.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,39 +29,7 @@ const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh"
  * exactly like a lease this caller had freed. `unreachable` is the fifth: the
  * release never got far enough to say anything.
  */
-export type MergeLeaseRelease =
-  | { outcome: "released"; ref: string; sha: string; acquiredAt: string }
-  | { outcome: "not-held" }
-  | { outcome: "skipped"; heldFor: string }
-  | { outcome: "refused"; heldBy: string }
-  | { outcome: "unreachable"; detail: string };
-
 export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>;
-
-/** The project-scoped identity of a Chain's external merge lease. */
-export type MergeLeaseTarget = {
-  projectId: string;
-  chainId: string;
-};
-
-export type MergeLeaseHold = {
-  acquiredAt: Date;
-  releasedAt: Date;
-  heldForSeconds: number;
-};
-
-/** Calculate a non-negative whole-second hold from the lease blob timestamp. */
-export const mergeLeaseHold = (acquiredAt: string, releasedAt: Date): MergeLeaseHold | null => {
-  const acquiredAtMs = Date.parse(acquiredAt);
-  const releasedAtMs = releasedAt.getTime();
-  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
-  return {
-    acquiredAt: new Date(acquiredAtMs),
-    releasedAt: new Date(releasedAtMs),
-    // A clock adjustment must not produce a negative hold in the evidence.
-    heldForSeconds: Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000)),
-  };
-};
 
 // The line scripts/merge-lease.sh prints beside its prose for the operator.
 const MACHINE_LINE = /^MERGE LEASE: (.+)$/mu;
@@ -401,6 +373,7 @@ export type LeaseDisposition =
 export type MergeLeaseDependencies = {
   acquire: MergeLeaseAcquirer;
   release: MergeLeaseReleaser;
+  now?: () => Date;
 };
 
 export type WithMergeLease = <T>(
@@ -446,16 +419,32 @@ export const withMergeLease = async <T>(
   }
 
   let disposition: LeaseDisposition = { kind: "release" };
+  let callbackFailed = false;
+  let callbackError: unknown;
+  let result: { disposition: LeaseDisposition; value: T } | undefined;
   try {
-    const result = await fn();
+    result = await fn();
     disposition = result.disposition;
-    return { outcome: "ran", value: result.value };
-  } finally {
-    if (disposition.kind === "release") {
+  } catch (error: unknown) {
+    callbackFailed = true;
+    callbackError = error;
+  }
+  if (disposition.kind === "release") {
+    try {
       const release = await releaseMergeLeaseWith(dependencies.release, target);
       if (release?.outcome === "released") {
-        await recordMergeLeaseHold(db, target, release, new Date());
+        await recordMergeLeaseHold(db, target, release, dependencies.now?.() ?? new Date());
       }
+    } catch (releaseError: unknown) {
+      if (callbackFailed) {
+        throw new AggregateError(
+          [callbackError, releaseError],
+          "Merge lease callback and confirmed-release recording both failed",
+        );
+      }
+      throw releaseError;
     }
   }
+  if (callbackFailed) throw callbackError;
+  return { outcome: "ran", value: result!.value };
 };

@@ -5,7 +5,9 @@ import {
   AssigneeType,
   type ChangedFile,
   INTEGRATOR_SENTINEL_MODEL,
+  MERGE_TAIL_KIND,
   PrismaClient,
+  RunStatus,
   TaskStatus,
 } from "@anneal/db";
 
@@ -14,10 +16,10 @@ import {
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
-  type MergeLeaseTarget,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -56,9 +58,27 @@ const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
       if (target) releasedLeaseTargets.push(target);
       return release;
     },
+    now: () => CONFIRMED_RELEASED_AT,
   });
 };
 const runWithMergeLease = leaseRunner(acquireChainLease);
+const leaseHoldMarkers = (projectId: string) => db.taskActivity.findMany({
+  where: {
+    task: { projectId },
+    metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold },
+  },
+  orderBy: { createdAt: "asc" },
+});
+const assertConfirmedHold = async (projectId: string): Promise<void> => {
+  const markers = await leaseHoldMarkers(projectId);
+  assert.equal(markers.length, 1);
+  const metadata = markers[0]!.metadata as Record<string, unknown>;
+  assert.equal(metadata.leaseRef, "refs/merge-lease/holder");
+  assert.equal(metadata.leaseSha, "lease-fixture");
+  assert.equal(metadata.acquiredAt, "2026-08-27T12:00:00.000Z");
+  assert.equal(metadata.releasedAt, CONFIRMED_RELEASED_AT.toISOString());
+  assert.equal(metadata.heldForSeconds, 62);
+};
 beforeEach(async () => {
   releasedChainLeases.length = 0;
   releasedLeaseTargets.length = 0;
@@ -71,6 +91,7 @@ const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const BRANCH = "agentos/merge-tail-test";
 const NEWER_CLAIM = "merge-readiness-claim:new-worker|2099-01-01T00:00:00.000Z";
+const CONFIRMED_RELEASED_AT = new Date("2026-08-27T12:01:02.999Z");
 
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
   repository: "acme/widgets",
@@ -209,6 +230,7 @@ test("clean exact-head readiness authorizes and queues mechanical merge", async 
   assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
   assert.deepEqual(releasedChainLeases, [], "retained authorization is released by the final consumer");
   assert.deepEqual(releasedLeaseTargets, []);
+  assert.equal((await leaseHoldMarkers(seeded.project.id)).length, 0, "retained authorization is not measured before its consumer releases");
 });
 
 test("a defense-list diff authorizes the merge and leaves one audit message behind", async () => {
@@ -284,6 +306,7 @@ test("base drift after lease acquisition is rechecked before authorization", asy
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
   assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
   assert.deepEqual(releasedLeaseTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+  await assertConfirmedHold(seeded.project.id);
 });
 
 test("post-acquire readiness stop releases its own confirmed lease", async () => {
@@ -306,6 +329,7 @@ test("post-acquire readiness stop releases its own confirmed lease", async () =>
   assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
   assert.deepEqual(releasedLeaseTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+  await assertConfirmedHold(seeded.project.id);
 });
 
 test("a post-acquire release or hold-recording failure remains observable", async () => {
@@ -595,6 +619,41 @@ test("a worker that acquired then lost its claim releases without a concrete suc
   );
   assert.deepEqual(releasedChainLeases, [succeeded.readiness.chainId]);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).failureReason, NEWER_CLAIM);
+});
+
+test("a foreign project's active successor cannot receive a claim-loss lease handoff", async () => {
+  const owner = await seedReadiness();
+  const foreign = await seedReadiness();
+  await db.task.update({
+    where: { id: foreign.integrator.id },
+    data: { chainId: owner.readiness.chainId, chainIndex: 8, chainLayer: 8 },
+  });
+  await db.run.create({ data: {
+    projectId: foreign.project.id,
+    taskId: foreign.integrator.id,
+    agentId: foreign.integrator.assigneeAgentId!,
+    repoId: foreign.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${foreign.integrator.id}:run:1`,
+    runner: "CLAUDE",
+    model: INTEGRATOR_SENTINEL_MODEL,
+    promptHash: "foreign-successor",
+    status: RunStatus.QUEUED,
+    branch: BRANCH,
+    targetBranch: "main",
+  } });
+  const loseAfterAcquire: MergeLeaseAcquirer = async () => {
+    await db.task.update({ where: { id: owner.readiness.id }, data: { status: TaskStatus.DONE } });
+    return { outcome: "acquired" };
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 1, releaseChainLease, leaseRunner(loseAfterAcquire)),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.deepEqual(releasedLeaseTargets, [{ projectId: owner.project.id, chainId: owner.readiness.chainId }]);
+  await assertConfirmedHold(owner.project.id);
+  assert.equal((await leaseHoldMarkers(foreign.project.id)).length, 0);
 });
 
 test("eligible readiness is not hidden behind the first hundred ineligible candidates", async () => {

@@ -16,6 +16,7 @@ import {
   enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
+  MERGE_TAIL_KIND,
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
   PrismaClient,
@@ -24,6 +25,7 @@ import {
 import { type PullRequestSnapshot } from "./github-read.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
+import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -43,6 +45,13 @@ const RUNNER = "runner-stop-state";
 /** §D-P1 rule 3: completing a mechanical run needs the executor's own bearer,
  *  not the fleet-wide runner token. See merge-integrator-forgery.dbtest.ts. */
 const EXECUTOR = "merge-executor-token-stop-state";
+const CONFIRMED_RELEASED_AT = new Date("2026-08-27T12:01:02.999Z");
+const CONFIRMED_RELEASE = {
+  outcome: "released" as const,
+  ref: "refs/merge-lease/holder",
+  sha: "merge-consumer-lease",
+  acquiredAt: "2026-08-27T12:00:00.250Z",
+};
 
 const freshSnapshot = (): PullRequestSnapshot => ({
   repository: "acme/widgets", number: 123, state: "OPEN", isDraft: false, merged: false,
@@ -70,6 +79,7 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
         if (target) {
           releasedChainLeases.push(target.chainId);
           releasedLeaseTargets.push(target);
+          await recordMergeLeaseHold(db, target, CONFIRMED_RELEASE, CONFIRMED_RELEASED_AT);
         }
       },
     }).request(path, {
@@ -310,6 +320,9 @@ test("a merged outcome advances the chain and lands DONE", async () => {
   const chain = await seedIntegratorChain(db, { label: "merged" });
   const run = await liveIntegratorRun(chain);
   await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({ outcome: "merged", mergeCommitSha: "e".repeat(40) }));
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: chain.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+  }), 0, "the retained readiness lease is not measured before merge completion");
   assert.equal((await completeRun(run)).status, 200);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, "DONE");
   assert.equal(await stopQuestionFor(chain.integratorTask!.id), null);
@@ -318,6 +331,19 @@ test("a merged outcome advances the chain and lands DONE", async () => {
     chainId: chain.integratorTask!.chainId,
     projectId: chain.project.id,
   }]);
+  const hold = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: chain.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+  });
+  assert.deepEqual(hold.metadata, {
+    kind: MERGE_TAIL_KIND.leaseHold,
+    schemaVersion: 1,
+    chainId: chain.integratorTask!.chainId,
+    leaseRef: CONFIRMED_RELEASE.ref,
+    leaseSha: CONFIRMED_RELEASE.sha,
+    acquiredAt: CONFIRMED_RELEASE.acquiredAt,
+    releasedAt: CONFIRMED_RELEASED_AT.toISOString(),
+    heldForSeconds: 62,
+  });
 });
 
 test("N19 no generic exit from a stop: PATCH, retry and enqueue are all refused", async () => {

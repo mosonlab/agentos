@@ -17,7 +17,8 @@ import {
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
-import { settleLease, type MergeLeaseTarget } from "./merge-lease.js";
+import { settleLease } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,

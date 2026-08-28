@@ -22,6 +22,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { DIRECT_TEMPLATE_NAME, MERGE_TAIL_KIND, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
 
 import type { ReleaseMergeLease } from "./merge-lease.js";
+import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -40,6 +41,13 @@ after(async () => { await db.$disconnect(); });
 const OPERATOR = "operator-cancel-release";
 const RUNNER = "runner-cancel-release";
 const RUNNER_ID = "cancel-release-runner";
+const CONFIRMED_RELEASED_AT = new Date("2026-08-27T12:01:02.999Z");
+const CONFIRMED_RELEASE = {
+  outcome: "released" as const,
+  ref: "refs/merge-lease/holder",
+  sha: "cancellation-lease",
+  acquiredAt: "2026-08-27T12:00:00.250Z",
+};
 
 const call = async (method: string, path: string, token: string, body?: unknown): Promise<{ status: number; body: any }> => {
   const prior = [
@@ -50,12 +58,7 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   process.env.RUNNER_TOKEN = RUNNER;
   try {
     const response = await createApp(db, {
-      releaseMergeLease: async (target) => {
-        if (target) {
-          releasedChainLeases.push(target.chainId);
-          releasedLeaseTargets.push(target);
-        }
-      },
+      releaseMergeLease: collectRelease,
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -69,10 +72,27 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   }
 };
 
-const collectRelease: ReleaseMergeLease = async (target) => {
+const collectRelease: ReleaseMergeLease = async (target, database) => {
   if (!target) return;
   releasedChainLeases.push(target.chainId);
   releasedLeaseTargets.push(target);
+  await recordMergeLeaseHold(database, target, CONFIRMED_RELEASE, CONFIRMED_RELEASED_AT);
+};
+
+const assertConfirmedHold = async (taskId: string): Promise<void> => {
+  const hold = await db.taskActivity.findFirstOrThrow({
+    where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+  });
+  assert.deepEqual(hold.metadata, {
+    kind: MERGE_TAIL_KIND.leaseHold,
+    schemaVersion: 1,
+    chainId: (hold.metadata as Record<string, unknown>).chainId,
+    leaseRef: CONFIRMED_RELEASE.ref,
+    leaseSha: CONFIRMED_RELEASE.sha,
+    acquiredAt: CONFIRMED_RELEASE.acquiredAt,
+    releasedAt: CONFIRMED_RELEASED_AT.toISOString(),
+    heldForSeconds: 62,
+  });
 };
 
 let sequence = 0;
@@ -242,7 +262,7 @@ test("cancelling a merge-tail auxiliary run releases the chain it serves", async
 
 test("reconciliation terminalizing a cancellation after runner loss releases the lease", async () => {
   const now = new Date();
-  const chain = await seedChain();
+  const chain = await seedChain({ outputKind: "merge-result", chainIndex: 7 });
   const run = await seedRun(chain, { leaseExpiresAt: new Date(now.getTime() - 60_000) });
   await db.run.update({ where: { id: run.id }, data: {
     cancelRequestId: "cancel-lost-runner",
@@ -254,6 +274,7 @@ test("reconciliation terminalizing a cancellation after runner loss releases the
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.CANCELLED);
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
   assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
+  await assertConfirmedHold(chain.task.id);
 });
 
 test("a lost merge-tail run that still has an attempt left keeps the lease for its retry", async () => {
@@ -354,7 +375,58 @@ test("a stranded queued handoff releases once and records settlement after relea
     orderBy: { createdAt: "desc" },
   });
   assert.equal((settled.metadata as Record<string, unknown>).state, "released");
+  await assertConfirmedHold(chain.task.id);
 
   assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), collectRelease), 0);
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+});
+
+test("one hold-recording failure does not block other stranded lease releases or settlements", async () => {
+  const now = new Date();
+  const first = await seedChain();
+  const second = await seedChain();
+  const firstRun = await seedRun(first, { status: RunStatus.QUEUED });
+  const secondRun = await seedRun(second, { status: RunStatus.QUEUED });
+  for (const [chain, run] of [[first, firstRun], [second, secondRun]] as const) {
+    await db.taskActivity.create({ data: {
+      taskId: chain.task.id,
+      actorType: "control-plane",
+      body: `Chain Lease handed to queued Run ${run.id}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.leaseHandoff,
+        schemaVersion: 1,
+        state: "pending",
+        chainId: chain.chainId,
+        toRunId: run.id,
+        handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+      },
+    } });
+  }
+  const attempted: string[] = [];
+  const recordingFailure = new Error("first project's hold marker failed");
+  const releaseAll: ReleaseMergeLease = async (target, database) => {
+    if (!target) return;
+    attempted.push(target.projectId);
+    if (target.projectId === first.project.id) throw recordingFailure;
+    await collectRelease(target, database);
+  };
+
+  await assert.rejects(
+    reconcileDatabaseRuns(db, now, releaseAll),
+    (error: unknown) => error instanceof AggregateError && error.errors.includes(recordingFailure),
+  );
+  assert.deepEqual(new Set(attempted), new Set([first.project.id, second.project.id]));
+  for (const chain of [first, second]) {
+    const settlement = await db.taskActivity.findFirstOrThrow({
+      where: {
+        taskId: chain.task.id,
+        metadata: { path: ["state"], equals: "released" },
+      },
+    });
+    assert.equal((settlement.metadata as Record<string, unknown>).kind, MERGE_TAIL_KIND.leaseHandoff);
+  }
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: first.task.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+  }), 0);
+  await assertConfirmedHold(second.task.id);
 });

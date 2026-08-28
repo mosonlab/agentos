@@ -34,10 +34,10 @@ import {
   noteLeaseHandoff,
   releaseMergeLease,
   withMergeLease,
-  type MergeLeaseTarget,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
@@ -473,7 +473,11 @@ const applyReadinessDecision = async (
       const handoff = activeSuccessor && readiness.chainId
         ? await db.run.findFirst({
           where: {
-            task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+            task: {
+              projectId: readiness.projectId,
+              chainId: readiness.chainId,
+              chainIndex: { gt: readiness.chainIndex ?? -1 },
+            },
             status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
           },
           select: { id: true },
@@ -544,7 +548,11 @@ const applyReadinessDecision = async (
         const handoff = activeSuccessor && readiness.chainId
           ? await tx.run.findFirst({
             where: {
-              task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+              task: {
+                projectId: readiness.projectId,
+                chainId: readiness.chainId,
+                chainIndex: { gt: readiness.chainIndex ?? -1 },
+              },
               status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
             },
             select: { id: true },

@@ -6,17 +6,39 @@ import {
   type Prisma,
   type PrismaClient,
 } from "@anneal/db";
-import {
-  mergeLeaseHold,
-  type MergeLeaseRelease,
-  type MergeLeaseTarget,
-} from "./merge-lease.js";
 
-/** Backward-compatible name for the canonical release result. */
-export type MergeLeaseReleaseForHold = MergeLeaseRelease;
+/** What one `merge-lease.sh release` did. */
+export type MergeLeaseRelease =
+  | { outcome: "released"; ref: string; sha: string; acquiredAt: string }
+  | { outcome: "not-held" }
+  | { outcome: "skipped"; heldFor: string }
+  | { outcome: "refused"; heldBy: string }
+  | { outcome: "unreachable"; detail: string };
 
-export { mergeLeaseHold } from "./merge-lease.js";
-export type { MergeLeaseHold, MergeLeaseTarget } from "./merge-lease.js";
+/** The project-scoped identity of a Chain's external merge lease. */
+export type MergeLeaseTarget = {
+  projectId: string;
+  chainId: string;
+};
+
+export type MergeLeaseHold = {
+  acquiredAt: Date;
+  releasedAt: Date;
+  heldForSeconds: number;
+};
+
+/** Calculate a non-negative whole-second hold from the lease blob timestamp. */
+export const mergeLeaseHold = (acquiredAt: string, releasedAt: Date): MergeLeaseHold | null => {
+  const acquiredAtMs = Date.parse(acquiredAt);
+  const releasedAtMs = releasedAt.getTime();
+  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
+  return {
+    acquiredAt: new Date(acquiredAtMs),
+    releasedAt: new Date(releasedAtMs),
+    // A clock adjustment must not produce a negative hold in the evidence.
+    heldForSeconds: Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000)),
+  };
+};
 
 export type MergeLeaseHoldRecordResult = "recorded" | "already-recorded" | "ignored";
 
@@ -35,19 +57,20 @@ const mergeLeaseHoldActivityId = (target: MergeLeaseTarget, leaseSha: string): s
 /**
  * Persist one confirmed release on the latest chain task in its project.
  *
- * A non-release, malformed timestamp, or missing confirmation is deliberately a
- * no-op. Database failures propagate to the caller so a control-plane path
- * cannot report that evidence was stored when the write failed.
+ * A non-release is deliberately a no-op. Malformed confirmation and database
+ * failures propagate so a control-plane path cannot silently lose evidence.
  */
 export const recordMergeLeaseHold = async (
   db: PrismaClient,
   target: MergeLeaseTarget,
-  release: MergeLeaseReleaseForHold,
+  release: MergeLeaseRelease,
   releasedAt: Date,
 ): Promise<MergeLeaseHoldRecordResult> => {
   if (release.outcome !== "released" || !release.ref || !release.sha) return "ignored";
   const hold = mergeLeaseHold(release.acquiredAt, releasedAt);
-  if (!hold) return "ignored";
+  if (!hold) {
+    throw new Error("Cannot record confirmed merge lease release: invalid acquiredAt or releasedAt");
+  }
 
   const task = await db.task.findFirst({
     where: {

@@ -10,7 +10,8 @@ import {
 } from "@anneal/db";
 
 import { jsonValue } from "./execution.js";
-import { settleLease, type MergeLeaseTarget } from "./merge-lease.js";
+import { settleLease } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import type { Refusal } from "./refusal.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { lockTaskMutationRows } from "./task-write.js";

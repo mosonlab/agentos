@@ -13,9 +13,9 @@ import {
   noteLeaseHandoffReleased,
   releaseMergeLease,
   settleLease,
-  type MergeLeaseTarget,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { handleRegressionCompletion, regressionVerdictForRun } from "./merge-tail-actions.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 import { terminalizeRun } from "./run-terminal.js";
@@ -361,13 +361,27 @@ export const reconcileDatabaseRuns = async (
       count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length,
     };
   });
-  for (const target of reconciliation.strandedChainLeases) await releaseChainLease(target, db);
+  const releaseFailures: unknown[] = [];
+  for (const target of reconciliation.strandedChainLeases) {
+    try {
+      await releaseChainLease(target, db);
+    } catch (error: unknown) {
+      releaseFailures.push(error);
+    }
+  }
   if (reconciliation.strandedHandoffs.length > 0) {
-    await db.$transaction(async (tx) => {
-      for (const handoff of reconciliation.strandedHandoffs) {
-        await noteLeaseHandoffReleased(tx, { ...handoff, at: now });
-      }
-    });
+    try {
+      await db.$transaction(async (tx) => {
+        for (const handoff of reconciliation.strandedHandoffs) {
+          await noteLeaseHandoffReleased(tx, { ...handoff, at: now });
+        }
+      });
+    } catch (error: unknown) {
+      releaseFailures.push(error);
+    }
+  }
+  if (releaseFailures.length > 0) {
+    throw new AggregateError(releaseFailures, "One or more stranded merge lease releases or settlements failed");
   }
   return reconciliation.count;
 };

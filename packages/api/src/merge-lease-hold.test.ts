@@ -27,7 +27,7 @@ test("mergeLeaseHold records whole elapsed seconds and clamps clock skew", () =>
   assert.equal(mergeLeaseHold(acquiredAt, new Date(Number.NaN)), null);
 });
 
-test("recordMergeLeaseHold ignores unsuccessful or malformed releases", async () => {
+test("recordMergeLeaseHold ignores unsuccessful releases but surfaces malformed confirmation", async () => {
   let taskLookups = 0;
   let writes = 0;
   const db = {
@@ -39,9 +39,12 @@ test("recordMergeLeaseHold ignores unsuccessful or malformed releases", async ()
   assert.equal(await recordMergeLeaseHold(db, target, { outcome: "skipped", heldFor: "chain-2" }, releasedAt), "ignored");
   assert.equal(await recordMergeLeaseHold(db, target, { outcome: "refused", heldBy: "other" }, releasedAt), "ignored");
   assert.equal(await recordMergeLeaseHold(db, target, { outcome: "unreachable", detail: "offline" }, releasedAt), "ignored");
-  assert.equal(await recordMergeLeaseHold(db, target, {
-    outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-sha", acquiredAt: "invalid",
-  }, releasedAt), "ignored");
+  await assert.rejects(
+    recordMergeLeaseHold(db, target, {
+      outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-sha", acquiredAt: "invalid",
+    }, releasedAt),
+    /confirmed merge lease release.*invalid acquiredAt/u,
+  );
   assert.equal(taskLookups, 0);
   assert.equal(writes, 0);
 });
