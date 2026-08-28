@@ -53,7 +53,6 @@ const PARTS: Record<string, string[]> = {
   "select.tsx": ["Select"],
   "switch.tsx": ["Switch"],
   "table.tsx": ["Table", "TableHeader", "TableBody", "TableFooter", "TableHead", "TableRow", "TableCell", "TableCaption"],
-  "tabs.tsx": ["Tabs", "TabsList", "TabsTrigger", "TabsContent"],
   "textarea.tsx": ["Textarea"],
 };
 
@@ -62,10 +61,10 @@ const NOT_A_PART = ["badgeVariants", "buttonVariants"];
 const kebab = (name: string): string =>
   name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
-test("the 13 migrated files plus hover-card carry 54 parts, and the plan's count is pinned", () => {
+test("the 12 migrated files plus hover-card carry 50 parts, and the plan's count is pinned", () => {
   const migrated = Object.entries(PARTS).filter(([file]) => file !== "hover-card.tsx");
-  assert.equal(migrated.length, 13);
-  assert.equal(migrated.reduce((total, [, parts]) => total + parts.length, 0), 51);
+  assert.equal(migrated.length, 12);
+  assert.equal(migrated.reduce((total, [, parts]) => total + parts.length, 0), 47);
   assert.equal(PARTS["hover-card.tsx"]!.length, 3);
 });
 

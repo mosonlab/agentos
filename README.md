@@ -198,10 +198,6 @@ the authoritative support statement.
 
 ## Credits and license
 
-An independent build inspired by Danny Postma's video *How I Built My Own
-AgentOS on Claude's Agent SDK (So You Can Too)* (2026), written from scratch
-from the ideas in it.
-
 The chain's role and step prompts owe more than inspiration: five skills from
 [mattpocock/skills](https://github.com/mattpocock/skills) supply their working
 text, carried verbatim and wrapped in paragraphs written here for this

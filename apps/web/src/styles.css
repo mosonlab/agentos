@@ -19,9 +19,7 @@
   --radius-lg: var(--radius); --radius-xl: var(--radius-card); --font-mono: var(--mono);
 }
 
-/* AgentOS web — visual language copied from design-reference/ (Danny Postma's
-   AgentOS): warm-olive near-black, a single yellow accent, mono everywhere.
-   Token names follow design-reference/ui-notes.md §0. */
+/* AgentOS web — warm-olive near-black, a single yellow accent, mono everywhere. */
 
 :root {
   --background:#f6f2e7; --foreground:#252116; --card:#fffdf7; --card-foreground:#252116;
