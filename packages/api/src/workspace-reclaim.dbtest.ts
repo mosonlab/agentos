@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import {
+  ChainControlState,
+  lockChainRows,
+  PrismaClient,
+  RunStatus,
+  SessionExecutionStatus,
+  TaskStatus,
+} from "@anneal/db";
 // The production runner, not a stand-in. The runner exposes these two
 // entrypoints the way @anneal/db does — types from source, runtime from dist —
 // so this typechecks before anything is built and runs against the compiled
@@ -17,7 +24,8 @@ import type { RunnerConfig } from "@anneal/runner/config";
 
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
+import { acknowledgeReclaimSalvage } from "./workspace-reclaim.js";
 
 /**
  * Workspace GC ownership (issue #115), end to end.
@@ -412,6 +420,147 @@ test("reclaim salvage acknowledgement rebases an already-queued retry", async ()
   assert.equal(response.status, 200, JSON.stringify(response.body));
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, salvage);
+});
+
+test("a committed Chain Hold bars the fresh replacement after late salvage", async () => {
+  const root = await scratchRoot("salvage-held-replacement");
+  const runnerId = "runner-salvage-held";
+  const seeded = await seedRun({ root, runnerId, status: "LOST", pushedBranch: null });
+  const chainId = `salvage-held-${seeded.task.id}`;
+  await db.task.create({ data: {
+    projectId: seeded.project.id,
+    repoId: seeded.repo.id,
+    assigneeAgentId: seeded.agent.id,
+    name: "Held predecessor",
+    description: "holds the replacement layer",
+    chainId,
+    chainIndex: 0,
+    chainLayer: 1,
+    status: TaskStatus.DOING,
+  } });
+  await db.task.update({
+    where: { id: seeded.task.id },
+    data: { chainId, chainIndex: 1, chainLayer: 2, status: TaskStatus.DOING },
+  });
+  await db.agentRepoAccess.create({ data: {
+    projectId: seeded.project.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    mountPath: "/repo",
+    permissions: "GIT_WRITE",
+  } });
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: { workspaceReclaimAt: new Date(), leaseExpiresAt: null },
+  });
+  const replacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    runner: "CLAUDE",
+    runnerId: "replacement-runner",
+    fencingToken: `2:${seeded.task.id}:replacement`,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    model: "claude",
+    promptHash: "hash-2",
+    status: RunStatus.CLAIMED,
+    targetBranch: seeded.repo.defaultBranch,
+    maxRunsPerTask: 5,
+  } });
+  await db.session.create({ data: {
+    runId: replacement.id,
+    projectId: seeded.project.id,
+    agentId: seeded.agent.id,
+    taskId: seeded.task.id,
+    runner: "CLAUDE",
+    executionStatus: SessionExecutionStatus.PROVISIONING,
+  } });
+
+  const holdClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const salvageClientBase = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let releaseHold!: () => void;
+  let reportHeld!: () => void;
+  let reportRepairAttempt!: () => void;
+  const holdGate = new Promise<void>((resolve) => { releaseHold = resolve; });
+  const held = new Promise<void>((resolve) => { reportHeld = resolve; });
+  const repairAttempt = new Promise<void>((resolve) => { reportRepairAttempt = resolve; });
+  let attemptReported = false;
+  const reportOnce = () => {
+    if (attemptReported) return;
+    attemptReported = true;
+    reportRepairAttempt();
+  };
+  const salvageClient = new Proxy(salvageClientBase, {
+    get(target, property, receiver) {
+      if (property !== "$transaction") {
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+        const instrumented = new Proxy(tx, {
+          get(txTarget, txProperty, txReceiver) {
+            if (txProperty === "$queryRaw") {
+              return (...args: unknown[]) => {
+                const query = args[0] as string[] | { strings?: string[] } | undefined;
+                const sql = Array.isArray(query) ? query.join(" ") : query?.strings?.join(" ") ?? "";
+                if (sql.includes('ORDER BY "chainLayer"')) reportOnce();
+                return Reflect.apply(txTarget.$queryRaw, txTarget, args);
+              };
+            }
+            if (txProperty === "run") {
+              return new Proxy(txTarget.run, {
+                get(runTarget, runProperty, runReceiver) {
+                  if (runProperty !== "create") return Reflect.get(runTarget, runProperty, runReceiver);
+                  return (...args: unknown[]) => {
+                    reportOnce();
+                    return Reflect.apply(runTarget.create, runTarget, args);
+                  };
+                },
+              });
+            }
+            return Reflect.get(txTarget, txProperty, txReceiver);
+          },
+        });
+        return operation(instrumented);
+      }, options as any);
+    },
+  }) as PrismaClient;
+
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+  try {
+    const holding = holdClient.$transaction(async (tx) => {
+      await lockChainRows(tx, { projectId: seeded.project.id, chainId });
+      await tx.chainControl.create({ data: {
+        projectId: seeded.project.id,
+        chainId,
+        state: ChainControlState.HELD,
+        heldLayer: 1,
+        holdGeneration: 1,
+      } });
+      reportHeld();
+      await holdGate;
+    });
+    await held;
+    const repairing = acknowledgeReclaimSalvage(salvageClient, {
+      runnerId,
+      runId: seeded.run.id,
+      pushedBranch: salvage,
+    });
+    await repairAttempt;
+    releaseHold();
+    const [repair] = await Promise.all([repairing, holding]);
+    assert.equal(repair, "repaired");
+  } finally {
+    releaseHold();
+    await Promise.all([holdClient.$disconnect(), salvageClientBase.$disconnect()]);
+  }
+
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).status, RunStatus.CANCELLED);
+  assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 2, "Hold must bar a later-layer Run 3");
 });
 
 test("reclaim salvage acknowledgement refuses cleanup after the replacement started", async () => {

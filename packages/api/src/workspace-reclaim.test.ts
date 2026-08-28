@@ -110,10 +110,15 @@ test("reclaim salvage ACK accepts only the owner's deterministic ref while the i
     status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null, pushedBranch: null,
   };
   const db: any = {
+    $queryRaw: async () => [{ id: "task-1" }],
     run: {
       findUnique: async () => ({ ...stored, pushedBranch: written }),
       findFirst: async () => null,
       updateMany: async ({ data }: { data: { pushedBranch: string } }) => { written = data.pushedBranch; return { count: 1 }; },
+    },
+    task: {
+      findUnique: async () => ({ projectId: "project-1", chainId: null }),
+      findUniqueOrThrow: async () => ({ id: "task-1" }),
     },
   };
   db.$transaction = async (operation: (tx: any) => unknown) => operation(db);

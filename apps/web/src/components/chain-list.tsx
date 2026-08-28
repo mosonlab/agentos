@@ -99,11 +99,12 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
 };
 
-export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
+export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, onStart }: {
   step: ChainStep;
   here: boolean;
   pending: boolean;
   blockedBy: readonly ChainStep[];
+  heldLayer: number | null;
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
@@ -121,7 +122,7 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
         {held ? (
           <span data-chain-held-hint="" className={cn(HINT, "mt-[3px] block")}>
-            {step.holdRefusal}
+            {t("chain.startHeldHint", { n: heldLayer ?? "?" })}
           </span>
         ) : null}
         {blockedOn ? (
@@ -213,7 +214,15 @@ export const ChainList = ({ chain, taskId, pending, onStart, onControl }: {
           )}
         >
           {group.steps.map((step) => (
-            <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} blockedBy={group.blockers} onStart={onStart} />
+            <ChainRow
+              key={step.taskId}
+              step={step}
+              here={step.taskId === taskId}
+              pending={pending}
+              blockedBy={group.blockers}
+              heldLayer={heldLayer}
+              onStart={onStart}
+            />
           ))}
         </section>
       ))}

@@ -193,21 +193,23 @@ test("an unheld Chain offers Hold and no held badge", () => {
 });
 
 test("a held Chain offers Resume, names its layer and disables later Start", () => {
+  const refusal = "Cannot start Task 2; Chain is held after layer 1";
   const markup = render(chain([
     step(1, { layer: 1, status: "DOING", currentExecution: true }),
-    step(2, { layer: 2, startable: false, startAction: null, holdRefusal: "Cannot start Task 2; Chain is held after layer 1" }),
+    step(2, { layer: 2, startable: false, startAction: null, holdRefusal: refusal }),
   ], { control: heldControl({ holdReason: "inspect the output" }) }), "t1");
   assert.match(markup, new RegExp(`>${en("chain.resume")}<`));
   assert.match(markup, new RegExp(en("chain.heldAfter", { n: 1 })));
   assert.match(markup, new RegExp(en("chain.holdReason", { reason: "inspect the output" })));
-  assert.match(markup, /Cannot start Task 2; Chain is held after layer 1/u);
+  assert.match(markup, new RegExp(en("chain.startHeldHint", { n: 1 })));
+  assert.doesNotMatch(markup, new RegExp(refusal));
   assert.match(markup, new RegExp(`data-chain-node="t2"[\\s\\S]*<button[^>]*disabled=""[^>]*>${en("chain.startNext")}<\\/button>`, "u"));
   assert.doesNotMatch(markup, new RegExp(en("chain.waitingOperator")));
 });
 
-test("a held human Step renders the API refusal without client-side layer arithmetic", () => {
+test("a held human Step localizes the API refusal without client-side layer arithmetic", () => {
   const refusal = "Cannot start Human approval; Chain is held after layer 1";
-  const markup = render(chain([
+  const value = chain([
     step(1, { layer: 1, status: "DONE" }),
     step(2, {
       layer: null,
@@ -219,9 +221,13 @@ test("a held human Step renders the API refusal without client-side layer arithm
       startAction: null,
       holdRefusal: refusal,
     }),
-  ], { control: heldControl() }), "t1");
-  assert.match(markup, new RegExp(refusal));
-  assert.match(markup, new RegExp(`data-chain-node="t2"[\\s\\S]*<button[^>]*disabled=""[^>]*>${en("chain.startNext")}<\\/button>`, "u"));
+  ], { control: heldControl() });
+  for (const locale of ["en", "zh"] as const) {
+    const markup = renderLocale(value, "t1", locale);
+    assert.match(markup, new RegExp(translate(locale, "chain.startHeldHint", { n: 1 })));
+    assert.doesNotMatch(markup, new RegExp(refusal));
+    assert.match(markup, new RegExp(`data-chain-node="t2"[\\s\\S]*<button[^>]*disabled=""[^>]*>${translate(locale, "chain.startNext")}<\\/button>`, "u"));
+  }
 });
 
 test("a held Chain says it is waiting only after its held layer finishes, in both locales", () => {
