@@ -1,9 +1,11 @@
 # Batch 2 Tasks Automation Runbook
 
-This page describes the current behavior of task-chain auto-advance, the API
+This page describes the current behavior of task-chain auto-advance, bounded
+cross-chain template dispatch, per-instantiation assignee overrides, the API
 scheduler, and inbound template webhooks. The implementation is concentrated in
 `packages/db/src/workflow.ts`, `packages/api/src/app.ts`,
-`packages/api/src/scheduler.ts`, and the Task/TaskTemplate schema.
+`packages/api/src/templates.ts`, `packages/api/src/scheduler.ts`, and the
+Task/TaskTemplate schema.
 
 ## 1. Chain auto-advance
 
@@ -23,6 +25,10 @@ agent-executable. For a human gate, the implementation first uses the direct
 nearest lower `chainIndex` in the same project/chain that has an agent and repo,
 requeues that predecessor, and queues its run again. This chain-ordered fallback
 is the repair for HUMAN gates assembled without a usable predecessor relation.
+
+A template chain may also have a cross-chain dispatch binding. That binding is
+resolved by the same server-owned completion path described below; it is not a
+webhook, merge callback, or generic chain-profile feature.
 
 ### Successor selection
 
@@ -99,7 +105,98 @@ flowchart TD
   N -- human/no agent, operator PATCH --> U[Status TODO + operator activity]
 ```
 
-## 2. Scheduler operations
+## 2. Template chain instantiation
+
+### Cross-chain dispatch binding
+
+`POST /projects/:projectId/task-templates/:templateId/instantiate` accepts the
+optional `afterTaskId`. It must identify an unarchived, not-yet-DONE Task in the
+same project that has a chain identity and is the sole task at that chain's
+highest execution layer. A predecessor whose terminal layer has multiple rows,
+a non-chain task, a missing/cross-project id, an occupied pointer, or an already
+finished/archived task is refused with a stable 400 code such as
+`after_task_not_found`, `after_task_not_chained`, `after_task_not_terminal`,
+`after_task_already_bound`, `after_task_already_done`, or `after_task_archived`.
+
+The binding is created in the same Serializable transaction as the new chain.
+The first task alone stores `dispatchAfterTaskId`; it is unique, project-scoped,
+and protected by a composite foreign key and a shape check. The new chain starts
+with every task in `TODO` and no Run. `afterTaskId` with `autoStart=true` is a
+400 (`dispatch_conflicts_with_auto_start`) rather than an instruction to ignore
+one of the two inputs. The transaction writes audit activities on the new first
+task and predecessor. A failed validation or occupied-pointer race rolls back
+the entire chain.
+
+Completion dispatch is deliberately bounded. While holding the predecessor
+chain mutex, the control plane re-reads the whole chain and requires every row
+to be `DONE`; it then locks the successor chain and queues the bound first Run
+through the normal enqueue path. The pointer is retained as history. Concurrent
+completion/replay attempts observe the active Run or the successor state and do
+not create a second Run. If a legacy/directly-seeded binding is encountered
+while the predecessor is not actually complete, the successor is parked in
+`REVIEW` with an explicit failure reason rather than silently waiting. Archived
+successors, missing grants, archived assignees, missing executable assignment,
+and stopped merge-integrator successors are likewise parked while predecessor
+success is preserved. To recover a parked bound successor, correct the stated
+condition, set the task back to `TODO`, and use `Start now`; there is no separate
+“retry dispatch” endpoint.
+
+A bound first task is inert until dispatch. `POST /tasks/:taskId/start` returns
+409 while its predecessor is unresolved, and the generic status PATCH also
+refuses moving that task from `TODO` to another status before the predecessor is
+`DONE`. This prevents either route from bypassing the binding and starting the
+chain early. When `afterTaskId` is absent, existing `autoStart=true` and
+`autoStart=false` behavior is unchanged. Webhook and operator template fires
+continue to call this unbound path with `autoStart=true`.
+
+### Per-instantiation assignee overrides
+
+The same instantiate body accepts `stepOverrides`, an object keyed by the
+canonical decimal `stepIndex` with no leading zero. Each value is a strict object
+containing only `assigneeAgentId`; at most 64 entries are accepted. Overrides are
+API-only and can be sent with or without `afterTaskId`.
+
+The effective assignee is the override when present and the canonical template
+assignee otherwise. The step's `assigneeType` and every other template-step
+property remain canonical. The override agent must be active in the project and
+have an `AgentRepoAccess` grant for the selected repository. Effective assignees
+are also checked against the bidirectional merge-integrator binding rule and the
+pinned compound-implementation rule. Unknown or malformed step keys, unknown or
+archived agents, missing grants, HUMAN steps, and invariant violations return
+stable 400 codes including `step_override_invalid_key`,
+`step_override_unknown_step`, `step_override_agent_not_found`,
+`step_override_agent_archived`, `step_override_missing_repo_grant`,
+`step_override_step_not_agent`, `step_override_integrator_binding`,
+`step_override_compound_implementation`, and `step_override_too_many`.
+
+Overrides are copied only to the newly materialized Task rows. The
+`TaskTemplate` and `TaskTemplateStep` rows, including their timestamps, are never
+updated; unspecified steps keep their canonical assignees, prompts, layers,
+outputs, approval gates, branch settings, and other defaults. The deployed
+thirteen-step Full Assurance template therefore keeps its canonical contract.
+The response shape remains the existing `{ chainId, branchName, tasks, fireId }`
+shape, with the effective assignee and nullable binding visible on the returned
+Task rows.
+
+### Storage and verification anchors
+
+Migration `20260825120000_task_dispatch_binding` adds the nullable
+`Task.dispatchAfterTaskId` pointer without backfilling existing rows. The schema
+keeps both the scalar unique index and the `(dispatchAfterTaskId, projectId)`
+unique index: the former is the one-to-one occupied-pointer invariant, while the
+latter supports Prisma's one-to-one relation validator and the composite
+project-scoped foreign key. `onDelete=RESTRICT` keeps a predecessor from being
+deleted while a successor points at it. `goalPredecessorTaskId` remains a
+separate pointer with separate semantics.
+
+The focused behavior anchors are
+`packages/api/src/template-dispatch-binding.dbtest.ts`,
+`packages/api/src/template-overrides.dbtest.ts`,
+`packages/api/src/dispatch-activation.dbtest.ts`,
+`packages/api/src/dispatch-lifecycle.dbtest.ts`, and
+`packages/api/src/migration.dbtest.ts`.
+
+## 3. Scheduler operations
 
 The API process starts one non-overlapping scheduler interval after the HTTP
 server starts. `SCHEDULER_POLL_INTERVAL_MS` defaults to `30000`. The value must
@@ -158,7 +255,7 @@ For schema verification, run `npm run db:drift-check` with `DATABASE_URL`
 pointing at the migrated schema. Real DB tests use a dedicated non-public
 schema and reset/replay every migration before the process's suite.
 
-## 3. Webhook trigger operations
+## 4. Webhook trigger operations
 
 Webhooks are configured on `TaskTemplate`, not on the removed Trigger model.
 Patch `/task-templates/:templateId` with:
@@ -197,7 +294,7 @@ database error follows the normal API error handler. The created tasks and
 activities are the durable fire trail; `chainId` and
 `taskIds` from the response should be retained by the caller for correlation.
 
-## 4. Fixed failure signatures (A/B/C/D)
+## 5. Fixed failure signatures (A/B/C/D)
 
 These are operational fingerprints. When the symptom appears, use the stated
 root cause and current guard before changing behavior.
@@ -391,7 +488,7 @@ The specification/plan amendment that defines successful-run HUMAN successors
 as `REVIEW + gate` is part of the current contract; it is not an optional
 template-only behavior.
 
-## 5. Notes for the next batch
+## 6. Notes for the next batch
 
 This batch's behavior touches:
 
