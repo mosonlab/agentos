@@ -490,11 +490,26 @@ export type ChainStep = {
   mergeRecovery?: MergeRecovery | null;
 };
 
+export type ChainControl = {
+  projectId: string;
+  chainId: string;
+  state: "held" | "released";
+  heldLayer: number | null;
+  heldAt: string | null;
+  holdRequestId: string | null;
+  holdReason: string | null;
+  releasedAt: string | null;
+  releaseRequestId: string | null;
+  holdGeneration: number;
+};
+
 export type Chain = {
   chainId: string | null;
   total: number;
   done: number;
   steps: ChainStep[];
+  /** Present on a real Chain response; omitted by the legacy chainless envelope. */
+  control?: ChainControl | null;
 };
 
 /** A webhook-configured template. `repo` is nullable: a trigger is defined by

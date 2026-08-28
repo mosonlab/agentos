@@ -239,6 +239,18 @@ test("cards in one chain render their own positions and never the active-step na
   assert.doesNotMatch(card(), /·/);
 });
 
+test("a parked Step's board card never describes a held Chain", () => {
+  const markup = card({
+    status: "BACKLOG",
+    chainId: "c1",
+    chainIndex: 4,
+    chainName: "Release",
+    chainProgress: progress({ position: 4 }),
+  });
+  assert.match(markup, /step 4\/9/);
+  assert.doesNotMatch(markup, /Held after layer|Resume Chain|Stop after current layer|Waiting for the operator/);
+});
+
 test("a bound board card names its unresolved predecessor without adding a board column", () => {
   const markup = card({
     chainId: "c1", chainName: "Release", chainProgress: progress({ position: 1 }),

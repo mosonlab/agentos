@@ -60,6 +60,7 @@ import {
   isRegressionVerificationOutputKind,
   type CandidateActivity,
   type CardRow,
+  type ChainControlSnapshot,
   type DecisionRow,
   mergeRecoveryPhase,
   type MergeRecoveryAttempt,
@@ -2392,6 +2393,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     if (!subject) return context.json({ error: "Task not found" }, 404);
     if (!subject.chainId) return context.json({ chainId: null, total: 0, done: 0, steps: [] });
+    const chainId = subject.chainId;
 
     const chainInclude = {
       assigneeAgent: { select: {
@@ -2443,21 +2445,50 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
     }));
 
-    const [admissions, recoveryRow] = await Promise.all([
-      db.$transaction((tx) => readStepAdmissions(tx, chainRows.map((row) => row.id), { locked: false })),
+    const [chainRead, recoveryRow] = await Promise.all([
+      db.$transaction(async (tx) => {
+        // Read the control authority once in the same transaction used for
+        // admission. The route projects this exact row, while the shared
+        // admission seam consumes the same snapshot for held-layer startability.
+        const control = await tx.chainControl.findUnique({
+          where: { projectId_chainId: { projectId: subject.projectId, chainId } },
+          select: {
+            projectId: true,
+            chainId: true,
+            state: true,
+            heldLayer: true,
+            heldAt: true,
+            holdRequestId: true,
+            holdReason: true,
+            releasedAt: true,
+            releaseRequestId: true,
+            holdGeneration: true,
+          },
+        });
+        const controls: ReadonlyMap<string, ChainControlSnapshot> = control === null
+          ? new Map()
+          : new Map([[chainKey({ projectId: control.projectId, chainId: control.chainId }), {
+            ...control,
+            held: control.state === ChainControlState.HELD,
+          }]]);
+        const admissions = await readStepAdmissions(tx, chainRows.map((row) => row.id), { locked: false, controls });
+        return { admissions, control };
+      }),
       db.mergeRecoveryAttempt.findFirst({
-        where: { integratorTask: { projectId: subject.projectId, chainId: subject.chainId } },
+        where: { integratorTask: { projectId: subject.projectId, chainId } },
         orderBy: [{ startedAt: "desc" }, { id: "desc" }],
       }),
     ]);
+    const { admissions, control } = chainRead;
     const mergeRecovery = mergeRecoveryProjection(recoveryRow);
     const ordinals = positions(chainRows);
     const progress = chainProgress(chainRows);
 
     return context.json({
-      chainId: subject.chainId,
+      chainId,
       total: progress?.total ?? chainRows.length,
       done: progress?.done ?? 0,
+      control: control === null ? null : chainControlProjection(control),
       steps: chainRows.map((row) => ({
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,

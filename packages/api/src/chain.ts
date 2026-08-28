@@ -300,7 +300,15 @@ export type StepAdmission =
     refusal: Refusal;
   };
 
-type ReadStepAdmissionOptions = { locked: boolean };
+type ReadStepAdmissionOptions = {
+  locked: boolean;
+  /**
+   * A caller that already read the controls in the same transaction can pass
+   * them here. The chain-detail route uses this to project the same authority
+   * row it used for admission without issuing a second ChainControl query.
+   */
+  controls?: ReadonlyMap<string, ChainControlSnapshot | undefined>;
+};
 
 const grantKey = (input: { projectId: string; agentId: string; repoId: string }): string => (
   `${input.projectId}:${input.agentId}:${input.repoId}`
@@ -428,8 +436,10 @@ export const readStepAdmissions = async (
       : [],
     // Keep control reads in the same batch as the existing admission facts.
     // `readChainControls` returns absent rows as not-held snapshots and issues
-    // one OR query for all Chain keys, never one lookup per Task.
-    readChainControls(tx, chainInputs),
+    // one OR query for all Chain keys, never one lookup per Task. A chain-detail
+    // caller may provide its already-read control map so the projection and
+    // admission share one authority query and one transaction snapshot.
+    options.controls ?? readChainControls(tx, chainInputs),
     grantInputs.length === 0
       ? []
       : options.locked

@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { CHAIN_PAGE, ChainList, GATE_TITLE_KEY } from "../components/chain-list";
 import { translate } from "../lib/i18n-core";
+import { LocaleProvider } from "../lib/i18n";
 import type { Chain, ChainStep } from "../lib/types";
 
 /* The expected values are unchanged; since batch 1 they come from the `en`
@@ -27,8 +28,20 @@ const chain = (steps: ChainStep[], overrides: Partial<Chain> = {}): Chain => ({
   chainId: "c1", total: steps.length, done: steps.filter((row) => row.status === "DONE").length, steps, ...overrides,
 });
 
+const heldControl = (overrides: Partial<NonNullable<Chain["control"]>> = {}): NonNullable<Chain["control"]> => ({
+  projectId: "p1", chainId: "c1", state: "held", heldLayer: 1,
+  heldAt: "2026-08-28T00:00:00.000Z", holdRequestId: "hold-1", holdReason: null,
+  releasedAt: null, releaseRequestId: null, holdGeneration: 1, ...overrides,
+});
+
 const render = (value: Chain, taskId: string): string => renderToStaticMarkup(
   <ChainList chain={value} taskId={taskId} pending={false} onStart={() => undefined} />,
+);
+
+const renderLocale = (value: Chain, taskId: string, locale: "en" | "zh"): string => renderToStaticMarkup(
+  <LocaleProvider initialLocale={locale}>
+    <ChainList chain={value} taskId={taskId} pending={false} onStart={() => undefined} />
+  </LocaleProvider>,
 );
 
 test("a nine-step chain renders nine rows and exactly one Viewed here", () => {
@@ -170,6 +183,43 @@ test("Viewed here and Current execution are independent facts", () => {
   const same = render(chain([step(1, { currentExecution: true })]), "t1");
   assert.equal([...same.matchAll(new RegExp(en("chain.viewedHere"), "g"))].length, 1);
   assert.equal([...same.matchAll(new RegExp(en("chain.currentExecution"), "g"))].length, 1);
+});
+
+test("an unheld Chain offers Hold and no held badge", () => {
+  const markup = render(chain([step(1)], { control: null }), "t1");
+  assert.match(markup, new RegExp(`>${en("chain.stopAfterLayer")}<`));
+  assert.doesNotMatch(markup, /data-chain-held-badge=/u);
+  assert.doesNotMatch(markup, /data-chain-hold-reason=/u);
+});
+
+test("a held Chain offers Resume, names its layer and disables later Start", () => {
+  const markup = render(chain([
+    step(1, { layer: 1, status: "DOING", currentExecution: true }),
+    step(2, { layer: 2, startable: false, startAction: null }),
+  ], { control: heldControl({ holdReason: "inspect the output" }) }), "t1");
+  assert.match(markup, new RegExp(`>${en("chain.resume")}<`));
+  assert.match(markup, new RegExp(en("chain.heldAfter", { n: 1 })));
+  assert.match(markup, new RegExp(en("chain.holdReason", { reason: "inspect the output" })));
+  assert.match(markup, new RegExp(en("chain.startHeldHint", { n: 1 })));
+  assert.match(markup, new RegExp(`data-chain-node="t2"[\\s\\S]*<button[^>]*disabled=""[^>]*>${en("chain.startNext")}<\\/button>`, "u"));
+  assert.doesNotMatch(markup, new RegExp(en("chain.waitingOperator")));
+});
+
+test("a held Chain says it is waiting only after its held layer finishes, in both locales", () => {
+  const running = chain([
+    step(1, { layer: 1, status: "DOING", currentExecution: true }),
+    step(2, { layer: 2 }),
+  ], { control: heldControl() });
+  assert.doesNotMatch(renderLocale(running, "t1", "en"), new RegExp(en("chain.waitingOperator")));
+
+  const complete = chain([
+    step(1, { layer: 1, status: "DONE", currentExecution: false }),
+    step(2, { layer: 2 }),
+  ], { control: heldControl() });
+  for (const locale of ["en", "zh"] as const) {
+    const markup = renderLocale(complete, "t1", locale);
+    assert.match(markup, new RegExp(translate(locale, "chain.waitingOperator")));
+  }
 });
 
 /* ---------------------------------------------------------------- E14 wiring */

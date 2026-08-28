@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import { compactTokens, durationWithInboxWait, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
@@ -260,6 +260,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   // No new cadence: the chain rides the page's default poll.
   const chain = usePoll<Chain>(`/tasks/${taskId}/chain`);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const chainControlInFlight = useRef(false);
   const { pending, error: actionError, run } = useAction();
   const t = useT();
 
@@ -293,6 +294,20 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   };
   const startStep = (step: ChainStep): void => {
     void run(async () => { await api.post(`/tasks/${step.taskId}/start`, {}); reload(); chain.reload(); });
+  };
+  const controlChain = (): void => {
+    const current = chain.data;
+    if (current === null || current === undefined || current.chainId === null || chainControlInFlight.current) return;
+    const held = current.control?.state === "held";
+    chainControlInFlight.current = true;
+    void run(async () => {
+      try {
+        await api.post(`/tasks/${taskId}/chain/${held ? "resume" : "hold"}`, { requestId: crypto.randomUUID() });
+        chain.reload();
+      } finally {
+        chainControlInFlight.current = false;
+      }
+    });
   };
   const setArchived = (archived: boolean): void => {
     void run(async () => {
@@ -433,7 +448,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         {task.chainId === null ? null
           : chain.data && chain.data.chainId !== null
-            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
+            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} onControl={controlChain} />
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
