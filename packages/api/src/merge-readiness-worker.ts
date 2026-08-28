@@ -34,22 +34,10 @@ import {
   noteLeaseHandoff,
   releaseMergeLease,
   withMergeLease,
+  type MergeLeaseTarget,
+  type ReleaseMergeLease,
+  type WithMergeLease,
 } from "./merge-lease.js";
-
-// The merge-lease target/release APIs are integrated alongside this worker. Keep
-// this seam structural so readiness can be tested independently while that
-// contract lands; the project identity must travel with every release.
-type MergeLeaseTarget = { projectId: string; chainId: string };
-type ReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClient) => Promise<void>;
-type WithMergeLease = <T>(
-  target: MergeLeaseTarget | null,
-  fn: () => Promise<{ disposition: { kind: "release" } | { kind: "retain"; handoffRunId: string }; value: T }>,
-  db: PrismaClient,
-) => Promise<
-  | { outcome: "contended" }
-  | { outcome: "unreachable"; detail: string }
-  | { outcome: "ran"; value: T }
->;
 
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
@@ -167,7 +155,7 @@ const stopReadiness = async (
   // `stopMergeTail` resolves the owning project and chain while the mutation is
   // locked. Pass that target through unchanged so a shared chainId cannot be
   // attributed to the readiness project's neighboring tail.
-  await releaseChainLease(transition.leaseToRelease as unknown as MergeLeaseTarget | null, db);
+  await releaseChainLease(transition.leaseToRelease, db);
   return true;
 };
 
@@ -735,8 +723,8 @@ export const startReadinessWorker = (
       reader,
       new Date(),
       5,
-      releaseMergeLease as unknown as ReleaseMergeLease,
-      withMergeLease as unknown as WithMergeLease,
+      releaseMergeLease,
+      withMergeLease,
     )
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {

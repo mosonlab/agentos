@@ -14,6 +14,9 @@ import {
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
+  type MergeLeaseTarget,
+  type ReleaseMergeLease,
+  type WithMergeLease,
 } from "./merge-lease.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { createApp } from "./test-app.js";
@@ -22,17 +25,6 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
-type MergeLeaseTarget = { projectId: string; chainId: string };
-type ReadinessReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClient) => Promise<void>;
-type ReadinessWithMergeLease = <T>(
-  target: MergeLeaseTarget | null,
-  fn: () => Promise<{ disposition: { kind: "release" } | { kind: "retain"; handoffRunId: string }; value: T }>,
-  db: PrismaClient,
-) => Promise<
-  | { outcome: "contended" }
-  | { outcome: "unreachable"; detail: string }
-  | { outcome: "ran"; value: T }
->;
 const releasedLeaseTargets: MergeLeaseTarget[] = [];
 const leasedTargets: MergeLeaseTarget[] = [];
 const releaseLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
@@ -44,23 +36,20 @@ const releaseLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
     acquiredAt: "2026-08-27T12:00:00.000Z",
   };
 };
-const releaseChainLease: ReadinessReleaseMergeLease = async (target) => {
+const releaseChainLease: ReleaseMergeLease = async (target) => {
   if (target) {
     releasedChainLeases.push(target.chainId);
     releasedLeaseTargets.push(target);
   }
 };
 const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
-const leaseRunner = (acquire: MergeLeaseAcquirer): ReadinessWithMergeLease => (
+const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
   target,
   fn,
+  db,
 ) => {
   if (target) leasedTargets.push(target);
-  // The checked-out merge-lease module predates the target context; this test
-  // adapter supplies that context while retaining its real acquire/release
-  // state machine. The integration branch removes this adapter and passes the
-  // target directly to withMergeLease.
-  return withMergeLease(target?.chainId ?? null, fn, {
+  return withMergeLease(target, fn, db, {
     acquire,
     release: async (chainId) => {
       const release = await releaseLeaseAdapter(chainId);
@@ -330,7 +319,7 @@ test("a post-acquire release or hold-recording failure remains observable", asyn
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
   };
   const releaseFailure = new Error("lease hold recording failed");
-  const failingFinalRelease: ReadinessWithMergeLease = async (target, fn) => {
+  const failingFinalRelease: WithMergeLease = async (target, fn) => {
     if (target) leasedTargets.push(target);
     const result = await fn();
     if (result.disposition.kind === "release") throw releaseFailure;
