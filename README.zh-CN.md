@@ -173,9 +173,6 @@ AgentOS 是个人项目，不承诺提供支持或响应时间。安全报告请
 
 ## 致谢与许可证
 
-本项目是受 Danny Postma 的视频 *How I Built My Own AgentOS on Claude's Agent
-SDK (So You Can Too)*（2026）启发的独立实现，从视频中的想法出发从零构建。
-
 任务链的角色与步骤提示词欠的不止是启发：其行文主体来自
 [mattpocock/skills](https://github.com/mattpocock/skills) 的五个技能，逐字沿用，
 外面包着为本平台契约另写的段落。上游以 MIT 授权，`Copyright (c) 2026 Matt
