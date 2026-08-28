@@ -250,6 +250,9 @@ model Agent {
   /// Set when the operator changes model or runner in the console. Canonical
   /// seed and prompt sync preserve this runtime choice.
   runtimeConfigCustomized Boolean          @default(false)
+  /// The customized canonical/production comparison most recently reported
+  /// to Inbox. Cleared when that drift is no longer present.
+  runtimeConfigDriftNoticeFingerprint String?
   codexServiceTier   CodexServiceTier     @default(DEFAULT)
   foundationalPrompt String
   rolePrompt         String

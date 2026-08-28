@@ -444,11 +444,16 @@ const taskFields = {
   cron: z.string().trim().min(9).max(100).nullable(),
   timezone: z.string().trim().min(1).max(64).nullable(),
 };
+const taskCreateStatus = z.nativeEnum(TaskStatus).refine(
+  (status) => status === TaskStatus.BACKLOG || status === TaskStatus.TODO,
+  "Task creation status must be BACKLOG or TODO",
+);
 /** Exported for `smoke-fixture.test.ts`: the published release fixture and this
  *  schema have to agree about `opensPullRequest`, and the only way to assert
  *  that is to parse the fixture with the schema the route actually uses. */
 export const taskInput = z.object({
   ...taskFields,
+  status: taskCreateStatus.default(TaskStatus.TODO),
   description: taskFields.description.default(""),
   workingDirectory: taskFields.workingDirectory.default(null),
   repoId: taskFields.repoId.default(null),
@@ -2171,7 +2176,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // Without this guard every POST snapshots the fallback base before step
         // 0 can publish, and all runners race the same new shared head.
         const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
-        if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
+        if (created.status === TaskStatus.TODO && currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
           // Bypassing `openRun` here once put step 1 on a per-Task branch while
           // every later Step shared the Chain branch, silently dropping step 1.
           const opened = await openRun(tx, created.id, { kind: "task-created", readyAt: new Date() });
