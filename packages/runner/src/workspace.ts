@@ -10,6 +10,7 @@ import type { SessionConfigOptions } from "./adapters/session-config.js";
 import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
+import { configureWorkspaceGit, resolveRunnerGitIdentity } from "./git-provenance.js";
 import { type RetryOptions } from "./network-retry.js";
 import {
   ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
@@ -21,6 +22,8 @@ export type Workspace = {
   path: string;
   branch: string;
   baseSha: string;
+  /** Absolute hook directory activated only in the provider child environment. */
+  commitHooksPath?: string;
   /** Present only for an object-id-only detached checkout. */
   pinnedBaseSha?: string;
 };
@@ -280,6 +283,7 @@ export const provisionWorkspace = async (
     await mkdir(workspace, { recursive: false, mode: 0o750 });
   }
   try {
+    const identity = await resolveRunnerGitIdentity(config, root, env, execute);
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
     const pinnedBaseSha = claim.run.pinnedBaseSha;
@@ -324,6 +328,7 @@ export const provisionWorkspace = async (
             config, mirror, [implementationBaseSha, pinnedBaseSha], root, env, execute, retryOptions,
           );
           await execute(config, "git", ["init"], workspace, env);
+          const commitHooksPath = await configureWorkspaceGit(config, claim, workspace, identity, env, execute);
           await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
           // Local transport: slow on a large range, but it cannot hang on a
           // network that is no longer in the path, so it carries no ceiling.
@@ -333,7 +338,7 @@ export const provisionWorkspace = async (
           if (baseSha !== pinnedBaseSha) {
             throw new Error(`Pinned workspace resolved ${baseSha}, expected ${pinnedBaseSha}`);
           }
-          return { path: workspace, branch, baseSha, pinnedBaseSha };
+          return { path: workspace, branch, baseSha, pinnedBaseSha, ...(commitHooksPath ? { commitHooksPath } : {}) };
         }
         // The publication ACK is fenced and immediate, but no database protocol
         // can eliminate a crash between the remote accepting git push and that
@@ -363,12 +368,13 @@ export const provisionWorkspace = async (
         // the daemon and the clone running as another account — git copies the
         // file instead. That is still local disk, and still not the remote.
         await execute(config, "git", ["clone", "--branch", cloneTarget, "--single-branch", mirror, workspace], root, env);
+        const commitHooksPath = await configureWorkspaceGit(config, claim, workspace, identity, env, execute);
         // Delivery pushes to `origin`; the mirror is a provisioning detail and
         // must never become the run's publication target.
         await execute(config, "git", ["remote", "set-url", "origin", claim.repo.remoteUrl], workspace, env);
         const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
         if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
-        return { path: workspace, branch, baseSha };
+        return { path: workspace, branch, baseSha, ...(commitHooksPath ? { commitHooksPath } : {}) };
       },
     );
     const materialized = await materializePreparedSpecification(config, claim, provisioned, execute, env);
@@ -387,11 +393,15 @@ export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): 
   if (!inside(root, workspace)) throw new Error("Resumed workspace escaped the controlled root");
   const info = await stat(workspace);
   if (!info.isDirectory()) throw new Error("Resumed workspace is not a directory");
+  const env = workspaceEnvironment(config);
+  const identity = await resolveRunnerGitIdentity(config, workspace, env, command);
+  const commitHooksPath = await configureWorkspaceGit(config, claim, workspace, identity, env, command);
   return {
     path: workspace,
     branch: claim.run.branch,
     baseSha: claim.run.baseSha,
     ...(claim.run.pinnedBaseSha ? { pinnedBaseSha: claim.run.pinnedBaseSha } : {}),
+    ...(commitHooksPath ? { commitHooksPath } : {}),
   };
 };
 

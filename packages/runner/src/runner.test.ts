@@ -30,6 +30,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: workspaceRoot,
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
@@ -50,6 +51,7 @@ const mechanicalClaim: ClaimedTask = {
   task: {
     id: "task-10",
     chainId: null,
+    chainIndex: null,
     name: "Merge execution",
     description: "Execute the authorized merge",
     repoId: "repo-1",

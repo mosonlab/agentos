@@ -25,6 +25,7 @@ const claim: ClaimedTask = {
   task: {
     id: "task-1",
     chainId: "chain-1",
+    chainIndex: 0,
     name: "Ship it",
     description: "Do the work",
     repoId: "repo-1",
@@ -32,6 +33,7 @@ const claim: ClaimedTask = {
     maxDurationMin: 120,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 3,
+    templateStep: null,
   },
   agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement", disabledTools: [] },
   repo: { id: "repo-1", remoteUrl: "/repo", defaultBranch: "main", mountPath: "repo" },
@@ -451,7 +453,7 @@ test("a credential-bearing runner proxy stays in env and out of run-as argv", ()
     binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
     proxyEnvironment: { HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl },
   };
-  const env = buildChildEnvironment(config, { ...claim, runner: "PI" }, scratch, "/work");
+  const env = buildChildEnvironment(config, { ...claim, runner: "PI" }, scratch, "/work", "/work/.git/anneal-hooks");
   const launch = launchArgv(config, "PI", ["--version"], env);
   const argv = [launch.executable, ...launch.args].join(" ");
   assert.equal(env.HTTP_PROXY, proxyUrl);
@@ -460,6 +462,10 @@ test("a credential-bearing runner proxy stays in env and out of run-as argv", ()
   assert.equal(argv.includes("proxy-pass"), false);
   assert.match(argv, /RUNNER_WORKSPACE_ROOT=/u);
   assert.match(argv, /CONTROL_PLANE_STATE_DIR=/u);
+  assert.match(argv, /AGENTOS_RUN_ID=run-1/u);
+  assert.match(argv, /GIT_CONFIG_COUNT=1/u);
+  assert.match(argv, /GIT_CONFIG_KEY_0=core\.hooksPath/u);
+  assert.match(argv, /GIT_CONFIG_VALUE_0=\/work\/\.git\/anneal-hooks/u);
 });
 
 test("the interpreter the CLI is told to run the MCP server with is overridable and published", () => {

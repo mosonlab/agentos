@@ -20,6 +20,7 @@ const config = (root: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: root,
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot: root,
   failedWorkspaceRetention: 0,
   workspaceReclaimIntervalMs: 300_000,

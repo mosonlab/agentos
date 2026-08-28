@@ -392,7 +392,7 @@ export const executeClaim = async (
     await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
       reuse: claim.resume !== null,
     });
-    const env = buildChildEnvironment(config, claim, scratch, workspace.path);
+    const env = buildChildEnvironment(config, claim, scratch, workspace.path, workspace.commitHooksPath);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);

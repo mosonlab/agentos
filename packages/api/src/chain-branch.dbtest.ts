@@ -1,10 +1,16 @@
 import "./test-workspace-root.js";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
 import { PrismaClient } from "@anneal/db";
+import { buildChildEnvironment } from "@anneal/runner/adapters";
+import type { ClaimedTask } from "@anneal/runner/api";
+import type { RunnerConfig } from "@anneal/runner/config";
 
 import { createApp } from "./test-app.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
@@ -52,6 +58,9 @@ const withTokens = async <T>(operation: () => T | Promise<T>): Promise<T> => {
   mkdirSync(isolatedRoot, { recursive: true });
   return operation();
 };
+
+const git = (cwd: string, args: string[], env?: NodeJS.ProcessEnv): string =>
+  execFileSync("git", args, { cwd, encoding: "utf8", ...(env ? { env } : {}) }).trim();
 
 type Response = { status: number; body: any };
 
@@ -1148,4 +1157,102 @@ test("T20: a template step's PR flag reaches the task it instantiates", async ()
   const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false]);
+});
+
+test("T21: a claimed database chain run is the exact provenance recorded by its real Git commit", async () => {
+  mkdirSync(isolatedRoot, { recursive: true });
+  const root = await mkdtemp(join(isolatedRoot, "chain-provenance-"));
+  try {
+    const remote = join(root, "origin.git");
+    const seedRepo = join(root, "seed");
+    git(root, ["init", "--bare", "--initial-branch=main", remote]);
+    git(root, ["init", "--initial-branch=main", seedRepo]);
+    git(seedRepo, ["config", "user.name", "Seed Author"]);
+    git(seedRepo, ["config", "user.email", "seed@example.invalid"]);
+    await writeFile(join(seedRepo, "base.txt"), "base\n");
+    git(seedRepo, ["add", "base.txt"]);
+    git(seedRepo, ["commit", "-m", "seed"]);
+    git(seedRepo, ["remote", "add", "origin", remote]);
+    git(seedRepo, ["push", "-u", "origin", "main"]);
+
+    const seeded = await seedProject("t21-provenance");
+    await db.repo.update({ where: { id: seeded.repo.id }, data: { remoteUrl: remote, defaultBranch: "main" } });
+    const template = await db.taskTemplate.create({ data: {
+      projectId: seeded.project.id,
+      name: "provenance-template",
+      description: "provenance integration",
+      variables: [],
+      steps: { create: [{
+        stepIndex: 0,
+        layer: 0,
+        name: "Implementation",
+        assigneeType: "AGENT",
+        assigneeAgentId: seeded.agent.id,
+        prompt: "make one commit",
+        outputKind: "implementation",
+      }] },
+    } });
+    const chain = await instantiateTemplate(db, seeded.project.id, template.id, {
+      repoId: seeded.repo.id,
+      variables: {},
+      autoStart: true,
+    });
+    const queued = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[0]!.id, status: "QUEUED" } });
+    const claimed = await claimRun(queued.id) as ClaimedTask;
+    assert.equal(claimed.task.chainId, chain.chainId);
+    assert.equal(claimed.task.chainIndex, 0);
+    assert.equal(claimed.task.templateStep?.name, "Implementation");
+
+    const configured: RunnerConfig = {
+      apiUrl: "http://api.invalid",
+      runnerToken: RUNNER,
+      runnerId: "runner-1",
+      daemonVersion: "0.0.0-dbtest",
+      pollIntervalMs: 1_000,
+      leaseSeconds: 60,
+      heartbeatIntervalMs: 5_000,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: join(root, "home"),
+      gitIdentity: { name: "Human Maintainer", email: "maintainer@example.invalid" },
+      workspaceRoot: join(root, "runs"),
+      failedWorkspaceRetention: 0,
+      workspaceReclaimIntervalMs: 300_000,
+      toolDeadlineMs: 60_000,
+      apiTimeoutMs: 5_000,
+      runAsPrefix: [],
+      binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    };
+    const runnerWorkspaceUrl = new URL("../../runner/src/workspace.js", import.meta.url).href;
+    const { provisionWorkspace } = await import(runnerWorkspaceUrl) as {
+      provisionWorkspace: (config: RunnerConfig, claim: ClaimedTask) => Promise<{
+        path: string;
+        branch: string;
+        baseSha: string;
+        commitHooksPath?: string;
+      }>;
+    };
+    const workspace = await provisionWorkspace(configured, claimed);
+    const childEnvironment = buildChildEnvironment(configured, claimed, {
+      base: join(root, "scratch"),
+      workspaceRoot: join(root, "scratch", "workspaces"),
+      stateDir: join(root, "scratch", "state"),
+      configRoot: join(root, "scratch", "config"),
+    }, workspace.path, workspace.commitHooksPath);
+    await writeFile(join(workspace.path, "claimed.txt"), "claimed chain work\n");
+    git(workspace.path, ["add", "claimed.txt"], childEnvironment);
+    git(workspace.path, ["commit", "-m", "claimed chain commit"], childEnvironment);
+    const message = git(workspace.path, ["show", "-s", "--format=%B", "HEAD"]);
+    assert.match(message, new RegExp(`^X-Anneal-Run: ${claimed.run.id}$`, "mu"));
+
+    const persisted = await db.run.findUniqueOrThrow({
+      where: { id: claimed.run.id },
+      include: { task: { include: { templateStep: true } } },
+    });
+    assert.equal(persisted.id, claimed.run.id);
+    assert.equal(persisted.task?.chainId, chain.chainId);
+    assert.equal(persisted.task?.chainIndex, 0);
+    assert.equal(persisted.task?.templateStep?.name, "Implementation");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

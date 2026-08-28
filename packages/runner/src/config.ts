@@ -19,6 +19,11 @@ export const DEFAULT_API_URL = "http://127.0.0.1:3000";
 
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 
+export type GitIdentity = {
+  name: string;
+  email: string;
+};
+
 export type RunnerConfig = {
   apiUrl: string;
   runnerToken: string;
@@ -29,6 +34,9 @@ export type RunnerConfig = {
   heartbeatIntervalMs: number;
   path: string;
   home: string;
+  /** Optional operator override. When absent, provisioning reads the runner
+   * account's global Git configuration and pins that identity locally. */
+  gitIdentity: GitIdentity | null;
   /** Optional operator-selected gate worker exposed to agent sessions. */
   gateServer?: string;
   /** Proxy variables captured once, when the daemon starts. */
@@ -74,6 +82,11 @@ export const loadRunnerConfig = (): RunnerConfig => {
   const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
   const home = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty";
   const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
+  const gitName = process.env.RUNNER_GIT_USER_NAME;
+  const gitEmail = process.env.RUNNER_GIT_USER_EMAIL;
+  if ((gitName === undefined) !== (gitEmail === undefined)) {
+    throw new Error("RUNNER_GIT_USER_NAME and RUNNER_GIT_USER_EMAIL must be set together");
+  }
   // First, and before this function returns anything a caller could dial: the
   // runner's own index.ts builds the client, the preflight and the poll loop out
   // of this object, so a destination refused here is refused before any DNS
@@ -89,6 +102,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
     path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     home,
+    gitIdentity: gitName === undefined ? null : { name: gitName, email: gitEmail! },
     ...(gateServer ? { gateServer } : {}),
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),

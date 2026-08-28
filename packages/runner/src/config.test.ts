@@ -77,6 +77,26 @@ test("the daemon reports the runner package version", () => {
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
 });
 
+test("an explicit runner Git identity is accepted only as a complete pair", () => {
+  const previousName = process.env.RUNNER_GIT_USER_NAME;
+  const previousEmail = process.env.RUNNER_GIT_USER_EMAIL;
+  try {
+    process.env.RUNNER_GIT_USER_NAME = "Configured Human";
+    process.env.RUNNER_GIT_USER_EMAIL = "configured@example.invalid";
+    assert.deepEqual(loadRunnerConfig().gitIdentity, {
+      name: "Configured Human",
+      email: "configured@example.invalid",
+    });
+    delete process.env.RUNNER_GIT_USER_EMAIL;
+    assert.throws(loadRunnerConfig, /RUNNER_GIT_USER_NAME and RUNNER_GIT_USER_EMAIL must be set together/u);
+  } finally {
+    if (previousName === undefined) delete process.env.RUNNER_GIT_USER_NAME;
+    else process.env.RUNNER_GIT_USER_NAME = previousName;
+    if (previousEmail === undefined) delete process.env.RUNNER_GIT_USER_EMAIL;
+    else process.env.RUNNER_GIT_USER_EMAIL = previousEmail;
+  }
+});
+
 test("runner proxy configuration is opt-in and maps to child-standard names", () => {
   assert.deepEqual(runnerProxyEnvironment({}), {});
   assert.deepEqual(runnerProxyEnvironment({

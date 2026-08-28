@@ -76,6 +76,7 @@ export type ClaimedTask = {
   task: {
     id: string;
     chainId: string | null;
+    chainIndex: number | null;
     name: string;
     description: string;
     repoId: string;
@@ -83,7 +84,7 @@ export type ClaimedTask = {
     maxDurationMin: number;
     stallTimeoutMin: number;
     maxSessionsPerTask: number;
-    templateStep?: { name: string; outputKind?: string } | null;
+    templateStep: { name: string; outputKind?: string } | null;
   };
   agent: {
     id: string;

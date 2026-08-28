@@ -36,6 +36,7 @@ const config = (root: string, runAsPrefix: string[] = []): RunnerConfig => ({
   runAsPrefix,
   path: process.env.PATH ?? "/usr/bin:/bin",
   home: root,
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
 } as RunnerConfig);
 
 const packageLock = (version = "1.0.0"): string => `${JSON.stringify({
@@ -821,7 +822,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
     await git(root, "init", "--bare", "--initial-branch=main", remote);
     await git(seed, "init", "--initial-branch=main");
     await git(seed, "config", "user.name", "AgentOS Test");
-    await git(seed, "config", "user.email", "runner@agentos.local");
+    await git(seed, "config", "user.email", "runner@example.invalid");
     await createFixture(seed, false);
     await runCommand([], "npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], seed, process.env);
     await git(seed, "add", ".");
