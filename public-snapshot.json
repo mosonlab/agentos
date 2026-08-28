@@ -188,11 +188,6 @@
       "reason": "internal agent-chain specifications, session identifiers, plans, and review records are operator workflow state rather than product source"
     },
     {
-      "glob": "BLUEPRINT.md",
-      "disposition": "later-release-follow-up",
-      "reason": "private upstream product requirements require a separate publication decision"
-    },
-    {
       "glob": "CLAUDE.md",
       "disposition": "later-release-follow-up",
       "reason": "symlink to AGENTS.md, skipped to avoid divergent copies: the snapshot's file list is what an exporter copies, and an exporter that dereferences it would publish the same instructions twice as two real files that can be edited apart. AGENTS.md is published as the one truth; republishing the link is a decision to make when a snapshot tool can carry a symlink as a symlink."
@@ -211,11 +206,6 @@
       "glob": "deploy/**",
       "disposition": "later-release-follow-up",
       "reason": "host-specific deployment material requires environment and path review"
-    },
-    {
-      "glob": "design-reference/**",
-      "disposition": "later-release-follow-up",
-      "reason": "internal design references and image provenance require separate review"
     },
     {
       "glob": "docs/BACKLOG*.md",
@@ -241,11 +231,6 @@
       "glob": "docs/plans/**",
       "disposition": "later-release-follow-up",
       "reason": "internal plans and generated baseline images require separate review"
-    },
-    {
-      "glob": "docs/reference/**",
-      "disposition": "later-release-follow-up",
-      "reason": "third-party research records and provenance require separate review"
     },
     {
       "glob": "docs/release/private/**",
