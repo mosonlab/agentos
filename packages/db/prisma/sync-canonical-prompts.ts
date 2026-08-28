@@ -366,25 +366,53 @@ const main = async (): Promise<void> => {
           if (runtimeDifferences.length > 0 && runtimeConfigRefusal(agent)) {
             throw new Error(`Agent ${name} (${agent.id}) has an invalid runtime configuration: ${runtimeConfigRefusal(agent)}`);
           }
-          if (runtimeDifferences.length > 0 && agent.runtimeConfigCustomized) {
-            const fingerprint = JSON.stringify({
-              canonical: { model: role.model, runnerPreference: role.runnerPreference },
-              production: { model: agent.model, runnerPreference: agent.runnerPreference },
+          let runtimeConfigCustomized = agent.runtimeConfigCustomized;
+          if (adoptsCanonicalDefaults) {
+            await tx.agent.update({
+              where: { id: agent.id },
+              data: { ...transition.to, runtimeConfigDriftNoticeFingerprint: null },
             });
-            const claimed = await tx.agent.updateMany({
+            adoptedAgentDefaults += 1;
+          } else if (runtimeDifferences.length > 0 && !runtimeConfigCustomized) {
+            const promoted = await tx.agent.updateMany({
               where: {
                 id: agent.id,
                 model: agent.model,
                 runnerPreference: agent.runnerPreference,
-                runtimeConfigCustomized: true,
-                OR: [
-                  { runtimeConfigDriftNoticeFingerprint: null },
-                  { runtimeConfigDriftNoticeFingerprint: { not: fingerprint } },
-                ],
+                runtimeConfigCustomized: false,
               },
-              data: { runtimeConfigDriftNoticeFingerprint: fingerprint },
+              data: { runtimeConfigCustomized: true },
             });
-            if (claimed.count === 1) {
+            if (promoted.count !== 1) {
+              throw new Error(`Agent ${name} (${agent.id}) changed while its runtime configuration was being preserved`);
+            }
+            runtimeConfigCustomized = true;
+            preservedAgentOverrides += 1;
+          }
+          if (runtimeDifferences.length > 0 && runtimeConfigCustomized) {
+            const fingerprint = JSON.stringify({
+              canonical: { model: role.model, runnerPreference: role.runnerPreference },
+              production: { model: agent.model, runnerPreference: agent.runnerPreference },
+            });
+            if (agent.runtimeConfigDriftNoticeFingerprint !== fingerprint) {
+              const claimed = await tx.agent.updateMany({
+                where: {
+                  id: agent.id,
+                  model: agent.model,
+                  runnerPreference: agent.runnerPreference,
+                  runtimeConfigCustomized: true,
+                  runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
+                },
+                data: { runtimeConfigDriftNoticeFingerprint: fingerprint },
+              });
+              if (claimed.count !== 1) {
+                throw new Error(`Agent ${name} (${agent.id}) changed while canonical runtime drift was being recorded`);
+              }
+              const chatId = process.env["FEISHU_DEFAULT_CHAT_ID"];
+              const thread = chatId ? (
+                await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+                ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
+              ) : null;
               await tx.inboxMessage.create({ data: {
                 from: "AGENT",
                 agentId: agent.id,
@@ -394,12 +422,13 @@ const main = async (): Promise<void> => {
                   `Agent: ${name}`,
                   `Canonical: model=${role.model}, runner=${role.runnerPreference}`,
                   `Production: model=${agent.model}, runner=${agent.runnerPreference}`,
-                  `runtimeConfigCustomized=${agent.runtimeConfigCustomized}`,
+                  `runtimeConfigCustomized=${runtimeConfigCustomized}`,
                 ].join("\n"),
+                ...(thread ? { threadId: thread.id } : {}),
               } });
               runtimeDriftNotices += 1;
             }
-          } else if (agent.runtimeConfigDriftNoticeFingerprint !== null) {
+          } else if (!adoptsCanonicalDefaults && agent.runtimeConfigDriftNoticeFingerprint !== null) {
             await tx.agent.updateMany({
               where: {
                 id: agent.id,
@@ -410,19 +439,6 @@ const main = async (): Promise<void> => {
               },
               data: { runtimeConfigDriftNoticeFingerprint: null },
             });
-          }
-          if (adoptsCanonicalDefaults) {
-            await tx.agent.update({
-              where: { id: agent.id },
-              data: transition.to,
-            });
-            adoptedAgentDefaults += 1;
-          } else if (runtimeDifferences.length > 0 && !agent.runtimeConfigCustomized) {
-            await tx.agent.update({
-              where: { id: agent.id },
-              data: { runtimeConfigCustomized: true },
-            });
-            preservedAgentOverrides += 1;
           }
         }
         updatedRoles[name] = (await tx.agent.updateMany({

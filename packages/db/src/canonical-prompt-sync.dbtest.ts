@@ -473,12 +473,50 @@ test("sync adopts the exact model-only executioner transition", async () => {
   }), driftNoticeCountBefore);
 });
 
-test("sync notifies once per current customized runtime drift without overwriting it", async () => {
+test("sync notifies once per current customized runtime drift without overwriting it", async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const originalProduction = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
   const changedProduction = { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE };
-  const mergeResolver = await prisma.agent.update({
+  const mergeResolver = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
+    select: {
+      id: true,
+      model: true,
+      runnerPreference: true,
+      runtimeConfigCustomized: true,
+      runtimeConfigDriftNoticeFingerprint: true,
+    },
+  });
+  const existingNoticeIds = new Set((await prisma.inboxMessage.findMany({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+    select: { id: true },
+  })).map(({ id }) => id));
+  const operatorChatId = `canonical-drift-dbtest-${randomBytes(4).toString("hex")}`;
+  const previousOperatorChatId = process.env["FEISHU_DEFAULT_CHAT_ID"];
+  process.env["FEISHU_DEFAULT_CHAT_ID"] = operatorChatId;
+  t.after(async () => {
+    if (previousOperatorChatId === undefined) delete process.env["FEISHU_DEFAULT_CHAT_ID"];
+    else process.env["FEISHU_DEFAULT_CHAT_ID"] = previousOperatorChatId;
+    const createdNoticeIds = (await prisma.inboxMessage.findMany({
+      where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+      select: { id: true },
+    })).map(({ id }) => id).filter((id) => !existingNoticeIds.has(id));
+    if (createdNoticeIds.length > 0) await prisma.inboxMessage.deleteMany({ where: { id: { in: createdNoticeIds } } });
+    await prisma.agent.update({
+      where: { id: mergeResolver.id },
+      data: {
+        model: mergeResolver.model,
+        runnerPreference: mergeResolver.runnerPreference,
+        runtimeConfigCustomized: mergeResolver.runtimeConfigCustomized,
+        runtimeConfigDriftNoticeFingerprint: mergeResolver.runtimeConfigDriftNoticeFingerprint,
+      },
+    });
+    await prisma.inboxThread.deleteMany({
+      where: { channel: "FEISHU", externalChatId: operatorChatId, sessionId: null },
+    });
+  });
+  await prisma.agent.update({
+    where: { id: mergeResolver.id },
     data: { ...originalProduction, runtimeConfigCustomized: true },
   });
 
@@ -499,6 +537,10 @@ test("sync notifies once per current customized runtime drift without overwritin
   assert.equal(firstNotice.length, 1);
   assert.equal(firstNotice[0]!.from, "AGENT");
   assert.equal(firstNotice[0]!.kind, "TEXT");
+  assert.notEqual(firstNotice[0]!.threadId, null);
+  assert.equal((await prisma.inboxThread.findUniqueOrThrow({
+    where: { id: firstNotice[0]!.threadId! },
+  })).externalChatId, operatorChatId);
   assert.match(firstNotice[0]!.body, /Agent: merge-resolver/u);
   assert.match(firstNotice[0]!.body, /Canonical: model=gpt-5.6-sol:high, runner=CODEX/u);
   assert.match(firstNotice[0]!.body, /Production: model=claude-opus-5:medium, runner=CLAUDE/u);
@@ -550,18 +592,61 @@ test("sync notifies once per current customized runtime drift without overwritin
     where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
   }), 4);
 
-  const deleted = await prisma.inboxMessage.deleteMany({
-    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
-  });
-  assert.equal(deleted.count, 4);
-  await prisma.agent.update({
-    where: { id: mergeResolver.id },
-    data: {
-      ...canonicalProduction,
-      runtimeConfigCustomized: false,
-      runtimeConfigDriftNoticeFingerprint: null,
+});
+
+test("sync notifies drift that it promotes to a customized runtime", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const agent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "default" } },
+    select: {
+      id: true,
+      model: true,
+      runnerPreference: true,
+      runtimeConfigCustomized: true,
+      runtimeConfigDriftNoticeFingerprint: true,
     },
   });
+  const existingNoticeIds = new Set((await prisma.inboxMessage.findMany({
+    where: { agentId: agent.id, body: { startsWith: "Canonical runtime drift detected" } },
+    select: { id: true },
+  })).map(({ id }) => id));
+  t.after(async () => {
+    const createdNoticeIds = (await prisma.inboxMessage.findMany({
+      where: { agentId: agent.id, body: { startsWith: "Canonical runtime drift detected" } },
+      select: { id: true },
+    })).map(({ id }) => id).filter((id) => !existingNoticeIds.has(id));
+    if (createdNoticeIds.length > 0) await prisma.inboxMessage.deleteMany({ where: { id: { in: createdNoticeIds } } });
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: {
+        model: agent.model,
+        runnerPreference: agent.runnerPreference,
+        runtimeConfigCustomized: agent.runtimeConfigCustomized,
+        runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
+      },
+    });
+  });
+  const production = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
+  await prisma.agent.update({
+    where: { id: agent.id },
+    data: { ...production, runtimeConfigCustomized: false, runtimeConfigDriftNoticeFingerprint: null },
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"preservedAgentOverrides":1/u);
+  assert.match(synced.output, /"runtimeDriftNotices":1/u);
+
+  assert.deepEqual(await prisma.agent.findUniqueOrThrow({
+    where: { id: agent.id },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  }), { ...production, runtimeConfigCustomized: true });
+  const notices = await prisma.inboxMessage.findMany({
+    where: { agentId: agent.id, body: { startsWith: "Canonical runtime drift detected" } },
+    orderBy: { createdAt: "asc" },
+  });
+  assert.equal(notices.length, existingNoticeIds.size + 1);
+  assert.match(notices.at(-1)!.body, /runtimeConfigCustomized=true/u);
 });
 
 test("sync recreates a missing regression verifier and restores canonical bindings", async () => {
