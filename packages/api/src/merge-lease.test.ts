@@ -7,6 +7,8 @@ import {
   commitWithLeaseDisposition,
   leaseHandoffsWithoutConsumer,
   leaseHolderFor,
+  mergeLeaseHold,
+  readMergeLeaseRelease,
   settleLease,
   withMergeLease,
   type MergeLeaseAcquirer,
@@ -19,6 +21,7 @@ const released: MergeLeaseRelease = {
   outcome: "released",
   ref: "refs/merge-lease/holder",
   sha: "abc",
+  acquiredAt: "2026-08-27T12:00:00.000Z",
 };
 
 const holderTx = (input: {
@@ -79,6 +82,40 @@ test("settleLease maps continuation and stop outcomes through the holder record"
     disposition: "release",
     leaseToRelease: "chain-1",
   });
+});
+
+test("release parsing requires the timestamp while leaving duration validation to the calculator", () => {
+  assert.deepEqual(
+    readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha 2026-08-27T12:00:00.000Z"),
+    {
+      outcome: "released",
+      ref: "refs/merge-lease/holder",
+      sha: "lease-sha",
+      acquiredAt: "2026-08-27T12:00:00.000Z",
+    },
+  );
+  assert.deepEqual(
+    readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha malformed-timestamp"),
+    {
+      outcome: "released",
+      ref: "refs/merge-lease/holder",
+      sha: "lease-sha",
+      acquiredAt: "malformed-timestamp",
+    },
+  );
+  assert.equal(readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha"), null);
+});
+
+test("mergeLeaseHold calculates whole elapsed seconds and clamps invalid or skewed timestamps", () => {
+  const acquiredAt = "2026-08-27T12:00:00.250Z";
+  assert.deepEqual(mergeLeaseHold(acquiredAt, new Date("2026-08-27T12:01:02.999Z")), {
+    acquiredAt: new Date(acquiredAt),
+    releasedAt: new Date("2026-08-27T12:01:02.999Z"),
+    heldForSeconds: 62,
+  });
+  assert.equal(mergeLeaseHold(acquiredAt, new Date("2026-08-27T11:59:59.999Z"))?.heldForSeconds, 0);
+  assert.equal(mergeLeaseHold("not-a-date", new Date("2026-08-27T12:01:02.999Z")), null);
+  assert.equal(mergeLeaseHold(acquiredAt, new Date("not-a-date")), null);
 });
 
 test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", async () => {

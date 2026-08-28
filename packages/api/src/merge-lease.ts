@@ -25,7 +25,7 @@ const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh"
  * release never got far enough to say anything.
  */
 export type MergeLeaseRelease =
-  | { outcome: "released"; ref: string; sha: string }
+  | { outcome: "released"; ref: string; sha: string; acquiredAt: string }
   | { outcome: "not-held" }
   | { outcome: "skipped"; heldFor: string }
   | { outcome: "refused"; heldBy: string }
@@ -33,23 +33,45 @@ export type MergeLeaseRelease =
 
 export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>;
 
+export type MergeLeaseHold = {
+  acquiredAt: Date;
+  releasedAt: Date;
+  heldForSeconds: number;
+};
+
+/** Calculate a non-negative whole-second hold from the lease blob timestamp. */
+export const mergeLeaseHold = (acquiredAt: string, releasedAt: Date): MergeLeaseHold | null => {
+  const acquiredAtMs = Date.parse(acquiredAt);
+  const releasedAtMs = releasedAt.getTime();
+  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
+  return {
+    acquiredAt: new Date(acquiredAtMs),
+    releasedAt: new Date(releasedAtMs),
+    // A clock adjustment must not produce a negative hold in the evidence.
+    heldForSeconds: Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000)),
+  };
+};
+
 // The line scripts/merge-lease.sh prints beside its prose for the operator.
 const MACHINE_LINE = /^MERGE LEASE: (.+)$/mu;
 
-const readOutcome = (output: string): MergeLeaseRelease | null => {
+/** Parse the machine-readable result emitted after a release attempt. */
+export const readMergeLeaseRelease = (output: string): MergeLeaseRelease | null => {
   const spoken = MACHINE_LINE.exec(output)?.[1]?.trim();
   if (!spoken) return null;
-  const [outcome, first, second, ...extra] = spoken.split(" ");
-  if (extra.length > 0) return null;
+  const [outcome, ...tokens] = spoken.split(" ");
   switch (outcome) {
-    case "released":
-      return first !== undefined && second !== undefined ? { outcome: "released", ref: first, sha: second } : null;
+    case "released": {
+      const [ref, sha, acquiredAt, ...extra] = tokens;
+      if (ref === undefined || sha === undefined || acquiredAt === undefined || extra.length > 0) return null;
+      return { outcome: "released", ref, sha, acquiredAt };
+    }
     case "not-held":
-      return first === undefined ? { outcome: "not-held" } : null;
+      return tokens.length === 0 ? { outcome: "not-held" } : null;
     case "skipped":
-      return first !== undefined && second === undefined ? { outcome: "skipped", heldFor: first } : null;
+      return tokens.length === 1 && tokens[0] !== undefined ? { outcome: "skipped", heldFor: tokens[0] } : null;
     case "refused":
-      return first !== undefined && second === undefined ? { outcome: "refused", heldBy: first } : null;
+      return tokens.length === 1 && tokens[0] !== undefined ? { outcome: "refused", heldBy: tokens[0] } : null;
     default:
       return null;
   }
@@ -63,7 +85,7 @@ const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
     });
     const detail = `${stdout}${stderr}`.trim();
     if (detail) console.log(detail);
-    return readOutcome(detail) ?? { outcome: "unreachable", detail: detail || "the release printed nothing" };
+    return readMergeLeaseRelease(detail) ?? { outcome: "unreachable", detail: detail || "the release printed nothing" };
   } catch (error: unknown) {
     const failure = error as { stdout?: string; stderr?: string };
     const detail = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
@@ -71,7 +93,7 @@ const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
     // A refusal is the one non-zero exit the script means: it read the lease and
     // declined to break it. Anything else never got that far, so the state of
     // the lock on main is unknown rather than decided.
-    const spoken = readOutcome(detail);
+    const spoken = readMergeLeaseRelease(detail);
     if (spoken?.outcome === "refused") return spoken;
     return { outcome: "unreachable", detail: detail || String(error) };
   }
