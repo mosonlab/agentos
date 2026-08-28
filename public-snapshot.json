@@ -46,7 +46,7 @@
     { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by AGENTS.md" },
     { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents list with each agent's role, model, effort and runner" },
     { "glob": "docs/media/chain.png", "purpose": "README screenshot: a twelve-step assurance chain with assigned agent roles" },
-    { "glob": "docs/media/tasks.png", "purpose": "README screenshot: the task board with a twelve-step template chain in flight" },
+    { "glob": "docs/media/chain-timelapse.gif", "purpose": "README hero: time-lapse of one real seven-step chain crossing the task board" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/architecture.md", "purpose": "README-linked architecture, task workflow and security-defaults detail" },
     { "glob": "docs/install.md", "purpose": "README-linked installation detail and the repository verification sequence" },
@@ -302,8 +302,8 @@
     },
     {
       "category": "binary-material",
-      "glob": "docs/media/tasks.png",
-      "reason": "reviewed README screenshot of the task board, published with v0.2.0"
+      "glob": "docs/media/chain-timelapse.gif",
+      "reason": "reviewed README hero: time-lapse of one real seven-step chain on the task board"
     },
     {
       "category": "credential-placeholder",
