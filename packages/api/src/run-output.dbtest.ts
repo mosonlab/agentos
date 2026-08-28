@@ -27,6 +27,8 @@ import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "
 
 import { hashToken } from "./auth.js";
 import { previousRunHandoffForClaim } from "./canonical-task-output.js";
+import { handleRegressionCompletion } from "./merge-tail-actions.js";
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -262,6 +264,86 @@ const succeededCompletion = (runnerId: string, fencingToken: string, branch: str
   workspaceRetained: false,
 });
 
+const protocolErrorCompletion = (runnerId: string, fencingToken: string, branch: string) => ({
+  ...failedCompletion(runnerId, fencingToken, branch),
+  exitCode: 0,
+  failureClass: "PROTOCOL_ERROR",
+  retryable: true,
+  failureReason: "Provider stream disconnected before its terminal result event",
+  failureEnvelope: {
+    version: 1,
+    phase: "EXECUTE",
+    runnerClass: "PROTOCOL_ERROR",
+    exitCode: 0,
+    signal: null,
+    terminationReason: null,
+    terminalEventSeen: false,
+    terminalSuccess: false,
+    agentExited: true,
+    providerError: null,
+    stderrSummary: "Provider stream disconnected before its terminal result event",
+    stdoutSummary: FAILED_TAIL,
+    timedOut: false,
+    transient: false,
+    timeoutMs: null,
+  },
+});
+
+const REGRESSION_STEP = {
+  chained: true,
+  outputKind: "regression-verification",
+  templateName: DIRECT_TEMPLATE_NAME,
+  stepIndex: 5,
+} as const;
+
+const REGRESSION_V2_STEP = {
+  ...REGRESSION_STEP,
+  outputKind: "regression-verification-v2",
+} as const;
+
+const negativeRegressionVerdict = (
+  outcome: "review-fail" | "gate-fail" | "refresh-conflict",
+  schemaVersion: 1 | 2,
+) => outcome === "gate-fail"
+  ? {
+      schemaVersion,
+      outcome,
+      headSha: SHA,
+      baseHeadSha: "b".repeat(40),
+      gateVerdict: "FAIL",
+      ...(schemaVersion === 2 ? { gateProof: "MERGE GATE: FAIL (targeted DB regression)" } : {}),
+      summary: "gate failed",
+    }
+  : {
+      schemaVersion,
+      outcome,
+      headSha: SHA,
+      baseHeadSha: "b".repeat(40),
+      summary: `${outcome} requires repair`,
+    };
+
+const addRepairAgent = async (
+  seeded: Awaited<ReturnType<typeof seedTask>>,
+  agentName: "senior-dev" | "merge-resolver",
+) => {
+  const repairAgent = await db.agent.create({ data: {
+    projectId: seeded.project.id,
+    environmentId: seeded.agent.environmentId,
+    name: agentName,
+    title: agentName,
+    model: "claude-opus-5:high",
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  } });
+  await db.agentRepoAccess.create({ data: {
+    projectId: seeded.project.id,
+    agentId: repairAgent.id,
+    repoId: seeded.repo.id,
+    mountPath: "/repo",
+    permissions: "GIT_WRITE",
+  } });
+};
+
 test("a failed run's output survives on the run that produced it", async () => {
   const { task } = await seedTask({ chained: false });
   const runId = await enqueue(task.id);
@@ -409,6 +491,232 @@ test("every authored Regression stop verdict releases its chain lease", async ()
   }
 });
 
+test("a retryable protocol failure consumes its durable negative Regression verdict exactly once", async () => {
+  for (const [outcome, repairKind, agentName] of [
+    ["review-fail", "review-fix", "senior-dev"],
+    ["gate-fail", "gate-fix", "senior-dev"],
+    ["refresh-conflict", "refresh-conflict", "merge-resolver"],
+  ] as const) {
+    await resetTestDb(db);
+    const seeded = await seedTask(REGRESSION_STEP);
+    await addRepairAgent(seeded, agentName);
+    const runId = await enqueue(seeded.task.id);
+    const claimed = await claimRun(runId, `runner-durable-${outcome}`);
+    const body = outcome === "gate-fail"
+      ? { schemaVersion: 1, outcome, headSha: SHA, baseHeadSha: "b".repeat(40), gateVerdict: "FAIL", summary: "gate failed" }
+      : { schemaVersion: 1, outcome, headSha: SHA, baseHeadSha: "b".repeat(40), summary: `${outcome} requires repair` };
+    const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
+      fencingToken: claimed.fencingToken,
+      kind: "regression-verification",
+      body: JSON.stringify(body),
+      commitSha: SHA,
+    });
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+
+    const completion = protocolErrorCompletion(
+      `runner-durable-${outcome}`,
+      claimed.fencingToken,
+      claimed.run.branch ?? "master",
+    );
+    const completed = await call("POST", `/runner/runs/${runId}/complete`, RUNNER, completion);
+    assert.equal(completed.status, 200, JSON.stringify(completed.body));
+    assert.equal(completed.body.succeeded, false, outcome);
+    assert.equal(completed.body.retryCreated, false, outcome);
+
+    const settled = await db.run.findUniqueOrThrow({ where: { id: runId } });
+    assert.equal(settled.status, "FAILED", outcome);
+    assert.equal(settled.failureClass, "PROTOCOL_ERROR", outcome);
+    assert.equal(settled.retryable, true, outcome);
+    assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 1, `${outcome} queued Regression Run 2`);
+    assert.equal(await db.task.count({ where: {
+      projectId: seeded.project.id,
+      name: `Autonomous merge tail: ${repairKind}`,
+    } }), 1, outcome);
+
+    const duplicate = await call("POST", `/runner/runs/${runId}/complete`, RUNNER, completion);
+    assert.equal(duplicate.status, 409, JSON.stringify(duplicate.body));
+    assert.equal(await reconcileDatabaseRuns(db, new Date()), 0, outcome);
+    const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } });
+    const session = await db.session.findUniqueOrThrow({ where: { runId } });
+    assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+      task: regression,
+      run: {
+        id: runId,
+        agentId: seeded.agent.id,
+        branch: claimed.run.branch,
+        headSha: SHA,
+        sessionId: session.id,
+      },
+      now: new Date(),
+    })), "handled", outcome);
+    assert.equal(await db.task.count({ where: {
+      projectId: seeded.project.id,
+      name: { startsWith: "Autonomous merge tail:" },
+    } }), 1, `${outcome} duplicated its repair`);
+  }
+});
+
+test("a current v2 gate-fail with gate proof is consumed after protocol failure", async () => {
+  const seeded = await seedTask(REGRESSION_V2_STEP);
+  await addRepairAgent(seeded, "senior-dev");
+  const runId = await enqueue(seeded.task.id);
+  const claimed = await claimRun(runId, "runner-v2-durable-gate-fail");
+  const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
+    fencingToken: claimed.fencingToken,
+    kind: "regression-verification-v2",
+    body: JSON.stringify(negativeRegressionVerdict("gate-fail", 2)),
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+
+  const completed = await call(
+    "POST",
+    `/runner/runs/${runId}/complete`,
+    RUNNER,
+    protocolErrorCompletion("runner-v2-durable-gate-fail", claimed.fencingToken, claimed.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.succeeded, false);
+  assert.equal(completed.body.retryCreated, false);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: runId } })).status, "FAILED");
+  assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 1);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: "Autonomous merge tail: gate-fix",
+  } }), 1);
+});
+
+test("current v2 durable negative verdicts survive lease-loss reconciliation without a Regression retry", async () => {
+  for (const [outcome, repairKind, agentName] of [
+    ["review-fail", "review-fix", "senior-dev"],
+    ["gate-fail", "gate-fix", "senior-dev"],
+    ["refresh-conflict", "refresh-conflict", "merge-resolver"],
+  ] as const) {
+    await resetTestDb(db);
+    const seeded = await seedTask(REGRESSION_V2_STEP);
+    await addRepairAgent(seeded, agentName);
+    const runId = await enqueue(seeded.task.id);
+    const claimed = await claimRun(runId, `runner-reconcile-${outcome}`);
+    const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
+      fencingToken: claimed.fencingToken,
+      kind: "regression-verification-v2",
+      body: JSON.stringify(negativeRegressionVerdict(outcome, 2)),
+      commitSha: SHA,
+    });
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    await db.run.update({ where: { id: runId }, data: {
+      branch: claimed.run.branch ?? "master",
+      leaseExpiresAt: new Date(Date.now() - 60_000),
+      heartbeatAt: null,
+    } });
+
+    assert.equal(await reconcileDatabaseRuns(db, new Date(), async () => {}), 1, outcome);
+    const settled = await db.run.findUniqueOrThrow({ where: { id: runId } });
+    assert.equal(settled.status, "LOST", outcome);
+    assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 1, `${outcome} queued Regression Run 2`);
+    assert.equal(await db.task.count({ where: {
+      projectId: seeded.project.id,
+      name: `Autonomous merge tail: ${repairKind}`,
+    } }), 1, outcome);
+
+    assert.equal(await reconcileDatabaseRuns(db, new Date(), async () => {}), 0, outcome);
+    assert.equal(await db.task.count({ where: {
+      projectId: seeded.project.id,
+      name: { startsWith: "Autonomous merge tail:" },
+    } }), 1, `${outcome} duplicated its repair during reconciliation`);
+  }
+});
+
+test("only same-Run exact-head negative evidence enters the protocol-failure exception", async () => {
+  const cases = [
+    {
+      label: "body-commit-head-mismatch",
+      body: JSON.stringify({ ...negativeRegressionVerdict("review-fail", 2), headSha: "c".repeat(40) }),
+      commitSha: SHA,
+      completionHeadSha: SHA,
+    },
+    {
+      label: "completion-head-mismatch",
+      body: JSON.stringify(negativeRegressionVerdict("review-fail", 2)),
+      commitSha: SHA,
+      completionHeadSha: "c".repeat(40),
+    },
+    {
+      label: "malformed-output",
+      body: "not-json",
+      commitSha: SHA,
+      completionHeadSha: SHA,
+    },
+    {
+      label: "pass",
+      body: JSON.stringify({
+        schemaVersion: 2,
+        outcome: "pass",
+        headSha: SHA,
+        baseHeadSha: "b".repeat(40),
+        gateVerdict: "PASS",
+        gateProof: `MERGE GATE: PASS ${SHA}`,
+      }),
+      commitSha: SHA,
+      completionHeadSha: SHA,
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    await resetTestDb(db);
+    const seeded = await seedTask(REGRESSION_V2_STEP);
+    const runId = await enqueue(seeded.task.id);
+    const claimed = await claimRun(runId, `runner-boundary-${scenario.label}`);
+    await db.taskStepOutput.create({ data: {
+      taskId: seeded.task.id,
+      runId,
+      kind: "regression-verification-v2",
+      body: scenario.body,
+      commitSha: scenario.commitSha,
+    } });
+    const completion = {
+      ...protocolErrorCompletion(`runner-boundary-${scenario.label}`, claimed.fencingToken, claimed.run.branch ?? "master"),
+      headSha: scenario.completionHeadSha,
+    };
+    const completed = await call("POST", `/runner/runs/${runId}/complete`, RUNNER, completion);
+    assert.equal(completed.status, 200, JSON.stringify(completed.body));
+    assert.equal(completed.body.retryCreated, true, scenario.label);
+    assert.equal(await db.task.count({ where: {
+      projectId: seeded.project.id,
+      name: { startsWith: "Autonomous merge tail:" },
+    } }), 0, scenario.label);
+    assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 2, scenario.label);
+  }
+
+  await resetTestDb(db);
+  const seeded = await seedTask(REGRESSION_V2_STEP);
+  const priorRunId = await enqueue(seeded.task.id);
+  const prior = await claimRun(priorRunId, "runner-prior-output");
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.task.id,
+    runId: priorRunId,
+    kind: "regression-verification-v2",
+    body: JSON.stringify(negativeRegressionVerdict("review-fail", 2)),
+    commitSha: SHA,
+  } });
+  await db.run.update({ where: { id: priorRunId }, data: { status: "FAILED", endedAt: new Date() } });
+  const currentRunId = await enqueue(seeded.task.id);
+  const current = await claimRun(currentRunId, "runner-current-output");
+  const completed = await call(
+    "POST",
+    `/runner/runs/${currentRunId}/complete`,
+    RUNNER,
+    protocolErrorCompletion("runner-current-output", current.fencingToken, current.run.branch ?? prior.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.retryCreated, true);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: { startsWith: "Autonomous merge tail:" },
+  } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 3);
+});
+
 /**
  * A step whose deliverable only its agent can author used to settle SUCCEEDED
  * when the session ended without persisting one — the Claude adapter reads the
@@ -418,13 +726,6 @@ test("every authored Regression stop verdict releases its chain lease", async ()
  * which only an operator could clear. The miss is a retryable failure of the
  * run instead, and the fail-loud is what is left when the budget is spent.
  */
-const REGRESSION_STEP = {
-  chained: true,
-  outputKind: "regression-verification",
-  templateName: DIRECT_TEMPLATE_NAME,
-  stepIndex: 5,
-} as const;
-
 test("a required deliverable the run never persisted is a retryable failure, not a success", async () => {
   const { task } = await seedTask(REGRESSION_STEP);
   const runId = await enqueue(task.id);

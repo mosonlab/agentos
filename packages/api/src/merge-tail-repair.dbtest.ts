@@ -332,7 +332,7 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
 
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
   assert.equal(await repairCount(seeded), 1);
-  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
 test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {
@@ -609,6 +609,38 @@ test("successful resolver, review-fix, and gate-fix completions rerun regression
       run: { id: run2.id, agentId: seeded.regressionAgent.id, branch: BRANCH, headSha: RESOLVED, sessionId: seeded.session.id },
       now: new Date(),
     })), "advance", outcome);
+    await resetTestDb(db);
+  }
+});
+
+test("a completed repair permanently consumes its source Regression verdict", async () => {
+  for (const outcome of ["refresh-conflict", "review-fail", "gate-fail"] as const) {
+    const seeded = await exercise(outcome);
+    const repair = await repairFor(
+      seeded,
+      outcome === "gate-fail" ? "gate-fix" : outcome === "review-fail" ? "review-fix" : outcome,
+    );
+    const output = outcome === "refresh-conflict"
+      ? JSON.stringify({
+        schemaVersion: 1,
+        outcome: "resolved",
+        startHeadSha: HEAD,
+        targetHeadSha: BASE,
+        resolvedHeadSha: RESOLVED,
+        tradeOffs: [],
+        changedTestExpectations: [],
+      })
+      : "fixed regression verdict";
+    await completeRepair(seeded, repair.id, output);
+    const before = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    const noticesBefore = await db.inboxMessage.count({ where: { taskId: seeded.regression.id } });
+
+    assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled", outcome);
+    assert.equal(await repairCount(seeded), 1, `${outcome} opened a second repair from the same source Run`);
+    const after = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    assert.equal(after.status, before.status, outcome);
+    assert.equal(after.failureReason, before.failureReason, outcome);
+    assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), noticesBefore, outcome);
     await resetTestDb(db);
   }
 });

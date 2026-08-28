@@ -55,6 +55,7 @@ import {
 import {
   handleRegressionCompletion,
   openMergeTailStopNotice,
+  regressionVerdictForRun,
   stopMergeTail,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
@@ -330,6 +331,25 @@ export const completeRun = async (
       : verdict
         ? verdict.externalFailure
         : externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
+    // A negative Regression verdict is durable control-plane evidence even
+    // when the provider stream drops before its terminal event. Qualify this
+    // exception at the same canonical boundary as an ordinary successful
+    // completion: the output must belong to this Run, its JSON body and
+    // authored commit must be valid, and the completion must name that exact
+    // head. PASS is deliberately excluded; advancing after a failed transport
+    // completion needs its own policy decision.
+    const failedRegressionVerdict = !succeeded && failureClass === FailureClass.PROTOCOL_ERROR && retryable
+      && run.taskId && run.task && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
+      ? await regressionVerdictForRun(tx, {
+          task: run.task,
+          runId: run.id,
+          runHeadSha: body.headSha ?? null,
+        })
+      : null;
+    const durableNegativeRegressionVerdict = Boolean(
+      failedRegressionVerdict?.status === "ok"
+      && failedRegressionVerdict.verdict.outcome !== "pass",
+    );
     // One reason for the Run, the Session and — unless the budget replaces it
     // with its own — the parked Task.
     const failureReason = succeeded ? null : missingOutputReason ?? body.failureReason ?? "Execution failed";
@@ -350,7 +370,8 @@ export const completeRun = async (
     // a chain step — while the failure path consults it only for a failure
     // that is not about to be retried, which is why the ceiling is computed
     // above the read.
-    const failureIsFinal = !succeeded && !(retryable && run.runNumber < budgetCeiling);
+    const failureIsFinal = !succeeded
+      && (durableNegativeRegressionVerdict || !(retryable && run.runNumber < budgetCeiling));
     const tailMarkers = run.task && (failureIsFinal || (succeeded && !run.task.templateId && !run.task.chainId))
       ? await readMarkers(tx, run.task.id)
       : [];
@@ -503,7 +524,7 @@ export const completeRun = async (
     if (terminal === null || "message" in terminal) return null;
     let retryCreated = false;
     let retryRefusal: Refusal | null = null;
-    if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
+    if (!succeeded && retryable && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
         kind: "retry-after-completion",
         sourceRunId: run.id,
@@ -521,7 +542,8 @@ export const completeRun = async (
       leaseOutcome = "stop";
     }
     if (run.taskId) {
-      const budgetExhausted = !succeeded && retryable && !retryCreated && !retryRefusal;
+      const budgetExhausted = !succeeded && retryable && !durableNegativeRegressionVerdict
+        && !retryCreated && !retryRefusal;
       let canonicalOutputFailure: string | null = null;
       if (!succeeded && !retryCreated && run.task) {
         // The same markers the success path above read, from the same scan.
@@ -627,7 +649,23 @@ export const completeRun = async (
         }
         canonicalOutputFailure = outputRefusal;
       }
-      if (succeeded && mechanical) {
+      if (durableNegativeRegressionVerdict && run.task?.templateId) {
+        await handleRegressionCompletion(tx, {
+          task: run.task,
+          run: {
+            id: run.id,
+            agentId: run.agentId,
+            branch: body.branch ?? run.branch,
+            headSha: body.headSha ?? null,
+            sessionId: run.session.id,
+          },
+          ...(failedRegressionVerdict?.status === "ok"
+            ? { qualifiedVerdict: failedRegressionVerdict.verdict }
+            : {}),
+          now,
+        });
+        leaseOutcome = "stop";
+      } else if (succeeded && mechanical) {
         // Already branched above; the mechanical path owns its own advance.
       } else if (succeeded && run.task?.templateId) {
         if (canonicalOutputFailure) {
@@ -770,7 +808,8 @@ export const completeRun = async (
           taskId: run.taskId,
           actorType: "runner",
           actorId: body.runnerId,
-          body: canonicalOutputFailure ? `Run ${run.runNumber} succeeded but canonical task output was refused`
+          body: durableNegativeRegressionVerdict ? `Run ${run.runNumber} failed after publishing a negative Regression verdict; repair queued`
+            : canonicalOutputFailure ? `Run ${run.runNumber} succeeded but canonical task output was refused`
             : succeeded && (run.task?.templateId || run.task?.chainId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
             : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
             : retryCreated ? `Run ${run.runNumber} failed; retry queued`
