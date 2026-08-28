@@ -90,7 +90,7 @@ const ADJUDICATION_STEPS = {
 const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): Promise<void> => {
   const template = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId, name: "direct-engineer-workflow" } },
-    include: { steps: { orderBy: { stepIndex: "desc" } } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
   });
   const revalidation = template.steps.find(({ stepIndex }) => stepIndex === 1);
   assert.equal(revalidation?.outputKind, "revalidation");

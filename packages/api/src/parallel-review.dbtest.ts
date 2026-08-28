@@ -14,6 +14,7 @@ import {
   PrismaClient,
   RepoPermission,
   RunStatus,
+  SessionExecutionStatus,
   TaskStatus,
 } from "@anneal/db";
 
@@ -77,6 +78,10 @@ type DirectFixture = CanonicalInstallation & {
   solTaskId: string;
   blindTaskId: string;
   fixTaskId: string;
+};
+
+type BoundDirectFixture = DirectFixture & {
+  revalidationTaskId: string;
 };
 
 type FullFixture = CanonicalInstallation & {
@@ -188,7 +193,7 @@ const canonicalInstallation = async (): Promise<CanonicalInstallation> => {
       include: { steps: { orderBy: { stepIndex: "asc" } } },
     }),
   ]);
-  assert.deepEqual(direct.steps.map((step) => step.layer), [1, 2, 2, 3, 4, 5, 6]);
+  assert.deepEqual(direct.steps.map((step) => step.layer), [1, 2, 3, 3, 4, 5, 6, 7]);
   assert.deepEqual(full.steps.map((step) => step.layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
   return {
     projectId: project.id,
@@ -216,6 +221,43 @@ const instantiateDirect = async (brief = SPECIFICATION_BRIEF): Promise<DirectFix
     solTaskId: byIndex.get(2)!.id,
     blindTaskId: byIndex.get(3)!.id,
     fixTaskId: byIndex.get(4)!.id,
+  };
+};
+
+const instantiateBoundDirect = async (brief = SPECIFICATION_BRIEF): Promise<BoundDirectFixture> => {
+  const installation = await canonicalInstallation();
+  const predecessor = await db.task.create({
+    data: {
+      projectId: installation.projectId,
+      repoId: installation.repoId,
+      name: "Bound direct predecessor",
+      description: "Complete to dispatch revalidation",
+      chainId: `predecessor-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
+      chainIndex: 1,
+      chainLayer: 1,
+      status: TaskStatus.TODO,
+    },
+  });
+  const branchName = `parallel/bound-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+  const chain = await instantiateTemplate(db, installation.projectId, installation.directTemplateId, {
+    repoId: installation.repoId,
+    variables: { branchName },
+    description: brief,
+    afterTaskId: predecessor.id,
+  });
+  assert.equal(chain.tasks.length, 8);
+  const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
+  const dispatched = await operatorRequest(`/tasks/${predecessor.id}`, "PATCH", { status: TaskStatus.DONE });
+  assert.equal(dispatched.status, 200, JSON.stringify(dispatched.body));
+  return {
+    ...installation,
+    chainId: chain.chainId,
+    branchName,
+    revalidationTaskId: byIndex.get(1)!.id,
+    implementationTaskId: byIndex.get(2)!.id,
+    solTaskId: byIndex.get(3)!.id,
+    blindTaskId: byIndex.get(4)!.id,
+    fixTaskId: byIndex.get(5)!.id,
   };
 };
 
@@ -417,6 +459,97 @@ test("Direct sync instantiates a parallel review frontier claimable by distinct 
   assert.notEqual(first.run.id, second.run.id);
   assert.deepEqual(new Set([first.task.chainLayer, second.task.chainLayer]), new Set([2]));
   assert.deepEqual(new Set([first.task.chainIndex, second.task.chainIndex]), new Set([2, 3]));
+});
+
+test("bound revalidation PATCH becomes implementation spec.md authority for both reviews", async () => {
+  const fixture = await instantiateBoundDirect();
+  const revalidation = await claim("revalidation-runner");
+  assert.equal(revalidation.run.taskId, fixture.revalidationTaskId);
+  const refreshedBrief = "Parallel review specification fixture brief with current route names.";
+  const patched = await request(
+    `/session/runs/${revalidation.run.id}/task`,
+    "PATCH",
+    revalidation.sessionToken,
+    { fencingToken: revalidation.fencingToken, description: refreshedBrief },
+  );
+  assert.equal(patched.status, 200, JSON.stringify(patched.body));
+  const implementationDescription = (await db.task.findUniqueOrThrow({
+    where: { id: fixture.implementationTaskId },
+    select: { description: true },
+  })).description;
+  assert.match(implementationDescription, new RegExp(refreshedBrief, "u"));
+  assert.match(implementationDescription, /Implement this task/u);
+
+  const completedRevalidation = await complete(revalidation, "revalidation-runner", {
+    outputKind: "revalidation",
+    output: {
+      schemaVersion: 1,
+      headSha: IMPLEMENTATION_BASE,
+      outcome: "updated",
+      summary: "Refreshed descriptive route names.",
+      changedReferences: ["route names"],
+    },
+    headSha: IMPLEMENTATION_BASE,
+    baseSha: IMPLEMENTATION_BASE,
+    branch: fixture.branchName,
+  });
+  assert.equal(completedRevalidation.status, 200, JSON.stringify(completedRevalidation.body));
+
+  const implementation = await completeImplementation(fixture, "bound-implementation-runner");
+  assert.deepEqual(implementation.specificationMaterialization, {
+    kind: "direct-implementation",
+    path: `.chain/${fixture.branchName}/spec.md`,
+    body: refreshedBrief,
+  });
+  materializedSpecification = refreshedBrief;
+  const reviews = await reviewClaims(fixture, "bound-sol-runner", "bound-blind-runner");
+  assert.notEqual(reviews.first.run.id, reviews.second.run.id);
+});
+
+test("a collapsed premise waits in Inbox and an operator choice resumes revalidation", async () => {
+  const fixture = await instantiateBoundDirect();
+  const revalidation = await claim("premise-collapse-runner");
+  assert.equal(revalidation.run.taskId, fixture.revalidationTaskId);
+  await db.session.update({
+    where: { runId: revalidation.run.id },
+    data: { providerConversationId: "premise-collapse-conversation" },
+  });
+  const choices = [
+    { id: "cancel-chain", label: "cancel this chain" },
+    { id: "operator-rewrite", label: "operator rewrites the brief, then continue" },
+    { id: "proceed-reading", label: "proceed with the step's proposed reading" },
+  ];
+  const question = await request(
+    `/session/runs/${revalidation.run.id}/inbox/questions`,
+    "POST",
+    revalidation.sessionToken,
+    {
+      fencingToken: revalidation.fencingToken,
+      requestId: "premise-collapse-question",
+      body: "The implementation premise is already delivered at current HEAD.",
+      choices,
+      chatId: "premise-collapse-chat",
+    },
+  );
+  assert.equal(question.status, 201, JSON.stringify(question.body));
+  const messageId = (question.body as { id: string }).id;
+  const waitingRun = await db.run.findUniqueOrThrow({ where: { id: revalidation.run.id } });
+  const waitingSession = await db.session.findUniqueOrThrow({ where: { runId: revalidation.run.id } });
+  assert.equal(waitingRun.status, RunStatus.WAITING_INBOX);
+  assert.equal(waitingSession.executionStatus, SessionExecutionStatus.WAITING_INBOX);
+  assert.equal(waitingSession.waitingOnMessageId, messageId);
+
+  const decision = await operatorRequest(`/inbox/messages/${messageId}/decision`, "POST", {
+    requestId: "premise-collapse-decision",
+    decision: "operator-rewrite",
+  });
+  assert.equal(decision.status, 201, JSON.stringify(decision.body));
+  const resumedRun = await db.run.findUniqueOrThrow({ where: { id: revalidation.run.id } });
+  const resumedSession = await db.session.findUniqueOrThrow({ where: { runId: revalidation.run.id } });
+  assert.equal(resumedRun.status, RunStatus.QUEUED);
+  assert.equal(resumedSession.executionStatus, SessionExecutionStatus.REQUESTED);
+  assert.equal(resumedSession.waitingOnMessageId, null);
+  assert.match(resumedSession.resumeInput ?? "", /operator-rewrite/u);
 });
 
 test("a faithful direct brief ending in the prior-output reminder remains claimable", async () => {

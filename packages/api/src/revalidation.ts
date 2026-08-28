@@ -204,7 +204,11 @@ export const patchBoundImplementationDescription = async (
           message: `Cannot rewrite implementation task brief: ${rewritten.unparseable}`,
         });
       }
-      const updated = await tx.task.update({ where: { id: targetRow.id }, data: { description: rewritten } });
+      const updated = await tx.task.update({
+        where: { id: targetRow.id },
+        data: { description: rewritten },
+        select: revalidationTaskSelect,
+      });
       await tx.taskActivity.create({
         data: revalidationActivity({
           taskId: currentCaller.id,
@@ -306,7 +310,7 @@ export const cancelBoundRevalidationRun = async (
         }),
       });
       return { cancelRequested: true, requestId, reason };
-    });
+    }));
   } catch (error: unknown) {
     await recordRevalidationFailure(db, fence.runId, error);
     throw error;

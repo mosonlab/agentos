@@ -55,14 +55,17 @@ test("rejects a non-revalidator, an unbound task, and ambiguous implementations"
     templateStep: { outputKind: "implementation", priorOutputKinds: [] },
   });
   const wrongAgent = deriveBoundImplementationTask({ ...caller(), agentName: "senior-dev" }, [caller(), implementation]);
-  assert.equal(wrongAgent.reason, "forbidden");
+  assert.ok("message" in wrongAgent);
+  if ("message" in wrongAgent) assert.equal(wrongAgent.reason, "forbidden");
   const unbound = deriveBoundImplementationTask(caller({ chainId: null, dispatchAfterTaskId: null }), [implementation]);
-  assert.equal(unbound.reason, "conflict");
+  assert.ok("message" in unbound);
+  if ("message" in unbound) assert.equal(unbound.reason, "conflict");
   const ambiguous = deriveBoundImplementationTask(caller(), [caller(), implementation, {
     ...implementation,
     id: "implementation-2",
     chainIndex: 2,
     chainLayer: 2,
   }]);
-  assert.equal(ambiguous.reason, "conflict");
+  assert.ok("message" in ambiguous);
+  if ("message" in ambiguous) assert.equal(ambiguous.reason, "conflict");
 });
