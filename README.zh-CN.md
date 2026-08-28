@@ -1,11 +1,13 @@
 <div align="center">
 
-# AgentOS
+# Anneal
 
 **AI 现在能写代码了，但没人有能力审完它写的东西。**
 
-AgentOS 就是负责审的那一层：面向 coding agent 的本地控制平面。你只写规格，
+Anneal 就是负责审的那一层：面向 coding agent 的本地控制平面。你只写规格，
 剩下的交给一条链——计划、评审、实现、验证、合入，每一次 run 都可观察、可评审。
+
+*退火是消除金属加工后内应力的热处理工序。缺陷在工序里被消掉，而不是留到成品上。*
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#支持状态)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -20,11 +22,11 @@ AgentOS 就是负责审的那一层：面向 coding agent 的本地控制平面�
 
 ## 这是什么
 
-AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、provider 事件流、人工
+Anneal 把任务、agent、仓库与文件授权、独立的运行记录、provider 事件流、人工
 提问、评审关卡和 git 交付串成一个工作流，全部跑在你自己的机器上。
 
 它编排的是你已经安装并完成认证的官方 Codex CLI、Claude Code 与 Pi：这些 CLI
-手里已有的订阅登录，就是它运行所依赖的全部认证。AgentOS 自己不提供任何凭据，
+手里已有的订阅登录，就是它运行所依赖的全部认证。Anneal 自己不提供任何凭据，
 也不转售任何订阅，详见[认证与订阅](#认证与订阅)。
 
 ## 它改变了什么
@@ -62,10 +64,10 @@ Mac 上完成。第一个预览版到第三个预览版之间的八天，从里�
 
 ## 十二步任务链
 
-AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个角色自带 runner、
+Anneal 自带的 Full Assurance 模板。每一步绑定一个角色，每个角色自带 runner、
 模型与推理档位。
 
-下表里的 `Sol` 与 `Luna` 不是 AgentOS 造的词，是 Codex CLI 暴露的 GPT-5.6 变体，
+下表里的 `Sol` 与 `Luna` 不是 Anneal 造的词，是 Codex CLI 暴露的 GPT-5.6 变体，
 绑定名为 `gpt-5.6-sol` 与 `gpt-5.6-luna`。
 
 <details>
@@ -107,9 +109,9 @@ AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个�
 > **Developer Preview 3（v0.3.0）。** 接口、配置与已存数据的形状都可能在预览版
 > 之间变动，预览版之间除全新安装外没有升级路径。
 >
-> **裸机执行警告。** AgentOS 会用非交互式 permission bypass 启动 coding CLI。
+> **裸机执行警告。** Anneal 会用非交互式 permission bypass 启动 coding CLI。
 > 默认安装下它们以你的 macOS 用户身份、在 sandbox 之外运行，拥有该用户的文件
-> 系统与网络权限。AgentOS grant 约束的是 AgentOS API，不构成 host containment。
+> 系统与网络权限。Anneal grant 约束的是 Anneal API，不构成 host containment。
 > 只用可丢弃仓库，以及你愿意让 agent 修改的机器。
 
 ## 快速开始
@@ -120,8 +122,8 @@ Git，以及在同一 macOS 账号下**已安装且已登录**的官方 Codex CL
 Pi 都是可选的。
 
 ```sh
-git clone https://github.com/mosonlab/agentos.git
-cd agentos
+git clone https://github.com/mosonlab/anneal.git
+cd anneal
 git checkout v0.3.0
 npm ci
 npm run setup:local
@@ -145,19 +147,19 @@ Developer Preview。支持范围以及每一条主张背后的证据，记录在
 声明（仅英文）。它描述的是本仓库内记录的证据，不是 CLI provider 作出的兼容性
 承诺。
 
-AgentOS 的目标平台是 Apple Silicon 上的 macOS。Linux 未验证；Windows 按设计不
+Anneal 的目标平台是 Apple Silicon 上的 macOS。Linux 未验证；Windows 按设计不
 支持：runner 依赖 POSIX 进程组、路径和命令行为。
 
 Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由你
-自己负责。AgentOS 不提供 provider 凭据，也不提供使用资格。
+自己负责。Anneal 不提供 provider 凭据，也不提供使用资格。
 
 ## 认证与订阅
 
-AgentOS 不持有任何 provider 凭据。它启动的是你本机已经安装并登录的官方 CLI
-（Codex CLI、Claude Code 与 Pi），认证状态留在各个 CLI 自己的配置里，AgentOS
-既不读取也不转发。这里没有 AgentOS 账号，没有 API 反代，也没有要你粘贴的 key。
+Anneal 不持有任何 provider 凭据。它启动的是你本机已经安装并登录的官方 CLI
+（Codex CLI、Claude Code 与 Pi），认证状态留在各个 CLI 自己的配置里，Anneal
+既不读取也不转发。这里没有 Anneal 账号，没有 API 反代，也没有要你粘贴的 key。
 
-因此这些 CLI 支持哪种认证，AgentOS 就跑在哪种之上：ChatGPT 订阅登录、Claude
+因此这些 CLI 支持哪种认证，Anneal 就跑在哪种之上：ChatGPT 订阅登录、Claude
 Pro/Max 登录，或各 CLI 自己的 API key 模式，完全按你已经配好的样子。Pi 同样没有
 自己的账号，它走的是 Codex 那份登录。
 
@@ -167,7 +169,7 @@ Pro/Max 登录，或各 CLI 自己的 API key 模式，完全按你已经配好�
 bearer header 与 `Authorization`（[`docs/release/security.md`](docs/release/security.md)）。
 
 这些都不能替你裁定 provider 的条款。套餐额度、速率限制、用量配额，以及你的套餐是否
-允许这种编排方式，都在你和 provider 之间。AgentOS 不授予任何权益，也不替 CLI
+允许这种编排方式，都在你和 provider 之间。Anneal 不授予任何权益，也不替 CLI
 provider 作出兼容性承诺。
 
 ## 文档
@@ -183,7 +185,7 @@ provider 作出兼容性承诺。
 
 ## 支持
 
-AgentOS 是个人项目，不承诺提供支持或响应时间。安全报告请通过
+Anneal 是个人项目，不承诺提供支持或响应时间。安全报告请通过
 [`SECURITY.md`](SECURITY.md) 中的私密渠道提交；权威支持声明见
 [`docs/release/support-matrix.md`](docs/release/support-matrix.md)。
 

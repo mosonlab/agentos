@@ -1,12 +1,15 @@
 <div align="center">
 
-# AgentOS
+# Anneal
 
 **AI can write code now. Nobody has the capacity to review all of it.**
 
-AgentOS is the part that reviews it: a local control plane for coding agents.
+Anneal is the part that reviews it: a local control plane for coding agents.
 You write the spec. A chain takes it from there — plan, review, implement,
 verify, merge — and every run stays observable and reviewable.
+
+*Annealing is the heat treatment that relieves the internal stresses left in
+worked metal. The defects come out in the process.*
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -15,19 +18,19 @@ verify, merge — and every run stays observable and reviewable.
 
 [Install](#quick-start) · [Docs](#documentation) · [Status](#status) · [简体中文](README.zh-CN.md)
 
-<img src="docs/media/tasks.png" alt="AgentOS task board: template chains in flight, each card showing its step, run status, model and cost" width="880">
+<img src="docs/media/tasks.png" alt="Anneal task board: template chains in flight, each card showing its step, run status, model and cost" width="880">
 
 </div>
 
 ## What it is
 
-AgentOS connects tasks, agents, repository and file grants, isolated run
+Anneal connects tasks, agents, repository and file grants, isolated run
 records, provider event streams, human questions, review gates and git delivery
 into one workflow that runs entirely on your own machine.
 
 It orchestrates the official Codex CLI, Claude Code and Pi that you have
 already installed and signed in to, so the subscription logins those CLIs
-already hold are what it runs on. AgentOS supplies no credential of its own and
+already hold are what it runs on. Anneal supplies no credential of its own and
 resells no subscription. See
 [Authentication and subscriptions](#authentication-and-subscriptions).
 
@@ -75,10 +78,10 @@ can check. Making it checkable is the next preview's job.
 
 ## The twelve-step chain
 
-The Full Assurance template that ships with AgentOS. Every step binds a role,
+The Full Assurance template that ships with Anneal. Every step binds a role,
 and every role carries its own runner, model and reasoning effort.
 
-`Sol` and `Luna` in the table below are not AgentOS names: they are the GPT-5.6
+`Sol` and `Luna` in the table below are not Anneal names: they are the GPT-5.6
 variants the Codex CLI exposes, bound as `gpt-5.6-sol` and `gpt-5.6-luna`.
 
 <details>
@@ -123,10 +126,10 @@ seed.
 > shapes may change between preview releases, and the only upgrade path is a
 > fresh install.
 >
-> **Host execution.** AgentOS launches coding CLIs with non-interactive
+> **Host execution.** Anneal launches coding CLIs with non-interactive
 > permission bypass. By default they run as your macOS user, outside a sandbox,
-> with that user's filesystem and network authority. AgentOS grants constrain
-> AgentOS APIs; they are not host containment. Use a disposable repository and a
+> with that user's filesystem and network authority. Anneal grants constrain
+> Anneal APIs; they are not host containment. Use a disposable repository and a
 > machine you are willing to let an agent modify.
 
 ## Quick start
@@ -137,8 +140,8 @@ Docker Compose, Git, and the official Codex CLI already signed in under the same
 macOS account. Claude Code and Pi are optional.
 
 ```sh
-git clone https://github.com/mosonlab/agentos.git
-cd agentos
+git clone https://github.com/mosonlab/anneal.git
+cd anneal
 git checkout v0.3.0
 npm ci
 npm run setup:local
@@ -162,23 +165,23 @@ recorded in [`docs/release/support-matrix.md`](docs/release/support-matrix.md),
 the authoritative support statement. It describes evidence held in this
 repository, not compatibility promises by the CLI providers.
 
-AgentOS targets macOS on Apple Silicon. Linux is unverified, and Windows is
+Anneal targets macOS on Apple Silicon. Linux is unverified, and Windows is
 unsupported by design: the runner relies on POSIX process-group, path and
 command behavior.
 
 Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
-limits, models, and provider-side availability remain yours. AgentOS supplies no
+limits, models, and provider-side availability remain yours. Anneal supplies no
 provider credential and no entitlement.
 
 ## Authentication and subscriptions
 
-AgentOS holds no provider credential. It launches the official CLIs you have
+Anneal holds no provider credential. It launches the official CLIs you have
 already installed and signed in to (Codex CLI, Claude Code and Pi), and their
 authentication stays where each CLI keeps it, in that CLI's own configuration.
-AgentOS neither reads it nor forwards it, and there is no AgentOS account, no
+Anneal neither reads it nor forwards it, and there is no Anneal account, no
 API proxy and no key to paste in.
 
-Whatever authentication those CLIs support is therefore what AgentOS runs on: a
+Whatever authentication those CLIs support is therefore what Anneal runs on: a
 ChatGPT subscription login, a Claude Pro/Max login, or each CLI's own API-key
 mode, exactly as you already configured it. Pi carries no account of its own
 either: it authenticates through the Codex login.
@@ -192,7 +195,7 @@ and `Authorization` ([`docs/release/security.md`](docs/release/security.md)).
 
 None of that settles a provider's terms for you. Plan limits,
 rate limits, usage allowances, and whether your plan permits this kind of
-orchestration are between you and the provider. AgentOS grants no entitlement
+orchestration are between you and the provider. Anneal grants no entitlement
 and makes no compatibility promise for a CLI provider.
 
 ## Documentation
@@ -211,7 +214,7 @@ and makes no compatibility promise for a CLI provider.
 
 ## Support
 
-AgentOS is a personal project with no support or response-time commitments. Send
+Anneal is a personal project with no support or response-time commitments. Send
 security reports through the private channel in [`SECURITY.md`](SECURITY.md),
 and see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) for
 the authoritative support statement.
