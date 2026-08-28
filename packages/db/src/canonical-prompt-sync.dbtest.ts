@@ -431,6 +431,7 @@ test("sync adopts any uncustomized canonical runtime drift", async () => {
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.match(synced.output, /"adoptedAgentDefaults":2/u);
+  assert.match(synced.output, /"preservedAgentOverrides":0/u);
   assert.match(synced.output, /Canonical runtime config adopted for Agent review-coordinator: from model=claude-opus-5:medium, runnerPreference=CLAUDE to model=openai-codex\/gpt-5\.6-sol:xhigh, runnerPreference=PI/u);
   assert.match(synced.output, /Canonical runtime config adopted for Agent review-coordinator-sol: from model=gpt-5\.6-sol:medium, runnerPreference=CODEX to model=openai-codex\/gpt-5\.6-sol:xhigh, runnerPreference=PI/u);
 

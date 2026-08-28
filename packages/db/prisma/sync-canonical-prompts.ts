@@ -344,6 +344,7 @@ const main = async (): Promise<void> => {
       }
       const updatedRoles: Record<string, number> = {};
       let adoptedAgentDefaults = 0;
+      let preservedAgentOverrides = 0;
       let runtimeDriftNotices = 0;
       const runtimeConfigAdoptions: Array<{
         name: string;
@@ -467,6 +468,7 @@ const main = async (): Promise<void> => {
         migratedTasks,
         preservedTaskAssignments,
         adoptedAgentDefaults,
+        preservedAgentOverrides,
         runtimeDriftNotices,
         runtimeConfigAdoptions,
         updatedSteps,
