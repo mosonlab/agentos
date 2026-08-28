@@ -108,6 +108,60 @@ export const preKernelSeed = `
          ('t-new', 'p-up', 'second', 'desc', 'done', '2026-08-02T00:00:00Z', NOW());
 `;
 
+export interface PreflightResult { code: number; stdout: string; stderr: string }
+
+/**
+ * The preflight as the operator runs it, against a database this harness
+ * stages for each case.
+ *
+ * It lives here rather than in one test file because the preflight's cases are
+ * split across two of them: every case restages the whole pre-kernel history,
+ * which is a `prisma migrate deploy` replay each time, and node:test runs the
+ * tests inside one file one after another. Two files run those replays at the
+ * same time. `label` is what keeps their schemas apart when the two files
+ * happen to share a database.
+ */
+export const preflightHarness = (label: string): {
+  stage: (rows: string[]) => PreKernelDatabase;
+  runPreflight: (environment?: Record<string, string | undefined>) => PreflightResult;
+  cleanup: () => void;
+} => {
+  let fixture: PreKernelDatabase | undefined;
+  return {
+    stage: (rows: string[]): PreKernelDatabase => {
+      fixture?.cleanup();
+      fixture = stageAtPreviousMigration(label);
+      fixture.execute(preKernelSeed + rows.join("\n"));
+      return fixture;
+    },
+    runPreflight: (environment: Record<string, string | undefined> = {}): PreflightResult => {
+      if (!fixture) throw new Error("the preflight harness was run before anything was staged");
+      const env = {
+        ...process.env,
+        DATABASE_URL: fixture.url,
+        PATH: `${dbDirectory}/node_modules/.bin:${process.env.PATH ?? ""}`,
+        ...environment,
+      } as NodeJS.ProcessEnv;
+      for (const [key, value] of Object.entries(environment)) if (value === undefined) delete env[key];
+      try {
+        // Run exactly as `npm run db:preflight-goal-execution` runs it: from the db
+        // workspace, not from the repository root, so the script resolves its own
+        // dependencies exactly as the wired script does.
+        const stdout = execFileSync("npx", ["tsx", "prisma/preflight-goal-execution.ts"], {
+          cwd: dbDirectory,
+          env,
+          encoding: "utf8",
+        });
+        return { code: 0, stdout, stderr: "" };
+      } catch (error) {
+        const failure = error as { status?: number; stdout?: string; stderr?: string };
+        return { code: failure.status ?? -1, stdout: String(failure.stdout ?? ""), stderr: String(failure.stderr ?? "") };
+      }
+    },
+    cleanup: (): void => { fixture?.cleanup(); },
+  };
+};
+
 export const preKernelRun = (
   id: string, taskId: string | null, goalId: string | null, runNumber: number, status = "succeeded",
 ): string => `
