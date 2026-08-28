@@ -222,7 +222,7 @@ line at all**. Read a missing verdict line as "no verdict", never as a pass —
   or baseline from the ones the dispatcher froze.
 
   **The worker is not network-isolated, and this repository does not claim it
-  is** (Leo's ruling, 2026-08-20). The gate's normal flow never needs GitHub —
+  is** (the operator's ruling, 2026-08-20). The gate's normal flow never needs GitHub —
   the mirror arrives over SSH, nothing fetches — but nothing here denies the
   host a route to GitHub or anywhere else, and no firewall rule is required
   before a box may gate. That was weighed and declined: the gate executes the

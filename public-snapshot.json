@@ -378,7 +378,7 @@
     {
       "category": "pii-email",
       "glob": "packages/build-info/stamp.test.mjs",
-      "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by Leo on 2026-08-19"
+      "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by the operator on 2026-08-19"
     },
     {
       "category": "pii-email",

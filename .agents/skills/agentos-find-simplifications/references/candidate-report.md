@@ -40,7 +40,7 @@ Use a stable ID such as `SIM-RUNNER-001`.
 ### `<ID>`: `<action-oriented title>`
 
 - Theme: `<theme ID>`
-- Verdict: `confirmed-internal-delete` | `public-removal-needs-Leo` | `defense-or-persisted-separate-task` | `intentional-keep` | `rejected`
+- Verdict: `confirmed-internal-delete` | `public-removal-needs-operator` | `defense-or-persisted-separate-task` | `intentional-keep` | `rejected`
 - Surface: exact files, symbols, routes, events, config keys, scripts, prompts, or packages
 - Problem: what complexity exists and what maintenance cost it creates
 - Production consumers: each caller or `none found`, with searches and call-site interpretation
@@ -61,7 +61,7 @@ Do not assign `confirmed-internal-delete` when production or dynamic consumption
 
 ## Decision request
 
-Ask Leo only for decisions with material consequences:
+Ask the operator only for decisions with material consequences:
 
 - theme IDs to advance;
 - public-removal IDs approved for the next minor release;
@@ -71,4 +71,4 @@ State that selecting a theme approves only its closed candidate list. New deleti
 
 ## Persistence boundary
 
-Present the report in the conversation by default. If Leo asks to persist it, use the existing AgentOS backlog, brief, or private operator-record authority. Do not create an `.agents/notes` tree or a new repository record system.
+Present the report in the conversation by default. If the operator asks to persist it, use the existing AgentOS backlog, brief, or private operator-record authority. Do not create an `.agents/notes` tree or a new repository record system.
