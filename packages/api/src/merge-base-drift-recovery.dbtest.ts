@@ -422,6 +422,43 @@ test("pre-intent base drift recovers without inventing an intent while duplicate
   assert.equal(await db.run.count({ where: { taskId: ambiguous.gateTask.id } }), 1);
 });
 
+test("a legacy zero-intent validation failure reopens the same aggregate and recovers", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "recover-legacy-pre-intent", shape: "canonical-compound-readiness" });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  const sourceRun = await mechanicalStop(
+    seeded,
+    authorization.id,
+    BASE,
+    BASE_2,
+    "base-drift",
+    JSON.stringify({ observed: BASE_2, authorized: BASE }),
+    false,
+  );
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  const legacy = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: "FAILED",
+    failureReason: "source executor run does not have exactly one server-bound merge intent",
+    endedAt: new Date(),
+  } });
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: legacy.id } });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.boundSourceRunId, sourceRun.id);
+  assert.equal(aggregate.failureReason, null);
+  assert.equal(aggregate.endedAt, null);
+  assert.equal(await db.mergeRecoveryAttempt.count({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } }), 1, "the durable failed aggregate is reopened instead of replaced");
+});
+
 test("two distinct executor drifts recover; the third queues no run and notifies once", async () => {
   const seeded = await seedStopped("canonical-compound-readiness", "recover-limit");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
