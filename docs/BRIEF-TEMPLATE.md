@@ -73,14 +73,14 @@ brief defect (Moson, 2026-08-28).
 
 ## Routing
 
-Implementation runs on the template default (luna max). This template is why:
-a brief with checkable Changes and mechanical Acceptance is exactly the work
-that tier finishes, and the chain's review and regression tail catches what
-it misses. Wanting a heavier implementation tier is a signal about the brief,
-not the model: work whose correctness cannot be bounded by mechanical
-acceptance belongs in a compound chain, where the spec and plan phases carry
-the judgment. A `Route:` override in a brief states its reason on the same
-line; expect it to stay rare.
+Implementation defaults to the template assignee (luna max): a brief with
+mechanical Acceptance is work that tier finishes under the chain's review and
+regression tail. Route `implementation=senior-dev`, with the reason on the
+same line, when the hazard is one the acceptance suite cannot witness even
+when stated: concurrency and transaction-boundary semantics, lock or lease
+ownership windows, cross-module contract migrations. Tier answers how hard
+the diff is; chain shape answers how settled the spec is — a brief that
+cannot reach mechanical Acceptance is compound-shaped regardless of tier.
 
 ## Skeleton
 
