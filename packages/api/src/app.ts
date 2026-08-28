@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
+  ChainControlState,
   agentArchiveBlocker,
   applyInboxDecision,
   catalogRunnerForModel,
@@ -798,6 +799,37 @@ const inboxReplyInput = z.object({
 });
 const inboxCloseInput = z.object({
   requestId: z.string().trim().min(1).max(200),
+});
+const chainHoldInput = z.object({
+  requestId: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(4_000).nullable().optional(),
+}).strict();
+
+type ChainControlProjectionInput = {
+  projectId: string;
+  chainId: string;
+  state: ChainControlState;
+  heldLayer: number | null;
+  heldAt: Date | null;
+  holdRequestId: string | null;
+  holdReason: string | null;
+  releasedAt: Date | null;
+  releaseRequestId: string | null;
+  holdGeneration: number;
+};
+
+/** Stable wire shape shared by the Hold route and the later Chain read route. */
+export const chainControlProjection = (control: ChainControlProjectionInput) => ({
+  projectId: control.projectId,
+  chainId: control.chainId,
+  state: control.state === ChainControlState.HELD ? "held" as const : "released" as const,
+  heldLayer: control.heldLayer,
+  heldAt: control.heldAt,
+  holdRequestId: control.holdRequestId,
+  holdReason: control.holdReason,
+  releasedAt: control.releasedAt,
+  releaseRequestId: control.releaseRequestId,
+  holdGeneration: control.holdGeneration,
 });
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
@@ -2409,6 +2441,111 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         mergeRecovery,
       })),
     });
+  });
+  app.post("/tasks/:taskId/chain/hold", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const body = await readJson(context.req.raw, chainHoldInput);
+    const result = await readCommitted(db, async (tx) => {
+      // Chain identity is immutable after dispatch, so this unlocked read only
+      // chooses the mutex. Every fact used for the write is re-read after the
+      // full-chain lock, just as completion and task mutation do.
+      const identity = await tx.task.findUnique({
+        where: { id: taskId },
+        select: { projectId: true, chainId: true },
+      });
+      if (!identity) return refusal("not-found", "Task not found");
+      if (!identity.chainId) return refusal("conflict", "Task does not belong to a Chain");
+
+      await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+      const chainRows = await tx.task.findMany({
+        where: { projectId: identity.projectId, chainId: identity.chainId },
+        select: { id: true, status: true, chainIndex: true, chainLayer: true },
+      });
+      // Keep the route's task addressing scoped to the same project/Chain pair
+      // selected above. This is defensive against malformed legacy rows and
+      // makes a missing row a normal 404 instead of creating an orphan control.
+      if (!chainRows.some((row) => row.id === taskId)) return refusal("not-found", "Task not found");
+
+      const existing = await tx.chainControl.findUnique({
+        where: { projectId_chainId: { projectId: identity.projectId, chainId: identity.chainId } },
+      });
+      // Event history is the durable idempotency ledger. A delayed retry of an
+      // accepted Hold must remain a no-op even after Resume has replaced the
+      // mutable state with RELEASED.
+      const priorRequest = existing === null ? null : await tx.chainControlEvent.findUnique({
+        where: {
+          chainControlId_kind_requestId: {
+            chainControlId: existing.id,
+            kind: ChainControlState.HELD,
+            requestId: body.requestId,
+          },
+        },
+      });
+      if (priorRequest || existing?.state === ChainControlState.HELD) {
+        if (!existing) throw new Error("Chain control event exists without its authority");
+        return {
+          control: chainControlProjection(existing),
+          duplicate: true,
+        };
+      }
+
+      const heldLayer = chainRows
+        .filter((row) => row.status !== TaskStatus.DONE)
+        .map((row) => row.chainLayer ?? row.chainIndex)
+        .filter((layer): layer is number => layer !== null)
+        .sort((left, right) => left - right)[0];
+      if (heldLayer === undefined) {
+        return refusal("conflict", "Cannot hold a completed Chain; there is nothing left to hold");
+      }
+
+      const now = new Date();
+      const holdGeneration = (existing?.holdGeneration ?? 0) + 1;
+      const held = existing
+        ? await tx.chainControl.update({
+          where: { id: existing.id },
+          data: {
+            state: ChainControlState.HELD,
+            heldLayer,
+            heldAt: now,
+            holdRequestId: body.requestId,
+            holdReason: body.reason ?? null,
+            releasedAt: null,
+            releaseRequestId: null,
+            holdGeneration,
+          },
+        })
+        : await tx.chainControl.create({
+          data: {
+            projectId: identity.projectId,
+            chainId: identity.chainId,
+            state: ChainControlState.HELD,
+            heldLayer,
+            heldAt: now,
+            holdRequestId: body.requestId,
+            holdReason: body.reason ?? null,
+            holdGeneration,
+          },
+        });
+      await tx.chainControlEvent.create({
+        data: {
+          chainControlId: held.id,
+          kind: ChainControlState.HELD,
+          layer: heldLayer,
+          actorType: "operator",
+          actorId: null,
+          requestId: body.requestId,
+          reason: body.reason ?? null,
+          createdAt: now,
+          holdGeneration,
+        },
+      });
+      return {
+        control: chainControlProjection(held),
+        duplicate: false,
+      };
+    });
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result);
   });
   app.patch("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));

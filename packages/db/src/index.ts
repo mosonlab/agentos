@@ -31,3 +31,4 @@ export * from "./template-sources.js";
 export * from "./canonical-template-transition.js";
 export * from "./canonical-output-schema.js";
 export * from "./verify-starter-onboarding.js";
+export * from "./chain-control.js";
