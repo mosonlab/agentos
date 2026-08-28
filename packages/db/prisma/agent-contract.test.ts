@@ -82,7 +82,7 @@ test("canonical profiles start at Default and native child capability replaces A
   assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
-test("loaded role sources provide the canonical AgentOS model and runner pairs", async () => {
+test("named canonical roles use their model catalog runner and retired role names stay absent", async () => {
   const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
   for (const name of [
     "spec",

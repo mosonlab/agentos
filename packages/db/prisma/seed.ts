@@ -121,7 +121,7 @@ const main = async (): Promise<void> => {
   for (const role of sources.roles) {
     const existing = await prisma.agent.findUnique({
       where: { projectId_name: { projectId: project.id, name: role.name } },
-      select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+      select: { runtimeConfigCustomized: true },
     });
     const runtimeConfigCustomized = existing?.runtimeConfigCustomized === true;
     const useCanonicalRuntimeConfig = !runtimeConfigCustomized;
@@ -131,7 +131,6 @@ const main = async (): Promise<void> => {
         environmentId: environment.id,
         title: role.title,
         ...(useCanonicalRuntimeConfig ? { model: role.model, runnerPreference: role.runnerPreference } : {}),
-        runtimeConfigCustomized,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
         rolePrompt: role.rolePrompt,

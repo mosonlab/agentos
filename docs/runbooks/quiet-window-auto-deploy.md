@@ -183,9 +183,9 @@ The job then performs exactly this sequence and stops at the first failure:
    `runtimeConfigDriftNoticeFingerprint`; every such adoption is reported with
    the Agent name and from/to values. A customized Agent keeps its persisted
    model and runner values, with the existing drift-notice behavior unchanged.
-   The review-base transitions adopt only `compound-engineer-workflow:6` from
-   `null` to step 5 and `direct-engineer-workflow:2` from `null` to step 1. The
-   dedicated
+   The review-base transitions adopt only
+   `compound-engineer-workflow:6` from `null` to step 5 and
+   `direct-engineer-workflow:2` from `null` to step 1. The dedicated
    `regression-verifier` is the one source-declared role creation: when absent,
    sync creates it from canonical role text in the active
    `review-coordinator-sol` environment, copies that source Agent's repository

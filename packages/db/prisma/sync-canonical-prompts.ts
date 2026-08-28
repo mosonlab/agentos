@@ -344,7 +344,6 @@ const main = async (): Promise<void> => {
       }
       const updatedRoles: Record<string, number> = {};
       let adoptedAgentDefaults = 0;
-      let preservedAgentOverrides = 0;
       let runtimeDriftNotices = 0;
       const runtimeConfigAdoptions: Array<{
         name: string;
@@ -366,7 +365,6 @@ const main = async (): Promise<void> => {
           if (runtimeDifferences.length > 0 && runtimeConfigRefusal(agent)) {
             throw new Error(`Agent ${name} (${agent.id}) has an invalid runtime configuration: ${runtimeConfigRefusal(agent)}`);
           }
-          let runtimeConfigCustomized = agent.runtimeConfigCustomized;
           if (adoptsCanonicalDefaults) {
             const adopted = await tx.agent.updateMany({
               where: {
@@ -391,7 +389,7 @@ const main = async (): Promise<void> => {
               to: { model: role.model, runnerPreference: role.runnerPreference },
             });
           }
-          if (runtimeDifferences.length > 0 && runtimeConfigCustomized) {
+          if (runtimeDifferences.length > 0 && agent.runtimeConfigCustomized) {
             const fingerprint = JSON.stringify({
               canonical: { model: role.model, runnerPreference: role.runnerPreference },
               production: { model: agent.model, runnerPreference: agent.runnerPreference },
@@ -424,7 +422,7 @@ const main = async (): Promise<void> => {
                   `Agent: ${name}`,
                   `Canonical: model=${role.model}, runner=${role.runnerPreference}`,
                   `Production: model=${agent.model}, runner=${agent.runnerPreference}`,
-                  `runtimeConfigCustomized=${runtimeConfigCustomized}`,
+                  `runtimeConfigCustomized=${agent.runtimeConfigCustomized}`,
                 ].join("\n"),
                 ...(thread ? { threadId: thread.id } : {}),
               } });
@@ -468,7 +466,6 @@ const main = async (): Promise<void> => {
         migratedTasks,
         preservedTaskAssignments,
         adoptedAgentDefaults,
-        preservedAgentOverrides,
         runtimeDriftNotices,
         runtimeConfigAdoptions,
         updatedSteps,

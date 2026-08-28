@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CodexServiceTier,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   Prisma,
   RunStatus,
@@ -1455,10 +1456,13 @@ test("Agent API does not mark unchanged runtime fields as an operator override",
   });
 });
 
-test("reset-runtime-config restores canonical runtime values and refuses non-canonical or archived agents", async () => {
+test("reset-runtime-config restores canonical runtime values and refuses invalid reset targets", async () => {
   await withTokens(async () => {
-    const canonicalRole = (await loadAgentSources()).roles.find(({ name }) => name === "default");
+    const roles = (await loadAgentSources()).roles;
+    const canonicalRole = roles.find(({ name }) => name === "default");
+    const nonCodexRole = roles.find(({ runnerPreference }) => runnerPreference === RunnerPreference.CLAUDE);
     assert.ok(canonicalRole);
+    assert.ok(nonCodexRole);
     const updates: Array<Record<string, unknown>> = [];
     const canonical = lockedAgent({
       id: "agent-default",
@@ -1485,6 +1489,14 @@ test("reset-runtime-config restores canonical runtime values and refuses non-can
             model: canonical!.model,
             runnerPreference: canonical!.runnerPreference,
           });
+          if (where.id === "agent-fast-tier") return lockedAgent({
+            id: "agent-fast-tier",
+            name: nonCodexRole.name,
+            model: "gpt-5.6-sol:high",
+            runnerPreference: RunnerPreference.CODEX,
+            codexServiceTier: CodexServiceTier.FAST,
+            runtimeConfigCustomized: true,
+          });
           if (where.id === canonical!.id) return canonical;
           return null;
         },
@@ -1507,6 +1519,11 @@ test("reset-runtime-config restores canonical runtime values and refuses non-can
     assert.equal((await request("missing")).status, 404);
     assert.equal((await request("agent-custom")).status, 400);
     assert.equal((await request("agent-archived")).status, 409);
+    const tierRefusal = await request("agent-fast-tier");
+    assert.equal(tierRefusal.status, 400);
+    assert.deepEqual(await tierRefusal.json(), {
+      error: "Fast service tier requires a Codex gpt-* model or a PI openai-codex/* model",
+    });
     const reset = await request(canonical!.id);
     assert.equal(reset.status, 200);
     assert.deepEqual(updates, [{
