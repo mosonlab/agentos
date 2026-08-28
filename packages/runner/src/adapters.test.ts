@@ -542,6 +542,14 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
   }
 });
 
+test("Codex fresh and resume launches preserve non-interactive tool authorization", () => {
+  const spec = runSpec();
+  const resume = { ...spec, providerConversationId: "thread-1", input: "continue" };
+  for (const args of [argsForRunner("CODEX", spec), argsForRunner("CODEX", spec, resume)]) {
+    assert.ok(args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  }
+});
+
 test("native implementation subagents are pinned on fresh and resumed Codex launches", () => {
   const executioner = {
     ...claim,

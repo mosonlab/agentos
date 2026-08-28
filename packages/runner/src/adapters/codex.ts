@@ -90,7 +90,8 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
       "-c", `service_tier="${serviceTier}"`,
       ...nativeSubagentArgs(spec.claim.run),
-      ...mcpArgs(spec.credentialsPath), resume.providerConversationId, "-",
+      ...mcpArgs(spec.credentialsPath),
+      "--dangerously-bypass-approvals-and-sandbox", resume.providerConversationId, "-",
     ]
     : [
       "exec", "--json", "-m", model,
