@@ -754,6 +754,20 @@ test("a required deliverable the run never persisted is a retryable failure, not
   assert.deepEqual(releasedChainLeases, []);
 });
 
+test("Regression v2 status reserves remediation for the mechanical Runner path", async () => {
+  const { task } = await seedTask(REGRESSION_V2_STEP);
+  const runId = await enqueue(task.id);
+  const claimed = await claimRun(runId, "runner-regression-mechanical-output");
+
+  const status = await call("GET", `/session/runs/${runId}/status`, claimed.sessionToken);
+
+  assert.equal(status.status, 200, JSON.stringify(status.body));
+  assert.equal(status.body.task.outputKind, "regression-verification-v2");
+  assert.equal(status.body.task.outputRequired, true);
+  assert.equal(status.body.task.outputRemediationAllowed, false);
+  assert.equal(status.body.task.outputPersisted, false);
+});
+
 test("a run that authored nothing is re-queued even when a prior run's output is on the task", async () => {
   const { task } = await seedTask({
     chained: true,

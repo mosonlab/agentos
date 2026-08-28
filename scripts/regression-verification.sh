@@ -3,9 +3,10 @@
 #
 # The model invokes `prepare`, performs only the semantic recheck, then invokes
 # `finalize` (or `review-fail <summary>`). This script owns every git/network,
-# gate, verdict-transcription, and AgentOS-output operation. Merge readiness
-# owns the short merge-lease window after a durable exact-head PASS exists, so
-# lease transport failures never consume a semantic-verification Run.
+# gate, verdict transcription, and the local Runner handoff. The Runner owns
+# the fenced control-plane write outside the Agent sandbox. Merge readiness owns
+# the short merge-lease window after a durable exact-head PASS exists, so lease
+# transport failures never consume a semantic-verification Run.
 
 set -u
 set -o pipefail
@@ -21,8 +22,7 @@ require_env() {
   [ -n "${!name:-}" ] || die "$name is required"
 }
 
-for required in AGENTOS_API_URL AGENTOS_SESSION_TOKEN AGENTOS_RUN_ID AGENTOS_FENCING_TOKEN \
-  AGENTOS_WORKSPACE_PATH AGENTOS_PULL_REQUEST_BASE; do
+for required in AGENTOS_RUN_ID AGENTOS_WORKSPACE_PATH AGENTOS_PULL_REQUEST_BASE; do
   require_env "$required"
 done
 
@@ -32,16 +32,14 @@ git check-ref-format --branch "$AGENTOS_PULL_REQUEST_BASE" >/dev/null 2>&1 \
 
 SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_FILE="${AGENTOS_REGRESSION_STATE:-$AGENTOS_WORKSPACE_PATH/.git/agentos-regression-state}"
+OUTPUT_FILE="$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"
 GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_ROOT/scripts/gate-worker/gate-dispatch.sh}"
-API_CLIENT="${REGRESSION_API_CLIENT:-curl}"
 GATE_LOG=""
-API_HEADERS=""
 # shellcheck source=scripts/gate-worker/lib.sh
 . "$SCRIPT_ROOT/scripts/gate-worker/lib.sh"
 
 cleanup() {
   [ -z "$GATE_LOG" ] || rm -f -- "$GATE_LOG"
-  [ -z "$API_HEADERS" ] || rm -f -- "$API_HEADERS"
 }
 trap cleanup EXIT
 
@@ -101,52 +99,29 @@ process.stdout.write(JSON.stringify(value));
 ' "$1" "$2" "$3" "$4"
 }
 
-api_request() {
-  local method="$1" path="$2" body="$3" status
-  umask 077
-  API_HEADERS="$(mktemp "${TMPDIR:-/tmp}/regression-api-headers.XXXXXX")" \
-    || die "cannot create API header file"
-  printf 'Authorization: Bearer %s\nContent-Type: application/json\n' \
-    "$AGENTOS_SESSION_TOKEN" > "$API_HEADERS" \
-    || { rm -f -- "$API_HEADERS"; API_HEADERS=""; die "cannot write API header file"; }
-  printf '%s' "$body" | "$API_CLIENT" --fail-with-body --silent --show-error \
-    -X "$method" \
-    --header "@$API_HEADERS" \
-    --data-binary @- \
-    "${AGENTOS_API_URL%/}/session/runs/$AGENTOS_RUN_ID$path"
-  status=$?
-  rm -f -- "$API_HEADERS"
-  API_HEADERS=""
-  return "$status"
-}
-
 persist_output() {
-  local verdict="$1" commit_sha="$2" request
-  request="$(printf '%s\0%s\0%s\0%s' "$AGENTOS_FENCING_TOKEN" "$OUTPUT_KIND" "$verdict" "$commit_sha" | node -e '
+  local verdict="$1" commit_sha="$2" output_dir temporary
+  output_dir="$(dirname "$OUTPUT_FILE")"
+  if [ -L "$output_dir" ]; then
+    die "refusing symlinked regression output directory"
+  fi
+  umask 077
+  mkdir -p -- "$output_dir" || die "cannot create regression output directory"
+  [ -d "$output_dir" ] || die "regression output directory is not a directory"
+  temporary="$(mktemp "${OUTPUT_FILE}.XXXXXXXX")" \
+    || die "cannot create regression output handoff"
+  printf '%s\0%s\0%s\0%s' "$AGENTOS_RUN_ID" "$OUTPUT_KIND" "$verdict" "$commit_sha" | node -e '
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => { input += chunk; });
 process.stdin.on("end", () => {
-const [fencingToken, kind, body, commitSha] = input.split("\0");
-process.stdout.write(JSON.stringify({ fencingToken, kind, body, commitSha }));
+const [runId, kind, body, commitSha] = input.split("\0");
+process.stdout.write(JSON.stringify({ schemaVersion: 1, runId, kind, body, commitSha }));
 });
-')" || die "cannot encode regression output request"
-  api_request PUT /output "$request" >/dev/null \
-    || die "AgentOS rejected the mechanical regression output"
-}
-
-record_failure() {
-  local message="$1" request
-  request="$(printf '%s\0%s' "$AGENTOS_FENCING_TOKEN" "$message" | node -e '
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => { input += chunk; });
-process.stdin.on("end", () => {
-const [fencingToken, body] = input.split("\0");
-process.stdout.write(JSON.stringify({ fencingToken, actorType: "agent", body }));
-});
-')" || return 1
-  api_request POST /activity "$request" >/dev/null 2>&1 || true
+' > "$temporary" || { rm -f -- "$temporary"; die "cannot encode regression output handoff"; }
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; die "cannot protect regression output handoff"; }
+  mv -f -- "$temporary" "$OUTPUT_FILE" \
+    || { rm -f -- "$temporary"; die "cannot publish regression output handoff"; }
 }
 
 persist_refresh_conflict() {
@@ -180,7 +155,10 @@ refresh_onto_target() {
 }
 
 prepare() {
-  local base_head result prepared_head
+  local base_head result prepared_head output_dir
+  output_dir="$(dirname "$OUTPUT_FILE")"
+  [ ! -L "$output_dir" ] || die "refusing symlinked regression output directory"
+  rm -f -- "$OUTPUT_FILE" || die "cannot clear stale regression output handoff"
   base_head="$(fetch_base)" || die "cannot refresh target head"
   refresh_onto_target "$base_head"
   result=$?
@@ -265,7 +243,6 @@ finalize() {
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;
     *)
-      record_failure "Regression gate dispatch produced no admissible verdict after attempt $attempt (exit $gate_status)"
       die "gate dispatch produced no admissible PASS/FAIL verdict after $attempt attempt(s) (exit $gate_status)"
       ;;
   esac

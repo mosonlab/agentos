@@ -8,6 +8,7 @@ import {
   type ControlPlane,
   type ReclaimResult,
   type SessionEventPayload,
+  type SessionTaskOutput,
   type SessionTaskOutputStatus,
 } from "./api.js";
 import type { RunnerKind } from "./config.js";
@@ -24,6 +25,7 @@ export type ControlPlaneDouble = {
   starts: Array<Record<string, unknown> & { promptHash: string }>;
   eventBatches: SessionEventPayload[][];
   activities: Array<{ body: string; metadata: Record<string, unknown> }>;
+  taskOutputs: SessionTaskOutput[];
   publishedBranches: string[];
   leaseIndependentCleanups: Array<{ cleanupStatus: string; cleanupFailureReason?: string; workspaceRetained: boolean }>;
   reclaimReports: ReclaimResult[][];
@@ -42,6 +44,7 @@ export const createControlPlaneDouble = (
   const starts: Array<Record<string, unknown> & { promptHash: string }> = [];
   const eventBatches: SessionEventPayload[][] = [];
   const activities: Array<{ body: string; metadata: Record<string, unknown> }> = [];
+  const taskOutputs: SessionTaskOutput[] = [];
   const publishedBranches: string[] = [];
   const leaseIndependentCleanups: Array<{ cleanupStatus: string; cleanupFailureReason?: string; workspaceRetained: boolean }> = [];
   const reclaimReports: ReclaimResult[][] = [];
@@ -72,6 +75,10 @@ export const createControlPlaneDouble = (
     completeRun: async (config, claim, completion) => {
       completions.push(completion);
       await overrides.completeRun?.(config, claim, completion);
+    },
+    persistSessionTaskOutput: async (config, claim, output) => {
+      taskOutputs.push(output);
+      await overrides.persistSessionTaskOutput?.(config, claim, output);
     },
     readSessionTaskOutputStatus: async (config, claim) => {
       outputStatusReads += 1;
@@ -116,6 +123,7 @@ export const createControlPlaneDouble = (
     starts,
     eventBatches,
     activities,
+    taskOutputs,
     publishedBranches,
     leaseIndependentCleanups,
     reclaimReports,
@@ -149,9 +157,10 @@ export const createRoutedControlPlaneDouble = (
     config: Parameters<ControlPlane["completeRun"]>[0],
     path: string,
     body: Record<string, unknown>,
+    method: "POST" | "PUT" = "POST",
   ): Promise<T> => {
     const response = await handler(`${config.apiUrl}${path}`, {
-      method: "POST",
+      method,
       body: JSON.stringify(body),
     });
     const responseBody = await response.text();
@@ -186,6 +195,12 @@ export const createRoutedControlPlaneDouble = (
       await request(config, `/runner/runs/${claim.run.id}/complete`, {
         runnerId: config.runnerId, fencingToken: claim.fencingToken, ...completion,
       });
+    },
+    persistSessionTaskOutput: async (config, claim, output) => {
+      await request(config, `/session/runs/${claim.run.id}/output`, {
+        fencingToken: claim.fencingToken,
+        ...output,
+      }, "PUT");
     },
     readSessionTaskOutputStatus: async (config, claim) => {
       const payload = await request<{ task: SessionTaskOutputStatus | null }>(
