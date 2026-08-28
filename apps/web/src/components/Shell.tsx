@@ -6,8 +6,7 @@ import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
-import { needsReply } from "../lib/inbox";
-import type { InboxMessage } from "../lib/types";
+import type { InboxSummary } from "../lib/types";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import { cn } from "../lib/utils";
 import {
@@ -76,13 +75,16 @@ export const ThemeCycleButton = (): ReactNode => {
 
 export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   const path = useRoute();
-  // GET /inbox/messages is global: the control plane has no project filter on it.
-  const { data: inbox } = usePoll<InboxMessage[]>("/inbox/messages", 5_000);
-  /* Only cards the operator still owes an answer to. Detached notifications are
-   * open too, but nobody is blocked on them: counting them here is what made the
-   * badge read 145 with nothing actually waiting. They live in the Inbox's
-   * Notices lane instead. */
-  const openCount = (inbox ?? []).filter(needsReply).length;
+  /* The badge is one number, so it polls one number. This used to read
+   * `GET /inbox/messages` — the complete global message collection, 490 KB
+   * across 231 messages, every 5s from whichever page the operator happened to
+   * be on — and then counted the rows client-side. The summary route applies the
+   * same rule server-side: only cards the operator still owes an answer to.
+   * Detached notifications are open too, but nobody is blocked on them, and
+   * counting them is what made the badge read 145 with nothing actually waiting;
+   * they live in the Inbox's Notices lane instead. */
+  const { data: summary, error: summaryError } = usePoll<InboxSummary>("/inbox/messages/summary", 5_000);
+  const openCount = summary?.needsReply;
   const t = useT();
 
   const active = (item: { to: string; match: string[] }): boolean =>
@@ -97,12 +99,14 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
             <Link key={item.to} to={item.to} className={cn(NAV_ITEM, active(item) && NAV_ITEM_ACTIVE)}>
               {item.icon}
               {t(item.labelKey)}
-              {/* Count source and cadence unchanged (spec §4.4.4); the badge only
-                  gains a label, because a bare number beside "Inbox" reads as
-                  nothing at all to a screen reader. */}
-              {item.to === "/inbox" && openCount > 0
-                ? <span className={cn(COUNT, NAV_COUNT)} aria-label={t("sidebar.inbox.unread", { n: openCount })}><span className={BADGE_COUNT}>{openCount}</span></span>
-                : null}
+              {/* Count meaning and cadence unchanged (spec §4.4.4) — only the
+                  transport moved. The label is there because a bare number
+                  beside "Inbox" reads as nothing at all to a screen reader. */}
+              {item.to !== "/inbox" ? null : summaryError !== null
+                ? <span className={cn(COUNT, NAV_COUNT)} aria-label={t("sidebar.inbox.unavailable")}><span className={BADGE_COUNT}>!</span></span>
+                : openCount !== undefined && openCount > 0
+                  ? <span className={cn(COUNT, NAV_COUNT)} aria-label={t("sidebar.inbox.unread", { n: openCount })}><span className={BADGE_COUNT}>{openCount}</span></span>
+                  : null}
             </Link>
           ))}
         </nav>

@@ -39,6 +39,15 @@ import { stopMergeTail } from "./merge-tail-actions.js";
 type DbReader = PrismaClient | Prisma.TransactionClient;
 
 const SHA = /^[0-9a-f]{40}$/u;
+const LEGACY_PRE_INTENT_REFUSAL = "source executor run does not have exactly one server-bound merge intent";
+
+const isLegacyPreIntentRefusal = (attempt: MergeRecoveryAttempt): boolean => (
+  attempt.status === MergeRecoveryStatus.FAILED
+  && attempt.failureReason === LEGACY_PRE_INTENT_REFUSAL
+  && attempt.boundSourceRunId === null
+  && attempt.authorizationActivityId === null
+  && attempt.recoveryRunId === null
+);
 
 export const baseDriftRecoveryPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS);
@@ -61,7 +70,27 @@ const ensureValidationAttemptLocked = async (
   candidate?: RecoveryCandidate,
 ): Promise<MergeRecoveryAttempt> => {
   const existing = await recoveryAttemptFor(tx, integratorTaskId, sourceStopId);
-  if (existing) return existing;
+  const candidateData = candidate ? {
+    boundSourceRunId: candidate.sourceRunId,
+    authorizationActivityId: candidate.authorizationActivityId,
+    readinessTaskId: candidate.readinessTaskId,
+    regressionTaskId: candidate.regressionTaskId,
+    repository: candidate.repository,
+    prNumber: candidate.prNumber,
+    targetBranch: candidate.targetBranch,
+    authorizedHeadSha: candidate.authorizedHeadSha,
+    authorizedBaseSha: candidate.authorizedBaseSha,
+    observedBaseSha: candidate.observedBaseSha,
+  } : {};
+  if (existing) {
+    if (!candidate || !isLegacyPreIntentRefusal(existing)) return existing;
+    return tx.mergeRecoveryAttempt.update({ where: { id: existing.id }, data: {
+      status: MergeRecoveryStatus.VALIDATING,
+      failureReason: null,
+      endedAt: null,
+      ...candidateData,
+    } });
+  }
   const latest = await tx.mergeRecoveryAttempt.aggregate({
     where: { integratorTaskId },
     _max: { attempt: true },
@@ -71,18 +100,7 @@ const ensureValidationAttemptLocked = async (
     sourceStopId,
     attempt: (latest._max.attempt ?? 0) + 1,
     status: MergeRecoveryStatus.VALIDATING,
-    ...(candidate ? {
-      boundSourceRunId: candidate.sourceRunId,
-      authorizationActivityId: candidate.authorizationActivityId,
-      readinessTaskId: candidate.readinessTaskId,
-      regressionTaskId: candidate.regressionTaskId,
-      repository: candidate.repository,
-      prNumber: candidate.prNumber,
-      targetBranch: candidate.targetBranch,
-      authorizedHeadSha: candidate.authorizedHeadSha,
-      authorizedBaseSha: candidate.authorizedBaseSha,
-      observedBaseSha: candidate.observedBaseSha,
-    } : {}),
+    ...candidateData,
   } });
 };
 
@@ -127,7 +145,9 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
   const stop = await latestRecordedStop(db as Prisma.TransactionClient, task.id);
   if (!stop || stop.condition !== "base-drift") return { kind: "skip" };
   const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
-  if (existingAttempt && existingAttempt.status !== MergeRecoveryStatus.VALIDATING) return { kind: "skip" };
+  if (existingAttempt
+    && existingAttempt.status !== MergeRecoveryStatus.VALIDATING
+    && !isLegacyPreIntentRefusal(existingAttempt)) return { kind: "skip" };
   const refuse = (code: CandidateRefusalCode, detail?: string): CandidateLoad => ({
     kind: "refused", code, stopId: stop.stopId, ...(detail ? { detail } : {}),
   });
@@ -199,10 +219,15 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
     orderBy: { createdAt: "asc" }, select: { metadata: true },
   });
   const intents = intentRows.map((row) => asJsonObject(row.metadata)).filter((metadata) => metadata?.sourceRunId === sourceRun.id);
-  if (intents.length !== 1) return refuse("intent-count");
-  const intent = intents[0]!;
-  if (intent.authorizationActivityId !== authorization.activityId
-    || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha) {
+  // The executor's first pull-request read can observe base drift before the
+  // irreversible path writes an intent. A successful, run-bound stop with no
+  // intent is therefore the expected pre-intent shape and is safe to recover.
+  // Once an intent exists it must still bind the selected authorization, and
+  // multiple rows remain ambiguous rather than being guessed through.
+  if (intents.length > 1) return refuse("intent-count");
+  const intent = intents[0];
+  if (intent && (intent.authorizationActivityId !== authorization.activityId
+    || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha)) {
     return refuse("intent-mismatch");
   }
   if (evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");

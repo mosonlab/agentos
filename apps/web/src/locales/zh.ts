@@ -663,6 +663,7 @@ export const zh = {
   "sessions.truncated": "… 已截断，还有 {n} 个字符",
   "sessions.waiting": "正在等待收件箱裁决。",
 
+  "sidebar.inbox.unavailable": "收件箱数量暂不可用",
   "sidebar.inbox.unread": "{n} 条未读收件箱消息",
   "sidebar.nav.agents": "Agents",
   "sidebar.nav.connections": "连接",
@@ -690,6 +691,8 @@ export const zh = {
   "startup.refused.body": "控制面拒绝了本浏览器的操作员身份（{status}）。本机凭据位于仓库根目录的 {env}，由 {setup} 生成；修改后请重启 {restart}。本屏不显示任何机密内容。",
   "startup.refused.title": "本机配置被拒绝",
   "startup.retry": "重试",
+  "startup.timeout.body": "首个请求等待了 {seconds} 秒仍无响应。控制面不可达或仍在重启；什么都还没加载。等它恢复响应后重试。",
+  "startup.timeout.title": "控制面在限定时间内没有响应",
   "startup.unreachable.body": "本机没有任何响应。先用 {command} 启动控制面，然后重试。",
   "startup.unreachable.title": "控制面没有响应",
 
@@ -841,7 +844,9 @@ export const zh = {
   "tasks.column.REVIEW": "评审",
   "tasks.column.TODO": "待办",
   "tasks.column.drop": "把任务拖到这里",
+  "tasks.column.more": "再显示 {n} 条",
   "tasks.column.nothing": "这里还没有任务",
+  "tasks.column.previous": "显示前 {n} 条",
   "tasks.confirm.archiveDone": "归档此项目中全部 {n} 个已完成的任务？",
   "tasks.confirm.delete": "删除任务 {name}？",
   "tasks.create": "创建任务",
