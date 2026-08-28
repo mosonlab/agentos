@@ -62,15 +62,26 @@ it can.
 
 ## Routing
 
-Implementation defaults to the template assignee (luna max): a brief with
-mechanical Acceptance is work that tier finishes under the chain's review and
-regression tail. Route `implementation=senior-dev`, with the reason on the
-same line, when the hazard is one the acceptance suite cannot witness even
-when stated: concurrency and transaction-boundary semantics, lock or lease
-ownership windows, cross-module contract migrations. A sol route without a
-reason is a brief defect. Tier answers how hard the diff is; chain shape
-answers how settled the spec is — a brief that cannot reach mechanical
-Acceptance is compound-shaped regardless of tier.
+Implementation has three routes:
+
+- **senior-dev-luna** (template default): a brief with mechanical Acceptance
+  is work that tier finishes under the chain's review and regression tail.
+- **senior-dev**, with the reason on the same line, when the hazard is one
+  the acceptance suite cannot witness even when stated: concurrency and
+  transaction-boundary semantics, lock or lease ownership windows,
+  cross-module contract migrations. A sol route without a reason is a brief
+  defect.
+- **frontend-dev** for frontend implementation work (UI components, pages,
+  client-side behavior).
+
+Tier answers how hard the diff is; chain shape answers how settled the spec
+is — a brief that cannot reach mechanical Acceptance is compound-shaped
+regardless of tier.
+
+Until the platform parses the `Route:` line (tracked on the revalidate-step
+chain), the line is documentation only: the dispatcher must also pass the
+matching stepOverrides at instantiation, or PATCH the implementation task's
+assignee before start.
 
 ## Skeleton
 
