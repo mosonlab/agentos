@@ -173,7 +173,11 @@ test("Chain and standalone startability agree on held layers while the admission
   assert.equal(atLayer.body.startable, true);
   assert.equal(aboveLayer.status, 200);
   assert.equal(aboveLayer.body.startable, false);
-  assert.equal(aboveLayer.body.checklist.predecessorsDone, true);
+  // Layer 2 is intentionally still TODO so its ordinary predecessor guard
+  // correctly keeps layer 3 from being startable. The hold is a separate
+  // control refusal, not a StartabilityChecklist entry; Start and Retry above
+  // assert its hold-naming refusal directly.
+  assert.equal(aboveLayer.body.checklist.predecessorsDone, false);
   assert.deepEqual(Object.keys(aboveLayer.body.checklist).sort(), [
     "agentAssignee", "budgetRemaining", "noActiveRun", "predecessorsDone", "repoAccessGrant", "repoBound",
   ]);
