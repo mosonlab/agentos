@@ -168,13 +168,16 @@ test("an early-step rerun inherits its owning chain priority", async () => {
 
 test("a chainless task ranks as one unfinished task", async () => {
   const executor = await seedExecutor();
-  const chain = await seedChain(executor, [TaskStatus.TODO, TaskStatus.TODO], 0, EARLIER);
+  const twoUnfinished = await seedChain(executor, [TaskStatus.TODO, TaskStatus.TODO], 0, EARLIER);
+  const oneUnfinished = await seedChain(executor, [TaskStatus.DONE, TaskStatus.TODO], 1, EARLIER);
   const chainless = await seedChainless(executor, LATER);
 
-  const claimed = await claim("chainless-priority-runner");
+  const first = await claim("chainless-priority-runner-1");
+  const second = await claim("chainless-priority-runner-2");
 
-  assert.equal(claimed.run.id, chainless.run.id);
-  assert.equal((await db.run.findUniqueOrThrow({ where: { id: chain.run.id } })).status, RunStatus.QUEUED);
+  assert.equal(first.run.id, oneUnfinished.run.id, "chainless ties a one-unfinished chain behind FIFO");
+  assert.equal(second.run.id, chainless.run.id, "chainless outranks a two-unfinished chain");
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: twoUnfinished.run.id } })).status, RunStatus.QUEUED);
 });
 
 test("equal chain priorities retain readyAt then createdAt FIFO ordering", async () => {
