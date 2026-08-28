@@ -127,3 +127,35 @@ test("a server that accepts the connection and never answers rejects as TimeoutE
     await new Promise<void>((resolve) => { server.close(() => resolve()); });
   }
 });
+
+test("a response that sends headers and then stalls its body is translated to a timed-out ApiError", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.flushHeaders();
+  });
+  await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  const port = (server.address() as AddressInfo).port;
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  Object.defineProperty(AbortSignal, "timeout", {
+    configurable: true,
+    value: () => originalTimeout(100),
+  });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: (_url: string, init: RequestInit) => originalFetch(`http://127.0.0.1:${port}/projects`, init),
+  });
+  try {
+    await assert.rejects(() => api.get("/projects"), (reason: unknown) => {
+      assert.ok(reason instanceof ApiError);
+      assert.equal(reason.status, 0);
+      assert.equal(reason.timedOut, true);
+      return true;
+    });
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    Object.defineProperty(AbortSignal, "timeout", { configurable: true, value: originalTimeout });
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => { server.close(() => resolve()); });
+  }
+});

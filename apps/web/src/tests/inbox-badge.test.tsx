@@ -79,10 +79,11 @@ test("nothing owed is no badge at all, not a zero", async () => {
   assert.doesNotMatch(markup, /unread/u);
 });
 
-test("a control plane without the summary route leaves the sidebar usable", async () => {
-  // The route answers 404 here. A badge is not worth a broken shell, and the
-  // failure is visible in the network log rather than swallowed into a count.
+test("a failed summary poll is visible and never poses as a zero count", async () => {
+  // The route answers 404 here. The shell remains usable, but a failed count
+  // cannot silently claim that nobody is waiting.
   const { markup } = await mounted({ "/api/projects": PROJECTS });
   assert.match(markup, /Vibeville/u);
   assert.doesNotMatch(markup, /unread/u);
+  assert.match(markup, /aria-label="Inbox count unavailable"/u);
 });

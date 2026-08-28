@@ -124,52 +124,35 @@ export const StartupGate = ({ children }: { children: (bootstrap: Bootstrap) => 
       </Page>
     );
   }
-  if (state.kind === "refused") {
+  if (state.kind !== "ready") {
+    const status = "status" in state ? state.status : 0;
+    const screens = {
+      refused: {
+        title: t("startup.refused.title"),
+        body: tn("startup.refused.body", {
+          status,
+          env: <code>.env</code>,
+          setup: <code>npm run setup:local</code>,
+          restart: <code>npm run dev:web</code>,
+        }),
+      },
+      unreachable: {
+        title: t("startup.unreachable.title"),
+        body: tn("startup.unreachable.body", { command: <code>npm run dev:api</code> }),
+      },
+      timeout: {
+        title: t("startup.timeout.title"),
+        body: t("startup.timeout.body", { seconds: REQUEST_TIMEOUT_MS / 1_000 }),
+      },
+      failed: {
+        title: t("startup.failed.title"),
+        body: t("startup.failed.body", { status }),
+      },
+    } satisfies Record<typeof state.kind, { title: string; body: ReactNode }>;
+    const screen = screens[state.kind];
     return (
-      <div data-startup-state="refused">
-        <GateScreen
-          title={t("startup.refused.title")}
-          body={tn("startup.refused.body", {
-            status: state.status,
-            env: <code>.env</code>,
-            setup: <code>npm run setup:local</code>,
-            restart: <code>npm run dev:web</code>,
-          })}
-          onRetry={reload}
-        />
-      </div>
-    );
-  }
-  if (state.kind === "unreachable") {
-    return (
-      <div data-startup-state="unreachable">
-        <GateScreen
-          title={t("startup.unreachable.title")}
-          body={tn("startup.unreachable.body", { command: <code>npm run dev:api</code> })}
-          onRetry={reload}
-        />
-      </div>
-    );
-  }
-  if (state.kind === "timeout") {
-    return (
-      <div data-startup-state="timeout">
-        <GateScreen
-          title={t("startup.timeout.title")}
-          body={t("startup.timeout.body", { seconds: REQUEST_TIMEOUT_MS / 1_000 })}
-          onRetry={reload}
-        />
-      </div>
-    );
-  }
-  if (state.kind === "failed") {
-    return (
-      <div data-startup-state="failed">
-        <GateScreen
-          title={t("startup.failed.title")}
-          body={t("startup.failed.body", { status: state.status })}
-          onRetry={reload}
-        />
+      <div data-startup-state={state.kind}>
+        <GateScreen title={screen.title} body={screen.body} onRetry={reload} />
       </div>
     );
   }

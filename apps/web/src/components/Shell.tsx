@@ -83,8 +83,8 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
    * Detached notifications are open too, but nobody is blocked on them, and
    * counting them is what made the badge read 145 with nothing actually waiting;
    * they live in the Inbox's Notices lane instead. */
-  const { data: summary } = usePoll<InboxSummary>("/inbox/messages/summary", 5_000);
-  const openCount = summary?.needsReply ?? 0;
+  const { data: summary, error: summaryError } = usePoll<InboxSummary>("/inbox/messages/summary", 5_000);
+  const openCount = summary?.needsReply;
   const t = useT();
 
   const active = (item: { to: string; match: string[] }): boolean =>
@@ -102,9 +102,11 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
               {/* Count meaning and cadence unchanged (spec §4.4.4) — only the
                   transport moved. The label is there because a bare number
                   beside "Inbox" reads as nothing at all to a screen reader. */}
-              {item.to === "/inbox" && openCount > 0
-                ? <span className={cn(COUNT, NAV_COUNT)} aria-label={t("sidebar.inbox.unread", { n: openCount })}><span className={BADGE_COUNT}>{openCount}</span></span>
-                : null}
+              {item.to !== "/inbox" ? null : summaryError !== null
+                ? <span className={cn(COUNT, NAV_COUNT)} aria-label={t("sidebar.inbox.unavailable")}><span className={BADGE_COUNT}>!</span></span>
+                : openCount !== undefined && openCount > 0
+                  ? <span className={cn(COUNT, NAV_COUNT)} aria-label={t("sidebar.inbox.unread", { n: openCount })}><span className={BADGE_COUNT}>{openCount}</span></span>
+                  : null}
             </Link>
           ))}
         </nav>

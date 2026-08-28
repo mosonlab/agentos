@@ -664,6 +664,7 @@ export const zh = {
   "sessions.waiting": "正在等待收件箱裁决。",
 
   "sidebar.inbox.unread": "{n} 条未读收件箱消息",
+  "sidebar.inbox.unavailable": "收件箱数量暂不可用",
   "sidebar.nav.agents": "Agents",
   "sidebar.nav.connections": "连接",
   "sidebar.nav.costs": "成本",
@@ -844,6 +845,7 @@ export const zh = {
   "tasks.column.TODO": "待办",
   "tasks.column.drop": "把任务拖到这里",
   "tasks.column.more": "再显示 {n} 条",
+  "tasks.column.previous": "显示前 {n} 条",
   "tasks.column.nothing": "这里还没有任务",
   "tasks.confirm.archiveDone": "归档此项目中全部 {n} 个已完成的任务？",
   "tasks.confirm.delete": "删除任务 {name}？",

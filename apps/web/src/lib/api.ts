@@ -68,8 +68,22 @@ export class ApiError extends Error {
   }
 }
 
+const transportError = (path: string, reason: unknown): ApiError => (
+  isTimeout(reason)
+    ? new ApiError(0, path, `No answer within ${REQUEST_TIMEOUT_MS / 1_000}s`, TIMEOUT_CODE)
+    : new ApiError(0, path, reason instanceof Error ? reason.message : "Network error")
+);
+
+const responseText = async (response: Response, path: string): Promise<string> => {
+  try {
+    return await response.text();
+  } catch (reason: unknown) {
+    throw transportError(path, reason);
+  }
+};
+
 const parseError = async (response: Response, path: string): Promise<ApiError> => {
-  const text = await response.text().catch(() => "");
+  const text = await responseText(response, path);
   let detail = text;
   let code: string | null = null;
   let reason: string | null = null;
@@ -84,11 +98,12 @@ const parseError = async (response: Response, path: string): Promise<ApiError> =
   return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`, code, reason);
 };
 
-/** `AbortSignal.timeout` rejects the fetch with a `TimeoutError`, which is a
- *  `DOMException` in the browser and in jsdom but only ever an `Error` with that
- *  name under a mocked transport — so the name is what this reads. */
+/** `AbortSignal.timeout` rejects the fetch with a `TimeoutError`. Chromium may
+ *  report `AbortError` when the same signal expires during a response body
+ *  read; this client installs no other abort source, so both names mean its
+ *  request bound fired. */
 const isTimeout = (reason: unknown): boolean =>
-  reason instanceof Error && reason.name === "TimeoutError";
+  reason instanceof Error && (reason.name === "TimeoutError" || reason.name === "AbortError");
 
 const requestRaw = async (path: string, init?: RequestInit): Promise<Response> => {
   try {
@@ -103,10 +118,7 @@ const requestRaw = async (path: string, init?: RequestInit): Promise<Response> =
       },
     });
   } catch (reason: unknown) {
-    if (isTimeout(reason)) {
-      throw new ApiError(0, path, `No answer within ${REQUEST_TIMEOUT_MS / 1_000}s`, TIMEOUT_CODE);
-    }
-    throw new ApiError(0, path, reason instanceof Error ? reason.message : "Network error");
+    throw transportError(path, reason);
   }
 };
 
@@ -114,7 +126,7 @@ const requestText = async (path: string, init?: RequestInit): Promise<string> =>
   const response = await requestRaw(path, init);
   if (!response.ok) throw await parseError(response, path);
   if (response.status === 204) return "";
-  return response.text();
+  return responseText(response, path);
 };
 
 /** One poll's answer: whether anything arrived, and the validator to send next
@@ -144,7 +156,7 @@ const requestPolled = async (path: string, etag: string | null): Promise<Polled>
   if (response.status === 304) return { changed: false, body: "", etag: nextTag ?? etag };
   if (!response.ok) throw await parseError(response, path);
   if (response.status === 204) return { changed: true, body: "", etag: nextTag };
-  return { changed: true, body: await response.text(), etag: nextTag };
+  return { changed: true, body: await responseText(response, path), etag: nextTag };
 };
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {

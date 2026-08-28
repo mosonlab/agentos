@@ -667,6 +667,7 @@ export const en = {
   "sessions.waiting": "Waiting on an Inbox decision.",
 
   "sidebar.inbox.unread": "{n} unread inbox messages",
+  "sidebar.inbox.unavailable": "Inbox count unavailable",
   "sidebar.nav.agents": "Agents",
   "sidebar.nav.connections": "Connections",
   "sidebar.nav.costs": "Costs",
@@ -851,6 +852,7 @@ export const en = {
   "tasks.column.TODO": "Todo",
   "tasks.column.drop": "Drop tasks here",
   "tasks.column.more": "Show {n} more",
+  "tasks.column.previous": "Show previous {n}",
   "tasks.column.nothing": "Nothing here",
   "tasks.confirm.archiveDone": "Archive all {n} done tasks in this project?",
   "tasks.confirm.delete": "Delete task {name}?",
