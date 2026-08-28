@@ -145,10 +145,26 @@ const brief = [
 ].join("\n");
 
 test("revalidation permits background and descriptive code-reference drift", () => {
-  const proposed = brief
+  const stored = brief.replace(
+    "oldHandler in packages/api/src/old-route.ts",
+    "`oldHandler` in `packages/api/src/old-route.ts`",
+  );
+  const proposed = stored
     .replace("taskPatch reads oldHandler today", "patchBoundImplementationDescription reads newHandler today")
-    .replace("oldHandler in packages/api/src/old-route.ts", "newHandler in packages/api/src/new-route.ts");
-  assert.equal(validateRevalidatedBrief(brief, proposed), null);
+    .replace("`oldHandler` in `packages/api/src/old-route.ts`", "`newHandler` in `packages/api/src/new-route.ts`");
+  assert.equal(validateRevalidatedBrief(stored, proposed), null);
+});
+
+test("revalidation rejects Changes-item intent mutations hidden in backticks", () => {
+  const stored = brief.replace("Update oldHandler", "`Update oldHandler`");
+  const proposed = stored.replace("`Update oldHandler`", "`Delete oldHandler`");
+
+  const refusal = validateRevalidatedBrief(stored, proposed);
+
+  assert.deepEqual(refusal, {
+    reason: "invalid-request",
+    message: "Revalidation cannot change the intent of a Changes item",
+  });
 });
 
 test("revalidation rejects mutations to every immutable Product Contract bar", () => {

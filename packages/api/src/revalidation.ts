@@ -154,7 +154,7 @@ const parseProductBrief = (brief: string): ParsedProductBrief | null => {
   };
 };
 
-const descriptiveReference = /`[^`\n]+`|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.\/-]+|\/[A-Za-z0-9_.\/-]+|\b(?:GET|POST|PUT|PATCH|DELETE)\b|\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b|\b[A-Za-z]+[A-Z][A-Za-z0-9]*\b/gu;
+const descriptiveReference = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.\/-]+|\/[A-Za-z0-9_.\/-]+|\b(?:GET|POST|PUT|PATCH|DELETE)\b|\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b|\b[A-Za-z]+[A-Z][A-Za-z0-9]*\b/gu;
 
 const changesIntentSignature = (section: string): string => section.replace(descriptiveReference, "<reference>");
 
