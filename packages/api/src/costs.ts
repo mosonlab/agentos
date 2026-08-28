@@ -119,8 +119,8 @@ const windowDays = (since: Date, days: number): string[] => {
 const runCost = (run: CostsRunRow): UsageCost | null => {
   if (run.session === null) return null;
   // A run that dispatched native children reports one aggregate token total
-  // for a mix of models. `mixedModels` keeps those tokens visible while
-  // refusing to price them at the root model's rate.
+  // for a mix of models. `mixedModels` prices an unsplit aggregate at the
+  // platform-pinned Luna rate instead of the root model's rate.
   return sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null });
 };
 

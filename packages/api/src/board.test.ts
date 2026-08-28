@@ -246,14 +246,14 @@ test("task cost sums every run including failures and marks an estimated summand
   assert.equal(card.taskCost?.estimated, true);
 });
 
-test("mixed-model native subagent Runs retain tokens without a root-model cost estimate", () => {
+test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
   const card = boardCard(row({ runs: [{
     id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high",
     subagentModel: "gpt-5.6-luna:max",
     session: session({ inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
   }] }), null);
-  assert.equal(card.taskCost?.costUsd, null);
-  assert.equal(card.taskCost?.estimated, false);
+  assert.equal(card.taskCost?.costUsd, "0.32");
+  assert.equal(card.taskCost?.estimated, true);
   assert.equal(card.taskCost?.inputTokens, 1_000_000);
 });
 

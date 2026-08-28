@@ -38,6 +38,12 @@ export type UsageCost = {
 
 const MILLION = new Prisma.Decimal(1_000_000);
 
+/** Native implementation children are pinned to this model by the workflow
+ * contract. A Run with native children currently stores one aggregate Session,
+ * so this is the safe read-time rate when the provider gives no per-thread
+ * breakdown. */
+const NATIVE_CHILD_PRICING_MODEL = "gpt-5.6-luna";
+
 export const modelNameForPricing = (model: string): string => {
   const suffix = model.lastIndexOf(":");
   const withoutEffort = suffix === -1 ? model : model.slice(0, suffix);
@@ -65,12 +71,14 @@ export const sessionUsageCost = (
   }
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
   // Codex reports aggregate session tokens without a per-model breakdown for
-  // native children. Pricing that total at the root model would overstate a
-  // Luna-heavy implementation Run, so retain tokens but leave cost unpriced
-  // unless the provider supplies an authoritative amount.
-  if (options.mixedModels) return { costUsd: null, estimated: false, ...tokens };
-
-  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(model)];
+  // native children. The child model is platform-pinned to Luna max, so price
+  // an unsplit aggregate at Luna rather than at the root model's rate. This is
+  // an estimate because it is derived from the persisted token triple. A
+  // clean root/child split is represented by separate cost items and keeps the
+  // root's model here; `sumUsageCosts` combines those items without losing the
+  // distinction.
+  const pricingModel = options.mixedModels ? NATIVE_CHILD_PRICING_MODEL : model;
+  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(pricingModel)];
   // Every component is required for a complete estimate. Persisted null means
   // the provider did not report that component, not that it was zero. Codex
   // reports cached input as a subset of input, so inconsistent rows also fall

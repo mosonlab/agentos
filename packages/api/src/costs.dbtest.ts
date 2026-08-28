@@ -164,8 +164,8 @@ test("a codex session without a reported amount is counted apart, never as zero"
     agentId: dev.id, model: "openai-codex/gpt-5.6-luna", runner: "CODEX", startedAt: daysAgo(1),
     session: { costUsd: null, inputTokens: 1_000 },
   });
-  // A run whose native children used other models: tokens exist, but pricing
-  // them at the root model would overstate the spend.
+  // A native-child run has one unsplit aggregate. It must be priced at the
+  // platform-pinned Luna rate rather than at the root model's rate.
   await seedRun(project.id, repo.id, "Mixed", {
     agentId: dev.id, model: "openai-codex/gpt-5.6-sol", runner: "CODEX", startedAt: daysAgo(2),
     subagentModel: true,
@@ -178,15 +178,17 @@ test("a codex session without a reported amount is counted apart, never as zero"
 
   const { body } = await call(`/projects/${project.id}/costs?days=7`);
   assert.equal(body.runCount, 4);
-  assert.equal(body.costUnavailableRuns, 3);
-  assert.equal(Number(body.totalUsd), 2);
-  // The average is over the one run that has a cost, not over all four.
-  assert.equal(Number(body.avgUsd), 2);
+  assert.equal(body.costUnavailableRuns, 2);
+  // The mixed aggregate has 900 uncached + 100 cached input and 50 output
+  // tokens; Luna pricing yields $0.000242.
+  assert.equal(Number(body.totalUsd), 2.000242);
+  // The average is over the two runs that have a cost, not over all four.
+  assert.equal(Number(body.avgUsd), 1.000121);
   assert.equal(body.byAgent.length, 1);
   assert.equal(body.byAgent[0].runs, 4);
-  assert.equal(body.byAgent[0].costUnavailableRuns, 3);
-  assert.equal(Number(body.byAgent[0].usd), 2);
-  assert.equal(Number(body.byAgent[0].avgUsd), 2);
+  assert.equal(body.byAgent[0].costUnavailableRuns, 2);
+  assert.equal(Number(body.byAgent[0].usd), 2.000242);
+  assert.equal(Number(body.byAgent[0].avgUsd), 1.000121);
 });
 
 test("a complete codex token set is priced and labelled as an estimate", async () => {
