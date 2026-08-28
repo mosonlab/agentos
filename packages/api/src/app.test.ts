@@ -11,6 +11,7 @@ import {
   RunStatus,
   RunnerKind,
   RunnerPreference,
+  loadAgentSources,
   type PrismaClient,
 } from "@anneal/db";
 
@@ -1456,6 +1457,8 @@ test("Agent API does not mark unchanged runtime fields as an operator override",
 
 test("reset-runtime-config restores canonical runtime values and refuses non-canonical or archived agents", async () => {
   await withTokens(async () => {
+    const canonicalRole = (await loadAgentSources()).roles.find(({ name }) => name === "default");
+    assert.ok(canonicalRole);
     const updates: Array<Record<string, unknown>> = [];
     const canonical = lockedAgent({
       id: "agent-default",
@@ -1507,8 +1510,8 @@ test("reset-runtime-config restores canonical runtime values and refuses non-can
     const reset = await request(canonical!.id);
     assert.equal(reset.status, 200);
     assert.deepEqual(updates, [{
-      model: "gpt-5.6-sol:medium",
-      runnerPreference: RunnerPreference.CODEX,
+      model: canonicalRole.model,
+      runnerPreference: canonicalRole.runnerPreference,
       runtimeConfigCustomized: false,
       runtimeConfigDriftNoticeFingerprint: null,
     }]);
