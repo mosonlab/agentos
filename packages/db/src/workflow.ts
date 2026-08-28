@@ -300,7 +300,10 @@ export const pinnedImplementationRange = async (
         projectId: task.projectId,
         templateId: task.templateId,
         chainId: task.chainId,
-        chainIndex: baseFromStepIndex,
+        // baseFromStepIndex names the template Step. Conditional instantiation
+        // may omit an earlier Step and densely number the materialized Tasks,
+        // so Task.chainIndex is not an authority for this reference.
+        templateStep: { stepIndex: baseFromStepIndex },
       },
     },
     select: { kind: true, body: true, commitSha: true },

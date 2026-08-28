@@ -210,7 +210,7 @@ const main = async (): Promise<void> => {
     }
   }, { timeout: 30_000 });
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the seven-step direct template.`);
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the eight-step bound-capable direct template.`);
 };
 
 try {

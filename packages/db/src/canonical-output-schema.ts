@@ -74,6 +74,13 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
   spec: {
     v1: canonicalEnvelope.extend({ spec: nonEmptyString }),
   },
+  revalidation: {
+    v1: canonicalEnvelope.extend({
+      outcome: z.enum(["updated", "unchanged", "proceeded-after-premise-collapse"]),
+      summary: nonEmptyString,
+      changedReferences: stringList,
+    }),
+  },
   plan: {
     v1: canonicalEnvelope.extend({ summary: nonEmptyString, sliceIds: stringList }),
   },

@@ -38,7 +38,7 @@ const withApi = async (
   }
 };
 
-test("the MCP handshake advertises all eight AgentOS tools", async () => {
+test("the MCP handshake advertises all ten AgentOS tools", async () => {
   const credentials = { apiUrl: "http://unused", runId: "run-1", sessionToken: "t", fencingToken: "f", workspacePath: process.cwd() };
   const initialize = await handleRequest(credentials, {
     jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" },
@@ -48,9 +48,9 @@ test("the MCP handshake advertises all eight AgentOS tools", async () => {
   const listed = await handleRequest(credentials, { jsonrpc: "2.0", id: 2, method: "tools/list" });
   assert.deepEqual(
     ((listed?.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name),
-    ["task_activity_log", "task_output", "task_status", "inbox_ask", "files_list", "files_read", "files_write", "files_delete"],
+    ["task_activity_log", "task_output", "task_status", "task_patch", "inbox_ask", "revalidation_cancel", "files_list", "files_read", "files_write", "files_delete"],
   );
-  assert.equal(TOOLS.length, 8);
+  assert.equal(TOOLS.length, 10);
   // Notifications never get a reply.
   assert.equal(await handleRequest(credentials, { jsonrpc: "2.0", method: "notifications/initialized" }), null);
 });
@@ -113,6 +113,22 @@ test("tools carry the session token and fencing token to the session endpoints",
     assert.ok(received.every((hit) => hit.authorization === "Bearer agos_session_test"));
     assert.ok(received.every((hit) => JSON.parse(hit.body).fencingToken === "1:run-1:token"));
     assert.match(String(JSON.parse(received[0]!.body).commitSha), /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
+  });
+});
+
+test("revalidation tools use only the derived session routes", async () => {
+  await withApi(() => ({ status: 200, body: JSON.stringify({ ok: true }) }), async (credentials, received) => {
+    await invokeTool(credentials, "task_patch", { description: "Current file references." });
+    await invokeTool(credentials, "revalidation_cancel", {});
+    assert.deepEqual(received.map((hit) => `${hit.method} ${hit.url}`), [
+      "PATCH /session/runs/run-1/task",
+      "POST /session/runs/run-1/revalidation/cancel",
+    ]);
+    assert.deepEqual(JSON.parse(received[0]!.body), {
+      fencingToken: "1:run-1:token",
+      description: "Current file references.",
+    });
+    assert.deepEqual(JSON.parse(received[1]!.body), { fencingToken: "1:run-1:token" });
   });
 });
 

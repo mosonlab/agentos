@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient, RunnerKind, sessionUsageCost, type UsageCost } from "@anneal/db";
+import { Prisma, type PrismaClient, sessionUsageCost, type UsageCost } from "@anneal/db";
 
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 
@@ -11,14 +11,12 @@ import { terminalRunStatuses } from "./workspace-reclaim.js";
  * derived from token columns. `aggregateCosts` reconciles the grouped counts
  * with those detail rows before returning either result.
  *
- * TOKEN NORMALIZATION. `Session.totalTokens` is never read here, and must not
- * be: its meaning differs per runner. A claude session stores
- * `inputTokens + outputTokens` with `cachedInputTokens` excluded, while a codex
- * session stores `inputTokens` with cached input already counted inside it, so
- * the same column means two different things and summing it across runners is
- * meaningless. `runCost` converts Claude/PI's disjoint input and cache counts
- * to the cached-inclusive shape expected by `sessionUsageCost`; Codex is already
- * in that shape. Rows missing any pricing input remain explicitly unavailable.
+ * TOKEN NORMALIZATION. `Session.totalTokens` is never read here: it is a
+ * display projection, not the pricing basis. New persisted rows use the
+ * canonical raw triple (`inputTokens`, `cachedInputTokens`, `outputTokens`),
+ * where `inputTokens` includes its cached subset. `sessionUsageCost` prices
+ * that triple directly; rows missing any pricing input remain explicitly
+ * unavailable.
  */
 
 export const COSTS_DEFAULT_DAYS = 30;
@@ -34,7 +32,6 @@ const AMOUNT_DECIMALS = 6;
 
 export type CostsRunRow = {
   id: string;
-  runner: RunnerKind;
   model: string;
   subagentModel: string | null;
   startedAt: Date;
@@ -121,20 +118,10 @@ const windowDays = (since: Date, days: number): string[] => {
 
 const runCost = (run: CostsRunRow): UsageCost | null => {
   if (run.session === null) return null;
-  const session = run.runner === RunnerKind.CODEX || run.session.costUsd !== null
-    ? run.session
-    : {
-        ...run.session,
-        // Claude and PI store uncached input disjoint from cached input, while
-        // `sessionUsageCost` accepts Codex's cached-inclusive input shape.
-        inputTokens: run.session.inputTokens === null || run.session.cachedInputTokens === null
-          ? run.session.inputTokens
-          : run.session.inputTokens + run.session.cachedInputTokens,
-      };
   // A run that dispatched native children reports one aggregate token total
   // for a mix of models. `mixedModels` keeps those tokens visible while
   // refusing to price them at the root model's rate.
-  return sessionUsageCost(run.model, session, { mixedModels: run.subagentModel !== null });
+  return sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null });
 };
 
 export type CostsRunGroup = { agentId: string; _count: { _all: number } };
@@ -252,10 +239,9 @@ export const readProjectCosts = async (
     status: { in: [...terminalRunStatuses] },
     startedAt: { gte: since, lt: until },
   };
-  // Count aggregation stays in PostgreSQL. The detail query deliberately reads
-  // the raw runner plus token triple: Codex input includes cached input; Claude
-  // and PI input excludes it, and `runCost` normalizes that difference before
-  // pricing. Neither query reads or sums runner-dependent `totalTokens`.
+  // Count aggregation stays in PostgreSQL. The detail query reads the
+  // canonical token triple directly; it neither needs runner identity nor reads
+  // or sums the display-only `totalTokens` column.
   return db.$transaction(async (tx) => {
     const groupedRuns = await tx.run.groupBy({
       by: ["agentId"],
@@ -267,7 +253,6 @@ export const readProjectCosts = async (
       where,
       select: {
         id: true,
-        runner: true,
         model: true,
         subagentModel: true,
         startedAt: true,

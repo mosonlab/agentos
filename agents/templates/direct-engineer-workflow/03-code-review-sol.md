@@ -1,13 +1,13 @@
 ---
-stepIndex: 2
-layer: 2
+stepIndex: 3
+layer: 3
 agent: review-coordinator-sol
 approvalGate: false
 outputKind: sol-findings
 priorOutputKinds: [implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
-baseFromStepIndex: 1
+baseFromStepIndex: 2
 spawnPolicy: null
 ---
 Review the complete integrated implementation diff using the platform-pinned implementationBaseSha and implementationHeadSha. Do not write or commit a report file. Persist exactly one JSON object as the task output: `{"schemaVersion":1,"headSha":"<workspace HEAD>","reviewedBase":"<implementationBaseSha>","reviewedHead":"<implementationHeadSha>","findings":[{"id":"<stable ID>","severity":"P0|P1|P2","file":"<path>","line":1,"title":"<problem>","evidence":"<evidence>","requiredFix":"<fix>"}],"commandsRun":["<command>"]}`; an empty findings array is valid.

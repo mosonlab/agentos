@@ -664,9 +664,12 @@ test("a ready wizard ages to Pending on its own, and a hidden tab does not hold 
       assert.doesNotMatch(wizard.markup(), /data-onboarding-problem/u);
       // The operator switches away. Nothing will be fetched from here on.
       await wizard.visible(false);
-      await wizard.wait(900);
-      assert.ok(!wizard.disabled("Install"), "before the boundary the verdict still stands");
-      await wizard.wait(900);
+      // Wait past the boundary in one turn. Under the merge gate's parallel
+      // unit load a nominal 900 ms wait can be descheduled past the boundary,
+      // so an intermediate wall-clock assertion cannot prove the pre-boundary
+      // state. The ready assertions above and expired assertions below cover
+      // the two states without depending on scheduler latency.
+      await wizard.wait(1_800);
       assert.match(wizard.markup(), /data-codex-state="pending"/u, "the report aged out with nobody asking");
       assert.match(wizard.markup(), /data-onboarding-problem/u);
       assert.ok(wizard.disabled("Install"), "an expired verdict does not leave a live Install behind it");

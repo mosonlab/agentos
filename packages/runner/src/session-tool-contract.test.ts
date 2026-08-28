@@ -31,8 +31,8 @@ test("each transport manifest is generated from exactly the tools it exposes", (
       transport,
     );
   }
-  assert.equal(toolsFor("mcp-stdio").length, 8);
-  assert.equal(toolsFor("pi-extension").length, 8);
+  assert.equal(toolsFor("mcp-stdio").length, 10);
+  assert.equal(toolsFor("pi-extension").length, 10);
   assert.deepEqual(toolsFor("script").map((tool) => tool.name), ["task_activity_log", "task_output"]);
 });
 
@@ -49,6 +49,11 @@ test("requestFor owns every session control-plane request shape", () => {
     body: { fencingToken: "fence-1", kind: "result", body: "Done", commitSha: "a".repeat(40) },
   });
   assert.deepEqual(requestFor("task_status", {}, credentials), { method: "GET", path: "/status" });
+  assert.deepEqual(requestFor("task_patch", { description: "Updated file references." }, credentials), {
+    method: "PATCH",
+    path: "/task",
+    body: { fencingToken: "fence-1", description: "Updated file references." },
+  });
   assert.deepEqual(requestFor("inbox_ask", {
     body: "Ship?",
     choices: [{ id: "yes", label: "Yes" }, { id: "", label: "Dropped" }],
@@ -62,6 +67,12 @@ test("requestFor owns every session control-plane request shape", () => {
       choices: [{ id: "yes", label: "Yes" }],
     },
   });
+  assert.deepEqual(requestFor("revalidation_cancel", {}, credentials), {
+    method: "POST",
+    path: "/revalidation/cancel",
+    body: { fencingToken: "fence-1" },
+  });
+  assert.throws(() => requestFor("task_patch", {}, credentials), /task_patch requires description/u);
   assert.deepEqual(requestFor("files_list", { dir: "" }, credentials), {
     method: "GET", path: "/files", query: { dir: "" },
   });
@@ -151,7 +162,9 @@ test("the dependency-free PI adapter inlines the canonical definitions and reque
       ["task_activity_log", { body: "Progress", metadata: { phase: "test" } }],
       ["task_output", { kind: "result", body: "Done" }],
       ["task_status", {}],
+      ["task_patch", { description: "Updated file references." }],
       ["inbox_ask", { body: "Continue?", choices: [{ id: "yes", label: "Yes" }] }],
+      ["revalidation_cancel", {}],
       ["files_list", { dir: "reports" }],
       ["files_read", { path: "reports/a b.md" }],
       ["files_write", { path: "reports/out.txt", content: "ok" }],

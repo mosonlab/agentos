@@ -1,10 +1,11 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 
 /**
- * Usage a single provider payload reports. Every field is optional and absent
- * means "this payload said nothing about it" — never zero. A session that spent
- * money but reported no token counts stores its cost and leaves the token
- * columns null.
+ * Canonical usage extracted from one provider payload. `inputTokens` includes
+ * all input, including the `cachedInputTokens` subset; `outputTokens` is output
+ * only. Every field is optional and absent means "this payload said nothing
+ * about it" — never zero. A session that spent money but reported no token
+ * counts stores its cost and leaves the token columns null.
  */
 export type SessionUsage = {
   inputTokens?: number;
@@ -86,6 +87,12 @@ type ModelTotals = {
   cachedInputTokens: number | null;
 };
 
+/** Fold a provider's disjoint cached subset into canonical input exactly once.
+ * A missing cached figure leaves reported input unchanged; a missing input
+ * stays missing rather than being invented from the cached subset alone. */
+const canonicalInputTokens = (uncached: number | null, cached: number | null): number | null =>
+  uncached === null || cached === null ? uncached : uncached + cached;
+
 /**
  * CLAUDE's terminal `result` carries a per-model breakdown under `modelUsage`,
  * keyed by model id, whose entries are camelCase — while the top-level `usage`
@@ -97,8 +104,10 @@ type ModelTotals = {
  * top-level one drops every secondary model. This branch is therefore
  * EXCLUSIVE, and the two vocabularies never share a key list.
  *
- * Returns null when nothing usable was found, which is what routes an absent,
- * malformed or empty `modelUsage` back to the top-level branch.
+ * The returned input total is canonical: each model's provider-reported
+ * uncached input has its cache-read/creation input added exactly once. Returns
+ * null when nothing usable was found, which is what routes an absent, malformed
+ * or empty `modelUsage` back to the top-level branch.
  */
 const extractModelUsage = (value: unknown): ModelTotals | null => {
   const models = asRecord(value);
@@ -117,6 +126,7 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
       totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0);
     }
   }
+  totals.inputTokens = canonicalInputTokens(totals.inputTokens, totals.cachedInputTokens);
   // Usability is not a separate probe: `modelUsage` was usable iff this one pass
   // produced something. Two traversals would be free to diverge.
   return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null
@@ -131,12 +141,13 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
  * object is AgentOS-computed, and reading it as a provider payload would hide
  * that.
  *
- * CALIBER, which is not the same as the other two runners':
- * - `input` is uncached input only — PI reports `cacheRead` DISJOINT from it,
- *   so the stored `totalTokens` (input + output) excludes cache reads. That
- *   matches CLAUDE and deliberately differs from CODEX, whose `input_tokens`
- *   already contains `cached_input_tokens` and whose stored `totalTokens`
- *   therefore includes them.
+ * Canonicalization at this boundary makes PI's columns match the other
+ * runners:
+ * - `input` is uncached input and `cacheRead`/`cacheWrite` are a DISJOINT
+ *   cached subset. The extractor adds that subset exactly once to stored
+ *   `inputTokens`; `cachedInputTokens` retains the subset for reporting.
+ * - CODEX's `input_tokens` already contains `cached_input_tokens`, so that
+ *   branch does not add the cached subset a second time.
  * - `output` already contains PI's reasoning tokens, so there is no reasoning
  *   field to fold in here.
  * - `costNanoUsd` is PI's own per-message `cost.total` summed, not derived from
@@ -175,12 +186,14 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
   if (!totals) return null;
   const result: SessionUsage = {};
   const input = tokenCount(totals.input, "agentosPiUsage.input");
-  if (input !== null) result.inputTokens = input;
   const output = tokenCount(totals.output, "agentosPiUsage.output");
   if (output !== null) result.outputTokens = output;
   const cacheRead = tokenCount(totals.cacheRead, "agentosPiUsage.cacheRead");
   const cacheWrite = tokenCount(totals.cacheWrite, "agentosPiUsage.cacheWrite");
-  if (cacheRead !== null || cacheWrite !== null) result.cachedInputTokens = (cacheRead ?? 0) + (cacheWrite ?? 0);
+  const cached = cacheRead === null && cacheWrite === null ? null : (cacheRead ?? 0) + (cacheWrite ?? 0);
+  if (cached !== null) result.cachedInputTokens = cached;
+  const canonicalInput = canonicalInputTokens(input, cached);
+  if (canonicalInput !== null) result.inputTokens = canonicalInput;
   const cost = piCostAmount(totals.costNanoUsd);
   if (cost !== null) result.costUsd = cost;
   // Nothing usable routes back to the other branches rather than claiming the
@@ -202,7 +215,8 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
  *   `modelUsage`. Cost comes from the top-level `total_cost_usd` in both cases:
  *   it already equals the sum of the per-model `costUSD` values.
  * - CODEX `turn.completed`: `usage.{input_tokens,cached_input_tokens,output_tokens}`,
- *   no `modelUsage`, no cost anywhere — the fallback branch, unchanged.
+ *   no `modelUsage`, no cost anywhere — the fallback branch. Its input is
+ *   already cache-inclusive, so the cached subset is not added again.
  * - PI `agent_settled`: literally `{"type":"agent_settled"}` — no usage, no
  *   cost. PI prices itself per message instead, so the runner's PI parser sums
  *   those messages and attaches `agentosPiUsage`, which is EXCLUSIVE of the two
@@ -230,19 +244,23 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     if (models.cachedInputTokens !== null) result.cachedInputTokens = models.cachedInputTokens;
   } else if (usage) {
     const input = tokenCount(usage.input_tokens, "usage.input_tokens");
-    if (input !== null) result.inputTokens = input;
     const output = tokenCount(usage.output_tokens, "usage.output_tokens");
     if (output !== null) result.outputTokens = output;
 
-    // CODEX reports one cached figure; CLAUDE reports a read/creation pair.
-    // `reasoning_output_tokens` (CODEX) is deliberately not folded into output.
+    // CODEX reports one cached figure that is already included in input;
+    // CLAUDE reports a read/creation pair alongside uncached input. The pair
+    // is folded into input only in the latter shape. `reasoning_output_tokens`
+    // (CODEX) is deliberately not folded into output.
     const cached = tokenCount(usage.cached_input_tokens, "usage.cached_input_tokens");
     const cacheRead = tokenCount(usage.cache_read_input_tokens, "usage.cache_read_input_tokens");
     const cacheCreation = tokenCount(usage.cache_creation_input_tokens, "usage.cache_creation_input_tokens");
-    if (cached !== null) result.cachedInputTokens = cached;
-    else if (cacheRead !== null || cacheCreation !== null) {
-      result.cachedInputTokens = (cacheRead ?? 0) + (cacheCreation ?? 0);
-    }
+    const disjointCached = cached === null && (cacheRead !== null || cacheCreation !== null)
+      ? (cacheRead ?? 0) + (cacheCreation ?? 0)
+      : null;
+    const persistedCached = cached ?? disjointCached;
+    if (persistedCached !== null) result.cachedInputTokens = persistedCached;
+    const canonicalInput = canonicalInputTokens(input, disjointCached);
+    if (canonicalInput !== null) result.inputTokens = canonicalInput;
   }
 
   const cost = costAmount(event.total_cost_usd);
@@ -314,7 +332,8 @@ export const deriveUsageColumns = (usage: SessionUsage): DerivedUsage => ({
   outputTokens: columnValue(usage.outputTokens, "outputTokens"),
   cachedInputTokens: columnValue(usage.cachedInputTokens, "cachedInputTokens"),
   // Never 0 and never an estimate: null unless the provider reported at least
-  // one of the two halves. Cache is excluded to avoid double counting.
+  // one of the two halves. Input is already canonical and includes the cached
+  // subset, so it must not be added here a second time.
   totalTokens: usage.inputTokens === undefined && usage.outputTokens === undefined
     ? null
     : columnValue((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0), "totalTokens"),

@@ -1,7 +1,7 @@
 /** AgentOS tools for pi.
  *
  *  pi deliberately ships no MCP client ("It intentionally does not include
- *  built-in MCP..."), so the same eight AgentOS tools are registered as pi
+ *  built-in MCP..."), so the same ten AgentOS tools are registered as pi
  *  extension tools instead. The runner injects this file with `--extension`;
  *  credentials come from the inherited environment, exactly as the MCP server
  *  reads them, so the tool surface matches across all three CLIs.
@@ -14,10 +14,10 @@
 import { execFileSync } from "node:child_process";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
-type ToolName = "task_activity_log" | "task_output" | "task_status" | "inbox_ask"
+type ToolName = "task_activity_log" | "task_output" | "task_status" | "task_patch" | "inbox_ask" | "revalidation_cancel"
   | "files_list" | "files_read" | "files_write" | "files_delete";
 type ToolRequest = {
-  method: "GET" | "POST" | "PUT" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: Record<string, unknown>;
   query?: Record<string, string>;
@@ -65,6 +65,19 @@ const SESSION_TOOLS: ReadonlyArray<{
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "task_patch",
+    label: "Revalidate the implementation brief",
+    description: "Replace only the current bound chain's implementation brief. The server derives the target task and preserves its platform-authored prompt and output instructions; arbitrary task IDs and intent fields are not accepted.",
+    parameters: {
+      type: "object",
+      properties: {
+        description: { type: "string", description: "The refreshed descriptive brief, with intent and acceptance bars unchanged." },
+      },
+      required: ["description"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "inbox_ask",
     label: "Ask the human a question",
     description: "Ask the human a question through the AgentOS Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
@@ -86,6 +99,12 @@ const SESSION_TOOLS: ReadonlyArray<{
       required: ["body"],
       additionalProperties: false,
     },
+  },
+  {
+    name: "revalidation_cancel",
+    label: "Cancel the collapsed revalidation chain",
+    description: "Cancel this bound revalidation Run after the operator chose 'cancel this chain' for a collapsed premise. The runner performs cleanup and terminalization; no task ID is accepted.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "files_list",
@@ -197,6 +216,14 @@ const requestFor = (tool: ToolName, rawArguments: Record<string, unknown>): Tool
     };
   }
   if (tool === "task_status") return { method: "GET", path: "/status" };
+  if (tool === "task_patch") {
+    if (typeof rawArguments.description !== "string") throw new Error("task_patch requires description");
+    return {
+      method: "PATCH",
+      path: "/task",
+      body: { fencingToken: session.fencingToken, description: rawArguments.description },
+    };
+  }
   if (tool === "inbox_ask") {
     const body = nonEmptyString(rawArguments.body);
     if (!body) throw new Error("inbox_ask requires a non-empty body");
@@ -217,6 +244,13 @@ const requestFor = (tool: ToolName, rawArguments: Record<string, unknown>): Tool
         body,
         choices,
       },
+    };
+  }
+  if (tool === "revalidation_cancel") {
+    return {
+      method: "POST",
+      path: "/revalidation/cancel",
+      body: { fencingToken: session.fencingToken },
     };
   }
   if (tool === "files_list") {

@@ -186,6 +186,62 @@ test("afterTaskId binds only the first of the chain's tasks and writes both audi
   assert.equal((predecessorActivity.metadata as { successorChainId: string }).successorChainId, response.body.chainId);
 });
 
+test("a direct brief routes implementation by Agent name and rejects an unknown route atomically", async () => {
+  const seed = await fixture("implementation-route");
+  const senior = await db.agent.create({
+    data: {
+      projectId: seed.project.id,
+      environmentId: (await db.agent.findUniqueOrThrow({ where: { id: seed.agent.id } })).environmentId,
+      name: "senior-dev",
+      title: "Senior developer",
+      model: "codex",
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    },
+  });
+  await db.agentRepoAccess.create({
+    data: {
+      projectId: seed.project.id,
+      agentId: senior.id,
+      repoId: seed.repo.id,
+      mountPath: "/repo",
+      permissions: "GIT_WRITE",
+    },
+  });
+  await db.taskTemplate.update({
+    where: { id: seed.template.id },
+    data: { name: "direct-engineer-workflow" },
+  });
+  const implementation = await db.taskTemplateStep.findFirstOrThrow({
+    where: { taskTemplateId: seed.template.id, stepIndex: 1 },
+  });
+  await db.taskTemplateStep.update({
+    where: { id: implementation.id },
+    data: { outputKind: "implementation", opensPullRequest: true },
+  });
+
+  const routed = await request(seed.project.id, seed.template.id, {
+    repoId: seed.repo.id,
+    variables: {},
+    description: "Implement the brief.\n\nRoute: implementation=senior-dev - explicit fixture route.",
+  });
+  assert.equal(routed.status, 201, JSON.stringify(routed.body));
+  const routedImplementation = await db.task.findFirstOrThrow({
+    where: { chainId: routed.body.chainId, templateStepId: implementation.id },
+  });
+  assert.equal(routedImplementation.assigneeAgentId, senior.id);
+
+  const beforeUnknown = await rowCounts();
+  const unknown = await request(seed.project.id, seed.template.id, {
+    repoId: seed.repo.id,
+    variables: {},
+    description: "Implement the brief.\n\nRoute: implementation=missing-agent",
+  });
+  assert.equal(unknown.status, 400, JSON.stringify(unknown.body));
+  assert.equal(unknown.body.code, "implementation_route_unknown_agent");
+  await assertNoPartialRows(beforeUnknown);
+});
+
 test("status PATCH cannot move an unresolved bound first task away from TODO", async () => {
   const seed = await fixture("bound-status-patch");
   for (const status of [TaskStatus.DOING, TaskStatus.DONE]) {

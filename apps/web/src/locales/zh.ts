@@ -264,7 +264,7 @@ export const zh = {
   "format.minutesAgo": "{n} 分钟前",
   "format.minutesSeconds": "{m} 分 {s} 秒",
   "format.seconds": "{n} 秒",
-  "format.usageCost.cachedInput": "{n} 缓存输入",
+  "format.usageCost.cachedInput": "{n} 缓存输入（已含在输入中）",
   "format.usageCost.estimated": "{amount} 估算",
   "format.usageCost.input": "{n} 输入",
   "format.usageCost.output": "{n} 输出",

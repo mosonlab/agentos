@@ -18,6 +18,7 @@ import { isCompoundImplementationStep, isDirectImplementationStep } from "./work
 
 const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
   spec: "spec",
+  revalidation: "revalidation",
   plan: "plan",
   "plan-review": "plan-review",
   "revised-plan": "revised-plan",

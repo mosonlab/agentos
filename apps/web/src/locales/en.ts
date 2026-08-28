@@ -267,7 +267,7 @@ export const en = {
   "format.minutesAgo": "{n}m ago",
   "format.minutesSeconds": "{m}m {s}s",
   "format.seconds": "{n}s",
-  "format.usageCost.cachedInput": "{n} cached",
+  "format.usageCost.cachedInput": "{n} cached (included in input)",
   "format.usageCost.estimated": "{amount} est.",
   "format.usageCost.input": "{n} input",
   "format.usageCost.output": "{n} output",

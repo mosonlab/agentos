@@ -127,7 +127,7 @@ test("usage cost labels distinguish estimates, preserve small values, and never 
   }), "$0.00 est.");
   assert.equal(usageCostLabel({
     costUsd: null, estimated: false, inputTokens: 10, cachedInputTokens: 2, outputTokens: 3,
-  }), "10 input · 2 cached · 3 output");
+  }), "10 input · 2 cached (included in input) · 3 output");
 });
 
 test("usage cost labels translate estimate and token fragments with placeholder parity", () => {
@@ -135,10 +135,10 @@ test("usage cost labels translate estimate and token fragments with placeholder 
   const unpriced = { ...estimated, costUsd: null, estimated: false };
   asLocale("en");
   assert.equal(usageCostLabel(estimated), "$0.42 est.");
-  assert.equal(usageCostLabel(unpriced), "10 input · 2 cached · 3 output");
+  assert.equal(usageCostLabel(unpriced), "10 input · 2 cached (included in input) · 3 output");
   asLocale("zh");
   assert.equal(usageCostLabel(estimated), "$0.42 估算");
-  assert.equal(usageCostLabel(unpriced), "10 输入 · 2 缓存输入 · 3 输出");
+  assert.equal(usageCostLabel(unpriced), "10 输入 · 2 缓存输入（已含在输入中） · 3 输出");
 });
 
 /* -------------------------------------------------------------- schedule.ts */
