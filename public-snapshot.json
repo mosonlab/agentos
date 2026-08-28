@@ -394,6 +394,11 @@
       "category": "pii-email",
       "glob": "scripts/gate-worker/provision.sh",
       "reason": "synthetic Git author identity used only when a fresh gate worker has no configured identity; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "scripts/merge-train.test.mjs",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     }
   ],
   "mintedArtifacts": [],
