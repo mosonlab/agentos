@@ -83,6 +83,7 @@ test("tampered materialization returns one stable operator-visible reason", asyn
     new AbortController().signal,
   );
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
+  assert.equal(verdict?.classification, "non-transient");
   assert.match(verdict?.message ?? "", /Spec transcription claim refused: spec-transcription-mismatch/u);
 });
 
@@ -155,6 +156,7 @@ test("persistent transient repository failure reports retry count and last failu
   );
   assert.equal(reads, 3);
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+  assert.equal(verdict?.classification, "transient");
   assert.match(verdict?.message ?? "", /after 2 retries \(3 total attempts\)/u);
   assert.match(verdict?.message ?? "", /last failure: proxy flap 3/u);
 });
@@ -181,6 +183,7 @@ test("a read deadline overrun is transient and exhausts the bounded retry schedu
   );
   assert.equal(reads, 3);
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+  assert.equal(verdict?.classification, "transient");
   assert.match(verdict?.message ?? "", /last failure: repository content read exceeded the 5ms server deadline/u);
 });
 
@@ -203,6 +206,7 @@ test("a permanent repository response failure refuses without retrying", async (
     { retryDelaysMs: [0, 0], wait: async () => {} },
   );
   assert.equal(reads, 1);
+  assert.equal(verdict?.classification, "non-transient");
   assert.match(verdict?.message ?? "", /repository file is missing/u);
 });
 
@@ -228,6 +232,7 @@ test("a content mismatch refuses immediately without retrying", async () => {
   assert.equal(reads, 1);
   assert.deepEqual(waits, []);
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
+  assert.equal(verdict?.classification, "non-transient");
 });
 
 test("direct authority is read from the implementation task and compound authority from the approved spec output", async () => {
@@ -319,6 +324,63 @@ test("an unsupported repository remote is refused before repository I/O with a n
   assert.equal(prepared.status, "refused");
   if (prepared.status === "refused") {
     assert.equal(prepared.refusal.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+    assert.equal(prepared.refusal.classification, "non-transient");
     assert.match(prepared.refusal.message, /remote is not a supported GitHub repository/u);
   }
+});
+
+test("missing or corrupt authority and an unavailable reader are non-transient refusals", async () => {
+  const candidate = {
+    task: {
+      id: "compound-review",
+      projectId: "project",
+      templateId: "compound-template",
+      chainId: "compound-chain",
+      chainIndex: 2,
+      description: "review task",
+      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1 },
+    },
+    repo: { remoteUrl: "https://github.com/acme/repo" },
+    branch: "feature/compound",
+  };
+  const preparedFor = (stepOutput: { kind: string; body: string } | null) => prepareSpecificationVerification(
+    {
+      task: { findMany: async () => [{
+        description: "specification task",
+        templateStep: { outputKind: "spec", priorOutputKinds: [] },
+        stepOutput,
+      }] },
+    } as unknown as Parameters<typeof prepareSpecificationVerification>[0],
+    candidate,
+    "f".repeat(40),
+  );
+
+  const missing = await preparedFor(null);
+  assert.equal(missing.status, "refused");
+  if (missing.status === "refused") {
+    assert.equal(missing.refusal.reason, "spec-transcription-authority-missing");
+    assert.equal(missing.refusal.classification, "non-transient");
+  }
+
+  const corrupt = await preparedFor({ kind: "spec", body: "not-json" });
+  assert.equal(corrupt.status, "refused");
+  if (corrupt.status === "refused") {
+    assert.equal(corrupt.refusal.reason, "spec-transcription-authority-missing");
+    assert.equal(corrupt.refusal.classification, "non-transient");
+  }
+
+  const unavailableReader = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "f".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    null,
+    new AbortController().signal,
+  );
+  assert.equal(unavailableReader?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+  assert.equal(unavailableReader?.classification, "non-transient");
 });
