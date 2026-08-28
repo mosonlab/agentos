@@ -5,7 +5,9 @@ import {
   AssigneeType,
   type ChangedFile,
   INTEGRATOR_SENTINEL_MODEL,
+  latestMarker,
   PrismaClient,
+  readMarkers,
   TaskStatus,
 } from "@agentos/db";
 
@@ -26,16 +28,22 @@ before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
 const releaseLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
   releasedChainLeases.push(chainId);
-  return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
+  return {
+    outcome: "released",
+    ref: "refs/merge-lease/holder",
+    sha: "lease-fixture",
+    acquiredAt: "2026-08-27T12:00:00.000Z",
+  };
 };
-const releaseChainLease: ReleaseMergeLease = async (chainId) => {
-  if (chainId) releasedChainLeases.push(chainId);
+const releaseChainLease: ReleaseMergeLease = async (target) => {
+  if (target) releasedChainLeases.push(target.chainId);
 };
 const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
 const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
-  chainId,
+  target,
   fn,
-) => withMergeLease(chainId, fn, { acquire, release: releaseLeaseAdapter });
+  client,
+) => withMergeLease(target, fn, client, { acquire, release: releaseLeaseAdapter });
 const runWithMergeLease = leaseRunner(acquireChainLease);
 beforeEach(async () => {
   releasedChainLeases.length = 0;
@@ -169,6 +177,36 @@ const seedReadiness = async () => {
   } });
   return { project, repo, regression, readiness, integrator };
 };
+
+test("lease hold activity stays on the indexed tail in its project", async () => {
+  const seeded = await seedReadiness();
+  const foreign = await db.project.create({
+    data: { name: "Foreign merge tail", slug: `foreign-merge-tail-${Date.now()}` },
+  });
+  await db.task.create({ data: {
+    projectId: foreign.id,
+    name: "Colliding foreign task",
+    description: "same operator-provided chain id",
+    chainId: seeded.readiness.chainId,
+    chainIndex: 99,
+    chainLayer: 99,
+  } });
+
+  await withMergeLease({
+    projectId: seeded.project.id,
+    chainId: seeded.readiness.chainId!,
+  }, async () => ({ disposition: { kind: "release" }, value: null }), db, {
+    acquire: acquireChainLease,
+    release: releaseLeaseAdapter,
+  });
+
+  const activities = await db.taskActivity.findMany({
+    where: { metadata: { path: ["kind"], equals: "mergeTail.leaseHold" } },
+    select: { taskId: true },
+  });
+  assert.deepEqual(activities, [{ taskId: seeded.integrator.id }]);
+  assert.equal(latestMarker(await readMarkers(db, seeded.integrator.id), "leaseHold")?.raw.chainId, seeded.readiness.chainId);
+});
 
 test("clean exact-head readiness authorizes and queues mechanical merge", async () => {
   const seeded = await seedReadiness();

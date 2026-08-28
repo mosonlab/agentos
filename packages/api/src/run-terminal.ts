@@ -10,7 +10,7 @@ import {
 } from "@agentos/db";
 
 import { jsonValue } from "./execution.js";
-import { settleLease } from "./merge-lease.js";
+import { settleLease, type MergeLeaseTarget } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { lockTaskMutationRows } from "./task-write.js";
@@ -71,7 +71,7 @@ export type TerminalResult = {
   runId: string;
   taskId: string | null;
   status: RunStatus;
-  leaseToRelease: string | null;
+  leaseToRelease: MergeLeaseTarget | null;
   cancellationState?: "acknowledged";
   requestId?: string;
 };

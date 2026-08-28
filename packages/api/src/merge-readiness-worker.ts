@@ -386,7 +386,9 @@ const applyReadinessDecision = async (
     });
     if (requeued) {
       result.requeued += 1;
-      await releaseChainLease(readiness.chainId, db);
+      await releaseChainLease(readiness.chainId
+        ? { chainId: readiness.chainId, projectId: readiness.projectId }
+        : null, db);
     }
     return requeued;
   };
@@ -410,7 +412,9 @@ const applyReadinessDecision = async (
   // From the base this authorization pins to the merge that consumes it,
   // `main` must not move. The callback makes the sole lawful handoff explicit:
   // only an authorized mechanical merge retains the Lease.
-  const leased = await runWithMergeLease(readiness.chainId, async () => {
+  const leased = await runWithMergeLease(readiness.chainId
+    ? { chainId: readiness.chainId, projectId: readiness.projectId }
+    : null, async () => {
     // The acquire is the only network call outside the GitHub read budget. A
     // stale worker that lost its claim while taking the Lease must classify the
     // new owner before choosing release or retain.
@@ -561,7 +565,7 @@ const applyReadinessDecision = async (
         : { kind: "release" as const },
       value: authorization.kind,
     };
-  }, undefined, { db });
+  }, db);
   if (leased.outcome === "contended") return;
   if (leased.value === "authorized") {
     result.authorized += 1;

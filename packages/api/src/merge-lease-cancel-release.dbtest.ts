@@ -47,9 +47,9 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   process.env.RUNNER_TOKEN = RUNNER;
   try {
     const response = await createApp(db, {
-      releaseMergeLease: async (chainId) => {
-      if (chainId) releasedChainLeases.push(chainId);
-    },
+      releaseMergeLease: async (target) => {
+        if (target) releasedChainLeases.push(target.chainId);
+      },
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -63,9 +63,9 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   }
 };
 
-const collectRelease: ReleaseMergeLease = async (chainId) => {
-  if (!chainId) return;
-  releasedChainLeases.push(chainId);
+const collectRelease: ReleaseMergeLease = async (target) => {
+  if (!target) return;
+  releasedChainLeases.push(target.chainId);
 };
 
 let sequence = 0;

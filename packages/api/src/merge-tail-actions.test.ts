@@ -44,6 +44,7 @@ const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
     task: {
       findUnique: async () => ({
         chainId: "chain-1",
+        projectId: "project-1",
         templateStep: {
           stepIndex: 5,
           outputKind: "regression-verification-v2",
@@ -151,7 +152,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
     markerStates: string[];
     noticeKey: RegExp;
     recoveryTarget: MergeRecoveryStatus | null;
-    leaseToRelease: string | null;
+    leaseToRelease: { chainId: string; projectId: string } | null;
   }> = [
     {
       name: "regression without recovery",
@@ -160,7 +161,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["stopped"],
       noticeKey: /^merge-tail-stop:regression-1:/u,
       recoveryTarget: null,
-      leaseToRelease: "chain-1",
+      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
     },
     {
       name: "regression during recovery",
@@ -169,7 +170,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["tail-stopped", "tail-stopped"],
       noticeKey: /:stop-1:regression$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      leaseToRelease: "chain-1",
+      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
     },
     {
       name: "readiness without recovery",
@@ -178,7 +179,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["stopped"],
       noticeKey: /^merge-readiness-stop:readiness-1:/u,
       recoveryTarget: null,
-      leaseToRelease: "chain-1",
+      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
     },
     {
       name: "readiness during recovery",
@@ -187,7 +188,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["tail-stopped", "tail-stopped", "stopped"],
       noticeKey: /:stop-1:readiness$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      leaseToRelease: "chain-1",
+      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
     },
     {
       name: "recovery validation",
@@ -226,7 +227,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["failed"],
       noticeKey: /^merge-tail-stop:regression-1:/u,
       recoveryTarget: null,
-      leaseToRelease: "chain-1",
+      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
     },
   ];
 

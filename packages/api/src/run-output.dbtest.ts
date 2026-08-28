@@ -66,8 +66,8 @@ const call = async (
   method: string, path: string, token: string, body?: unknown,
 ): Promise<{ status: number; body: any }> => withTokens(async () => {
   const response = await createApp(db, {
-    releaseMergeLease: async (chainId) => {
-      if (chainId) releasedChainLeases.push(chainId);
+    releaseMergeLease: async (target) => {
+      if (target) releasedChainLeases.push(target.chainId);
     },
   }).request(path, {
     method,

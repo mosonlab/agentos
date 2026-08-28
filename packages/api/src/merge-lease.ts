@@ -11,12 +11,12 @@ import {
   RunStatus,
   type Prisma,
   type PrismaClient,
+  writeMarker,
 } from "@agentos/db";
 
 const execFileAsync = promisify(execFile);
 
 const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
-const MERGE_LEASE_HOLD_KIND = "mergeLease.holdDuration";
 
 /**
  * What one `merge-lease.sh release` did. The script has four outcomes and three
@@ -26,7 +26,7 @@ const MERGE_LEASE_HOLD_KIND = "mergeLease.holdDuration";
  * release never got far enough to say anything.
  */
 export type MergeLeaseRelease =
-  | { outcome: "released"; ref: string; sha: string; acquiredAt?: string }
+  | { outcome: "released"; ref: string; sha: string; acquiredAt: string }
   | { outcome: "not-held" }
   | { outcome: "skipped"; heldFor: string }
   | { outcome: "refused"; heldBy: string }
@@ -37,33 +37,27 @@ export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>
 // The line scripts/merge-lease.sh prints beside its prose for the operator.
 const MACHINE_LINE = /^MERGE LEASE: (.+)$/mu;
 
-const readOutcome = (output: string): MergeLeaseRelease | null => {
+export const readMergeLeaseRelease = (output: string): MergeLeaseRelease | null => {
   const spoken = MACHINE_LINE.exec(output)?.[1]?.trim();
   if (!spoken) return null;
-  const [outcome, first, second, fourth, ...extra] = spoken.split(" ");
+  const [outcome, ...tokens] = spoken.split(" ");
   switch (outcome) {
     case "released": {
-      if (first === undefined || second === undefined || extra.length > 0) return null;
-      if (fourth !== undefined && Number.isNaN(Date.parse(fourth))) return null;
+      const [ref, sha, acquiredAt, ...extra] = tokens;
+      if (ref === undefined || sha === undefined || acquiredAt === undefined || extra.length > 0) return null;
       return {
         outcome: "released",
-        ref: first,
-        sha: second,
-        ...(fourth === undefined ? {} : { acquiredAt: fourth }),
+        ref,
+        sha,
+        acquiredAt,
       };
     }
     case "not-held":
-      return first === undefined && second === undefined && fourth === undefined && extra.length === 0
-        ? { outcome: "not-held" }
-        : null;
+      return tokens.length === 0 ? { outcome: "not-held" } : null;
     case "skipped":
-      return first !== undefined && second === undefined && fourth === undefined && extra.length === 0
-        ? { outcome: "skipped", heldFor: first }
-        : null;
+      return tokens.length === 1 && tokens[0] !== undefined ? { outcome: "skipped", heldFor: tokens[0] } : null;
     case "refused":
-      return first !== undefined && second === undefined && fourth === undefined && extra.length === 0
-        ? { outcome: "refused", heldBy: first }
-        : null;
+      return tokens.length === 1 && tokens[0] !== undefined ? { outcome: "refused", heldBy: tokens[0] } : null;
     default:
       return null;
   }
@@ -77,7 +71,7 @@ const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
     });
     const detail = `${stdout}${stderr}`.trim();
     if (detail) console.log(detail);
-    return readOutcome(detail) ?? { outcome: "unreachable", detail: detail || "the release printed nothing" };
+    return readMergeLeaseRelease(detail) ?? { outcome: "unreachable", detail: detail || "the release printed nothing" };
   } catch (error: unknown) {
     const failure = error as { stdout?: string; stderr?: string };
     const detail = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
@@ -85,7 +79,7 @@ const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
     // A refusal is the one non-zero exit the script means: it read the lease and
     // declined to break it. Anything else never got that far, so the state of
     // the lock on main is unknown rather than decided.
-    const spoken = readOutcome(detail);
+    const spoken = readMergeLeaseRelease(detail);
     if (spoken?.outcome === "refused") return spoken;
     return { outcome: "unreachable", detail: detail || String(error) };
   }
@@ -106,7 +100,9 @@ const releaseMergeLeaseWith = async (
   return release;
 };
 
-export type ReleaseMergeLease = (chainId: string | null, db: PrismaClient) => Promise<void>;
+export type MergeLeaseTarget = { chainId: string; projectId: string };
+
+export type ReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClient) => Promise<void>;
 
 export type MergeLeaseHold = {
   acquiredAt: Date;
@@ -130,56 +126,57 @@ export const mergeLeaseHold = (acquiredAt: string, releasedAt: Date): MergeLease
 /** Persist one confirmed lease release on the latest task in its chain. */
 export const recordMergeLeaseHold = async (
   db: PrismaClient,
-  chainId: string,
+  target: MergeLeaseTarget,
   release: MergeLeaseRelease,
   releasedAt: Date,
 ): Promise<void> => {
-  if (release.outcome !== "released" || !release.acquiredAt) return;
+  if (release.outcome !== "released") return;
   const hold = mergeLeaseHold(release.acquiredAt, releasedAt);
   if (!hold) return;
   const task = await db.task.findFirst({
-    where: { chainId },
+    where: {
+      projectId: target.projectId,
+      chainId: target.chainId,
+      chainIndex: { not: null },
+    },
     orderBy: [{ chainIndex: "desc" }, { id: "desc" }],
     select: { id: true },
   });
   if (!task) return;
-  await db.taskActivity.create({ data: {
-    taskId: task.id,
+  await writeMarker(db, task.id, "leaseHold", {
     actorType: "control-plane",
     body: `Chain Lease released after ${hold.heldForSeconds} seconds`,
     metadata: {
-      kind: MERGE_LEASE_HOLD_KIND,
-      schemaVersion: 1,
-      chainId,
+      chainId: target.chainId,
       leaseRef: release.ref,
       leaseSha: release.sha,
       acquiredAt: hold.acquiredAt.toISOString(),
       releasedAt: hold.releasedAt.toISOString(),
       heldForSeconds: hold.heldForSeconds,
-    } as Prisma.InputJsonObject,
-  } });
+    },
+  });
 };
 
 const recordMergeLeaseHoldBestEffort = async (
-  db: PrismaClient | undefined,
-  chainId: string | null,
+  db: PrismaClient,
+  target: MergeLeaseTarget | null,
   release: MergeLeaseRelease | null,
   releasedAt: Date,
 ): Promise<void> => {
-  if (!db || !chainId || !release) return;
+  if (!target || !release) return;
   try {
-    await recordMergeLeaseHold(db, chainId, release, releasedAt);
+    await recordMergeLeaseHold(db, target, release, releasedAt);
   } catch (error: unknown) {
     // The ref is already deleted when this runs. Keep a logging outage from
     // turning a confirmed release into a failed control-plane action.
-    console.error(`Merge lease hold recording failed for chain ${chainId}: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`Merge lease hold recording failed for chain ${target.chainId}: ${error instanceof Error ? error.message : String(error)}`);
   }
 };
 
-export const releaseMergeLease: ReleaseMergeLease = async (chainId, db) => {
-  const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, chainId);
+export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
+  const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, target?.chainId ?? null);
   const releasedAt = new Date();
-  await recordMergeLeaseHoldBestEffort(db, chainId, release, releasedAt);
+  await recordMergeLeaseHoldBestEffort(db, target, release, releasedAt);
 };
 
 /**
@@ -224,6 +221,7 @@ const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): v
  */
 export type LeaseHolder = {
   chainId: string;
+  projectId: string;
   taskId: string;
   role: "mechanical" | "regression" | "auxiliary";
 };
@@ -237,6 +235,7 @@ export const leaseHolderFor = async (
     where: { id: taskId },
     select: {
       chainId: true,
+      projectId: true,
       templateStep: { select: {
         stepIndex: true,
         outputKind: true,
@@ -250,23 +249,25 @@ export const leaseHolderFor = async (
     : isRegressionVerificationOutputKind(task.templateStep?.outputKind)
       ? "regression" as const
       : null;
-  if (directRole) return task.chainId ? { chainId: task.chainId, taskId, role: directRole } : null;
+  if (directRole) return task.chainId
+    ? { chainId: task.chainId, projectId: task.projectId, taskId, role: directRole }
+    : null;
   const markers = await readMarkers(tx, taskId);
   const auxiliaryRegressionTaskId = latestMarker(markers, "repairAttempt")?.regressionTaskId ?? null;
   if (!auxiliaryRegressionTaskId) return null;
   const regression = await tx.task.findUnique({
     where: { id: auxiliaryRegressionTaskId },
-    select: { chainId: true },
+    select: { chainId: true, projectId: true },
   });
   return regression?.chainId
-    ? { chainId: regression.chainId, taskId, role: "auxiliary" }
+    ? { chainId: regression.chainId, projectId: regression.projectId, taskId, role: "auxiliary" }
     : null;
 };
 
 export type LeaseSettlementOutcome = "continue" | "stop";
 export type LeaseSettlement = {
   disposition: "retain" | "release";
-  leaseToRelease: string | null;
+  leaseToRelease: MergeLeaseTarget | null;
 };
 
 /** Decide the Lease disposition from one terminal-control outcome. */
@@ -276,7 +277,10 @@ export const settleLease = async (
 ): Promise<LeaseSettlement> => {
   if (input.outcome === "continue") return { disposition: "retain", leaseToRelease: null };
   const holder = await leaseHolderFor(tx, input.taskId);
-  return { disposition: "release", leaseToRelease: holder?.chainId ?? null };
+  return {
+    disposition: "release",
+    leaseToRelease: holder ? { chainId: holder.chainId, projectId: holder.projectId } : null,
+  };
 };
 
 const LEASE_HANDOFF_GRACE_MS = 60_000;
@@ -307,15 +311,15 @@ export const noteLeaseHandoff = async (
 export const leaseHandoffsWithoutConsumer = async (
   tx: Prisma.TransactionClient,
   now: Date,
-): Promise<Array<{ chainId: string; toRunId: string; taskId: string }>> => {
+): Promise<Array<{ chainId: string; projectId: string; toRunId: string; taskId: string }>> => {
   const rows = await tx.taskActivity.findMany({
     where: {
       metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
     },
-    select: { taskId: true, metadata: true },
+    select: { taskId: true, metadata: true, task: { select: { projectId: true } } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
-  const pending = new Map<string, { chainId: string; toRunId: string; taskId: string }>();
+  const pending = new Map<string, { chainId: string; projectId: string; toRunId: string; taskId: string }>();
   const settled = new Set<string>();
   for (const row of rows) {
     const raw = row.metadata;
@@ -330,7 +334,12 @@ export const leaseHandoffsWithoutConsumer = async (
     if (metadata.state === "pending" && typeof metadata.chainId === "string"
       && Number.isFinite(handedOffAt) && handedOffAt < now.getTime() - LEASE_HANDOFF_GRACE_MS
       && !settled.has(metadata.toRunId) && !pending.has(metadata.toRunId)) {
-      pending.set(metadata.toRunId, { chainId: metadata.chainId, toRunId: metadata.toRunId, taskId: row.taskId });
+      pending.set(metadata.toRunId, {
+        chainId: metadata.chainId,
+        projectId: row.task.projectId,
+        toRunId: metadata.toRunId,
+        taskId: row.taskId,
+      });
     }
   }
   if (pending.size === 0) return [];
@@ -438,13 +447,11 @@ export type MergeLeaseDependencies = {
   release: MergeLeaseReleaser;
 };
 
-export type WithMergeLeaseContext = { db?: PrismaClient };
-
 export type WithMergeLease = <T>(
-  chainId: string | null,
+  target: MergeLeaseTarget | null,
   fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  db: PrismaClient,
   dependencies?: MergeLeaseDependencies,
-  context?: WithMergeLeaseContext,
 ) => Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }>;
 
 /**
@@ -455,20 +462,20 @@ export type WithMergeLease = <T>(
  * callback through the same interface.
  */
 export const withMergeLease = async <T>(
-  chainId: string | null,
+  target: MergeLeaseTarget | null,
   fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  db: PrismaClient,
   dependencies: MergeLeaseDependencies = {
     acquire: acquireMergeLease,
     release: releaseMergeLeaseAdapter,
   },
-  context?: WithMergeLeaseContext,
 ): Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }> => {
-  if (chainId === null) {
+  if (target === null) {
     const result = await fn();
     return { outcome: "ran", value: result.value };
   }
 
-  const acquisition = await dependencies.acquire(chainId);
+  const acquisition = await dependencies.acquire(target.chainId);
   if (acquisition.outcome === "contended") return { outcome: "contended" };
   if (acquisition.outcome === "unreachable") {
     throw new Error(`merge lease acquire is unreachable: ${acquisition.detail}`);
@@ -481,9 +488,9 @@ export const withMergeLease = async <T>(
     return { outcome: "ran", value: result.value };
   } finally {
     if (disposition.kind === "release") {
-      const release = await releaseMergeLeaseWith(dependencies.release, chainId);
+      const release = await releaseMergeLeaseWith(dependencies.release, target.chainId);
       const releasedAt = new Date();
-      await recordMergeLeaseHoldBestEffort(context?.db, chainId, release, releasedAt);
+      await recordMergeLeaseHoldBestEffort(db, target, release, releasedAt);
     }
   }
 };

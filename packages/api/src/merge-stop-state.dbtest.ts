@@ -64,9 +64,9 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
   try {
     const response = await createApp(db, {
-      releaseMergeLease: async (chainId) => {
-      if (chainId) releasedChainLeases.push(chainId);
-    },
+      releaseMergeLease: async (target) => {
+        if (target) releasedChainLeases.push(target.chainId);
+      },
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

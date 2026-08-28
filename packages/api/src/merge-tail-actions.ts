@@ -15,7 +15,7 @@ import {
 } from "@agentos/db";
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
-import { settleLease } from "./merge-lease.js";
+import { settleLease, type MergeLeaseTarget } from "./merge-lease.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,
@@ -151,7 +151,7 @@ export type StopMergeTailInput =
     sessionId?: string;
   };
 
-export type StopMergeTailResult = { leaseToRelease: string | null };
+export type StopMergeTailResult = { leaseToRelease: MergeLeaseTarget | null };
 
 const transitionRecovery = async (
   tx: DbTx,
