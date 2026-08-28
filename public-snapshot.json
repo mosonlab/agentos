@@ -387,6 +387,61 @@
     },
     {
       "category": "pii-email",
+      "glob": "packages/api/src/workspace-reclaim.dbtest.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/config.test.ts",
+      "reason": "synthetic Git author identities used to verify runner configuration; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so they name no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/dispose-workspace.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/git-provenance.test.ts",
+      "reason": "synthetic Git author and chain trailer identities in disposable fixture repositories; `.invalid` is a reserved top-level domain (RFC 2606) that cannot receive mail, so they name no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/git-provenance.ts",
+      "reason": "synthetic chain trailer identity; `.invalid` is a reserved top-level domain (RFC 2606) that cannot receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/provision-failure.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/reclaim.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/run-output.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/runner.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/workspace.test.ts",
+      "reason": "synthetic Git author identities in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so they name no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/worktree-observer.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
       "glob": "packages/api/src/merge-tail-repair.dbtest.ts",
       "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     },
