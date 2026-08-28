@@ -25,6 +25,52 @@ test("database reconciliation active status query remains limited to three execu
   assert.deepEqual(statuses, [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING]);
 });
 
+test("database reconciliation releases colliding chain ids in each project", async () => {
+  const now = new Date("2026-08-16T07:00:00.000Z");
+  const released: Array<{ chainId: string; projectId: string }> = [];
+  const database = {
+    run: {
+      findMany: async ({ where }: { where: Record<string, unknown> }) => "id" in where
+        ? [{ id: "run-a" }, { id: "run-b" }]
+        : [],
+    },
+    taskActivity: {
+      findMany: async () => [
+        {
+          taskId: "task-a",
+          task: { projectId: "project-a" },
+          metadata: {
+            state: "pending",
+            chainId: "shared-chain",
+            toRunId: "run-a",
+            handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+          },
+        },
+        {
+          taskId: "task-b",
+          task: { projectId: "project-b" },
+          metadata: {
+            state: "pending",
+            chainId: "shared-chain",
+            toRunId: "run-b",
+            handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+          },
+        },
+      ],
+      create: async () => ({}),
+    },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
+  } as unknown as PrismaClient;
+
+  assert.equal(await reconcileDatabaseRuns(database, now, async (target) => {
+    if (target) released.push(target);
+  }), 2);
+  assert.deepEqual(released, [
+    { chainId: "shared-chain", projectId: "project-a" },
+    { chainId: "shared-chain", projectId: "project-b" },
+  ]);
+});
+
 test("four concurrent archived-run sweeps use one deterministic idempotency key", async () => {
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
   const ids = new Set<string>();

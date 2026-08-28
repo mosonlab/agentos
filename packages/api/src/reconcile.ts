@@ -20,6 +20,7 @@ import { terminalizeRun } from "./run-terminal.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
 const archivedNoticePageSize = 100;
+const mergeLeaseTargetKey = (target: MergeLeaseTarget): string => JSON.stringify([target.projectId, target.chainId]);
 export const archivedNoticeSweepIntervalMs = 60_000;
 
 export const noteArchivedQueuedRuns = async (
@@ -181,7 +182,7 @@ export const reconcileDatabaseRuns = async (
           },
         });
         if (terminal === null || "message" in terminal) continue;
-        if (terminal.leaseToRelease) stranded.set(terminal.leaseToRelease.chainId, terminal.leaseToRelease);
+        if (terminal.leaseToRelease) stranded.set(mergeLeaseTargetKey(terminal.leaseToRelease), terminal.leaseToRelease);
         continue;
       }
       // Order PATCH and retry creation through the same Task-row mutex. The
@@ -228,7 +229,7 @@ export const reconcileDatabaseRuns = async (
           });
         } else {
           const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
-          if (lease.leaseToRelease) stranded.set(lease.leaseToRelease.chainId, lease.leaseToRelease);
+          if (lease.leaseToRelease) stranded.set(mergeLeaseTargetKey(lease.leaseToRelease), lease.leaseToRelease);
           await tx.task.update({
             where: { id: run.taskId },
             data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
@@ -249,7 +250,7 @@ export const reconcileDatabaseRuns = async (
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.
         const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
-        if (lease.leaseToRelease) stranded.set(lease.leaseToRelease.chainId, lease.leaseToRelease);
+        if (lease.leaseToRelease) stranded.set(mergeLeaseTargetKey(lease.leaseToRelease), lease.leaseToRelease);
         await tx.task.update({
           where: { id: run.taskId },
           data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
@@ -279,7 +280,8 @@ export const reconcileDatabaseRuns = async (
       if (expired === null || "message" in expired) continue;
     }
     for (const handoff of strandedHandoffs) {
-      stranded.set(handoff.chainId, { chainId: handoff.chainId, projectId: handoff.projectId });
+      const target = { chainId: handoff.chainId, projectId: handoff.projectId };
+      stranded.set(mergeLeaseTargetKey(target), target);
     }
     return {
       strandedChainLeases: [...stranded.values()],
