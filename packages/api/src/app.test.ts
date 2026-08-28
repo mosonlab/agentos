@@ -1568,12 +1568,14 @@ test("claim query filters archived agents before take so active work cannot star
       // The claim loop brackets every candidate in a savepoint.
       $executeRawUnsafe: async () => 0,
       run: {
-        findMany: async ({ where, take }: { where: Record<string, any>; take: number }) => {
-          claimWhere = where;
-          const filtered = where.agent
-            ? seeded.filter((run) => run.agent.archivedAt === where.agent.archivedAt)
-            : seeded;
-          return filtered.slice(0, take);
+        findMany: async ({ where, take }: { where: Record<string, any>; take?: number }) => {
+          if (where.agent) {
+            claimWhere = where;
+            const filtered = seeded.filter((run) => run.agent.archivedAt === where.agent.archivedAt);
+            return take === undefined ? filtered : filtered.slice(0, take);
+          }
+          const selectedIds = where.id?.in as string[] | undefined;
+          return selectedIds ? seeded.filter((run) => selectedIds.includes(run.id)) : [];
         },
         updateMany: async ({ where }: { where: { id: string } }) => { claimedId = where.id; return { count: 1 }; },
         findFirst: async () => null,
@@ -1583,6 +1585,7 @@ test("claim query filters archived agents before take so active work cannot star
       session: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "session-1", ...data }) },
       sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
       task: {
+        groupBy: async () => [{ projectId: "project-1", chainId: "chain-1", _count: { _all: 1 } }],
         findUnique: async ({ where }: { where: { id: string } }) => {
           const found = seeded.find((entry) => entry.task.id === where.id)?.task;
           return found ? { ...found, projectId: "project-1", archivedAt: null, assigneeAgentId: null } : null;
