@@ -16,7 +16,7 @@ Anneal 就是负责审的那一层：面向 coding agent 的本地控制平面�
 
 [安装](#快速开始) · [文档](#文档) · [支持状态](#支持状态) · [English](README.md)
 
-<img src="docs/media/tasks.png" alt="任务看板：模板链运行中，每张卡片展示所处步骤、run 状态、模型与成本" width="880">
+<img src="docs/media/chain-timelapse.gif" alt="一条真实链两小时的时间推移：七个步骤跨列推进，两轮代码评审并行，最后 regression 驳回了上一步声称已采纳的修复" width="880">
 
 </div>
 
