@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError, api } from "../lib/api";
+import { ApiError, REQUEST_TIMEOUT_MS, api } from "../lib/api";
 import { useT, useTNodes } from "../lib/i18n";
 import type { Project } from "../lib/types";
 import { NOTICE, Page } from "./ui";
@@ -45,6 +45,11 @@ type GateState =
   | { kind: "refused"; status: number }
   /** Status 0: nothing answered at all. */
   | { kind: "unreachable" }
+  /** The request was accepted and then left hanging until the client's own
+   *  bound expired — a control plane that is restarting rather than absent.
+   *  Kept distinct from `unreachable` because the operator's next move is to
+   *  wait and retry, not to start a process that is already running. */
+  | { kind: "timeout" }
   /** Any other failure, kept distinct so a 500 is not described as a missing token. */
   | { kind: "failed"; status: number };
 
@@ -62,6 +67,7 @@ const bootstrap = async (): Promise<GateState> => {
     const projects = await api.get<Project[]>("/projects");
     return { kind: "ready", projects: projects ?? [] };
   } catch (reason: unknown) {
+    if (reason instanceof ApiError && reason.timedOut) return { kind: "timeout" };
     const status = reason instanceof ApiError ? reason.status : 0;
     if (status === 401 || status === 403) return { kind: "refused", status };
     if (status === 0) return { kind: "unreachable" };
@@ -140,6 +146,17 @@ export const StartupGate = ({ children }: { children: (bootstrap: Bootstrap) => 
         <GateScreen
           title={t("startup.unreachable.title")}
           body={tn("startup.unreachable.body", { command: <code>npm run dev:api</code> })}
+          onRetry={reload}
+        />
+      </div>
+    );
+  }
+  if (state.kind === "timeout") {
+    return (
+      <div data-startup-state="timeout">
+        <GateScreen
+          title={t("startup.timeout.title")}
+          body={t("startup.timeout.body", { seconds: REQUEST_TIMEOUT_MS / 1_000 })}
           onRetry={reload}
         />
       </div>

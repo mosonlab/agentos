@@ -1,0 +1,97 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { ApiError, REQUEST_TIMEOUT_MS, api } from "../lib/api";
+
+/**
+ * Every control-plane request is bounded.
+ *
+ * `fetch` has no timeout: a socket that is accepted and then never answered
+ * leaves the promise pending forever, which is how an API restart overlapping
+ * the first load turned into a permanent Loading screen. The bound lives in the
+ * client rather than in each caller, so a page cannot forget it.
+ */
+type Call = { url: string; init: RequestInit };
+
+const withFetch = async (
+  answer: (call: Call) => Promise<Response>,
+  work: () => Promise<void>,
+): Promise<Call[]> => {
+  const calls: Call[] = [];
+  const original = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (url: string, init: RequestInit) => {
+      const call = { url, init };
+      calls.push(call);
+      return await answer(call);
+    },
+  });
+  try {
+    await work();
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
+  }
+  return calls;
+};
+
+const ok = async (): Promise<Response> => new Response("{}", { status: 200 });
+
+/** What `AbortSignal.timeout` rejects the fetch with once the bound expires. */
+const timedOutFetch = async (): Promise<Response> => {
+  throw new DOMException("The operation timed out.", "TimeoutError");
+};
+
+test("the bound is a real interval, and one an operator would wait through", () => {
+  assert.ok(Number.isFinite(REQUEST_TIMEOUT_MS));
+  assert.ok(REQUEST_TIMEOUT_MS > 0 && REQUEST_TIMEOUT_MS <= 30_000, `${REQUEST_TIMEOUT_MS}ms is not a bound anyone waits through`);
+});
+
+test("every request carries the abort signal that enforces the bound", async () => {
+  const calls = await withFetch(ok, async () => {
+    await api.get("/projects");
+    await api.poll("/tasks?view=board", null);
+    await api.post("/tasks/t1/retry", {});
+  });
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    assert.ok(call.init.signal instanceof AbortSignal, `${call.url} was sent unbounded`);
+    assert.equal(call.init.signal.aborted, false, "the signal fires on the bound, not before the request");
+  }
+});
+
+test("a request abandoned on the bound is an ApiError that says so, not an opaque DOMException", async () => {
+  await withFetch(timedOutFetch, async () => {
+    await assert.rejects(() => api.get("/projects"), (reason: unknown) => {
+      assert.ok(reason instanceof ApiError);
+      // Nothing answered, so there is no status to report — 0 is the client's
+      // own "no answer", the same one a refused connection uses.
+      assert.equal(reason.status, 0);
+      assert.equal(reason.timedOut, true);
+      assert.match(reason.message, /15s/u);
+      return true;
+    });
+  });
+});
+
+test("a poll is bounded on the same terms as any other request", async () => {
+  await withFetch(timedOutFetch, async () => {
+    await assert.rejects(() => api.poll("/tasks?view=board", 'W/"a"'), (reason: unknown) => {
+      assert.ok(reason instanceof ApiError);
+      assert.equal(reason.timedOut, true);
+      return true;
+    });
+  });
+});
+
+test("an ordinary transport failure is not reported as a timeout", async () => {
+  await withFetch(async () => { throw new TypeError("Failed to fetch"); }, async () => {
+    await assert.rejects(() => api.get("/projects"), (reason: unknown) => {
+      assert.ok(reason instanceof ApiError);
+      assert.equal(reason.status, 0);
+      assert.equal(reason.timedOut, false);
+      assert.equal(reason.message, "Failed to fetch");
+      return true;
+    });
+  });
+});
