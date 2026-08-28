@@ -1715,7 +1715,7 @@ const activateChainSuccessorInternal = async (
   if (!currentRows.every((row) => row.status === TaskStatus.DONE)) {
     // The first review completion exits here while its blind sibling is still
     // unfinished; the second completion owns the join.
-    if (boundSuccessor && !chainControl.held) {
+    if (boundSuccessor) {
       await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
     }
     return { nextTaskId: null, gated: false };
@@ -1738,7 +1738,7 @@ const activateChainSuccessorInternal = async (
     // cannot complete an archived task, but retaining this check also keeps
     // legacy/directly-seeded rows inert instead of dispatching from archived
     // history when an activation replay is attempted.
-    if (boundSuccessor && current.archivedAt === null && !chainControl.held) {
+    if (boundSuccessor && current.archivedAt === null) {
       await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, predecessorComplete);
     }
     return { nextTaskId: null, gated: false };

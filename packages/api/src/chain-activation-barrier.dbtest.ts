@@ -5,21 +5,34 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  MERGE_TAIL_KIND,
   PrismaClient,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
 } from "@anneal/db";
 
+import {
+  CHAIN_OPERATOR_TOKEN,
+  CHAIN_RUNNER_TOKEN,
+  operatorRequest,
+  runnerCompletionRequest,
+  seedBasicChain,
+  seedRun,
+} from "./chain-hold-resume-fixture.js";
+import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
-const RUNNER_TOKEN = "chain-activation-runner-token";
+const RUNNER_TOKEN = CHAIN_RUNNER_TOKEN;
 const priorRunnerToken = process.env.RUNNER_TOKEN;
+const priorOperatorToken = process.env.OPERATOR_TOKEN;
 
 before(() => {
   process.env.RUNNER_TOKEN = RUNNER_TOKEN;
+  process.env.OPERATOR_TOKEN = CHAIN_OPERATOR_TOKEN;
   db = setupTestDb();
 });
 beforeEach(async () => { await resetTestDb(db); });
@@ -27,6 +40,8 @@ after(async () => {
   await db.$disconnect();
   if (priorRunnerToken === undefined) delete process.env.RUNNER_TOKEN;
   else process.env.RUNNER_TOKEN = priorRunnerToken;
+  if (priorOperatorToken === undefined) delete process.env.OPERATOR_TOKEN;
+  else process.env.OPERATOR_TOKEN = priorOperatorToken;
 });
 
 const seedRunningHeldChain = async () => {
@@ -139,10 +154,190 @@ test("completion under a held Chain persists output and withholds successor acti
   assert.equal(response.status, 200, await response.text());
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.predecessor.id } })).status, TaskStatus.DONE);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: chain.run.id } })).status, RunStatus.SUCCEEDED);
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: chain.predecessor.id } });
+  assert.equal(output.runId, chain.run.id);
+  assert.equal(output.kind, "result");
+  assert.equal(output.body, "completed under hold");
   assert.equal(await db.run.count({ where: { taskId: chain.successor.id } }), 0);
   const activity = await db.taskActivity.findFirst({
     where: { taskId: chain.predecessor.id, body: { contains: "activation withheld" } },
     orderBy: { createdAt: "desc" },
   });
   assert.ok(activity, "completion records why the successor was withheld");
+});
+
+test("a held fan-out layer completes every sibling while its join remains unactivated", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DOING, TaskStatus.DOING, TaskStatus.TODO],
+    layers: [1, 1, 2],
+  });
+  const firstRun = await seedRun(db, chain, chain.first.id);
+  const secondRun = await seedRun(db, chain, chain.second.id);
+  const held = await operatorRequest(db, `/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-fanout", reason: "review siblings" });
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal(held.body.control.heldLayer, 1);
+  assert.equal((await runnerCompletionRequest(db, firstRun.run, "fan-out first")).status, 200);
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+  assert.equal((await runnerCompletionRequest(db, secondRun.run, "fan-out second")).status, 200);
+  assert.deepEqual(
+    (await db.task.findMany({ where: { id: { in: [chain.first.id, chain.second.id] } }, orderBy: { chainIndex: "asc" }, select: { status: true } }))
+      .map((task) => task.status),
+    [TaskStatus.DONE, TaskStatus.DONE],
+  );
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: { in: [chain.first.id, chain.second.id] } } }), 2);
+});
+
+test("real Hold-first and completion-first routes preserve the two mutex outcomes", async () => {
+  const holdFirst = await seedBasicChain(db, {
+    statuses: [TaskStatus.DOING, TaskStatus.TODO],
+    control: null,
+  });
+  const holdFirstRun = await seedRun(db, holdFirst, holdFirst.first.id);
+  const held = await operatorRequest(db, `/tasks/${holdFirst.second.id}/chain/hold`, { requestId: "hold-first", reason: "stop after layer" });
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal((await runnerCompletionRequest(db, holdFirstRun.run, "hold won")).status, 200);
+  assert.equal(await db.run.count({ where: { taskId: holdFirst.second.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: { taskId: holdFirst.first.id, body: { contains: "activation withheld" } } }), 1);
+
+  const completionFirst = await seedBasicChain(db, {
+    statuses: [TaskStatus.DOING, TaskStatus.TODO],
+    control: null,
+  });
+  const completionFirstRun = await seedRun(db, completionFirst, completionFirst.first.id);
+  const completed = await runnerCompletionRequest(db, completionFirstRun.run, "completion won");
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const successorRunsBeforeHold = await db.run.findMany({ where: { taskId: completionFirst.second.id }, orderBy: { id: "asc" } });
+  assert.equal(successorRunsBeforeHold.length, 1);
+  const holdAfterCompletion = await operatorRequest(db, `/tasks/${completionFirst.second.id}/chain/hold`, { requestId: "hold-after-completion", reason: "hold new layer" });
+  assert.equal(holdAfterCompletion.status, 200, JSON.stringify(holdAfterCompletion.body));
+  assert.equal(holdAfterCompletion.body.control.heldLayer, 2);
+  assert.deepEqual(await db.run.findMany({ where: { taskId: completionFirst.second.id }, orderBy: { id: "asc" }, select: { id: true, status: true } }),
+    successorRunsBeforeHold.map((run) => ({ id: run.id, status: run.status })));
+});
+
+test("a held approval gate opens Inbox, and answering it completes without crossing the barrier", async () => {
+  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO], control: null });
+  await db.task.update({ where: { id: chain.first.id }, data: { approvalGate: true } });
+  const running = await seedRun(db, chain, chain.first.id);
+  const held = await operatorRequest(db, `/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-gate", reason: "inspect gate" });
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal((await runnerCompletionRequest(db, running.run, "gate evidence")).status, 200);
+  const gate = await db.inboxMessage.findFirstOrThrow({ where: { gateTaskId: chain.first.id, status: "OPEN" } });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.first.id } })).status, TaskStatus.REVIEW);
+  const answer = await operatorRequest(db, `/inbox/messages/${gate.id}/decision`, { decision: "approve", requestId: "answer-held-gate" });
+  assert.equal(answer.status, 201, JSON.stringify(answer.body));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.first.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
+  assert.equal(await db.run.count({ where: { taskId: chain.second.id } }), 0);
+  assert.equal((await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: chain.project.id, chainId: chain.chainId } } })).state, ChainControlState.HELD);
+});
+
+test("a completion at or below the held layer keeps ordinary output and successor behavior", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DOING, TaskStatus.TODO, TaskStatus.TODO],
+    control: {
+      state: ChainControlState.HELD,
+      heldLayer: 2,
+      holdGeneration: 1,
+      holdRequestId: "hold-layer-two",
+      holdReason: "stop after layer two",
+      heldAt: new Date("2026-08-28T02:00:00.000Z"),
+      event: true,
+    },
+  });
+  const running = await seedRun(db, chain, chain.first.id);
+  assert.equal((await runnerCompletionRequest(db, running.run, "layer one ordinary completion")).status, 200);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.first.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: chain.first.id } })).body, "layer one ordinary completion");
+  assert.equal(await db.run.count({ where: { taskId: chain.second.id, status: RunStatus.QUEUED } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+});
+
+test("a held merge-readiness completion records evidence, leaves the integrator inactive, and does not touch lease activity", async () => {
+  const chain = await seedIntegratorChain(db, { label: "held-readiness", shape: "canonical-compound-readiness" });
+  assert.ok(chain.readinessTask);
+  assert.ok(chain.integratorTask);
+  await recordMergeLeaseHold(db, { projectId: chain.project.id, chainId: chain.chainId }, {
+    outcome: "released",
+    ref: "refs/merge-lease/holder",
+    sha: "readiness-lease-before",
+    acquiredAt: "2026-08-28T02:00:00.000Z",
+  }, new Date("2026-08-28T02:01:00.000Z"));
+  const leaseBefore = await db.taskActivity.findMany({
+    where: { taskId: chain.integratorTask.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+    orderBy: { id: "asc" },
+  });
+  await db.chainControl.create({ data: {
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+    state: ChainControlState.HELD,
+    heldLayer: chain.readinessTask.chainLayer,
+    heldAt: new Date("2026-08-28T02:02:00.000Z"),
+    holdRequestId: "hold-readiness",
+    holdReason: "inspect readiness",
+    holdGeneration: 1,
+  } });
+  await db.task.update({ where: { id: chain.readinessTask.id }, data: { status: TaskStatus.DOING } });
+  const run = await db.run.create({ data: {
+    projectId: chain.project.id,
+    taskId: chain.readinessTask.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${chain.readinessTask.id}:readiness:1`,
+    runner: "CLAUDE",
+    model: chain.agent.model,
+    status: RunStatus.RUNNING,
+    runnerId: "readiness-runner",
+    fencingToken: "readiness-fence",
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    promptHash: "readiness-prompt",
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: chain.project.id,
+    agentId: chain.agent.id,
+    taskId: chain.readinessTask.id,
+    runner: "CLAUDE",
+    executionStatus: SessionExecutionStatus.RUNNING,
+  } });
+  const completed = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "readiness-runner", fencingToken: "readiness-fence", exitCode: 0,
+      terminalEventSeen: true, terminalSuccess: true, cleanupStatus: "SUCCEEDED", output: "readiness evidence" }),
+  });
+  assert.equal(completed.status, 200, await completed.text());
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.DONE);
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: chain.readinessTask.id } });
+  assert.equal(output.body, "readiness evidence");
+  assert.equal(output.runId, run.id);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask.id } }), 0);
+  const leaseAfter = await db.taskActivity.findMany({
+    where: { taskId: chain.integratorTask.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+    orderBy: { id: "asc" },
+  });
+  assert.deepEqual(leaseAfter, leaseBefore);
+});
+
+test("bound successor dispatch remains active while the predecessor Chain is held", async () => {
+  const predecessorChain = await seedBasicChain(db, { statuses: [TaskStatus.DOING] });
+  const boundSuccessor = await db.task.create({ data: {
+    projectId: predecessorChain.project.id,
+    repoId: predecessorChain.repo.id,
+    assigneeAgentId: predecessorChain.agent.id,
+    name: "Bound successor",
+    description: "bound successor",
+    chainId: `bound-successor-${predecessorChain.chainId}`,
+    chainIndex: 0,
+    chainLayer: 1,
+    status: TaskStatus.TODO,
+    dispatchAfterTaskId: predecessorChain.first.id,
+  } });
+  const running = await seedRun(db, predecessorChain, predecessorChain.first.id);
+  assert.equal((await runnerCompletionRequest(db, running.run, "bound predecessor")).status, 200);
+  assert.equal((await db.chainControl.findUniqueOrThrow({ where: { id: predecessorChain.control!.id } })).state, ChainControlState.HELD);
+  assert.equal(await db.run.count({ where: { taskId: boundSuccessor.id, status: RunStatus.QUEUED } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: predecessorChain.first.id, status: RunStatus.CANCELLED } }), 0);
 });
