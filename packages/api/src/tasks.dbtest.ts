@@ -48,8 +48,12 @@ const call = async (
   return { status: response.status, body: response.status === 204 ? null : await response.json() };
 });
 
+const seedBareProject = (label: string) => db.project.create({
+  data: { name: label, slug: `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}` },
+});
+
 const seedTask = async (label: string, overrides: Record<string, unknown> = {}) => {
-  const project = await db.project.create({ data: { name: label, slug: `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}` } });
+  const project = await seedBareProject(label);
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
   const agent = await db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
@@ -1008,7 +1012,7 @@ test("template instantiation creates an inert chain unless autoStart is true", a
 });
 
 test("human task creation accepts BACKLOG atomically without queuing a Run", async () => {
-  const project = await db.project.create({ data: { name: "backlog-create", slug: `backlog-create-${Date.now()}` } });
+  const project = await seedBareProject("backlog-create");
   const created = await call("POST", `/projects/${project.id}/tasks`, {
     name: "Human backlog card",
     assigneeType: "HUMAN",
@@ -1024,7 +1028,7 @@ test("human task creation accepts BACKLOG atomically without queuing a Run", asy
 });
 
 test("human task creation keeps TODO as the default status", async () => {
-  const project = await db.project.create({ data: { name: "todo-create", slug: `todo-create-${Date.now()}` } });
+  const project = await seedBareProject("todo-create");
   const created = await call("POST", `/projects/${project.id}/tasks`, {
     name: "Human todo card",
     assigneeType: "HUMAN",
@@ -1037,7 +1041,7 @@ test("human task creation keeps TODO as the default status", async () => {
 });
 
 test("task creation rejects statuses other than BACKLOG or TODO", async () => {
-  const project = await db.project.create({ data: { name: "invalid-create-status", slug: `invalid-create-status-${Date.now()}` } });
+  const project = await seedBareProject("invalid-create-status");
   for (const status of ["DOING", "REVIEW", "DONE"] as const) {
     const created = await call("POST", `/projects/${project.id}/tasks`, {
       name: `Invalid ${status}`,
@@ -1049,6 +1053,30 @@ test("task creation rejects statuses other than BACKLOG or TODO", async () => {
   }
   assert.equal(await db.task.count({ where: { projectId: project.id } }), 0);
   assert.equal(await db.run.count({ where: { projectId: project.id } }), 0);
+});
+
+test("agent task creation parks explicit BACKLOG and queues default TODO", async () => {
+  const context = await seedTask("agent-create-status", { status: "DONE" });
+  const request = {
+    name: "Agent card",
+    assigneeType: "AGENT",
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    scheduleKind: "NOW",
+  };
+
+  const backlog = await call("POST", `/projects/${context.project.id}/tasks`, {
+    ...request,
+    status: "BACKLOG",
+  });
+  assert.equal(backlog.status, 201, JSON.stringify(backlog.body));
+  assert.equal(backlog.body.status, "BACKLOG");
+  assert.equal(await db.run.count({ where: { taskId: backlog.body.id } }), 0);
+
+  const todo = await call("POST", `/projects/${context.project.id}/tasks`, request);
+  assert.equal(todo.status, 201, JSON.stringify(todo.body));
+  assert.equal(todo.body.status, "TODO");
+  assert.equal(await db.run.count({ where: { taskId: todo.body.id, status: "QUEUED" } }), 1);
 });
 
 test("archive and direct task creation released together never strand a queued run", async () => {

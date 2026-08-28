@@ -2176,7 +2176,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // Without this guard every POST snapshots the fallback base before step
         // 0 can publish, and all runners race the same new shared head.
         const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
-        if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
+        if (created.status === TaskStatus.TODO && currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
           // Bypassing `openRun` here once put step 1 on a per-Task branch while
           // every later Step shared the Chain branch, silently dropping step 1.
           const opened = await openRun(tx, created.id, { kind: "task-created", readyAt: new Date() });

@@ -856,7 +856,8 @@ also have a project-local `assigneeAgentId` and `repoId`, and the assignee must
 have access to that repository. `scheduleKind` is `NOW`, `AT`, or `CRON`:
 `AT` requires `runAt` and an agent/repository; `CRON` requires `cron` (five
 fields, no macros) and computes the next `runAt`; `timezone` is an optional IANA
-timezone. The task body also supports `approvalGate`, `opensPullRequest`,
+timezone. The task body also supports `status` (`TODO` or `BACKLOG` at
+creation), `approvalGate`, `opensPullRequest`,
 `maxDurationMin`, `stallTimeoutMin`, `maxSessionsPerTask`, `workingDirectory`,
 `targetBranch`, and paired `chainId`/`chainIndex` fields.
 
