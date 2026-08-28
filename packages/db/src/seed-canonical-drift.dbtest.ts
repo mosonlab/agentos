@@ -71,15 +71,28 @@ test("seed rolls a registered canonical generation over inside its installation 
   const outgoing = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
   });
-  await prisma.taskTemplateStep.updateMany({
-    where: { taskTemplateId: outgoing.id, outputKind: "regression-verification-v2" },
-    data: { outputKind: "regression-verification" },
+  const steps = await prisma.taskTemplateStep.findMany({
+    where: { taskTemplateId: outgoing.id },
+    orderBy: { stepIndex: "asc" },
   });
+  const revalidation = steps.find((step) => step.outputKind === "revalidation");
+  assert.ok(revalidation);
+  await prisma.taskTemplateStep.delete({ where: { id: revalidation.id } });
+  for (const step of steps.filter((candidate) => candidate.id !== revalidation.id)) {
+    await prisma.taskTemplateStep.update({
+      where: { id: step.id },
+      data: {
+        stepIndex: step.stepIndex - 1,
+        layer: (step.layer ?? 0) - 1,
+        baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+      },
+    });
+  }
 
   const rolled = seed();
   assert.equal(rolled.status, 0, rolled.output);
 
-  const legacyName = `direct-engineer-workflow-legacy-pre-narrow-regression-lease-${outgoing.id}`;
+  const legacyName = `direct-engineer-workflow-legacy-pre-revalidate-step-${outgoing.id}`;
   const legacy = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: legacyName } },
   });
