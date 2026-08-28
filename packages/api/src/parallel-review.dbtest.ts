@@ -525,15 +525,143 @@ test("persistent transient specification reads defer observably and a later poll
   assert.equal(reads, 4);
 });
 
-test("a transient specification read budget exhausts to the existing failed/backlog settlement with the last error", async () => {
+test("transient specification read deferrals follow the backoff schedule and clamp to the budget deadline", async () => {
   const fixture = await instantiateDirect();
-  await completeImplementation(fixture, "exhausted-read-implementation");
+  await completeImplementation(fixture, "backoff-read-implementation");
   let reads = 0;
   const app = createApp(db, {
     specificationReader: {
       readFileAtCommit: async () => {
         reads += 1;
         throw new GitHubReadError(`proxy flap ${reads}`, "transport");
+      },
+    },
+  });
+  const poll = () => app.request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "backoff-read-review", leaseSeconds: 120 }),
+  });
+
+  assert.equal((await poll()).status, 204);
+  const first = await db.taskActivity.findFirstOrThrow({
+    where: { metadata: { path: ["condition"], equals: "specification-read-claim-deferred" } },
+    select: { id: true, taskId: true, metadata: true },
+  });
+  const runId = String((first.metadata as Record<string, unknown>).runId);
+  await db.run.update({ where: { id: runId }, data: { readyAt: new Date(0) } });
+  assert.equal((await poll()).status, 204);
+
+  let deferrals = await db.taskActivity.findMany({
+    where: {
+      taskId: first.taskId,
+      metadata: { path: ["condition"], equals: "specification-read-claim-deferred" },
+    },
+    select: { id: true, metadata: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  assert.deepEqual(deferrals.map(({ metadata }) => {
+    const evidence = metadata as Record<string, unknown>;
+    return [evidence.attempt, evidence.delayMs];
+  }), [[1, 15_000], [2, 30_000]]);
+
+  await db.taskActivity.update({
+    where: { id: deferrals[0]!.id },
+    data: { createdAt: new Date(Date.now() - 299_000) },
+  });
+  await db.run.update({ where: { id: runId }, data: { readyAt: new Date(0) } });
+  assert.equal((await poll()).status, 204);
+  deferrals = await db.taskActivity.findMany({
+    where: {
+      taskId: first.taskId,
+      metadata: { path: ["condition"], equals: "specification-read-claim-deferred" },
+    },
+    select: { id: true, metadata: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  const third = deferrals.map(({ metadata }) => metadata as Record<string, unknown>)
+    .find((evidence) => evidence.attempt === 3);
+  assert.ok(third);
+  assert.equal(third.delayMs, 60_000);
+  assert.equal(third.nextAttemptAt, third.budgetDeadlineAt);
+  assert.equal(reads, 9);
+});
+
+test("a resumed run starts a fresh transient specification read budget", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "resumed-read-implementation");
+  let reads = 0;
+  let unavailable = true;
+  const app = createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async () => {
+        reads += 1;
+        if (unavailable) throw new GitHubReadError(`proxy flap ${reads}`, "transport");
+        return new TextEncoder().encode(SPECIFICATION_BRIEF);
+      },
+    },
+  });
+  const poll = () => app.request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "resumed-read-review", leaseSeconds: 120 }),
+  });
+
+  assert.equal((await poll()).status, 204);
+  const staleDeferral = await db.taskActivity.findFirstOrThrow({
+    where: { metadata: { path: ["condition"], equals: "specification-read-claim-deferred" } },
+    select: { id: true, taskId: true, metadata: true },
+  });
+  const runId = String((staleDeferral.metadata as Record<string, unknown>).runId);
+  unavailable = false;
+  await db.run.update({ where: { id: runId }, data: { readyAt: new Date(0) } });
+  const firstClaim = await poll();
+  const firstClaimText = await firstClaim.text();
+  assert.equal(firstClaim.status, 200, firstClaimText);
+  assert.equal((JSON.parse(firstClaimText) as Claim).run.id, runId);
+  await db.taskActivity.update({
+    where: { id: staleDeferral.id },
+    data: { createdAt: new Date(Date.now() - 6 * 60_000) },
+  });
+  await db.run.update({
+    where: { id: runId },
+    data: {
+      status: RunStatus.QUEUED,
+      readyAt: new Date(0),
+      runnerId: null,
+      fencingToken: null,
+      leaseExpiresAt: null,
+    },
+  });
+  unavailable = true;
+
+  assert.equal((await poll()).status, 204);
+  const resumed = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(resumed.status, RunStatus.QUEUED);
+  const currentEpisode = await db.taskActivity.findMany({
+    where: {
+      taskId: staleDeferral.taskId,
+      createdAt: { gt: resumed.claimedAt! },
+      metadata: { path: ["condition"], equals: "specification-read-claim-deferred" },
+    },
+    select: { metadata: true },
+  });
+  assert.equal(currentEpisode.length, 1);
+  assert.equal((currentEpisode[0]!.metadata as Record<string, unknown>).attempt, 1);
+  assert.equal(reads, 7);
+});
+
+test("an expired transient specification read budget fails even if the repository read recovered", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "exhausted-read-implementation");
+  let reads = 0;
+  let unavailable = true;
+  const app = createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async () => {
+        reads += 1;
+        if (unavailable) throw new GitHubReadError(`proxy flap ${reads}`, "transport");
+        return new TextEncoder().encode(SPECIFICATION_BRIEF);
       },
     },
   });
@@ -554,15 +682,29 @@ test("a transient specification read budget exhausts to the existing failed/back
     data: { createdAt: new Date(Date.now() - 6 * 60_000) },
   });
   await db.run.update({ where: { id: runId }, data: { readyAt: new Date(0) } });
+  await db.run.updateMany({
+    where: {
+      taskId: { in: [fixture.solTaskId, fixture.blindTaskId] },
+      id: { not: runId },
+      status: RunStatus.QUEUED,
+    },
+    data: { readyAt: new Date(Date.now() + 60_000) },
+  });
+  unavailable = false;
 
   const exhausted = await poll();
   assert.equal(exhausted.status, 204, await exhausted.text());
-  assert.equal(reads, 6);
+  assert.equal(reads, 3);
   const failed = await db.run.findUniqueOrThrow({ where: { id: runId } });
   assert.equal(failed.status, RunStatus.FAILED);
   assert.equal(failed.retryable, false);
   assert.match(failed.failureReason ?? "", /transient read deferral budget exhausted after 300000ms/u);
-  assert.match(failed.failureReason ?? "", /last failure: proxy flap 6/u);
+  assert.match(failed.failureReason ?? "", /last failure: proxy flap 3/u);
+  assert.equal((failed.failureReason?.match(/Spec transcription claim refused/gu) ?? []).length, 1);
+  assert.equal(failed.leaseGeneration, 0);
+  assert.equal(failed.runnerId, null);
+  assert.equal(failed.fencingToken, null);
+  assert.equal(await db.session.count({ where: { runId } }), 0);
   const task = await db.task.findUniqueOrThrow({ where: { id: deferral.taskId } });
   assert.equal(task.status, TaskStatus.BACKLOG);
   assert.equal(task.failureReason, failed.failureReason);
@@ -576,6 +718,48 @@ test("a transient specification read budget exhausts to the existing failed/back
   assert.equal(await db.inboxMessage.count({
     where: { dedupeKey: `spec-transcription-unreadable:${runId}` },
   }), 1);
+});
+
+test("one poll settles every review sibling whose transient specification read budget expired", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "sibling-exhaustion-implementation");
+  const app = createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async () => {
+        throw new GitHubReadError("shared proxy flap", "transport");
+      },
+    },
+  });
+  const poll = () => app.request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "sibling-exhaustion-review", leaseSeconds: 120 }),
+  });
+
+  assert.equal((await poll()).status, 204);
+  assert.equal((await poll()).status, 204);
+  const deferrals = await db.taskActivity.findMany({
+    where: {
+      taskId: { in: [fixture.solTaskId, fixture.blindTaskId] },
+      metadata: { path: ["condition"], equals: "specification-read-claim-deferred" },
+    },
+    select: { id: true, metadata: true },
+  });
+  assert.equal(deferrals.length, 2);
+  const runIds = deferrals.map(({ metadata }) => String((metadata as Record<string, unknown>).runId));
+  await db.taskActivity.updateMany({
+    where: { id: { in: deferrals.map(({ id }) => id) } },
+    data: { createdAt: new Date(Date.now() - 6 * 60_000) },
+  });
+  await db.run.updateMany({ where: { id: { in: runIds } }, data: { readyAt: new Date(0) } });
+
+  assert.equal((await poll()).status, 204);
+  assert.equal(await db.run.count({
+    where: { id: { in: runIds }, status: RunStatus.FAILED },
+  }), 2);
+  assert.equal(await db.task.count({
+    where: { id: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: TaskStatus.BACKLOG },
+  }), 2);
 });
 
 test("a review cancelled during transient specification-read deferral is never claimed", async () => {

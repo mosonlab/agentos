@@ -33,10 +33,12 @@ import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
 import {
   prepareSpecificationVerification,
+  specificationReadBudgetExhaustedRefusal,
   specificationMaterializationForDirectImplementation,
   type SpecificationReader,
   type SpecificationRefusal,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
+  SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
@@ -58,7 +60,6 @@ const namedFailureReason = (error: CandidateActivationFailure): string => `${err
 
 const SKIP = { outcome: "skip" } as const;
 const HALT = { outcome: "halt" } as const;
-const ROLLBACK_SKIP = { outcome: "rollback-skip" } as const;
 
 export type ClaimRunInput = {
   body: ClaimInput;
@@ -230,44 +231,87 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       return tx.taskActivity.findMany({
         where: {
           taskId: candidate.task.id,
+          // A resumed Run keeps its id, but every successful claim rewrites
+          // claimedAt. Rows before it belong to an earlier claim episode.
+          ...(candidate.claimedAt ? { createdAt: { gt: candidate.claimedAt } } : {}),
           AND: [
             { metadata: { path: ["condition"], equals: SPECIFICATION_READ_DEFERRAL_CONDITION } },
             { metadata: { path: ["runId"], equals: candidate.id } },
           ],
         },
-        select: { createdAt: true },
+        select: { createdAt: true, metadata: true },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       });
+    };
+    const specificationReadDeferralState = async (candidate: (typeof candidates)[number]) => {
+      const priorDeferrals = await priorSpecificationReadDeferrals(candidate);
+      const budgetStartedAt = priorDeferrals[0]?.createdAt;
+      if (!budgetStartedAt) return null;
+      const latestMetadata = priorDeferrals.at(-1)?.metadata;
+      const latestEvidence = typeof latestMetadata === "object" && latestMetadata !== null && !Array.isArray(latestMetadata)
+        ? latestMetadata as Record<string, unknown>
+        : {};
+      const persistedDetail = typeof latestEvidence.lastUnderlyingErrorDetail === "string"
+        ? latestEvidence.lastUnderlyingErrorDetail
+        : null;
+      const persistedMessage = typeof latestEvidence.lastUnderlyingError === "string"
+        ? latestEvidence.lastUnderlyingError
+        : "repository content read failed";
+      const messagePrefix = `Spec transcription claim refused: ${SPEC_TRANSCRIPTION_UNREADABLE_REASON}: `;
+      return {
+        attemptCount: priorDeferrals.length,
+        budgetStartedAt,
+        budgetDeadlineAt: new Date(budgetStartedAt.getTime() + SPECIFICATION_READ_DEFERRAL_BUDGET_MS),
+        lastUnderlyingError: persistedDetail
+          ?? (persistedMessage.startsWith(messagePrefix) ? persistedMessage.slice(messagePrefix.length) : persistedMessage),
+      };
+    };
+    const exhaustTransientSpecificationRead = async (
+      candidate: (typeof candidates)[number],
+      state: NonNullable<Awaited<ReturnType<typeof specificationReadDeferralState>>>,
+      implementationHeadSha: string,
+    ) => {
+      const refusal = specificationReadBudgetExhaustedRefusal(
+        SPECIFICATION_READ_DEFERRAL_BUDGET_MS,
+        state.lastUnderlyingError,
+      );
+      await parkQueuedCandidate(candidate, {
+        reason: refusal.message,
+        condition: refusal.reason,
+        activityBody: `Review claim stopped after its transient specification-read budget was exhausted: ${refusal.message}`,
+        inboxBody: `Review claim failed and the task was parked in Backlog after its transient specification-read budget was exhausted: ${refusal.message}`,
+        metadata: {
+          classification: refusal.classification,
+          exhaustedCondition: SPECIFICATION_READ_DEFERRAL_CONDITION,
+          budgetStartedAt: state.budgetStartedAt.toISOString(),
+          budgetDeadlineAt: state.budgetDeadlineAt.toISOString(),
+          implementationHeadSha,
+          lastUnderlyingError: state.lastUnderlyingError,
+        },
+      });
+      // Match the existing unreadable-refusal settlement: one parked review
+      // does not keep an eligible sibling from settling in this same poll.
+      return SKIP;
     };
     const deferTransientSpecificationRead = async (
       candidate: (typeof candidates)[number],
       refusal: SpecificationRefusal,
       implementationHeadSha: string,
+      state: Awaited<ReturnType<typeof specificationReadDeferralState>>,
     ) => {
       if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to defer`);
-      const priorDeferrals = await priorSpecificationReadDeferrals(candidate);
-      const budgetStartedAt = priorDeferrals[0]?.createdAt ?? now;
+      const budgetStartedAt = state?.budgetStartedAt ?? now;
       const budgetDeadlineAt = new Date(budgetStartedAt.getTime() + SPECIFICATION_READ_DEFERRAL_BUDGET_MS);
       if (now.getTime() >= budgetDeadlineAt.getTime()) {
-        const reason = `Spec transcription claim refused: ${refusal.reason}: transient read deferral budget exhausted after ${SPECIFICATION_READ_DEFERRAL_BUDGET_MS}ms; last underlying error: ${refusal.message}`;
-        const parked = await parkQueuedCandidate(candidate, {
-          reason,
-          condition: refusal.reason,
-          activityBody: `Review claim stopped after its transient specification-read budget was exhausted: ${reason}`,
-          inboxBody: `Review claim failed and the task was parked in Backlog after its transient specification-read budget was exhausted: ${reason}`,
-          metadata: {
-            classification: refusal.classification,
-            exhaustedCondition: SPECIFICATION_READ_DEFERRAL_CONDITION,
-            budgetStartedAt: budgetStartedAt.toISOString(),
-            budgetDeadlineAt: budgetDeadlineAt.toISOString(),
-            implementationHeadSha,
-            lastUnderlyingError: refusal.message,
-          },
-        });
-        return parked.chainLocked ? HALT : SKIP;
+        return exhaustTransientSpecificationRead(candidate, {
+          attemptCount: state?.attemptCount ?? 0,
+          budgetStartedAt,
+          budgetDeadlineAt,
+          lastUnderlyingError: refusal.detail,
+        }, implementationHeadSha);
       }
 
-      const attempt = priorDeferrals.length + 1;
+      const attempt = (state?.attemptCount ?? 0) + 1;
       const delayMs = SPECIFICATION_READ_DEFERRAL_DELAYS_MS[
         Math.min(attempt - 1, SPECIFICATION_READ_DEFERRAL_DELAYS_MS.length - 1)
       ]!;
@@ -282,10 +326,6 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         data: { readyAt: nextAttemptAt },
       });
       if (deferred.count !== 1) return SKIP;
-      const lockedTask = await lockTaskMutationRows(tx, candidate.task.id);
-      if (!lockedTask
-        || lockedTask.archivedAt !== null
-        || (lockedTask.status !== TaskStatus.TODO && lockedTask.status !== TaskStatus.DOING)) return ROLLBACK_SKIP;
       await tx.taskActivity.create({
         data: {
           taskId: candidate.task.id,
@@ -303,10 +343,11 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             nextAttemptAt: nextAttemptAt.toISOString(),
             implementationHeadSha,
             lastUnderlyingError: refusal.message,
+            lastUnderlyingErrorDetail: refusal.detail,
           },
         },
       });
-      return lockedTask.chainId ? HALT : SKIP;
+      return candidate.task.chainId ? HALT : SKIP;
     };
     // One candidate's decision, taken as its own unit of work so the loop can
     // isolate it. `skip` moves to the next candidate, `halt` ends the whole
@@ -532,6 +573,14 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         return SKIP;
       }
       if (prepared.status === "ready") {
+        const deferralState = await specificationReadDeferralState(candidate);
+        if (deferralState && now.getTime() >= deferralState.budgetDeadlineAt.getTime()) {
+          return exhaustTransientSpecificationRead(
+            candidate,
+            deferralState,
+            prepared.verification.implementationHeadSha,
+          );
+        }
         if (!verificationResults.has(prepared.verification.key)) {
           // Repository I/O must not happen while this serializable transaction
           // holds candidate/chain rows. The outer claim loop performs the read
@@ -545,6 +594,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
               candidate,
               refusal,
               prepared.verification.implementationHeadSha,
+              deferralState,
             );
           }
           await parkQueuedCandidate(candidate, {
@@ -725,10 +775,6 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         console.error(`Claim candidate ${candidate.id} failed and was isolated from the claim`, error);
         isolated ??= error;
-        continue;
-      }
-      if (decided.outcome === "rollback-skip") {
-        await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         continue;
       }
       await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${savepoint}`);

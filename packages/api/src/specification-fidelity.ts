@@ -26,6 +26,7 @@ export type SpecificationRefusalClassification = "transient" | "non-transient";
 export type SpecificationRefusal = {
   reason: SpecificationRefusalReason;
   classification: SpecificationRefusalClassification;
+  detail: string;
   message: string;
 };
 
@@ -124,18 +125,27 @@ export const normalizeLineEndings = (bytes: Uint8Array): Uint8Array => {
 const refusal = (
   reason: SpecificationRefusalReason,
   detail: string,
-  classification: SpecificationRefusalClassification,
+  classification: SpecificationRefusalClassification = "non-transient",
 ): SpecificationRefusal => ({
   reason,
   classification,
+  detail,
   message: `Spec transcription claim refused: ${reason}: ${detail}`,
 });
 
 export const specificationUnreadableRefusal = (
   detail: string,
-  classification: SpecificationRefusalClassification,
+  classification: SpecificationRefusalClassification = "non-transient",
 ): SpecificationRefusal => (
   refusal(SPEC_TRANSCRIPTION_UNREADABLE_REASON, detail, classification)
+);
+
+export const specificationReadBudgetExhaustedRefusal = (
+  budgetMs: number,
+  lastUnderlyingError: string,
+): SpecificationRefusal => specificationUnreadableRefusal(
+  `transient read deferral budget exhausted after ${budgetMs}ms; last underlying error: ${lastUnderlyingError}`,
+  "transient",
 );
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
@@ -153,14 +163,12 @@ const compoundAuthority = (source: AuthoritySource): AuthorityResult => {
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "approved specification output is missing",
-      "non-transient",
     ) };
   }
   if (source.stepOutput.kind !== "spec") {
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "approved specification output has an unexpected kind",
-      "non-transient",
     ) };
   }
   let parsed: unknown;
@@ -170,14 +178,12 @@ const compoundAuthority = (source: AuthoritySource): AuthorityResult => {
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "approved specification output is not valid JSON",
-      "non-transient",
     ) };
   }
   if (!isRecord(parsed) || parsed.schemaVersion !== 1 || typeof parsed.spec !== "string") {
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "approved specification output has no canonical spec field",
-      "non-transient",
     ) };
   }
   return { text: parsed.spec };
@@ -188,7 +194,6 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "direct-chain implementation step metadata is missing",
-      "non-transient",
     ) };
   }
   const parsed = readBrief(source.description, {
@@ -198,7 +203,6 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
     ? { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "direct-chain task brief is unavailable",
-      "non-transient",
     ) }
     : { text: parsed.brief };
 };
@@ -213,7 +217,6 @@ const authorityFor = async (
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "chain identity is unavailable",
-      "non-transient",
     ) };
   }
   const sources = await tx.task.findMany({
@@ -236,7 +239,6 @@ const authorityFor = async (
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "compound chain has multiple specification steps",
-      "non-transient",
     ) };
   }
   if (specificationSources[0]) return compoundAuthority(specificationSources[0]);
@@ -248,7 +250,6 @@ const authorityFor = async (
       implementationSources.length === 0
         ? "direct-chain implementation task is missing"
         : "direct chain has multiple implementation steps",
-      "non-transient",
     ) };
   }
   return directAuthority(implementationSources[0]!);
@@ -283,14 +284,12 @@ export const prepareSpecificationVerification = async (
     return { status: "refused", refusal: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "pinned implementation head is unavailable",
-      "non-transient",
     ) };
   }
   if (!candidate.branch || !isValidBranchName(candidate.branch)) {
     return { status: "refused", refusal: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "materialized specification branch is unavailable",
-      "non-transient",
     ) };
   }
 
@@ -301,7 +300,6 @@ export const prepareSpecificationVerification = async (
   if (!repository) {
     return { status: "refused", refusal: specificationUnreadableRefusal(
       `repository remote is not a supported GitHub repository: ${candidate.repo.remoteUrl}`,
-      "non-transient",
     ) };
   }
   const path = specificationPathForBranch(candidate.branch);
@@ -330,7 +328,7 @@ const isAbortError = (error: unknown): boolean => (
   error instanceof Error && error.name === "AbortError"
 );
 
-export type SpecificationReadFailureKind = "transient" | "permanent";
+export type SpecificationReadFailureKind = SpecificationRefusalClassification;
 
 const TRANSIENT_SYSTEM_ERROR_CODES = new Set([
   "ECONNABORTED",
@@ -346,11 +344,11 @@ const TRANSIENT_SYSTEM_ERROR_CODES = new Set([
 /** Only transport and deadline failures are retried; repository/content responses fail closed immediately. */
 export const classifySpecificationReadFailure = (error: unknown): SpecificationReadFailureKind => {
   if (error instanceof GitHubReadError) {
-    return error.kind === "timeout" || error.kind === "transport" ? "transient" : "permanent";
+    return error.kind === "timeout" || error.kind === "transport" ? "transient" : "non-transient";
   }
   if (isAbortError(error)) return "transient";
   const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
-  return code && TRANSIENT_SYSTEM_ERROR_CODES.has(code) ? "transient" : "permanent";
+  return code && TRANSIENT_SYSTEM_ERROR_CODES.has(code) ? "transient" : "non-transient";
 };
 
 type SpecificationReadRetryOptions = {
@@ -376,7 +374,6 @@ export const verifyPreparedSpecification = async (
 ): Promise<SpecificationRefusal | null> => {
   if (!reader) return specificationUnreadableRefusal(
     "server-side repository content reader is unavailable",
-    "non-transient",
   );
   const retryDelaysMs = options.retryDelaysMs ?? SPECIFICATION_READ_RETRY_DELAYS_MS;
   const attemptTimeoutsMs = options.attemptTimeoutsMs ?? SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS;
@@ -416,12 +413,12 @@ export const verifyPreparedSpecification = async (
     const detail = failureDetail(failure);
     const failureKind = classifySpecificationReadFailure(failure);
     const delayMs = retryDelaysMs[attempt];
-    if (failureKind === "permanent" || delayMs === undefined) {
+    if (failureKind === "non-transient" || delayMs === undefined) {
       return specificationUnreadableRefusal(
         delayMs === undefined && attempt > 0
           ? `after ${attempt} retries (${attempt + 1} total attempts); last failure: ${detail}`
           : detail,
-        failureKind === "transient" ? "transient" : "non-transient",
+        failureKind,
       );
     }
     await wait(delayMs, signal);
@@ -434,6 +431,5 @@ export const verifyPreparedSpecification = async (
     : refusal(
       SPEC_TRANSCRIPTION_REFUSAL_REASON,
       `materialized ${verification.path} does not match the authoritative specification`,
-      "non-transient",
     );
 };
