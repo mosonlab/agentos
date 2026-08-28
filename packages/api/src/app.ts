@@ -3271,7 +3271,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being acknowledged"));
     if ("message" in result) return refusalJson(context, result);
     const { leaseToRelease, ...settlement } = result;
-    await releaseChainLease(leaseToRelease);
+    // Cancellation is a terminal write. The lease target is deliberately
+    // released only after that transaction commits, when the release adapter
+    // can also record the confirmed deletion and its hold window.
+    await releaseChainLease(leaseToRelease, db);
     return context.json(settlement);
   });
 
@@ -4041,7 +4044,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being settled"));
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...cancellation } = result;
-    await releaseChainLease(releaseMergeLeaseTask);
+    // A queued cancellation is the final consumer when no runner ever claims
+    // the Run. Keep the release post-commit so a rollback cannot free a lease
+    // whose cancellation state was not durably written.
+    await releaseChainLease(releaseMergeLeaseTask, db);
     return context.json(cancellation);
   });
 

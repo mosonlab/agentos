@@ -11,6 +11,7 @@ import {
 
 import { jsonValue } from "./execution.js";
 import { settleLease } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import type { Refusal } from "./refusal.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { lockTaskMutationRows } from "./task-write.js";
@@ -71,7 +72,13 @@ export type TerminalResult = {
   runId: string;
   taskId: string | null;
   status: RunStatus;
-  leaseToRelease: string | null;
+  /**
+   * The final consumer's project-scoped Chain Lease identity. The release
+   * happens after this transaction commits, so carrying the project along with
+   * the chain is necessary both for attribution and for two projects that use
+   * the same chain id not to collapse into one evidence record.
+   */
+  leaseToRelease: MergeLeaseTarget | null;
   cancellationState?: "acknowledged";
   requestId?: string;
 };

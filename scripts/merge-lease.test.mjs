@@ -191,6 +191,10 @@ test("merge lease task release ignores holder identity and skips a different tas
 
   const released = runLease(fixture, ["release", "--task", "chain-42"], "api@fixture");
   assert.equal(released.status, 0, released.stdout + released.stderr);
+  assert.ok(
+    released.stdout.includes(`MERGE LEASE: released refs/merge-lease/holder ${original.sha} ${original.lease.acquiredAt}`),
+    released.stdout,
+  );
   assert.match(runLease(fixture, ["status"]).stdout, /no lease held/u);
 });
 
@@ -417,12 +421,12 @@ test("a release that frees the lease says released in both lines", (t) => {
     "api@fixture",
   );
   assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
-  const { sha } = readLease(fixture);
+  const { sha, lease } = readLease(fixture);
 
   const released = runLease(fixture, ["release", "--task", "chain-7"], "api@fixture");
   assert.equal(released.status, 0, released.stdout + released.stderr);
   assert.match(released.stdout, new RegExp(`^merge-lease: released refs/merge-lease/holder \\(${sha}\\)$`, "mu"));
-  assert.match(released.stdout, new RegExp(`^MERGE LEASE: released refs/merge-lease/holder ${sha}$`, "mu"));
+  assert.match(released.stdout, new RegExp(`^MERGE LEASE: released refs/merge-lease/holder ${sha} ${lease.acquiredAt}$`, "mu"));
 });
 
 test("a release with nothing to free says not-held in both lines", (t) => {
