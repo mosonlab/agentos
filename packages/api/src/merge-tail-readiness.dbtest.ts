@@ -234,6 +234,29 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId], "base drift requeue releases before the next v2 Regression run");
 });
 
+test("base drift after lease acquisition is rechecked before authorization", async () => {
+  const seeded = await seedReadiness();
+  const driftedBase = "d".repeat(40);
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : driftedBase });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, movingReader, new Date(), 5, releaseChainLease, runWithMergeLease),
+    { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+  );
+  assert.equal(reads, 2);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+});
+
 test("ordinary base requeue authorizes the refreshed exact head", async () => {
   const seeded = await seedReadiness();
   const driftedBase = "d".repeat(40);
@@ -430,17 +453,35 @@ test("a stale worker cannot requeue regression after a newer worker owns the cla
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
 });
 
-test("an unreachable merge lease acquire stops with a durable reason", async () => {
+test("an unreachable merge lease acquire defers mechanically without spending regression", async () => {
   const seeded = await seedReadiness();
   const unreachable: MergeLeaseAcquirer = async () => ({ outcome: "unreachable", detail: "spawn bash ENOENT" });
+  const started = new Date();
   assert.deepEqual(
-    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, leaseRunner(unreachable)),
-    { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+    await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(unreachable)),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
   );
   const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
-  assert.equal(readiness.status, TaskStatus.REVIEW);
-  assert.match(readiness.failureReason ?? "", /merge lease acquire is unreachable.*ENOENT/u);
-  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+  assert.equal(readiness.status, TaskStatus.DOING);
+  assert.match(readiness.failureReason ?? "", /^merge-readiness-claim:/u);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.readiness.id } });
+  assert.match(activity.body, /lease acquisition deferred.*ENOENT/ui);
+  assert.deepEqual(releasedChainLeases, []);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+
+  assert.deepEqual(
+    await readinessTick(
+      db,
+      reader(),
+      new Date(started.getTime() + (READINESS_CLAIM_LEASE_MS * 2)),
+      5,
+      releaseChainLease,
+      runWithMergeLease,
+    ),
+    { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 
 test("a worker that acquired then lost its claim releases without a concrete successor Run", async () => {

@@ -1,6 +1,6 @@
 # 0001 - Narrow the merge lease hold window
 
-Status: accepted (2026-08-26), amended (2026-08-26)
+Status: superseded by ADR-0003 (2026-08-28)
 
 ## Amendment (2026-08-26): the independent review and the release-authority check are retired
 

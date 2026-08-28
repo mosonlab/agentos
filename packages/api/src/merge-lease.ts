@@ -130,12 +130,13 @@ const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): v
 /**
  * The chain whose merge lease a Task's run holds, or null when that Task is not
  * part of the merge tail. This mirrors the completion path's `tailLeaseChainId`:
- * only the mechanical merge step, the Regression step, and the merge-tail
- * auxiliary tasks (automatic repair attempts) ever run under the lease, and an
- * auxiliary task answers for the lease of the Regression
- * chain it serves rather than for a chain of its own. It reads the same marker
- * window the completion path reads because it is the same question, which is
- * why the window no longer needs restating here.
+ * the mechanical merge step consumes the current readiness handoff. Regression
+ * and auxiliary shapes remain here as cleanup identities for older retained
+ * handoffs and interrupted generations; their release is idempotent when the
+ * current readiness-owned protocol holds no Lease yet. An auxiliary task
+ * answers for the Regression chain it serves rather than for a chain of its
+ * own. It reads the same marker window the completion path reads because it is
+ * the same question, which is why the window no longer needs restating here.
  */
 export type LeaseHolder = {
   chainId: string;
@@ -356,7 +357,11 @@ export type MergeLeaseDependencies = {
 export type WithMergeLease = <T>(
   chainId: string | null,
   fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
-) => Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }>;
+) => Promise<
+  | { outcome: "contended" }
+  | { outcome: "unreachable"; detail: string }
+  | { outcome: "ran"; value: T }
+>;
 
 /**
  * Run one authorization attempt under the Chain's merge Lease. A successful
@@ -372,7 +377,11 @@ export const withMergeLease = async <T>(
     acquire: acquireMergeLease,
     release: releaseMergeLeaseAdapter,
   },
-): Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }> => {
+): Promise<
+  | { outcome: "contended" }
+  | { outcome: "unreachable"; detail: string }
+  | { outcome: "ran"; value: T }
+> => {
   if (chainId === null) {
     const result = await fn();
     return { outcome: "ran", value: result.value };
@@ -381,7 +390,7 @@ export const withMergeLease = async <T>(
   const acquisition = await dependencies.acquire(chainId);
   if (acquisition.outcome === "contended") return { outcome: "contended" };
   if (acquisition.outcome === "unreachable") {
-    throw new Error(`merge lease acquire is unreachable: ${acquisition.detail}`);
+    return { outcome: "unreachable", detail: acquisition.detail };
   }
 
   let disposition: LeaseDisposition = { kind: "release" };

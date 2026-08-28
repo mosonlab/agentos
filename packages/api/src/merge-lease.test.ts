@@ -197,6 +197,25 @@ test("a contended merge Lease does not run the callback", async () => {
   assert.equal(releaseCalled, false);
 });
 
+test("an unreachable merge Lease is a retryable result and does not run the callback", async () => {
+  let callbackCalled = false;
+  let releaseCalled = false;
+  const result = await withMergeLease("chain-unreachable", async () => {
+    callbackCalled = true;
+    return { disposition: { kind: "release" }, value: null };
+  }, {
+    acquire: async () => ({ outcome: "unreachable", detail: "TLS transport failed" }),
+    release: async () => {
+      releaseCalled = true;
+      return released;
+    },
+  });
+
+  assert.deepEqual(result, { outcome: "unreachable", detail: "TLS transport failed" });
+  assert.equal(callbackCalled, false);
+  assert.equal(releaseCalled, false);
+});
+
 test("the module reports a release anomaly itself", async (t) => {
   const said: string[] = [];
   t.mock.method(console, "error", (...args: unknown[]) => { said.push(args.map(String).join(" ")); });

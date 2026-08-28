@@ -76,7 +76,7 @@ exec "$REGRESSION_FIXTURE_NODE" "$@"
 `);
   executable(join(bin, "merge-lease"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_LEASE_LOG"
-exit 0
+exit "${"$"}{REGRESSION_FIXTURE_LEASE_EXIT:-0}"
 `);
   executable(join(bin, "gate-dispatch"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_GATE_LOG"
@@ -137,16 +137,16 @@ test("prepare refreshes before semantic review without acquiring the merge lease
   assert.equal(readFileSync(seeded.requests, "utf8"), "", "prepare emitted no final output");
 });
 
-test("finalize persists the dispatch PASS line verbatim and retains the lease", () => {
+test("finalize persists the dispatch PASS before readiness acquires the lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   seeded.env.REGRESSION_FIXTURE_GATE_NOISE = "verbose gate detail that stays platform-side";
+  seeded.env.REGRESSION_FIXTURE_LEASE_EXIT = "99";
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
   const headSha = git(seeded.work, "rev-parse", "HEAD");
   assert.match(headSha, SHA);
-  assert.equal(readFileSync(seeded.leaseLog, "utf8").trim().split("\n").length, 1);
-  assert.match(readFileSync(seeded.leaseLog, "utf8"), /^acquire --task chain-1 /u);
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "Regression never touches the merge lease");
   assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${headSha} --master ${seeded.baseSha}`);
   const [request] = requestBodies(seeded);
   const verdict = JSON.parse(String(request?.body)) as Record<string, unknown>;
@@ -214,6 +214,29 @@ test("finalize refreshes drift outside the lease and requires semantic recheck",
   assert.equal(readFileSync(join(seeded.work, "drift.txt"), "utf8"), "drift\n");
 });
 
+test("finalize refuses a PASS when the target moves during the gate", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  const main = join(seeded.root, "main-during-gate");
+  git(seeded.root, "clone", "--branch", "main", seeded.origin, main);
+  const driftGate = join(seeded.root, "bin", "drift-gate");
+  executable(driftGate, `#!/bin/sh
+printf 'drift during gate\n' > '${main}/during-gate.txt'
+git -C '${main}' add during-gate.txt
+git -C '${main}' commit -m 'drift during gate' >/dev/null
+git -C '${main}' push origin main >/dev/null
+printf 'MERGE GATE: PASS %s\n' "$1"
+`);
+  seeded.env.REGRESSION_GATE_DISPATCH = driftGate;
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 77, finalized.stderr);
+  assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
+  assert.equal(readFileSync(seeded.requests, "utf8"), "");
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
+  assert.equal(readFileSync(join(seeded.work, "during-gate.txt"), "utf8"), "drift during gate\n");
+});
+
 test("review-fail is emitted mechanically without acquiring or dispatching", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
@@ -228,17 +251,14 @@ test("review-fail is emitted mechanically without acquiring or dispatching", () 
   assert.equal(verdict.baseHeadSha, seeded.baseSha);
 });
 
-test("gate FAIL preserves its proof and releases immediately", () => {
+test("gate FAIL preserves its proof without touching the merge lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (runner package tests)";
   seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
-  const leases = readFileSync(seeded.leaseLog, "utf8").trim().split("\n");
-  assert.equal(leases.length, 2);
-  assert.match(leases[0]!, /^acquire --task chain-1 /u);
-  assert.equal(leases[1], "release --task chain-1");
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   const [request] = requestBodies(seeded);
   assert.deepEqual(JSON.parse(String(request?.body)), {
     schemaVersion: 2,
@@ -295,7 +315,7 @@ test("a non-conflict merge failure aborts loudly without persisting output", () 
   assert.equal(git(seeded.work, "status", "--porcelain"), "");
 });
 
-test("a gate without a verdict records failure, releases the lease, and dies loudly", () => {
+test("a gate without a verdict records failure and dies loudly without a lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "gate exited before verdict";
@@ -305,10 +325,7 @@ test("a gate without a verdict records failure, releases the lease, and dies lou
   assert.notEqual(finalized.status, 0);
   assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 1 attempt\(s\) \(exit 143\)/u);
   assert.doesNotMatch(finalized.stdout, /gate exited before verdict/u);
-  assert.deepEqual(readFileSync(seeded.leaseLog, "utf8").trim().split("\n"), [
-    "acquire --task chain-1 --reason chain merge tail chain-1",
-    "release --task chain-1",
-  ]);
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   const [request] = requestBodies(seeded);
   assert.equal(request?.actorType, "agent");
   assert.match(String(request?.body), /no admissible verdict after attempt 1 \(exit 143\)/u);

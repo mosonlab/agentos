@@ -34,10 +34,16 @@ The chain-tail verification that must pass before a chain's branch may merge:
 lint, types, and tests run by a gate worker in a clean environment. Gate
 evidence belongs to the chain tail only; review steps never run the gate.
 
+**Merge readiness**:
+The mechanical chain step that validates durable **Merge gate** evidence
+against current repository state, obtains the merge **Lease**, and authorizes
+the exact merge. It performs no semantic review.
+
 **Lease**:
 The time-bounded claim a runner holds on a run, kept alive by heartbeats. An
-expired lease returns the run to the queue; merge execution additionally takes
-a merge lease so only one chain integrates at a time.
+expired lease returns the run to the queue. The merge Lease is a separate
+global claim: **Merge readiness** obtains it and hands it to merge execution so
+only one chain integrates at a time.
 
 **Specification of record**:
 The single authoritative statement of what to build, which every later step
@@ -70,7 +76,8 @@ through the inbox. The human-in-the-loop point for un-grilled cards.
 - Planning turns the specification into **Slices**; implementation works the
   **Frontier** they form
 - **Blind review** produces findings; **Disposition** rules on each
-- The **Merge gate** and the merge **Lease** guard the chain tail
+- The **Merge gate** produces exact-head evidence; **Merge readiness** validates
+  it under the merge **Lease** and hands the claim to merge execution
 
 ## Flagged ambiguities
 

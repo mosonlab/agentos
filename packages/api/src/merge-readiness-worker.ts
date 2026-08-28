@@ -11,6 +11,7 @@ import {
   authorizationMetadata,
   enqueueTaskRun,
   isMergeReadinessStep,
+  MERGE_TAIL_KIND,
   parseRegressionVerdict,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   recoveryContext,
@@ -350,6 +351,41 @@ const deferReadiness = async (
   return deferred.count === 1;
 });
 
+const recordLeaseDeferral = async (
+  db: PrismaClient,
+  input: {
+    readinessTaskId: string;
+    claimReason: string;
+    chainId: string | null;
+    detail: string;
+    at: Date;
+  },
+): Promise<boolean> => db.$transaction(async (tx) => {
+  await lockTaskMutationRows(tx, input.readinessTaskId);
+  const held = await tx.task.updateMany({
+    where: {
+      id: input.readinessTaskId,
+      status: TaskStatus.DOING,
+      failureReason: input.claimReason,
+    },
+    data: { failureReason: input.claimReason },
+  });
+  if (held.count !== 1) return false;
+  await tx.taskActivity.create({ data: {
+    taskId: input.readinessTaskId,
+    actorType: "control-plane",
+    body: `Merge lease acquisition deferred: ${input.detail}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.readiness,
+      state: "lease-acquire-deferred",
+      chainId: input.chainId,
+      detail: input.detail,
+      retryAfter: new Date(input.at.getTime() + READINESS_CLAIM_LEASE_MS).toISOString(),
+    },
+  } });
+  return true;
+});
+
 const applyReadinessDecision = async (
   db: PrismaClient,
   read: ClaimedReadiness,
@@ -357,6 +393,7 @@ const applyReadinessDecision = async (
   result: ReadinessTickResult,
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
+  reader: PullRequestReader | null,
 ): Promise<void> => {
   const { readiness, regression, recovery } = read;
   let claimReason = read.claimReason;
@@ -443,6 +480,43 @@ const applyReadinessDecision = async (
     claimReason = renewedClaim;
     read.claimReason = renewedClaim;
 
+    // Regression evidence is durable before this short Lease window. Repeat
+    // the remote decision after acquisition so a base move between the first
+    // read and the Lease cannot authorize stale evidence.
+    const leasedDecision = await evaluateReadiness(reader, read.input);
+    switch (leasedDecision.kind) {
+      case "skip":
+        return { disposition: { kind: "release" as const }, value: "lease-recheck-skipped" as const };
+      case "defer":
+        await deferReadiness(db, readiness.id, claimReason);
+        return { disposition: { kind: "release" as const }, value: "lease-recheck-deferred" as const };
+      case "stop": {
+        const stopped = await stopReadiness(db, {
+          readinessTaskId: readiness.id,
+          regressionTaskId: regression.id,
+          reason: leasedDecision.evidence,
+          recovery,
+          claimReason,
+        }, async () => undefined);
+        if (stopped) result.stopped += 1;
+        return { disposition: { kind: "release" as const }, value: "lease-recheck-stopped" as const };
+      }
+      case "requeue-regression": {
+        const requeued = await requeueRegression(db, {
+          readinessTaskId: readiness.id,
+          regressionTaskId: regression.id,
+          ...leasedDecision,
+          now: read.input.now,
+          recovery,
+          claimReason,
+        });
+        if (requeued) result.requeued += 1;
+        return { disposition: { kind: "release" as const }, value: "lease-recheck-requeued" as const };
+      }
+      case "authorize":
+        break;
+    }
+
     const authorization = await db.$transaction(async (tx) => {
       await lockTaskMutationRows(tx, readiness.id);
       const held = await tx.task.updateMany({
@@ -474,9 +548,9 @@ const applyReadinessDecision = async (
       }
       const binding = `mechanical:${readiness.id}:${randomUUID()}`;
       const payload = {
-        ...decision.evidence,
+        ...leasedDecision.evidence,
         mergeMethod: AUTHORIZED_MERGE_METHOD,
-        issuedAt: decision.issuedAt,
+        issuedAt: leasedDecision.issuedAt,
         decision: {
           channel: "mechanical" as const,
           inboxDecisionId: binding,
@@ -486,7 +560,7 @@ const applyReadinessDecision = async (
       const activity = await tx.taskActivity.create({ data: {
         taskId: readiness.id,
         actorType: "control-plane",
-        body: `Mechanical merge authorized for PR #${decision.prNumber} at ${decision.evidence.headSha}`,
+        body: `Mechanical merge authorized for PR #${leasedDecision.prNumber} at ${leasedDecision.evidence.headSha}`,
         metadata: {
           ...authorizationMetadata(payload),
           recoverySourceStopId: recovery?.sourceStopId ?? null,
@@ -499,37 +573,37 @@ const applyReadinessDecision = async (
           kind: "merge-authorization",
           body: JSON.stringify({
             authorizationActivityId: activity.id,
-            headSha: decision.evidence.headSha,
+            headSha: leasedDecision.evidence.headSha,
           }),
-          commitSha: decision.evidence.headSha,
+          commitSha: leasedDecision.evidence.headSha,
         },
         update: {
           kind: "merge-authorization",
           body: JSON.stringify({
             authorizationActivityId: activity.id,
-            headSha: decision.evidence.headSha,
+            headSha: leasedDecision.evidence.headSha,
           }),
-          commitSha: decision.evidence.headSha,
+          commitSha: leasedDecision.evidence.headSha,
         },
       });
       await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
       // The defence list no longer holds a merge. What it still does is say
       // which of these paths a human would want to have seen move, so the
       // merge leaves an audit message behind instead of a review obligation.
-      if (decision.auditTriggers.length > 0) {
+      if (leasedDecision.auditTriggers.length > 0) {
         await openDefenseAuditNotice(tx, {
           readinessTaskId: readiness.id,
-          headSha: decision.headSha,
-          baseSha: decision.baseSha,
-          triggers: decision.auditTriggers,
+          headSha: leasedDecision.headSha,
+          baseSha: leasedDecision.baseSha,
+          triggers: leasedDecision.auditTriggers,
         });
       }
       await writeMarker(tx, readiness.id, "readiness", {
         actorType: "control-plane",
-        body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
+        body: `Merge readiness authorized exact head ${leasedDecision.evidence.headSha}; merge execution queued`,
         metadata: {
           state: "authorized",
-          headSha: decision.evidence.headSha,
+          headSha: leasedDecision.evidence.headSha,
           authorizationActivityId: activity.id,
           recoverySourceStopId: recovery?.sourceStopId ?? null,
         },
@@ -563,6 +637,16 @@ const applyReadinessDecision = async (
     };
   });
   if (leased.outcome === "contended") return;
+  if (leased.outcome === "unreachable") {
+    await recordLeaseDeferral(db, {
+      readinessTaskId: readiness.id,
+      claimReason,
+      chainId: readiness.chainId,
+      detail: leased.detail,
+      at: read.input.now,
+    });
+    return;
+  }
   if (leased.value === "authorized") {
     result.authorized += 1;
   }
@@ -594,6 +678,7 @@ export const readinessTick = async (
         result,
         releaseChainLease,
         runWithMergeLease,
+        reader,
       );
     } catch (error: unknown) {
       const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;

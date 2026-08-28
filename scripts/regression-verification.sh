@@ -3,9 +3,9 @@
 #
 # The model invokes `prepare`, performs only the semantic recheck, then invokes
 # `finalize` (or `review-fail <summary>`). This script owns every git/network,
-# lease, gate, verdict-transcription, and AgentOS-output operation. PASS retains
-# the merge lease for readiness and the merge executor; every non-PASS outcome
-# acquired here releases it immediately.
+# gate, verdict-transcription, and AgentOS-output operation. Merge readiness
+# owns the short merge-lease window after a durable exact-head PASS exists, so
+# lease transport failures never consume a semantic-verification Run.
 
 set -u
 set -o pipefail
@@ -22,7 +22,7 @@ require_env() {
 }
 
 for required in AGENTOS_API_URL AGENTOS_SESSION_TOKEN AGENTOS_RUN_ID AGENTOS_FENCING_TOKEN \
-  AGENTOS_WORKSPACE_PATH AGENTOS_CHAIN_ID AGENTOS_PULL_REQUEST_BASE; do
+  AGENTOS_WORKSPACE_PATH AGENTOS_PULL_REQUEST_BASE; do
   require_env "$required"
 done
 
@@ -32,11 +32,8 @@ git check-ref-format --branch "$AGENTOS_PULL_REQUEST_BASE" >/dev/null 2>&1 \
 
 SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_FILE="${AGENTOS_REGRESSION_STATE:-$AGENTOS_WORKSPACE_PATH/.git/agentos-regression-state}"
-MERGE_LEASE="${REGRESSION_MERGE_LEASE:-$SCRIPT_ROOT/scripts/merge-lease.sh}"
 GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_ROOT/scripts/gate-worker/gate-dispatch.sh}"
 API_CLIENT="${REGRESSION_API_CLIENT:-curl}"
-LEASE_HELD=false
-RETAIN_LEASE=false
 GATE_LOG=""
 API_HEADERS=""
 # shellcheck source=scripts/gate-worker/lib.sh
@@ -45,9 +42,6 @@ API_HEADERS=""
 cleanup() {
   [ -z "$GATE_LOG" ] || rm -f -- "$GATE_LOG"
   [ -z "$API_HEADERS" ] || rm -f -- "$API_HEADERS"
-  if [ "$LEASE_HELD" = true ] && [ "$RETAIN_LEASE" != true ]; then
-    "$MERGE_LEASE" release --task "$AGENTOS_CHAIN_ID" >/dev/null 2>&1 || true
-  fi
 }
 trap cleanup EXIT
 
@@ -155,26 +149,19 @@ process.stdout.write(JSON.stringify({ fencingToken, actorType: "agent", body }))
   api_request POST /activity "$request" >/dev/null 2>&1 || true
 }
 
-release_lease() {
-  "$MERGE_LEASE" release --task "$AGENTOS_CHAIN_ID" \
-    || die "merge lease release failed for $AGENTOS_CHAIN_ID"
-  LEASE_HELD=false
-}
-
 persist_refresh_conflict() {
-  local pre_head="$1" target_head="$2" conflicts="$3" acquired="${4:-false}" verdict display_mode
+  local pre_head="$1" target_head="$2" conflicts="$3" verdict display_mode
   valid_sha "$pre_head" && valid_sha "$target_head" \
     || die "refusing malformed refresh-conflict verdict"
   [ -n "$conflicts" ] || die "refusing refresh-conflict verdict without unmerged paths"
   verdict="$(json_verdict refresh-conflict "$pre_head" "$target_head" "$conflicts")"
   persist_output "$verdict" "$pre_head"
-  if [ "$acquired" = true ]; then release_lease; fi
   display_mode="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
   printf 'REGRESSION %s: refresh-conflict %s\n' "$display_mode" "$conflicts"
 }
 
 refresh_onto_target() {
-  local target_head="$1" acquired="${2:-false}" pre_head conflicts merge_output merge_status
+  local target_head="$1" pre_head conflicts merge_output merge_status
   valid_sha "$target_head" || die "refusing to merge malformed target head: $target_head"
   pre_head="$(head_sha)" || die "cannot resolve a valid workspace HEAD"
   merge_output="$(git merge --no-edit "$target_head" 2>&1)"
@@ -185,7 +172,7 @@ refresh_onto_target() {
   conflicts="$(git diff --name-only --diff-filter=U | paste -sd, -)"
   git merge --abort >/dev/null 2>&1 || true
   if [ -n "$conflicts" ]; then
-    persist_refresh_conflict "$pre_head" "$target_head" "$conflicts" "$acquired"
+    persist_refresh_conflict "$pre_head" "$target_head" "$conflicts"
     return 2
   fi
   [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
@@ -195,7 +182,7 @@ refresh_onto_target() {
 prepare() {
   local base_head result prepared_head
   base_head="$(fetch_base)" || die "cannot refresh target head"
-  refresh_onto_target "$base_head" false
+  refresh_onto_target "$base_head"
   result=$?
   [ "$result" -eq 0 ] || return 0
   prepared_head="$(head_sha)" || die "cannot resolve prepared workspace HEAD"
@@ -204,13 +191,12 @@ prepare() {
 }
 
 semantic_stale() {
-  local target_head="$1" acquired="${2:-false}" result refreshed_head
-  refresh_onto_target "$target_head" "$acquired"
+  local target_head="$1" result refreshed_head
+  refresh_onto_target "$target_head"
   result=$?
   [ "$result" -eq 0 ] || return 0
   refreshed_head="$(head_sha)" || die "cannot resolve refreshed workspace HEAD"
   write_state "$refreshed_head" "$target_head"
-  if [ "$acquired" = true ]; then release_lease; fi
   printf 'REGRESSION FINALIZE: semantic-stale %s %s\n' "$refreshed_head" "$target_head"
   return "$EXIT_SEMANTIC_STALE"
 }
@@ -227,7 +213,7 @@ review_fail() {
 }
 
 finalize() {
-  local current latest result acquired_latest gate_log gate_status gate_proof attempt verdict
+  local current latest gate_log gate_status gate_proof attempt verdict
   read_state
   current="$(head_sha)" || die "cannot resolve finalize workspace HEAD"
   [ "$current" = "$VERIFIED_HEAD_SHA" ] || die "workspace HEAD changed after semantic verification"
@@ -236,26 +222,13 @@ finalize() {
   # queues behind a tree that still needs another model pass.
   latest="$(fetch_base)" || die "cannot refresh target head"
   if [ "$latest" != "$BASE_HEAD_SHA" ]; then
-    semantic_stale "$latest" false
-    return $?
-  fi
-
-  "$MERGE_LEASE" acquire --task "$AGENTOS_CHAIN_ID" \
-    --reason "chain merge tail $AGENTOS_CHAIN_ID" \
-    || die "merge lease acquire failed for $AGENTOS_CHAIN_ID"
-  LEASE_HELD=true
-
-  # Close the fetch/acquire race. A changed tree is integrated mechanically,
-  # but the lease is released before asking the model to verify it again.
-  acquired_latest="$(fetch_base)" || die "cannot refresh target head after lease acquire"
-  if [ "$acquired_latest" != "$BASE_HEAD_SHA" ]; then
-    semantic_stale "$acquired_latest" true
+    semantic_stale "$latest"
     return $?
   fi
 
   current="$(head_sha)" || die "cannot resolve gated workspace HEAD"
   gate_log="$(mktemp "${TMPDIR:-/tmp}/regression-gate.XXXXXX")" \
-    || { release_lease; die "cannot create gate output file"; }
+    || die "cannot create gate output file"
   GATE_LOG="$gate_log"
   gate_status=76
   for attempt in 1 2 3; do
@@ -272,22 +245,27 @@ finalize() {
   done
   gate_proof="$(gate_verdict_read "$gate_log")" || gate_proof=""
 
+  # Gate execution may be long. Do not publish evidence against a base that
+  # moved while it ran; readiness performs the final check again under Lease.
+  latest="$(fetch_base)" || die "cannot refresh target head after gate"
+  if [ "$latest" != "$BASE_HEAD_SHA" ]; then
+    semantic_stale "$latest"
+    return $?
+  fi
+
   case "$gate_proof" in
     "MERGE GATE: PASS $current")
       verdict="$(json_verdict pass "$current" "$BASE_HEAD_SHA" "$gate_proof")"
       persist_output "$verdict" "$current"
-      RETAIN_LEASE=true
       printf 'REGRESSION FINALIZE: pass %s\n' "$current"
       ;;
     'MERGE GATE: FAIL ('*')')
       verdict="$(json_verdict gate-fail "$current" "$BASE_HEAD_SHA" "$gate_proof")"
       persist_output "$verdict" "$current"
-      release_lease
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;
     *)
       record_failure "Regression gate dispatch produced no admissible verdict after attempt $attempt (exit $gate_status)"
-      release_lease
       die "gate dispatch produced no admissible PASS/FAIL verdict after $attempt attempt(s) (exit $gate_status)"
       ;;
   esac
