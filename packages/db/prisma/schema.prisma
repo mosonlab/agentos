@@ -975,11 +975,20 @@ model Session {
   exitCode               Int?
   signal                 String?
   terminationReason      String?
+  /// Provider-captured authoritative amount in USD. NULL means that no
+  /// authoritative amount was captured; it never means zero or an estimate.
   costUsd                Decimal?               @db.Decimal(12, 4)
+  /// All provider-reported input tokens, including cached input tokens.
   inputTokens            Int?
+  /// Provider-reported output tokens. Reasoning is included only when the
+  /// provider includes it in its output figure.
   outputTokens           Int?
+  /// The cached-input subset of inputTokens. It is informational and must not
+  /// be added to inputTokens again when computing totalTokens.
   cachedInputTokens      Int?
-  totalTokens            Int? // input + output; cached excluded to avoid double counting
+  /// inputTokens + outputTokens. Cached input is counted once because it is
+  /// already included in inputTokens.
+  totalTokens            Int?
   failureReason          String?
   cleanupFailureReason   String?
   run                    Run                    @relation(fields: [runId, projectId], references: [id, projectId], onDelete: Cascade)

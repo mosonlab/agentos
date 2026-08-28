@@ -210,25 +210,31 @@ test("a complete codex token set is priced and labelled as an estimate", async (
   assert.equal(body.topRuns[0].model, "openai-codex/gpt-5.6-luna");
 });
 
-test("token estimates normalize cached input according to each runner", async () => {
+test("canonical token rows price identically across runners", async () => {
   const { project, repo, agent } = await seedProject("costs-runner-normalization");
+  const claude = await agent("claude", "Claude Implementer");
   const codex = await agent("codex", "Implementer");
   const pi = await agent("pi", "PI Implementer");
+  // Canonical persisted input includes its cached subset. Every adapter writes
+  // this same triple, so Costs must not need the runner to interpret it.
+  await seedRun(project.id, repo.id, "Claude estimated", {
+    agentId: claude.id, model: "openai-codex/gpt-5.6-luna", runner: "CLAUDE", startedAt: daysAgo(1),
+    session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
+  });
   await seedRun(project.id, repo.id, "Codex estimated", {
     agentId: codex.id, model: "openai-codex/gpt-5.6-luna", runner: "CODEX", startedAt: daysAgo(1),
-    // Codex input includes its cached subset.
     session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
   });
   await seedRun(project.id, repo.id, "PI estimated", {
     agentId: pi.id, model: "openai-codex/gpt-5.6-luna", runner: "PI", startedAt: daysAgo(1),
-    // PI input is already uncached and cache reads are disjoint.
-    session: { costUsd: null, inputTokens: 900_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
+    session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
   });
 
   const { body } = await call(`/projects/${project.id}/costs?days=7`);
-  assert.equal(Number(body.totalUsd), 1.564);
-  assert.equal(Number(body.estimatedUsd), 1.564);
+  assert.equal(Number(body.totalUsd), 2.346);
+  assert.equal(Number(body.estimatedUsd), 2.346);
   assert.deepEqual(body.byAgent.map((entry: { agent: string; usd: string }) => [entry.agent, Number(entry.usd)]), [
+    ["claude", 0.782],
     ["codex", 0.782],
     ["pi", 0.782],
   ]);

@@ -2193,12 +2193,12 @@ test("ingesting a FINAL_OUTPUT writes the derived usage columns", async () => {
     assert.equal(updates.length, 1);
     const write = updates[0] as { where: { id: string }; data: Record<string, unknown> };
     assert.equal(write.where.id, "ses-1");
-    assert.equal(write.data.inputTokens, 4);
+    assert.equal(write.data.inputTokens, 8_824);
     assert.equal(write.data.outputTokens, 77);
     assert.equal(write.data.cachedInputTokens, 8_820);
-    // totalTokens is input + output by definition (spec §4.6); cache is stored
-    // separately rather than folded in.
-    assert.equal(write.data.totalTokens, 81);
+    // inputTokens includes cached input; totalTokens is input + output by
+    // definition, so the cache is not added a second time.
+    assert.equal(write.data.totalTokens, 8_901);
     assert.equal(String(write.data.costUsd), "0.0491");
   });
 });
