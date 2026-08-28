@@ -402,6 +402,11 @@
     },
     {
       "category": "pii-email",
+      "glob": "packages/runner/src/dependency-cache.test.ts",
+      "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
       "glob": "packages/runner/src/dispose-workspace.test.ts",
       "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     },
@@ -424,6 +429,11 @@
       "category": "pii-email",
       "glob": "packages/runner/src/reclaim.test.ts",
       "reason": "synthetic Git author identity in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/repo-mirror.test.ts",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     },
     {
       "category": "pii-email",
