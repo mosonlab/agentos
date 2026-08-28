@@ -675,15 +675,20 @@ test("the original Run budget continues through remediation", async () => {
     claimed.run.maxDurationMin = 0.002;
 
     await executeClaim(configured, claimed, { controlPlane: controlPlane.controlPlane });
-    // Let the heartbeat callback that performed the budget kill finish its
-    // best-effort API report before afterEach restores the real global fetch.
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    // The heartbeat callback that performs the budget kill finishes its
+    // best-effort event report asynchronously. Under full-suite load a fixed
+    // sleep can expire before that callback is scheduled, so wait for the
+    // observable report instead.
+    let finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    for (let attempt = 0; attempt < 100 && !finished; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    }
 
     const completion = controlPlane.completions.at(-1);
     assert.equal(completion?.terminalSuccess, false);
     assert.equal(completion?.failureClass, "BUDGET_EXCEEDED");
     assert.match(String(completion?.failureReason), /walltime budget exceeded/u);
-    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     assert.ok(finished);
     assert.equal(finished.payload.outputPersisted, false);
   } finally {
