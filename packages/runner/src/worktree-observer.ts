@@ -44,6 +44,47 @@ const listedWorktreePaths = (output: string): string[] => output
   .filter((field) => field.startsWith(WORKTREE_FIELD))
   .map((field) => field.slice(WORKTREE_FIELD.length));
 
+const decodeQuotedPath = (value: string): string => {
+  if (!value.startsWith('"')) return value;
+  if (!value.endsWith('"')) throw new Error("git worktree returned an unterminated quoted path");
+  let decoded = "";
+  for (let index = 1; index < value.length - 1; index += 1) {
+    const character = value[index]!;
+    if (character !== "\\") {
+      decoded += character;
+      continue;
+    }
+    index += 1;
+    const escaped = value[index];
+    if (escaped === undefined || index >= value.length - 1) {
+      throw new Error("git worktree returned an incomplete path escape");
+    }
+    const simple: Record<string, string> = {
+      a: "\u0007", b: "\b", t: "\t", n: "\n", v: "\u000b", f: "\f", r: "\r", "\\": "\\", '"': '"',
+    };
+    if (simple[escaped] !== undefined) {
+      decoded += simple[escaped];
+      continue;
+    }
+    if (!/[0-7]/u.test(escaped)) throw new Error(`git worktree returned an unknown path escape \\${escaped}`);
+    let octal = escaped;
+    while (octal.length < 3 && /[0-7]/u.test(value[index + 1] ?? "")) {
+      index += 1;
+      octal += value[index];
+    }
+    decoded += String.fromCharCode(Number.parseInt(octal, 8));
+  }
+  return decoded;
+};
+
+const legacyListedWorktreePaths = (output: string): string[] => output
+  .split("\n")
+  .filter((line) => line.startsWith(WORKTREE_FIELD))
+  .map((line) => decodeQuotedPath(line.slice(WORKTREE_FIELD.length)));
+
+const lacksNulWorktreeOutput = (error: unknown): boolean => error instanceof Error
+  && /unknown (?:switch|option) [`']?z['`]?/iu.test(error.message);
+
 const within = (root: string, candidate: string): boolean =>
   candidate === root || candidate.startsWith(`${root}${sep}`);
 
@@ -74,16 +115,31 @@ export const observeExternalWorktrees = async (
   workspacePath: string,
   execute: WorktreeObserverCommandExecutor = command,
 ): Promise<string[]> => {
-  const output = await execute(
-    config,
-    "git",
-    ["worktree", "list", "--porcelain", "-z"],
-    workspacePath,
-    workspaceEnvironment(config),
-  );
+  const env = workspaceEnvironment(config);
+  let worktreePaths: string[];
+  try {
+    const output = await execute(
+      config,
+      "git",
+      ["worktree", "list", "--porcelain", "-z"],
+      workspacePath,
+      env,
+    );
+    worktreePaths = listedWorktreePaths(output);
+  } catch (error: unknown) {
+    if (!lacksNulWorktreeOutput(error)) throw error;
+    const output = await execute(
+      config,
+      "git",
+      ["-c", "core.quotePath=false", "worktree", "list", "--porcelain"],
+      workspacePath,
+      env,
+    );
+    worktreePaths = legacyListedWorktreePaths(output);
+  }
   const lexicalRoot = resolve(workspacePath);
   const root = await resolvedPath(lexicalRoot);
-  const worktrees = await Promise.all(listedWorktreePaths(output).map(
+  const worktrees = await Promise.all(worktreePaths.map(
     (listedPath) => resolvedPath(resolve(lexicalRoot, listedPath)),
   ));
   return worktrees

@@ -98,6 +98,34 @@ test("returns no observation when all registered worktrees resolve inside the ru
   }
 });
 
+test("falls back to quoted porcelain output when Git does not support -z", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-worktree-observer-legacy-"));
+  try {
+    const workspace = join(root, "run");
+    const newlinePath = join(root, "operator", "line\nbreak");
+    const calls: string[][] = [];
+    const execute: WorktreeObserverCommandExecutor = async (_config, _executable, args) => {
+      calls.push(args);
+      if (args.includes("-z")) throw new Error("git failed (129): error: unknown switch `z'");
+      return [
+        `worktree ${workspace}`,
+        "HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "",
+        `worktree ${JSON.stringify(newlinePath)}`,
+        "HEAD bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ].join("\n");
+    };
+
+    assert.deepEqual(await observeExternalWorktrees(config(root), workspace, execute), [newlinePath]);
+    assert.deepEqual(calls, [
+      ["worktree", "list", "--porcelain", "-z"],
+      ["-c", "core.quotePath=false", "worktree", "list", "--porcelain"],
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an unresolvable worktree path does not hide other outside worktrees", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-worktree-observer-unresolvable-"));
   try {

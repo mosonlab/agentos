@@ -35,6 +35,7 @@ export const regressionRepairHandoffForClaim = async (
     runId: string;
     runNumber: number;
     branch: string | null;
+    targetBranch: string | null;
     outputKind: string | null;
   },
 ): Promise<RegressionRepairHandoffSelection> => {
@@ -120,13 +121,15 @@ export const regressionRepairHandoffForClaim = async (
     || output.run.pushedBranch !== input.branch) {
     return invalid(`repair task ${repairTaskId} did not publish ${resolvedHeadSha} to ${input.branch}`);
   }
+  // A failed Run can publish its recoverable work to a per-Run salvage ref.
+  // The retry checks out that ref as targetBranch while it still publishes
+  // successful repair evidence to the task's shared branch.
   const retryRun = await tx.run.findFirst({
     where: {
       taskId: input.taskId,
       runNumber: { gt: 1, lt: input.runNumber },
-      status: RunStatus.SUCCEEDED,
       pushStatus: PushStatus.SUCCEEDED,
-      pushedBranch: input.branch,
+      pushedBranch: input.targetBranch,
       headSha: { not: null },
       createdAt: { gte: output.updatedAt },
     },

@@ -7,6 +7,7 @@ import {
   executionModeFor,
   FailureClass,
   integratorBindingRefusal,
+  INTEGRATOR_OUTPUT_KIND,
   isMergeReadinessStep,
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
@@ -138,7 +139,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     // before a deploy can acquire the exclusive half, and claims arriving
     // during a deploy return no work without observing candidates.
     if (!await deployBarrierAllowsClaim(tx)) return null;
-    const candidates = await tx.run.findMany({
+    const candidateWhere = {
       where: {
         status: RunStatus.QUEUED,
         readyAt: { lte: now },
@@ -154,6 +155,8 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         },
         OR: [{ blockedByRunId: null }, { blockedBy: { status: RunStatus.SUCCEEDED } }],
       },
+    } satisfies Pick<Prisma.RunFindManyArgs, "where">;
+    const candidateInclude = {
       include: {
         // templateStep travels with the claim so delivery can title the PR
         // after the chain rather than the step it happens to be running.
@@ -172,9 +175,62 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           },
         },
       },
-      orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
-      take: 20,
-    });
+    } satisfies Pick<Prisma.RunFindManyArgs, "include">;
+    const candidates = claimantClass === "merge-executor"
+      ? await tx.run.findMany({
+        ...candidateWhere,
+        ...candidateInclude,
+        orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
+        take: 20,
+      })
+      : await (async () => {
+        // Rank in PostgreSQL before applying the window so the transaction
+        // returns only the candidates it can inspect. Mechanical rows are not
+        // in the ordinary runner's lane and therefore cannot consume that
+        // window; claimantMayTake remains the final execution-mode authority.
+        const selectedIds = (await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT candidate."id"
+          FROM "Run" AS candidate
+          JOIN "Task" AS task
+            ON task."id" = candidate."taskId"
+           AND task."projectId" = candidate."projectId"
+          JOIN "Agent" AS agent
+            ON agent."id" = candidate."agentId"
+           AND agent."projectId" = candidate."projectId"
+          LEFT JOIN "Run" AS blocker ON blocker."id" = candidate."blockedByRunId"
+          LEFT JOIN "TaskTemplateStep" AS template_step ON template_step."id" = task."templateStepId"
+          LEFT JOIN LATERAL (
+            SELECT count(*)::integer AS "unfinished"
+            FROM "Task" AS chain_task
+            WHERE chain_task."projectId" = task."projectId"
+              AND chain_task."chainId" = task."chainId"
+              AND chain_task."status" <> lower(${TaskStatus.DONE})::"TaskStatus"
+          ) AS chain_priority ON task."chainId" IS NOT NULL
+          WHERE candidate."status" = lower(${RunStatus.QUEUED})::"RunStatus"
+            AND candidate."readyAt" <= ${now}
+            AND agent."archivedAt" IS NULL
+            AND task."status" IN (lower(${TaskStatus.TODO})::"TaskStatus", lower(${TaskStatus.DOING})::"TaskStatus")
+            AND task."assigneeType" = lower(${AssigneeType.AGENT})::"AssigneeType"
+            AND task."archivedAt" IS NULL
+            AND (candidate."blockedByRunId" IS NULL OR blocker."status" = lower(${RunStatus.SUCCEEDED})::"RunStatus")
+            AND COALESCE(template_step."outputKind", '') <> ${INTEGRATOR_OUTPUT_KIND}
+          ORDER BY COALESCE(chain_priority."unfinished", 1) ASC,
+            candidate."readyAt" ASC,
+            candidate."createdAt" ASC
+          LIMIT 20
+        `).map(({ id }) => id);
+        if (selectedIds.length === 0) return [];
+        const selected = await tx.run.findMany({
+          where: { id: { in: selectedIds } },
+          ...candidateInclude,
+        });
+        const selectedById = new Map(selected.map((candidate) => [candidate.id, candidate]));
+        return selectedIds.map((id) => {
+          const candidate = selectedById.get(id);
+          if (!candidate) throw new Error(`Prioritized queued candidate ${id} could not be loaded`);
+          return candidate;
+        });
+      })();
     const executorRunnerIds = mergeExecutorRunnerIds();
     const parkQueuedCandidate = async (
       candidate: (typeof candidates)[number],
@@ -439,6 +495,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         runId: candidate.id,
         runNumber: candidate.runNumber,
         branch: candidate.branch,
+        targetBranch: candidate.targetBranch,
         outputKind: candidate.task.templateStep?.outputKind ?? null,
       });
       if (regressionRepairHandoff.status === "invalid") {
