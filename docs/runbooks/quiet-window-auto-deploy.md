@@ -175,17 +175,17 @@ The job then performs exactly this sequence and stops at the first failure:
 6. run `npm run db:sync-canonical-prompts`; structural drift outside an
    explicitly source-declared assignee or review-base transition is a terminal
    refusal and is never changed with SQL. Operator model and runner overrides
-   are preserved after validation; only uncustomized Agent-default transitions
-   declared by the source may be adopted. The review-base
-   transitions adopt only `compound-engineer-workflow:6` from `null` to step 5
-   and `direct-engineer-workflow:2` from `null` to step 1. Agent-default transitions
-   are frozen to `review-coordinator` and `review-coordinator-sol`, from model
-   `gpt-5.6-sol:high` with `runnerPreference` `CODEX` to model
-   `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`, plus
-   `implementation-plan-executioner` from `gpt-5.6-sol:medium` / `CODEX` to
-   `gpt-5.6-sol:high` / `CODEX`; the sync adopts one only when both persisted
-   fields exactly match that `from` state and the canonical source exactly
-   matches the `to` state. The dedicated
+   are preserved after validation. Canonical model and runner defaults are
+   loaded from the `agents/roles/*.md` frontmatter through the shared role
+   source loader. For each canonical-role Agent with
+   `runtimeConfigCustomized` false, the sync adopts any model or
+   `runnerPreference` value that differs from that role source and clears its
+   `runtimeConfigDriftNoticeFingerprint`; every such adoption is reported with
+   the Agent name and from/to values. A customized Agent keeps its persisted
+   model and runner values, with the existing drift-notice behavior unchanged.
+   The review-base transitions adopt only `compound-engineer-workflow:6` from
+   `null` to step 5 and `direct-engineer-workflow:2` from `null` to step 1. The
+   dedicated
    `regression-verifier` is the one source-declared role creation: when absent,
    sync creates it from canonical role text in the active
    `review-coordinator-sol` environment, copies that source Agent's repository
