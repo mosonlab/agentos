@@ -383,6 +383,11 @@
     },
     {
       "category": "pii-email",
+      "glob": "packages/runner/src/regression-output-handoff.test.ts",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
       "glob": "packages/runner/src/adapters.test.ts",
       "reason": "synthetic Git author identity in disposable fixture repositories; `agentos.invalid` is beneath the reserved `.invalid` top-level domain (RFC 2606) and cannot receive mail, so it names no person"
     },
