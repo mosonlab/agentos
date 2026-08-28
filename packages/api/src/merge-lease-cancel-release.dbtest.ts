@@ -1,11 +1,12 @@
 /**
  * Operator cancellation and the merge lease.
  *
- * A chain acquires `refs/merge-lease/holder` when its Regression step starts and
- * the control plane releases it on every terminal outcome it writes itself. An
- * operator's cancellation is also a terminal outcome — settlement creates no
- * retry and no successor — so a cancelled chain-tail run that kept the lease
- * would strand the merge window until a machine stole it 45 minutes later.
+ * Readiness acquires `refs/merge-lease/holder` before handing authorization to
+ * the queued mechanical merge, and the control plane releases it when the
+ * final consumer settles. An operator's cancellation is also a terminal
+ * outcome — settlement creates no retry and no successor — so a cancelled
+ * chain-tail run that retained the lease would strand the merge window until a
+ * machine stole it 45 minutes later.
  *
  * There are three terminal writers of a cancellation, and all three are here:
  * the cancel route (a run cancelled before it was ever claimed), the runner's
@@ -28,8 +29,10 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
+const releasedLeaseTargets: Array<{ chainId: string; projectId: string }> = [];
 beforeEach(async () => {
   releasedChainLeases.length = 0;
+  releasedLeaseTargets.length = 0;
   await resetTestDb(db);
 });
 after(async () => { await db.$disconnect(); });
@@ -47,9 +50,12 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   process.env.RUNNER_TOKEN = RUNNER;
   try {
     const response = await createApp(db, {
-      releaseMergeLease: async (chainId) => {
-      if (chainId) releasedChainLeases.push(chainId);
-    },
+      releaseMergeLease: async (target) => {
+        if (target) {
+          releasedChainLeases.push(target.chainId);
+          releasedLeaseTargets.push(target);
+        }
+      },
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -63,15 +69,16 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   }
 };
 
-const collectRelease: ReleaseMergeLease = async (chainId) => {
-  if (!chainId) return;
-  releasedChainLeases.push(chainId);
+const collectRelease: ReleaseMergeLease = async (target) => {
+  if (!target) return;
+  releasedChainLeases.push(target.chainId);
+  releasedLeaseTargets.push(target);
 };
 
 let sequence = 0;
 
-/** One chain whose tail step is the Regression step that holds the lease. */
-const seedChain = async (options: { outputKind?: string } = {}) => {
+/** One chain whose merge-tail tasks share the readiness-owned lease identity. */
+const seedChain = async (options: { outputKind?: string; chainId?: string } = {}) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Cancel release", slug: `cancel-release-${suffix}` } });
@@ -96,7 +103,7 @@ const seedChain = async (options: { outputKind?: string } = {}) => {
     projectId: project.id, name: "Regression", description: "prove the candidate", assigneeAgentId: agent.id,
     repoId: repo.id, status: TaskStatus.DOING, targetBranch: "master",
     templateId: template.id, templateStepId: templateStep.id,
-    chainId: `chain-${suffix}`, chainIndex: 6, chainLayer: 6,
+    chainId: options.chainId ?? `chain-${suffix}`, chainIndex: 6, chainLayer: 6,
   } });
   return { project, agent, repo, task, chainId: task.chainId!, suffix };
 };
@@ -154,7 +161,7 @@ const seedRun = async (
   return run;
 };
 
-test("acknowledging an operator cancellation releases the Regression chain's lease", async () => {
+test("acknowledging an operator cancellation releases the merge-tail chain lease", async () => {
   const chain = await seedChain();
   const run = await seedRun(chain);
 
@@ -173,6 +180,7 @@ test("acknowledging an operator cancellation releases the Regression chain's lea
   assert.equal(acknowledged.body.cancellationState, "acknowledged");
   assert.equal("releaseMergeLeaseTask" in acknowledged.body, false, "the lease target is not part of the response");
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
 
   // The acknowledgement is idempotent, and repeating it must not release again.
   const repeated = await call("POST", `/runner/runs/${run.id}/cancel/acknowledge`, RUNNER, {
@@ -182,7 +190,7 @@ test("acknowledging an operator cancellation releases the Regression chain's lea
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
 });
 
-test("stopping and parking a queued Regression run releases the lease at once", async () => {
+test("stopping and parking a queued merge-tail run releases the lease at once", async () => {
   const chain = await seedChain();
   const run = await seedRun(chain, { status: RunStatus.QUEUED });
 
@@ -194,6 +202,7 @@ test("stopping and parking a queued Regression run releases the lease at once", 
   assert.equal("releaseMergeLeaseTask" in stopped.body, false, "the lease target is not part of the response");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.task.id } })).status, TaskStatus.BACKLOG);
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
 });
 
 test("cancelling an ordinary chain step never touches the lease", async () => {
@@ -211,7 +220,7 @@ test("cancelling an ordinary chain step never touches the lease", async () => {
   assert.deepEqual(releasedChainLeases, []);
 });
 
-test("cancelling a merge-tail auxiliary run releases the Regression chain it serves", async () => {
+test("cancelling a merge-tail auxiliary run releases the chain it serves", async () => {
   const chain = await seedChain();
   const auxiliary = await seedAuxiliaryRepair(chain);
   const run = await seedRun(chain, { taskId: auxiliary.id });
@@ -223,8 +232,10 @@ test("cancelling a merge-tail auxiliary run releases the Regression chain it ser
     runnerId: RUNNER_ID, fencingToken: run.fencingToken, requestId: "cancel-auxiliary",
   });
   assert.equal(acknowledged.status, 200, JSON.stringify(acknowledged.body));
-  // The auxiliary task has no chain of its own; the lease is the Regression's.
+  // The auxiliary task has no chain of its own; resolve the served chain's
+  // project-scoped lease identity through its repair marker.
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
 });
 
 test("reconciliation terminalizing a cancellation after runner loss releases the lease", async () => {
@@ -240,9 +251,10 @@ test("reconciliation terminalizing a cancellation after runner loss releases the
   assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.CANCELLED);
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
 });
 
-test("a lost Regression run that still has an attempt left keeps the lease for its retry", async () => {
+test("a lost merge-tail run that still has an attempt left keeps the lease for its retry", async () => {
   const now = new Date();
   const chain = await seedChain();
   const run = await seedRun(chain, {
@@ -253,11 +265,12 @@ test("a lost Regression run that still has an attempt left keeps the lease for i
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.LOST);
   const retry = await db.run.findFirst({ where: { taskId: chain.task.id, runNumber: 2 } });
   assert.ok(retry, "the lost run bought a retry");
-  // The retry re-enters `acquire --task <chain>` and is handed the same lease.
+  // The retry remains claimable; readiness will reacquire the same
+  // project-scoped lease identity before handing it to the final consumer.
   assert.deepEqual(releasedChainLeases, []);
 });
 
-test("a lost Regression run with no attempts left releases the lease", async () => {
+test("a lost merge-tail run with no attempts left releases the lease", async () => {
   const now = new Date();
   const chain = await seedChain();
   const run = await seedRun(chain, {
@@ -269,6 +282,34 @@ test("a lost Regression run with no attempts left releases the lease", async () 
   assert.equal(await db.run.count({ where: { taskId: chain.task.id, runNumber: 3 } }), 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.task.id } })).status, TaskStatus.REVIEW);
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
+});
+
+test("reconciliation releases same-named chain leases independently per project", async () => {
+  const now = new Date();
+  const chainId = "shared-chain-id";
+  const first = await seedChain({ chainId });
+  const second = await seedChain({ chainId });
+  await seedRun(first, {
+    runNumber: 2,
+    maxRunsPerTask: 1,
+    leaseExpiresAt: new Date(now.getTime() - 60_000),
+    heartbeatAt: null,
+  });
+  await seedRun(second, {
+    runNumber: 2,
+    maxRunsPerTask: 1,
+    leaseExpiresAt: new Date(now.getTime() - 60_000),
+    heartbeatAt: null,
+  });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 2);
+  assert.deepEqual(
+    releasedLeaseTargets.sort((left, right) => left.projectId.localeCompare(right.projectId)),
+    [first, second]
+      .map((chain) => ({ chainId, projectId: chain.project.id }))
+      .sort((left, right) => left.projectId.localeCompare(right.projectId)),
+  );
 });
 
 test("a lost ordinary step with no attempts left never touches the lease", async () => {
@@ -303,6 +344,7 @@ test("a stranded queued handoff releases once and records settlement after relea
 
   assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
   const settled = await db.taskActivity.findFirstOrThrow({
     where: { taskId: chain.task.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff } },
     orderBy: { createdAt: "desc" },

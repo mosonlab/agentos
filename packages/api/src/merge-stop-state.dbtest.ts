@@ -30,8 +30,10 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
+const releasedLeaseTargets: Array<{ chainId: string; projectId: string }> = [];
 beforeEach(async () => {
   releasedChainLeases.length = 0;
+  releasedLeaseTargets.length = 0;
   await resetTestDb(db);
 });
 after(async () => { await db.$disconnect(); });
@@ -64,9 +66,12 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
   try {
     const response = await createApp(db, {
-      releaseMergeLease: async (chainId) => {
-      if (chainId) releasedChainLeases.push(chainId);
-    },
+      releaseMergeLease: async (target) => {
+        if (target) {
+          releasedChainLeases.push(target.chainId);
+          releasedLeaseTargets.push(target);
+        }
+      },
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -143,6 +148,10 @@ test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, ques
   assert.equal(activities.filter((row) => row.body.includes("Chain complete")).length, 0);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1, "no automatic retry");
   assert.deepEqual(releasedChainLeases, [chain.integratorTask!.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{
+    chainId: chain.integratorTask!.chainId,
+    projectId: chain.project.id,
+  }]);
 });
 
 test("a legacy integrator role enters automatic base-drift recovery regardless of ordinal", async () => {
@@ -305,6 +314,10 @@ test("a merged outcome advances the chain and lands DONE", async () => {
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, "DONE");
   assert.equal(await stopQuestionFor(chain.integratorTask!.id), null);
   assert.deepEqual(releasedChainLeases, [chain.integratorTask!.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{
+    chainId: chain.integratorTask!.chainId,
+    projectId: chain.project.id,
+  }]);
 });
 
 test("N19 no generic exit from a stop: PATCH, retry and enqueue are all refused", async () => {
