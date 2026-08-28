@@ -19,6 +19,7 @@ import {
 import {
   composeTemplateTaskDescription,
   instantiateTemplate,
+  parseImplementationRoute,
 } from "./templates.js";
 import { readBrief } from "./task-brief.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
@@ -39,6 +40,15 @@ test("composed task descriptions derive the prior-output reminder from declared 
     if (priorOutputKinds.length > 0) assert.match(description, /implementation/u);
     else assert.doesNotMatch(description, /prior template steps/u);
   }
+});
+
+test("implementation route parsing accepts only a complete machine-readable line", () => {
+  assert.equal(parseImplementationRoute("Build it\nRoute: implementation=senior-dev\n"), "senior-dev");
+  assert.equal(parseImplementationRoute("Route: implementation=frontend-dev"), "frontend-dev");
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev - reason"), null);
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev "), null);
+  assert.equal(parseImplementationRoute("Route: implementation=unknown"), "unknown");
+  assert.equal(parseImplementationRoute(undefined), null);
 });
 
 test("a direct brief ending in the prior-output reminder round-trips without truncation", () => {
@@ -472,4 +482,68 @@ test("step override structural refusals happen before template reads and carry s
       (error: unknown) => isTemplateInstantiationRefusal(error) && error.code === code,
     );
   }
+});
+
+test("Route overrides the direct implementation step by role after its step index is renumbered", async () => {
+  const canonical = {
+    id: "agent-luna", name: "senior-dev-luna", projectId: "project-1", archivedAt: null,
+    model: "gpt-5.6-luna:max", foundationalPrompt: "foundation", rolePrompt: "role",
+  };
+  const routed = {
+    id: "agent-senior", name: "senior-dev", projectId: "project-1", archivedAt: null,
+    model: "gpt-5.6-sol:high", foundationalPrompt: "foundation", rolePrompt: "role",
+  };
+  const steps = [
+    {
+      id: "step-implementation", stepIndex: 41, name: "Implementation", prompt: "implement {{chainId}}",
+      outputKind: "implementation", attachmentsFromPrevious: false, priorOutputKinds: [],
+      assigneeType: AssigneeType.AGENT, assigneeAgentId: canonical.id, assigneeAgent: canonical,
+      approvalGate: false, opensPullRequest: true, layer: 1, baseFromStepIndex: null, runner: null,
+    },
+    {
+      id: "step-review", stepIndex: 42, name: "Review", prompt: "review {{chainId}}",
+      outputKind: "sol-findings", attachmentsFromPrevious: true, priorOutputKinds: ["implementation"],
+      assigneeType: AssigneeType.AGENT, assigneeAgentId: canonical.id, assigneeAgent: canonical,
+      approvalGate: false, opensPullRequest: false, layer: 2, baseFromStepIndex: 41, runner: null,
+    },
+  ];
+  const created: Array<Record<string, unknown>> = [];
+  const tx = {
+    $queryRaw: async () => [
+      canonical,
+      routed,
+      { agentId: canonical.id, repoId: "repo-1" },
+      { agentId: routed.id, repoId: "repo-1" },
+    ],
+    agentRepoAccess: { count: async () => 1 },
+    task: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const task = { id: `task-${created.length + 1}`, ...data };
+        created.push(task);
+        return task;
+      },
+    },
+    taskActivity: { createMany: async () => ({ count: created.length }) },
+  };
+  const db = {
+    taskTemplate: {
+      findFirst: async () => ({ id: "template-1", name: "direct-engineer-workflow", variables: [], steps }),
+    },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agent: {
+      findFirst: async () => routed,
+      findMany: async () => [routed],
+    },
+    agentRepoAccess: { findFirst: async () => ({ agentId: routed.id }) },
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+
+  const result = await instantiateTemplate(db, "project-1", "template-1", {
+    repoId: "repo-1",
+    variables: {},
+    description: "Build it\nRoute: implementation=senior-dev\n",
+  });
+
+  assert.equal(result.tasks.length, 2);
+  assert.deepEqual(created.map((task) => task.assigneeAgentId), [routed.id, canonical.id]);
 });

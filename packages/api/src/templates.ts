@@ -5,6 +5,7 @@ import {
   canonicalIntegratorBindingRefusal,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
+  isDirectImplementationStep,
   lockAgentRepoGrant,
   lockAgentRows,
   lockChainRows,
@@ -34,6 +35,19 @@ export type InstantiateTemplateInput = {
 };
 
 const stepOverrideKey = /^[1-9]\d*$/u;
+
+const implementationRouteLine = /^Route: implementation=([A-Za-z0-9-]+)$/mu;
+const implementationRouteAgents = new Set([
+  "senior-dev-luna",
+  "senior-dev",
+  "frontend-dev",
+]);
+
+/** Read the machine-readable implementation route from a brief description. */
+export const parseImplementationRoute = (description: string | undefined): string | null => {
+  const match = description?.match(implementationRouteLine);
+  return match?.[1] ?? null;
+};
 
 type OverrideAgent = {
   id: string;
@@ -172,7 +186,17 @@ export const instantiateTemplate = async (
       `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
     );
   }
-  const overrideEntries = Object.entries(input.stepOverrides ?? {});
+  const implementationRoute = parseImplementationRoute(input.description);
+  if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
+    throw overrideRefusal(
+      "implementation_route_unknown_agent",
+      `Unknown implementation route agent ${implementationRoute}; expected one of senior-dev-luna, senior-dev, frontend-dev`,
+    );
+  }
+  let effectiveStepOverrides: Record<string, { assigneeAgentId: string }> = {
+    ...(input.stepOverrides ?? {}),
+  };
+  let overrideEntries = Object.entries(effectiveStepOverrides);
   if (overrideEntries.length > 64) {
     throw overrideRefusal(
       "step_override_too_many",
@@ -206,6 +230,36 @@ export const instantiateTemplate = async (
   }
   assertValidBaseReferences(template.steps);
 
+  if (implementationRoute !== null) {
+    const implementationStep = template.steps.find((step) => isDirectImplementationStep({
+      outputKind: step.outputKind,
+      taskTemplate: { name: template.name },
+    }));
+    if (implementationStep) {
+      const routeAgent = await db.agent.findFirst({
+        where: { projectId, name: implementationRoute },
+        select: { id: true, name: true, projectId: true, archivedAt: true },
+      });
+      if (!routeAgent) {
+        throw overrideRefusal(
+          "step_override_agent_not_found",
+          `Implementation route agent ${implementationRoute} was not found in this project`,
+        );
+      }
+      effectiveStepOverrides = {
+        ...effectiveStepOverrides,
+        [String(implementationStep.stepIndex)]: { assigneeAgentId: routeAgent.id },
+      };
+      overrideEntries = Object.entries(effectiveStepOverrides);
+      if (overrideEntries.length > 64) {
+        throw overrideRefusal(
+          "step_override_too_many",
+          `stepOverrides contains ${overrideEntries.length} entries; at most 64 step overrides are allowed`,
+        );
+      }
+    }
+  }
+
   const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
   for (const [stepIndex] of overrideEntries) {
     if (!templateStepsByIndex.has(stepIndex)) {
@@ -225,7 +279,7 @@ export const instantiateTemplate = async (
     for (const row of rows) overrideAgents.set(row.id, row);
   }
   const effectiveSteps = template.steps.map((step): EffectiveTemplateStep => {
-    const override = input.stepOverrides?.[String(step.stepIndex)];
+    const override = effectiveStepOverrides[String(step.stepIndex)];
     const assigneeAgentId = override?.assigneeAgentId ?? step.assigneeAgentId;
     return {
       step,
