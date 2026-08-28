@@ -55,6 +55,7 @@ test("provisioning trusts an already-published intended head after its database 
       path: process.env.PATH ?? "/usr/bin:/bin",
       // Never the real home: provisioning keeps its mirror there.
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-1" },
@@ -99,6 +100,7 @@ test("provisioning commits the server-prepared direct specification before the a
       runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin",
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const branch = "feature/platform-spec";
     const specificationPath = `.chain/${branch}/spec.md`;
@@ -149,6 +151,7 @@ test("prepared specification refuses a repository symlink that would escape the 
     const config = {
       workspaceRoot: join(root, "workspaces"), runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin", home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const branch = "feature/platform-spec";
     const claim = {
@@ -196,6 +199,7 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
     const config = {
       workspaceRoot: join(root, "workspaces"), runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin", home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-1" },
@@ -247,6 +251,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
       path: process.env.PATH ?? "/usr/bin:/bin",
       // Never the real home: provisioning keeps its mirror there.
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-blind" },
@@ -290,6 +295,7 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       path: process.env.PATH ?? "/usr/bin:/bin",
       // Never the real home: provisioning keeps its mirror there.
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-retry" },
@@ -340,6 +346,7 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       path: process.env.PATH ?? "/usr/bin:/bin",
       // Never the real home: provisioning keeps its mirror there.
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-timeout" },
@@ -388,6 +395,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       path: process.env.PATH ?? "/usr/bin:/bin",
       // Never the real home: provisioning keeps its mirror there.
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-pinned-timeout" },
@@ -441,6 +449,7 @@ test("session credentials are created through the run-as prefix, with the token 
       apiUrl: "http://api.local",
       path: process.env.PATH ?? "/usr/bin:/bin",
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
       runAsPrefix: [launcher],
     } as unknown as RunnerConfig;
     const claim = {
@@ -522,6 +531,7 @@ test("a run-as workspace is provisioned by the launched account and cannot be en
       runAsPrefix: [launcher],
       path: process.env.PATH ?? "/usr/bin:/bin",
       home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-prefix" },

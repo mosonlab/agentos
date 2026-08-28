@@ -39,6 +39,7 @@ const config = (root: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
   home: join(root, "home"),
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot: join(root, "runs"),
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
@@ -58,6 +59,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   task: {
     id: "task-113",
     chainId: null,
+    chainIndex: null,
     name: "Rate limit the inbox poller",
     description: "work",
     repoId: "repo-1",

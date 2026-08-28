@@ -127,6 +127,7 @@ const config = (workspaceRoot: string, agentBinary: string): RunnerConfig => ({
   heartbeatIntervalMs: 60_000,
   path: process.env.PATH ?? "/usr/bin:/bin",
   home: join(workspaceRoot, "..", "home"),
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot,
   failedWorkspaceRetention: 0,
   workspaceReclaimIntervalMs: 300_000,
@@ -142,6 +143,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   task: {
     id: "task-114",
     chainId: null,
+    chainIndex: null,
     name: "Find the inbox deadlock",
     description: "work",
     repoId: "repo-1",

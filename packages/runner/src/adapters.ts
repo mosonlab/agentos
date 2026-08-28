@@ -140,6 +140,7 @@ export const buildChildEnvironment = (
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
   workspacePath: string,
+  commitHooksPath?: string,
 ): NodeJS.ProcessEnv => {
   const outputKind = claim.task.templateStep?.outputKind;
   const regressionStep = outputKind !== undefined && stepRole({ outputKind }) === "regression";
@@ -164,8 +165,11 @@ export const buildChildEnvironment = (
     http_proxy: _httpProxyLower,
     https_proxy: _httpsProxyLower,
     no_proxy: _noProxyLower,
-    ...taskSecrets
+    ...unfilteredTaskSecrets
   } = claim.secrets;
+  const taskSecrets = Object.fromEntries(Object.entries(unfilteredTaskSecrets).filter(([name]) =>
+    !name.startsWith("GIT_CONFIG_")
+    && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
   return {
     ...taskSecrets,
     ...workspaceEnvironment(config),
@@ -174,6 +178,11 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
+    ...(commitHooksPath ? {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: commitHooksPath,
+    } : {}),
     ...(regressionStep ? {
       AGENTOS_CHAIN_ID: claim.task.chainId!,
       AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
@@ -191,6 +200,7 @@ export const buildChildEnvironment = (
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "HOME", "GIT_CONFIG_GLOBAL", "CODEX_HOME", "PI_CODING_AGENT_DIR",
   "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX", "AGENTOS_GATE_SERVER",
+  "AGENTOS_RUN_ID", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 ] as const;
 
 /**

@@ -68,6 +68,7 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: root,
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot: root,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
