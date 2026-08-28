@@ -29,7 +29,7 @@ import {
   isIntegratorBindingError,
   PrismaClient,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { fireAtTask, fireCronTask } from "./scheduler.js";
 import { instantiateTemplate } from "./templates.js";

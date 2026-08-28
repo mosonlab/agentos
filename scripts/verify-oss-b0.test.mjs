@@ -103,8 +103,8 @@ const connection = ({ scheme = "postgresql", user = "agentos", secret = "pw", ho
   port = "55777", database = "agentos_test", query = "" } = {}) =>
   `${scheme}:${"//"}${user}:${secret}@${host}${port === "" ? "" : `:${port}`}/${database}${query}`;
 
-const WEB_BUILD = "npm run build -w @agentos/web";
-const WEB_TEST = "npm test -w @agentos/web";
+const WEB_BUILD = "npm run build -w @anneal/web";
+const WEB_TEST = "npm test -w @anneal/web";
 const DEPENDENCY_GATE = "npm run test:dependency-gate";
 const SECRET_HYGIENE = "npm run verify:secret-hygiene";
 /** The scanner's clean line, which now says how large the search it ran was. */
@@ -385,7 +385,7 @@ test("launch failure, output overflow and timeout are three different reasons", 
 
 test("a suite killed at the command ceiling is a refusal, not a pass", () => {
   const { statusOf, run } = fullRun({
-    inject: { "npm run test:db -w @agentos/db": { status: null, signal: "SIGKILL", stdout: "", stderr: "" } },
+    inject: { "npm run test:db -w @anneal/db": { status: null, signal: "SIGKILL", stdout: "", stderr: "" } },
   });
   assert.equal(statusOf("database-fixtures").reason, "command-timed-out");
   assert.equal(run.result, "refused");
@@ -947,7 +947,7 @@ test("a real suite's absolute test-file paths do not refuse, an injected home pa
   const passing = fullRun({
     root,
     repositoryPath: root,
-    inject: { "npm test -w @agentos/api": { status: 0, stdout: suiteOutput, stderr: "" } },
+    inject: { "npm test -w @anneal/api": { status: 0, stdout: suiteOutput, stderr: "" } },
   });
   assert.equal(passing.statusOf("api-tests").status, "verified");
 
@@ -955,7 +955,7 @@ test("a real suite's absolute test-file paths do not refuse, an injected home pa
     root,
     repositoryPath: root,
     inject: {
-      "npm test -w @agentos/api": {
+      "npm test -w @anneal/api": {
         status: 0, stdout: `read ${homePath(".agentos", "config.json")}\n`, stderr: "",
       },
     },
@@ -1449,7 +1449,7 @@ test("E10 stays Pending when the API database fixtures did not run", () => {
   // And the row the plan assigns to the DB check is the row this check carries.
   const fixtures = ACCEPTANCE_CHECKS.find((check) => check.id === "database-fixtures");
   assert.deepEqual(fixtures.evidence, ["E9", "E10"]);
-  assert.ok(fixtures.commands.some((argv) => argv.join(" ") === "npm run test:db -w @agentos/api"));
+  assert.ok(fixtures.commands.some((argv) => argv.join(" ") === "npm run test:db -w @anneal/api"));
   assert.ok(!ACCEPTANCE_CHECKS.find((check) => check.id === "api-tests").evidence.includes("E10"));
 });
 

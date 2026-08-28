@@ -1,4 +1,4 @@
-import { lockRunRow, lockTaskRow, Prisma, RunStatus } from "@agentos/db";
+import { lockRunRow, lockTaskRow, Prisma, RunStatus } from "@anneal/db";
 
 /**
  * The statuses a lease can still be live under. Distinct from the database

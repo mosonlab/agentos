@@ -1,4 +1,4 @@
-import { isIntegratorStep, isMergeReadinessStep } from "@agentos/db";
+import { isIntegratorStep, isMergeReadinessStep } from "@anneal/db";
 
 export type ChainExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
 

@@ -330,7 +330,7 @@ export const executeClaim = async (
         terminalSuccess: false,
         terminationReason: "mechanical run claimed by a model runner",
         failureClass: "PROTOCOL_ERROR",
-        failureReason: "This runner does not execute mechanical runs; @agentos/merge-executor does",
+        failureReason: "This runner does not execute mechanical runs; @anneal/merge-executor does",
         retryable: false,
         cleanupStatus: "SUCCEEDED",
         workspaceRetained: false,

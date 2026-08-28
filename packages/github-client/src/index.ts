@@ -1,5 +1,5 @@
 /**
- * `@agentos/github-client` — the shared, idempotent GitHub write layer.
+ * `@anneal/github-client` — the shared, idempotent GitHub write layer.
  *
  * The rule the layer exists to enforce is one sentence long — **a write that
  * errors is read back before anything is resent, and a read-back that fails is

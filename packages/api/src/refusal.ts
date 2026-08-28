@@ -8,7 +8,7 @@ import {
   isPinnedBaseCommitError,
   isWorkflowRefusalError,
   type WorkflowRefusalReason,
-} from "@agentos/db";
+} from "@anneal/db";
 
 export type RefusalReason =
   | WorkflowRefusalReason

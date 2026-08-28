@@ -454,7 +454,7 @@ test("every workspace manifest records the same first-party version", () => {
     assert.equal(pkg.private, true, `${path} must stay private`);
     for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
       for (const [name, range] of Object.entries(pkg[field] ?? {})) {
-        if (!name.startsWith("@agentos/")) continue;
+        if (!name.startsWith("@anneal/")) continue;
         assert.equal(range, releaseVersion, `${path} must pin ${name} to the exact release version`);
       }
     }

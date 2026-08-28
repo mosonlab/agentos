@@ -133,7 +133,7 @@ something outside the checkout.
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
   use a separate worktree for development. A fresh worktree needs
-  `npm install && npm run db:generate && npm run build -w @agentos/db` before
+  `npm install && npm run db:generate && npm run build -w @anneal/db` before
   anything else works.
 
 ### Development database bootstrap

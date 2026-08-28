@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type Prisma, RunStatus } from "@agentos/db";
+import { type Prisma, RunStatus } from "@anneal/db";
 
 import { explainFenceRefusal, fencedRunWhere, type RunFence, withFencedRun } from "./run-fence.js";
 

@@ -1,4 +1,4 @@
-import { stepRole } from "@agentos/db";
+import { stepRole } from "@anneal/db";
 
 const FEATURE_BRIEF_PREFIX = "\nFeature brief:\n";
 const PRIOR_OUTPUTS_REMINDER = "\nRead the prior template steps' persisted outputs before working.";

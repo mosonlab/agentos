@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient } from "@anneal/db";
 
 import { createApp as createLiveApp } from "./app.js";
 import { defaultControlPlaneStateDir } from "./control-plane-state.js";

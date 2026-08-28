@@ -7,7 +7,7 @@
  * under a fully re-verified authorization or records a named stop condition.
  */
 
-import { confirmedWrite } from "@agentos/github-client";
+import { confirmedWrite } from "@anneal/github-client";
 
 import {
   AUTHORIZED_MERGE_METHOD,
@@ -15,7 +15,7 @@ import {
   type MergeOutcome,
   type RequiredCheck,
   type StopCondition,
-} from "@agentos/db/merge-integrator";
+} from "@anneal/db/merge-integrator";
 
 import type { BranchProtectionRule, MergeResponse, PullRequestSnapshot, ReadResult, RepositorySnapshot } from "./github.js";
 

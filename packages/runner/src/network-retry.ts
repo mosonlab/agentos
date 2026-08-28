@@ -300,7 +300,7 @@ const RETRIED_GIT_OPERATIONS = new Set(["clone", "fetch", "push", "ls-remote"]);
  * `gh pr create` was taken off it by #139. A loop that resends on an error
  * alone cannot tell a lost response from a failed one, and for a creating write
  * that difference is a duplicate object — those go through
- * `@agentos/github-client`'s confirmedWrite, which resends only after a
+ * `@anneal/github-client`'s confirmedWrite, which resends only after a
  * read-back has positively found nothing.
  */
 export const runWithNetworkRetry = async <T>(

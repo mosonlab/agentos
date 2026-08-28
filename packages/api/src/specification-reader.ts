@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
-import { githubRepositoryFromRemote } from "@agentos/db";
+import { githubRepositoryFromRemote } from "@anneal/db";
 
 import { controlledGitEnvironment, prefixedCommand, splitRunAsPrefix } from "./git-launch.js";
 import type { SpecificationReader } from "./specification-fidelity.js";

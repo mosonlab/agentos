@@ -14,7 +14,7 @@ import {
   type CanonicalFixedImplementationArtifact,
   type CanonicalReviewArtifact,
   type TaskStepOutput,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import {
   fenceRefusalResponse,

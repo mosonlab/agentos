@@ -24,7 +24,7 @@ import { loadStarterAgentSource } from "./agent-sources.js";
 /**
  * The mount a first-run installation uses, for the Repo and for its one
  * `AgentRepoAccess` alike (plan Step 4 fixes the created shape down to this
- * literal). It lives in @agentos/db so the API that writes it and the verifier
+ * literal). It lives in @anneal/db so the API that writes it and the verifier
  * that checks it cannot drift apart; that the literal is `repo` and not
  * something else is asserted against the plain string in
  * `packages/api/src/onboarding.dbtest.ts`, which installs through the API and

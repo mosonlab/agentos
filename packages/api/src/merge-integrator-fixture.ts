@@ -24,7 +24,7 @@ import {
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
   type PrismaClient,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 let sequence = 0;
 const unique = (label: string): string => {

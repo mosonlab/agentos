@@ -10,7 +10,7 @@ import {
   Prisma,
   type Task,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 export type LockedTask = {
   id: string;

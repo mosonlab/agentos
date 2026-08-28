@@ -1,5 +1,5 @@
 {
-  "name": "@agentos/db",
+  "name": "@anneal/db",
   "version": "0.3.0",
   "private": true,
   "type": "module",
@@ -28,7 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck:cli",
     "typecheck:cli": "tsc -p tsconfig.cli.json --noEmit",
     "test": "node --import tsx --test prisma/*.test.ts src/*.test.ts",
-    "pretest:db": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/runner",
+    "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner",
     "test:db": "node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",

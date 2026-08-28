@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FAILURE_ENVELOPE_VERSION, FailureClass, type FailureEnvelope } from "@agentos/db";
+import { FAILURE_ENVELOPE_VERSION, FailureClass, type FailureEnvelope } from "@anneal/db";
 
 import { classifyEnvelope, externalFailure, failureIsRetryable } from "./execution.js";
 

@@ -1,5 +1,5 @@
 /**
- * `@agentos/merge-executor` — the merge authority, in its own package, its own
+ * `@anneal/merge-executor` — the merge authority, in its own package, its own
  * process, and its own OS principal (§D-P1).
  *
  * What this process does NOT contain, structurally: an adapter, a prompt
@@ -12,7 +12,7 @@
 
 import "dotenv/config";
 
-import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@agentos/db/merge-integrator";
+import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
 import { makeAgentOsClient, type MechanicalCancellation, type MechanicalClaim } from "./agentos.js";
 import { loadExecutorConfig, type ExecutorConfig } from "./config.js";

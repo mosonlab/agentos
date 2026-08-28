@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { FailureClass, type FailureEnvelope, type Prisma } from "@agentos/db";
+import { FailureClass, type FailureEnvelope, type Prisma } from "@anneal/db";
 
 export type ExitEvidence = {
   exitCode: number | null;
@@ -73,7 +73,7 @@ export const externalFailure = (evidence: {
  * same refund one route away, would have let it run. A ceiling only half the
  * system honours is not a ceiling.
  */
-export { runBudgetCeiling } from "@agentos/db";
+export { runBudgetCeiling } from "@anneal/db";
 
 export const retryDelayMs = (runNumber: number, failureClass: FailureClass): number => {
   const base = failureClass === FailureClass.RATE_LIMITED ? 60_000 : 30_000;

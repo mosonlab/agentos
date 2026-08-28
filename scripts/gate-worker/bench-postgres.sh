@@ -16,7 +16,7 @@
 #   B  tmpfs        the container as #146 leaves it: data directory in RAM,
 #                   fsync/synchronous_commit/full_page_writes off, WAL bounded
 #
-# Both arms run the gate's own database step, `npm run test:db -w @agentos/api`,
+# Both arms run the gate's own database step, `npm run test:db -w @anneal/api`,
 # under the same environment merge-gate.sh exports for it, with a fresh
 # container, fresh isolated host directories and a fresh schema each time. Only
 # the timed command's server differs.
@@ -246,7 +246,7 @@ run_trial() {
   load="$(uptime | sed 's/.*load average: //')"
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   t0=$(date +%s)
-  ( cd "$WORKTREE" && npm run test:db -w @agentos/api ) >> "$log" 2>&1
+  ( cd "$WORKTREE" && npm run test:db -w @anneal/api ) >> "$log" 2>&1
   rc=$?
   elapsed=$(( $(date +%s) - t0 ))
   ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

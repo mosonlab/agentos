@@ -272,7 +272,7 @@ export type EvidenceRequestResult = { cardId: string; nonce: string; activityId:
 
 /**
  * Phase A. A pure database write in whichever process happens to be running:
- * `gateQuestion` runs inside `applyInboxDecisionTx` in the @agentos/inbox
+ * `gateQuestion` runs inside `applyInboxDecisionTx` in the @anneal/inbox
  * process, which can reach neither the API's GitHub client nor its
  * configuration — MF-3's topology finding, which applies to the initial gate
  * exactly as it does to a renewal.

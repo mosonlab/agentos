@@ -14,7 +14,7 @@ import {
   RunnerPreference,
   loadTemplateStepSources,
   type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import {
   composeTemplateTaskDescription,

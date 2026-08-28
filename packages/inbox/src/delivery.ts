@@ -1,4 +1,4 @@
-import { InboxDeliveryStatus, InboxStatus, Prisma, type PrismaClient } from "@agentos/db";
+import { InboxDeliveryStatus, InboxStatus, Prisma, type PrismaClient } from "@anneal/db";
 
 import { questionCard, type Choice } from "./cards.js";
 

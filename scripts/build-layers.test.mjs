@@ -38,22 +38,22 @@ const fixtureRepository = (t) => {
     workspaces: ["packages/*"],
     scripts: {
       build:
-        "npm run build -w @agentos/leaf && npm run build -w @agentos/middle && npm run build -w @agentos/top",
+        "npm run build -w @anneal/leaf && npm run build -w @anneal/middle && npm run build -w @anneal/top",
     },
   });
-  writeManifest(root, "packages/leaf", { name: "@agentos/leaf" });
-  writeManifest(root, "packages/middle", { name: "@agentos/middle", dependencies: { "@agentos/leaf": "*" } });
+  writeManifest(root, "packages/leaf", { name: "@anneal/leaf" });
+  writeManifest(root, "packages/middle", { name: "@anneal/middle", dependencies: { "@anneal/leaf": "*" } });
   writeManifest(root, "packages/top", {
-    name: "@agentos/top",
-    dependencies: { "@agentos/middle": "*" },
-    devDependencies: { "@agentos/leaf": "*" },
+    name: "@anneal/top",
+    dependencies: { "@anneal/middle": "*" },
+    devDependencies: { "@anneal/leaf": "*" },
   });
   return root;
 };
 
 test("LAYERS-ORDER puts every workspace after everything it depends on", (t) => {
   const layers = buildLayers(fixtureRepository(t));
-  assert.deepEqual(layers, [["@agentos/leaf"], ["@agentos/middle"], ["@agentos/top"]]);
+  assert.deepEqual(layers, [["@anneal/leaf"], ["@anneal/middle"], ["@anneal/top"]]);
 });
 
 test("LAYERS-CONCURRENCY groups workspaces that do not depend on each other", (t) => {
@@ -61,13 +61,13 @@ test("LAYERS-CONCURRENCY groups workspaces that do not depend on each other", (t
   writeManifest(root, ".", {
     name: "fixture",
     workspaces: ["packages/*"],
-    scripts: { build: "npm run build -w @agentos/one && npm run build -w @agentos/two" },
+    scripts: { build: "npm run build -w @anneal/one && npm run build -w @anneal/two" },
   });
-  writeManifest(root, "packages/one", { name: "@agentos/one" });
-  writeManifest(root, "packages/two", { name: "@agentos/two" });
+  writeManifest(root, "packages/one", { name: "@anneal/one" });
+  writeManifest(root, "packages/two", { name: "@anneal/two" });
   // Serial in the root script, and independent in fact. That difference is the
   // entire reason this file exists.
-  assert.deepEqual(buildLayers(root), [["@agentos/one", "@agentos/two"]]);
+  assert.deepEqual(buildLayers(root), [["@anneal/one", "@anneal/two"]]);
 });
 
 test("LAYERS-SCOPE covers exactly the workspaces the root build script names", () => {
@@ -85,7 +85,7 @@ test("LAYERS-REAL-ORDER holds for this repository's own graph", () => {
   const placed = new Set();
   for (const layer of layers) {
     for (const name of layer) {
-      const directory = name.replace("@agentos/", "");
+      const directory = name.replace("@anneal/", "");
       let manifest;
       for (const parent of ["packages", "apps"]) {
         try {
@@ -110,7 +110,7 @@ test("LAYERS-REAL-ORDER holds for this repository's own graph", () => {
 
 test("LAYERS-REFUSES a root build step that is not a plain workspace build", () => {
   assert.throws(
-    () => workspacesInRootBuild({ scripts: { build: "npm run build -w @agentos/one && rm -rf dist" } }),
+    () => workspacesInRootBuild({ scripts: { build: "npm run build -w @anneal/one && rm -rf dist" } }),
     /not a workspace build/,
   );
 });
@@ -128,7 +128,7 @@ test("LAYERS-REFUSES a cycle rather than looping", () => {
 });
 
 test("LAYERS-IGNORES dependencies that are not themselves built", () => {
-  // @agentos/build-info is a real instance of this: depended on, no build of
+  // @anneal/build-info is a real instance of this: depended on, no build of
   // its own, and therefore never something to wait for.
-  assert.deepEqual(layerWorkspaces(["a"], () => ["@agentos/not-built"]), [["a"]]);
+  assert.deepEqual(layerWorkspaces(["a"], () => ["@anneal/not-built"]), [["a"]]);
 });

@@ -3,7 +3,7 @@
  *
  * Everything here is pure and this file imports nothing at all — the same bar
  * `merge-integrator.ts` holds, and for the same reason: the browser bundle must
- * not pull in Prisma, so `@agentos/db/model-routing` is published as a subpath
+ * not pull in Prisma, so `@anneal/db/model-routing` is published as a subpath
  * that reaches no client, no schema and no I/O.
  *
  * The runner types are written as string-literal unions rather than imported

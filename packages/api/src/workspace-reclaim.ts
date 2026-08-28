@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import {
   CleanupStatus, enqueueTaskRun, FailureClass, resolveRunBranches, RunStatus, SessionExecutionStatus,
   type Prisma, type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 /**
  * Workspace GC ownership (issue #115).

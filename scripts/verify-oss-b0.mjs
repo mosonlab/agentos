@@ -92,7 +92,7 @@ export const nodeSatisfiesRange = (version) => {
 
 /**
  * Per-command ceiling. Deliberately far above the slowest real command —
- * `npm run test:db -w @agentos/api` is 29 serialized suites that truncate and
+ * `npm run test:db -w @anneal/api` is 29 serialized suites that truncate and
  * reseed a schema per case, and takes tens of minutes on a fast machine — but
  * finite: a command that stops answering must become a refusal with a class,
  * not an acceptance run that never ends.
@@ -711,19 +711,19 @@ export const ACCEPTANCE_CHECKS = Object.freeze([
     // `database-fixtures` below, so a run with no disposable target leaves E10
     // `Pending` instead of certifying unit coverage as the real thing.
     evidence: ["E6"],
-    commands: [npm("test", "-w", "@agentos/api")],
+    commands: [npm("test", "-w", "@anneal/api")],
   },
   {
     id: "runner-tests",
     needs: ["test-red-lines"],
     evidence: ["E11"],
-    commands: [npm("test", "-w", "@agentos/runner")],
+    commands: [npm("test", "-w", "@anneal/runner")],
   },
   {
     id: "db-tests",
     needs: ["test-red-lines"],
     evidence: [],
-    commands: [npm("test", "-w", "@agentos/db")],
+    commands: [npm("test", "-w", "@anneal/db")],
   },
   {
     id: "database-fixtures",
@@ -733,20 +733,20 @@ export const ACCEPTANCE_CHECKS = Object.freeze([
     // cases. Without a disposable target this check is pending, and both rows stay
     // `Pending` with it: unit coverage does not stand in for a database.
     evidence: ["E9", "E10"],
-    commands: [npm("run", "test:db", "-w", "@agentos/db"), npm("run", "test:db", "-w", "@agentos/api")],
+    commands: [npm("run", "test:db", "-w", "@anneal/db"), npm("run", "test:db", "-w", "@anneal/api")],
     requiresDisposableDatabase: true,
   },
   {
     id: "web-build",
     needs: ["dependency-gate"],
     evidence: [],
-    commands: [npm("run", "build", "-w", "@agentos/web")],
+    commands: [npm("run", "build", "-w", "@anneal/web")],
   },
   {
     id: "web-tests",
     needs: ["web-build"],
     evidence: ["E6"],
-    commands: [npm("test", "-w", "@agentos/web")],
+    commands: [npm("test", "-w", "@anneal/web")],
   },
   {
     id: "secret-hygiene",

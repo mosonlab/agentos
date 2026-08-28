@@ -77,7 +77,7 @@ test("§D-P6 — every bound GraphQL type, field and enum value still exists, an
   if (!token) {
     // Two modes, and the difference is the whole of §D-P6's honesty.
     //
-    // `npm run schema-gate -w @agentos/merge-executor` sets
+    // `npm run schema-gate -w @anneal/merge-executor` sets
     // MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED=1 and is a RELEASE GATE: with no
     // token it fails, loudly, because an unrun gate is not a passed gate.
     //
@@ -89,7 +89,7 @@ test("§D-P6 — every bound GraphQL type, field and enum value still exists, an
       process.env.MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED, undefined,
       "GITHUB_SCHEMA_GATE_TOKEN is unset. `npm run schema-gate` is a release gate against the live GitHub schema; it fails rather than skips.",
     );
-    t.skip("GITHUB_SCHEMA_GATE_TOKEN is unset, and this run is the ordinary workspace suite, which is NOT the schema gate. Run `npm run schema-gate -w @agentos/merge-executor` with a read-only token; it fails without one. scripts/merge-gate.sh does not run it, and a merge-gate PASS does not endorse it.");
+    t.skip("GITHUB_SCHEMA_GATE_TOKEN is unset, and this run is the ordinary workspace suite, which is NOT the schema gate. Run `npm run schema-gate -w @anneal/merge-executor` with a read-only token; it fails without one. scripts/merge-gate.sh does not run it, and a merge-gate PASS does not endorse it.");
     return;
   }
   const response = await fetch(process.env.GITHUB_GRAPHQL_URL ?? "https://api.github.com/graphql", {

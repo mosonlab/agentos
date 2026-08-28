@@ -11,7 +11,7 @@ import {
   RunStatus,
   type Prisma,
   type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 const execFileAsync = promisify(execFile);
 

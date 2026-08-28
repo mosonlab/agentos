@@ -1,9 +1,9 @@
-import { type BuildInfo, buildSha, formatBuildLine, readBuildInfo } from "@agentos/build-info";
+import { type BuildInfo, buildSha, formatBuildLine, readBuildInfo } from "@anneal/build-info";
 
 /** What this process calls itself in its startup line and on `/version`. The
  *  package name in the stamp says what was built; this says what is running,
  *  and an unbuilt process still has to be able to name itself. */
-export const API_SERVICE = "@agentos/api";
+export const API_SERVICE = "@anneal/api";
 
 // Resolved once, from beside this module: in `dist` that is the API's own build
 // stamp, and under tsx there is no stamp at all, which reports as "unbuilt".

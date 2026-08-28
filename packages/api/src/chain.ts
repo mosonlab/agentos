@@ -5,7 +5,7 @@ import {
   lockAgentRepoGrant,
   Prisma,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { runBudgetCeiling } from "./execution.js";
 import type { Refusal } from "./refusal.js";

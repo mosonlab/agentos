@@ -1,22 +1,22 @@
 {
-  "name": "@agentos/api",
+  "name": "@anneal/api",
   "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json && node ../build-info/stamp.mjs dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build -w @agentos/github-client && npm run build -w @agentos/db",
+    "pretest": "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
     "test": "node --import tsx --test src/*.test.ts src/files/*.test.ts",
-    "pretest:db": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/runner && npm run build -w @agentos/api",
+    "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner && npm run build -w @anneal/api",
     "test:db": "node --import tsx scripts/dbtest.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@agentos/build-info": "0.3.0",
-    "@agentos/db": "0.3.0",
-    "@agentos/github-client": "0.3.0",
+    "@anneal/build-info": "0.3.0",
+    "@anneal/db": "0.3.0",
+    "@anneal/github-client": "0.3.0",
     "@hono/node-server": "^1.19.6",
     "cron-parser": "^5.10.0",
     "dotenv": "^17.2.3",
@@ -25,7 +25,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@agentos/runner": "0.3.0",
+    "@anneal/runner": "0.3.0",
     "@types/fs-ext": "^2.0.3",
     "@types/node": "^24.10.1",
     "tsx": "^4.20.6"

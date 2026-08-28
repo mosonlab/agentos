@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma, type PrismaClient } from "@agentos/db";
+import { Prisma, type PrismaClient } from "@anneal/db";
 
 import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, readBoard, repairBinding, taskChainName } from "./board.js";
 

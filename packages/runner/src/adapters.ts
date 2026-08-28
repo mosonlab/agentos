@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { stepRole } from "@agentos/db";
+import { stepRole } from "@anneal/db";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { InFlightTool } from "./budget.js";

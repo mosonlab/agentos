@@ -12,7 +12,7 @@ import {
   stopStateRefusal,
   type Task,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import type { TaskPatchInput } from "./app.js";
 import { blockingPredecessor } from "./chain.js";

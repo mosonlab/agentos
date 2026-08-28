@@ -55,7 +55,7 @@ const POLL_SECONDS_TEXT = process.env.QUIET_WINDOW_POLL_SECONDS ?? "60";
 const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT) : Number.NaN;
 const POLL_MS = POLL_SECONDS * 1_000;
 const SHA = /^[0-9a-f]{40}$/u;
-const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @agentos/db deploy-barrier.ts ("AGDP").
+const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @anneal/db deploy-barrier.ts ("AGDP").
 const DEPLOY_BARRIER_KEY = 1;
 
 const generatedPrismaClientIsComplete = (root) =>
@@ -177,7 +177,7 @@ const readJson = (path, reason) => {
 
 const readDeployedRevision = () => {
   const stamp = readJson(API_BUILD_STAMP, "deployed-revision-unreadable");
-  if (!SHA.test(stamp.commit ?? "") || stamp.dirty !== false || stamp.packageName !== "@agentos/api") {
+  if (!SHA.test(stamp.commit ?? "") || stamp.dirty !== false || stamp.packageName !== "@anneal/api") {
     fail("deployed-revision-unreadable", "api-dist-stamp-is-not-a-clean-agentos-api-build");
   }
   return stamp.commit;

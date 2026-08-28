@@ -5,7 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   PrismaClient, SESSION_USAGE_LOCK_CLASS, recomputeSessionUsage, runBackfillSessionUsageCli, sessionUsageLockKey,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 

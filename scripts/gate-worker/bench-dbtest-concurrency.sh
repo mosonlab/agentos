@@ -18,7 +18,7 @@
 #   B  parallel   the defaults: one template migration, a database per file,
 #                 and cores-1 (capped at 4) files at once
 #
-# Both arms run `npm run test:db -w @agentos/api`, the gate's own command, under
+# Both arms run `npm run test:db -w @anneal/api`, the gate's own command, under
 # the environment merge-gate.sh exports for it, with a fresh container, fresh
 # isolated host directories and a fresh database each trial.
 #
@@ -237,7 +237,7 @@ run_trial() {
   load="$(uptime | sed 's/.*load average: //')"
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   t0=$(date +%s)
-  ( cd "$WORKTREE" && npm run test:db -w @agentos/api ) >> "$log" 2>&1
+  ( cd "$WORKTREE" && npm run test:db -w @anneal/api ) >> "$log" 2>&1
   rc=$?
   elapsed=$(( $(date +%s) - t0 ))
   ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

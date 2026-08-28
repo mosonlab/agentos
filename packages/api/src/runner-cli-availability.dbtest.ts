@@ -3,7 +3,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, RunnerPreference, TaskStatus } from "@agentos/db";
+import { enqueueTaskRun, PrismaClient, RunnerPreference, TaskStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { readStoredCliAvailability } from "./runner-cli-availability.js";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma, RunStatus, type PrismaClient } from "@agentos/db";
+import { Prisma, RunStatus, type PrismaClient } from "@anneal/db";
 
 import { defaultInboxResumeWindowMs, InboxRunFenceRefusal, suspendForInbox } from "./inbox.js";
 

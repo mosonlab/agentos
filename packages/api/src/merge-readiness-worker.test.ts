@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient } from "@anneal/db";
 
 import {
   READINESS_CLAIM_LEASE_MS,
