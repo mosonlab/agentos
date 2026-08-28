@@ -30,7 +30,7 @@ import {
   RunnerPreference,
   recomputeSessionUsage,
   runnerFor,
-  sessionUsageCost,
+  runSessionUsageCost,
   sumUsageCosts,
   SecretPurpose,
   SkillKind,
@@ -2265,9 +2265,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // is where an operator reads a run's fate, and the header pill is not.
     const latestRunId = task.runs[0]?.id ?? null;
     const mergeOutcome = projectMergeOutcome(task.stepOutput);
-    const usageCosts = task.runs.map((run) => run.session === null
-      ? null
-      : sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null }));
+    const usageCosts = task.runs.map(runSessionUsageCost);
     return context.json({
       ...task,
       executionOwner: chainExecutionOwner(task),
@@ -3371,6 +3369,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         })),
         skipDuplicates: true,
       });
+      if (body.events.some((event) => event.type === "NATIVE_CHILD_STARTED")) {
+        await tx.session.update({ where: { id: run.session.id }, data: { nativeChildUsed: true } });
+      }
       if (body.providerConversationId && !run.session.providerConversationId) {
         await tx.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
       }

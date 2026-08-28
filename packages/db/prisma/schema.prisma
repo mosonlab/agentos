@@ -986,6 +986,9 @@ model Session {
   /// The cached-input subset of inputTokens. It is informational and must not
   /// be added to inputTokens again when computing totalTokens.
   cachedInputTokens      Int?
+  /// True only after the runner observes a successful native child spawn.
+  /// Run.subagentModel is launch capability, not evidence that a child ran.
+  nativeChildUsed        Boolean                @default(false)
   /// inputTokens + outputTokens. Cached input is counted once because it is
   /// already included in inputTokens.
   totalTokens            Int?

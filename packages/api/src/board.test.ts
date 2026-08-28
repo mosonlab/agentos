@@ -6,7 +6,7 @@ import { Prisma, type PrismaClient } from "@anneal/db";
 import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, readBoard, repairBinding, taskChainName } from "./board.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
-  costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
+  nativeChildUsed: false, costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
 });
 
 const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
@@ -250,11 +250,21 @@ test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
   const card = boardCard(row({ runs: [{
     id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high",
     subagentModel: "gpt-5.6-luna:max",
-    session: session({ inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
+    session: session({ nativeChildUsed: true, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
   }] }), null);
   assert.equal(card.taskCost?.costUsd, "0.32");
   assert.equal(card.taskCost?.estimated, true);
   assert.equal(card.taskCost?.inputTokens, 1_000_000);
+});
+
+test("a native subagent grant without an observed child uses the root estimate", () => {
+  const card = boardCard(row({ runs: [{
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high",
+    subagentModel: "gpt-5.6-luna:max",
+    session: session({ nativeChildUsed: false, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
+  }] }), null);
+  assert.equal(card.taskCost?.costUsd, "8");
+  assert.equal(card.taskCost?.estimated, true);
 });
 
 test("the assignee carries the model spec the card shows", () => {

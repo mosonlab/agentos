@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient, sessionUsageCost, type UsageCost } from "@anneal/db";
+import { Prisma, type PrismaClient, runSessionUsageCost, type UsageCost } from "@anneal/db";
 
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 
@@ -14,7 +14,7 @@ import { terminalRunStatuses } from "./workspace-reclaim.js";
  * TOKEN NORMALIZATION. `Session.totalTokens` is never read here: it is a
  * display projection, not the pricing basis. New persisted rows use the
  * canonical raw triple (`inputTokens`, `cachedInputTokens`, `outputTokens`),
- * where `inputTokens` includes its cached subset. `sessionUsageCost` prices
+ * where `inputTokens` includes its cached subset. `runSessionUsageCost` prices
  * that triple directly; rows missing any pricing input remain explicitly
  * unavailable.
  */
@@ -38,6 +38,7 @@ export type CostsRunRow = {
   agent: { id: string; name: string };
   task: { name: string } | null;
   session: {
+    nativeChildUsed: boolean;
     costUsd: Prisma.Decimal | null;
     inputTokens: number | null;
     cachedInputTokens: number | null;
@@ -117,11 +118,7 @@ const windowDays = (since: Date, days: number): string[] => {
 };
 
 const runCost = (run: CostsRunRow): UsageCost | null => {
-  if (run.session === null) return null;
-  // A run that dispatched native children reports one aggregate token total
-  // for a mix of models. `mixedModels` prices an unsplit aggregate at the
-  // platform-pinned Luna rate instead of the root model's rate.
-  return sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null });
+  return runSessionUsageCost(run);
 };
 
 export type CostsRunGroup = { agentId: string; _count: { _all: number } };
@@ -259,7 +256,7 @@ export const readProjectCosts = async (
         agent: { select: { id: true, name: true } },
         task: { select: { name: true } },
         // Deliberately not `totalTokens` — see the module comment.
-        session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true } },
+        session: { select: { nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true } },
       },
       orderBy: { startedAt: "asc" },
     });

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Prisma } from "@prisma/client";
 
-import { sessionUsageCost, sumUsageCosts } from "./cost.js";
+import { runSessionUsageCost, sessionUsageCost, sumUsageCosts } from "./cost.js";
 
 test("Codex tokens use the model table, cached rate, and ignore the effort suffix", () => {
   const cost = sessionUsageCost("gpt-5.6-sol:xhigh", {
@@ -43,6 +43,38 @@ test("an unsplit native-child session uses the pinned Luna price", () => {
   );
 });
 
+test("a native-child grant without an observed child keeps the root model price", () => {
+  const grantedRun = {
+    model: "gpt-5.6-sol:high",
+    subagentModel: "gpt-5.6-luna:max",
+    session: {
+      nativeChildUsed: false,
+      costUsd: null,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 400_000,
+      outputTokens: 100_000,
+    },
+  };
+  const cost = runSessionUsageCost(grantedRun);
+  assert.equal(cost?.costUsd?.toString(), "6.2");
+  assert.equal(cost?.estimated, true);
+});
+
+test("an observed unsplit native child prices the aggregate at Luna", () => {
+  const cost = runSessionUsageCost({
+    model: "gpt-5.6-sol:high",
+    session: {
+      nativeChildUsed: true,
+      costUsd: null,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 100_000,
+      outputTokens: 500_000,
+    },
+  });
+  assert.equal(cost?.costUsd?.toString(), "0.782");
+  assert.equal(cost?.estimated, true);
+});
+
 test("a clean root and child split keeps each model's pricing", () => {
   const root = sessionUsageCost("gpt-5.6-sol:high", {
     costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
@@ -80,6 +112,17 @@ test("a provider-reported Claude cost always wins over the price table", () => {
   });
   assert.equal(cost.costUsd?.toString(), "0.049117");
   assert.equal(cost.estimated, false);
+});
+
+test("Claude Opus 5 tokens are estimated when the provider amount is absent", () => {
+  const cost = sessionUsageCost("claude-opus-5:medium", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 400_000,
+    outputTokens: 100_000,
+  });
+  assert.equal(cost.costUsd?.toString(), "5.7");
+  assert.equal(cost.estimated, true);
 });
 
 test("an unpriced token component suppresses a partial aggregate dollar amount", () => {

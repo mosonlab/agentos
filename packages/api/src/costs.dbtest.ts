@@ -63,6 +63,7 @@ type RunSpec = {
   status?: "SUCCEEDED" | "FAILED" | "RUNNING";
   subagentModel?: true;
   session?: {
+    nativeChildUsed?: boolean;
     costUsd?: string | null;
     inputTokens?: number | null;
     cachedInputTokens?: number | null;
@@ -94,6 +95,7 @@ const seedRun = async (
     await db.session.create({ data: {
       runId: run.id, projectId, agentId: spec.agentId, taskId: task.id, runner: spec.runner,
       executionStatus: "SUCCEEDED", startedAt: spec.startedAt,
+      nativeChildUsed: spec.session?.nativeChildUsed ?? false,
       costUsd: spec.session?.costUsd ?? null,
       inputTokens: spec.session?.inputTokens ?? null,
       cachedInputTokens: spec.session?.cachedInputTokens ?? null,
@@ -169,7 +171,7 @@ test("a codex session without a reported amount is counted apart, never as zero"
   await seedRun(project.id, repo.id, "Mixed", {
     agentId: dev.id, model: "openai-codex/gpt-5.6-sol", runner: "CODEX", startedAt: daysAgo(2),
     subagentModel: true,
-    session: { costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
+    session: { nativeChildUsed: true, costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
   });
   // A settled run that never produced a session row at all.
   await seedRun(project.id, repo.id, "Sessionless", {

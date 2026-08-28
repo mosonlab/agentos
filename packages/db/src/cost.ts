@@ -10,15 +10,18 @@ export type TokenPrices = {
  * Repository-versioned base API prices. Values are USD per one million tokens;
  * the UI marks the result estimated because session totals cannot reconstruct
  * request-level pricing tiers or non-token fees. Source model pages (checked
- * 2026-08-20):
+ * 2026-08-20 for OpenAI and 2026-08-28 for Anthropic):
  * https://developers.openai.com/api/docs/models/gpt-5.6-sol
  * https://developers.openai.com/api/docs/models/gpt-5.6-terra
  * https://developers.openai.com/api/docs/models/gpt-5.6-luna
+ * https://www.anthropic.com/news/claude-opus-5
+ * https://www-cdn.anthropic.com/files/4zrzovbb/website/5678bc2f5978e5bcd4f1fe7c14b2c72284dcf9f8.pdf
  */
 export const MODEL_TOKEN_PRICES: Readonly<Record<string, TokenPrices>> = {
   "gpt-5.6-sol": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "30" },
   "gpt-5.6-terra": { inputPerMillionUsd: "2", cachedInputPerMillionUsd: "0.2", outputPerMillionUsd: "12" },
   "gpt-5.6-luna": { inputPerMillionUsd: "0.2", cachedInputPerMillionUsd: "0.02", outputPerMillionUsd: "1.2" },
+  "claude-opus-5": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "25" },
 };
 
 export type CostableSession = {
@@ -26,6 +29,11 @@ export type CostableSession = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   outputTokens: number | null;
+};
+
+export type CostableRun = {
+  model: string;
+  session: (CostableSession & { nativeChildUsed: boolean }) | null;
 };
 
 export type UsageCost = {
@@ -97,6 +105,13 @@ export const sessionUsageCost = (
     .dividedBy(MILLION);
   return { costUsd, estimated: true, ...tokens };
 };
+
+/** Price one persisted Run from observed usage provenance. The immutable
+ * subagent launch snapshot is deliberately absent: permission to spawn a child
+ * says nothing about whether the aggregate contains child tokens. */
+export const runSessionUsageCost = (run: CostableRun): UsageCost | null => run.session === null
+  ? null
+  : sessionUsageCost(run.model, run.session, { mixedModels: run.session.nativeChildUsed });
 
 export const sumUsageCosts = (items: UsageCost[]): UsageCost | null => {
   if (items.length === 0) return null;

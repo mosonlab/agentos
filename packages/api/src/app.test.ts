@@ -2214,6 +2214,17 @@ test("a batch with no FINAL_OUTPUT does not touch the usage columns", async () =
   });
 });
 
+test("an observed native child is persisted independently of the launch grant", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const response = await postEvents(ingestDatabase(updates, []), ["NATIVE_CHILD_STARTED"]);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 1 });
+    assert.deepEqual(updates, [{ where: { id: "ses-1" }, data: { nativeChildUsed: true } }]);
+  });
+});
+
 test("a failing usage recompute does not fail the ingest", async () => {
   await withTokens(async () => {
     // The derived cache must never be fatal to the write path it decorates:
@@ -2404,9 +2415,9 @@ test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
       runs: [
         {
           id: "prefixed-run", runNumber: 2, status: "SUCCEEDED", model: "openai-codex/gpt-5.6-sol:high",
-          subagentModel: null,
+          subagentModel: "gpt-5.6-luna:max",
           session: {
-            costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+            nativeChildUsed: false, costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
             startedAt: null, endedAt: null,
           },
         },

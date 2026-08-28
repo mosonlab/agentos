@@ -1356,6 +1356,37 @@ test("Codex treats recovered reconnect evidence as provisional after terminal co
   assert.equal(adapterExecutionSucceeded(evidence), true);
 });
 
+test("Codex emits an observed-child signal only after a spawn returns a child thread", () => {
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const state = createAdapterState("CODEX", "transcript");
+  const sink = (event: { type: string; payload: Record<string, unknown> }): void => { events.push(event); };
+
+  parseCodexEvent(state, {
+    type: "item.completed",
+    item: {
+      id: "spawn-1",
+      type: "collab_agent_tool_call",
+      tool: "spawn_agent",
+      status: "completed",
+      receiver_thread_ids: ["child-thread-1"],
+    },
+  }, sink);
+  parseCodexEvent(state, {
+    type: "item.completed",
+    item: {
+      id: "spawn-2",
+      type: "collab_agent_tool_call",
+      tool: "spawn_agent",
+      status: "failed",
+      receiver_thread_ids: [],
+    },
+  }, sink);
+
+  const observed = events.filter((event) => event.type === "NATIVE_CHILD_STARTED");
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]?.payload.id, "spawn-1");
+});
+
 test("Codex reconnect classification follows the counter shape instead of a fixed retry budget", () => {
   const cases = [
     { message: "Reconnecting... 2/8", terminalSuccess: true },
