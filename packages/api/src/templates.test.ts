@@ -18,9 +18,9 @@ import {
 
 import {
   composeTemplateTaskDescription,
-  featureBriefFromTaskDescription,
   instantiateTemplate,
 } from "./templates.js";
+import { readBrief } from "./task-brief.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
 
 test("composed task descriptions derive the prior-output reminder from declared kinds", () => {
@@ -32,7 +32,10 @@ test("composed task descriptions derive the prior-output reminder from declared 
       priorOutputKinds,
       outputKind: "implementation",
     });
-    assert.equal(featureBriefFromTaskDescription(description, priorOutputKinds.length > 0), featureBrief);
+    const parsed = readBrief(description);
+    assert.ok(!("unparseable" in parsed));
+    assert.equal(parsed.brief, featureBrief);
+    assert.equal(parsed.hadReminder, priorOutputKinds.length > 0);
     if (priorOutputKinds.length > 0) assert.match(description, /implementation/u);
     else assert.doesNotMatch(description, /prior template steps/u);
   }
@@ -46,7 +49,9 @@ test("a direct brief ending in the prior-output reminder round-trips without tru
     priorOutputKinds: [],
     outputKind: "implementation",
   });
-  assert.equal(featureBriefFromTaskDescription(description, false), featureBrief);
+  const parsed = readBrief(description);
+  assert.ok(!("unparseable" in parsed));
+  assert.equal(parsed.brief, featureBrief);
 });
 
 test("mechanical cards retain only their canonical prompt while model cards retain generated context", () => {
@@ -63,20 +68,21 @@ test("mechanical cards retain only their canonical prompt while model cards reta
     );
   }
   for (const outputKind of ["regression-verification", "regression-verification-v2", "regression-verification-v3"]) {
-    assert.equal(
-      composeTemplateTaskDescription({ ...common, outputKind }),
-      `${common.prompt}\nFeature brief:\n${common.featureBrief}\nRead the prior template steps' persisted outputs before working.`,
-    );
+    assert.deepEqual(readBrief(composeTemplateTaskDescription({ ...common, outputKind })), {
+      prompt: common.prompt,
+      brief: common.featureBrief,
+      hadReminder: true,
+    });
   }
   const regressionDescription = composeTemplateTaskDescription({
     ...common,
     outputKind: "regression-verification-v2",
   });
-  assert.equal(
-    featureBriefFromTaskDescription(regressionDescription, true),
-    common.featureBrief,
-    "a platform-authored regression output must not make its brief unreadable",
-  );
+  assert.deepEqual(readBrief(regressionDescription), {
+    prompt: common.prompt,
+    brief: common.featureBrief,
+    hadReminder: true,
+  }, "a platform-authored regression output must not make its brief unreadable");
 });
 
 test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {

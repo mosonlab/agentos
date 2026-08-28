@@ -15,7 +15,7 @@
 # The mirror's lack of a remote is enforced here and in mirror-push.sh. What is
 # deliberately NOT claimed: this box is not made
 # network-isolated. Nothing here denies it a route to GitHub or anywhere else,
-# and the repository does not guarantee one is denied (Leo's ruling,
+# and the repository does not guarantee one is denied (the operator's ruling,
 # 2026-08-20). The gate's own flow never needs GitHub — the mirror arrives over
 # ssh from the local machine and nothing fetches from a remote — but a candidate
 # commit's build and test scripts run on this box, so what they can reach is

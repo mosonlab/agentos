@@ -19,7 +19,7 @@
 //    checked to exit 76 with a GATE NOT RUN line rather than 1 with a
 //    MERGE GATE: FAIL line.
 //
-// 4. What the worker's isolation is claimed to be. Leo's ruling of 2026-08-20
+// 4. What the worker's isolation is claimed to be. The operator's ruling of 2026-08-20
 //    is that no network egress control is required: the deterministic boundary
 //    is the exact pushed objects, no mirror remote and no merge authority; the box is NOT
 //    network-isolated. The failure mode this guards is a document drifting back
@@ -887,7 +887,7 @@ test("the runbook's exit-code table is the table lib.sh defines", () => {
 });
 
 test("the isolation claim stays the one that is actually enforced", () => {
-  // Leo's ruling, 2026-08-20: no egress control, so nothing here may probe a
+  // The operator's ruling, 2026-08-20: no egress control, so nothing here may probe a
   // route or make provisioning depend on one, and the runbook has to say plainly
   // that the box is not isolated. Exact inputs and the mirror's lack of a
   // remote stay fail-closed.

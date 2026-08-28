@@ -6,7 +6,7 @@ import { type BuildInfo } from "@agentos/build-info";
 import type { PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
-import { API_SERVICE, apiBuildInfo, apiBuildLine, versionPayload } from "./version.js";
+import { API_SERVICE, apiBuildLine, versionPayload } from "./version.js";
 
 const OID = "0123456789abcdef0123456789abcdef01234567";
 
@@ -36,7 +36,6 @@ test("a process running from source says so instead of naming a commit", async (
   assert.equal(body.stamped, false);
   assert.equal(body.commit, null);
   assert.equal(body.buildSha, "unbuilt");
-  assert.equal(apiBuildInfo().stamped, false);
 });
 
 test("a built process reports the commit its dist was built from", () => {

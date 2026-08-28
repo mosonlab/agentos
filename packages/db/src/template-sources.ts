@@ -15,16 +15,32 @@ export const LEGACY_ALL_PRIOR_OUTPUTS = "__legacy_all_prior_outputs__";
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   {
     name: INTEGRATOR_TEMPLATE_NAME,
+    description: "Twelve-step Full Assurance workflow with parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
     stepCount: 12,
     layers: [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11],
+    stepNames: [
+      "Write a spec", "Plan", "Plan review", "Revise plan", "Implementation", "Code review (Sol)",
+      "Code review (Opus blind)", "Apply review fixes", "Librarian",
+      "Regression verification", "Merge authorization", "Merge execution",
+    ],
   },
   {
     name: DIRECT_TEMPLATE_NAME,
+    description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
     stepCount: 7,
     layers: [1, 2, 2, 3, 4, 5, 6],
+    stepNames: [
+      "Implementation", "Code review (Sol)", "Code review (Opus blind)",
+      "Apply review fixes", "Regression verification", "Merge authorization", "Merge execution",
+    ],
   },
 ] as const;
 export type CanonicalTemplateName = (typeof CANONICAL_TEMPLATE_SOURCE_SPECS)[number]["name"];
+export const canonicalTemplateSourceSpec = (name: CanonicalTemplateName) => {
+  const spec = CANONICAL_TEMPLATE_SOURCE_SPECS.find((candidate) => candidate.name === name);
+  if (!spec) throw new Error(`Unknown canonical template source ${name}`);
+  return spec;
+};
 const STRUCTURAL_FIELDS = [
   "stepIndex",
   "layer",
@@ -40,6 +56,7 @@ const STRUCTURAL_FIELDS = [
 
 export type TemplateStepSource = {
   stepIndex: number;
+  name: string;
   layer: number;
   agentName: string | null;
   approvalGate: boolean;
@@ -53,6 +70,7 @@ export type TemplateStepSource = {
 };
 
 export type PersistedTemplateStepStructure = {
+  name: string;
   assigneeAgent: { name: string } | null;
   assigneeType: string;
   /**
@@ -76,6 +94,7 @@ export const templateStepStructureDifferences = (
 ): string[] => {
   const expectedAssigneeType = expected.agentName === null ? "HUMAN" : "AGENT";
   const fields = [
+    ["name", actual.name, expected.name],
     ["agent", actual.assigneeAgent?.name ?? null, expected.agentName],
     ["assigneeType", actual.assigneeType, expectedAssigneeType],
     ["layer", actual.layer, expected.layer],
@@ -133,8 +152,7 @@ export const loadTemplateStepSources = async (
   templateName: CanonicalTemplateName = INTEGRATOR_TEMPLATE_NAME,
   sourceRoot: string = templatesRoot,
 ): Promise<TemplateStepSource[]> => {
-  const sourceSpec = CANONICAL_TEMPLATE_SOURCE_SPECS.find((candidate) => candidate.name === templateName);
-  if (!sourceSpec) throw new Error(`Unknown canonical template source ${templateName}`);
+  const sourceSpec = canonicalTemplateSourceSpec(templateName);
   const templateRoot = join(sourceRoot, templateName);
   const files = (await readdir(templateRoot)).sort();
   const steps: TemplateStepSource[] = [];
@@ -156,6 +174,7 @@ export const loadTemplateStepSources = async (
     if (document.body.length === 0) throw new Error(`${filePath} has an empty prompt body`);
     steps.push({
       stepIndex,
+      name: sourceSpec.stepNames[stepIndex - 1]!,
       layer,
       agentName: agent === "null" ? null : agent,
       approvalGate: parseBoolean(requiredFrontmatter(document, "approvalGate", filePath), filePath, "approvalGate"),

@@ -69,12 +69,6 @@ export const isLegacyCombinedBlindReviewStep = (step: TemplateStepIdentity | nul
   step !== null && step !== undefined && stepRole(step) === "must-fix"
 );
 
-export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => {
-  if (!step) return false;
-  const role = stepRole(step);
-  return role === "blind-findings" || role === "must-fix";
-};
-
 export const isCanonicalBlindFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
   step !== null && step !== undefined && stepRole(step) === "blind-findings"
 );

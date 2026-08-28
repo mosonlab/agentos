@@ -64,13 +64,38 @@ be running, dispatch through `scripts/gate-worker/gate-dispatch.sh <oid>`; read
 [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
 a remote worker.
 
-Every delivery that advances `main` acquires `scripts/merge-lease.sh` before
-running the merge gate for the final integrated head and holds it until the
-merge consumes that proof. Writing code, pushing a feature branch, and opening
-a pull request need no lease. Pass `--task <id>` to both `acquire` and
-`release`: the default holder `user@host` is shared by every agent window on
-one machine, so a release without a task id cannot tell its own lease from a
-sibling's.
+For one candidate, acquire `scripts/merge-lease.sh` before running the merge
+gate for the final integrated head and hold it until the merge consumes that
+proof. Writing code, pushing a feature branch, and opening a pull request need
+no lease. Pass `--task <id>` to both `acquire` and `release`: the default holder
+`user@host` is shared by every agent window on one machine, so a release without
+a task id cannot tell its own lease from a sibling's.
+
+When two or three host-side pull requests are ready together, their feature
+windows push, open the pull requests, and hand one coordinating window the
+ordered `(PR number, exact head OID)` tuples. They do not acquire the lease or
+advance `main` themselves. The coordinating window reads the gate-worker
+runbook, then runs one fixed-width cumulative batch:
+
+```sh
+scripts/merge-train.mjs \
+  --task <coordinator-id> \
+  --candidate <pr>:<40-character-head> \
+  --candidate <pr>:<40-character-head> \
+  [--candidate <pr>:<40-character-head>]
+```
+
+The command builds nested merge prefixes, gates them concurrently, and acquires
+the same merge lease only to publish the longest contiguous PASS prefix. A
+conflict ends the batch at the preceding prefix; the coordinator never resolves
+one. A stale `main` publishes nothing. Rerun the same command after a partial
+publication: it reads live `main`, skips candidate heads already contained
+there, and rebuilds the rest. The command requires an authenticated `gh` CLI to
+verify exact PR state.
+
+Changes to the merge train, merge lease, gate dispatcher, merge gate, or their
+delivery authority use the existing single-candidate path. Delivery machinery
+does not use its new implementation to authorize its own first publication.
 
 Open the pull request right after pushing the feature branch, before
 dispatching the gate: once the exact-head fast-forward lands, GitHub refuses a

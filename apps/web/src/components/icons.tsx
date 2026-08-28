@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 
-/** Thin-line 16px icons in the shape of the reference sidebar set
- *  (design-reference/ui-notes.md §1). */
+/** Thin-line 16px icons used by the sidebar. */
 
 const Svg = ({ children, size = 16 }: { children: ReactNode; size?: number }): ReactNode => (
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"

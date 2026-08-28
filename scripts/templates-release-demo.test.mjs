@@ -45,11 +45,11 @@ test("authority artifacts are approved, commit-bound, scoped, and attributed", (
   const approved = {
     status: "approved",
     agentosCommit: commit,
-    approver: "Leo",
+    approver: "the operator",
     approvedAt: "2026-08-19T12:00:00.000Z",
     scopes: { providerPath: true },
   };
-  assert.equal(validateAuthority(approved, commit, "providerPath").approver, "Leo");
+  assert.equal(validateAuthority(approved, commit, "providerPath").approver, "the operator");
   assert.throws(() => validateAuthority({ ...approved, status: "pending" }, commit, "providerPath"), /not approved/);
   assert.throws(() => validateAuthority({ ...approved, agentosCommit: "b".repeat(40) }, commit, "providerPath"), /another AgentOS commit/);
   assert.throws(() => validateAuthority({ ...approved, scopes: {} }, commit, "providerPath"), /does not approve/);

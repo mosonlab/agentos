@@ -1,18 +1,21 @@
 import {
-  CleanupStatus,
-  FailureClass,
-  InboxStatus,
   lockTaskRow,
   openRun,
   runBudgetCeiling,
   RunStatus,
-  SessionExecutionStatus,
   TaskStatus,
   type PrismaClient,
 } from "@agentos/db";
 
-import { mergeTailLeaseChainId, releaseMergeLease, type ReleaseMergeLease } from "./merge-lease.js";
+import {
+  leaseHandoffsWithoutConsumer,
+  noteLeaseHandoffReleased,
+  releaseMergeLease,
+  settleLease,
+  type ReleaseMergeLease,
+} from "./merge-lease.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
+import { terminalizeRun } from "./run-terminal.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
 const archivedNoticePageSize = 100;
@@ -132,8 +135,11 @@ export const reconcileDatabaseRuns = async (
   const orphans = candidates.filter((run) => run.cancelRequestedAt !== null || !(
     run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
   ));
-  if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
-  const strandedChainLeases = await db.$transaction(async (tx) => {
+  const reconciliation = await db.$transaction(async (tx) => {
+    const strandedHandoffs = await leaseHandoffsWithoutConsumer(tx, now);
+    if (orphans.length === 0 && expiredInboxRuns.length === 0 && strandedHandoffs.length === 0) {
+      return { strandedChainLeases: [] as string[], strandedHandoffs, count: 0 };
+    }
     // Chains whose tail run this sweep terminalizes without a successor. Held
     // until the sweep commits, because a lease released against a transaction
     // that then rolls back would free a window the chain still owns.
@@ -162,64 +168,24 @@ export const reconcileDatabaseRuns = async (
         },
       });
       if (!current) continue;
+      if (current.cancelRequestId && current.cancelRequestedAt) {
+        const terminal = await terminalizeRun(tx, {
+          runId: run.id,
+          at: now,
+          outcome: {
+            kind: "cancelled",
+            requestId: current.cancelRequestId,
+            cleanupConfirmed: false,
+            activity: "runner-lost",
+          },
+        });
+        if (terminal === null || "message" in terminal) continue;
+        if (terminal.leaseToRelease) stranded.add(terminal.leaseToRelease);
+        continue;
+      }
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
-      if (current.cancelRequestId && current.cancelRequestedAt) {
-        const reason = current.cancelReason ?? "Cancelled by operator";
-        const cancelled = await tx.run.updateMany({
-          where: {
-            id: run.id,
-            cancelRequestId: current.cancelRequestId,
-            status: { in: [...activeStatuses] },
-            OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
-          },
-          data: {
-            status: RunStatus.CANCELLED,
-            endedAt: now,
-            leaseExpiresAt: null,
-            sessionTokenRevokedAt: now,
-            failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
-            failureReason: reason,
-            retryable: false,
-            retryAt: null,
-            terminationReason: reason,
-            workspaceRetained: true,
-          },
-        });
-        if (cancelled.count !== 1) continue;
-        await tx.session.updateMany({
-          where: { runId: run.id },
-          data: {
-            executionStatus: SessionExecutionStatus.CANCELLED,
-            cleanupStatus: CleanupStatus.RETAINED,
-            endedAt: now,
-            cleanupEndedAt: now,
-            failureReason: reason,
-            terminationReason: reason,
-          },
-        });
-        if (run.taskId) {
-          await tx.task.updateMany({
-            where: { id: run.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] } },
-            data: { status: TaskStatus.REVIEW, failureReason: reason },
-          });
-          await tx.taskActivity.create({ data: {
-            taskId: run.taskId,
-            actorType: "control-plane",
-            body: `Run ${run.runNumber} cancellation terminalized after runner loss; process cleanup unconfirmed`,
-            metadata: {
-              runId: run.id,
-              requestId: current.cancelRequestId,
-              status: RunStatus.CANCELLED,
-              cleanupConfirmed: false,
-            },
-          } });
-        }
-        const cancelledChainId = await mergeTailLeaseChainId(tx, run.taskId);
-        if (cancelledChainId) stranded.add(cancelledChainId);
-        continue;
-      }
       // Losing a lease is an external failure: it buys an attempt, never spends one.
       // A lost lease refunds the already-authorized Run; it does not recompute
       // from a task budget that may have changed while the Run was in flight.
@@ -228,35 +194,23 @@ export const reconcileDatabaseRuns = async (
       // gates an operator reaches can still tell it from the configured budget
       // after that budget changes. See `runBudgetCeiling`.
       const budgetGrants = run.budgetGrants + 1;
-      const lost = await tx.run.updateMany({
-        where: {
-          id: run.id,
-          cancelRequestedAt: null,
-          status: { in: [...activeStatuses] },
-          OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
-        },
-        data: {
-          status: RunStatus.LOST,
-          endedAt: now,
-          leaseExpiresAt: null,
-          sessionTokenRevokedAt: now,
-          failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
-          retryable: true,
+      const lost = await terminalizeRun(tx, {
+        runId: run.id,
+        at: now,
+        outcome: {
+          kind: "lost",
+          where: {
+            id: run.id,
+            cancelRequestedAt: null,
+            status: { in: [...activeStatuses] },
+            OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
+          },
+          reason: leaseLossReason,
           maxRunsPerTask: budgetCeiling,
           budgetGrants,
-          failureReason: leaseLossReason,
         },
       });
-      if (lost.count !== 1) continue;
-      await tx.session.updateMany({
-        where: { runId: run.id },
-        data: {
-          executionStatus: SessionExecutionStatus.LOST,
-          cleanupStatus: CleanupStatus.PENDING,
-          endedAt: now,
-          failureReason: leaseLossReason,
-        },
-      });
+      if (lost === null || "message" in lost) continue;
       if (!run.taskId) continue;
       if (run.runNumber < budgetCeiling) {
         const opened = await openRun(tx, run.taskId, {
@@ -272,8 +226,8 @@ export const reconcileDatabaseRuns = async (
             data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
           });
         } else {
-          const lostChainId = await mergeTailLeaseChainId(tx, run.taskId);
-          if (lostChainId) stranded.add(lostChainId);
+          const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
+          if (lease.leaseToRelease) stranded.add(lease.leaseToRelease);
           await tx.task.update({
             where: { id: run.taskId },
             data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
@@ -293,8 +247,8 @@ export const reconcileDatabaseRuns = async (
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.
-        const lostChainId = await mergeTailLeaseChainId(tx, run.taskId);
-        if (lostChainId) stranded.add(lostChainId);
+        const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
+        if (lease.leaseToRelease) stranded.add(lease.leaseToRelease);
         await tx.task.update({
           where: { id: run.taskId },
           data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
@@ -310,49 +264,37 @@ export const reconcileDatabaseRuns = async (
       }
     }
     for (const run of expiredInboxRuns) {
-      const expired = await tx.run.updateMany({
-        where: { id: run.id, status: RunStatus.WAITING_INBOX },
-        data: {
-          status: RunStatus.TIMED_OUT,
-          endedAt: now,
-          retryable: false,
-          failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
-          failureReason: "Inbox response window expired",
+      const expired = await terminalizeRun(tx, {
+        runId: run.id,
+        at: now,
+        outcome: {
+          kind: "timed-out",
+          sessionId: run.session?.id ?? null,
+          waitingOnMessageId: run.session?.waitingOnMessageId ?? null,
+          taskId: run.taskId,
+          reason: "Inbox response window expired",
         },
       });
-      if (expired.count !== 1) continue;
-      if (run.session) {
-        await tx.session.updateMany({
-          where: { id: run.session.id, executionStatus: SessionExecutionStatus.WAITING_INBOX },
-          data: {
-            executionStatus: SessionExecutionStatus.TIMED_OUT,
-            cleanupStatus: CleanupStatus.RETAINED,
-            endedAt: now,
-            cleanupEndedAt: now,
-            failureReason: "Inbox response window expired",
-          },
-        });
-      }
-      if (run.session?.waitingOnMessageId) {
-        await tx.inboxMessage.updateMany({
-          where: { id: run.session.waitingOnMessageId, status: InboxStatus.OPEN },
-          data: { status: InboxStatus.CLOSED },
-        });
-      }
-      if (run.taskId) {
-        await tx.task.update({
-          where: { id: run.taskId },
-          data: { status: TaskStatus.REVIEW, failureReason: "Inbox response window expired" },
-        });
-        await tx.taskActivity.create({
-          data: { taskId: run.taskId, actorType: "control-plane", body: "Inbox response window expired; run moved to review" },
-        });
-      }
+      if (expired === null || "message" in expired) continue;
     }
-    return [...stranded];
+    for (const handoff of strandedHandoffs) {
+      stranded.add(handoff.chainId);
+    }
+    return {
+      strandedChainLeases: [...stranded],
+      strandedHandoffs,
+      count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length,
+    };
   });
-  for (const chainId of strandedChainLeases) await releaseChainLease(chainId);
-  return orphans.length + expiredInboxRuns.length;
+  for (const chainId of reconciliation.strandedChainLeases) await releaseChainLease(chainId);
+  if (reconciliation.strandedHandoffs.length > 0) {
+    await db.$transaction(async (tx) => {
+      for (const handoff of reconciliation.strandedHandoffs) {
+        await noteLeaseHandoffReleased(tx, { ...handoff, at: now });
+      }
+    });
+  }
+  return reconciliation.count;
 };
 
 /**

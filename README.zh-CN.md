@@ -2,10 +2,10 @@
 
 # AgentOS
 
-**面向 coding agent 的本地控制平面。**
+**AI 现在能写代码了，但没人有能力审完它写的东西。**
 
-你只写规格，剩下的交给一条 agent 链：计划、评审、实现、验证、合入。
-每一次 run 都可观察、可评审。
+AgentOS 就是负责审的那一层：面向 coding agent 的本地控制平面。你只写规格，
+剩下的交给一条链——计划、评审、实现、验证、合入，每一次 run 都可观察、可评审。
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#支持状态)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -52,10 +52,24 @@ AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、prov
 
 </div>
 
+## 它由自己的链构建
+
+本仓库的 pull request，其规格、计划、评审、实现与合入，都由下面这条链在一台
+Mac 上完成。第一个预览版到第三个预览版之间的八天，从里面看就是这个样子。
+
+链交付的 commit 在 git 历史里还没有明确的归属标记，所以这句话说的是工作方式，
+不是一个你现在就能核对的数字。把它变成可核对的，是下一个预览版的任务。
+
 ## 十二步任务链
 
 AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个角色自带 runner、
 模型与推理档位。
+
+下表里的 `Sol` 与 `Luna` 不是 AgentOS 造的词，是 Codex CLI 暴露的 GPT-5.6 变体，
+绑定名为 `gpt-5.6-sol` 与 `gpt-5.6-luna`。
+
+<details>
+<summary><b>十二步完整表</b> —— 每一步的角色、runner、模型与档位</summary>
 
 | # | 步骤 | Agent 角色 | 做什么 | Runner | 模型 · 档位 |
 | --- | --- | --- | --- | --- | --- |
@@ -71,6 +85,8 @@ AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个�
 | 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Codex | GPT-5.6 Luna · max |
 | 11 | 合并就绪 | — | 重算 head，要求每份未结评审清空，签发精确 head 的合并授权 | — | 机械步，不跑模型 |
 | 12 | 执行合并 | `merge-integrator` | 对着线上 PR 重新校验每一项前置条件，然后合并 | — | 机械步，不跑模型 |
+
+</details>
 
 <div align="center">
 
@@ -172,9 +188,6 @@ AgentOS 是个人项目，不承诺提供支持或响应时间。安全报告请
 [`docs/release/support-matrix.md`](docs/release/support-matrix.md)。
 
 ## 致谢与许可证
-
-本项目是受 Danny Postma 的视频 *How I Built My Own AgentOS on Claude's Agent
-SDK (So You Can Too)*（2026）启发的独立实现，从视频中的想法出发从零构建。
 
 任务链的角色与步骤提示词欠的不止是启发：其行文主体来自
 [mattpocock/skills](https://github.com/mattpocock/skills) 的五个技能，逐字沿用，

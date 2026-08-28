@@ -17,8 +17,6 @@ import { type CardActions } from "../components/task-card";
 import { EmptyState, ErrorNotice, InfoNotice, KeyValue, Modal, Page, STACK } from "../components/ui";
 import { Button } from "../components/ui/button";
 
-export { COLUMNS } from "../lib/board";
-
 /**
  * The page owns the viewport on a desktop and gives it back on a phone.
  *

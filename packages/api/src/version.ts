@@ -10,8 +10,6 @@ export const API_SERVICE = "@agentos/api";
 // Both are the truth about the process that is answering.
 const info: BuildInfo = readBuildInfo(import.meta.url);
 
-export const apiBuildInfo = (): BuildInfo => info;
-
 /** The startup line. Printed before anything can fail, because the first thing
  *  an incident asks of a control plane is which build it is. */
 export const apiBuildLine = (buildInfo: BuildInfo = info): string =>

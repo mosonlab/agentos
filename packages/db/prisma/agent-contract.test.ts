@@ -365,6 +365,7 @@ test("the complete template source inventory rejects a missing workflow or non-d
 test("canonical prompt sync can detect every Markdown-owned structural field", async () => {
   const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
   const persisted: PersistedTemplateStepStructure = {
+    name: expected.name,
     assigneeAgent: { name: expected.agentName! },
     assigneeType: "AGENT",
     layer: expected.layer,
@@ -378,6 +379,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
   };
   assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
   const mutations: Array<[string, PersistedTemplateStepStructure]> = [
+    ["name", { ...persisted, name: "Different display name" }],
     ["agent", { ...persisted, assigneeAgent: { name: "different-agent" } }],
     ["assigneeType", { ...persisted, assigneeType: "HUMAN" }],
     ["layer", { ...persisted, layer: expected.layer + 1 }],

@@ -118,7 +118,7 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
               "baseFromStepIndex", "layer"
             ) VALUES ($1, $2, $3, $4, $5, $6::"AssigneeType", $7, $8, $9, $10::jsonb, $11, $12, $13, $14)`,
             `${templateId}-step-${step.stepIndex}`, templateId,
-            step.agentName ? agentIds.get(step.agentName) : null, step.stepIndex, `Step ${step.stepIndex}`,
+            step.agentName ? agentIds.get(step.agentName) : null, step.stepIndex, step.name,
             step.agentName ? "agent" : "human", step.prompt, step.approvalGate,
             step.attachmentsFromPrevious, step.spawnPolicy === null ? null : JSON.stringify(step.spawnPolicy),
             step.outputKind, step.opensPullRequest, step.baseFromStepIndex, step.layer,

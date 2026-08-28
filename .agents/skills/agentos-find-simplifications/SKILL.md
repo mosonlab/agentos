@@ -1,19 +1,19 @@
 ---
 name: agentos-find-simplifications
-description: "Find evidence-backed AgentOS simplification candidates and group them for Leo's approval before implementation."
+description: "Find evidence-backed AgentOS simplification candidates and group them for the operator's approval before implementation."
 ---
 
 # AgentOS simplification discovery
 
-Run a manual, full-repository survey when Leo decides AgentOS feels bloated. The outcome is a small set of well-proven deletion or consolidation themes, not code changes.
+Run a manual, full-repository survey when the operator decides AgentOS feels bloated. The outcome is a small set of well-proven deletion or consolidation themes, not code changes.
 
 ## Authority boundary
 
 This skill is discovery-only.
 
 - Keep the survey read-only. Do not edit source, tests, configuration, prompts, documentation, or repository records.
-- Do not create a branch, brief, backlog card, chain, pull request, or Agent Note unless Leo separately asks for that action.
-- Stop after presenting the candidate report. Ask Leo to select theme IDs and separately approve any public-interface removal IDs.
+- Do not create a branch, brief, backlog card, chain, pull request, or Agent Note unless the operator separately asks for that action.
+- Stop after presenting the candidate report. Ask the operator to select theme IDs and separately approve any public-interface removal IDs.
 - After approval, handle each selected theme through the repository's normal brief, chain, review, pull-request, and exact-head merge-gate process. Approval of a theme is not approval of unlisted deletions.
 
 Use the current repository instructions as authority. Bind every report to an exact commit and state whether it represents `HEAD`, `origin/main`, or a dirty working tree. The serving checkout remains read-only; if later work must persist an artifact or run mutating validation, use an isolated worktree.
@@ -84,8 +84,8 @@ Reject or downgrade leads based only on file size, aesthetic preference, a one-o
 Assign exactly one verdict to every investigated lead:
 
 - `confirmed-internal-delete`: internal removal or folding supported by strong consumer and intent evidence.
-- `public-removal-needs-Leo`: exported API, CLI, protocol, wire format, configuration contract, or other externally consumable surface. List it separately; target an approved removal to the next minor release while AgentOS is pre-1.0.
-- `defense-or-persisted-separate-task`: persisted data, Prisma schema or migrations, merge authorization or automation, release authority, ownership, locking, workspace containment, security, secrets, or other defense-list behavior. Report the opportunity, but require a separate Sol high task and explicit Leo approval before implementation.
+- `public-removal-needs-operator`: exported API, CLI, protocol, wire format, configuration contract, or other externally consumable surface. List it separately; target an approved removal to the next minor release while AgentOS is pre-1.0.
+- `defense-or-persisted-separate-task`: persisted data, Prisma schema or migrations, merge authorization or automation, release authority, ownership, locking, workspace containment, security, secrets, or other defense-list behavior. Report the opportunity, but require a separate Sol high task and explicit the operator approval before implementation.
 - `intentional-keep`: complexity or duplication justified by a current owner, contract, boundary, or deliberate architecture.
 - `rejected`: the evidence did not prove a net simplification or a production consumer still needs the behavior.
 
@@ -99,9 +99,9 @@ The report must account for every surveyed area, including areas with no accepte
 
 For each theme, read the current `AGENTS.md` `Dispatching chains` rules and recommend a chain type plus one implementation route: `Luna Max eligible` or `Sol High required`. State the exact routing reason. Treat this as a post-approval handoff recommendation, not implementation authority. A Luna subagent dispatched outside the required AgentOS chain does not inherit the chain's permission to implement.
 
-End with only the consequential decisions Leo must make:
+End with only the consequential decisions the operator must make:
 
 1. Which theme IDs, if any, should advance to separate briefs and chains?
-2. Which `public-removal-needs-Leo` IDs, if any, are approved for a next-minor breaking removal?
+2. Which `public-removal-needs-operator` IDs, if any, are approved for a next-minor breaking removal?
 
 Do not implement while waiting for the answer.

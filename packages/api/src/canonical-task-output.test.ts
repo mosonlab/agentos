@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
-  isCanonicalBlindReviewStep,
   isLegacyCombinedBlindReviewStep,
   isCanonicalSolFindingsStep,
   isCanonicalFixStep,
@@ -84,15 +83,12 @@ test("Regression v2 is canonical while the rolled v1 contract remains readable",
 
 test("the canonical graphs carry blind findings and no adjudication node", () => {
   assert.equal(isCanonicalBlindFindingsStep(step("direct-engineer-workflow", 3, "blind-findings")), true);
-  assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow", 3, "blind-findings")), true);
   assert.equal(isCanonicalBlindFindingsStep(step("compound-engineer-workflow", 7, "blind-findings")), true);
-  assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow", 4, "fixed-implementation")), false);
 });
 
 test("the retired combined review role is recognized by output kind", () => {
   assert.equal(isLegacyCombinedBlindReviewStep(step("direct-engineer-workflow-legacy-v1", 3, "must-fix")), true);
   assert.equal(isLegacyCombinedBlindReviewStep(step("compound-engineer-workflow-legacy-v1", 7, "must-fix")), true);
-  assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow-legacy-v1", 3, "must-fix")), true);
   assert.equal(isLegacyCombinedBlindReviewStep(step("any-template-generation", 99, "must-fix")), true);
   assert.equal(isLegacyCombinedBlindReviewStep(step("direct-engineer-workflow-legacy-v1", 3, "blind-findings")), false);
 });

@@ -49,7 +49,7 @@ Choose Direct when one implementation context window can deliver a brief whose c
 
 ## Implementation assignee routing
 
-Keep the template's default implementation assignee. Assign `senior-dev` (same rule for the review-fix step) only when the work touches persisted data or a defense-list path — merge gate, gate worker, migrations, merge automation — or when that classification is uncertain. Assign `frontend-dev` when the work is primarily a new or redesigned web page or UI surface (Leo 2026-08-27); the defense-list rule wins when both apply.
+Keep the template's default implementation assignee. Assign `senior-dev` (same rule for the review-fix step) only when the work touches persisted data or a defense-list path — merge gate, gate worker, migrations, merge automation — or when that classification is uncertain. Assign `frontend-dev` when the work is primarily a new or redesigned web page or UI surface (the operator 2026-08-27); the defense-list rule wins when both apply.
 
 A backlog card that needs a non-default implementation assignee states it as the machine-readable line `Route: implementation=senior-dev` (or `=frontend-dev`) in its description; the dispatcher copies it into `stepOverrides`. Only the implementation step is routable this way.
 

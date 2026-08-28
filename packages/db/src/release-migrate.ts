@@ -19,7 +19,7 @@
  * single mutating command this module may spawn, and a test asserts that no
  * other command it spawns can deploy.
  *
- * (Leo's 2026-08-19 ruling settles the wording conflict between OSS-B0's
+ * (the operator's 2026-08-19 ruling settles the wording conflict between OSS-B0's
  * Step 3, which describes importing the preflight module, and OSS-F0's
  * Decision 7, which requires the wrapper: compose the wrapper, add the
  * release-only prechecks around it, change neither plan.)

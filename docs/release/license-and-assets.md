@@ -79,7 +79,6 @@ and this repository's own.
 | `apps/web/src/components/ui/select.tsx` | `text/tsx` | `50b8ee0ec789e167e23993907529b01e22e1ba2b41ee57ada18f989777c2c827` | 1784 |
 | `apps/web/src/components/ui/switch.tsx` | `text/tsx` | `15d1beaf5575318d9f1065f94036fc3c3464f967f8e6b19a1356c63b0269762a` | 1238 |
 | `apps/web/src/components/ui/table.tsx` | `text/tsx` | `932dce4e8a81167636a36ee4d02477d9820cbbe338774ddea7334abbedb0feeb` | 3424 |
-| `apps/web/src/components/ui/tabs.tsx` | `text/tsx` | `8cc42eb2622997e341c6b006711d10953c2d596ec19068ee909e991aa488180a` | 1615 |
 | `apps/web/src/components/ui/textarea.tsx` | `text/tsx` | `592fb0c774fec5943cf21bfd462129737dce2788ce024c77f3fe30d22697118f` | 1304 |
 
 These files import `@radix-ui/*`, `class-variance-authority`, `clsx`,
@@ -102,7 +101,8 @@ and this repository's own.
 ## Data fixtures
 
 Non-source data files in the published set. None is third-party, and none carries
-a credential, a personal identifier, a private path or a live endpoint.
+a credential, a private path or a live endpoint. One carries a personal
+identifier, recorded below.
 
 | Path | Media type | SHA-256 | Bytes |
 | --- | --- | --- | --- |
@@ -120,6 +120,13 @@ is the part worth writing down:
   of an internal task chain in this repository, captured 2026-08-17 and frozen so
   that the task console's regression tests read fixed input rather than whatever
   a database happens to hold. Reviewed for publication.
+
+  One of the seven rows records an approval by name: the text says a named person
+  approved the intended product behavior. That name stays. The fixture is what
+  those rows actually said on 2026-08-17, and its provenance record asserts
+  exactly that; editing the text and recomputing the digest would leave a
+  self-consistent pair whose authority statement is false. The name is not a
+  credential and identifies this repository's own operator.
 - **`tc-ux-v1-prompts.provenance.json`** — the provenance record for the fixture
   above: what it was captured from, when, its byte count and its SHA-256. The
   digest it records is the fixture's actual digest in this commit, so the pair
