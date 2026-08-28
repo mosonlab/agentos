@@ -8,7 +8,6 @@ import {
 } from "@anneal/db";
 import {
   mergeLeaseHold,
-  type MergeLeaseHold,
   type MergeLeaseRelease,
 } from "./merge-lease.js";
 
