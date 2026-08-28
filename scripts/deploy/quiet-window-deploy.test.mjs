@@ -76,9 +76,9 @@ test("quiet-window runbook pins source-declared canonical transitions", () => {
   }
   assert.match(syncSource, /const REGRESSION_AGENT_NAME = "regression-verifier"/u);
   assert.match(syncSource, /"compound-engineer-workflow:6", \{ from: null, to: 5 \}/u);
-  assert.match(syncSource, /"direct-engineer-workflow:2", \{ from: null, to: 1 \}/u);
+  assert.match(syncSource, /"direct-engineer-workflow:3", \{ from: null, to: 2 \}/u);
   assert.match(runbook, /`compound-engineer-workflow:6` from `null` to step 5/u);
-  assert.match(runbook, /`direct-engineer-workflow:2` from `null` to step 1/u);
+  assert.match(runbook, /`direct-engineer-workflow:3` from `null` to step 2/u);
   assert.match(runbook, /`regression-verifier` is the one source-declared role creation/u);
   assert.match(runbook, /Full Assurance step 11/u);
   assert.match(runbook, /TODO, and free of every Run, Session, and step output/u);

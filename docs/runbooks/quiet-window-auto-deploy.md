@@ -178,7 +178,7 @@ The job then performs exactly this sequence and stops at the first failure:
    are preserved after validation; only uncustomized Agent-default transitions
    declared by the source may be adopted. The review-base
    transitions adopt only `compound-engineer-workflow:6` from `null` to step 5
-   and `direct-engineer-workflow:2` from `null` to step 1. Agent-default transitions
+   and `direct-engineer-workflow:3` from `null` to step 2. Agent-default transitions
    are frozen to `review-coordinator` and `review-coordinator-sol`, from model
    `gpt-5.6-sol:high` with `runnerPreference` `CODEX` to model
    `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`, plus
