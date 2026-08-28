@@ -4,12 +4,14 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  MERGE_TAIL_KIND,
   PrismaClient,
   readChainControls,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
 
+import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -66,7 +68,52 @@ const getTasks = async (projectId: string) => {
 };
 
 let sequence = 0;
-const seedChain = async (options: { allDone?: boolean; chainId?: string } = {}) => {
+const createChainTasks = async (options: {
+  projectId: string;
+  repoId: string;
+  agentId: string;
+  chainId: string;
+  chainIndexOffset?: number;
+  allDone?: boolean;
+}) => {
+  const chainIndexOffset = options.chainIndexOffset ?? 0;
+  const first = await db.task.create({ data: {
+    projectId: options.projectId,
+    repoId: options.repoId,
+    assigneeAgentId: options.agentId,
+    name: "First",
+    description: "first",
+    chainId: options.chainId,
+    chainIndex: chainIndexOffset,
+    chainLayer: 1,
+    status: options.allDone ? TaskStatus.DONE : TaskStatus.DOING,
+  } });
+  const second = await db.task.create({ data: {
+    projectId: options.projectId,
+    repoId: options.repoId,
+    assigneeAgentId: options.agentId,
+    name: "Second",
+    description: "second",
+    chainId: options.chainId,
+    chainIndex: chainIndexOffset + 1,
+    chainLayer: 2,
+    status: options.allDone ? TaskStatus.DONE : TaskStatus.TODO,
+  } });
+  const third = await db.task.create({ data: {
+    projectId: options.projectId,
+    repoId: options.repoId,
+    assigneeAgentId: options.agentId,
+    name: "Third",
+    description: "third",
+    chainId: options.chainId,
+    chainIndex: chainIndexOffset + 2,
+    chainLayer: 3,
+    status: options.allDone ? TaskStatus.DONE : TaskStatus.TODO,
+  } });
+  return { chainId: options.chainId, first, second, third };
+};
+
+const seedChain = async (options: { allDone?: boolean; chainId?: string; chainIndexOffset?: number } = {}) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Chain control", slug: `chain-control-${suffix}` } });
@@ -94,40 +141,15 @@ const seedChain = async (options: { allDone?: boolean; chainId?: string } = {}) 
     permissions: "GIT_WRITE",
   } });
   const chainId = options.chainId ?? `chain-${suffix}`;
-  const first = await db.task.create({ data: {
+  const chain = await createChainTasks({
     projectId: project.id,
     repoId: repo.id,
-    assigneeAgentId: agent.id,
-    name: "First",
-    description: "first",
+    agentId: agent.id,
     chainId,
-    chainIndex: 0,
-    chainLayer: 1,
-    status: options.allDone ? TaskStatus.DONE : TaskStatus.DOING,
-  } });
-  const second = await db.task.create({ data: {
-    projectId: project.id,
-    repoId: repo.id,
-    assigneeAgentId: agent.id,
-    name: "Second",
-    description: "second",
-    chainId,
-    chainIndex: 1,
-    chainLayer: 2,
-    status: options.allDone ? TaskStatus.DONE : TaskStatus.TODO,
-  } });
-  const third = await db.task.create({ data: {
-    projectId: project.id,
-    repoId: repo.id,
-    assigneeAgentId: agent.id,
-    name: "Third",
-    description: "third",
-    chainId,
-    chainIndex: 2,
-    chainLayer: 3,
-    status: options.allDone ? TaskStatus.DONE : TaskStatus.TODO,
-  } });
-  return { project, agent, repo, chainId, first, second, third };
+    chainIndexOffset: options.chainIndexOffset ?? 0,
+    allDone: options.allDone ?? false,
+  });
+  return { project, agent, repo, ...chain };
 };
 
 test("the shared reader treats absent and released controls as not held", async () => {
@@ -168,6 +190,19 @@ test("Hold creates one authority and one audit event without touching Runs or Ta
     runner: "CLAUDE",
     model: "claude",
   } });
+  assert.equal(await recordMergeLeaseHold(db, {
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+  }, {
+    outcome: "released",
+    ref: "refs/merge-lease/holder",
+    sha: "slice-01-merge-lease",
+    acquiredAt: "2026-08-27T12:00:00.250Z",
+  }, new Date("2026-08-27T12:01:02.999Z")), "recorded");
+  const mergeLeaseActivityBefore = await db.taskActivity.findMany({
+    where: { taskId: chain.third.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
   const statusesBefore = await db.task.findMany({ where: { projectId: chain.project.id, chainId: chain.chainId }, select: { id: true, status: true } });
   const held = await call(`/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-1", reason: "review the current output" });
   assert.equal(held.status, 200);
@@ -206,12 +241,21 @@ test("Hold creates one authority and one audit event without touching Runs or Ta
     statusesBefore,
   );
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: queued.id } })).cancelRequestId, null);
+  const mergeLeaseActivityAfter = await db.taskActivity.findMany({
+    where: { taskId: chain.third.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  assert.equal(JSON.stringify(mergeLeaseActivityAfter), JSON.stringify(mergeLeaseActivityBefore));
 });
 
 test("repeated Hold is an idempotent success and does not append history", async () => {
   const chain = await seedChain();
   const first = await call(`/tasks/${chain.first.id}/chain/hold`, { requestId: "hold-original", reason: "first reason" });
   assert.equal(first.status, 200);
+  const repeatedSame = await call(`/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-original", reason: "ignored same-request reason" });
+  assert.equal(repeatedSame.status, 200);
+  assert.equal(repeatedSame.body.duplicate, true);
+  assert.equal(repeatedSame.body.control.holdRequestId, "hold-original");
   const repeated = await call(`/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-retry", reason: "ignored reason" });
   assert.equal(repeated.status, 200);
   assert.equal(repeated.body.duplicate, true);
@@ -244,14 +288,48 @@ test("Hold refuses unknown, chainless, and complete Tasks", async () => {
 });
 
 test("the authority is scoped by project and accepted request ids are unique per transition kind", async () => {
-  const left = await seedChain({ chainId: "same-chain" });
+  const left = await seedChain({ chainId: "same-chain", chainIndexOffset: 0 });
   // Task's legacy `(chainId, chainIndex)` uniqueness is global, so a second
   // project can reuse the chain id only at disjoint indices. The authority
   // itself is still keyed by the full project/Chain pair.
-  const right = await seedChain({ chainId: "same-chain-other-project" });
+  const right = await seedChain({ chainId: left.chainId, chainIndexOffset: 11 });
+  const sibling = await createChainTasks({
+    projectId: left.project.id,
+    repoId: left.repo.id,
+    agentId: left.agent.id,
+    chainId: "different-chain-in-same-project",
+    chainIndexOffset: 21,
+  });
   assert.notEqual(left.project.id, right.project.id);
+  const rightTasksBefore = await db.task.findMany({
+    where: { projectId: right.project.id, chainId: right.chainId },
+    orderBy: { chainIndex: "asc" },
+    select: { id: true, status: true, chainId: true, chainIndex: true, chainLayer: true },
+  });
+  const siblingTasksBefore = await db.task.findMany({
+    where: { projectId: left.project.id, chainId: sibling.chainId },
+    orderBy: { chainIndex: "asc" },
+    select: { id: true, status: true, chainId: true, chainIndex: true, chainLayer: true },
+  });
   assert.equal((await call(`/tasks/${left.first.id}/chain/hold`, { requestId: "same-request" })).status, 200);
   assert.equal(await db.chainControl.count({ where: { projectId: right.project.id } }), 0);
+  assert.deepEqual(
+    await db.task.findMany({
+      where: { projectId: right.project.id, chainId: right.chainId },
+      orderBy: { chainIndex: "asc" },
+      select: { id: true, status: true, chainId: true, chainIndex: true, chainLayer: true },
+    }),
+    rightTasksBefore,
+  );
+  assert.equal(await db.chainControl.count({ where: { projectId: left.project.id, chainId: sibling.chainId } }), 0);
+  assert.deepEqual(
+    await db.task.findMany({
+      where: { projectId: left.project.id, chainId: sibling.chainId },
+      orderBy: { chainIndex: "asc" },
+      select: { id: true, status: true, chainId: true, chainIndex: true, chainLayer: true },
+    }),
+    siblingTasksBefore,
+  );
   assert.equal((await call(`/tasks/${right.first.id}/chain/hold`, { requestId: "same-request" })).status, 200);
   const leftControl = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: left.project.id, chainId: left.chainId } } });
   const rightControl = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: right.project.id, chainId: right.chainId } } });
@@ -265,6 +343,22 @@ test("the authority is scoped by project and accepted request ids are unique per
   } }));
   assert.equal(await db.chainControlEvent.count({ where: { chainControlId: leftControl.id } }), 1);
   assert.equal(await db.chainControlEvent.count({ where: { chainControlId: rightControl.id } }), 1);
+});
+
+test("Hold records the next non-DONE layer even when no Run is active", async () => {
+  const chain = await seedChain();
+  await db.task.update({ where: { id: chain.first.id }, data: { status: TaskStatus.DONE } });
+  assert.equal(await db.run.count(), 0);
+
+  const held = await call(`/tasks/${chain.first.id}/chain/hold`, { requestId: "hold-without-run" });
+  assert.equal(held.status, 200);
+  assert.equal(held.body.control.heldLayer, 2);
+  const control = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+  } } });
+  assert.equal(control.heldLayer, 2);
+  assert.equal(control.state, ChainControlState.HELD);
 });
 
 test("moving one Step to Backlog never creates or changes ChainControl", async () => {
