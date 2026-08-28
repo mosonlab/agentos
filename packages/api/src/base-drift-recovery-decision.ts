@@ -105,7 +105,7 @@ const refusalReason = (refusal: Extract<CandidateLoad, { kind: "refused" }>): st
     case "tail-unresolved": return "current direct/compound regression and readiness tail cannot be resolved";
     case "tail-state-mismatch": return "merge tail task state is not the completed-readiness/stopped-executor shape";
     case "authorization-invalid": return `authorized readiness evidence is ${refusal.detail ?? "missing"}`;
-    case "intent-count": return "source executor run does not have exactly one server-bound merge intent";
+    case "intent-count": return "source executor run has multiple server-bound merge intents";
     case "intent-mismatch": return "executor intent does not match the selected authorization";
     case "authorized-base-mismatch": return "stop evidence does not match the authorized base SHA";
     case "readiness-head-mismatch": return "readiness output does not match the authorized head SHA";
