@@ -114,17 +114,6 @@ test("a provider-reported Claude cost always wins over the price table", () => {
   assert.equal(cost.estimated, false);
 });
 
-test("Claude Opus 5 tokens are estimated when the provider amount is absent", () => {
-  const cost = sessionUsageCost("claude-opus-5:medium", {
-    costUsd: null,
-    inputTokens: 1_000_000,
-    cachedInputTokens: 400_000,
-    outputTokens: 100_000,
-  });
-  assert.equal(cost.costUsd?.toString(), "5.7");
-  assert.equal(cost.estimated, true);
-});
-
 test("an unpriced token component suppresses a partial aggregate dollar amount", () => {
   const priced = sessionUsageCost("gpt-5.6-luna", {
     costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50,

@@ -274,46 +274,10 @@ test("CLAUDE modelUsage includes each cached input component exactly once", () =
   assert.equal(deriveUsageColumns(usage).totalTokens, 32);
 });
 
-test("CLAUDE modelUsage cost fills a missing or zero terminal total", () => {
-  const modelUsage = {
-    primary: { inputTokens: 5, outputTokens: 7, costUSD: 0.012 },
-    secondary: { inputTokens: 11, costUSD: 0.003 },
-  };
-  const missing = extractUsage({ modelUsage });
-  const zero = extractUsage({ modelUsage, total_cost_usd: 0 });
-  assert.equal(missing.costUsd?.toString(), "0.015");
-  assert.equal(zero.costUsd?.toString(), "0.015");
-  // A positive terminal total remains authoritative, preserving Claude's
-  // provider-reported precision when it is present.
-  assert.equal(extractUsage({ modelUsage, total_cost_usd: 0.014 }).costUsd?.toString(), "0.014");
-});
-
-test("one malformed CLAUDE model cost is dropped without discarding valid siblings", async () => {
-  const { result: usage, warnings } = await withCapturedWarnings(() => extractUsage({
-    total_cost_usd: 0,
-    modelUsage: {
-      malformed: { inputTokens: 4, costUSD: "unknown" },
-      valid: { inputTokens: 5, costUSD: 0.002 },
-    },
-  }));
-  assert.equal(usage.inputTokens, 9);
-  assert.equal(usage.costUsd?.toString(), "0.002");
-  assert.match(warnings.join("\n"), /modelUsage\.costUSD/u);
-});
-
 test("an unusable modelUsage falls back to the top-level usage block", () => {
   assert.deepEqual(extractUsage({ usage: { input_tokens: 4 }, modelUsage: { m: {} } }), { inputTokens: 4 });
   assert.deepEqual(extractUsage({ usage: { input_tokens: 4 }, modelUsage: {} }), { inputTokens: 4 });
   assert.deepEqual(extractUsage({ usage: { input_tokens: 4 }, modelUsage: "nope" }), { inputTokens: 4 });
-});
-
-test("a cost-only modelUsage keeps its cost and falls back to top-level tokens", () => {
-  const usage = extractUsage({
-    usage: { input_tokens: 4 },
-    modelUsage: { m: { costUSD: 0.01 } },
-  });
-  assert.equal(usage.inputTokens, 4);
-  assert.equal(usage.costUsd?.toString(), "0.01");
 });
 
 test("one malformed modelUsage entry does not discard the others", () => {

@@ -10,18 +10,15 @@ export type TokenPrices = {
  * Repository-versioned base API prices. Values are USD per one million tokens;
  * the UI marks the result estimated because session totals cannot reconstruct
  * request-level pricing tiers or non-token fees. Source model pages (checked
- * 2026-08-20 for OpenAI and 2026-08-28 for Anthropic):
+ * 2026-08-20):
  * https://developers.openai.com/api/docs/models/gpt-5.6-sol
  * https://developers.openai.com/api/docs/models/gpt-5.6-terra
  * https://developers.openai.com/api/docs/models/gpt-5.6-luna
- * https://www.anthropic.com/news/claude-opus-5
- * https://www-cdn.anthropic.com/files/4zrzovbb/website/5678bc2f5978e5bcd4f1fe7c14b2c72284dcf9f8.pdf
  */
 export const MODEL_TOKEN_PRICES: Readonly<Record<string, TokenPrices>> = {
   "gpt-5.6-sol": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "30" },
   "gpt-5.6-terra": { inputPerMillionUsd: "2", cachedInputPerMillionUsd: "0.2", outputPerMillionUsd: "12" },
   "gpt-5.6-luna": { inputPerMillionUsd: "0.2", cachedInputPerMillionUsd: "0.02", outputPerMillionUsd: "1.2" },
-  "claude-opus-5": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "25" },
 };
 
 export type CostableSession = {
