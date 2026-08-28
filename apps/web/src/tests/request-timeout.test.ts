@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import test from "node:test";
 
 import { ApiError, REQUEST_TIMEOUT_MS, api } from "../lib/api";
@@ -94,4 +96,34 @@ test("an ordinary transport failure is not reported as a timeout", async () => {
       return true;
     });
   });
+});
+
+/**
+ * The live half: the failure this whole change exists for, against a real
+ * socket rather than a mocked one.
+ *
+ * The observed outage was not a refused connection — the dev proxy accepted it
+ * and then nothing came back (ETIMEDOUT at 05:09, an API restart at 05:23). A
+ * server that accepts and never answers is what `AbortSignal.timeout` has to
+ * survive, and `TimeoutError` is the exact name the client keys on to tell that
+ * apart from an ordinary transport failure. The bound here is 300ms rather than
+ * `REQUEST_TIMEOUT_MS` because the property is the rejection, not the interval.
+ */
+test("a server that accepts the connection and never answers rejects as TimeoutError", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  const port = (server.address() as AddressInfo).port;
+  try {
+    await assert.rejects(
+      () => fetch(`http://127.0.0.1:${port}/projects`, { signal: AbortSignal.timeout(300) }),
+      (reason: unknown) => {
+        assert.ok(reason instanceof Error);
+        assert.equal(reason.name, "TimeoutError", "the client's timeout branch reads this name");
+        return true;
+      },
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => { server.close(() => resolve()); });
+  }
 });
