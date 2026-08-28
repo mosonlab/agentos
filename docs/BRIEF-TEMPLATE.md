@@ -60,6 +60,28 @@ it can.
   Environment rules and role behavior live in the agent prompts; code facts
   live in the repository. Do not restate either.
 
+## Routing
+
+The implementation step defaults to the template's assignee (luna:max). Leave
+it there for a narrow, tightly-bounded brief with mechanical acceptance: the
+chain's review and regression tail is the objective backstop the tier table
+requires. Add a `Route: implementation=senior-dev` line only with a stated
+reason, and only for work that genuinely needs the heavier tier: concurrency
+or transaction-boundary semantics, cross-module contract changes, or
+migration and judgment-heavy decisions. A sol route without a reason is a
+brief defect (Moson, 2026-08-28).
+
+## Routing
+
+Implementation runs on the template default (luna max). This template is why:
+a brief with checkable Changes and mechanical Acceptance is exactly the work
+that tier finishes, and the chain's review and regression tail catches what
+it misses. Wanting a heavier implementation tier is a signal about the brief,
+not the model: work whose correctness cannot be bounded by mechanical
+acceptance belongs in a compound chain, where the spec and plan phases carry
+the judgment. A `Route:` override in a brief states its reason on the same
+line; expect it to stay rare.
+
 ## Skeleton
 
 ```
