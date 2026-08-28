@@ -392,6 +392,11 @@
     },
     {
       "category": "pii-email",
+      "glob": "packages/api/src/chain-branch.dbtest.ts",
+      "reason": "synthetic Git author identities in a disposable fixture repository; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so they name no person"
+    },
+    {
+      "category": "pii-email",
       "glob": "packages/runner/src/config.test.ts",
       "reason": "synthetic Git author identities used to verify runner configuration; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so they name no person"
     },
