@@ -118,7 +118,7 @@ const inWindow = (row: UsageRow): boolean => (
  * in that shape. Provider cost, when present, remains authoritative. */
 const legacyCost = (row: UsageRow) => sessionUsageCost(row.model, {
   costUsd: row.costUsd,
-  inputTokens: row.runner === "CODEX" || row.inputTokens === null || row.cachedInputTokens === null
+  inputTokens: row.runner === "CODEX" || row.costUsd !== null || row.inputTokens === null || row.cachedInputTokens === null
     ? row.inputTokens
     : row.inputTokens + row.cachedInputTokens,
   cachedInputTokens: row.cachedInputTokens,
@@ -197,14 +197,11 @@ test("the exact migration preserves fixed-window pricing while canonicalizing Cl
   );
 });
 
-test("the exact migration refuses a nonzero cached row without input and rolls back", async () => {
+test("the exact migration leaves a nonzero cached row without input untouched", async () => {
   const seeded = await seedLegacyRows([
     { label: "Missing input", runner: "CLAUDE", inputTokens: null, cachedInputTokens: 5, outputTokens: 1, totalTokens: null, costUsd: null },
   ]);
-  await assert.rejects(
-    db.$executeRawUnsafe(migrationSql),
-    /nonzero cached input requires inputTokens/u,
-  );
+  await db.$executeRawUnsafe(migrationSql);
   const [row] = await readRows(seeded.sessionIds);
   assert.equal(row?.inputTokens, null);
   assert.equal(row?.cachedInputTokens, 5);

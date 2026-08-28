@@ -87,6 +87,12 @@ type ModelTotals = {
   cachedInputTokens: number | null;
 };
 
+/** Fold a provider's disjoint cached subset into canonical input exactly once.
+ * A missing cached figure leaves reported input unchanged; a missing input
+ * stays missing rather than being invented from the cached subset alone. */
+const canonicalInputTokens = (uncached: number | null, cached: number | null): number | null =>
+  uncached === null || cached === null ? uncached : uncached + cached;
+
 /**
  * CLAUDE's terminal `result` carries a per-model breakdown under `modelUsage`,
  * keyed by model id, whose entries are camelCase — while the top-level `usage`
@@ -120,12 +126,7 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
       totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0);
     }
   }
-  // Claude's modelUsage.inputTokens is uncached. The cache fields are a subset
-  // of canonical input, so add the aggregate once after all models are folded;
-  // keeping the null guard preserves partial-usage semantics.
-  if (totals.inputTokens !== null && totals.cachedInputTokens !== null) {
-    totals.inputTokens += totals.cachedInputTokens;
-  }
+  totals.inputTokens = canonicalInputTokens(totals.inputTokens, totals.cachedInputTokens);
   // Usability is not a separate probe: `modelUsage` was usable iff this one pass
   // produced something. Two traversals would be free to diverge.
   return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null
@@ -185,18 +186,14 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
   if (!totals) return null;
   const result: SessionUsage = {};
   const input = tokenCount(totals.input, "agentosPiUsage.input");
-  if (input !== null) result.inputTokens = input;
   const output = tokenCount(totals.output, "agentosPiUsage.output");
   if (output !== null) result.outputTokens = output;
   const cacheRead = tokenCount(totals.cacheRead, "agentosPiUsage.cacheRead");
   const cacheWrite = tokenCount(totals.cacheWrite, "agentosPiUsage.cacheWrite");
-  if (cacheRead !== null || cacheWrite !== null) {
-    const cached = (cacheRead ?? 0) + (cacheWrite ?? 0);
-    result.cachedInputTokens = cached;
-    // PI's provider input excludes the cache pair. Do not invent input when
-    // the provider omitted it; preserve the field's absent/null semantics.
-    if (input !== null) result.inputTokens = input + cached;
-  }
+  const cached = cacheRead === null && cacheWrite === null ? null : (cacheRead ?? 0) + (cacheWrite ?? 0);
+  if (cached !== null) result.cachedInputTokens = cached;
+  const canonicalInput = canonicalInputTokens(input, cached);
+  if (canonicalInput !== null) result.inputTokens = canonicalInput;
   const cost = piCostAmount(totals.costNanoUsd);
   if (cost !== null) result.costUsd = cost;
   // Nothing usable routes back to the other branches rather than claiming the
@@ -247,7 +244,6 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     if (models.cachedInputTokens !== null) result.cachedInputTokens = models.cachedInputTokens;
   } else if (usage) {
     const input = tokenCount(usage.input_tokens, "usage.input_tokens");
-    if (input !== null) result.inputTokens = input;
     const output = tokenCount(usage.output_tokens, "usage.output_tokens");
     if (output !== null) result.outputTokens = output;
 
@@ -258,14 +254,13 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     const cached = tokenCount(usage.cached_input_tokens, "usage.cached_input_tokens");
     const cacheRead = tokenCount(usage.cache_read_input_tokens, "usage.cache_read_input_tokens");
     const cacheCreation = tokenCount(usage.cache_creation_input_tokens, "usage.cache_creation_input_tokens");
-    if (cached !== null) result.cachedInputTokens = cached;
-    else if (cacheRead !== null || cacheCreation !== null) {
-      const totalCached = (cacheRead ?? 0) + (cacheCreation ?? 0);
-      result.cachedInputTokens = totalCached;
-      // Claude's top-level input is uncached. Keep it absent when omitted,
-      // while adding each cache component once when it is present.
-      if (input !== null) result.inputTokens = input + totalCached;
-    }
+    const disjointCached = cached === null && (cacheRead !== null || cacheCreation !== null)
+      ? (cacheRead ?? 0) + (cacheCreation ?? 0)
+      : null;
+    const persistedCached = cached ?? disjointCached;
+    if (persistedCached !== null) result.cachedInputTokens = persistedCached;
+    const canonicalInput = canonicalInputTokens(input, disjointCached);
+    if (canonicalInput !== null) result.inputTokens = canonicalInput;
   }
 
   const cost = costAmount(event.total_cost_usd);

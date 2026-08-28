@@ -865,7 +865,8 @@ const PI_TRANSCRIPT: unknown[] = [
 
 // The second message is the one that settles the caliber: input 1068 and
 // cacheRead 3584 are DISJOINT (1068 + 5 + 3584 = 4657, PI's own totalTokens),
-// so uncached input is what reaches inputTokens.
+// so the raw PI aggregate keeps uncached input separate; the usage extractor
+// adds cacheRead exactly once when it persists canonical inputTokens.
 const PI_EXPECTED = {
   messages: 2,
   reported: 2,

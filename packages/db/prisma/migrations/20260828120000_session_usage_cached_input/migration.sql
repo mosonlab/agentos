@@ -8,26 +8,16 @@
 
 DO $$
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM "Session"
-    WHERE "runner"::text IN ('claude', 'pi')
-      AND "cachedInputTokens" IS NOT NULL
-      AND "cachedInputTokens" <> 0
-      AND "inputTokens" IS NULL
-  ) THEN
-    RAISE EXCEPTION
-      'session usage normalization: nonzero cached input requires inputTokens for Claude/PI';
-  END IF;
-
   -- Use bigint for the check so PostgreSQL cannot overflow while evaluating
-  -- the guard itself. A NULL total has no value to convert and remains NULL.
+  -- the guard itself. A NULL input has no value to convert, and a NULL total
+  -- has no value to convert; both remain NULL.
   IF EXISTS (
     SELECT 1
     FROM "Session"
     WHERE "runner"::text IN ('claude', 'pi')
       AND "cachedInputTokens" IS NOT NULL
       AND "cachedInputTokens" <> 0
+      AND "inputTokens" IS NOT NULL
       AND (
         ("inputTokens"::bigint + "cachedInputTokens"::bigint) NOT BETWEEN -2147483648 AND 2147483647
         OR (
@@ -49,6 +39,7 @@ BEGIN
     END
   WHERE "runner"::text IN ('claude', 'pi')
     AND "cachedInputTokens" IS NOT NULL
-    AND "cachedInputTokens" <> 0;
+    AND "cachedInputTokens" <> 0
+    AND "inputTokens" IS NOT NULL;
 END;
 $$;
