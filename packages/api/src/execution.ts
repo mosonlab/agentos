@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { FailureClass, type FailureEnvelope, type Prisma } from "@agentos/db";
 
@@ -17,13 +17,8 @@ export const completionSucceeded = (evidence: ExitEvidence): boolean =>
   && evidence.terminalEventSeen
   && evidence.terminalSuccess;
 
-export const makeDedupeKey = (taskId: string, runNumber: number): string => `task:${taskId}:run:${runNumber}`;
-
 export const makeFencingToken = (runId: string, generation: number): string =>
   `${generation}:${runId}:${randomUUID()}`;
-
-export const hashPrompt = (parts: string[]): string =>
-  createHash("sha256").update(parts.join("\n")).digest("hex");
 
 const retryableFailureClasses: readonly FailureClass[] = [
   FailureClass.RATE_LIMITED,

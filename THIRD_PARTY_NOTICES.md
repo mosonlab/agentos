@@ -112,7 +112,6 @@ publishes.
 | `@radix-ui/react-progress` | MIT |
 | `@radix-ui/react-slot` | MIT |
 | `@radix-ui/react-switch` | MIT |
-| `@radix-ui/react-tabs` | MIT |
 | `@tailwindcss/vite` | MIT |
 | `@vitejs/plugin-react` | MIT |
 | `class-variance-authority` | Apache-2.0 |

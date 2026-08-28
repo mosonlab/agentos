@@ -79,7 +79,6 @@ and this repository's own.
 | `apps/web/src/components/ui/select.tsx` | `text/tsx` | `50b8ee0ec789e167e23993907529b01e22e1ba2b41ee57ada18f989777c2c827` | 1784 |
 | `apps/web/src/components/ui/switch.tsx` | `text/tsx` | `15d1beaf5575318d9f1065f94036fc3c3464f967f8e6b19a1356c63b0269762a` | 1238 |
 | `apps/web/src/components/ui/table.tsx` | `text/tsx` | `932dce4e8a81167636a36ee4d02477d9820cbbe338774ddea7334abbedb0feeb` | 3424 |
-| `apps/web/src/components/ui/tabs.tsx` | `text/tsx` | `8cc42eb2622997e341c6b006711d10953c2d596ec19068ee909e991aa488180a` | 1615 |
 | `apps/web/src/components/ui/textarea.tsx` | `text/tsx` | `592fb0c774fec5943cf21bfd462129737dce2788ce024c77f3fe30d22697118f` | 1304 |
 
 These files import `@radix-ui/*`, `class-variance-authority`, `clsx`,
