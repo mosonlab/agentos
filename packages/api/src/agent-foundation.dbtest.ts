@@ -2,9 +2,10 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import { loadAgentSources, PrismaClient, RunnerPreference } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
+import { runDbScript } from "./test-db-script.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
@@ -86,4 +87,61 @@ test("patching an Agent model records an operator runtime override", async () =>
   assert.equal(stored.model, "claude-opus-5:medium");
   assert.equal(stored.runnerPreference, "CLAUDE");
   assert.equal(stored.runtimeConfigCustomized, true);
+});
+
+test("reset-runtime-config restores the role source and leaves canonical sync with nothing to adopt", async () => {
+  await runDbScript("seed.ts");
+  const source = (await loadAgentSources()).roles.find(({ name }) => name === "default");
+  assert.ok(source);
+  const project = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const agent = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: source.name } },
+  });
+  assert.deepEqual({
+    model: agent.model,
+    runnerPreference: agent.runnerPreference,
+    runtimeConfigCustomized: agent.runtimeConfigCustomized,
+  }, {
+    model: source.model,
+    runnerPreference: source.runnerPreference,
+    runtimeConfigCustomized: false,
+  });
+
+  const patched = await call("PATCH", `/agents/${agent.id}`, {
+    model: "claude-opus-5:medium",
+    runnerPreference: RunnerPreference.CLAUDE,
+  });
+  assert.equal(patched.status, 200);
+  await db.agent.update({
+    where: { id: agent.id },
+    data: { runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift" },
+  });
+  assert.deepEqual(await db.agent.findUniqueOrThrow({
+    where: { id: agent.id },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  }), {
+    model: "claude-opus-5:medium",
+    runnerPreference: RunnerPreference.CLAUDE,
+    runtimeConfigCustomized: true,
+  });
+
+  const reset = await call("POST", `/agents/${agent.id}/reset-runtime-config`);
+  assert.equal(reset.status, 200);
+  assert.deepEqual(await db.agent.findUniqueOrThrow({
+    where: { id: agent.id },
+    select: {
+      model: true,
+      runnerPreference: true,
+      runtimeConfigCustomized: true,
+      runtimeConfigDriftNoticeFingerprint: true,
+    },
+  }), {
+    model: source.model,
+    runnerPreference: source.runnerPreference,
+    runtimeConfigCustomized: false,
+    runtimeConfigDriftNoticeFingerprint: null,
+  });
+
+  const synced = await runDbScript("sync-canonical-prompts.ts");
+  assert.match(synced, /"adoptedAgentDefaults":0/u);
 });

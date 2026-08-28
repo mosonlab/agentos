@@ -1,5 +1,5 @@
 /**
- * The canonical prompt sync's frozen-base agent transition against PostgreSQL.
+ * The canonical prompt sync's canonical runtime adoption against PostgreSQL.
  *
  * Requires a scratch server. It creates and drops its own schema and never
  * touches an existing one.
@@ -16,6 +16,7 @@ import { after, before, test } from "node:test";
 
 import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
 
+import { loadAgentSources } from "./agent-sources.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
 import { isIntegratorStep } from "./merge-integrator.js";
 
@@ -47,9 +48,35 @@ const command = (args: string[]) => {
   return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 };
 
+type CanonicalRuntime = { model: string; runnerPreference: RunnerPreference };
+
 let prisma: PrismaClient;
+let canonicalRuntimes: Map<string, CanonicalRuntime>;
+
+const canonicalRuntime = (name: string): CanonicalRuntime => {
+  const runtime = canonicalRuntimes.get(name);
+  assert.ok(runtime, `role source must contain ${name}`);
+  return runtime;
+};
+
+const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+const runtimeAdoptionPattern = (
+  name: string,
+  from: CanonicalRuntime,
+  to: CanonicalRuntime,
+): RegExp => new RegExp(
+  `Canonical runtime config adopted for Agent ${escapeRegex(name)}: `
+  + `from model=${escapeRegex(from.model)}, runnerPreference=${from.runnerPreference} `
+  + `to model=${escapeRegex(to.model)}, runnerPreference=${to.runnerPreference}`,
+  "u",
+);
 
 before(async () => {
+  canonicalRuntimes = new Map((await loadAgentSources()).roles.map((role) => [role.name, {
+    model: role.model,
+    runnerPreference: role.runnerPreference,
+  }]));
   const migrated = command(["prisma", "migrate", "deploy"]);
   assert.equal(migrated.status, 0, migrated.output);
   const seeded = command(["tsx", "prisma/seed.ts"]);
@@ -399,14 +426,16 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
   assert.equal(directAfter.id, directBefore.id);
 });
 
-test("sync upgrades only the exact frozen-base review agent defaults", async () => {
+test("sync adopts any uncustomized canonical runtime drift", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const names = ["review-coordinator", "review-coordinator-sol"];
-  const frozenBase = { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI };
-  const frozenSolBase = { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI };
+  const driftedCoordinator = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
+  const driftedSol = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
+  const coordinatorSource = canonicalRuntime("review-coordinator");
+  const solSource = canonicalRuntime("review-coordinator-sol");
 
-  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator" }, data: frozenBase });
-  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator-sol" }, data: frozenSolBase });
+  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator" }, data: driftedCoordinator });
+  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator-sol" }, data: driftedSol });
   await prisma.agent.updateMany({
     where: { projectId: project.id, name: "review-coordinator" },
     data: { title: "Unrelated drift" },
@@ -421,8 +450,8 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   });
   assert.equal(rolledBack.length, 2);
   assert.ok(rolledBack.every((agent) => (agent.name === "review-coordinator"
-    ? agent.model === frozenBase.model && agent.runnerPreference === frozenBase.runnerPreference
-    : agent.model === frozenSolBase.model && agent.runnerPreference === frozenSolBase.runnerPreference)));
+    ? agent.model === driftedCoordinator.model && agent.runnerPreference === driftedCoordinator.runnerPreference
+    : agent.model === driftedSol.model && agent.runnerPreference === driftedSol.runnerPreference)));
 
   await prisma.agent.updateMany({
     where: { projectId: project.id, name: "review-coordinator" },
@@ -431,24 +460,30 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.match(synced.output, /"adoptedAgentDefaults":2/u);
+  assert.match(synced.output, runtimeAdoptionPattern("review-coordinator", driftedCoordinator, coordinatorSource));
+  assert.match(synced.output, runtimeAdoptionPattern("review-coordinator-sol", driftedSol, solSource));
 
   const upgraded = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
     select: { name: true, model: true, runnerPreference: true },
   });
   assert.equal(upgraded.length, 2);
-  assert.ok(upgraded.every((agent) => agent.runnerPreference === RunnerPreference.PI
-    && agent.model === "openai-codex/gpt-5.6-sol:xhigh"));
+  assert.ok(upgraded.every((agent) => {
+    const source = canonicalRuntime(agent.name);
+    return agent.model === source.model && agent.runnerPreference === source.runnerPreference;
+  }));
 });
 
-test("sync adopts the exact model-only executioner transition", async () => {
+test("sync adopts uncustomized model-only runtime drift", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const executionerSource = canonicalRuntime("implementation-plan-executioner");
   await prisma.agent.update({
     where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
     data: {
       model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
       runtimeConfigCustomized: false,
+      runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",
     },
   });
   const driftNoticeCountBefore = await prisma.inboxMessage.count({
@@ -461,12 +496,12 @@ test("sync adopts the exact model-only executioner transition", async () => {
 
   const executioner = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
   });
   assert.deepEqual(executioner, {
-    model: "gpt-5.6-sol:high",
-    runnerPreference: RunnerPreference.CODEX,
+    ...executionerSource,
     runtimeConfigCustomized: false,
+    runtimeConfigDriftNoticeFingerprint: null,
   });
   assert.equal(await prisma.inboxMessage.count({
     where: { body: { startsWith: "Canonical runtime drift detected" } },
@@ -477,6 +512,7 @@ test("sync notifies once per current customized runtime drift without overwritin
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const originalProduction = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
   const changedProduction = { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE };
+  const mergeResolverSource = canonicalRuntime("merge-resolver");
   const mergeResolver = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
     select: {
@@ -542,7 +578,10 @@ test("sync notifies once per current customized runtime drift without overwritin
     where: { id: firstNotice[0]!.threadId! },
   })).externalChatId, operatorChatId);
   assert.match(firstNotice[0]!.body, /Agent: merge-resolver/u);
-  assert.match(firstNotice[0]!.body, /Canonical: model=gpt-5.6-sol:high, runner=CODEX/u);
+  assert.match(firstNotice[0]!.body, new RegExp(
+    `Canonical: model=${escapeRegex(mergeResolverSource.model)}, runner=${mergeResolverSource.runnerPreference}`,
+    "u",
+  ));
   assert.match(firstNotice[0]!.body, /Production: model=claude-opus-5:medium, runner=CLAUDE/u);
   assert.match(firstNotice[0]!.body, /runtimeConfigCustomized=true/u);
 
@@ -578,8 +617,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
   }), 3);
 
-  const canonicalProduction = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
-  await prisma.agent.update({ where: { id: mergeResolver.id }, data: canonicalProduction });
+  await prisma.agent.update({ where: { id: mergeResolver.id }, data: mergeResolverSource });
   const resolvedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(resolvedSync.status, 0, resolvedSync.output);
   assert.match(resolvedSync.output, /"runtimeDriftNotices":0/u);
@@ -594,8 +632,9 @@ test("sync notifies once per current customized runtime drift without overwritin
 
 });
 
-test("sync notifies drift that it promotes to a customized runtime", async (t) => {
+test("sync adopts uncustomized runtime drift without promoting it", async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const defaultSource = canonicalRuntime("default");
   const agent = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "default" } },
     select: {
@@ -629,28 +668,33 @@ test("sync notifies drift that it promotes to a customized runtime", async (t) =
   const production = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
   await prisma.agent.update({
     where: { id: agent.id },
-    data: { ...production, runtimeConfigCustomized: false, runtimeConfigDriftNoticeFingerprint: null },
+    data: { ...production, runtimeConfigCustomized: false, runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift" },
   });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
-  assert.match(synced.output, /"preservedAgentOverrides":1/u);
-  assert.match(synced.output, /"runtimeDriftNotices":1/u);
+  assert.match(synced.output, /"adoptedAgentDefaults":1/u);
+  assert.match(synced.output, /"runtimeDriftNotices":0/u);
+  assert.match(synced.output, runtimeAdoptionPattern("default", production, defaultSource));
 
   assert.deepEqual(await prisma.agent.findUniqueOrThrow({
     where: { id: agent.id },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
-  }), { ...production, runtimeConfigCustomized: true });
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
+  }), {
+    ...defaultSource,
+    runtimeConfigCustomized: false,
+    runtimeConfigDriftNoticeFingerprint: null,
+  });
   const notices = await prisma.inboxMessage.findMany({
     where: { agentId: agent.id, body: { startsWith: "Canonical runtime drift detected" } },
     orderBy: { createdAt: "asc" },
   });
-  assert.equal(notices.length, existingNoticeIds.size + 1);
-  assert.match(notices.at(-1)!.body, /runtimeConfigCustomized=true/u);
+  assert.equal(notices.length, existingNoticeIds.size);
 });
 
 test("sync recreates a missing regression verifier and restores canonical bindings", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const verifierSource = canonicalRuntime("regression-verifier");
   const source = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
   });
@@ -678,8 +722,8 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   const verifier = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
   });
-  assert.equal(verifier.model, "gpt-5.6-luna:xhigh");
-  assert.equal(verifier.runnerPreference, RunnerPreference.CODEX);
+  assert.equal(verifier.model, verifierSource.model);
+  assert.equal(verifier.runnerPreference, verifierSource.runnerPreference);
   assert.equal(verifier.inboxAccess, false);
   const canonicalSteps = regressionSteps.filter(({ taskTemplate }) =>
     taskTemplate.name === "compound-engineer-workflow" || taskTemplate.name === "direct-engineer-workflow");
