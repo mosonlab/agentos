@@ -42,6 +42,16 @@ export class DeployFailure extends Error {
 export const quietWindowIsOpen = (runs) =>
   runs.every((run) => !BLOCKING_RUN_STATUSES.includes(String(run.status).toLowerCase()));
 
+const DEPLOYED_API_PACKAGE_NAMES = new Set(["@anneal/api", "@agentos/api"]);
+
+/** Accept the one live rename boundary while still requiring a clean exact commit. */
+export const deployedBuildStampRefusal = (stamp) => {
+  if (typeof stamp?.commit !== "string" || !/^[0-9a-f]{40}$/u.test(stamp.commit)) return "invalid-commit";
+  if (stamp.dirty !== false) return "dirty-build";
+  if (!DEPLOYED_API_PACKAGE_NAMES.has(stamp.packageName)) return "unexpected-package-name";
+  return null;
+};
+
 export const gitPreflightFailure = ({ branch, dirty, head, target, fastForward }) => {
   if (branch !== "main") return "production-checkout-not-main";
   if (dirty) return "dirty-working-tree";

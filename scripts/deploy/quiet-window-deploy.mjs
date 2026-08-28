@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import {
   DeployFailure,
   SERVICE_LABELS,
+  deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
   runLocked,
@@ -177,8 +178,9 @@ const readJson = (path, reason) => {
 
 const readDeployedRevision = () => {
   const stamp = readJson(API_BUILD_STAMP, "deployed-revision-unreadable");
-  if (!SHA.test(stamp.commit ?? "") || stamp.dirty !== false || stamp.packageName !== "@anneal/api") {
-    fail("deployed-revision-unreadable", "api-dist-stamp-is-not-a-clean-agentos-api-build");
+  const refusal = deployedBuildStampRefusal(stamp);
+  if (refusal) {
+    fail("deployed-revision-unreadable", `api-dist-stamp-${refusal}`);
   }
   return stamp.commit;
 };

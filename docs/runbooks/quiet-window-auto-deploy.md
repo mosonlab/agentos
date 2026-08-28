@@ -22,6 +22,11 @@ The checkout must have:
   `postgres:16-alpine` image);
 - all thirteen service labels above already loaded.
 
+`com.agentos.web` serves the published `apps/web/dist` tree with Vite preview;
+never point the production label at the Vite development server. The live
+checkout may fetch a newer source revision before artifact publication, while
+the preview process remains bound to the last verified build.
+
 ## Appliance checkout
 
 The production checkout is a dedicated clone owned by the loaded AgentOS
@@ -197,7 +202,7 @@ The job then performs exactly this sequence and stops at the first failure:
    old template carries webhook configuration, rather than changing live-chain
    semantics or moving operator-owned trigger state implicitly. A quiescent
    chain moves under the legacy identity intact and does not block it. The same guarded rollover preserves both pre-merge-lease
-   canonical templates before installing their lease-aware Regression prompts;
+   canonical templates before installing their mechanically-owned Regression prompts;
 7. verify the staged generated Prisma client, recheck the barrier and blocking
    statuses, swap the staged `dist/` trees and target `node_modules`, and
    restart the services;

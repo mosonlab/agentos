@@ -22,6 +22,7 @@ import test from "node:test";
 import {
   DeployFailure,
   SERVICE_LABELS,
+  deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
   gitPreflightFailure,
@@ -152,6 +153,15 @@ test("quiet-window predicate blocks only claimed, provisioning, and running", ()
     assert.equal(quietWindowIsOpen([{ status }]), true, status);
   }
   assert.equal(quietWindowIsOpen([{ status: "queued" }, { status: "waiting-inbox" }]), true);
+});
+
+test("deployed build stamps cross the current npm-scope rename without weakening identity", () => {
+  const commit = "a".repeat(40);
+  assert.equal(deployedBuildStampRefusal({ packageName: "@anneal/api", commit, dirty: false }), null);
+  assert.equal(deployedBuildStampRefusal({ packageName: "@agentos/api", commit, dirty: false }), null);
+  assert.equal(deployedBuildStampRefusal({ packageName: "@other/api", commit, dirty: false }), "unexpected-package-name");
+  assert.equal(deployedBuildStampRefusal({ packageName: "@anneal/api", commit, dirty: true }), "dirty-build");
+  assert.equal(deployedBuildStampRefusal({ packageName: "@anneal/api", commit: "not-a-sha", dirty: false }), "invalid-commit");
 });
 
 test("production host factory refuses a missing mechanism", () => {
