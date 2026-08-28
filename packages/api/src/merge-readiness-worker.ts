@@ -11,6 +11,7 @@ import {
   authorizationMetadata,
   enqueueTaskRun,
   isMergeReadinessStep,
+  latestRecordedStop,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
@@ -56,6 +57,89 @@ const READINESS_REGRESSION_INCLUDE = {
   runs: { orderBy: { runNumber: "desc" as const }, take: 1, select: { id: true } },
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
+
+const LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE =
+  "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
+
+export const reopenRecoveryHeadAdoptionFailures = async (
+  db: PrismaClient,
+  limit = 5,
+): Promise<number> => {
+  const candidates = await db.mergeRecoveryAttempt.findMany({
+    where: {
+      status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+      failureReason: LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE,
+    },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    take: limit,
+  });
+  let reopened = 0;
+  for (const candidate of candidates) {
+    if (!candidate.readinessTaskId || !candidate.regressionTaskId || !candidate.recoveryRunId) continue;
+    const applied = await db.$transaction(async (tx) => {
+      if (!await lockTaskMutationRows(tx, candidate.readinessTaskId!)) return false;
+      const [attempt, regression, readiness, integrator, run, output, stop] = await Promise.all([
+        tx.mergeRecoveryAttempt.findUnique({ where: { id: candidate.id } }),
+        tx.task.findUnique({ where: { id: candidate.regressionTaskId! }, select: { status: true } }),
+        tx.task.findUnique({ where: { id: candidate.readinessTaskId! }, select: { status: true } }),
+        tx.task.findUnique({ where: { id: candidate.integratorTaskId }, select: { status: true } }),
+        tx.run.findUnique({ where: { id: candidate.recoveryRunId! }, select: { id: true, taskId: true, status: true, headSha: true } }),
+        tx.taskStepOutput.findUnique({ where: { taskId: candidate.regressionTaskId! } }),
+        latestRecordedStop(tx, candidate.integratorTaskId),
+      ]);
+      const verdict = parseRegressionVerdict(output?.body ?? "", output?.kind ?? "");
+      if (!attempt
+        || attempt.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
+        || attempt.failureReason !== LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
+        || attempt.recoveryRunId !== candidate.recoveryRunId
+        || attempt.currentBaseSha === null
+        || regression?.status !== TaskStatus.REVIEW
+        || readiness?.status !== TaskStatus.REVIEW
+        || integrator?.status !== TaskStatus.REVIEW
+        || run?.taskId !== candidate.regressionTaskId
+        || run.status !== RunStatus.SUCCEEDED
+        || verdict.status !== "ok"
+        || verdict.verdict.outcome !== "pass"
+        || output?.runId !== run.id
+        || output?.commitSha !== verdict.verdict.headSha
+        || run.headSha !== verdict.verdict.headSha
+        || verdict.verdict.baseHeadSha !== attempt.currentBaseSha
+        || stop?.stopId !== attempt.sourceStopId) return false;
+
+      const updated = await tx.mergeRecoveryAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+          failureReason: LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE,
+        },
+        data: { status: MergeRecoveryStatus.REPAIRING, failureReason: null, endedAt: null },
+      });
+      if (updated.count !== 1) return false;
+      await tx.task.update({ where: { id: candidate.regressionTaskId! }, data: { status: TaskStatus.DONE, failureReason: null } });
+      await tx.task.update({ where: { id: candidate.readinessTaskId! }, data: { status: TaskStatus.TODO, failureReason: null } });
+      await tx.task.update({ where: { id: candidate.integratorTaskId }, data: {
+        status: TaskStatus.REVIEW,
+        failureReason: `Automatic base-drift recovery ${candidate.attempt} resumed after verified regression head adoption`,
+      } });
+      const body = `Automatic base-drift recovery ${candidate.attempt} reopened the verified Regression result for fresh readiness authorization`;
+      const metadata = {
+        aggregateId: candidate.id,
+        sourceStopId: candidate.sourceStopId,
+        recoveryRunId: candidate.recoveryRunId,
+        state: "reopened-head-adoption",
+      };
+      await writeMarker(tx, candidate.integratorTaskId, "baseDriftRecovery", {
+        actorType: "control-plane", body, metadata,
+      });
+      await writeMarker(tx, candidate.regressionTaskId!, "baseDriftRecovery", {
+        actorType: "control-plane", body, metadata,
+      });
+      return true;
+    });
+    if (applied) reopened += 1;
+  }
+  return reopened;
+};
 
 const readinessCandidates = async function* (
   db: PrismaClient,
@@ -721,7 +805,8 @@ export const startReadinessWorker = (
   const timer = setInterval(() => {
     if (inFlight) return;
     inFlight = true;
-    void readinessTick(db, reader, new Date(), 5, releaseMergeLease, withMergeLease)
+    void reopenRecoveryHeadAdoptionFailures(db)
+      .then(() => readinessTick(db, reader, new Date(), 5, releaseMergeLease, withMergeLease))
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {
         inFlight = false;

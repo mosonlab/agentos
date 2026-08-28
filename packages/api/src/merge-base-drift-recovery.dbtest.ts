@@ -28,7 +28,7 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
-import { readinessTick } from "./merge-readiness-worker.js";
+import { readinessTick, reopenRecoveryHeadAdoptionFailures } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
@@ -268,6 +268,42 @@ test("recovery adopts the verified head produced by merging the current base bef
   assert.equal(parsed.status, "ok");
   if (parsed.status === "ok") assert.equal(parsed.payload.headSha, HEAD_2);
   assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
+});
+
+test("the deployed head-adoption fix reopens its exact legacy downstream stop once", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-reopens-head-adoption-stop");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await recordRecoveryPass(seeded, BASE_2, HEAD_2);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const failure = "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
+  await db.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
+    status: "BLOCKED_DOWNSTREAM", failureReason: failure, endedAt: new Date(),
+  } });
+  await db.task.updateMany({
+    where: { id: { in: [seeded.gateTask.id, seeded.readinessTask!.id, seeded.integratorTask!.id] } },
+    data: { status: TaskStatus.REVIEW, failureReason: failure },
+  });
+
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 1);
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status, "REPAIRING");
+
+  const tick = await readinessTick(
+    db,
+    reader(snapshot(BASE_2, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    new Date(),
+    5,
+    releaseChainLease,
+    runWithMergeLease,
+  );
+  assert.equal(tick.authorized, 1);
+  const completed = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(completed.status, "SUCCEEDED");
+  assert.equal(completed.authorizedHeadSha, HEAD_2);
 });
 
 test("recovery holds the full chain mutex before mutation and a concurrent chain writer completes without deadlock or lost recovery", { timeout: 20_000 }, async () => {
