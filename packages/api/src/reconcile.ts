@@ -286,7 +286,7 @@ export const reconcileDatabaseRuns = async (
       count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length,
     };
   });
-  for (const chainId of reconciliation.strandedChainLeases) await releaseChainLease(chainId);
+  for (const chainId of reconciliation.strandedChainLeases) await releaseChainLease(chainId, db);
   if (reconciliation.strandedHandoffs.length > 0) {
     await db.$transaction(async (tx) => {
       for (const handoff of reconciliation.strandedHandoffs) {

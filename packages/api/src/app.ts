@@ -3187,7 +3187,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being acknowledged"));
     if ("message" in result) return refusalJson(context, result);
     const { leaseToRelease, ...settlement } = result;
-    await releaseChainLease(leaseToRelease);
+    await releaseChainLease(leaseToRelease, db);
     return context.json(settlement);
   });
 
@@ -3918,7 +3918,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being settled"));
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...cancellation } = result;
-    await releaseChainLease(releaseMergeLeaseTask);
+    await releaseChainLease(releaseMergeLeaseTask, db);
     return context.json(cancellation);
   });
 

@@ -7,6 +7,8 @@ import {
   commitWithLeaseDisposition,
   leaseHandoffsWithoutConsumer,
   leaseHolderFor,
+  mergeLeaseHold,
+  recordMergeLeaseHold,
   settleLease,
   withMergeLease,
   type MergeLeaseAcquirer,
@@ -120,6 +122,83 @@ test("commitWithLeaseDisposition releases only after the transaction commits", a
 
   assert.equal(value, 42);
   assert.deepEqual(events, ["transaction", "commit", "release:chain-1"]);
+});
+
+test("mergeLeaseHold records whole elapsed seconds and clamps clock skew", () => {
+  const acquiredAt = "2026-08-27T12:00:00.250Z";
+  assert.deepEqual(mergeLeaseHold(acquiredAt, new Date("2026-08-27T12:01:02.999Z")), {
+    acquiredAt: new Date(acquiredAt),
+    releasedAt: new Date("2026-08-27T12:01:02.999Z"),
+    heldForSeconds: 62,
+  });
+  assert.equal(mergeLeaseHold(acquiredAt, new Date("2026-08-27T11:59:59.999Z"))?.heldForSeconds, 0);
+  assert.equal(mergeLeaseHold("not-a-date", new Date()), null);
+});
+
+test("recordMergeLeaseHold writes only an actual release to the latest chain task", async () => {
+  const writes: Array<Record<string, unknown>> = [];
+  let taskQuery: Record<string, unknown> | undefined;
+  const db = {
+    task: {
+      findFirst: async (query: Record<string, unknown>) => {
+        taskQuery = query;
+        return { id: "tail-task" };
+      },
+    },
+    taskActivity: { create: async ({ data }: { data: Record<string, unknown> }) => { writes.push(data); } },
+  } as unknown as Prisma.TransactionClient as unknown as Parameters<typeof recordMergeLeaseHold>[0];
+  const releasedAt = new Date("2026-08-27T12:01:02.999Z");
+  await recordMergeLeaseHold(db, "chain-1", {
+    outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-sha",
+    acquiredAt: "2026-08-27T12:00:00.250Z",
+  }, releasedAt);
+  await recordMergeLeaseHold(db, "chain-1", { outcome: "not-held" }, releasedAt);
+  await recordMergeLeaseHold(db, "chain-1", { outcome: "skipped", heldFor: "chain-2" }, releasedAt);
+
+  assert.deepEqual(taskQuery, {
+    where: { chainId: "chain-1" },
+    orderBy: [{ chainIndex: "desc" }, { id: "desc" }],
+    select: { id: true },
+  });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]?.taskId, "tail-task");
+  assert.equal(writes[0]?.actorType, "control-plane");
+  assert.equal(writes[0]?.body, "Chain Lease released after 62 seconds");
+  assert.deepEqual(writes[0]?.metadata, {
+    kind: "mergeLease.holdDuration",
+    schemaVersion: 1,
+    chainId: "chain-1",
+    leaseRef: "refs/merge-lease/holder",
+    leaseSha: "lease-sha",
+    acquiredAt: "2026-08-27T12:00:00.250Z",
+    releasedAt: "2026-08-27T12:01:02.999Z",
+    heldForSeconds: 62,
+  });
+});
+
+test("withMergeLease records the release after the adapter confirms deletion", async () => {
+  const events: string[] = [];
+  const writes: Array<Record<string, unknown>> = [];
+  const db = {
+    task: { findFirst: async () => ({ id: "tail-task" }) },
+    taskActivity: { create: async ({ data }: { data: Record<string, unknown> }) => { events.push("activity"); writes.push(data); } },
+  } as unknown as Parameters<typeof recordMergeLeaseHold>[0];
+  const result = await withMergeLease("chain-1", async () => ({
+    disposition: { kind: "release" }, value: "done",
+  }), {
+    acquire: async () => { events.push("acquire"); return { outcome: "acquired" }; },
+    release: async () => {
+      events.push("release");
+      return {
+        outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-sha",
+        acquiredAt: "2026-08-27T12:00:00.000Z",
+      };
+    },
+  }, { db });
+
+  assert.deepEqual(result, { outcome: "ran", value: "done" });
+  assert.deepEqual(events, ["acquire", "release", "activity"]);
+  assert.equal(writes.length, 1);
 });
 
 test("a completed callback releases the merge Lease", async () => {

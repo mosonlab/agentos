@@ -16,6 +16,7 @@ import {
 const execFileAsync = promisify(execFile);
 
 const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
+const MERGE_LEASE_HOLD_KIND = "mergeLease.holdDuration";
 
 /**
  * What one `merge-lease.sh release` did. The script has four outcomes and three
@@ -25,7 +26,7 @@ const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh"
  * release never got far enough to say anything.
  */
 export type MergeLeaseRelease =
-  | { outcome: "released"; ref: string; sha: string }
+  | { outcome: "released"; ref: string; sha: string; acquiredAt?: string }
   | { outcome: "not-held" }
   | { outcome: "skipped"; heldFor: string }
   | { outcome: "refused"; heldBy: string }
@@ -39,17 +40,30 @@ const MACHINE_LINE = /^MERGE LEASE: (.+)$/mu;
 const readOutcome = (output: string): MergeLeaseRelease | null => {
   const spoken = MACHINE_LINE.exec(output)?.[1]?.trim();
   if (!spoken) return null;
-  const [outcome, first, second, ...extra] = spoken.split(" ");
-  if (extra.length > 0) return null;
+  const [outcome, first, second, fourth, ...extra] = spoken.split(" ");
   switch (outcome) {
-    case "released":
-      return first !== undefined && second !== undefined ? { outcome: "released", ref: first, sha: second } : null;
+    case "released": {
+      if (first === undefined || second === undefined || extra.length > 0) return null;
+      if (fourth !== undefined && Number.isNaN(Date.parse(fourth))) return null;
+      return {
+        outcome: "released",
+        ref: first,
+        sha: second,
+        ...(fourth === undefined ? {} : { acquiredAt: fourth }),
+      };
+    }
     case "not-held":
-      return first === undefined ? { outcome: "not-held" } : null;
+      return first === undefined && second === undefined && fourth === undefined && extra.length === 0
+        ? { outcome: "not-held" }
+        : null;
     case "skipped":
-      return first !== undefined && second === undefined ? { outcome: "skipped", heldFor: first } : null;
+      return first !== undefined && second === undefined && fourth === undefined && extra.length === 0
+        ? { outcome: "skipped", heldFor: first }
+        : null;
     case "refused":
-      return first !== undefined && second === undefined ? { outcome: "refused", heldBy: first } : null;
+      return first !== undefined && second === undefined && fourth === undefined && extra.length === 0
+        ? { outcome: "refused", heldBy: first }
+        : null;
     default:
       return null;
   }
@@ -80,8 +94,8 @@ const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
 const releaseMergeLeaseWith = async (
   releaser: MergeLeaseReleaser,
   chainId: string | null,
-): Promise<void> => {
-  if (!chainId) return;
+): Promise<MergeLeaseRelease | null> => {
+  if (!chainId) return null;
   let release: MergeLeaseRelease;
   try {
     release = await releaser(chainId);
@@ -89,12 +103,83 @@ const releaseMergeLeaseWith = async (
     release = { outcome: "unreachable", detail: error instanceof Error ? error.message : String(error) };
   }
   reportMergeLeaseAnomaly(chainId, release);
+  return release;
 };
 
-export type ReleaseMergeLease = (chainId: string | null) => Promise<void>;
+export type ReleaseMergeLease = (chainId: string | null, db: PrismaClient) => Promise<void>;
 
-export const releaseMergeLease: ReleaseMergeLease = async (chainId) => {
-  await releaseMergeLeaseWith(releaseMergeLeaseAdapter, chainId);
+export type MergeLeaseHold = {
+  acquiredAt: Date;
+  releasedAt: Date;
+  heldForSeconds: number;
+};
+
+/** Calculate a lease hold duration from the timestamp persisted in its blob. */
+export const mergeLeaseHold = (acquiredAt: string, releasedAt: Date): MergeLeaseHold | null => {
+  const acquiredAtMs = Date.parse(acquiredAt);
+  const releasedAtMs = releasedAt.getTime();
+  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
+  return {
+    acquiredAt: new Date(acquiredAtMs),
+    releasedAt: new Date(releasedAtMs),
+    // A clock adjustment must not produce a negative hold in the evidence.
+    heldForSeconds: Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000)),
+  };
+};
+
+/** Persist one confirmed lease release on the latest task in its chain. */
+export const recordMergeLeaseHold = async (
+  db: PrismaClient,
+  chainId: string,
+  release: MergeLeaseRelease,
+  releasedAt: Date,
+): Promise<void> => {
+  if (release.outcome !== "released" || !release.acquiredAt) return;
+  const hold = mergeLeaseHold(release.acquiredAt, releasedAt);
+  if (!hold) return;
+  const task = await db.task.findFirst({
+    where: { chainId },
+    orderBy: [{ chainIndex: "desc" }, { id: "desc" }],
+    select: { id: true },
+  });
+  if (!task) return;
+  await db.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "control-plane",
+    body: `Chain Lease released after ${hold.heldForSeconds} seconds`,
+    metadata: {
+      kind: MERGE_LEASE_HOLD_KIND,
+      schemaVersion: 1,
+      chainId,
+      leaseRef: release.ref,
+      leaseSha: release.sha,
+      acquiredAt: hold.acquiredAt.toISOString(),
+      releasedAt: hold.releasedAt.toISOString(),
+      heldForSeconds: hold.heldForSeconds,
+    } as Prisma.InputJsonObject,
+  } });
+};
+
+const recordMergeLeaseHoldBestEffort = async (
+  db: PrismaClient | undefined,
+  chainId: string | null,
+  release: MergeLeaseRelease | null,
+  releasedAt: Date,
+): Promise<void> => {
+  if (!db || !chainId || !release) return;
+  try {
+    await recordMergeLeaseHold(db, chainId, release, releasedAt);
+  } catch (error: unknown) {
+    // The ref is already deleted when this runs. Keep a logging outage from
+    // turning a confirmed release into a failed control-plane action.
+    console.error(`Merge lease hold recording failed for chain ${chainId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
+export const releaseMergeLease: ReleaseMergeLease = async (chainId, db) => {
+  const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, chainId);
+  const releasedAt = new Date();
+  await recordMergeLeaseHoldBestEffort(db, chainId, release, releasedAt);
 };
 
 /**
@@ -293,7 +378,7 @@ export const commitWithLeaseDisposition = async <T>(
 ): Promise<T | null> => {
   const committed = await db.$transaction(fn, options);
   if (committed === null) return null;
-  if (committed.lease.disposition === "release") await release(committed.lease.leaseToRelease);
+  if (committed.lease.disposition === "release") await release(committed.lease.leaseToRelease, db);
   return committed.value;
 };
 
@@ -353,9 +438,13 @@ export type MergeLeaseDependencies = {
   release: MergeLeaseReleaser;
 };
 
+export type WithMergeLeaseContext = { db?: PrismaClient };
+
 export type WithMergeLease = <T>(
   chainId: string | null,
   fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  dependencies?: MergeLeaseDependencies,
+  context?: WithMergeLeaseContext,
 ) => Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }>;
 
 /**
@@ -372,6 +461,7 @@ export const withMergeLease = async <T>(
     acquire: acquireMergeLease,
     release: releaseMergeLeaseAdapter,
   },
+  context?: WithMergeLeaseContext,
 ): Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }> => {
   if (chainId === null) {
     const result = await fn();
@@ -391,7 +481,9 @@ export const withMergeLease = async <T>(
     return { outcome: "ran", value: result.value };
   } finally {
     if (disposition.kind === "release") {
-      await releaseMergeLeaseWith(dependencies.release, chainId);
+      const release = await releaseMergeLeaseWith(dependencies.release, chainId);
+      const releasedAt = new Date();
+      await recordMergeLeaseHoldBestEffort(context?.db, chainId, release, releasedAt);
     }
   }
 };

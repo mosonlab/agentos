@@ -150,7 +150,7 @@ const stopReadiness = async (
     return { applied: true as const, leaseToRelease: stopped.leaseToRelease };
   });
   if (!transition.applied) return false;
-  await releaseChainLease(transition.leaseToRelease);
+  await releaseChainLease(transition.leaseToRelease, db);
   return true;
 };
 
@@ -386,7 +386,7 @@ const applyReadinessDecision = async (
     });
     if (requeued) {
       result.requeued += 1;
-      await releaseChainLease(readiness.chainId);
+      await releaseChainLease(readiness.chainId, db);
     }
     return requeued;
   };
@@ -561,7 +561,7 @@ const applyReadinessDecision = async (
         : { kind: "release" as const },
       value: authorization.kind,
     };
-  });
+  }, undefined, { db });
   if (leased.outcome === "contended") return;
   if (leased.value === "authorized") {
     result.authorized += 1;
