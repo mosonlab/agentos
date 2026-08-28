@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CleanupStatus, RunStatus } from "@agentos/db";
+import { CleanupStatus, RunStatus } from "@anneal/db";
 
 import { terminalFieldsFor, type TerminalOutcome } from "./run-terminal.js";
 

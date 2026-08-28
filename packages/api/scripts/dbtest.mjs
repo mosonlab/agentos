@@ -1,4 +1,4 @@
-// The database-test runner: `npm run test:db -w @agentos/api`.
+// The database-test runner: `npm run test:db -w @anneal/api`.
 //
 // node:test already runs each *.dbtest.ts in its own process, so the only thing
 // that ever forced them into a queue was the schema they shared:
@@ -22,7 +22,7 @@
 //
 //   AGENTOS_DBTEST_CONCURRENCY=3   how many files at once (default: cores-1, max 4)
 //   AGENTOS_DBTEST_PROVISION=0     keep the shared schema; forces serial
-//   npm run test:db -w @agentos/api -- src/chain.dbtest.ts   run a subset
+//   npm run test:db -w @anneal/api -- src/chain.dbtest.ts   run a subset
 
 import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";

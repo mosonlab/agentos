@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   Prisma, backfillSessionUsage, deriveUsageColumns, extractUsage, recomputeSessionUsage, sessionUsageLockKey, sumUsage,
   type PrismaClient, type SessionUsage,
-} from "@agentos/db";
+} from "@anneal/db";
 
 // Fixtures are the COMPLETE `result` objects pasted from
 // spikes/cli-capabilities/samples/, nothing trimmed — regenerate with:

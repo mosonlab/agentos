@@ -1,9 +1,9 @@
 import "./test-workspace-root.js";
 import assert from "node:assert/strict";
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 import { after, before, beforeEach, test } from "node:test";
 
-import { AssigneeType } from "@agentos/db";
+import { AssigneeType } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";

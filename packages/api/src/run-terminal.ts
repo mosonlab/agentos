@@ -7,7 +7,7 @@ import {
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { jsonValue } from "./execution.js";
 import { settleLease, type MergeLeaseTarget } from "./merge-lease.js";

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { Prisma } from "@agentos/db";
+import type { Prisma } from "@anneal/db";
 
 const CAPABILITY_KEY = "cliAvailability";
 

@@ -10,8 +10,8 @@ import { createHash } from "node:crypto";
  * The key is `${projectId}:${chainId}`, the same pair `chainKey`
  * (`packages/api/src/chain.ts`) uses, because that pair is what the platform
  * means by "one chain": `activateChainSuccessor` scopes its successor lookup by
- * both. It is spelled out here rather than imported because `@agentos/api`
- * depends on `@agentos/db` and not the reverse; `chain-branch.test.ts` asserts
+ * both. It is spelled out here rather than imported because `@anneal/api`
+ * depends on `@anneal/db` and not the reverse; `chain-branch.test.ts` asserts
  * the two agree.
  *
  * Both halves of the name are load-bearing. The slug is for the operator reading

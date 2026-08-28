@@ -24,7 +24,7 @@ import {
   INTEGRATOR_OUTPUT_KIND,
   PrismaClient,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";

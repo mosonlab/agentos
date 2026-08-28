@@ -15,7 +15,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, TaskStatus } from "@agentos/db";
+import { enqueueTaskRun, PrismaClient, TaskStatus } from "@anneal/db";
 
 import { hashToken } from "./auth.js";
 import { FAILURE_REASON_LIMIT } from "./failure-reason.js";

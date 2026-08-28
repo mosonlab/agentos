@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 
-import { RunStatus, type PrismaClient } from "@agentos/db";
+import { RunStatus, type PrismaClient } from "@anneal/db";
 
 import {
   acknowledgeReclaimSalvage, publishReclaimIntents, terminalRunStatuses, workspaceKeepStatuses,

@@ -20,7 +20,7 @@ const withRepository = (callback) => {
   try {
     const packageDir = join(root, "packages", "thing");
     mkdirSync(packageDir, { recursive: true });
-    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: "@agentos/thing", version: "1.2.3" }));
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: "@anneal/thing", version: "1.2.3" }));
     writeFileSync(join(root, ".gitignore"), "dist/\n");
     git(root, "init", "-q", "-b", "main");
     git(root, "-c", "user.email=t@example.invalid", "-c", "user.name=Test", "add", "-A");
@@ -36,7 +36,7 @@ test("a clean worktree stamps the commit the artefact was built from", () => {
     const { path, info } = stamp({ outDir: "dist", packageDir, now: new Date("2026-08-18T09:30:00.000Z") });
     assert.equal(info.commit, head);
     assert.equal(info.dirty, false);
-    assert.equal(info.packageName, "@agentos/thing");
+    assert.equal(info.packageName, "@anneal/thing");
     assert.equal(info.version, "1.2.3");
     assert.equal(info.builtAt, "2026-08-18T09:30:00.000Z");
     assert.equal(path, join(packageDir, "dist", "build-info.json"));
@@ -75,11 +75,11 @@ test("the build's own output does not make the build dirty", () => {
 test("building outside a git worktree records no commit instead of failing", () => {
   const root = mkdtempSync(join(tmpdir(), "agentos-stamp-nogit-"));
   try {
-    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@agentos/tarball", version: "0.1.0" }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@anneal/tarball", version: "0.1.0" }));
     const { info } = stamp({ outDir: "dist", packageDir: root });
     assert.equal(info.commit, null);
     assert.equal(info.dirty, false);
-    assert.equal(info.packageName, "@agentos/tarball");
+    assert.equal(info.packageName, "@anneal/tarball");
     assert.deepEqual(readGitState(root), { commit: null, dirty: false });
   } finally {
     rmSync(root, { recursive: true, force: true });

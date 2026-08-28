@@ -12,7 +12,7 @@ import {
   type Prisma,
   type PrismaClient,
   writeMarker,
-} from "@agentos/db";
+} from "@anneal/db";
 
 const execFileAsync = promisify(execFile);
 

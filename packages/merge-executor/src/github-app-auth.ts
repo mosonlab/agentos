@@ -10,7 +10,7 @@ import { sign } from "node:crypto";
 import type { Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 
-import { NO_RESPONSE, callWithTimeout, type Http } from "@agentos/github-client";
+import { NO_RESPONSE, callWithTimeout, type Http } from "@anneal/github-client";
 
 const APP_JWT_BACKDATE_SECONDS = 60;
 const APP_JWT_LIFETIME_SECONDS = 9 * 60;

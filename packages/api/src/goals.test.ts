@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GoalStatus, Prisma, type PrismaClient } from "@agentos/db";
+import { GoalStatus, Prisma, type PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 

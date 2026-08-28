@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AssigneeType, type Prisma, TaskStatus } from "@agentos/db";
+import { AssigneeType, type Prisma, TaskStatus } from "@anneal/db";
 
 import { writeTask } from "./task-write.js";
 

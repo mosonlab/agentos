@@ -14,15 +14,15 @@
  * There is deliberately no write here, and that is the API's whole share of
  * #139: this process may read a pull request and may never change one. If a
  * GitHub write is ever added to the control plane — a status comment, a label,
- * a review — it goes through `@agentos/github-client`'s `confirmedWrite`, not
+ * a review — it goes through `@anneal/github-client`'s `confirmedWrite`, not
  * through a hand-rolled fetch, because the failure this process is most likely
  * to see is the one that looks like an error and was actually a success. The
  * classification of *that* failure is already shared: `isDeterministicRefusal`
  * below is the same predicate the merge executor and the runner answer with.
  */
 
-import { isDeterministicRefusal } from "@agentos/github-client";
-import type { ChangedFile } from "@agentos/db";
+import { isDeterministicRefusal } from "@anneal/github-client";
+import type { ChangedFile } from "@anneal/db";
 
 import { abortableDelay } from "./abortable-delay.js";
 import { decodeStrictBase64 } from "./base64.js";

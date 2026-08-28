@@ -1,5 +1,5 @@
 {
-  "name": "@agentos/github-client",
+  "name": "@anneal/github-client",
   "version": "0.3.0",
   "private": true,
   "type": "module",

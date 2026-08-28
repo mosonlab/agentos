@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
-import { Prisma, type PrismaClient } from "@agentos/db";
+import { Prisma, type PrismaClient } from "@anneal/db";
 
 import { decryptSecret } from "./secrets.js";
 

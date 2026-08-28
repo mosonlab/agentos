@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { MergeEvidence } from "@agentos/db";
+import type { MergeEvidence } from "@anneal/db";
 
 import { evaluateReadiness, type ReadinessInput } from "./readiness-decision.js";
 import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";

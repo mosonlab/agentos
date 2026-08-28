@@ -1,9 +1,9 @@
-import { ENFORCED_BY, type ToolKey } from "@agentos/db/model-routing";
+import { ENFORCED_BY, type ToolKey } from "@anneal/db/model-routing";
 
 import type { RunnerKind } from "./types";
 
-export { ENFORCED_BY, TOOL_KEYS } from "@agentos/db/model-routing";
-export type { ToolKey } from "@agentos/db/model-routing";
+export { ENFORCED_BY, TOOL_KEYS } from "@anneal/db/model-routing";
+export type { ToolKey } from "@anneal/db/model-routing";
 
 export const TOOL_LABEL_KEYS: Record<ToolKey, string> = {
   BASH: "agents.tools.BASH",

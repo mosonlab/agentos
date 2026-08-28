@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 
-import { backfillTaskSource, backfilledFireId, PrismaClient } from "@agentos/db";
+import { backfillTaskSource, backfilledFireId, PrismaClient } from "@anneal/db";
 
 import { fireCronTask } from "./scheduler.js";
 import { resetTestDb, setupTestDb, testDatabaseSchema, testDatabaseUrl } from "./testdb.js";

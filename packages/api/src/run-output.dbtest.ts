@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@anneal/db";
 
 import { hashToken } from "./auth.js";
 import { previousRunHandoffForClaim } from "./canonical-task-output.js";

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 
 import { preMigratedEnvironmentVariable } from "./dbtest-plan.js";
 

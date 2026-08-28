@@ -11,12 +11,12 @@
 // layers is a second statement of the dependency graph, and the failure mode
 // when it drifts is not a build error: it is a workspace compiled against a
 // stale sibling `dist/`, which succeeds and is wrong. Reading the same
-// `@agentos/*` dependencies npm itself resolves means the graph cannot drift
+// `@anneal/*` dependencies npm itself resolves means the graph cannot drift
 // from the manifests that define it.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const FIRST_PARTY = "@agentos/";
+const FIRST_PARTY = "@anneal/";
 
 // The root build script is the authority on scope. Anything in it that is not a
 // plain workspace build is refused rather than skipped: a build step this
@@ -40,7 +40,7 @@ export const firstPartyDependencies = (manifest) =>
  * Groups workspaces into layers where every member of a layer depends only on
  * earlier layers, so a layer can be built concurrently.
  *
- * Dependencies outside the build set — `@agentos/build-info` is one, a package
+ * Dependencies outside the build set — `@anneal/build-info` is one, a package
  * with no build of its own — constrain nothing, because there is no build
  * output of theirs to wait for.
  */

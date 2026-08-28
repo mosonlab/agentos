@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";

@@ -11,7 +11,7 @@ import {
   loadStarterAgentSource,
   runVerifyStarterOnboardingCli,
   verifyStarterOnboarding,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import {
   createStarterInstallation,

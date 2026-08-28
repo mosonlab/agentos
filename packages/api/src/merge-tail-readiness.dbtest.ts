@@ -9,7 +9,7 @@ import {
   PrismaClient,
   readMarkers,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {

@@ -14,7 +14,7 @@ import {
   TaskStatus,
   latestMarker,
   readMarkers,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { createApp } from "./test-app.js";

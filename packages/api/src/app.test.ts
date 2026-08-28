@@ -12,7 +12,7 @@ import {
   RunnerKind,
   RunnerPreference,
   type PrismaClient,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { createApp, partitionArchivable } from "./test-app.js";
 import { createApp as createLiveApp } from "./app.js";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AssigneeType, ScheduleKind } from "@agentos/db";
+import { AssigneeType, ScheduleKind } from "@anneal/db";
 
 import { computeNextOccurrence, schedulerPollIntervalMs, schedulerTick, startScheduler, validateSchedule } from "./scheduler.js";
 

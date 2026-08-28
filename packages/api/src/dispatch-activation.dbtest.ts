@@ -16,7 +16,7 @@ import {
   Prisma,
   PrismaClient,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";

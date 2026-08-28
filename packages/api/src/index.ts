@@ -6,7 +6,7 @@ import {
   ServiceMaintenanceLockError,
   SERVICE_LOCK_CONTENTION_EXIT_CODE,
   type HeldServiceMaintenanceLock,
-} from "@agentos/db/service-lock";
+} from "@anneal/db/service-lock";
 import type { ServerType } from "@hono/node-server";
 import { config } from "dotenv";
 
@@ -30,7 +30,7 @@ let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let evidenceTimer: ReturnType<typeof setInterval> | null = null;
 let readinessTimer: ReturnType<typeof setInterval> | null = null;
 let baseDriftRecoveryTimer: ReturnType<typeof setInterval> | null = null;
-let prisma: (typeof import("@agentos/db"))["prisma"] | undefined;
+let prisma: (typeof import("@anneal/db"))["prisma"] | undefined;
 let cleanupPromise: Promise<void> | undefined;
 let requestedSignal: NodeJS.Signals | undefined;
 // Signals must never start cleanup before an in-flight ownership acquisition has
@@ -171,7 +171,7 @@ const main = async (): Promise<void> => {
     files,
     { serve },
   ] = await Promise.all([
-    import("@agentos/db"),
+    import("@anneal/db"),
     import("./app.js"),
     import("./github-read.js"),
     import("./specification-reader.js"),

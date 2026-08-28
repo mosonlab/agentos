@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   ENFORCED_BY, findModel, joinModel, MODELS, runnerForModel, splitModel, TOOL_KEYS, validateModelPair,
-} from "@agentos/db/model-routing";
+} from "@anneal/db/model-routing";
 
 /** The `mechanical/` provider is not a model provider. `merge-integrator` is a
  *  sentinel role whose "model" names a program, and the picker must *not* offer

@@ -60,7 +60,7 @@ import {
   type DecisionRow,
   mergeRecoveryPhase,
   type MergeRecoveryAttempt,
-} from "@agentos/db";
+} from "@anneal/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";

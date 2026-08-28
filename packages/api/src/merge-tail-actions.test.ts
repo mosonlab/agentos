@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MergeRecoveryStatus, type Prisma, type RecoveryContext } from "@agentos/db";
+import { MergeRecoveryStatus, type Prisma, type RecoveryContext } from "@anneal/db";
 
 import {
   openDefenseAuditNotice,

@@ -1,7 +1,7 @@
 /**
  * The subpath's one structural promise, asserted rather than intended.
  *
- * `@agentos/db/model-routing` is imported by the browser bundle. If anything in
+ * `@anneal/db/model-routing` is imported by the browser bundle. If anything in
  * it ever acquires an import — `@prisma/client` above all, but equally a sibling
  * module that has one — the console starts shipping the control plane. The
  * assertion is therefore the strongest available and the cheapest to keep: the

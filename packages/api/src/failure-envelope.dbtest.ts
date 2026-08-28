@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { FAILURE_ENVELOPE_VERSION, type FailureEnvelope, PrismaClient } from "@agentos/db";
+import { FAILURE_ENVELOPE_VERSION, type FailureEnvelope, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";

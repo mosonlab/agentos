@@ -7,7 +7,7 @@
   // published package. The cost was that they were type-checked by nothing at
   // all — a broken entrypoint surfaced only when an operator ran it against a
   // real database. This project closes that gap without emitting anything:
-  // `npm run typecheck:cli -w @agentos/db`.
+  // `npm run typecheck:cli -w @anneal/db`.
   //
   // Only entrypoints belong here. Each one owns a client and a disconnect and
   // delegates every decision to `src/`, so this list stays short and the logic

@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 

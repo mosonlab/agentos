@@ -294,7 +294,8 @@ test("merge lease status prints every field of the current holder", (t) => {
   assert.equal(lease.task, "task-42");
   assert.equal(lease.reason, "Inspect status");
   assert.match(lease.acquiredAt, /^\d{4}-\d{2}-\d{2}T/u);
-  assert.match(lease.token, /^[0-9a-f-]{36}$/u);
+  assert.match(lease.token, /^merge-lease-v1-[0-9a-f]{32}$/u);
+  assert.doesNotMatch(lease.token, /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/u);
 });
 
 test("machine steal is refused through 45 minutes and allowed only after it", (t) => {

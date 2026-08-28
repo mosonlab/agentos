@@ -1,7 +1,7 @@
 # Merge executor operator runbook
 
 This is the current public authority for provisioning and maintaining the
-self-hosted `@agentos/merge-executor`. It covers GitHub.com, a dedicated local
+self-hosted `@anneal/merge-executor`. It covers GitHub.com, a dedicated local
 service identity, and documented but unverified macOS LaunchDaemon and Linux
 systemd profiles. These profiles are procedures, not qualifying platform
 evidence or a support commitment. They do not change the public support matrix,
@@ -193,10 +193,10 @@ staging tree is not the serving checkout and contains no `.env` or App key:
 git status --short
 npm ci
 npm run db:generate
-npm run build -w @agentos/github-client
-npm run build -w @agentos/db
-npm run build -w @agentos/merge-executor
-npm run test -w @agentos/merge-executor
+npm run build -w @anneal/github-client
+npm run build -w @anneal/db
+npm run build -w @anneal/merge-executor
+npm run test -w @anneal/merge-executor
 git rev-parse HEAD
 ```
 

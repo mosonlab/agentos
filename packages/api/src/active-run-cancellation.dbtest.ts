@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@agentos/db";
+import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
 
 import { suspendForInbox } from "./inbox.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";

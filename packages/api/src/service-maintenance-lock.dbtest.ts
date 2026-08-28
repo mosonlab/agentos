@@ -32,7 +32,7 @@ import {
   MAINTENANCE_LOCK_KEY_SQL,
   SERVICE_LOCK_CONTENTION_EXIT_CODE,
   type MaintenanceLockTarget,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { spawnedStartupEnvironment } from "./test-startup-environment.js";
 import { ScratchDatabaseManager } from "./testdb.js";

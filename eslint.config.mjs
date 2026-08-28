@@ -52,7 +52,7 @@ export default tseslint.config(
           // rejection is least likely to be noticed, so they are linted from an
           // inferred project rather than skipped.
           //
-          // @agentos/build-info is on the list for a different reason. It is a
+          // @anneal/build-info is on the list for a different reason. It is a
           // plain-JS workspace whose public type surface is a hand-written
           // index.d.ts, so it has no tsconfig for the project service to place
           // the file in, and an unplaceable file is a parse error rather than a

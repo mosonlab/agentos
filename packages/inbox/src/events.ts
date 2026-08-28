@@ -1,4 +1,4 @@
-import { applyInboxDecisionTx, InboxSender, InboxStatus, Prisma, type PrismaClient } from "@agentos/db";
+import { applyInboxDecisionTx, InboxSender, InboxStatus, Prisma, type PrismaClient } from "@anneal/db";
 
 export type FeishuEnvelope = {
   header?: { event_id?: string; event_type?: string };

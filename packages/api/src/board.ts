@@ -20,7 +20,7 @@ import {
   type TaskSource,
   type TaskStatus as TaskStatusType,
   type UsageCost,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { chainExecutionOwner, type ChainExecutionOwner } from "./chain-execution-owner.js";
 import { chainKey, chainProgressByChain, positions, type ChainProgress } from "./chain.js";

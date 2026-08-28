@@ -25,7 +25,7 @@ import type { FailureClass } from "@prisma/client";
  * wants, so growing it later means adding rows of detail, not reinterpreting
  * what is here.
  *
- * The runner package cannot import this module — it has no `@agentos/db`
+ * The runner package cannot import this module — it has no `@anneal/db`
  * dependency on purpose, because it must not be able to reach a database. It
  * mirrors this shape in `packages/runner/src/envelope.ts`; this file is the
  * canonical definition, and the API's zod schema is the boundary that catches

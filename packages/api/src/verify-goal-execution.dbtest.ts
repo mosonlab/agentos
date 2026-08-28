@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 

@@ -159,7 +159,7 @@ done
 # plists pointing at files that were never staged.
 for index in "${!staged_sources[@]}"; do
   src="${staged_sources[$index]}"
-  [ -f "$src" ] || fail "missing $src — build it first (npm run build -w @agentos/runner), then re-run"
+  [ -f "$src" ] || fail "missing $src — build it first (npm run build -w @anneal/runner), then re-run"
 done
 
 if [ -d "$WORKSPACE_ROOT" ]; then

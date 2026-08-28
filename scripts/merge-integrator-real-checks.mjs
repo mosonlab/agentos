@@ -33,7 +33,7 @@
  *   MERGE_EVIDENCE_TOKEN_FILE     mode-0600 file holding the scratch credential
  *                                 (the same custody rule as the real one)
  *   GITHUB_SCHEMA_GATE_TOKEN      read-only token for the §D-P6 gate
- *   npm run build -w @agentos/merge-executor   the harness drives the real
+ *   npm run build -w @anneal/merge-executor   the harness drives the real
  *                                 decision table, not a paraphrase of it
  *
  * NOT IMPLEMENTED here, by the plan's own scope note: provisioning the
@@ -170,13 +170,13 @@ const makeApi = (token) => {
 
 const runSchemaGate = async () => {
   const record = direction("D-P6", "GraphQL schema gate runs before any merge direction");
-  record.command("npm run schema-gate -w @agentos/merge-executor");
+  record.command("npm run schema-gate -w @anneal/merge-executor");
   if (!process.env.GITHUB_SCHEMA_GATE_TOKEN?.trim()) {
     record.fail("GITHUB_SCHEMA_GATE_TOKEN is not set; the gate would skip, and an unrun gate is not a passed gate");
     return false;
   }
   try {
-    const { stdout } = await execFileAsync("npm", ["run", "schema-gate", "-w", "@agentos/merge-executor"], {
+    const { stdout } = await execFileAsync("npm", ["run", "schema-gate", "-w", "@anneal/merge-executor"], {
       cwd: REPO_ROOT, env: process.env, maxBuffer: 8 * 1024 * 1024,
     });
     record.observe(stdout.trim().split("\n").slice(-6).join("\n"));
@@ -586,7 +586,7 @@ const main = async () => {
         });
       } catch (error) {
         const record = direction("build", "the harness drives the real decision table and the real GitHub client");
-        record.fail(`packages/merge-executor/dist is missing or unusable (${String(error.message ?? error)}); run \`npm run build -w @agentos/merge-executor\` first`);
+        record.fail(`packages/merge-executor/dist is missing or unusable (${String(error.message ?? error)}); run \`npm run build -w @anneal/merge-executor\` first`);
         decisionTable = null;
       }
       if (decisionTable && client) {

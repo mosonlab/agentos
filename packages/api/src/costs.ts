@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient, RunnerKind, sessionUsageCost, type UsageCost } from "@agentos/db";
+import { Prisma, type PrismaClient, RunnerKind, sessionUsageCost, type UsageCost } from "@anneal/db";
 
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 

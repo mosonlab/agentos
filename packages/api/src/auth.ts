@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient } from "@anneal/db";
 
 import { activeRunStatuses } from "./run-fence.js";
 

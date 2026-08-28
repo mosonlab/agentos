@@ -23,7 +23,7 @@ import {
   applyInboxDecisionTx,
   gateQuestion,
   recordGateAttestation,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { persistSessionTaskOutput } from "./canonical-task-output.js";
 import { evidenceTick } from "./merge-evidence-worker.js";

@@ -148,7 +148,7 @@ test("every declared shape is wired into the scan, so none of them is decoration
 
 test("the command runs over this checkout and reports classes only", () => {
   // The real thing: this repository, its real bundle and its real tracked files.
-  // It requires `npm run build -w @agentos/web` to have run, which is the
+  // It requires `npm run build -w @anneal/web` to have run, which is the
   // documented order and the reason the acceptance sequence builds first.
   const result = execFileSync(process.execPath, [scriptPath], { cwd: REPOSITORY_ROOT, encoding: "utf8" });
   assert.match(result,

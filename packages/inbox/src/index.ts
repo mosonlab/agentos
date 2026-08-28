@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { isArchivedAssigneeError, isArchivedTaskError, prisma } from "@agentos/db";
+import { isArchivedAssigneeError, isArchivedTaskError, prisma } from "@anneal/db";
 import { config as loadEnvironment } from "dotenv";
 
 import { deliverPending, type FeishuMessageClient } from "./delivery.js";

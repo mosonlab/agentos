@@ -18,7 +18,7 @@ import {
   writeMarker,
   type PrismaClient,
   type RecoveryContext,
-} from "@agentos/db";
+} from "@anneal/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { openDefenseAuditNotice, stopMergeTail } from "./merge-tail-actions.js";

@@ -5,15 +5,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient } from "@anneal/db";
 // The production runner, not a stand-in. The runner exposes these two
-// entrypoints the way @agentos/db does — types from source, runtime from dist —
+// entrypoints the way @anneal/db does — types from source, runtime from dist —
 // so this typechecks before anything is built and runs against the compiled
 // daemon (`pretest:db` builds it). What it buys is that the deletion side of
 // the protocol under test is the code that actually runs in production: its
 // authorizer, its physical root check, its settlement path.
-import { reclaimWorkspaces } from "@agentos/runner/reclaim";
-import type { RunnerConfig } from "@agentos/runner/config";
+import { reclaimWorkspaces } from "@anneal/runner/reclaim";
+import type { RunnerConfig } from "@anneal/runner/config";
 
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";

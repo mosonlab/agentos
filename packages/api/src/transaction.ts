@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from "@agentos/db";
+import { Prisma, type PrismaClient } from "@anneal/db";
 
 const DEFAULT_SERIALIZABLE_ATTEMPTS = 6;
 const SERIALIZATION_SQLSTATE = new Set(["40001", "40P01"]);

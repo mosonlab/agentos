@@ -302,7 +302,7 @@ const runExecutor = async (config) => {
   const command = process.env.MERGE_SYSTEM_TEST_EXECUTOR_COMMAND?.trim();
   if (!command) {
     record.fail(
-      "MERGE_SYSTEM_TEST_EXECUTOR_COMMAND is not set. It must start @agentos/merge-executor as the declared dedicated "
+      "MERGE_SYSTEM_TEST_EXECUTOR_COMMAND is not set. It must start @anneal/merge-executor as the declared dedicated "
       + "principal; the harness will not substitute its own uid",
     );
   }

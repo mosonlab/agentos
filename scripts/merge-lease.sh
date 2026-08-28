@@ -229,7 +229,10 @@ make_lease_blob() {
   local stolen_json="${1:-}" acquired_at token
   acquired_at="$(node -e 'process.stdout.write(new Date().toISOString())')" \
     || die "could not create an acquisition timestamp"
-  token="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')" \
+  # A bare UUID matches GitHub's legacy npm-token detector and makes the lease
+  # ref impossible to create when Push Protection is enabled. Keep the same
+  # 128 bits of uniqueness without embedding a UUID-shaped substring.
+  token="$(node -e 'process.stdout.write(`merge-lease-v1-${require("node:crypto").randomBytes(16).toString("hex")}`)')" \
     || die "could not create a lease token"
   NEW_SHA="$(node -e '
     const [holder, task, acquiredAt, reason, token, stolen] = process.argv.slice(1);

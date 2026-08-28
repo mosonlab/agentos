@@ -8,7 +8,7 @@ import {
   type Task,
   TaskSource,
   TaskStatus,
-} from "@agentos/db";
+} from "@anneal/db";
 import { CronExpressionParser } from "cron-parser";
 
 export const computeNextOccurrence = (cron: string, timezone: string | null, after: Date): Date => {
