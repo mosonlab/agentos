@@ -645,6 +645,33 @@ test("revalidation cancellation requires the durable cancel-chain decision and p
   assert.match(run.cancelReason ?? "", /operator selected cancel this chain/u);
   assert.ok(run.cancelRequestedAt);
   assert.ok(run.sessionTokenRevokedAt);
+  const activityCount = await db.taskActivity.count({
+    where: { metadata: { path: ["requestId"], equals: run.cancelRequestId } },
+  });
+  const wrongFenceReplay = await request(
+    `/session/runs/${resumed.run.id}/revalidation/cancel`,
+    "POST",
+    resumed.sessionToken,
+    { fencingToken: "wrong-replay-fence" },
+  );
+  assert.equal(wrongFenceReplay.status, 409, JSON.stringify(wrongFenceReplay.body));
+  const replay = await request(
+    `/session/runs/${resumed.run.id}/revalidation/cancel`,
+    "POST",
+    resumed.sessionToken,
+    { fencingToken: resumed.fencingToken },
+  );
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.deepEqual(replay.body, cancelled.body);
+  assert.equal(await db.taskActivity.count({
+    where: { metadata: { path: ["requestId"], equals: run.cancelRequestId } },
+  }), activityCount);
+  const revokedStatus = await request(
+    `/session/runs/${resumed.run.id}/status`,
+    "GET",
+    resumed.sessionToken,
+  );
+  assert.equal(revokedStatus.status, 401, JSON.stringify(revokedStatus.body));
   const chainTasks = await db.task.findMany({ where: { chainId: fixture.chainId }, orderBy: { chainIndex: "asc" } });
   assert.equal(chainTasks.length, 8);
   assert.ok(chainTasks.every((task) => task.status === TaskStatus.BACKLOG));

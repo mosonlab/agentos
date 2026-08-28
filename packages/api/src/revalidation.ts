@@ -1,5 +1,6 @@
 import {
   lockChainRows,
+  lockRunRow,
   InboxStatus,
   Prisma,
   TaskStatus,
@@ -341,7 +342,7 @@ export const readBoundImplementationTask = async (
   return deriveBoundImplementationTask(caller, chainRows);
 };
 
-const revalidationCancelRequestId = (runId: string): string => `revalidation:${runId}:cancel`;
+export const revalidationCancelRequestId = (runId: string): string => `revalidation:${runId}:cancel`;
 
 const premiseCollapseChoices = [
   { id: "cancel-chain", label: "cancel this chain" },
@@ -371,95 +372,120 @@ export const cancelBoundRevalidationRun = async (
   expectedLeaseGeneration?: number,
 ): Promise<RevalidationCancellation> => {
   try {
-    return await db.$transaction((tx) => withFencedRun(tx, fence, {
-      ...callerSelect,
-      status: true,
-      cancelRequestId: true,
-      session: { select: { id: true } },
-    }, async (run) => {
-      const generationRefusal = sessionGenerationRefusal(run, expectedLeaseGeneration);
-      if (generationRefusal) return generationRefusal;
-      const caller = callerFromRun(run);
-      if ("message" in caller) return caller;
-      const locked = await lockedRevalidationTarget(tx, run, caller, fence);
-      if ("message" in locked) return locked;
-      const decision = await tx.inboxDecision.findFirst({
-        where: { runId: fence.runId },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        select: {
-          id: true,
-          decision: true,
-          inboxMessage: {
-            select: { status: true, selectedChoiceId: true, sessionId: true, taskId: true, choices: true },
-          },
-        },
-      });
-      if (!decision
-        || decision.decision !== "cancel-chain"
-        || decision.inboxMessage.status !== InboxStatus.ANSWERED
-        || decision.inboxMessage.selectedChoiceId !== "cancel-chain"
-        || decision.inboxMessage.sessionId !== run.session?.id
-        || decision.inboxMessage.taskId !== locked.caller.id
-        || !hasPremiseCollapseChoices(decision.inboxMessage.choices)) {
-        return failureActivity(tx, locked.caller, fence, {
-          reason: "forbidden",
-          message: "Revalidation cancellation requires this Run's answered cancel-chain Inbox decision",
-        });
-      }
+    return await db.$transaction(async (tx) => {
+      // Serialize the initial write with response-loss retries. Once the
+      // deterministic outcome is committed, replay needs the same fence
+      // identity but deliberately does not require the Run to remain active:
+      // cancellation itself revokes the token and invalidates the active fence.
+      await lockRunRow(tx, fence.runId);
       const requestId = revalidationCancelRequestId(fence.runId);
-      const reason = "Revalidation premise collapsed; operator selected cancel this chain";
-      const requested = await tx.run.updateMany({
-        where: {
-          ...fencedRunWhere(fence),
-          cancelRequestId: null,
-          cancelRequestedAt: null,
-        },
-        data: {
-          cancelRequestId: requestId,
-          cancelReason: reason,
-          cancelRequestedAt: now,
-          sessionTokenRevokedAt: now,
+      const committed = await tx.run.findUnique({
+        where: { id: fence.runId },
+        select: {
+          cancelRequestId: true,
+          cancelReason: true,
+          cancelRequestedAt: true,
+          fencingToken: true,
+          leaseGeneration: true,
         },
       });
-      if (requested.count !== 1) {
-        return failureActivity(tx, locked.caller, fence, {
-          reason: "conflict",
-          message: "Run changed while revalidation cancellation was being requested",
-        });
+      if (committed?.cancelRequestId === requestId
+        && committed.cancelRequestedAt !== null
+        && committed.cancelReason !== null
+        && committed.fencingToken === fence.fencingToken
+        && (expectedLeaseGeneration === undefined || committed.leaseGeneration === expectedLeaseGeneration)) {
+        return { cancelRequested: true as const, requestId, reason: committed.cancelReason };
       }
-      const parked = await tx.task.updateMany({
-        where: {
-          id: { in: locked.rows.map((row) => row.id) },
-          archivedAt: null,
-          status: { not: TaskStatus.DONE },
-        },
-        data: { status: TaskStatus.BACKLOG, failureReason: reason },
-      });
-      await tx.taskActivity.createMany({
-        data: locked.rows.map((row) => ({
-          taskId: row.id,
-          actorType: "operator",
-          body: `Bound chain cancelled: ${reason}`,
-          metadata: { kind: "revalidation-cancel", runId: fence.runId, requestId, decisionId: decision.id },
-        })),
-      });
-      await tx.taskActivity.create({
-        data: revalidationActivity({
-          taskId: locked.caller.id,
-          agentId: run.agentId,
-          body: "Revalidation cancelled the bound chain after premise collapse",
-          metadata: {
-            kind: "revalidation-cancel",
-            runId: fence.runId,
-            requestId,
-            decisionId: decision.id,
-            targetTaskId: locked.target.id,
-            parkedTaskCount: parked.count,
+
+      return withFencedRun(tx, fence, {
+        ...callerSelect,
+        status: true,
+        cancelRequestId: true,
+        session: { select: { id: true } },
+      }, async (run) => {
+        const generationRefusal = sessionGenerationRefusal(run, expectedLeaseGeneration);
+        if (generationRefusal) return generationRefusal;
+        const caller = callerFromRun(run);
+        if ("message" in caller) return caller;
+        const locked = await lockedRevalidationTarget(tx, run, caller, fence);
+        if ("message" in locked) return locked;
+        const decision = await tx.inboxDecision.findFirst({
+          where: { runId: fence.runId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: {
+            id: true,
+            decision: true,
+            inboxMessage: {
+              select: { status: true, selectedChoiceId: true, sessionId: true, taskId: true, choices: true },
+            },
           },
-        }),
+        });
+        if (!decision
+          || decision.decision !== "cancel-chain"
+          || decision.inboxMessage.status !== InboxStatus.ANSWERED
+          || decision.inboxMessage.selectedChoiceId !== "cancel-chain"
+          || decision.inboxMessage.sessionId !== run.session?.id
+          || decision.inboxMessage.taskId !== locked.caller.id
+          || !hasPremiseCollapseChoices(decision.inboxMessage.choices)) {
+          return failureActivity(tx, locked.caller, fence, {
+            reason: "forbidden",
+            message: "Revalidation cancellation requires this Run's answered cancel-chain Inbox decision",
+          });
+        }
+        const reason = "Revalidation premise collapsed; operator selected cancel this chain";
+        const requested = await tx.run.updateMany({
+          where: {
+            ...fencedRunWhere(fence),
+            cancelRequestId: null,
+            cancelRequestedAt: null,
+          },
+          data: {
+            cancelRequestId: requestId,
+            cancelReason: reason,
+            cancelRequestedAt: now,
+            sessionTokenRevokedAt: now,
+          },
+        });
+        if (requested.count !== 1) {
+          return failureActivity(tx, locked.caller, fence, {
+            reason: "conflict",
+            message: "Run changed while revalidation cancellation was being requested",
+          });
+        }
+        const parked = await tx.task.updateMany({
+          where: {
+            id: { in: locked.rows.map((row) => row.id) },
+            archivedAt: null,
+            status: { not: TaskStatus.DONE },
+          },
+          data: { status: TaskStatus.BACKLOG, failureReason: reason },
+        });
+        await tx.taskActivity.createMany({
+          data: locked.rows.map((row) => ({
+            taskId: row.id,
+            actorType: "operator",
+            body: `Bound chain cancelled: ${reason}`,
+            metadata: { kind: "revalidation-cancel", runId: fence.runId, requestId, decisionId: decision.id },
+          })),
+        });
+        await tx.taskActivity.create({
+          data: revalidationActivity({
+            taskId: locked.caller.id,
+            agentId: run.agentId,
+            body: "Revalidation cancelled the bound chain after premise collapse",
+            metadata: {
+              kind: "revalidation-cancel",
+              runId: fence.runId,
+              requestId,
+              decisionId: decision.id,
+              targetTaskId: locked.target.id,
+              parkedTaskCount: parked.count,
+            },
+          }),
+        });
+        return { cancelRequested: true, requestId, reason };
       });
-      return { cancelRequested: true, requestId, reason };
-    }));
+    });
   } catch (error: unknown) {
     await recordRevalidationFailure(db, fence.runId, error);
     throw error;

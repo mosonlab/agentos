@@ -1216,7 +1216,10 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
   after the same Run's premise-collapse Inbox question has an answered
   `cancel-chain` decision. It records cancellation intent for the current Run,
   parks every unfinished task in the bound chain, and revokes the session token;
-  the owning runner then performs provider cleanup and terminalization.
+  the owning runner then performs provider cleanup and terminalization. A retry
+  with the same session token and fencing token replays the committed result
+  without repeating chain or activity mutations; the revoked token remains
+  unauthorized for every other session route.
 
 ### GET `/runs/:runId/events`
 

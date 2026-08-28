@@ -68,7 +68,12 @@ import { bodyLimit } from "hono/body-limit";
 import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
-import { authenticate, principalMayAccess, type Principal } from "./auth.js";
+import {
+  authenticate,
+  authenticateRevalidationCancellationReplay,
+  principalMayAccess,
+  type Principal,
+} from "./auth.js";
 import { etagFor, etagMatches, readBoard, readTaskList, serializeUsageCost, type TaskReadScope } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, readProjectCosts } from "./costs.js";
@@ -157,6 +162,7 @@ import {
   cancelBoundRevalidationRun,
   patchBoundImplementationDescription,
   readBoundImplementationTask,
+  revalidationCancelRequestId,
   SPEC_REVALIDATOR_AGENT_NAME,
 } from "./revalidation.js";
 import { claimRun, OPERATOR_NOTE_METADATA_FIELD } from "./run-claim.js";
@@ -989,7 +995,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       await next();
       return;
     }
-    const principal = await authenticate(db, context.req.header("Authorization"));
+    const authorization = context.req.header("Authorization");
+    let principal = await authenticate(db, authorization);
+    const cancellationReplay = context.req.method === "POST"
+      ? /^\/session\/runs\/([^/]+)\/revalidation\/cancel$/u.exec(context.req.path)
+      : null;
+    if (!principal && cancellationReplay?.[1]) {
+      principal = await authenticateRevalidationCancellationReplay(db, authorization, {
+        runId: cancellationReplay[1],
+        requestId: revalidationCancelRequestId(cancellationReplay[1]),
+      });
+    }
     if (!principal) return context.json({ error: "Unauthorized" }, 401);
     if (!principalMayAccess(principal, context.req.path)) return context.json({ error: "Forbidden for principal" }, 403);
     context.set("principal", principal);

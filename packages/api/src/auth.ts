@@ -70,6 +70,38 @@ export const authenticate = async (
   return run ? { kind: "session", runId: run.id, leaseGeneration: run.leaseGeneration } : null;
 };
 
+/**
+ * Authenticate only a replay of an already-committed revalidation cancellation.
+ *
+ * The successful cancellation revokes its own session token, so the ordinary
+ * live-session predicate cannot authenticate a caller whose response was lost.
+ * The API invokes this fallback only for the exact cancellation route. Matching
+ * the deterministic request id keeps the revoked token from regaining any
+ * other session capability.
+ */
+export const authenticateRevalidationCancellationReplay = async (
+  db: PrismaClient,
+  authorization: string | undefined,
+  input: { runId: string; requestId: string },
+  now = new Date(),
+): Promise<Principal | null> => {
+  if (!authorization?.startsWith("Bearer ")) return null;
+  const supplied = authorization.slice("Bearer ".length);
+  if (!supplied.startsWith("agos_session_")) return null;
+  const run = await db.run.findFirst({
+    where: {
+      id: input.runId,
+      sessionTokenHash: hashToken(supplied),
+      sessionTokenRevokedAt: { not: null },
+      sessionTokenExpiresAt: { gt: now },
+      cancelRequestId: input.requestId,
+      cancelRequestedAt: { not: null },
+    },
+    select: { id: true, leaseGeneration: true },
+  });
+  return run ? { kind: "session", runId: run.id, leaseGeneration: run.leaseGeneration } : null;
+};
+
 export const principalMayAccess = (principal: Principal, path: string): boolean => {
   if (principal.kind === "operator") return !path.startsWith("/runner/") && !path.startsWith("/session/");
   if (principal.kind === "runner") return path.startsWith("/runner/");
