@@ -116,6 +116,78 @@ test("operator principal cannot impersonate a runner", async () => {
   });
 });
 
+test("Inbox summary counts only open messages that need a reply and is not swallowed by the message-id route", async () => {
+  await withTokens(async () => {
+    const messages = [
+      { id: "choice", status: "OPEN", from: "AGENT", kind: "CHOICE", gateTaskId: null, replyToMessageId: null },
+      { id: "waiting-text", status: "OPEN", from: "AGENT", kind: "TEXT", gateTaskId: null, replyToMessageId: null },
+      { id: "notice", status: "OPEN", from: "AGENT", kind: "TEXT", gateTaskId: null, replyToMessageId: null },
+      { id: "closed", status: "CLOSED", from: "AGENT", kind: "CHOICE", gateTaskId: null, replyToMessageId: null },
+    ];
+    const database = {
+      inboxMessage: {
+        findMany: async () => messages,
+        findUnique: async () => { throw new Error("summary was routed as a message id"); },
+      },
+      session: { findMany: async () => [{ waitingOnMessageId: "waiting-text" }] },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/inbox/messages/summary", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { needsReply: 2 });
+  });
+});
+
+test("Inbox summary returns zero when every open card is a dismissible notice", async () => {
+  await withTokens(async () => {
+    const database = {
+      inboxMessage: { findMany: async () => [
+        { id: "notice", status: "OPEN", from: "AGENT", kind: "TEXT", gateTaskId: null, replyToMessageId: null },
+      ] },
+      session: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/inbox/messages/summary", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.deepEqual(await response.json(), { needsReply: 0 });
+  });
+});
+
+test("heavy polled collection routes validate unchanged payloads and change validators with data", async () => {
+  await withTokens(async () => {
+    let version = 1;
+    const database = {
+      project: { findMany: async () => [{ id: `project-${version}` }] },
+      agent: { findMany: async () => [{ id: `agent-${version}`, name: "worker" }] },
+      repo: { findMany: async () => [{ id: `repo-${version}` }] },
+      inboxMessage: { findMany: async () => [{
+        id: `message-${version}`, status: "OPEN", from: "AGENT", kind: "CHOICE",
+        gateTaskId: null, replyToMessageId: null, decisions: [], replies: [], session: null,
+      }] },
+      session: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    for (const path of ["/projects", "/projects/project-1/agents", "/projects/project-1/repos", "/inbox/messages"]) {
+      const first = await app.request(path, { headers: { Authorization: "Bearer operator-unit-token" } });
+      assert.equal(first.status, 200, path);
+      const firstTag = first.headers.get("ETag");
+      assert.ok(firstTag, `${path} did not return an ETag`);
+      const unchanged = await app.request(path, {
+        headers: { Authorization: "Bearer operator-unit-token", "If-None-Match": firstTag },
+      });
+      assert.equal(unchanged.status, 304, path);
+      assert.equal(await unchanged.text(), "", `${path} returned a 304 body`);
+      version += 1;
+      const changed = await app.request(path, {
+        headers: { Authorization: "Bearer operator-unit-token", "If-None-Match": firstTag },
+      });
+      assert.equal(changed.status, 200, path);
+      assert.notEqual(changed.headers.get("ETag"), firstTag, path);
+    }
+  });
+});
+
 /* A merge-tail stop report: agent-authored text, attached to the task it
  * happened on, and nothing resumes on a reply. It is the shape the Inbox is
  * full of, and the old "attached to nothing" rule refused to close it. */
@@ -1625,6 +1697,7 @@ test("claim query filters archived agents before take so active work cannot star
       session: null,
       task: {
         id: `task-${id}`, status: "TODO",
+        projectId: "project-1",
         chainId: archivedAt ? null : "chain-1", chainIndex: archivedAt ? null : 1,
         templateStep: null,
       },
@@ -1642,19 +1715,25 @@ test("claim query filters archived agents before take so active work cannot star
       ...Array.from({ length: 20 }, (_, index) => candidate(`archived-${index}`, old, index)),
       candidate("active", null, 100),
     ];
-    let claimWhere: Record<string, unknown> | undefined;
+    let claimQuery: string | undefined;
     let claimedId: string | undefined;
     const tx = {
-      $queryRaw: async () => [{ granted: true }],
+      $queryRaw: async (query: unknown) => {
+        const sql = Array.isArray(query)
+          ? query.join("?")
+          : (query as { strings?: string[] }).strings?.join("?") ?? "";
+        if (sql.includes('SELECT candidate."id"')) {
+          claimQuery = sql;
+          return [{ id: "active" }];
+        }
+        return [{ granted: true }];
+      },
       // The claim loop brackets every candidate in a savepoint.
       $executeRawUnsafe: async () => 0,
       run: {
-        findMany: async ({ where, take }: { where: Record<string, any>; take: number }) => {
-          claimWhere = where;
-          const filtered = where.agent
-            ? seeded.filter((run) => run.agent.archivedAt === where.agent.archivedAt)
-            : seeded;
-          return filtered.slice(0, take);
+        findMany: async ({ where }: { where: Record<string, any> }) => {
+          const selectedIds = where.id?.in as string[] | undefined;
+          return selectedIds ? seeded.filter((run) => selectedIds.includes(run.id)) : [];
         },
         updateMany: async ({ where }: { where: { id: string } }) => { claimedId = where.id; return { count: 1 }; },
         findFirst: async () => null,
@@ -1688,7 +1767,9 @@ test("claim query filters archived agents before take so active work cannot star
     });
     assert.equal(response.status, 200);
     const claim = await response.json() as { priorOutputs: Array<{ body: string }> };
-    assert.deepEqual(claimWhere?.agent, { archivedAt: null });
+    assert.ok(claimQuery);
+    assert.ok(claimQuery.includes('agent."archivedAt" IS NULL'));
+    assert.ok(claimQuery.indexOf('agent."archivedAt" IS NULL') < claimQuery.indexOf("LIMIT 20"));
     assert.equal(claimedId, "active");
     assert.equal(claim.priorOutputs[0]?.body, completePriorOutput);
   });
@@ -1706,7 +1787,12 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
       },
       taskActivity: { createMany: async () => ({ count: 0 }) },
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
-        $queryRaw: async () => [{ granted: true }],
+        $queryRaw: async (query: unknown) => {
+          const sql = Array.isArray(query)
+            ? query.join("?")
+            : (query as { strings?: string[] }).strings?.join("?") ?? "";
+          return sql.includes('SELECT candidate."id"') ? [] : [{ granted: true }];
+        },
         run: { findMany: async () => [] },
         taskActivity: { findMany: async () => [] },
       }),

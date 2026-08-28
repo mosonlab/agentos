@@ -121,6 +121,7 @@ const mechanicalStop = async (
   observedBaseSha: string,
   condition: StopCondition = "base-drift",
   evidence = JSON.stringify({ observed: observedBaseSha, authorized: authorizedBaseSha }),
+  recordIntent = true,
 ) => {
   const previous = await db.run.findFirst({ where: { taskId: seeded.integratorTask!.id }, orderBy: { runNumber: "desc" } });
   const run = previous?.status === "QUEUED"
@@ -136,14 +137,16 @@ const mechanicalStop = async (
     runId: run.id, projectId: seeded.project.id, taskId: seeded.integratorTask!.id,
     agentId: seeded.integratorAgent.id, runner: "CLAUDE", executionStatus: "SUCCEEDED",
   } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.integratorTask!.id, actorType: "merge-executor", body: "intent",
-    metadata: {
-      kind: MERGE_INTEGRATOR_KIND.intent, schemaVersion: 1, sourceRunId: run.id,
-      idempotencyKey: `123:${HEAD}:${authorizationActivityId}`, prNumber: 123,
-      headSha: HEAD, authorizationActivityId,
-    },
-  } });
+  if (recordIntent) {
+    await db.taskActivity.create({ data: {
+      taskId: seeded.integratorTask!.id, actorType: "merge-executor", body: "intent",
+      metadata: {
+        kind: MERGE_INTEGRATOR_KIND.intent, schemaVersion: 1, sourceRunId: run.id,
+        idempotencyKey: `123:${HEAD}:${authorizationActivityId}`, prNumber: 123,
+        headSha: HEAD, authorizationActivityId,
+      },
+    } });
+  }
   const outputBody = JSON.stringify({ outcome: "stopped", condition, evidence });
   await db.taskStepOutput.upsert({ where: { taskId: seeded.integratorTask!.id }, create: {
     taskId: seeded.integratorTask!.id, runId: run.id, kind: "merge-result", body: outputBody,
@@ -372,6 +375,88 @@ test("eligible direct and compound stops recover once under duplicate ticks and 
       1,
     );
   }
+});
+
+test("pre-intent base drift recovers without inventing an intent while duplicate intents fail closed", async () => {
+  const preIntent = await seedIntegratorChain(db, { label: "recover-pre-intent", shape: "canonical-compound-readiness" });
+  const authorization = await authorize(preIntent.readinessTask!.id, BASE);
+  const sourceRun = await mechanicalStop(
+    preIntent,
+    authorization.id,
+    BASE,
+    BASE_2,
+    "base-drift",
+    JSON.stringify({ observed: BASE_2, authorized: BASE }),
+    false,
+  );
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: preIntent.integratorTask!.id },
+  });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.boundSourceRunId, sourceRun.id);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: preIntent.integratorTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.intent },
+  } }), 0, "recovery does not fabricate irreversible-operation evidence");
+
+  await resetTestDb(db);
+  const ambiguous = await seedStopped("canonical-compound-readiness", "refuse-duplicate-intent");
+  const intent = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: ambiguous.integratorTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.intent },
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: intent.taskId,
+    actorType: intent.actorType,
+    actorId: intent.actorId,
+    body: intent.body,
+    metadata: intent.metadata as Prisma.InputJsonValue,
+  } });
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 0);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: ambiguous.integratorTask!.id },
+  })).failureReason, "source executor run has multiple server-bound merge intents");
+  assert.equal(await db.run.count({ where: { taskId: ambiguous.gateTask.id } }), 1);
+});
+
+test("a legacy zero-intent validation failure reopens the same aggregate and recovers", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "recover-legacy-pre-intent", shape: "canonical-compound-readiness" });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  const sourceRun = await mechanicalStop(
+    seeded,
+    authorization.id,
+    BASE,
+    BASE_2,
+    "base-drift",
+    JSON.stringify({ observed: BASE_2, authorized: BASE }),
+    false,
+  );
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  const legacy = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: "FAILED",
+    failureReason: "source executor run does not have exactly one server-bound merge intent",
+    endedAt: new Date(),
+  } });
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: legacy.id } });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.boundSourceRunId, sourceRun.id);
+  assert.equal(aggregate.failureReason, null);
+  assert.equal(aggregate.endedAt, null);
+  assert.equal(await db.mergeRecoveryAttempt.count({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } }), 1, "the durable failed aggregate is reopened instead of replaced");
 });
 
 test("two distinct executor drifts recover; the third queues no run and notifies once", async () => {
