@@ -708,8 +708,14 @@ test("output the agent already produced survives a delivery-phase failure", asyn
         if (existsSync(sentinel)) throw new Error("connection reset by peer");
       },
     });
+    // The drain retries the flush until the delivery deadline, so this test's
+    // wall clock is that deadline and nothing else. A 60s lease makes it 35s;
+    // a short one floors it at MIN_DELIVERY_BUDGET_MS instead. The loop is
+    // exercised identically either way — it exhausts its budget with events
+    // still pending — and the gate's critical path keeps the other 25 seconds.
+    const configured = { ...config(join(root, "workspaces"), agentBinary), leaseSeconds: 26 };
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote), { controlPlane: controlPlane.controlPlane });
+    await executeClaim(configured, claim(remote), { controlPlane: controlPlane.controlPlane });
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must still be completed");
