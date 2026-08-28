@@ -27,7 +27,7 @@ const fixture = async (label: string): Promise<Fixture> => {
   git(root, "init", "--bare", "--initial-branch=main", remote);
   git(root, "init", "--initial-branch=main", seed);
   git(seed, "config", "user.name", "AgentOS Test");
-  git(seed, "config", "user.email", "runner@agentos.local");
+  git(seed, "config", "user.email", "runner@example.invalid");
   await writeFile(join(seed, "tree.txt"), "base\n");
   git(seed, "add", "tree.txt");
   git(seed, "commit", "-m", "base");
@@ -42,6 +42,7 @@ const fixture = async (label: string): Promise<Fixture> => {
     runnerId: "runner-under-test",
     runAsPrefix: [],
     path: process.env.PATH ?? "/usr/bin:/bin",
+    gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   } as unknown as RunnerConfig;
   return { root, remote, seed, config, mirrorRoot, mirror: repoMirrorPath(mirrorRoot, remote) };
 };
