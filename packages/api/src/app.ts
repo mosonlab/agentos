@@ -823,8 +823,18 @@ type ChainControlProjectionInput = {
   holdGeneration: number;
 };
 
-/** Stable wire shape shared by the Hold route and the later Chain read route. */
-export const chainControlProjection = (control: ChainControlProjectionInput) => ({
+/** The Chain read contract exposes operator facts, not internal CAS metadata. */
+export const chainControlReadProjection = (control: ChainControlProjectionInput) => ({
+  state: control.state === ChainControlState.HELD ? "held" as const : "released" as const,
+  heldLayer: control.heldLayer,
+  heldAt: control.heldAt,
+  holdRequestId: control.holdRequestId,
+  holdReason: control.holdReason,
+  releasedAt: control.releasedAt,
+});
+
+/** Mutation responses retain transition metadata needed by idempotent clients. */
+export const chainControlMutationProjection = (control: ChainControlProjectionInput) => ({
   projectId: control.projectId,
   chainId: control.chainId,
   state: control.state === ChainControlState.HELD ? "held" as const : "released" as const,
@@ -845,7 +855,9 @@ type ChainResumeRow = {
   chainIndex: number | null;
   chainLayer: number | null;
   status: TaskStatus;
-  runs?: Array<{ id: string; session?: { id: string } | null }>;
+  assigneeType: AssigneeType;
+  assigneeAgentId: string | null;
+  repoId: string | null;
 };
 
 const executionLayer = (task: Pick<ChainResumeRow, "chainLayer" | "chainIndex">): number | null => (
@@ -879,6 +891,21 @@ const resumeActivationAnchor = (
       (left.chainIndex ?? Number.MAX_SAFE_INTEGER) - (right.chainIndex ?? Number.MAX_SAFE_INTEGER)
         || left.id.localeCompare(right.id)
     ))[0] ?? null;
+};
+
+const resumeActivationNeedsSourceRun = (
+  rows: readonly ChainResumeRow[],
+  anchor: ChainResumeRow,
+): boolean => {
+  const anchorLayer = executionLayer(anchor);
+  if (anchorLayer === null) return false;
+  const nextLayer = [...new Set(rows.map(executionLayer).filter((layer): layer is number => layer !== null))]
+    .filter((layer) => layer > anchorLayer && rows.some((row) => executionLayer(row) === layer && row.status !== TaskStatus.DONE))
+    .sort((left, right) => left - right)[0];
+  if (nextLayer === undefined) return false;
+  return rows
+    .filter((row) => executionLayer(row) === nextLayer && row.status !== TaskStatus.DONE)
+    .some((row) => row.assigneeType !== AssigneeType.AGENT || row.assigneeAgentId === null || row.repoId === null);
 };
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
@@ -2488,7 +2515,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       chainId,
       total: progress?.total ?? chainRows.length,
       done: progress?.done ?? 0,
-      control: control === null ? null : chainControlProjection(control),
+      control: control === null ? null : chainControlReadProjection(control),
       steps: chainRows.map((row) => ({
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,
@@ -2510,6 +2537,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         startAction: admissions.get(row.id)?.verdict.startable
           ? row.status === TaskStatus.BACKLOG ? "recover" : "start"
           : null,
+        holdRefusal: admissions.get(row.id)?.holdRefusal?.message ?? null,
         currentExecution: admissions.get(row.id)?.facts.active ?? false,
         blockedOn: row.id === firstTask?.id
           && row.dispatchAfterTaskId !== null
@@ -2563,7 +2591,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (priorRequest || existing?.state === ChainControlState.HELD) {
         if (!existing) throw new Error("Chain control event exists without its authority");
         return {
-          control: chainControlProjection(existing),
+          control: chainControlMutationProjection(existing),
           duplicate: true,
         };
       }
@@ -2619,7 +2647,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       return {
-        control: chainControlProjection(held),
+        control: chainControlMutationProjection(held),
         duplicate: false,
       };
     });
@@ -2651,7 +2679,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           chainIndex: true,
           chainLayer: true,
           status: true,
-          runs: { orderBy: { runNumber: "desc" }, take: 1, select: { id: true, session: { select: { id: true } } } },
+          assigneeType: true,
+          assigneeAgentId: true,
+          repoId: true,
         },
       });
       if (!chainRows.some((row) => row.id === taskId)) return refusal("not-found", "Task not found");
@@ -2677,7 +2707,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (priorRequest || existing.state !== ChainControlState.HELD) {
         return {
-          control: chainControlProjection(existing),
+          control: chainControlMutationProjection(existing),
           duplicate: true,
           nextTaskId: null,
           gated: false,
@@ -2685,6 +2715,23 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       if (existing.heldLayer === null) {
         throw new Error("Held Chain control is missing its held layer");
+      }
+
+      const anchor = resumeActivationAnchor(chainRows, existing.heldLayer);
+      const anchorLayer = anchor === null ? null : executionLayer(anchor);
+      const sourceRun = anchorLayer === null
+        ? null
+        : await tx.run.findFirst({
+          where: {
+            taskId: { in: chainRows.filter((row) => executionLayer(row) === anchorLayer).map((row) => row.id) },
+            status: RunStatus.SUCCEEDED,
+            session: { isNot: null },
+          },
+          orderBy: [{ endedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+          select: { id: true },
+        });
+      if (anchor !== null && sourceRun === null && resumeActivationNeedsSourceRun(chainRows, anchor)) {
+        return refusal("conflict", "Cannot resume an approval layer without a succeeded source Run session");
       }
 
       const now = new Date();
@@ -2707,7 +2754,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (releasedCount.count !== 1) {
         const current = await tx.chainControl.findUniqueOrThrow({ where: { id: existing.id } });
         return {
-          control: chainControlProjection(current),
+          control: chainControlMutationProjection(current),
           duplicate: true,
           nextTaskId: null,
           gated: false,
@@ -2728,12 +2775,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
 
-      const anchor = resumeActivationAnchor(chainRows, existing.heldLayer);
       const activated = anchor
-        ? await activateChainSuccessor(tx, anchor, { sourceRunId: anchor.runs?.[0]?.session ? anchor.runs[0].id : null }, now)
+        ? await activateChainSuccessor(tx, anchor, { sourceRunId: sourceRun?.id ?? null }, now)
         : { nextTaskId: null, gated: false };
       return {
-        control: chainControlProjection(released),
+        control: chainControlMutationProjection(released),
         duplicate: false,
         nextTaskId: activated.nextTaskId,
         gated: activated.gated,

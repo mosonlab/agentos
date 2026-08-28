@@ -23,7 +23,7 @@ import {
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 import { createApp } from "./test-app.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 let db: PrismaClient;
 const RUNNER_TOKEN = CHAIN_RUNNER_TOKEN;
@@ -43,6 +43,34 @@ after(async () => {
   if (priorOperatorToken === undefined) delete process.env.OPERATOR_TOKEN;
   else process.env.OPERATOR_TOKEN = priorOperatorToken;
 });
+
+const createClient = () => new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+
+/** Pause a transaction immediately after its Chain row lock resolves. */
+const instrumentTransactions = (
+  client: PrismaClient,
+  onQuery: (pending: Promise<unknown>, sql: string) => Promise<unknown> | unknown,
+): PrismaClient => new Proxy(client, {
+  get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, {
+        get(txTarget, txProperty, txReceiver) {
+          if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+          return (...args: unknown[]) => {
+            const query = args[0] as string[] | { strings?: string[] } | undefined;
+            const sql = Array.isArray(query) ? query.join(" ") : query?.strings?.join(" ") ?? "";
+            return onQuery(Reflect.apply(txTarget.$queryRaw, txTarget, args), sql);
+          };
+        },
+      });
+      return operation(instrumentedTx);
+    }, options as any);
+  },
+}) as PrismaClient;
 
 const seedRunningHeldChain = async () => {
   const suffix = `${process.pid}-${Date.now()}`;
@@ -186,34 +214,68 @@ test("a held fan-out layer completes every sibling while its join remains unacti
   );
   assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
   assert.equal(await db.taskStepOutput.count({ where: { taskId: { in: [chain.first.id, chain.second.id] } } }), 2);
+  const resumed = await operatorRequest(db, `/tasks/${chain.third.id}/chain/resume`, { requestId: "resume-fanout" });
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id, status: RunStatus.QUEUED } }), 1);
 });
 
-test("real Hold-first and completion-first routes preserve the two mutex outcomes", async () => {
-  const holdFirst = await seedBasicChain(db, {
-    statuses: [TaskStatus.DOING, TaskStatus.TODO],
-    control: null,
+const raceHoldAndCompletion = async (winner: "hold" | "completion") => {
+  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO], control: null });
+  const running = await seedRun(db, chain, chain.first.id);
+  let releaseWinner!: () => void;
+  let winnerLocked!: () => void;
+  let loserAttempted!: () => void;
+  let winnerObserved = false;
+  let loserObserved = false;
+  const winnerGate = new Promise<void>((resolve) => { releaseWinner = resolve; });
+  const winnerLock = new Promise<void>((resolve) => { winnerLocked = resolve; });
+  const loserLockAttempt = new Promise<void>((resolve) => { loserAttempted = resolve; });
+  const winnerDb = instrumentTransactions(createClient(), async (pending, sql) => {
+    const result = await pending;
+    if (!winnerObserved && sql.includes("chainLayer")) {
+      winnerObserved = true;
+      winnerLocked();
+      await winnerGate;
+    }
+    return result;
   });
-  const holdFirstRun = await seedRun(db, holdFirst, holdFirst.first.id);
-  const held = await operatorRequest(db, `/tasks/${holdFirst.second.id}/chain/hold`, { requestId: "hold-first", reason: "stop after layer" });
-  assert.equal(held.status, 200, JSON.stringify(held.body));
-  assert.equal((await runnerCompletionRequest(db, holdFirstRun.run, "hold won")).status, 200);
-  assert.equal(await db.run.count({ where: { taskId: holdFirst.second.id } }), 0);
-  assert.equal(await db.taskActivity.count({ where: { taskId: holdFirst.first.id, body: { contains: "activation withheld" } } }), 1);
+  const loserDb = instrumentTransactions(createClient(), (pending, sql) => {
+    if (!loserObserved && sql.includes("chainLayer")) {
+      loserObserved = true;
+      loserAttempted();
+    }
+    return pending;
+  });
+  try {
+    const first = winner === "hold"
+      ? operatorRequest(winnerDb, `/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-race-winner", reason: "stop after layer" })
+      : runnerCompletionRequest(winnerDb, running.run, "completion race winner");
+    await winnerLock;
+    const second = winner === "hold"
+      ? runnerCompletionRequest(loserDb, running.run, "hold won")
+      : operatorRequest(loserDb, `/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-race-loser", reason: "hold activated layer" });
+    await loserLockAttempt;
+    releaseWinner();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    assert.equal(firstResponse.status, 200, JSON.stringify(firstResponse.body));
+    assert.equal(secondResponse.status, 200, JSON.stringify(secondResponse.body));
+  } finally {
+    releaseWinner();
+    await Promise.all([winnerDb.$disconnect(), loserDb.$disconnect()]);
+  }
+  return chain;
+};
 
-  const completionFirst = await seedBasicChain(db, {
-    statuses: [TaskStatus.DOING, TaskStatus.TODO],
-    control: null,
-  });
-  const completionFirstRun = await seedRun(db, completionFirst, completionFirst.first.id);
-  const completed = await runnerCompletionRequest(db, completionFirstRun.run, "completion won");
-  assert.equal(completed.status, 200, JSON.stringify(completed.body));
-  const successorRunsBeforeHold = await db.run.findMany({ where: { taskId: completionFirst.second.id }, orderBy: { id: "asc" } });
-  assert.equal(successorRunsBeforeHold.length, 1);
-  const holdAfterCompletion = await operatorRequest(db, `/tasks/${completionFirst.second.id}/chain/hold`, { requestId: "hold-after-completion", reason: "hold new layer" });
-  assert.equal(holdAfterCompletion.status, 200, JSON.stringify(holdAfterCompletion.body));
-  assert.equal(holdAfterCompletion.body.control.heldLayer, 2);
-  assert.deepEqual(await db.run.findMany({ where: { taskId: completionFirst.second.id }, orderBy: { id: "asc" }, select: { id: true, status: true } }),
-    successorRunsBeforeHold.map((run) => ({ id: run.id, status: run.status })));
+test("concurrent Hold and completion with Hold winning withholds the successor", async () => {
+  const chain = await raceHoldAndCompletion("hold");
+  assert.equal(await db.run.count({ where: { taskId: chain.second.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: { taskId: chain.first.id, body: { contains: "activation withheld" } } }), 1);
+});
+
+test("concurrent Hold and completion with completion winning preserves the activated Run", async () => {
+  const chain = await raceHoldAndCompletion("completion");
+  assert.equal(await db.run.count({ where: { taskId: chain.second.id, status: RunStatus.QUEUED } }), 1);
+  assert.equal((await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: chain.project.id, chainId: chain.chainId } } })).heldLayer, 2);
 });
 
 test("a held approval gate opens Inbox, and answering it completes without crossing the barrier", async () => {
@@ -322,7 +384,7 @@ test("a held merge-readiness completion records evidence, leaves the integrator 
 });
 
 test("bound successor dispatch remains active while the predecessor Chain is held", async () => {
-  const predecessorChain = await seedBasicChain(db, { statuses: [TaskStatus.DOING] });
+  const predecessorChain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO] });
   const boundSuccessor = await db.task.create({ data: {
     projectId: predecessorChain.project.id,
     repoId: predecessorChain.repo.id,
@@ -338,6 +400,10 @@ test("bound successor dispatch remains active while the predecessor Chain is hel
   const running = await seedRun(db, predecessorChain, predecessorChain.first.id);
   assert.equal((await runnerCompletionRequest(db, running.run, "bound predecessor")).status, 200);
   assert.equal((await db.chainControl.findUniqueOrThrow({ where: { id: predecessorChain.control!.id } })).state, ChainControlState.HELD);
-  assert.equal(await db.run.count({ where: { taskId: boundSuccessor.id, status: RunStatus.QUEUED } }), 1);
+  const parked = await db.task.findUniqueOrThrow({ where: { id: boundSuccessor.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.equal(parked.failureReason, "bound predecessor is no longer terminal; successor was not queued");
+  assert.equal(await db.run.count({ where: { taskId: boundSuccessor.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: { taskId: boundSuccessor.id, body: { contains: "no longer terminal" } } }), 1);
   assert.equal(await db.run.count({ where: { taskId: predecessorChain.first.id, status: RunStatus.CANCELLED } }), 0);
 });

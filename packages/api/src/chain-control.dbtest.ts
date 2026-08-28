@@ -177,6 +177,26 @@ test("the shared reader treats absent and released controls as not held", async 
   assert.equal(held.get(`${chain.project.id}:${released.chainId}`)?.holdGeneration, 4);
 });
 
+test("the database rejects a HELD authority without a held layer", async () => {
+  const chain = await seedChain();
+  await assert.rejects(
+    db.chainControl.create({ data: {
+      projectId: chain.project.id,
+      chainId: "invalid-null-held-layer",
+      state: ChainControlState.HELD,
+      heldLayer: null,
+    } }),
+    /ChainControl_held_requires_layer_check|check constraint/iu,
+  );
+  const released = await db.chainControl.create({ data: {
+    projectId: chain.project.id,
+    chainId: "released-null-held-layer",
+    state: ChainControlState.RELEASED,
+    heldLayer: null,
+  } });
+  assert.equal(released.heldLayer, null);
+});
+
 test("Hold creates one authority and one audit event without touching Runs or Tasks", async () => {
   const chain = await seedChain();
   const queued = await db.run.create({ data: {

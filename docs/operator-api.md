@@ -937,12 +937,15 @@ curl "$BASE_URL/tasks/$TASK_ID/startability" -H "Authorization: Bearer $OPERATOR
 
 - Required path parameter: `taskId`.
 - The response includes a Chain-level `control` object. It contains the
-  current `state`, held layer (`heldLayer`), `heldAt`, optional `reason`, the
-  request identifier (`requestId`) that accepted the hold, and `releasedAt`
-  when the hold was last released. `control` is `null` for a Chain that has
-  never been held;
+  current `state`, held layer (`heldLayer`), `heldAt`, optional hold reason
+  (`holdReason`), the request identifier (`holdRequestId`) that accepted the
+  hold, and `releasedAt` when the hold was last released. `control` is `null`
+  for a Chain that has never been held;
   after a release it reports the released state and its last-release facts.
-  Per-Step fields, including `startable` and `startAction`, are unchanged.
+  Each Step also carries `holdRefusal`: the API's hold-specific refusal message
+  when the persisted barrier prevents that Step from starting, otherwise
+  `null`. The UI uses this field with `startable` and `startAction`; it does not
+  recompute the held-layer barrier.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"

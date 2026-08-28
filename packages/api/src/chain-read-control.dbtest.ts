@@ -33,16 +33,12 @@ test("GET Chain projects held, released, and never-held control state without ch
   const heldRead = await chainRead(held.first.id);
   assert.equal(heldRead.status, 200, JSON.stringify(heldRead.body));
   assert.deepEqual(heldRead.body.control, {
-    projectId: held.project.id,
-    chainId: held.chainId,
     state: "held",
     heldLayer: 1,
     heldAt: "2026-08-28T00:00:00.000Z",
     holdRequestId: "hold-fixture",
     holdReason: "fixture hold",
     releasedAt: null,
-    releaseRequestId: null,
-    holdGeneration: 1,
   });
   assert.deepEqual(
     heldRead.body.steps.map((step: any) => ({
@@ -53,12 +49,13 @@ test("GET Chain projects held, released, and never-held control state without ch
       status: step.status,
       startable: step.startable,
       startAction: step.startAction,
+      holdRefusal: step.holdRefusal,
       currentExecution: step.currentExecution,
     })),
     [
-      { taskId: held.first.id, position: 1, chainIndex: 0, layer: 1, status: TaskStatus.DONE, startable: false, startAction: null, currentExecution: false },
-      { taskId: held.second.id, position: 2, chainIndex: 1, layer: 2, status: TaskStatus.TODO, startable: false, startAction: null, currentExecution: false },
-      { taskId: held.third.id, position: 3, chainIndex: 2, layer: 3, status: TaskStatus.TODO, startable: false, startAction: null, currentExecution: false },
+      { taskId: held.first.id, position: 1, chainIndex: 0, layer: 1, status: TaskStatus.DONE, startable: false, startAction: null, holdRefusal: null, currentExecution: false },
+      { taskId: held.second.id, position: 2, chainIndex: 1, layer: 2, status: TaskStatus.TODO, startable: false, startAction: null, holdRefusal: "Cannot start Step 2; Chain is held after layer 1", currentExecution: false },
+      { taskId: held.third.id, position: 3, chainIndex: 2, layer: 3, status: TaskStatus.TODO, startable: false, startAction: null, holdRefusal: "Cannot start Step 3; Chain is held after layer 1", currentExecution: false },
     ],
   );
 
@@ -79,16 +76,12 @@ test("GET Chain projects held, released, and never-held control state without ch
   const releasedRead = await chainRead(released.first.id);
   assert.equal(releasedRead.status, 200, JSON.stringify(releasedRead.body));
   assert.deepEqual(releasedRead.body.control, {
-    projectId: released.project.id,
-    chainId: released.chainId,
     state: "released",
     heldLayer: 2,
     heldAt: "2026-08-28T01:00:00.000Z",
     holdRequestId: "hold-before-release",
     holdReason: "inspect first layer",
     releasedAt: "2026-08-28T02:00:00.000Z",
-    releaseRequestId: "release-fixture",
-    holdGeneration: 1,
   });
   assert.deepEqual(releasedRead.body.steps.map((step: any) => step.status), [TaskStatus.DONE, TaskStatus.TODO, TaskStatus.TODO]);
 

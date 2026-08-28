@@ -19,7 +19,9 @@ CREATE TABLE "ChainControl" (
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt" TIMESTAMP(3) NOT NULL,
 
-  CONSTRAINT "ChainControl_pkey" PRIMARY KEY ("id")
+  CONSTRAINT "ChainControl_pkey" PRIMARY KEY ("id"),
+  CONSTRAINT "ChainControl_held_requires_layer_check"
+    CHECK ("state" <> 'held' OR "heldLayer" IS NOT NULL)
 );
 
 CREATE UNIQUE INDEX "ChainControl_projectId_chainId_key"

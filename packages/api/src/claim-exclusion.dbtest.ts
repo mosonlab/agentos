@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   ChainControlState,
   enqueueTaskRun,
+  lockChainRows,
   PrismaClient,
   RunStatus,
   TaskStatus,
@@ -14,7 +15,7 @@ import {
 
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 const RUNNER_TOKEN = "claim-exclusion-runner-token";
 const EXECUTOR_TOKEN = "claim-exclusion-executor-token";
@@ -124,8 +125,9 @@ const release = async (projectId: string, chainId: string) => db.chainControl.up
 const claim = async (
   runnerId = RUNNER_ID,
   token = RUNNER_TOKEN,
+  client = db,
 ): Promise<{ status: number; body: any }> => {
-  const response = await createApp(db).request("/runner/tasks/claim", {
+  const response = await createApp(client).request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ runnerId, leaseSeconds: 60 }),
@@ -134,6 +136,74 @@ const claim = async (
     status: response.status,
     body: response.status === 204 ? null : await response.json().catch(() => null) as any,
   };
+};
+
+const createClient = () => new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+
+const instrumentChainLockAttempt = (client: PrismaClient, attempted: () => void): PrismaClient => new Proxy(client, {
+  get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumented = new Proxy(tx, {
+        get(txTarget, txProperty, txReceiver) {
+          if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+          return (...args: unknown[]) => {
+            const query = args[0] as string[] | { strings?: string[] } | undefined;
+            const sql = Array.isArray(query) ? query.join(" ") : query?.strings?.join(" ") ?? "";
+            if (sql.includes('ORDER BY "chainLayer"')) attempted();
+            return Reflect.apply(txTarget.$queryRaw, txTarget, args);
+          };
+        },
+      });
+      return operation(instrumented);
+    }, options as any);
+  },
+}) as PrismaClient;
+
+const holdWinsClaimRace = async (input: {
+  projectId: string;
+  chainId: string;
+  heldLayer: number;
+  runId: string;
+  runnerId: string;
+  token: string;
+}) => {
+  const holdClient = createClient();
+  const claimClientBase = createClient();
+  let releaseHold!: () => void;
+  let reportHeld!: () => void;
+  let reportClaimAttempt!: () => void;
+  const holdGate = new Promise<void>((resolve) => { releaseHold = resolve; });
+  const held = new Promise<void>((resolve) => { reportHeld = resolve; });
+  const claimAttempt = new Promise<void>((resolve) => { reportClaimAttempt = resolve; });
+  const claimClient = instrumentChainLockAttempt(claimClientBase, reportClaimAttempt);
+  try {
+    const holding = holdClient.$transaction(async (tx) => {
+      await lockChainRows(tx, { projectId: input.projectId, chainId: input.chainId });
+      await tx.chainControl.create({ data: {
+        projectId: input.projectId,
+        chainId: input.chainId,
+        state: ChainControlState.HELD,
+        heldLayer: input.heldLayer,
+        holdGeneration: 1,
+      } });
+      reportHeld();
+      await holdGate;
+    });
+    await held;
+    const claiming = claim(input.runnerId, input.token, claimClient);
+    await claimAttempt;
+    releaseHold();
+    const [claimed] = await Promise.all([claiming, holding]);
+    assert.equal(claimed.status, 204, JSON.stringify(claimed.body));
+  } finally {
+    releaseHold();
+    await Promise.all([holdClient.$disconnect(), claimClientBase.$disconnect()]);
+  }
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: input.runId } })).status, RunStatus.QUEUED);
 };
 
 test("ordinary runners exclude above-layer held Runs while an unheld Chain remains claimable", async () => {
@@ -209,6 +279,36 @@ test("merge-executor claims apply the same held-layer exclusion and see release 
   assert.equal(releasedPoll.body.run.id, run.id);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask.id } }), 1);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.CLAIMED);
+});
+
+test("a Hold that wins the Chain mutex bars an ordinary claim selected from a stale candidate scan", async () => {
+  const owner = await seedRunner();
+  const chain = await seedChain(owner, [1, 2]);
+  const run = await queue(chain.tasks[1]!.id);
+  await holdWinsClaimRace({
+    projectId: owner.project.id,
+    chainId: chain.chainId,
+    heldLayer: 1,
+    runId: run.id,
+    runnerId: "claim-race-ordinary",
+    token: RUNNER_TOKEN,
+  });
+});
+
+test("a Hold that wins the Chain mutex bars a merge-executor claim selected from a stale candidate scan", async () => {
+  const chain = await seedIntegratorChain(db, { label: "claim-race-merge" });
+  assert.ok(chain.integratorTask);
+  const run = await queue(chain.integratorTask.id);
+  const layer = chain.integratorTask.chainLayer ?? chain.integratorTask.chainIndex;
+  assert.ok(layer !== null);
+  await holdWinsClaimRace({
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+    heldLayer: layer - 1,
+    runId: run.id,
+    runnerId: EXECUTOR_RUNNER,
+    token: EXECUTOR_TOKEN,
+  });
 });
 
 test("filtering barred candidates before the ranked window preserves allowed-run ordering", async () => {

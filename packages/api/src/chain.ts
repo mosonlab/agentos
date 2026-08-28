@@ -1,6 +1,7 @@
 import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
+  chainControlKey,
   readChainControls,
   type ChainControlSnapshot,
   isMergeReadinessStep,
@@ -114,7 +115,7 @@ export const chainProgress = (rows: ChainRow[]): Omit<ChainProgress, "chainId"> 
  * constraint enforces it. Keying by the pair is what stops a task reading a
  * chain that belongs to another project.
  */
-export const chainKey = (row: { projectId: string; chainId: string }): string => `${row.projectId}:${row.chainId}`;
+export const chainKey = chainControlKey;
 
 export const chainProgressByChain = (rows: ChainRow[]): Map<string, ChainProgress> => {
   const groups = new Map<string, ChainRow[]>();

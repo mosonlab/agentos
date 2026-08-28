@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  AssigneeType,
   ChainControlState,
   PrismaClient,
   RunStatus,
@@ -107,6 +108,23 @@ test("two concurrent Resume requests have one release, event, and activation", a
   assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
 });
 
+test("concurrent Resume activates every node in one eligible fan-out layer exactly once", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.TODO, TaskStatus.TODO],
+    layers: [1, 2, 2],
+  });
+  const [first, second] = await Promise.all([
+    resume(chain.first.id, "resume-fanout-a"),
+    resume(chain.first.id, "resume-fanout-b"),
+  ]);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal([first.body.duplicate, second.body.duplicate].filter((value) => value === false).length, 1);
+  assert.equal(await db.run.count({ where: { taskId: chain.second.id, status: RunStatus.QUEUED } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id, status: RunStatus.QUEUED } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: { in: [chain.second.id, chain.third.id] } } }), 2);
+});
+
 test("Resume while the held layer runs only releases; ordinary completion then activates the next layer", async () => {
   const chain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO, TaskStatus.TODO] });
   const running = await seedRun(db, chain, chain.first.id);
@@ -164,6 +182,56 @@ test("a cancelled Run and provider conversation stay terminal while Resume creat
   assert.equal(fresh.runNumber, oldRun.runNumber + 1);
   assert.equal(fresh.session, null);
   assert.equal(fresh.sessionTokenHash, null);
+});
+
+test("Resume opens an approval successor from the succeeded source, never a newer cancelled Run", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.TODO],
+    layers: [1, 2],
+  });
+  await db.task.update({ where: { id: chain.second.id }, data: {
+    assigneeType: AssigneeType.HUMAN,
+    assigneeAgentId: null,
+    repoId: null,
+    approvalGate: true,
+  } });
+  const succeeded = await seedRun(db, chain, chain.first.id, {
+    status: RunStatus.SUCCEEDED,
+    providerConversationId: "succeeded-source-conversation",
+  });
+  const cancelled = await seedRun(db, chain, chain.first.id, {
+    status: RunStatus.CANCELLED,
+    providerConversationId: "cancelled-newer-conversation",
+  });
+
+  const resumed = await resume(chain.first.id, "resume-approval-source");
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.REVIEW);
+  const gate = await db.inboxMessage.findFirstOrThrow({ where: { gateTaskId: chain.second.id, status: "OPEN" } });
+  const succeededSession = await db.session.findUniqueOrThrow({ where: { runId: succeeded.run.id } });
+  const cancelledSession = await db.session.findUniqueOrThrow({ where: { runId: cancelled.run.id } });
+  assert.equal(gate.sessionId, succeededSession.id);
+  assert.notEqual(gate.sessionId, cancelledSession.id);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: cancelled.run.id } })).status, RunStatus.CANCELLED);
+});
+
+test("Resume refuses an approval successor when the completed layer has no succeeded source session", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.TODO],
+    layers: [1, 2],
+  });
+  await db.task.update({ where: { id: chain.second.id }, data: {
+    assigneeType: AssigneeType.HUMAN,
+    assigneeAgentId: null,
+    repoId: null,
+    approvalGate: true,
+  } });
+  await seedRun(db, chain, chain.first.id, { status: RunStatus.CANCELLED });
+  const resumed = await resume(chain.first.id, "resume-approval-without-source");
+  assert.equal(resumed.status, 409, JSON.stringify(resumed.body));
+  assert.equal((await db.chainControl.findUniqueOrThrow({ where: { id: chain.control!.id } })).state, ChainControlState.HELD);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.inboxMessage.count({ where: { gateTaskId: chain.second.id } }), 0);
 });
 
 test("Resume leaves a BACKLOG successor parked and preserves the parked-skip narration", async () => {
@@ -226,6 +294,7 @@ test("release writes exact fields and event facts, and a replay leaves every byt
 
 test("three alternating Hold/Resume cycles append exact events and no-op replays", async () => {
   const chain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO], control: null });
+  const runsBefore = await db.run.count({ where: { taskId: { in: chain.tasks.map((task) => task.id) } } });
   for (let cycle = 1; cycle <= 3; cycle += 1) {
     const held = await hold(chain, `hold-cycle-${cycle}`, cycle === 2 ? "second reason" : "cycle reason");
     assert.equal(held.status, 200, JSON.stringify(held.body));
@@ -237,6 +306,7 @@ test("three alternating Hold/Resume cycles append exact events and no-op replays
     const replayResume = await resume(chain.first.id, `resume-cycle-${cycle}`);
     assert.equal(replayHold.body.duplicate, true);
     assert.equal(replayResume.body.duplicate, true);
+    assert.equal(await db.run.count({ where: { taskId: { in: chain.tasks.map((task) => task.id) } } }), runsBefore);
   }
   const control = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: chain.project.id, chainId: chain.chainId } } });
   const events = await db.chainControlEvent.findMany({ where: { chainControlId: control.id }, orderBy: { createdAt: "asc" } });

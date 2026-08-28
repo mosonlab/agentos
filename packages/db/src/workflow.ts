@@ -209,10 +209,12 @@ export class ChainHeldError extends Error {
   constructor(
     readonly taskId: string,
     readonly chainId: string,
-    readonly taskLayer: number,
-    readonly heldLayer: number,
+    readonly taskLayer: number | null,
+    readonly heldLayer: number | null,
   ) {
-    super(`Chain ${chainId} is held after layer ${heldLayer}; Task ${taskId} at layer ${taskLayer} cannot queue a Run`);
+    super(taskLayer === null || heldLayer === null
+      ? `Chain ${chainId} is held; Task ${taskId} cannot queue a Run`
+      : `Chain ${chainId} is held after layer ${heldLayer}; Task ${taskId} at layer ${taskLayer} cannot queue a Run`);
     this.name = "ChainHeldError";
   }
 }
@@ -720,8 +722,8 @@ export type OpenRunRefusal = {
     taskId?: string;
     taskName?: string;
     chainId?: string;
-    taskLayer?: number;
-    heldLayer?: number;
+    taskLayer?: number | null;
+    heldLayer?: number | null;
     agentName?: string;
     condition?: string;
     code?: string;
@@ -886,13 +888,12 @@ export const openRun = async (
   // `chainLayer` is the post-expand authority, with `chainIndex` as the
   // compatibility fallback for legacy chain rows. Keep the read inside this
   // transaction and before any Run-birth work so a held successor produces no
-  // Run or queue activity. A malformed chain row has no comparable layer and
-  // retains the pre-hold behavior; the activation/admission seams handle the
-  // same malformed-row policy independently.
+  // Run or queue activity. The database prevents a HELD control without a
+  // layer; malformed legacy Task rows still fail closed at this seam.
   const taskLayer = task.chainLayer ?? task.chainIndex;
-  if (task.chainId && typeof taskLayer === "number") {
+  if (task.chainId) {
     const control = await readChainControl(tx, { projectId: task.projectId, chainId: task.chainId });
-    if (control.held && control.heldLayer !== null && taskLayer > control.heldLayer) {
+    if (control.held && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
       const error = new ChainHeldError(task.id, task.chainId, taskLayer, control.heldLayer);
       return openRunRefusal(
         "chain-held",
@@ -1743,6 +1744,14 @@ const activateChainSuccessorInternal = async (
     return { nextTaskId: null, gated: false };
   }
 
+  // A binding to a non-terminal layer is rejected at instantiation time. If a
+  // legacy row or direct fixture nevertheless carries one, park it while the
+  // predecessor Chain still has work. Bound dispatch belongs to the
+  // successor's Chain, so a hold here must not change that outcome.
+  if (boundSuccessor) {
+    await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+  }
+
   if (chainControl.held && (chainControl.heldLayer === null || nextLayer > chainControl.heldLayer)) {
     await tx.taskActivity.create({ data: {
       taskId: current.id,
@@ -1758,14 +1767,6 @@ const activateChainSuccessorInternal = async (
       },
     } });
     return { nextTaskId: null, gated: false };
-  }
-
-  // A binding to a non-terminal layer is rejected at instantiation time. If a
-  // legacy row or a direct fixture nevertheless carries one, park it while the
-  // predecessor chain still has work above this layer instead of silently
-  // leaving the successor inert forever.
-  if (boundSuccessor) {
-    await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
   }
 
   const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);

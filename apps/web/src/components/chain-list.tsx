@@ -30,12 +30,12 @@ export type ChainLayerGroup = {
   blockers: ChainStep[];
 };
 
-const executionLayer = (step: Pick<ChainStep, "layer" | "chainIndex" | "position">): number => (
-  step.layer ?? step.chainIndex ?? step.position
+const executionLayer = (step: Pick<ChainStep, "layer" | "chainIndex">): number | null => (
+  step.layer ?? step.chainIndex
 );
 
 /** The held layer is stored in the same coordinate system as each Step's
- * `layer`; the fallback keeps older nullable-expand responses usable. */
+ * `layer`; the API owns every per-Step barrier decision. */
 export const chainHeldLayer = (chain: Pick<Chain, "control">): number | null => (
   chain.control?.state === "held" ? chain.control.heldLayer : null
 );
@@ -99,21 +99,17 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
 };
 
-export const ChainRow = ({ step, here, pending, blockedBy, onStart, heldLayer }: {
+export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
   step: ChainStep;
   here: boolean;
   pending: boolean;
   blockedBy: readonly ChainStep[];
   onStart: (step: ChainStep) => void;
-  heldLayer?: number | null;
 }): ReactNode => {
   const t = useT();
   const blockedOn = step.blockedOn ?? null;
   const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
-  const held = heldLayer !== null && heldLayer !== undefined
-    && executionLayer(step) > heldLayer
-    && step.status !== "DONE"
-    && step.assigneeType === "AGENT";
+  const held = step.holdRefusal !== null;
   const showStart = step.startAction !== null || blockedOn !== null || held;
   return (
     <div data-chain-node={step.taskId} className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
@@ -125,7 +121,7 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart, heldLayer }:
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
         {held ? (
           <span data-chain-held-hint="" className={cn(HINT, "mt-[3px] block")}>
-            {t("chain.startHeldHint", { n: heldLayer })}
+            {step.holdRefusal}
           </span>
         ) : null}
         {blockedOn ? (
@@ -217,7 +213,7 @@ export const ChainList = ({ chain, taskId, pending, onStart, onControl }: {
           )}
         >
           {group.steps.map((step) => (
-            <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} blockedBy={group.blockers} onStart={onStart} heldLayer={heldLayer} />
+            <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} blockedBy={group.blockers} onStart={onStart} />
           ))}
         </section>
       ))}

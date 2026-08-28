@@ -48,7 +48,7 @@ const chainFor = (taskId: string): Chain => ({
     taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
     status: "TODO", approvalGate: false, assigneeType: "AGENT", executionOwner: "agent",
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
-    failureReason: null, latestRun: null, startable: true, startAction: "start",
+    failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
     currentExecution: false,
   }],
 });
@@ -258,9 +258,9 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
   runningChain.chainId = "chain-hold";
   runningChain.steps[0] = { ...runningChain.steps[0]!, layer: 1, status: "DOING", startable: false, startAction: null, currentExecution: true };
   runningChain.control = {
-    projectId: "project-1", chainId: "chain-hold", state: "held", heldLayer: 1,
+    state: "held", heldLayer: 1,
     heldAt: now, holdRequestId: "hold-1", holdReason: "inspect output",
-    releasedAt: null, releaseRequestId: null, holdGeneration: 1,
+    releasedAt: null,
   };
   const completedChain: Chain = {
     ...runningChain,
@@ -308,6 +308,7 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
 
     const toggle = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Resume Chain"));
     assert.ok(toggle);
+    latestChain = { ...completedChain, control: null };
     await act(async () => {
       toggle!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
       toggle!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
@@ -316,6 +317,17 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
     const resumes = mutations.filter((item) => item.url === "/tasks/hold/chain/resume");
     assert.equal(resumes.length, 1, JSON.stringify(mutations));
     assert.match(JSON.parse(resumes[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
+
+    const stop = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Stop after current layer"));
+    assert.ok(stop);
+    await act(async () => {
+      stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const holds = mutations.filter((item) => item.url === "/tasks/hold/chain/hold");
+    assert.equal(holds.length, 1, JSON.stringify(mutations));
+    assert.match(JSON.parse(holds[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
   } finally {
     act(() => root.unmount());
     Object.assign(globalThis, previous);

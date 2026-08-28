@@ -97,7 +97,7 @@ const heldChainTaskIdsForClaim = async (tx: Prisma.TransactionClient): Promise<s
     select: { projectId: true, chainId: true, heldLayer: true },
   });
   const heldChains = controls.flatMap(({ projectId, chainId, heldLayer }) => {
-    if (heldLayer === null) return [];
+    if (heldLayer === null) return [{ projectId, chainId }];
     return [{
       projectId,
       chainId,
@@ -263,7 +263,11 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
               WHERE chain_control."projectId" = task."projectId"
                 AND chain_control."chainId" = task."chainId"
                 AND chain_control."state" = lower(${ChainControlState.HELD})::"ChainControlState"
-                AND COALESCE(task."chainLayer", task."chainIndex") > chain_control."heldLayer"
+                AND (
+                  chain_control."heldLayer" IS NULL
+                  OR COALESCE(task."chainLayer", task."chainIndex") IS NULL
+                  OR COALESCE(task."chainLayer", task."chainIndex") > chain_control."heldLayer"
+                )
             )
           ORDER BY COALESCE(chain_priority."unfinished", 1) ASC,
             candidate."readyAt" ASC,
@@ -724,6 +728,30 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       const fencingToken = makeFencingToken(candidate.id, generation);
       const sessionCredential = issueSessionToken();
       const leaseExpiresAt = new Date(now.getTime() + body.leaseSeconds * 1000);
+      const lockedTask = await lockTaskMutationRows(tx, candidate.task.id);
+      if (!lockedTask) return SKIP;
+      if (candidate.task.chainId !== null) {
+        // `claimRun` is SERIALIZABLE, so its transaction snapshot predates a
+        // Hold that committed while this claim waited for the Chain mutex.
+        // Read through a fresh connection after taking that mutex. Hold and
+        // Resume both need the same Task locks, so this live row cannot change
+        // until the claim transaction decides and releases them.
+        const control = await db.chainControl.findUnique({
+          where: { projectId_chainId: {
+            projectId: candidate.task.projectId,
+            chainId: candidate.task.chainId,
+          } },
+          select: { state: true, heldLayer: true },
+        });
+        const taskLayer = candidate.task.chainLayer ?? candidate.task.chainIndex;
+        if (control?.state === ChainControlState.HELD
+          && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
+          // The Chain mutex was acquired after the candidate scan. Hold may
+          // have won that race, so the live authority under this lock decides.
+          // End the scan while retaining lock order; the Run stays QUEUED.
+          return HALT;
+        }
+      }
       const won = await tx.run.updateMany({
         where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
         data: {
@@ -741,7 +769,6 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         },
       });
       if (won.count !== 1) return SKIP;
-      await lockTaskMutationRows(tx, candidate.task.id);
       const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
         providerConversationId: candidate.session.providerConversationId,
         input: candidate.session.resumeInput,

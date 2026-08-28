@@ -484,6 +484,8 @@ export type ChainStep = {
    *  and the route's guard must not be able to disagree. */
   startable: boolean;
   startAction: "start" | "recover" | null;
+  /** Server-owned Chain hold refusal; null when the hold does not bar this Step. */
+  holdRefusal: string | null;
   /** API-computed predecessor binding state; absent for older chain responses. */
   blockedOn?: { taskId: string; name: string; status: TaskStatus } | null;
   currentExecution: boolean;
@@ -491,16 +493,12 @@ export type ChainStep = {
 };
 
 export type ChainControl = {
-  projectId: string;
-  chainId: string;
   state: "held" | "released";
   heldLayer: number | null;
   heldAt: string | null;
   holdRequestId: string | null;
   holdReason: string | null;
   releasedAt: string | null;
-  releaseRequestId: string | null;
-  holdGeneration: number;
 };
 
 export type Chain = {

@@ -19,11 +19,13 @@ const routeSection = (method, path) => {
 test("the Chain read route documents the control projection and never-held value", () => {
   const { text } = routeSection("GET", "/tasks/:taskId/chain");
   assert.match(text, /control[` ]+object/u);
-  assert.match(text, /state/u);
-  assert.match(text, /held layer/u);
-  assert.match(text, /reason/u);
-  assert.match(text, /request identifier/u);
-  assert.match(text, /last released/u);
+  assert.match(text, /`state`/u);
+  assert.match(text, /`heldLayer`/u);
+  assert.match(text, /`heldAt`/u);
+  assert.match(text, /`holdReason`/u);
+  assert.match(text, /`holdRequestId`/u);
+  assert.match(text, /`releasedAt`/u);
+  assert.match(text, /`holdRefusal`/u);
   assert.match(text, /null[^.]*never[^.]*held/iu);
 });
 
