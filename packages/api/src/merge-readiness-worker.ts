@@ -34,6 +34,7 @@ import {
   noteLeaseHandoff,
   releaseMergeLease,
   withMergeLease,
+  type MergeLeaseTarget,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
@@ -151,7 +152,10 @@ const stopReadiness = async (
     return { applied: true as const, leaseToRelease: stopped.leaseToRelease };
   });
   if (!transition.applied) return false;
-  await releaseChainLease(transition.leaseToRelease);
+  // `stopMergeTail` resolves the owning project and chain while the mutation is
+  // locked. Pass that target through unchanged so a shared chainId cannot be
+  // attributed to the readiness project's neighboring tail.
+  await releaseChainLease(transition.leaseToRelease, db);
   return true;
 };
 
@@ -423,7 +427,10 @@ const applyReadinessDecision = async (
     });
     if (requeued) {
       result.requeued += 1;
-      await releaseChainLease(readiness.chainId);
+      const target: MergeLeaseTarget | null = readiness.chainId
+        ? { projectId: readiness.projectId, chainId: readiness.chainId }
+        : null;
+      await releaseChainLease(target, db);
     }
     return requeued;
   };
@@ -447,7 +454,10 @@ const applyReadinessDecision = async (
   // From the base this authorization pins to the merge that consumes it,
   // `main` must not move. The callback makes the sole lawful handoff explicit:
   // only an authorized mechanical merge retains the Lease.
-  const leased = await runWithMergeLease(readiness.chainId, async () => {
+  const target: MergeLeaseTarget | null = readiness.chainId
+    ? { projectId: readiness.projectId, chainId: readiness.chainId }
+    : null;
+  const leased = await runWithMergeLease(target, async () => {
     // The acquire is the only network call outside the GitHub read budget. A
     // stale worker that lost its claim while taking the Lease must classify the
     // new owner before choosing release or retain.
@@ -635,7 +645,7 @@ const applyReadinessDecision = async (
         : { kind: "release" as const },
       value: authorization.kind,
     };
-  });
+  }, db);
   if (leased.outcome === "contended") return;
   if (leased.outcome === "unreachable") {
     await recordLeaseDeferral(db, {
@@ -690,6 +700,11 @@ export const readinessTick = async (
         claimReason: read.claimReason,
       }, releaseChainLease);
       if (stopped) result.stopped += 1;
+      // A failed release/hold recording can happen after stopMergeTail has
+      // already committed its state transition. A second stop then returns
+      // false and must not turn that failure into a successful-looking tick.
+      // Surface it to the worker caller so the missing evidence is observable.
+      if (!stopped) throw error;
     }
   }
   return result;
@@ -703,7 +718,14 @@ export const startReadinessWorker = (
   const timer = setInterval(() => {
     if (inFlight) return;
     inFlight = true;
-    void readinessTick(db, reader, new Date(), 5, releaseMergeLease, withMergeLease)
+    void readinessTick(
+      db,
+      reader,
+      new Date(),
+      5,
+      releaseMergeLease,
+      withMergeLease,
+    )
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {
         inFlight = false;

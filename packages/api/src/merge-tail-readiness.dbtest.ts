@@ -14,6 +14,7 @@ import {
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
+  type MergeLeaseTarget,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
@@ -24,21 +25,44 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
+const releasedLeaseTargets: MergeLeaseTarget[] = [];
+const leasedTargets: MergeLeaseTarget[] = [];
 const releaseLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
   releasedChainLeases.push(chainId);
-  return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
+  return {
+    outcome: "released",
+    ref: "refs/merge-lease/holder",
+    sha: "lease-fixture",
+    acquiredAt: "2026-08-27T12:00:00.000Z",
+  };
 };
-const releaseChainLease: ReleaseMergeLease = async (chainId) => {
-  if (chainId) releasedChainLeases.push(chainId);
+const releaseChainLease: ReleaseMergeLease = async (target) => {
+  if (target) {
+    releasedChainLeases.push(target.chainId);
+    releasedLeaseTargets.push(target);
+  }
 };
 const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
 const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
-  chainId,
+  target,
   fn,
-) => withMergeLease(chainId, fn, { acquire, release: releaseLeaseAdapter });
+  db,
+) => {
+  if (target) leasedTargets.push(target);
+  return withMergeLease(target, fn, db, {
+    acquire,
+    release: async (chainId) => {
+      const release = await releaseLeaseAdapter(chainId);
+      if (target) releasedLeaseTargets.push(target);
+      return release;
+    },
+  });
+};
 const runWithMergeLease = leaseRunner(acquireChainLease);
 beforeEach(async () => {
   releasedChainLeases.length = 0;
+  releasedLeaseTargets.length = 0;
+  leasedTargets.length = 0;
   await resetTestDb(db);
 });
 after(async () => { await db.$disconnect(); });
@@ -182,6 +206,9 @@ test("clean exact-head readiness authorizes and queues mechanical merge", async 
   const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.readiness.id } });
   assert.equal(output.commitSha, HEAD);
   assert.equal((await db.run.count({ where: { taskId: seeded.integrator.id } })), 1);
+  assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+  assert.deepEqual(releasedChainLeases, [], "retained authorization is released by the final consumer");
+  assert.deepEqual(releasedLeaseTargets, []);
 });
 
 test("a defense-list diff authorizes the merge and leaves one audit message behind", async () => {
@@ -255,6 +282,58 @@ test("base drift after lease acquisition is rechecked before authorization", asy
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+  assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+  assert.deepEqual(releasedLeaseTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+});
+
+test("post-acquire readiness stop releases its own confirmed lease", async () => {
+  const seeded = await seedReadiness();
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : null });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, movingReader, new Date(), 5, releaseChainLease, runWithMergeLease),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+  );
+  assert.equal(reads, 2);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.REVIEW);
+  assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+});
+
+test("a post-acquire release or hold-recording failure remains observable", async () => {
+  const seeded = await seedReadiness();
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : null });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  const releaseFailure = new Error("lease hold recording failed");
+  const failingFinalRelease: WithMergeLease = async (target, fn) => {
+    if (target) leasedTargets.push(target);
+    const result = await fn();
+    if (result.disposition.kind === "release") throw releaseFailure;
+    return { outcome: "ran", value: result.value };
+  };
+
+  await assert.rejects(
+    readinessTick(db, movingReader, new Date(), 5, releaseChainLease, failingFinalRelease),
+    (error: unknown) => error === releaseFailure,
+  );
+  assert.equal(reads, 2);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.REVIEW);
+  assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+  assert.deepEqual(releasedLeaseTargets, []);
 });
 
 test("ordinary base requeue authorizes the refreshed exact head", async () => {
@@ -316,6 +395,7 @@ test("an incomplete compare response and a behind head fail closed", async () =>
   assert.deepEqual(await readinessTick(db, incompleteReader, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
   assert.match((await db.task.findUniqueOrThrow({ where: { id: incomplete.readiness.id } })).failureReason ?? "", /completeness/u);
   assert.deepEqual(releasedChainLeases, [incomplete.readiness.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ projectId: incomplete.readiness.projectId, chainId: incomplete.readiness.chainId }]);
 
   await resetTestDb(db);
   releasedChainLeases.length = 0;

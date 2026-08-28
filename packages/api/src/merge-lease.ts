@@ -12,6 +12,7 @@ import {
   type Prisma,
   type PrismaClient,
 } from "@anneal/db";
+import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +33,12 @@ export type MergeLeaseRelease =
   | { outcome: "unreachable"; detail: string };
 
 export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>;
+
+/** The project-scoped identity of a Chain's external merge lease. */
+export type MergeLeaseTarget = {
+  projectId: string;
+  chainId: string;
+};
 
 export type MergeLeaseHold = {
   acquiredAt: Date;
@@ -101,22 +108,26 @@ const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
 
 const releaseMergeLeaseWith = async (
   releaser: MergeLeaseReleaser,
-  chainId: string | null,
-): Promise<void> => {
-  if (!chainId) return;
+  target: MergeLeaseTarget | null,
+): Promise<MergeLeaseRelease | null> => {
+  if (!target) return null;
   let release: MergeLeaseRelease;
   try {
-    release = await releaser(chainId);
+    release = await releaser(target.chainId);
   } catch (error: unknown) {
     release = { outcome: "unreachable", detail: error instanceof Error ? error.message : String(error) };
   }
-  reportMergeLeaseAnomaly(chainId, release);
+  reportMergeLeaseAnomaly(target.chainId, release);
+  return release;
 };
 
-export type ReleaseMergeLease = (chainId: string | null) => Promise<void>;
+export type ReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClient) => Promise<void>;
 
-export const releaseMergeLease: ReleaseMergeLease = async (chainId) => {
-  await releaseMergeLeaseWith(releaseMergeLeaseAdapter, chainId);
+export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
+  const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, target);
+  if (target && release?.outcome === "released") {
+    await recordMergeLeaseHold(db, target, release, new Date());
+  }
 };
 
 /**
@@ -162,6 +173,7 @@ const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): v
  */
 export type LeaseHolder = {
   chainId: string;
+  projectId: string;
   taskId: string;
   role: "mechanical" | "regression" | "auxiliary";
 };
@@ -175,6 +187,7 @@ export const leaseHolderFor = async (
     where: { id: taskId },
     select: {
       chainId: true,
+      projectId: true,
       templateStep: { select: {
         stepIndex: true,
         outputKind: true,
@@ -188,23 +201,27 @@ export const leaseHolderFor = async (
     : isRegressionVerificationOutputKind(task.templateStep?.outputKind)
       ? "regression" as const
       : null;
-  if (directRole) return task.chainId ? { chainId: task.chainId, taskId, role: directRole } : null;
+  if (directRole) {
+    return task.chainId
+      ? { chainId: task.chainId, projectId: task.projectId, taskId, role: directRole }
+      : null;
+  }
   const markers = await readMarkers(tx, taskId);
   const auxiliaryRegressionTaskId = latestMarker(markers, "repairAttempt")?.regressionTaskId ?? null;
   if (!auxiliaryRegressionTaskId) return null;
   const regression = await tx.task.findUnique({
     where: { id: auxiliaryRegressionTaskId },
-    select: { chainId: true },
+    select: { chainId: true, projectId: true },
   });
   return regression?.chainId
-    ? { chainId: regression.chainId, taskId, role: "auxiliary" }
+    ? { chainId: regression.chainId, projectId: regression.projectId, taskId, role: "auxiliary" }
     : null;
 };
 
 export type LeaseSettlementOutcome = "continue" | "stop";
 export type LeaseSettlement = {
   disposition: "retain" | "release";
-  leaseToRelease: string | null;
+  leaseToRelease: MergeLeaseTarget | null;
 };
 
 /** Decide the Lease disposition from one terminal-control outcome. */
@@ -214,7 +231,12 @@ export const settleLease = async (
 ): Promise<LeaseSettlement> => {
   if (input.outcome === "continue") return { disposition: "retain", leaseToRelease: null };
   const holder = await leaseHolderFor(tx, input.taskId);
-  return { disposition: "release", leaseToRelease: holder?.chainId ?? null };
+  return {
+    disposition: "release",
+    leaseToRelease: holder
+      ? { chainId: holder.chainId, projectId: holder.projectId }
+      : null,
+  };
 };
 
 const LEASE_HANDOFF_GRACE_MS = 60_000;
@@ -245,15 +267,15 @@ export const noteLeaseHandoff = async (
 export const leaseHandoffsWithoutConsumer = async (
   tx: Prisma.TransactionClient,
   now: Date,
-): Promise<Array<{ chainId: string; toRunId: string; taskId: string }>> => {
+): Promise<Array<{ chainId: string; projectId: string; toRunId: string; taskId: string }>> => {
   const rows = await tx.taskActivity.findMany({
     where: {
       metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
     },
-    select: { taskId: true, metadata: true },
+    select: { taskId: true, metadata: true, task: { select: { projectId: true } } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
-  const pending = new Map<string, { chainId: string; toRunId: string; taskId: string }>();
+  const pending = new Map<string, { chainId: string; projectId: string; toRunId: string; taskId: string }>();
   const settled = new Set<string>();
   for (const row of rows) {
     const raw = row.metadata;
@@ -268,7 +290,12 @@ export const leaseHandoffsWithoutConsumer = async (
     if (metadata.state === "pending" && typeof metadata.chainId === "string"
       && Number.isFinite(handedOffAt) && handedOffAt < now.getTime() - LEASE_HANDOFF_GRACE_MS
       && !settled.has(metadata.toRunId) && !pending.has(metadata.toRunId)) {
-      pending.set(metadata.toRunId, { chainId: metadata.chainId, toRunId: metadata.toRunId, taskId: row.taskId });
+      pending.set(metadata.toRunId, {
+        chainId: metadata.chainId,
+        projectId: row.task.projectId,
+        toRunId: metadata.toRunId,
+        taskId: row.taskId,
+      });
     }
   }
   if (pending.size === 0) return [];
@@ -316,7 +343,7 @@ export const commitWithLeaseDisposition = async <T>(
 ): Promise<T | null> => {
   const committed = await db.$transaction(fn, options);
   if (committed === null) return null;
-  if (committed.lease.disposition === "release") await release(committed.lease.leaseToRelease);
+  if (committed.lease.disposition === "release") await release(committed.lease.leaseToRelease, db);
   return committed.value;
 };
 
@@ -377,8 +404,10 @@ export type MergeLeaseDependencies = {
 };
 
 export type WithMergeLease = <T>(
-  chainId: string | null,
+  target: MergeLeaseTarget | null,
   fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  db: PrismaClient,
+  dependencies?: MergeLeaseDependencies,
 ) => Promise<
   | { outcome: "contended" }
   | { outcome: "unreachable"; detail: string }
@@ -393,8 +422,9 @@ export type WithMergeLease = <T>(
  * callback through the same interface.
  */
 export const withMergeLease = async <T>(
-  chainId: string | null,
+  target: MergeLeaseTarget | null,
   fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  db: PrismaClient,
   dependencies: MergeLeaseDependencies = {
     acquire: acquireMergeLease,
     release: releaseMergeLeaseAdapter,
@@ -404,12 +434,12 @@ export const withMergeLease = async <T>(
   | { outcome: "unreachable"; detail: string }
   | { outcome: "ran"; value: T }
 > => {
-  if (chainId === null) {
+  if (target === null) {
     const result = await fn();
     return { outcome: "ran", value: result.value };
   }
 
-  const acquisition = await dependencies.acquire(chainId);
+  const acquisition = await dependencies.acquire(target.chainId);
   if (acquisition.outcome === "contended") return { outcome: "contended" };
   if (acquisition.outcome === "unreachable") {
     return { outcome: "unreachable", detail: acquisition.detail };
@@ -422,7 +452,10 @@ export const withMergeLease = async <T>(
     return { outcome: "ran", value: result.value };
   } finally {
     if (disposition.kind === "release") {
-      await releaseMergeLeaseWith(dependencies.release, chainId);
+      const release = await releaseMergeLeaseWith(dependencies.release, target);
+      if (release?.outcome === "released") {
+        await recordMergeLeaseHold(db, target, release, new Date());
+      }
     }
   }
 };

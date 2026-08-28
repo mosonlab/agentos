@@ -43,7 +43,7 @@ const OPERATOR = "base-drift-recovery-operator";
 const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
 const releaseLeaseAdapter: MergeLeaseReleaser = async () => ({ outcome: "not-held" });
 const releaseChainLease: ReleaseMergeLease = async () => {};
-const runWithMergeLease: WithMergeLease = (chainId, fn) => withMergeLease(chainId, fn, {
+const runWithMergeLease: WithMergeLease = (target, fn, db) => withMergeLease(target, fn, db, {
   acquire: acquireChainLease,
   release: releaseLeaseAdapter,
 });
