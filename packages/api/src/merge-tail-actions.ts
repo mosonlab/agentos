@@ -8,6 +8,7 @@ import {
   parseRegressionVerdict,
   Prisma,
   readMarkerHistory,
+  type RegressionVerdict,
   type RecoveryContext,
   recoveryContext,
   TaskStatus,
@@ -15,6 +16,7 @@ import {
 } from "@anneal/db";
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
+import { canonicalOutputRefusal } from "./canonical-task-output.js";
 import { settleLease } from "./merge-lease.js";
 
 /**
@@ -27,6 +29,63 @@ import { settleLease } from "./merge-lease.js";
  */
 
 type DbTx = Prisma.TransactionClient;
+
+type RegressionTaskIdentity = {
+  id: string;
+  templateStep?: {
+    stepIndex?: number;
+    outputKind: string;
+    taskTemplate?: { name: string };
+  } | null | undefined;
+};
+
+export type RegressionVerdictQualification =
+  | { status: "ok"; verdict: RegressionVerdict; headSha: string }
+  | { status: "refused"; reason: string };
+
+/**
+ * Read and qualify the one Regression artifact that can control this Run.
+ * Completion supplies its reported head; reconciliation may fall back to the
+ * output's authored commit because no completion payload exists after a hard
+ * lease loss. A persisted Run head, when present, always remains authoritative.
+ */
+export const regressionVerdictForRun = async (
+  tx: DbTx,
+  input: {
+    task: RegressionTaskIdentity;
+    runId: string;
+    runHeadSha: string | null;
+    allowPersistedHeadWhenUnreported?: boolean;
+  },
+): Promise<RegressionVerdictQualification> => {
+  const output = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
+  const exactHead = input.runHeadSha
+    ?? (input.allowPersistedHeadWhenUnreported ? output?.commitSha ?? null : null);
+  const canonicalRefusal = canonicalOutputRefusal(input.task.templateStep, output, input.runId, exactHead);
+  if (canonicalRefusal) return { status: "refused", reason: canonicalRefusal };
+  if (!output) return { status: "refused", reason: "missing regression output" };
+  if (output.runId !== input.runId) {
+    return { status: "refused", reason: `regression output belongs to prior Run ${output.runId ?? "none"}, not current Run ${input.runId}` };
+  }
+  if (input.task.templateStep && output.kind !== input.task.templateStep.outputKind) {
+    return { status: "refused", reason: `task output kind ${output.kind} does not match Regression kind ${input.task.templateStep.outputKind}` };
+  }
+  if (!exactHead || output.commitSha !== exactHead) {
+    return {
+      status: "refused",
+      reason: `stale regression evidence: output ${output.commitSha ?? "missing"}, run ${exactHead ?? "missing"}`,
+    };
+  }
+  const parsed = parseRegressionVerdict(output.body, output.kind);
+  if (parsed.status === "invalid") return { status: "refused", reason: parsed.reason };
+  if (parsed.verdict.headSha !== exactHead) {
+    return {
+      status: "refused",
+      reason: `stale regression evidence: verdict ${parsed.verdict.headSha}, output ${output.commitSha}, run ${exactHead}`,
+    };
+  }
+  return { status: "ok", verdict: parsed.verdict, headSha: exactHead };
+};
 
 /**
  * The notice the tail writes when it stops, keyed by task and reason.
@@ -442,18 +501,13 @@ export const createMergeTailRepairTask = async (
 export const handleRegressionCompletion = async (
   tx: DbTx,
   input: {
-    task: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null };
+    task: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null; templateStep?: RegressionTaskIdentity["templateStep"] };
     run: { id: string; agentId: string; branch: string | null; headSha: string | null; sessionId: string };
+    qualifiedVerdict?: RegressionVerdict;
     now: Date;
   },
 ): Promise<"advance" | "handled"> => {
-  const persistedOutput = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
-  // Regression evidence is run-scoped even though TaskStepOutput is not yet.
-  // An earlier attempt's explicit verdict is not this attempt's output and must
-  // not be reused when the current agent finishes without calling task_output.
-  const output = persistedOutput?.runId === input.run.id ? persistedOutput : null;
   const recovery = await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
-  const parsed = parseRegressionVerdict(output?.body, output?.kind);
   const stop = async (reason: string): Promise<"handled"> => {
     await stopMergeTail(tx, {
       phase: "regression",
@@ -466,11 +520,15 @@ export const handleRegressionCompletion = async (
     });
     return "handled";
   };
-  if (parsed.status === "invalid") return stop(parsed.reason);
-  const verdict = parsed.verdict;
-  const effectiveHead = input.run.headSha ?? output?.commitSha ?? null;
-  if (effectiveHead !== verdict.headSha || output?.commitSha !== verdict.headSha) {
-    return stop(`stale regression evidence: verdict ${verdict.headSha}, output ${output?.commitSha ?? "missing"}, run ${effectiveHead ?? "missing"}`);
+  let verdict = input.qualifiedVerdict;
+  if (!verdict) {
+    const qualified = await regressionVerdictForRun(tx, {
+      task: input.task,
+      runId: input.run.id,
+      runHeadSha: input.run.headSha,
+    });
+    if (qualified.status === "refused") return stop(qualified.reason);
+    verdict = qualified.verdict;
   }
   const recordVerdict = () => writeMarker(tx, input.task.id, "regression", {
     actorType: "control-plane",
@@ -523,11 +581,10 @@ export const handleRegressionCompletion = async (
     && marker.baseHeadSha === verdict.baseHeadSha
     && marker.raw.sourceRunId === input.run.id
   ));
-  const matchingAttemptAnswered = matchingAttempt && attempts.some((marker) => (
-    marker.kind === "repairResult"
-    && marker.raw.repairTaskId === matchingAttempt.raw.repairTaskId
-  ));
-  if (matchingAttempt && !matchingAttemptAnswered) return "handled";
+  // A source verdict is consumed when its repair attempt is opened. The later
+  // repairResult closes that attempt; it does not make the old source Run a
+  // new verdict capable of opening another repair.
+  if (matchingAttempt) return "handled";
   await recordVerdict();
   const priorAttempts = attempts.filter((marker) => (
     marker.kind === "repairAttempt"

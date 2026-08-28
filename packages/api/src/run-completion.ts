@@ -25,7 +25,6 @@ import {
   mechanicalPrincipalRefusal,
   openRun,
   parseMergeResult,
-  parseRegressionVerdict,
   parseResolverResult,
   Prisma,
   type PrismaClient,
@@ -56,6 +55,7 @@ import {
 import {
   handleRegressionCompletion,
   openMergeTailStopNotice,
+  regressionVerdictForRun,
   stopMergeTail,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
@@ -338,18 +338,17 @@ export const completeRun = async (
     // authored commit must be valid, and the completion must name that exact
     // head. PASS is deliberately excluded; advancing after a failed transport
     // completion needs its own policy decision.
-    const failedRegressionOutput = !succeeded && failureClass === FailureClass.PROTOCOL_ERROR && retryable
-      && run.taskId && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
-      ? await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } })
-      : null;
-    const failedRegressionParse = failedRegressionOutput
-      ? parseRegressionVerdict(failedRegressionOutput.body, failedRegressionOutput.kind)
+    const failedRegressionVerdict = !succeeded && failureClass === FailureClass.PROTOCOL_ERROR && retryable
+      && run.taskId && run.task && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
+      ? await regressionVerdictForRun(tx, {
+          task: run.task,
+          runId: run.id,
+          runHeadSha: body.headSha ?? null,
+        })
       : null;
     const durableNegativeRegressionVerdict = Boolean(
-      failedRegressionOutput
-      && canonicalOutputRefusal(run.task?.templateStep, failedRegressionOutput, run.id, body.headSha ?? null) === null
-      && failedRegressionParse?.status === "ok"
-      && failedRegressionParse.verdict.outcome !== "pass",
+      failedRegressionVerdict?.status === "ok"
+      && failedRegressionVerdict.verdict.outcome !== "pass",
     );
     // One reason for the Run, the Session and — unless the budget replaces it
     // with its own — the parked Task.
@@ -660,6 +659,9 @@ export const completeRun = async (
             headSha: body.headSha ?? null,
             sessionId: run.session.id,
           },
+          ...(failedRegressionVerdict?.status === "ok"
+            ? { qualifiedVerdict: failedRegressionVerdict.verdict }
+            : {}),
           now,
         });
         leaseOutcome = "stop";
