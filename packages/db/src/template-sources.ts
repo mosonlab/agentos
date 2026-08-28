@@ -26,12 +26,13 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   },
   {
     name: DIRECT_TEMPLATE_NAME,
-    description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
-    stepCount: 7,
-    layers: [1, 2, 2, 3, 4, 5, 6],
+    description: "Direct-tier workflow: revalidate a bound brief against the current tree, implement from the refreshed brief, run parallel independent code review, adjudicate fixes inside the fix step, verify the exact head, and execute the mechanical merge tail.",
+    stepCount: 8,
+    layers: [1, 2, 3, 3, 4, 5, 6, 7],
     stepNames: [
-      "Implementation", "Code review (Sol)", "Code review (Opus blind)",
-      "Apply review fixes", "Regression verification", "Merge authorization", "Merge execution",
+      "Revalidate specification", "Implementation", "Code review (Sol)",
+      "Code review (Opus blind)", "Apply review fixes", "Regression verification",
+      "Merge authorization", "Merge execution",
     ],
   },
 ] as const;

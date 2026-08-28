@@ -1,4 +1,4 @@
-import { PrismaClient, Prisma, RunnerPreference, TaskStatus } from "@prisma/client";
+import { PrismaClient, Prisma, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
@@ -15,20 +15,23 @@ import {
 
 const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
-type AssigneeTransition = { from: readonly string[]; to: string };
+const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator";
+const SPEC_REVALIDATOR_AGENT_SOURCE = "review-coordinator-sol";
+type AssigneeTransition = { from: readonly (string | null)[]; to: string };
 const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
   ["compound-engineer-workflow:10", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
-  ["direct-engineer-workflow:5", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["direct-engineer-workflow:6", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["direct-engineer-workflow:1", { from: [null], to: SPEC_REVALIDATOR_AGENT_NAME }],
 ]);
 
 const STEP_NAME_TRANSITIONS = new Map([
   ["compound-engineer-workflow:11", { from: "Merge readiness", to: "Merge authorization" }],
-  ["direct-engineer-workflow:6", { from: "Merge readiness", to: "Merge authorization" }],
+  ["direct-engineer-workflow:7", { from: "Merge readiness", to: "Merge authorization" }],
 ]);
 
 const STEP_BASE_TRANSITIONS = new Map([
   ["compound-engineer-workflow:6", { from: null, to: 5 }],
-  ["direct-engineer-workflow:2", { from: null, to: 1 }],
+  ["direct-engineer-workflow:3", { from: null, to: 2 }],
 ]);
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
@@ -119,6 +122,49 @@ const main = async (): Promise<void> => {
         }
         createdAgents = 1;
       }
+      const revalidatorRole = rolesByName.get(SPEC_REVALIDATOR_AGENT_NAME);
+      if (!revalidatorRole) throw new Error(`Canonical role ${SPEC_REVALIDATOR_AGENT_NAME} was not found`);
+      const existingSpecRevalidator = await tx.agent.findUnique({
+        where: { projectId_name: { projectId: canonicalProject.id, name: SPEC_REVALIDATOR_AGENT_NAME } },
+        select: { id: true, archivedAt: true },
+      });
+      if (existingSpecRevalidator?.archivedAt) {
+        throw new Error(`Canonical Agent ${SPEC_REVALIDATOR_AGENT_NAME} is archived; sync will not resurrect it`);
+      }
+      if (!existingSpecRevalidator) {
+        const source = await tx.agent.findUnique({
+          where: { projectId_name: { projectId: canonicalProject.id, name: SPEC_REVALIDATOR_AGENT_SOURCE } },
+          select: {
+            environmentId: true,
+            disabledTools: true,
+            archivedAt: true,
+            repoAccess: { select: { projectId: true, repoId: true, mountPath: true } },
+          },
+        });
+        if (!source || source.archivedAt) {
+          throw new Error(`Cannot create ${SPEC_REVALIDATOR_AGENT_NAME}: active source Agent ${SPEC_REVALIDATOR_AGENT_SOURCE} was not found`);
+        }
+        const created = await tx.agent.create({ data: {
+          projectId: canonicalProject.id,
+          environmentId: source.environmentId,
+          name: revalidatorRole.name,
+          title: revalidatorRole.title,
+          model: revalidatorRole.model,
+          runnerPreference: revalidatorRole.runnerPreference,
+          inboxAccess: revalidatorRole.inboxAccess,
+          disabledTools: source.disabledTools,
+          foundationalPrompt: sources.foundationalPrompt,
+          rolePrompt: revalidatorRole.rolePrompt,
+        } });
+        if (source.repoAccess.length > 0) {
+          createdAgentRepoGrants += (await tx.agentRepoAccess.createMany({ data: source.repoAccess.map((grant) => ({
+            ...grant,
+            agentId: created.id,
+            permissions: RepoPermission.GIT_READ,
+          })) })).count;
+        }
+        createdAgents += 1;
+      }
       const createdCanonicalTemplates = (await applyCanonicalInstallation(tx, installationPlan, templateSources)).created;
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
@@ -170,7 +216,7 @@ const main = async (): Promise<void> => {
             const differences = templateStepStructureDifferences(persisted, step);
             const transition = ASSIGNEE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             const adoptsCanonicalAssignee = differences.includes("agent")
-              && transition?.from.includes(persisted.assigneeAgent?.name ?? "") === true
+              && transition?.from.includes(persisted.assigneeAgent?.name ?? null) === true
               && transition.to === step.agentName;
             const baseTransition = STEP_BASE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             const adoptsCanonicalBase = differences.includes("baseFromStepIndex")

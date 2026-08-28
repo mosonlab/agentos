@@ -23,6 +23,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "senior-dev", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
   { name: "spec", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
+  { name: "spec-revalidator", model: "openai-codex/gpt-5.6-luna:xhigh", runner: RunnerPreference.PI },
 ] as const;
 
 /**

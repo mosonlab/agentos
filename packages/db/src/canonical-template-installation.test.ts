@@ -68,9 +68,11 @@ test("installation planning decides successor drift, half migrations, and spawnP
   const mutableGeneration = generation as LegacyTemplateGeneration & { successorPromptDigest?: string };
   const originalSuccessorDigest = mutableGeneration.successorPromptDigest;
 
-  const halfMigrated = asPersisted(loaded);
-  halfMigrated[0] = { ...halfMigrated[0]!, approvalGate: !halfMigrated[0]!.approvalGate };
-  const spawnPolicy = { mode: "parallel", limit: 2 };
+    const halfMigrated = asPersisted(loaded);
+    halfMigrated[0] = { ...halfMigrated[0]!, approvalGate: !halfMigrated[0]!.approvalGate };
+    const missingRevalidator = asPersisted(loaded);
+    missingRevalidator[0] = { ...missingRevalidator[0]!, assigneeAgent: null };
+    const spawnPolicy = { mode: "parallel", limit: 2 };
   const sourceWithSpawnPolicy = loaded.map((step, index) => index === 0 ? { ...step, spawnPolicy } : step);
 
   try {
@@ -91,6 +93,11 @@ test("installation planning decides successor drift, half migrations, and spawnP
       {
         name: "current row with a named spawnPolicy",
         plan: planCanonicalInstallation([row(asPersisted(sourceWithSpawnPolicy))], sources(sourceWithSpawnPolicy)),
+        kind: "current",
+      },
+      {
+        name: "current row with a temporarily missing revalidator Agent",
+        plan: planCanonicalInstallation([row(missingRevalidator)], sources(loaded)),
         kind: "current",
       },
     ] as const;
