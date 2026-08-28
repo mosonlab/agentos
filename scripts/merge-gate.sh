@@ -1163,6 +1163,18 @@ done
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
 #
+# What the ceiling actually has to cover is not the cluster: the database wave
+# gives every *.dbtest.ts file its own `CREATE DATABASE ... TEMPLATE` copy and
+# creates all of them before the first test runs, so the data directory holds
+# one physical copy per file for the whole wave. At 1024m that headroom ran out
+# three files after the suite reached 62 — every splitting a test file for
+# concurrency would have hit it, and it surfaces as `53100: could not extend
+# file ... No space left on device` from whichever query happened to be running,
+# which reads like a test failure and is not one. It is raised rather than
+# reasoned about per file count, because the number of test files is not
+# something a change to them should have to check against a constant here.
+# Nothing is reserved by raising it: what a run actually writes is unchanged.
+#
 # Started here and waited for later. initdb takes a few seconds during which
 # this gate has an npm ci and two install-free suites to be getting on with, and
 # nothing between here and the wait touches the server. The wait is still its
@@ -1173,7 +1185,7 @@ docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
   -e POSTGRES_DB=agentos_gate \
   -e PGDATA=/var/lib/postgresql/data \
-  --tmpfs /var/lib/postgresql/data:rw,size=1024m \
+  --tmpfs /var/lib/postgresql/data:rw,size=3072m \
   -p 127.0.0.1::5432 "${POSTGRES_IMAGE}" \
   -c fsync=off \
   -c synchronous_commit=off \

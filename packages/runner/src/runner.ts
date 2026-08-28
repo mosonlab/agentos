@@ -63,6 +63,29 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const persistRegressionOutputHandoff = async (
+  controlPlane: ControlPlane,
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  handoff: Parameters<ControlPlane["persistSessionTaskOutput"]>[2],
+  sink: (event: AdapterEvent) => void,
+): Promise<void> => {
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await controlPlane.persistSessionTaskOutput(config, claim, handoff);
+      return;
+    } catch (error: unknown) {
+      if (attempt === attempts || !controlPlane.retriableStartupError(error)) throw error;
+      sink({
+        source: "RUNNER",
+        type: "REGRESSION_OUTPUT_HANDOFF_RETRYING",
+        payload: { attempt, attempts, message: errorMessage(error) },
+      });
+    }
+  }
+};
+
 const appendRetainedSessionConfig = (reason: string, path: string | null): string =>
   `${reason}${path ? `; session CLI config retained at ${path}` : ""}`;
 
@@ -536,7 +559,7 @@ export const executeClaim = async (
       try {
         const handoff = await readRegressionOutputHandoff(config, claim, workspace);
         if (handoff) {
-          await controlPlane.persistSessionTaskOutput(config, claim, handoff);
+          await persistRegressionOutputHandoff(controlPlane, config, claim, handoff, sink);
           regressionHandoffPersisted = true;
           sink({
             source: "RUNNER",
