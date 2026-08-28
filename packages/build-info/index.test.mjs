@@ -121,7 +121,7 @@ test("the wrong package is refused even when the commit is right", () => {
   assert.equal(reconcile(stamped(), OID, "@anneal/api").ok, true);
   const swapped = reconcile(stamped(), OID, "@anneal/runner");
   assert.equal(swapped.ok, false);
-  assert.match(swapped.reason, /holds a @agentos\/api build, expected @agentos\/runner/);
+  assert.match(swapped.reason, /holds a @anneal\/api build, expected @anneal\/runner/);
   // Unbound is still allowed, and says so rather than implying it checked.
   assert.match(reconcile(stamped(), OID).reason, /package identity unchecked/);
 });

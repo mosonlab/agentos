@@ -64,6 +64,12 @@ within one commit because manifests, lockfile links, static imports, dynamic
 imports, build provenance, workspace commands, tests, and documentation all
 refer to the same scope.
 
+The primary-category count contains 424 literal `<OLD_NPM_SCOPE>/` tokens. Four
+additional regex fixtures render the same scope while escaping the slash; the
+occurrence inventory classifies those lines under other code and configuration,
+but B must migrate them too. Verification therefore checks both the literal and
+escaped forms rather than relying on a literal-only grep.
+
 The safe order within B is:
 
 1. Replace the exact scope in manifests, sources, scripts, tests, and prose.

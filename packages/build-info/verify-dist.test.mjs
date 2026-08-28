@@ -85,7 +85,7 @@ test("the right commit of the wrong package is refused, not counted as a pass", 
   withDeployment({ "packages/api/dist": stamp(), "packages/runner/dist": stamp() }, (root) => {
     const results = verifyDists({ expected: OID, dists: DEFAULT_DISTS, root });
     assert.deepEqual(results.map((result) => result.ok), [true, false]);
-    assert.match(results[1].reason, /holds a @agentos\/api build, expected @agentos\/runner/);
+    assert.match(results[1].reason, /holds a @anneal\/api build, expected @anneal\/runner/);
   });
 });
 
@@ -167,7 +167,7 @@ test("a running service is asked the same question as a directory", async () => 
     fetchImplementation: respond({ ...document, service: "@anneal/runner" }),
   });
   assert.equal(impostor.ok, false);
-  assert.match(impostor.reason, /holds a @agentos\/runner build/);
+  assert.match(impostor.reason, /holds a @anneal\/runner build/);
 
   const [unbuilt] = await verifyUrls({
     expected: OID,

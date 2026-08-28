@@ -223,6 +223,24 @@ test("direct platform specification materialization is a registered prompt-only 
   assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
 });
 
+test("the internal npm scope rename is a registered prompt-only rollover", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const retiredDigests = {
+    "direct-engineer-workflow": "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
+    "compound-engineer-workflow": "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
+  } as const;
+
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+    const generation = generationOf(templateName, "pre-internal-npm-scope-rename");
+    assert.equal(generation.promptDigest, retiredDigests[templateName]);
+    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+  }
+});
+
 test("every direct prompt-only generation can roll straight to the current source", async () => {
   const current = (await loadAllTemplateStepSources()).get("direct-engineer-workflow");
   assert.ok(current);
@@ -230,6 +248,7 @@ test("every direct prompt-only generation can roll straight to the current sourc
     "pre-blind-review-retirement",
     "pre-platform-spec-materialization",
     "pre-regression-step-split",
+    "pre-internal-npm-scope-rename",
   ]) {
     assert.equal(successorPromptDrift("direct-engineer-workflow", marker, current), null, marker);
   }

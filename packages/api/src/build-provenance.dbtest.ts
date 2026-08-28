@@ -155,7 +155,7 @@ test("build provenance survives the whole path from the build script to /version
     ["stale", await mutated("stale", (stamp) => ({ ...stamp, commit: "f".repeat(40) })), /built from f{40}/],
     ["dirty", await mutated("dirty", (stamp) => ({ ...stamp, dirty: true })), /uncommitted changes/],
     ["unstamped", await mutated("unstamped", () => null), /never built/],
-    ["wrong package", await mutated("swapped", (stamp) => ({ ...stamp, packageName: "@anneal/runner" })), /holds a @agentos\/runner build/],
+    ["wrong package", await mutated("swapped", (stamp) => ({ ...stamp, packageName: "@anneal/runner" })), /holds a @anneal\/runner build/],
   ];
   for (const [label, directory, reason] of refusals) {
     const verdict = runVerify(["--expected", head, "--dist", directory, "--package", "@anneal/api"]);
