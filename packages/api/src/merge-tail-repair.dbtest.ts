@@ -504,13 +504,14 @@ test("a repaired Regression retry pins a failed prior Run's published head witho
   assert.equal(firstBody.regressionRepairHandoff.retry, undefined);
 
   const continuationHead = "d".repeat(40);
+  const retryBranch = "agentos/regression/retry-run-2";
   await db.run.update({
     where: { id: firstBody.run.id },
     data: {
       status: "FAILED",
       failureReason: "mechanical output handoff failed after the verdict was published",
       headSha: continuationHead,
-      pushedBranch: BRANCH,
+      pushedBranch: retryBranch,
       pushStatus: "SUCCEEDED",
       endedAt: new Date(),
     },
