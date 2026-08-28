@@ -24,6 +24,7 @@ test("the readiness worker never overlaps ticks in one process", async () => {
   let maximumActive = 0;
   let calls = 0;
   const db = {
+    mergeRecoveryAttempt: { findMany: async () => [] },
     task: {
       findMany: async () => {
         calls += 1;
