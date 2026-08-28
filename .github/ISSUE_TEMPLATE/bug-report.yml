@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not do what the documentation says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AgentOS is a Developer Preview and a personal project with no
+        response-time commitment. The authoritative statement of what is
+        supported is `docs/release/support-matrix.md`; read it first, because a
+        behaviour it already records as unsupported is not a bug.
+
+        Never put a credential, a token or a private path in a public issue.
+        Security reports go through the private channel in `SECURITY.md`.
+  - type: input
+    id: version
+    attributes:
+      label: Release tag or commit
+      description: The exact tag you checked out, or the commit SHA.
+      placeholder: v0.3.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: macOS version, chip, Node.js version.
+      placeholder: macOS 26.1, M2 Pro, Node 22.17.0
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: What you ran, verbatim.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: The exact reason code or message
+      description: >-
+        Verbatim output, not a paraphrase. If a run escalated, include the
+        escalation reason. Redact paths and identifiers you do not want public.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the documentation led you to expect
+      description: Name the file, and the line if you can.
+    validations:
+      required: true

@@ -2,10 +2,11 @@
 
 # AgentOS
 
-**A local control plane for coding agents.**
+**AI can write code now. Nobody has the capacity to review all of it.**
 
-You write the spec. A chain of agents takes it from there: plan, review,
-implement, verify, merge. Every run stays observable and reviewable.
+AgentOS is the part that reviews it: a local control plane for coding agents.
+You write the spec. A chain takes it from there — plan, review, implement,
+verify, merge — and every run stays observable and reviewable.
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -61,10 +62,27 @@ trigger, not by a standing objective. See [Status](#status).
 
 </div>
 
+## It is built by its own chains
+
+The pull requests in this repository are specified, planned, reviewed,
+implemented and merged by the chain below, running on one Mac. That is what the
+eight days between the first preview release and the third look like from the
+inside.
+
+Attribution for chain-delivered commits is not yet explicit in git history, so
+treat this as a statement about how the work is done rather than a number you
+can check. Making it checkable is the next preview's job.
+
 ## The twelve-step chain
 
 The Full Assurance template that ships with AgentOS. Every step binds a role,
 and every role carries its own runner, model and reasoning effort.
+
+`Sol` and `Luna` in the table below are not AgentOS names: they are the GPT-5.6
+variants the Codex CLI exposes, bound as `gpt-5.6-sol` and `gpt-5.6-luna`.
+
+<details>
+<summary><b>The twelve steps in full</b> — role, runner, model and effort for each</summary>
 
 | # | Step | Agent role | What it does | Runner | Model · effort |
 | --- | --- | --- | --- | --- | --- |
@@ -80,6 +98,8 @@ and every role carries its own runner, model and reasoning effort.
 | 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Claude | Claude Opus 5 · medium |
 | 11 | Merge readiness | — | Recomputes the head, requires every open review to clear, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
+
+</details>
 
 <div align="center">
 

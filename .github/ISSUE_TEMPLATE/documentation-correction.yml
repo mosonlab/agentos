@@ -1,0 +1,30 @@
+name: Documentation correction
+description: A document claims something the code does not do.
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the class of error most worth reporting. Naming the file and the
+        line is enough — a patch is not needed, and outside pull requests are not
+        being accepted yet.
+  - type: input
+    id: location
+    attributes:
+      label: File and line
+      placeholder: docs/install.md:42
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: What the document claims
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What the code actually does
+      description: Point at the source file, the command output, or both.
+    validations:
+      required: true
