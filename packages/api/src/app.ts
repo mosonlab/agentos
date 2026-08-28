@@ -153,6 +153,12 @@ import {
   reactivationBlocked,
 } from "./task-write.js";
 import { patchTask } from "./task-patch.js";
+import {
+  cancelBoundRevalidationRun,
+  patchBoundImplementationDescription,
+  readBoundImplementationTask,
+  SPEC_REVALIDATOR_AGENT_NAME,
+} from "./revalidation.js";
 import { claimRun, OPERATOR_NOTE_METADATA_FIELD } from "./run-claim.js";
 import { completeRun } from "./run-completion.js";
 import { withoutUndefined } from "./without-undefined.js";
@@ -492,6 +498,14 @@ const activityInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const fencedActivityInput = activityInput.extend({ fencingToken: fence });
+/** Revalidation is intentionally narrower than the operator task PATCH: the
+ * session names only the replacement brief and the server derives the one
+ * same-chain implementation task from the fenced Run. */
+const revalidationPatchInput = z.object({
+  fencingToken: fence,
+  description: z.string(),
+}).strict();
+const revalidationCancelInput = z.object({ fencingToken: fence }).strict();
 const mergeTargetInput = z.object({ prNumber: z.number().int().positive() });
 const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
   console.warn("Discarded runner telemetry", { input, issues: error.issues });
@@ -3487,6 +3501,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const run = await db.run.findUnique({
       where: { id: runId },
       include: {
+        agent: { select: { name: true } },
         task: {
           include: {
             stepOutput: true,
@@ -3495,6 +3510,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 name: true,
                 stepIndex: true,
                 outputKind: true,
+                priorOutputKinds: true,
                 taskTemplate: { select: { name: true } },
               },
             },
@@ -3503,6 +3519,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       },
     });
     if (!run) return context.json({ error: "Run not found" }, 404);
+    const boundImplementationTask = run.agent.name === SPEC_REVALIDATOR_AGENT_NAME && run.task
+      ? await readBoundImplementationTask(db, run)
+      : null;
+    if (boundImplementationTask && "message" in boundImplementationTask) {
+      return refusalJson(context, boundImplementationTask);
+    }
     const outputPersisted = run.task?.stepOutput?.runId === run.id;
     const outputSatisfiedByPriorRun = Boolean(
       run.task?.stepOutput
@@ -3537,8 +3559,38 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // A retry must not mistake an earlier Run's artifact for its own. This
         // is the same run-scoped fact completion validates before it advances.
         outputPersisted,
+        ...(boundImplementationTask ? { boundImplementationTask } : {}),
       } : null,
     });
+  });
+
+  /**
+   * The revalidator's only task mutation. The target is derived from the
+   * fenced Run, so a session can never name an arbitrary task or chain.
+   */
+  app.patch("/session/runs/:runId/task", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const principal = context.get("principal");
+    if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
+    const body = await readJson(context.req.raw, revalidationPatchInput);
+    const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
+    const result = await patchBoundImplementationDescription(db, fence, body.description, principal.leaseGeneration);
+    if (isFenceRefusalResponse(result)) return refusalJson(context, runFenceRefusal(result));
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result.task);
+  });
+
+  /** Ask the owning runner to cancel a premise-collapsed revalidation Run. */
+  app.post("/session/runs/:runId/revalidation/cancel", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const principal = context.get("principal");
+    if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
+    const body = await readJson(context.req.raw, revalidationCancelInput);
+    const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
+    const result = await cancelBoundRevalidationRun(db, fence, new Date(), principal.leaseGeneration);
+    if (isFenceRefusalResponse(result)) return refusalJson(context, runFenceRefusal(result));
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result);
   });
 
   app.put("/session/runs/:runId/output", async (context) => {

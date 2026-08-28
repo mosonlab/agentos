@@ -7,7 +7,7 @@
  *  local process could read them.
  *
  *  Hand-rolled JSON-RPC rather than the MCP SDK: the runner package ships with
- *  no runtime dependencies, and the surface here is eight tools. */
+ *  no runtime dependencies, and the surface here is ten tools. */
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -137,6 +137,9 @@ export const invokeTool = async (
     ].join("\n\n"));
   }
   if (name === "task_status") {
+    return text(JSON.stringify(result, null, 2));
+  }
+  if (name === "task_patch" || name === "revalidation_cancel") {
     return text(JSON.stringify(result, null, 2));
   }
   if (name === "inbox_ask") {

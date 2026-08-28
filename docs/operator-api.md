@@ -1140,6 +1140,10 @@ The operator can list and inspect sessions, cancel runs, and page through run
 events. The `/session/runs/...` routes used by an authenticated live agent
 session and the `/runner/...` machine protocol are intentionally not listed:
 the authentication middleware denies those prefixes to the operator principal.
+The two revalidation routes below are session-only capabilities; they are
+listed here so their authorization boundary is explicit even though operators
+cannot call them directly. A `spec-revalidator` session on a bound direct chain
+is the only caller accepted.
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree
@@ -1177,6 +1181,23 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"requestId":"cancel-001","reason":"Operator requested stop","parkTask":true}'
 ```
+
+### PATCH `/session/runs/:runId/task`
+
+- Session bearer authentication must name the same `runId` as the path.
+- Required JSON fields: `fencingToken`, `description`.
+- Only the bound chain's `spec-revalidator` Run may call this route. The
+  implementation task is derived server-side; no task ID or chain ID is
+  accepted. The fenced write replaces the brief while preserving the
+  platform-authored prompt and output instructions.
+
+### POST `/session/runs/:runId/revalidation/cancel`
+
+- Session bearer authentication must name the same `runId` as the path.
+- Required JSON field: `fencingToken`.
+- Only the bound chain's `spec-revalidator` Run may call this route. It records
+  cancellation intent for the current Run; the owning runner performs provider
+  cleanup and terminalization, leaving downstream chain tasks blocked.
 
 ### GET `/runs/:runId/events`
 
