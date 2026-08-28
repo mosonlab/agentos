@@ -110,10 +110,15 @@ const readReleaseIndex = (path, revision) => {
 
 const assertBuildStamp = (tree, path, revision, packageName) => {
   const stamp = readJsonObject(join(tree, path), `${packageName}-build-stamp`);
+  if (packageName === "@anneal/api" && stamp.packageName === "@agentos/api"
+    && stamp.commit === revision && stamp.dirty === false) return false;
   if (stamp.commit !== revision || stamp.dirty !== false || stamp.packageName !== packageName) {
     invalid(`${packageName}-build-stamp-mismatch`);
   }
+  return true;
 };
+
+const INCOMPATIBLE_BUILD_ENTRY = Symbol("incompatible-build-entry");
 
 const validateBuildEntry = (cacheRoot, revision, buildKey, expectedFiles = null) => {
   const entry = join(cacheRoot, "builds", buildKey);
@@ -124,7 +129,9 @@ const validateBuildEntry = (cacheRoot, revision, buildKey, expectedFiles = null)
   if (readFileSync(ready, "utf8").trim() !== buildKey) invalid("build-entry-ready-mismatch");
   const tree = join(entry, "tree");
   assertDirectory(tree, "build-entry-tree");
-  assertBuildStamp(tree, "packages/api/dist/build-info.json", revision, "@anneal/api");
+  if (!assertBuildStamp(tree, "packages/api/dist/build-info.json", revision, "@anneal/api")) {
+    return INCOMPATIBLE_BUILD_ENTRY;
+  }
   assertBuildStamp(tree, "packages/runner/dist/build-info.json", revision, "@anneal/runner");
   const files = inventoryBuildOutputs(tree);
   if (expectedFiles !== null && JSON.stringify(files) !== JSON.stringify(expectedFiles)) {
@@ -146,6 +153,7 @@ export const publishReleaseSnapshot = ({
   else mkdirSync(cacheRoot, { recursive: true, mode: 0o700 });
   const proposed = validateBuildEntry(cacheRoot, revision, buildKey);
   if (proposed === null) invalid("build-entry-missing");
+  if (proposed === INCOMPATIBLE_BUILD_ENTRY) invalid("build-entry-incompatible");
 
   const releases = join(cacheRoot, "releases");
   if (existsSync(releases)) assertDirectory(releases, "release-index-directory");
@@ -153,7 +161,8 @@ export const publishReleaseSnapshot = ({
   const path = releaseIndexPath(cacheRoot, revision);
   if (existsSync(path)) {
     const current = readReleaseIndex(path, revision);
-    if (validateBuildEntry(cacheRoot, revision, current.buildKey, current.files) !== null) {
+    const currentEntry = validateBuildEntry(cacheRoot, revision, current.buildKey, current.files);
+    if (currentEntry !== null && currentEntry !== INCOMPATIBLE_BUILD_ENTRY) {
       return Object.freeze({ published: false, buildKey: current.buildKey });
     }
   }
@@ -201,6 +210,7 @@ export const materializeReleaseSnapshot = ({
   const index = readReleaseIndex(path, revision);
   const entry = validateBuildEntry(cacheRoot, revision, index.buildKey, index.files);
   if (entry === null) return Object.freeze({ hit: false, reason: "evicted" });
+  if (entry === INCOMPATIBLE_BUILD_ENTRY) return Object.freeze({ hit: false, reason: "incompatible" });
 
   const copied = [];
   try {

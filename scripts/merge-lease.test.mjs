@@ -104,7 +104,7 @@ const readLease = (fixture) => {
     env: FIXTURE_ENV,
     encoding: "utf8",
   });
-  return { sha, lease: JSON.parse(body) };
+  return { sha, lease: JSON.parse(body), text: body };
 };
 
 const runLeaseAsync = (fixture, args, holder) =>
@@ -321,9 +321,14 @@ test("machine steal is refused through 45 minutes and allowed only after it", (t
   const stolen = runLease(fixture, ["steal", "--reason", "Machine recovery"], "machine@fixture");
   assert.equal(stolen.status, 0, stolen.stdout + stolen.stderr);
   assert.match(stolen.stderr, /stealing lease from/u);
-  const current = readLease(fixture).lease;
+  const { lease: current, text } = readLease(fixture);
   assert.equal(current.holder, "machine@fixture");
-  assert.deepEqual(current.stolenFrom, stale);
+  assert.deepEqual(current.stolenFrom, {
+    holder: stale.holder,
+    acquiredAt: stale.acquiredAt,
+    reason: stale.reason,
+  });
+  assert.doesNotMatch(text, /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/iu);
 });
 
 test("an explicit human steal replaces a fresh lease immediately", (t) => {
@@ -344,7 +349,11 @@ test("an explicit human steal replaces a fresh lease immediately", (t) => {
   const current = readLease(fixture).lease;
   assert.equal(current.holder, "leo@fixture");
   assert.equal(current.task, "incident-7");
-  assert.deepEqual(current.stolenFrom, original);
+  assert.deepEqual(current.stolenFrom, {
+    holder: original.holder,
+    acquiredAt: original.acquiredAt,
+    reason: original.reason,
+  });
 });
 
 test("two concurrent steals compare-and-swap the observed holder so exactly one wins", async (t) => {
@@ -369,7 +378,28 @@ test("two concurrent steals compare-and-swap the observed holder so exactly one 
   assert.match(results.find((result) => result.status === 1).stderr, /compare-and-swap refused/u);
   const current = readLease(fixture).lease;
   assert.ok(["first@fixture", "second@fixture"].includes(current.holder));
-  assert.deepEqual(current.stolenFrom, original);
+  assert.deepEqual(current.stolenFrom, {
+    holder: original.holder,
+    acquiredAt: original.acquiredAt,
+    reason: original.reason,
+  });
+});
+
+test("steal removes nested historical token fields before writing provenance", (t) => {
+  const fixture = leaseFixture(t);
+  const legacyUuid = "123e4567-e89b-12d3-a456-426614174000";
+  installLease(fixture, {
+    holder: "legacy@fixture",
+    acquiredAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    reason: "Legacy lease",
+    token: legacyUuid,
+    history: [{ token: legacyUuid, holder: "older@fixture" }],
+  });
+  const stolen = runLease(fixture, ["steal", "--reason", "Scope rename recovery"], "machine@fixture");
+  assert.equal(stolen.status, 0, stolen.stdout + stolen.stderr);
+  const { lease, text } = readLease(fixture);
+  assert.deepEqual(lease.stolenFrom.history, [{ holder: "older@fixture" }]);
+  assert.doesNotMatch(text, /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/iu);
 });
 
 // --- the release outcome, as the merge tail reads it -------------------------

@@ -238,7 +238,14 @@ make_lease_blob() {
     const [holder, task, acquiredAt, reason, token, stolen] = process.argv.slice(1);
     const lease = { holder, acquiredAt, reason, token };
     if (task) lease.task = task;
-    if (stolen) lease.stolenFrom = JSON.parse(stolen);
+    const withoutHistoricalTokens = (value) => {
+      if (Array.isArray(value)) return value.map(withoutHistoricalTokens);
+      if (typeof value !== "object" || value === null) return value;
+      return Object.fromEntries(Object.entries(value)
+        .filter(([key]) => key.toLowerCase() !== "token")
+        .map(([key, nested]) => [key, withoutHistoricalTokens(nested)]));
+    };
+    if (stolen) lease.stolenFrom = withoutHistoricalTokens(JSON.parse(stolen));
     process.stdout.write(JSON.stringify(lease) + "\n");
   ' "$HOLDER" "$TASK" "$acquired_at" "$REASON" "$token" "$stolen_json" \
     | git -C "$REPO_ROOT" hash-object -w --stdin)" \

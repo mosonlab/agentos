@@ -155,8 +155,11 @@ test("quiet-window predicate blocks only claimed, provisioning, and running", ()
   assert.equal(quietWindowIsOpen([{ status: "queued" }, { status: "waiting-inbox" }]), true);
 });
 
-test("deployed build stamps cross the current npm-scope rename without weakening identity", () => {
+test("a new-scope checkout accepts an old-scope live stamp during the rename transition", () => {
+  const repositoryRoot = realpathSync(new URL("../../", import.meta.url));
+  const checkoutManifest = JSON.parse(readFileSync(join(repositoryRoot, "packages/api/package.json"), "utf8"));
   const commit = "a".repeat(40);
+  assert.equal(checkoutManifest.name, "@anneal/api");
   assert.equal(deployedBuildStampRefusal({ packageName: "@anneal/api", commit, dirty: false }), null);
   assert.equal(deployedBuildStampRefusal({ packageName: "@agentos/api", commit, dirty: false }), null);
   assert.equal(deployedBuildStampRefusal({ packageName: "@other/api", commit, dirty: false }), "unexpected-package-name");
@@ -630,6 +633,25 @@ test("a missing or evicted release snapshot explicitly falls back to a source bu
   publishReleaseSnapshot({ revision, buildKey, cacheRoot });
   rmSync(join(cacheRoot, "builds", buildKey), { recursive: true });
   assert.deepEqual(materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }), { hit: false, reason: "evicted" });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a pre-rename warm cache entry is a cache miss instead of corruption", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-release-pre-rename-"));
+  const cacheRoot = join(root, "cache");
+  const stageRoot = join(root, "stage");
+  const revision = "9".repeat(40);
+  const buildKey = "8".repeat(64);
+  mkdirSync(stageRoot);
+  buildCacheFixture(cacheRoot, revision, buildKey);
+  publishReleaseSnapshot({ revision, buildKey, cacheRoot });
+  writeFileSync(join(cacheRoot, "builds", buildKey, "tree/packages/api/dist/build-info.json"), JSON.stringify({
+    packageName: "@agentos/api", commit: revision, dirty: false,
+  }));
+  assert.deepEqual(materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }), {
+    hit: false,
+    reason: "incompatible",
+  });
   rmSync(root, { recursive: true, force: true });
 });
 
