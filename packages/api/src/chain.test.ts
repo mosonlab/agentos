@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { ChainControlState, type ChainControlSnapshot } from "@anneal/db";
+
 import {
   chainKey,
   chainProgress,
   chainProgressByChain,
   blockingPredecessor,
   positions,
+  refusalForHeldChainStep,
   runFactsByTask,
   stepName,
   taskStartability,
@@ -156,6 +159,59 @@ test("a resolved dispatch binding restores the ordinary first-step decision", ()
     dispatchAfter: { status: "DONE" },
   });
   assert.equal(taskStartability(resolved, { total: 0, active: false }, 3, true).startable, true);
+});
+
+const heldControl = (heldLayer: number): ChainControlSnapshot => ({
+  projectId: "project-1",
+  chainId: "chain-1",
+  state: ChainControlState.HELD,
+  held: true,
+  heldLayer,
+  heldAt: new Date("2026-08-28T12:00:00.000Z"),
+  holdRequestId: "hold-1",
+  holdReason: null,
+  releasedAt: null,
+  releaseRequestId: null,
+  holdGeneration: 1,
+});
+
+test("a held Chain refuses only steps above its held layer and names the hold", () => {
+  const control = heldControl(2);
+  assert.deepEqual(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: 3, chainLayer: 3, name: "Later",
+  }, control), {
+    reason: "conflict",
+    message: "Cannot start Later; Chain is held after layer 2",
+  });
+  assert.equal(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: 2, chainLayer: 2, name: "Held layer",
+  }, control), null);
+  assert.equal(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: 1, chainLayer: 1, name: "Earlier",
+  }, control), null);
+  assert.equal(refusalForHeldChainStep({
+    projectId: "project-2", chainId: "chain-1", chainIndex: 3, chainLayer: 3, name: "Other project",
+  }, control), null);
+});
+
+test("held-layer admission prefers chainLayer and falls back to chainIndex", () => {
+  const control = heldControl(2);
+  // The stored execution layer is authoritative even when chainIndex is much
+  // larger (sparse template step numbering).
+  assert.equal(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: 99, chainLayer: 1, name: "Layer one",
+  }, control), null);
+  // Legacy rows without chainLayer compare by chainIndex.
+  assert.match(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: 3, chainLayer: null, name: "Legacy later",
+  }, control)?.message ?? "", /held after layer 2/u);
+});
+
+test("released, absent, and chainless control states do not refuse admission", () => {
+  const task = { projectId: "project-1", chainId: "chain-1", chainIndex: 3, chainLayer: 3, name: "Later" };
+  assert.equal(refusalForHeldChainStep(task, undefined), null);
+  assert.equal(refusalForHeldChainStep(task, { ...heldControl(2), held: false, state: ChainControlState.RELEASED }), null);
+  assert.equal(refusalForHeldChainStep({ ...task, chainId: null }, heldControl(2)), null);
 });
 
 test("the exposed checklist and overall verdict come from the shared start predicate", () => {

@@ -2573,6 +2573,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const admission = await readStepAdmission(tx, taskId, { locked: true });
       if (!admission.task) return admission.refusal;
       const task = admission.task;
+      // Retry has its own terminal-state rules and intentionally ignores the
+      // Start-only refusal ladder. A Chain hold is the one admission control
+      // refusal it must consume before opening a fresh Run.
+      if (admission.holdRefusal) return admission.holdRefusal;
       if (admission.blocker) {
         return refusal("conflict", `Cannot retry ${task.name}; predecessor ${admission.blocker.name} is not done`);
       }
