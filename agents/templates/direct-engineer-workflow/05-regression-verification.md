@@ -11,11 +11,13 @@ baseFromStepIndex: null
 spawnPolicy: null
 ---
 The platform script owns refresh/merge, merge-lease operations, gate dispatch
-and retries, verdict transcription, and the final `regression-verification-v2`
-task output. Do not perform or restate those mechanical operations yourself.
+and retries, verdict transcription, and the local handoff for the final
+`regression-verification-v2` task output. The Runner validates that handoff and
+persists it to AgentOS. Do not perform or restate those mechanical operations
+yourself.
 
 Run `scripts/regression-verification.sh prepare`. If it reports
-`refresh-conflict`, the final output is already persisted: record the outcome
+`refresh-conflict`, the final output handoff is already published: record the outcome
 in the activity log and finish. Otherwise read the implementation summary,
 both review reports, and the fixed implementation with its dispositions from
 AgentOS. Review the entire refreshed fix diff as one unit, account for every
@@ -28,10 +30,10 @@ defect exists, run
 `scripts/regression-verification.sh review-fail '<concise finding IDs or defect>'`
 and finish. Otherwise run `scripts/regression-verification.sh finalize`.
 
-A finalize exit 0 means the script persisted exactly one of `pass`, `gate-fail`,
-or `refresh-conflict`; report the bounded `REGRESSION FINALIZE` status line it
+A finalize exit 0 means the script published exactly one handoff for `pass`,
+`gate-fail`, or `refresh-conflict`; report the bounded `REGRESSION FINALIZE` status line it
 printed. A finalize exit 77 means the script integrated a newer target head
 outside the lease. Repeat the full semantic verification against that refreshed
 tree, then run either `review-fail` or `finalize` again. Any other nonzero script
-exit fails the run loudly. The script persists the one allowed v2 outcome;
+exit fails the run loudly. The script publishes the one allowed v2 outcome;
 never call `task_output` for this step or write a report file.

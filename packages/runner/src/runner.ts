@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+
 import {
   ADAPTER_VERSION,
   adapterExecutionSucceeded,
@@ -44,6 +46,7 @@ import {
 } from "./envelope.js";
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
+import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
@@ -528,9 +531,32 @@ export const executeClaim = async (
     const completedHandle = handle;
     const evidence = await completedHandle.exit;
     producedOutput = outputTail(evidence);
+    let regressionHandoffPersisted = false;
+    if (!fencingRejected) {
+      try {
+        const handoff = await readRegressionOutputHandoff(config, claim, workspace);
+        if (handoff) {
+          await controlPlane.persistSessionTaskOutput(config, claim, handoff);
+          regressionHandoffPersisted = true;
+          sink({
+            source: "RUNNER",
+            type: "REGRESSION_OUTPUT_HANDOFF_PERSISTED",
+            payload: { kind: handoff.kind, commitSha: handoff.commitSha },
+          });
+        }
+      } catch (error: unknown) {
+        remediationFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        sink({
+          source: "RUNNER",
+          type: "REGRESSION_OUTPUT_HANDOFF_FAILED",
+          payload: { message: errorMessage(error) },
+        });
+      }
+    }
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
-      && !fencingRejected) {
+      && !fencingRejected
+      && remediationFailureReason === null) {
       let outputStatus: SessionTaskOutputStatus | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
@@ -544,7 +570,19 @@ export const executeClaim = async (
       if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
         const outputKind = outputStatus.outputKind;
         const providerConversationId = completedHandle.providerConversationId;
-        if (outputStatus.outputSatisfiedByPriorRun) {
+        if (claim.task.templateStep.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND) {
+          remediationFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
+          sink({
+            source: "RUNNER",
+            type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
+            payload: {
+              outputKind,
+              outputRemediationAllowed: false,
+              providerConversationIdAvailable: providerConversationId !== null,
+              reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent",
+            },
+          });
+        } else if (outputStatus.outputSatisfiedByPriorRun) {
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_SKIPPED",

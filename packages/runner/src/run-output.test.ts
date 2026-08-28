@@ -13,6 +13,8 @@ import { RUNNER_EXCEPTION_REASON, summarizeEvidence } from "./envelope.js";
 import { executeClaim } from "./runner.js";
 import { createControlPlaneDouble } from "./test-control-plane.js";
 
+const REGRESSION_OUTPUT_KIND = "regression-verification-v2";
+
 /**
  * What a failed run actually hands the API.
  *
@@ -204,6 +206,38 @@ const requiredOutputClaim = (remoteUrl: string): ClaimedTask => {
   };
 };
 
+const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
+  const base = claim(remoteUrl);
+  return {
+    ...base,
+    task: {
+      ...base.task,
+      chainId: "chain-1",
+      chainIndex: 5,
+      templateStep: { name: "Regression verification", outputKind: REGRESSION_OUTPUT_KIND },
+    },
+  };
+};
+
+const regressionFailureAgent = [
+  "#!/bin/sh",
+  'case "$1" in',
+  '  --version) echo "1.2.3-stub"; exit 0 ;;',
+  '  --help) echo "--setting-sources"; exit 0 ;;',
+  '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
+  "esac",
+  "cat > /dev/null",
+  'head_sha="$(git rev-parse HEAD)"',
+  'mkdir -p "$AGENTOS_WORKSPACE_PATH/.agentos"',
+  'HEAD_SHA="$head_sha" node -e \'',
+  'const body = JSON.stringify({ schemaVersion: 2, outcome: "review-fail", headSha: process.env.HEAD_SHA, baseHeadSha: "b".repeat(40), summary: "RF-2 remains open" });',
+  'process.stdout.write(JSON.stringify({ schemaVersion: 1, runId: process.env.AGENTOS_RUN_ID, kind: "regression-verification-v2", body, commitSha: process.env.HEAD_SHA }));',
+  '\' > "$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"',
+  'chmod 600 "$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"',
+  'echo "Error: provider transport disconnected after verdict" >&2',
+  "exit 1",
+].join("\n");
+
 const outputStatus = (overrides: Partial<{
   outputKind: string | null;
   outputRequired: boolean;
@@ -278,6 +312,83 @@ test("a successful run's completion carries its final output as the same tail", 
       completion.output,
       "inverted the lock ordering in reconcile.ts and added the regression test",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a negative Regression verdict persists even when provider transport fails afterwards", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-transport-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "regression-agent.sh");
+    await writeFile(agentBinary, regressionFailureAgent);
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble();
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      regressionOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    assert.equal(
+      controlPlane.taskOutputs.length,
+      1,
+      JSON.stringify({ completion: controlPlane.completions.at(-1), events: controlPlane.eventBatches.flat() }),
+    );
+    const persisted = controlPlane.taskOutputs[0];
+    assert.equal(persisted?.kind, REGRESSION_OUTPUT_KIND);
+    assert.match(persisted?.commitSha ?? "", /^[0-9a-f]{40}$/u);
+    assert.deepEqual(JSON.parse(persisted?.body ?? "{}"), {
+      schemaVersion: 2,
+      outcome: "review-fail",
+      headSha: persisted?.commitSha,
+      baseHeadSha: "b".repeat(40),
+      summary: "RF-2 remains open",
+    });
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, false);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
+    assert.equal(
+      controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Regression v2 never resumes the model to remediate an absent mechanical handoff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-no-model-remediation-"));
+  try {
+    const remote = await seedRemote(root);
+    const remediationPrompt = join(root, "remediation-prompt.txt");
+    const agentBinary = join(root, "regression-agent.sh");
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({
+        outputKind: REGRESSION_OUTPUT_KIND,
+        outputRemediationAllowed: true,
+      }).task,
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      regressionOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    assert.equal(existsSync(remediationPrompt), false);
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, false);
+    assert.equal(
+      controlPlane.completions.at(-1)?.failureClass,
+      "PROTOCOL_ERROR",
+      JSON.stringify({ completion: controlPlane.completions.at(-1), events: controlPlane.eventBatches.flat() }),
+    );
+    const unavailable = controlPlane.eventBatches.flat()
+      .find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_UNAVAILABLE");
+    assert.equal(unavailable?.payload.reason, "mechanical-handoff-absent");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
