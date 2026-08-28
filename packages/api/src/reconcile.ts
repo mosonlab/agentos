@@ -1,4 +1,5 @@
 import {
+  isRegressionVerificationOutputKind,
   lockTaskRow,
   openRun,
   runBudgetCeiling,
@@ -14,6 +15,7 @@ import {
   settleLease,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
+import { handleRegressionCompletion, regressionVerdictForRun } from "./merge-tail-actions.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 import { terminalizeRun } from "./run-terminal.js";
 
@@ -115,6 +117,26 @@ export const reconcileDatabaseRuns = async (
         stallTimeoutMin: true,
         maxRunsPerTask: true,
         budgetGrants: true,
+        headSha: true,
+        session: { select: { id: true } },
+        task: {
+          select: {
+            id: true,
+            projectId: true,
+            repoId: true,
+            templateId: true,
+            chainId: true,
+            chainIndex: true,
+            targetBranch: true,
+            templateStep: {
+              select: {
+                stepIndex: true,
+                outputKind: true,
+                taskTemplate: { select: { name: true } },
+              },
+            },
+          },
+        },
       },
     }),
     db.run.findMany({
@@ -165,6 +187,7 @@ export const reconcileDatabaseRuns = async (
           cancelRequestId: true,
           cancelReason: true,
           cancelRequestedAt: true,
+          headSha: true,
         },
       });
       if (!current) continue;
@@ -186,6 +209,19 @@ export const reconcileDatabaseRuns = async (
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
+      const durableRegressionVerdict = run.task?.templateId
+        && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
+        ? await regressionVerdictForRun(tx, {
+            task: run.task,
+            runId: run.id,
+            runHeadSha: current.headSha,
+            allowPersistedHeadWhenUnreported: true,
+          })
+        : null;
+      const durableNegativeRegressionVerdict = durableRegressionVerdict?.status === "ok"
+        && durableRegressionVerdict.verdict.outcome !== "pass"
+        ? durableRegressionVerdict.verdict
+        : null;
       // Losing a lease is an external failure: it buys an attempt, never spends one.
       // A lost lease refunds the already-authorized Run; it does not recompute
       // from a task budget that may have changed while the Run was in flight.
@@ -212,6 +248,30 @@ export const reconcileDatabaseRuns = async (
       });
       if (lost === null || "message" in lost) continue;
       if (!run.taskId) continue;
+      if (durableNegativeRegressionVerdict && run.task && run.session) {
+        await handleRegressionCompletion(tx, {
+          task: run.task,
+          run: {
+            id: run.id,
+            agentId: run.agentId,
+            branch: run.branch,
+            headSha: durableNegativeRegressionVerdict.headSha,
+            sessionId: run.session.id,
+          },
+          qualifiedVerdict: durableNegativeRegressionVerdict,
+          now,
+        });
+        const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
+        if (lease.leaseToRelease) stranded.add(lease.leaseToRelease);
+        await tx.taskActivity.create({
+          data: {
+            taskId: run.taskId,
+            actorType: "control-plane",
+            body: `Run ${run.runNumber} lost after publishing a negative Regression verdict; repair queued`,
+          },
+        });
+        continue;
+      }
       if (run.runNumber < budgetCeiling) {
         const opened = await openRun(tx, run.taskId, {
           kind: "retry-after-lease-loss",
