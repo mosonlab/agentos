@@ -301,10 +301,6 @@ const grantKey = (input: { projectId: string; agentId: string; repoId: string })
   `${input.projectId}:${input.agentId}:${input.repoId}`
 );
 
-const chainRowsKey = (input: { projectId: string; chainId: string }): string => (
-  `${input.projectId}:${input.chainId}`
-);
-
 const refusalForStepAdmission = (
   task: StepAdmissionTask,
   verdict: TaskStartability,
@@ -374,7 +370,7 @@ export const readStepAdmissions = async (
   ));
   const chainInputs = [...new Map(tasks.flatMap((task) => (
     task.chainId !== null && task.chainIndex !== null
-      ? [[chainRowsKey({ projectId: task.projectId, chainId: task.chainId }), {
+      ? [[chainKey({ projectId: task.projectId, chainId: task.chainId }), {
         projectId: task.projectId,
         chainId: task.chainId,
       }] as const]
@@ -409,7 +405,7 @@ export const readStepAdmissions = async (
   const rowsByChain = new Map<string, Array<(typeof chainRows)[number]>>();
   for (const row of chainRows) {
     if (row.chainId === null) continue;
-    const key = chainRowsKey({ projectId: row.projectId, chainId: row.chainId });
+    const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
     const rows = rowsByChain.get(key);
     if (rows) rows.push(row); else rowsByChain.set(key, [row]);
   }
@@ -418,7 +414,7 @@ export const readStepAdmissions = async (
     const hasRepoGrant = task.assigneeAgentId !== null && task.repoId !== null
       && granted.has(grantKey({ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }));
     const chain = task.chainId !== null && task.chainIndex !== null
-      ? rowsByChain.get(chainRowsKey({ projectId: task.projectId, chainId: task.chainId })) ?? []
+      ? rowsByChain.get(chainKey({ projectId: task.projectId, chainId: task.chainId })) ?? []
       : [];
     const blocker = blockingPredecessor(chain, task.id);
     const baseVerdict = taskStartability(

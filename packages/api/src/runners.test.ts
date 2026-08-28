@@ -65,7 +65,18 @@ const makeDatabase = (
   onCandidateRead: () => void = () => undefined,
 ): PrismaClient => {
   const tx = {
-    $queryRaw: async () => [{ granted: barrierGranted }],
+    $queryRaw: async (query: unknown) => {
+      const sql = Array.isArray(query) ? query.join("") : JSON.stringify(query);
+      if (sql.includes("pg_try_advisory_xact_lock_shared")) return [{ granted: barrierGranted }];
+      if (sql.includes('FROM "Run" AS candidate')) {
+        onCandidateRead();
+        return candidates.map(({ id }) => ({ id }));
+      }
+      if (sql.includes('FROM "Task"')) {
+        return candidates.map(({ task }) => ({ id: (task as { id: string }).id }));
+      }
+      throw new Error(`Unexpected raw claim query: ${sql}`);
+    },
     // The claim loop brackets every candidate in a savepoint.
     $executeRawUnsafe: async () => 0,
     run: {
