@@ -1578,7 +1578,7 @@ test("claim query filters archived agents before take so active work cannot star
       // The claim loop brackets every candidate in a savepoint.
       $executeRawUnsafe: async () => 0,
       run: {
-        findMany: async ({ where, take }: { where: Record<string, any>; take?: number }) => {
+        findMany: async ({ where }: { where: Record<string, any> }) => {
           const selectedIds = where.id?.in as string[] | undefined;
           return selectedIds ? seeded.filter((run) => selectedIds.includes(run.id)) : [];
         },
@@ -1614,7 +1614,8 @@ test("claim query filters archived agents before take so active work cannot star
     });
     assert.equal(response.status, 200);
     const claim = await response.json() as { priorOutputs: Array<{ body: string }> };
-    assert.ok(claimQuery?.includes('agent."archivedAt" IS NULL'));
+    assert.ok(claimQuery);
+    assert.ok(claimQuery.includes('agent."archivedAt" IS NULL'));
     assert.ok(claimQuery.indexOf('agent."archivedAt" IS NULL') < claimQuery.indexOf("LIMIT 20"));
     assert.equal(claimedId, "active");
     assert.equal(claim.priorOutputs[0]?.body, completePriorOutput);
