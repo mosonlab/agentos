@@ -101,7 +101,8 @@ and this repository's own.
 ## Data fixtures
 
 Non-source data files in the published set. None is third-party, and none carries
-a credential, a personal identifier, a private path or a live endpoint.
+a credential, a private path or a live endpoint. One carries a personal
+identifier, recorded below.
 
 | Path | Media type | SHA-256 | Bytes |
 | --- | --- | --- | --- |
@@ -119,6 +120,13 @@ is the part worth writing down:
   of an internal task chain in this repository, captured 2026-08-17 and frozen so
   that the task console's regression tests read fixed input rather than whatever
   a database happens to hold. Reviewed for publication.
+
+  One of the seven rows records an approval by name: the text says a named person
+  approved the intended product behavior. That name stays. The fixture is what
+  those rows actually said on 2026-08-17, and its provenance record asserts
+  exactly that; editing the text and recomputing the digest would leave a
+  self-consistent pair whose authority statement is false. The name is not a
+  credential and identifies this repository's own operator.
 - **`tc-ux-v1-prompts.provenance.json`** — the provenance record for the fixture
   above: what it was captured from, when, its byte count and its SHA-256. The
   digest it records is the fixture's actual digest in this commit, so the pair

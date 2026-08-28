@@ -7,6 +7,9 @@
     { "glob": ".agents/skills/agentos-find-simplifications/agents/openai.yaml", "purpose": "Codex display metadata and explicit-only invocation policy for the simplification skill" },
     { "glob": ".agents/skills/agentos-find-simplifications/references/candidate-report.md", "purpose": "evidence and decision contract for AgentOS simplification candidate reports" },
     { "glob": ".env.example", "purpose": "safe configuration template" },
+    { "glob": ".github/ISSUE_TEMPLATE/bug-report.yml", "purpose": "bug report issue form carrying the fields CONTRIBUTING.md requires" },
+    { "glob": ".github/ISSUE_TEMPLATE/documentation-correction.yml", "purpose": "documentation correction issue form" },
+    { "glob": ".github/ISSUE_TEMPLATE/config.yml", "purpose": "issue chooser routing security reports to the private channel and questions to Discussions" },
     { "glob": ".github/workflows/ci.yml", "purpose": "continuous integration definition" },
     { "glob": ".gitignore", "purpose": "source hygiene" },
     { "glob": ".nvmrc", "purpose": "pinned Node.js major version" },
@@ -365,7 +368,7 @@
     {
       "category": "pii-email",
       "glob": "packages/build-info/stamp.test.mjs",
-      "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by Leo on 2026-08-19"
+      "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by the operator on 2026-08-19"
     },
     {
       "category": "pii-email",

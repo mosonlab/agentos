@@ -107,5 +107,5 @@ npm run demo:templates -- reset \
 It deletes only the project ID recorded by setup in the dedicated rehearsal
 schema. It never drops an unqualified database, removes evidence, closes a pull
 request, deletes a public branch or repository, or force-pushes. Public cleanup
-belongs to Leo. Source rollback is a normal revert; it does not erase recorded
+belongs to the operator. Source rollback is a normal revert; it does not erase recorded
 external evidence or public Git history.
