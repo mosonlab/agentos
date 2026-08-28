@@ -936,9 +936,52 @@ curl "$BASE_URL/tasks/$TASK_ID/startability" -H "Authorization: Bearer $OPERATOR
 ### GET `/tasks/:taskId/chain`
 
 - Required path parameter: `taskId`.
+- The response includes a Chain-level `control` object. It contains the
+  current `state`, held layer (`heldLayer`), `heldAt`, optional `reason`, the
+  request identifier (`requestId`) that accepted the hold, and `releasedAt`
+  when the hold was last released. `control` is `null` for a Chain that has
+  never been held;
+  after a release it reports the released state and its last-release facts.
+  Per-Step fields, including `startable` and `startAction`, are unchanged.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/tasks/:taskId/chain/hold`
+
+- Required path parameter: `taskId`.
+- Required JSON field: `requestId`.
+- Optional JSON field: `reason` (the operator's explanation for holding the
+  Chain).
+- A repeated Hold while the Chain is already held is a successful idempotent
+  no-op: it reports the existing hold and makes no transition or audit event.
+- Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`
+  when the Task belongs to no Chain or every Task in the Chain is already
+  `DONE` (there is nothing left to hold).
+
+```sh
+curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/hold" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"requestId":"hold-001","reason":"Review the current layer first"}'
+```
+
+### POST `/tasks/:taskId/chain/resume`
+
+- Required path parameter: `taskId`.
+- Required JSON field: `requestId`.
+- Resume releases a held Chain and activates the currently eligible layer at
+  most once. It never revives a cancelled Run or reuses its provider
+  conversation.
+- Resume on a Chain that is not held is a successful idempotent no-op: it
+  makes no transition, audit event, or activation.
+- Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`
+  when the Task belongs to no Chain.
+
+```sh
+curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"requestId":"resume-001"}'
 ```
 
 ### PATCH `/tasks/:taskId`
