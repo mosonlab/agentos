@@ -557,6 +557,24 @@ const applyReadinessDecision = async (
           inboxMessageId: binding,
         },
       };
+      if (recovery) {
+        // Recovery regression merges the current base before it proves the
+        // candidate, so its gated head may legitimately replace the head that
+        // first stopped on base drift. Adopt only the head re-read under the
+        // merge lease, and bind the CAS to this recovery run and exact base.
+        const adopted = await tx.mergeRecoveryAttempt.updateMany({
+          where: {
+            id: recovery.aggregateId,
+            status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+            recoveryRunId: recovery.recoveryRunId,
+            currentBaseSha: leasedDecision.evidence.baseSha,
+          },
+          data: { authorizedHeadSha: leasedDecision.evidence.headSha },
+        });
+        if (adopted.count !== 1) {
+          throw new Error("Recovery authorization could not adopt the verified regression head");
+        }
+      }
       const activity = await tx.taskActivity.create({ data: {
         taskId: readiness.id,
         actorType: "control-plane",
