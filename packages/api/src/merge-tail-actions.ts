@@ -416,6 +416,7 @@ export const createMergeTailRepairTask = async (
     metadata: {
       repairKind: input.repairKind,
       repairTaskId: task.id,
+      sourceRunId: input.sourceRun.id,
       headSha: input.headSha,
       baseHeadSha: input.baseHeadSha,
     },
@@ -426,6 +427,7 @@ export const createMergeTailRepairTask = async (
     metadata: {
       repairKind: input.repairKind,
       regressionTaskId: regressionTask.id,
+      sourceRunId: input.sourceRun.id,
       headSha: input.headSha,
       baseHeadSha: input.baseHeadSha,
     },
@@ -470,12 +472,13 @@ export const handleRegressionCompletion = async (
   if (effectiveHead !== verdict.headSha || output?.commitSha !== verdict.headSha) {
     return stop(`stale regression evidence: verdict ${verdict.headSha}, output ${output?.commitSha ?? "missing"}, run ${effectiveHead ?? "missing"}`);
   }
-  await writeMarker(tx, input.task.id, "regression", {
+  const recordVerdict = () => writeMarker(tx, input.task.id, "regression", {
     actorType: "control-plane",
     body: `Regression ${verdict.outcome} recorded for chain head ${verdict.headSha} against target ${verdict.baseHeadSha}`,
     metadata: { ...verdict },
   });
   if (verdict.outcome === "pass") {
+    await recordVerdict();
     if (recovery) {
       await tx.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
         status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
@@ -486,6 +489,7 @@ export const handleRegressionCompletion = async (
   }
 
   if (recovery) {
+    await recordVerdict();
     await stopMergeTail(tx, {
       phase: "regression",
       regressionTaskId: input.task.id,
@@ -512,6 +516,19 @@ export const handleRegressionCompletion = async (
   const repairKind = verdict.outcome === "refresh-conflict"
     ? "refresh-conflict"
     : verdict.outcome === "review-fail" ? "review-fix" : "gate-fix";
+  const matchingAttempt = attempts.find((marker) => (
+    marker.kind === "repairAttempt"
+    && marker.repairKind === repairKind
+    && marker.headSha === verdict.headSha
+    && marker.baseHeadSha === verdict.baseHeadSha
+    && marker.raw.sourceRunId === input.run.id
+  ));
+  const matchingAttemptAnswered = matchingAttempt && attempts.some((marker) => (
+    marker.kind === "repairResult"
+    && marker.raw.repairTaskId === matchingAttempt.raw.repairTaskId
+  ));
+  if (matchingAttempt && !matchingAttemptAnswered) return "handled";
+  await recordVerdict();
   const priorAttempts = attempts.filter((marker) => (
     marker.kind === "repairAttempt"
     && marker.repairKind === repairKind
