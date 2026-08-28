@@ -444,11 +444,16 @@ const taskFields = {
   cron: z.string().trim().min(9).max(100).nullable(),
   timezone: z.string().trim().min(1).max(64).nullable(),
 };
+const taskCreateStatus = z.nativeEnum(TaskStatus).refine(
+  (status) => status === TaskStatus.BACKLOG || status === TaskStatus.TODO,
+  "Task creation status must be BACKLOG or TODO",
+);
 /** Exported for `smoke-fixture.test.ts`: the published release fixture and this
  *  schema have to agree about `opensPullRequest`, and the only way to assert
  *  that is to parse the fixture with the schema the route actually uses. */
 export const taskInput = z.object({
   ...taskFields,
+  status: taskCreateStatus.default(TaskStatus.TODO),
   description: taskFields.description.default(""),
   workingDirectory: taskFields.workingDirectory.default(null),
   repoId: taskFields.repoId.default(null),

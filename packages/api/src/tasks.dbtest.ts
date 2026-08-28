@@ -1007,6 +1007,50 @@ test("template instantiation creates an inert chain unless autoStart is true", a
   assert.equal(await db.run.count({ where: { task: { chainId: started.body.chainId } } }), 1);
 });
 
+test("human task creation accepts BACKLOG atomically without queuing a Run", async () => {
+  const project = await db.project.create({ data: { name: "backlog-create", slug: `backlog-create-${Date.now()}` } });
+  const created = await call("POST", `/projects/${project.id}/tasks`, {
+    name: "Human backlog card",
+    assigneeType: "HUMAN",
+    status: "BACKLOG",
+  });
+
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.status, "BACKLOG");
+  const stored = await db.task.findUniqueOrThrow({ where: { id: created.body.id } });
+  assert.equal(stored.status, "BACKLOG");
+  assert.equal(stored.assigneeType, "HUMAN");
+  assert.equal(await db.run.count({ where: { taskId: stored.id } }), 0);
+});
+
+test("human task creation keeps TODO as the default status", async () => {
+  const project = await db.project.create({ data: { name: "todo-create", slug: `todo-create-${Date.now()}` } });
+  const created = await call("POST", `/projects/${project.id}/tasks`, {
+    name: "Human todo card",
+    assigneeType: "HUMAN",
+  });
+
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.status, "TODO");
+  assert.equal(await db.task.count({ where: { id: created.body.id, status: "TODO" } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: created.body.id } }), 0);
+});
+
+test("task creation rejects statuses other than BACKLOG or TODO", async () => {
+  const project = await db.project.create({ data: { name: "invalid-create-status", slug: `invalid-create-status-${Date.now()}` } });
+  for (const status of ["DOING", "REVIEW", "DONE"] as const) {
+    const created = await call("POST", `/projects/${project.id}/tasks`, {
+      name: `Invalid ${status}`,
+      assigneeType: "HUMAN",
+      status,
+    });
+    assert.equal(created.status, 400, `${status}: ${JSON.stringify(created.body)}`);
+    assert.equal(created.body.error, "Validation failed");
+  }
+  assert.equal(await db.task.count({ where: { projectId: project.id } }), 0);
+  assert.equal(await db.run.count({ where: { projectId: project.id } }), 0);
+});
+
 test("archive and direct task creation released together never strand a queued run", async () => {
   // The seeded task is DONE so this test is about the run the creation makes:
   // archive fails closed on any live task, and a TODO seed would refuse the
