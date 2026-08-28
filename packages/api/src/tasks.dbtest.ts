@@ -48,8 +48,12 @@ const call = async (
   return { status: response.status, body: response.status === 204 ? null : await response.json() };
 });
 
+const seedBareProject = (label: string) => db.project.create({
+  data: { name: label, slug: `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}` },
+});
+
 const seedTask = async (label: string, overrides: Record<string, unknown> = {}) => {
-  const project = await db.project.create({ data: { name: label, slug: `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}` } });
+  const project = await seedBareProject(label);
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
   const agent = await db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
@@ -1005,6 +1009,74 @@ test("template instantiation creates an inert chain unless autoStart is true", a
   });
   assert.equal(started.status, 201);
   assert.equal(await db.run.count({ where: { task: { chainId: started.body.chainId } } }), 1);
+});
+
+test("human task creation accepts BACKLOG atomically without queuing a Run", async () => {
+  const project = await seedBareProject("backlog-create");
+  const created = await call("POST", `/projects/${project.id}/tasks`, {
+    name: "Human backlog card",
+    assigneeType: "HUMAN",
+    status: "BACKLOG",
+  });
+
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.status, "BACKLOG");
+  const stored = await db.task.findUniqueOrThrow({ where: { id: created.body.id } });
+  assert.equal(stored.status, "BACKLOG");
+  assert.equal(stored.assigneeType, "HUMAN");
+  assert.equal(await db.run.count({ where: { taskId: stored.id } }), 0);
+});
+
+test("human task creation keeps TODO as the default status", async () => {
+  const project = await seedBareProject("todo-create");
+  const created = await call("POST", `/projects/${project.id}/tasks`, {
+    name: "Human todo card",
+    assigneeType: "HUMAN",
+  });
+
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.status, "TODO");
+  assert.equal(await db.task.count({ where: { id: created.body.id, status: "TODO" } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: created.body.id } }), 0);
+});
+
+test("task creation rejects statuses other than BACKLOG or TODO", async () => {
+  const project = await seedBareProject("invalid-create-status");
+  for (const status of ["DOING", "REVIEW", "DONE"] as const) {
+    const created = await call("POST", `/projects/${project.id}/tasks`, {
+      name: `Invalid ${status}`,
+      assigneeType: "HUMAN",
+      status,
+    });
+    assert.equal(created.status, 400, `${status}: ${JSON.stringify(created.body)}`);
+    assert.equal(created.body.error, "Validation failed");
+  }
+  assert.equal(await db.task.count({ where: { projectId: project.id } }), 0);
+  assert.equal(await db.run.count({ where: { projectId: project.id } }), 0);
+});
+
+test("agent task creation parks explicit BACKLOG and queues default TODO", async () => {
+  const context = await seedTask("agent-create-status", { status: "DONE" });
+  const request = {
+    name: "Agent card",
+    assigneeType: "AGENT",
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    scheduleKind: "NOW",
+  };
+
+  const backlog = await call("POST", `/projects/${context.project.id}/tasks`, {
+    ...request,
+    status: "BACKLOG",
+  });
+  assert.equal(backlog.status, 201, JSON.stringify(backlog.body));
+  assert.equal(backlog.body.status, "BACKLOG");
+  assert.equal(await db.run.count({ where: { taskId: backlog.body.id } }), 0);
+
+  const todo = await call("POST", `/projects/${context.project.id}/tasks`, request);
+  assert.equal(todo.status, 201, JSON.stringify(todo.body));
+  assert.equal(todo.body.status, "TODO");
+  assert.equal(await db.run.count({ where: { taskId: todo.body.id, status: "QUEUED" } }), 1);
 });
 
 test("archive and direct task creation released together never strand a queued run", async () => {
