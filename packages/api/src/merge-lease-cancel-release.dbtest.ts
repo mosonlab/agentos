@@ -78,7 +78,7 @@ const collectRelease: ReleaseMergeLease = async (target) => {
 let sequence = 0;
 
 /** One chain whose merge-tail tasks share the readiness-owned lease identity. */
-const seedChain = async (options: { outputKind?: string; chainId?: string } = {}) => {
+const seedChain = async (options: { outputKind?: string; chainId?: string; chainIndex?: number } = {}) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Cancel release", slug: `cancel-release-${suffix}` } });
@@ -103,7 +103,9 @@ const seedChain = async (options: { outputKind?: string; chainId?: string } = {}
     projectId: project.id, name: "Regression", description: "prove the candidate", assigneeAgentId: agent.id,
     repoId: repo.id, status: TaskStatus.DOING, targetBranch: "master",
     templateId: template.id, templateStepId: templateStep.id,
-    chainId: options.chainId ?? `chain-${suffix}`, chainIndex: 6, chainLayer: 6,
+    chainId: options.chainId ?? `chain-${suffix}`,
+    chainIndex: options.chainIndex ?? 6,
+    chainLayer: options.chainIndex ?? 6,
   } });
   return { project, agent, repo, task, chainId: task.chainId!, suffix };
 };
@@ -289,7 +291,9 @@ test("reconciliation releases same-named chain leases independently per project"
   const now = new Date();
   const chainId = "shared-chain-id";
   const first = await seedChain({ chainId });
-  const second = await seedChain({ chainId });
+  // Task's legacy uniqueness still covers (chainId, chainIndex) globally, so
+  // use another valid tail ordinal to model a cross-project chain-id collision.
+  const second = await seedChain({ chainId, chainIndex: 7 });
   await seedRun(first, {
     runNumber: 2,
     maxRunsPerTask: 1,
