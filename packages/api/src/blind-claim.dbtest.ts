@@ -109,16 +109,23 @@ const queueCanonicalStep = async (
   });
   const target = chain.tasks.find((task) => task.chainIndex === stepIndex);
   assert.ok(target, `canonical step ${stepIndex} must exist`);
+  const targetTemplateStep = template.steps.find((step) => step.id === target.templateStepId);
+  assert.ok(targetTemplateStep, `materialized step ${stepIndex} must retain its template identity`);
   // The pinned base belongs to the review layer, not necessarily to the target
   // step: the fix step that now follows the reviews pins nothing itself, and
   // its review siblings still need the implementation output they point at.
-  const sourceStepIndex = template.steps.find((step) => step.stepIndex === stepIndex)?.baseFromStepIndex
+  // Unbound direct chains omit revalidation and densely number materialized
+  // tasks, so baseFromStepIndex must resolve through template identity.
+  const sourceStepIndex = targetTemplateStep.baseFromStepIndex
     ?? template.steps
-      .filter((step) => step.stepIndex < stepIndex)
+      .filter((step) => step.stepIndex < targetTemplateStep.stepIndex)
       .reduce<number | null>((found, step) => step.baseFromStepIndex ?? found, null);
+  const sourceTemplateStep = sourceStepIndex === null
+    ? null
+    : template.steps.find((step) => step.stepIndex === sourceStepIndex) ?? null;
   const sourceTask = sourceStepIndex === null
     ? null
-    : priorTasks.find((task) => task.chainIndex === sourceStepIndex) ?? null;
+    : priorTasks.find((task) => task.templateStepId === sourceTemplateStep?.id) ?? null;
   const sourceRun = sourceTask
     ? await db.$transaction((tx) => enqueueTaskRun(tx as never, sourceTask.id))
     : null;

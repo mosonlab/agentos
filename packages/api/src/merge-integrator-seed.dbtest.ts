@@ -78,7 +78,7 @@ const directTemplate = async () => db.taskTemplate.findUniqueOrThrow({
 
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes the twelve-step and seven-step autonomous merge templates", async () => {
+test("a fresh seed writes the twelve-step and eight-step autonomous merge templates", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
@@ -110,17 +110,20 @@ test("a fresh seed writes the twelve-step and seven-step autonomous merge templa
   assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
 
   const direct = await directTemplate();
-  assert.equal(direct.steps.length, 7);
-  assert.equal(direct.steps[0]?.assigneeAgent?.name, "senior-dev-luna");
-  assert.equal(direct.steps[0]?.opensPullRequest, true);
-  assert.match(direct.steps[0]?.prompt ?? "", /brief is the specification of record/u);
-  assert.equal(direct.steps[2]?.attachmentsFromPrevious, false);
-  assert.equal(direct.steps[5]?.assigneeType, AssigneeType.AGENT);
-  assert.equal(direct.steps[5]?.approvalGate, false);
-  assert.equal(direct.steps[5]?.outputKind, "merge-authorization");
-  assert.equal(direct.steps[6]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
-  assert.equal(direct.steps[6]?.outputKind, INTEGRATOR_OUTPUT_KIND);
-  assert.match(direct.steps[4]?.prompt ?? "", /regression-verification\.sh finalize/u);
+  assert.equal(direct.steps.length, 8);
+  assert.equal(direct.steps[0]?.assigneeAgent?.name, "spec-revalidator");
+  assert.equal(direct.steps[0]?.opensPullRequest, false);
+  assert.equal(direct.steps[0]?.outputKind, "revalidation");
+  assert.equal(direct.steps[1]?.assigneeAgent?.name, "senior-dev-luna");
+  assert.equal(direct.steps[1]?.opensPullRequest, true);
+  assert.match(direct.steps[1]?.prompt ?? "", /brief is the specification of record/u);
+  assert.equal(direct.steps[3]?.attachmentsFromPrevious, false);
+  assert.equal(direct.steps[6]?.assigneeType, AssigneeType.AGENT);
+  assert.equal(direct.steps[6]?.approvalGate, false);
+  assert.equal(direct.steps[6]?.outputKind, "merge-authorization");
+  assert.equal(direct.steps[7]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
+  assert.equal(direct.steps[7]?.outputKind, INTEGRATOR_OUTPUT_KIND);
+  assert.match(direct.steps[5]?.prompt ?? "", /regression-verification\.sh finalize/u);
   const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
   assert.equal(resolver.model, "gpt-5.6-sol:high");
   assert.equal(resolver.runnerPreference, "CODEX");
@@ -130,7 +133,7 @@ test("the verifier passes on a freshly seeded database, and says how many steps 
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /19 steps across 2 templates/u);
+  assert.match(verified.output, /20 steps across 2 templates/u);
 });
 
 test("re-seeding is idempotent and does not flip the integrator step back", async () => {
@@ -195,7 +198,28 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
   // node one index and one layer further out.
   const oldTasks: Task[] = [];
   for (const template of [direct, compound]) {
-    const blind = template.steps.find((step) => step.outputKind === "blind-findings")!;
+    let historicalSteps = template.steps;
+    if (template.name === DIRECT_TEMPLATE_NAME) {
+      const revalidation = historicalSteps.find((step) => step.outputKind === "revalidation");
+      assert.ok(revalidation);
+      await db.taskTemplateStep.delete({ where: { id: revalidation.id } });
+      for (const step of historicalSteps.filter((candidate) => candidate.id !== revalidation.id)) {
+        await db.taskTemplateStep.update({
+          where: { id: step.id },
+          data: {
+            stepIndex: step.stepIndex - 1,
+            layer: (step.layer ?? 0) - 1,
+            baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+          },
+        });
+      }
+      historicalSteps = await db.taskTemplateStep.findMany({
+        where: { taskTemplateId: template.id },
+        include: { assigneeAgent: true },
+        orderBy: { stepIndex: "asc" },
+      });
+    }
+    const blind = historicalSteps.find((step) => step.outputKind === "blind-findings")!;
     // The adjudicator role is archived, so the seed no longer creates its
     // Agent row; production still carries the row the old node was bound to.
     const opus = await db.agent.findFirstOrThrow({
@@ -215,7 +239,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
         runnerPreference: opus.runnerPreference,
       },
     });
-    for (const step of [...template.steps].reverse()) {
+    for (const step of [...historicalSteps].reverse()) {
       if (step.stepIndex <= blind.stepIndex) continue;
       await db.taskTemplateStep.update({
         where: { id: step.id },
@@ -302,7 +326,10 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
       include: { steps: { orderBy: { stepIndex: "asc" } } },
     });
     assert.notEqual(replacement.id, oldTemplate.id);
-    assert.equal(replacement.steps.length, preserved.steps.length - 1);
+    assert.equal(
+      replacement.steps.length,
+      oldTemplate.name === DIRECT_TEMPLATE_NAME ? preserved.steps.length : preserved.steps.length - 1,
+    );
     assert.equal(replacement.steps.some((step) => step.outputKind === "must-fix"), false);
     assert.match(
       replacement.steps.find((step) => step.outputKind === "fixed-implementation")?.prompt ?? "",
@@ -319,8 +346,8 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
   });
   const regressionSteps = [
-    direct.steps.find(({ stepIndex }) => stepIndex === 5)!,
-    compound.steps.find(({ stepIndex }) => stepIndex === 10)!,
+    direct.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!,
+    compound.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!,
   ];
   const opus = await db.agent.findFirstOrThrow({
     where: { projectId: direct.projectId, name: "review-coordinator-opus" },

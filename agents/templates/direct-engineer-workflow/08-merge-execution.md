@@ -1,6 +1,6 @@
 ---
-stepIndex: 7
-layer: 6
+stepIndex: 8
+layer: 7
 agent: merge-integrator
 approvalGate: false
 outputKind: merge-result

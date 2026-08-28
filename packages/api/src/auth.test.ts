@@ -3,7 +3,12 @@ import { test } from "node:test";
 
 import type { Prisma, PrismaClient } from "@anneal/db";
 
-import { authenticate, mergeExecutorTokenIsDistinct, principalMayAccess } from "./auth.js";
+import {
+  authenticate,
+  authenticateRevalidationCancellationReplay,
+  mergeExecutorTokenIsDistinct,
+  principalMayAccess,
+} from "./auth.js";
 import { activeRunStatuses } from "./run-fence.js";
 
 const withEnv = async (env: Record<string, string | undefined>, body: () => Promise<void> | void): Promise<void> => {
@@ -75,4 +80,25 @@ test("session authentication uses the run-fence live status set", async () => {
     );
     assert.equal((where?.status as { in: unknown }).in, activeRunStatuses);
   });
+});
+
+test("a committed revalidation cancellation authenticates only through its replay predicate", async () => {
+  let where: Prisma.RunWhereInput | undefined;
+  const sessionDb = { run: { findFirst: async (input: { where: Prisma.RunWhereInput }) => {
+    where = input.where;
+    return { id: "run-1", leaseGeneration: 3 };
+  } } } as unknown as PrismaClient;
+  const now = new Date("2026-08-26T12:00:00.000Z");
+
+  assert.deepEqual(await authenticateRevalidationCancellationReplay(
+    sessionDb,
+    "Bearer agos_session_cancelled",
+    { runId: "run-1", requestId: "revalidation:run-1:cancel" },
+    now,
+  ), { kind: "session", runId: "run-1", leaseGeneration: 3 });
+  assert.equal(where?.id, "run-1");
+  assert.equal(where?.cancelRequestId, "revalidation:run-1:cancel");
+  assert.deepEqual(where?.cancelRequestedAt, { not: null });
+  assert.deepEqual(where?.sessionTokenRevokedAt, { not: null });
+  assert.deepEqual(where?.sessionTokenExpiresAt, { gt: now });
 });

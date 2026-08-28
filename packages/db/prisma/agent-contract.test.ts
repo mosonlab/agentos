@@ -93,6 +93,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "regression-verifier",
     "librarian",
     "senior-dev",
+    "spec-revalidator",
     "implementation-plan-executioner",
   ]) {
     const role = canonical.get(name);
@@ -208,7 +209,7 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.doesNotMatch(compoundRegression, /all\s+preceding Step outputs/u);
   assert.doesNotMatch(compoundRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directRegression = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))
-    .find((step) => step.stepIndex === 5)!.prompt;
+    .find((step) => step.stepIndex === 6)!.prompt;
   assert.equal(compoundRegression, directRegression);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
@@ -246,32 +247,33 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.deepEqual(
     directTemplateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, layer: 1, agentName: "senior-dev-luna", outputKind: "implementation" },
-      { stepIndex: 2, layer: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
-      { stepIndex: 3, layer: 2, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
-      { stepIndex: 4, layer: 3, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 5, layer: 4, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
-      { stepIndex: 6, layer: 5, agentName: "review-coordinator", outputKind: "merge-authorization" },
-      { stepIndex: 7, layer: 6, agentName: "merge-integrator", outputKind: "merge-result" },
+      { stepIndex: 1, layer: 1, agentName: "spec-revalidator", outputKind: "revalidation" },
+      { stepIndex: 2, layer: 2, agentName: "senior-dev-luna", outputKind: "implementation" },
+      { stepIndex: 3, layer: 3, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
+      { stepIndex: 4, layer: 3, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
+      { stepIndex: 5, layer: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 6, layer: 5, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
+      { stepIndex: 7, layer: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   // Only implementation opens the chain's pull request; the blind review
   // starts blind; regression verification reads the fix diff.
-  assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
-  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 2)?.baseFromStepIndex, 1);
-  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
-  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 4)?.attachmentsFromPrevious, true);
+  assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [2]);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.baseFromStepIndex, 2);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 4)?.attachmentsFromPrevious, false);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
-  const directFix = directTemplateSteps.find((step) => step.stepIndex === 4)!.prompt;
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 6)?.attachmentsFromPrevious, true);
+  const directFix = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
   assert.match(directFix, /Read both immutable review outputs from the preceding layer/u);
   assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
-  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
+  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;
   assert.match(directRegression, /regression-verification\.sh prepare/u);
   assert.match(directRegression, /regression-verification\.sh review-fail/u);
   assert.match(directRegression, /regression-verification\.sh finalize/u);
   assert.match(directRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   assert.doesNotMatch(directRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
-  const directImplementation = directTemplateSteps[0]!.prompt;
+  const directImplementation = directTemplateSteps.find((step) => step.stepIndex === 2)!.prompt;
   assert.match(directImplementation, /brief is the specification of record/u);
   assert.doesNotMatch(directImplementation, /Copy the brief verbatim/u);
   assert.match(
@@ -282,7 +284,7 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
   assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
   assert.match(directImplementation, /platform-pinned Implementation proof boundary/u);
-  assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
+  assert.match(directTemplateSteps[6]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
   // mechanical executor, with no human approval gate on either.
   const last = directTemplateSteps.at(-1)!;
@@ -300,7 +302,7 @@ test("the complete template source inventory contains only the twelve-step and d
   const templates = await loadAllTemplateStepSources();
   assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
   assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
-  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 7);
+  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 8);
 });
 
 test("the complete template source inventory rejects an unregistered workflow directory", async () => {

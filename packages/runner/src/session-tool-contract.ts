@@ -6,7 +6,9 @@ export type SessionToolName =
   | "task_activity_log"
   | "task_output"
   | "task_status"
+  | "task_patch"
   | "inbox_ask"
+  | "revalidation_cancel"
   | "files_list"
   | "files_read"
   | "files_write"
@@ -22,7 +24,7 @@ export type SessionToolDefinition = Readonly<{
 }>;
 
 export type SessionToolRequest = Readonly<{
-  method: "GET" | "POST" | "PUT" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: Readonly<Record<string, unknown>>;
   query?: Readonly<Record<string, string>>;
@@ -80,6 +82,21 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
     transports: INTERACTIVE_TRANSPORTS,
   },
   {
+    name: "task_patch",
+    title: "Revalidate the implementation brief",
+    description: "Replace only the current bound chain's implementation brief. The server derives the target task and preserves its platform-authored prompt and output instructions; arbitrary task IDs and intent fields are not accepted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        description: { type: "string", description: "The refreshed descriptive brief, with intent and acceptance bars unchanged." },
+      },
+      required: ["description"],
+      additionalProperties: false,
+    },
+    manifest: "- task_patch(description): replace the current bound chain's implementation brief; the server derives the target and preserves platform-authored instructions.",
+    transports: INTERACTIVE_TRANSPORTS,
+  },
+  {
     name: "inbox_ask",
     title: "Ask the human a question",
     description: "Ask the human a question through the AgentOS Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
@@ -102,6 +119,14 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- inbox_ask(body, choices?): ask the human. Suspends this Session until they answer; the Session resumes in place with the reply.",
+    transports: INTERACTIVE_TRANSPORTS,
+  },
+  {
+    name: "revalidation_cancel",
+    title: "Cancel the collapsed revalidation chain",
+    description: "Cancel this bound revalidation Run after the operator chose 'cancel this chain' for a collapsed premise. The runner performs cleanup and terminalization; no task ID is accepted.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    manifest: "- revalidation_cancel(): cancel this bound revalidation chain after the operator selected 'cancel this chain'; the owning runner performs cleanup.",
     transports: INTERACTIVE_TRANSPORTS,
   },
   {
@@ -218,6 +243,14 @@ export const requestFor = (
     };
   }
   if (tool.name === "task_status") return { method: "GET", path: "/status" };
+  if (tool.name === "task_patch") {
+    if (typeof rawArguments.description !== "string") throw new Error("task_patch requires description");
+    return {
+      method: "PATCH",
+      path: "/task",
+      body: { fencingToken: credentials.fencingToken, description: rawArguments.description },
+    };
+  }
   if (tool.name === "inbox_ask") {
     const body = nonEmptyString(rawArguments.body);
     if (!body) throw new Error("inbox_ask requires a non-empty body");
@@ -238,6 +271,13 @@ export const requestFor = (
         body,
         choices,
       },
+    };
+  }
+  if (tool.name === "revalidation_cancel") {
+    return {
+      method: "POST",
+      path: "/revalidation/cancel",
+      body: { fencingToken: credentials.fencingToken },
     };
   }
   if (tool.name === "files_list") {

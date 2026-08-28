@@ -5,6 +5,7 @@ import {
   canonicalIntegratorBindingRefusal,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
+  isDirectImplementationStep,
   lockAgentRepoGrant,
   lockAgentRows,
   lockChainRows,
@@ -34,6 +35,19 @@ export type InstantiateTemplateInput = {
 };
 
 const stepOverrideKey = /^[1-9]\d*$/u;
+
+const implementationRouteLine = /^Route: implementation=([A-Za-z0-9-]+)(?: - .+)?$/mu;
+const implementationRouteAgents = new Set([
+  "senior-dev-luna",
+  "senior-dev",
+  "frontend-dev",
+]);
+
+/** Read the machine-readable implementation route from a brief description. */
+export const parseImplementationRoute = (description: string | undefined): string | null => {
+  const match = description?.match(implementationRouteLine);
+  return match?.[1] ?? null;
+};
 
 type OverrideAgent = {
   id: string;
@@ -172,7 +186,10 @@ export const instantiateTemplate = async (
       `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
     );
   }
-  const overrideEntries = Object.entries(input.stepOverrides ?? {});
+  let effectiveStepOverrides: Record<string, { assigneeAgentId: string }> = {
+    ...(input.stepOverrides ?? {}),
+  };
+  let overrideEntries = Object.entries(effectiveStepOverrides);
   if (overrideEntries.length > 64) {
     throw overrideRefusal(
       "step_override_too_many",
@@ -197,6 +214,15 @@ export const instantiateTemplate = async (
   if (!template) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
   if (template.steps.length === 0) throw new Error("Template has no steps");
+  const implementationRoute = template.name === "direct-engineer-workflow"
+    ? parseImplementationRoute(input.description)
+    : null;
+  if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
+    throw overrideRefusal(
+      "implementation_route_unknown_agent",
+      `Unknown implementation route agent ${implementationRoute}; expected one of senior-dev-luna, senior-dev, frontend-dev`,
+    );
+  }
   const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
   if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
@@ -205,6 +231,54 @@ export const instantiateTemplate = async (
     throw new Error("Invalid template branch name");
   }
   assertValidBaseReferences(template.steps);
+
+  const conditionalRevalidation = template.name === "direct-engineer-workflow"
+    ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
+    : null;
+  const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
+  const instantiatedTemplateSteps = omitRevalidation
+    ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
+    : template.steps;
+  if (instantiatedTemplateSteps.length === 0) throw new Error("Template has no instantiable steps");
+
+  let routedImplementationStepIndex: number | null = null;
+  if (implementationRoute !== null) {
+    const implementationStep = template.steps.find((step) => isDirectImplementationStep({
+      outputKind: step.outputKind,
+      taskTemplate: { name: template.name },
+    }));
+    if (implementationStep) {
+      const stepKey = String(implementationStep.stepIndex);
+      if (effectiveStepOverrides[stepKey]) {
+        throw overrideRefusal(
+          "implementation_route_conflicts_with_step_override",
+          `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
+        );
+      }
+      const routeAgent = await db.agent.findFirst({
+        where: { projectId, name: implementationRoute },
+        select: { id: true, name: true, projectId: true, archivedAt: true },
+      });
+      if (!routeAgent) {
+        throw overrideRefusal(
+          "step_override_agent_not_found",
+          `Implementation route agent ${implementationRoute} was not found in this project`,
+        );
+      }
+      effectiveStepOverrides = {
+        ...effectiveStepOverrides,
+        [stepKey]: { assigneeAgentId: routeAgent.id },
+      };
+      routedImplementationStepIndex = implementationStep.stepIndex;
+      overrideEntries = Object.entries(effectiveStepOverrides);
+      if (overrideEntries.length > 64) {
+        throw overrideRefusal(
+          "step_override_too_many",
+          `stepOverrides contains ${overrideEntries.length} entries; at most 64 step overrides are allowed`,
+        );
+      }
+    }
+  }
 
   const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
   for (const [stepIndex] of overrideEntries) {
@@ -224,8 +298,8 @@ export const instantiateTemplate = async (
     });
     for (const row of rows) overrideAgents.set(row.id, row);
   }
-  const effectiveSteps = template.steps.map((step): EffectiveTemplateStep => {
-    const override = input.stepOverrides?.[String(step.stepIndex)];
+  const effectiveSteps = instantiatedTemplateSteps.map((step): EffectiveTemplateStep => {
+    const override = effectiveStepOverrides[String(step.stepIndex)];
     const assigneeAgentId = override?.assigneeAgentId ?? step.assigneeAgentId;
     return {
       step,
@@ -408,7 +482,9 @@ export const instantiateTemplate = async (
         // can change whether the assignee is a mechanical integrator or the
         // pinned compound implementation agent. One id-ordered statement, so
         // two instantiations sharing agents cannot deadlock.
-        const canonicalAgentIds = template.steps.flatMap((step) => step.assigneeAgentId ? [step.assigneeAgentId] : []);
+        const canonicalAgentIds = effectiveSteps.flatMap((effective) => (
+          effective.step.assigneeAgentId ? [effective.step.assigneeAgentId] : []
+        ));
         const lockedAgents = await lockAgentRows(
           tx,
           [...new Set([...canonicalAgentIds, ...overrideAgentIds])].sort(),
@@ -434,6 +510,14 @@ export const instantiateTemplate = async (
               );
             }
             throw new Error(`Template step ${step.name} agent ${lockedAgent.name} is archived`);
+          }
+          if (implementationRoute !== null
+            && step.stepIndex === routedImplementationStepIndex
+            && lockedAgent.name !== implementationRoute) {
+            throw overrideRefusal(
+              "implementation_route_agent_renamed",
+              `Implementation route agent ${implementationRoute} changed identity before the chain was created`,
+            );
           }
           const lockedBindingRefusal = canonicalIntegratorBindingRefusal(lockedAgent.name, {
             stepIndex: step.stepIndex,
@@ -478,6 +562,7 @@ export const instantiateTemplate = async (
         const promptVariables = { ...input.variables, chainId };
         for (const [index, effective] of effectiveSteps.entries()) {
           const { step } = effective;
+          const conditionalOrdinalOffset = omitRevalidation ? 1 : 0;
           const context = composeTemplateTaskDescription({
             prompt: interpolate(step.prompt, promptVariables),
             featureBrief: input.description,
@@ -496,11 +581,11 @@ export const instantiateTemplate = async (
             approvalGate: step.approvalGate,
             opensPullRequest: step.opensPullRequest,
             chainId,
-            chainIndex: step.stepIndex,
-            chainLayer: step.layer,
+            chainIndex: step.stepIndex - conditionalOrdinalOffset,
+            chainLayer: step.layer - conditionalOrdinalOffset,
             status: TaskStatus.TODO,
             source: options.source ?? TaskSource.MANUAL,
-            targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
+            targetBranch: index === 0 ? repo.defaultBranch : branchName,
             ...(index === 0 && input.afterTaskId ? { dispatchAfterTaskId: input.afterTaskId } : {}),
           } }));
         }
