@@ -451,6 +451,9 @@ test("sync adopts the exact model-only executioner transition", async () => {
       runtimeConfigCustomized: false,
     },
   });
+  const driftNoticeCountBefore = await prisma.inboxMessage.count({
+    where: { body: { startsWith: "Canonical runtime drift detected" } },
+  });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
@@ -465,27 +468,99 @@ test("sync adopts the exact model-only executioner transition", async () => {
     runnerPreference: RunnerPreference.CODEX,
     runtimeConfigCustomized: false,
   });
+  assert.equal(await prisma.inboxMessage.count({
+    where: { body: { startsWith: "Canonical runtime drift detected" } },
+  }), driftNoticeCountBefore);
 });
 
-test("sync preserves an operator-selected model and runner", async () => {
+test("sync notifies once per current customized runtime drift without overwriting it", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  await prisma.agent.update({
-    where: { projectId_name: { projectId: project.id, name: "spec" } },
-    data: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE, runtimeConfigCustomized: true },
+  const originalProduction = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
+  const changedProduction = { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE };
+  const mergeResolver = await prisma.agent.update({
+    where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
+    data: { ...originalProduction, runtimeConfigCustomized: true },
   });
 
-  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
-  assert.equal(synced.status, 0, synced.output);
-  assert.match(synced.output, /"preservedAgentOverrides":0/u);
+  const firstSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(firstSync.status, 0, firstSync.output);
+  assert.match(firstSync.output, /"runtimeDriftNotices":1/u);
 
-  const spec = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "spec" } },
+  const afterFirstSync = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
     select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
   });
-  assert.deepEqual(spec, {
-    model: "claude-opus-5:medium",
-    runnerPreference: RunnerPreference.CLAUDE,
-    runtimeConfigCustomized: true,
+  assert.deepEqual(afterFirstSync, { ...originalProduction, runtimeConfigCustomized: true });
+
+  const firstNotice = await prisma.inboxMessage.findMany({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+    orderBy: { createdAt: "asc" },
+  });
+  assert.equal(firstNotice.length, 1);
+  assert.equal(firstNotice[0]!.from, "AGENT");
+  assert.equal(firstNotice[0]!.kind, "TEXT");
+  assert.match(firstNotice[0]!.body, /Agent: merge-resolver/u);
+  assert.match(firstNotice[0]!.body, /Canonical: model=gpt-5.6-sol:high, runner=CODEX/u);
+  assert.match(firstNotice[0]!.body, /Production: model=claude-opus-5:medium, runner=CLAUDE/u);
+  assert.match(firstNotice[0]!.body, /runtimeConfigCustomized=true/u);
+
+  const unchangedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(unchangedSync.status, 0, unchangedSync.output);
+  assert.match(unchangedSync.output, /"runtimeDriftNotices":0/u);
+  assert.equal(await prisma.inboxMessage.count({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+  }), 1);
+
+  await prisma.agent.update({ where: { id: mergeResolver.id }, data: changedProduction });
+  const changedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(changedSync.status, 0, changedSync.output);
+  assert.match(changedSync.output, /"runtimeDriftNotices":1/u);
+
+  const notices = await prisma.inboxMessage.findMany({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+    orderBy: { createdAt: "asc" },
+  });
+  assert.equal(notices.length, 2);
+  assert.match(notices[1]!.body, /Production: model=claude-opus-5:high, runner=CLAUDE/u);
+  const afterChangedSync = await prisma.agent.findUniqueOrThrow({
+    where: { id: mergeResolver.id },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  });
+  assert.deepEqual(afterChangedSync, { ...changedProduction, runtimeConfigCustomized: true });
+
+  await prisma.agent.update({ where: { id: mergeResolver.id }, data: originalProduction });
+  const returnedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(returnedSync.status, 0, returnedSync.output);
+  assert.match(returnedSync.output, /"runtimeDriftNotices":1/u);
+  assert.equal(await prisma.inboxMessage.count({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+  }), 3);
+
+  const canonicalProduction = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
+  await prisma.agent.update({ where: { id: mergeResolver.id }, data: canonicalProduction });
+  const resolvedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(resolvedSync.status, 0, resolvedSync.output);
+  assert.match(resolvedSync.output, /"runtimeDriftNotices":0/u);
+
+  await prisma.agent.update({ where: { id: mergeResolver.id }, data: originalProduction });
+  const reappearedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(reappearedSync.status, 0, reappearedSync.output);
+  assert.match(reappearedSync.output, /"runtimeDriftNotices":1/u);
+  assert.equal(await prisma.inboxMessage.count({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+  }), 4);
+
+  const deleted = await prisma.inboxMessage.deleteMany({
+    where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
+  });
+  assert.equal(deleted.count, 4);
+  await prisma.agent.update({
+    where: { id: mergeResolver.id },
+    data: {
+      ...canonicalProduction,
+      runtimeConfigCustomized: false,
+      runtimeConfigDriftNoticeFingerprint: null,
+    },
   });
 });
 

@@ -327,6 +327,7 @@ const main = async (): Promise<void> => {
           title: true,
           model: true,
           runtimeConfigCustomized: true,
+          runtimeConfigDriftNoticeFingerprint: true,
           runnerPreference: true,
           inboxAccess: true,
           collaborators: { select: { allowedAgent: { select: { name: true } } } },
@@ -344,6 +345,7 @@ const main = async (): Promise<void> => {
       const updatedRoles: Record<string, number> = {};
       let adoptedAgentDefaults = 0;
       let preservedAgentOverrides = 0;
+      let runtimeDriftNotices = 0;
       for (const name of roleNames) {
         const role = rolesByName.get(name)!;
         for (const agent of agentsByName.get(name)!) {
@@ -363,6 +365,51 @@ const main = async (): Promise<void> => {
           }
           if (runtimeDifferences.length > 0 && runtimeConfigRefusal(agent)) {
             throw new Error(`Agent ${name} (${agent.id}) has an invalid runtime configuration: ${runtimeConfigRefusal(agent)}`);
+          }
+          if (runtimeDifferences.length > 0 && agent.runtimeConfigCustomized) {
+            const fingerprint = JSON.stringify({
+              canonical: { model: role.model, runnerPreference: role.runnerPreference },
+              production: { model: agent.model, runnerPreference: agent.runnerPreference },
+            });
+            const claimed = await tx.agent.updateMany({
+              where: {
+                id: agent.id,
+                model: agent.model,
+                runnerPreference: agent.runnerPreference,
+                runtimeConfigCustomized: true,
+                OR: [
+                  { runtimeConfigDriftNoticeFingerprint: null },
+                  { runtimeConfigDriftNoticeFingerprint: { not: fingerprint } },
+                ],
+              },
+              data: { runtimeConfigDriftNoticeFingerprint: fingerprint },
+            });
+            if (claimed.count === 1) {
+              await tx.inboxMessage.create({ data: {
+                from: "AGENT",
+                agentId: agent.id,
+                kind: "TEXT",
+                body: [
+                  "Canonical runtime drift detected",
+                  `Agent: ${name}`,
+                  `Canonical: model=${role.model}, runner=${role.runnerPreference}`,
+                  `Production: model=${agent.model}, runner=${agent.runnerPreference}`,
+                  `runtimeConfigCustomized=${agent.runtimeConfigCustomized}`,
+                ].join("\n"),
+              } });
+              runtimeDriftNotices += 1;
+            }
+          } else if (agent.runtimeConfigDriftNoticeFingerprint !== null) {
+            await tx.agent.updateMany({
+              where: {
+                id: agent.id,
+                model: agent.model,
+                runnerPreference: agent.runnerPreference,
+                runtimeConfigCustomized: agent.runtimeConfigCustomized,
+                runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
+              },
+              data: { runtimeConfigDriftNoticeFingerprint: null },
+            });
           }
           if (adoptsCanonicalDefaults) {
             await tx.agent.update({
@@ -404,13 +451,14 @@ const main = async (): Promise<void> => {
         preservedTaskAssignments,
         adoptedAgentDefaults,
         preservedAgentOverrides,
+        runtimeDriftNotices,
         updatedSteps,
         updatedRoles,
       };
     }, { timeout: 120_000 });
     const updated = result.createdCanonicalTemplates + result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
       + result.adoptedPriorOutputDeclarations
-      + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
+      + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + result.runtimeDriftNotices + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);
