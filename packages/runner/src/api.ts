@@ -304,6 +304,28 @@ export type SessionTaskOutputStatus = {
   outputPersisted: boolean;
 };
 
+export type SessionTaskOutput = {
+  kind: string;
+  body: string;
+  commitSha: string;
+  metadata?: Record<string, unknown>;
+};
+
+/** Persist a mechanically-authored deliverable through the Runner's existing
+ * fenced control-plane transport. The script that derives the deliverable
+ * never needs control-plane network access or session credentials. */
+export const persistSessionTaskOutput = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  output: SessionTaskOutput,
+): Promise<void> => {
+  await request(config, `/session/runs/${claim.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${claim.sessionToken}` },
+    body: JSON.stringify({ fencingToken: claim.fencingToken, ...output }),
+  });
+};
+
 /** Read the output fact through the Run's session principal. Completion is too
  * late for recovery: by then the provider process and workspace are gone. */
 export const readSessionTaskOutputStatus = async (
@@ -575,6 +597,7 @@ export interface ControlPlane {
   appendEvents: typeof appendEvents;
   appendActivity: typeof appendActivity;
   completeRun: typeof completeRun;
+  persistSessionTaskOutput: typeof persistSessionTaskOutput;
   readSessionTaskOutputStatus: typeof readSessionTaskOutputStatus;
   recordPublishedBranch: typeof recordPublishedBranch;
   recordLeaseIndependentCleanup: typeof recordLeaseIndependentCleanup;
@@ -596,6 +619,7 @@ export const controlPlane: ControlPlane = Object.freeze({
   appendEvents,
   appendActivity,
   completeRun,
+  persistSessionTaskOutput,
   readSessionTaskOutputStatus,
   recordPublishedBranch,
   recordLeaseIndependentCleanup,

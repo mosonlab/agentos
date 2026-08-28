@@ -55,6 +55,7 @@ import {
   selectAuthorization,
   stopStateFor,
   taskIsIntegratorStep,
+  isRegressionVerificationOutputKind,
   type CandidateActivity,
   type CardRow,
   type DecisionRow,
@@ -3530,7 +3531,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         outputKind: run.task.templateStep?.outputKind ?? null,
         outputRequired: requiredOutputKind(run.task.templateStep) !== null,
         outputRemediationAllowed:
-          !(run.task.stepOutput && outputIsImmutableOncePersisted(run.task.templateStep)),
+          !isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
+          && !(run.task.stepOutput && outputIsImmutableOncePersisted(run.task.templateStep)),
         outputSatisfiedByPriorRun,
         // A retry must not mistake an earlier Run's artifact for its own. This
         // is the same run-scoped fact completion validates before it advances.

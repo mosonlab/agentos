@@ -16,7 +16,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "merge-resolver", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "plan-reviser", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "regression-verifier", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
+  { name: "regression-verifier", model: "gpt-5.6-luna:xhigh", runner: RunnerPreference.CODEX },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
@@ -54,14 +54,12 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
     from: { model: "gpt-5.6-terra:high", runnerPreference: RunnerPreference.CODEX },
     to: { model: "openai-codex/gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.PI },
   }],
-  // 2026-08-27 ruling: regression verification is a narrow task with an
-  // objective test bedrock, the sweet spot for Luna at maximum effort; the
-  // cross-vendor value of a Claude pass is smallest where tests, not model
-  // judgement, hold the verdict. Supersedes the 2026-08-24 re-pin, whose
-  // target this from-value matches.
+  // 2026-08-28 ruling: xhigh is sufficient for regression verification's
+  // narrow, test-backed verdict. Supersedes the 2026-08-27 max-effort pin,
+  // whose target this from-value matches.
   ["regression-verifier", {
-    from: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
-    to: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CODEX },
+    from: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.CODEX },
   }],
   ["senior-dev", {
     from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },

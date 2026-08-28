@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-
-import { requestFor } from "./session-tool-contract.js";
 
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/regression-verification.sh");
 const SHA = /^[0-9a-f]{40}$/u;
@@ -18,7 +16,7 @@ type Fixture = {
   baseSha: string;
   branchSha: string;
   env: NodeJS.ProcessEnv;
-  requests: string;
+  output: string;
   leaseLog: string;
   gateLog: string;
   argvLog: string;
@@ -63,13 +61,14 @@ const fixture = (): Fixture => {
   git(seed, "push", "origin", "feature");
   const branchSha = git(seed, "rev-parse", "HEAD");
   git(root, "clone", "--branch", "feature", origin, work);
+  writeFileSync(join(work, ".git", "info", "exclude"), "\n/.agentos/\n", { flag: "a" });
 
   const bin = join(root, "bin");
-  const requests = join(root, "requests.ndjson");
+  const output = join(work, ".agentos", "regression-output.json");
   const leaseLog = join(root, "lease.log");
   const gateLog = join(root, "gate.log");
   const argvLog = join(root, "argv.log");
-  for (const path of [requests, leaseLog, gateLog, argvLog]) writeFileSync(path, "");
+  for (const path of [leaseLog, gateLog, argvLog]) writeFileSync(path, "");
   executable(join(bin, "node"), `#!/bin/sh
 printf 'node %s\\n' "$*" >> "$REGRESSION_FIXTURE_ARGV_LOG"
 exec "$REGRESSION_FIXTURE_NODE" "$@"
@@ -84,28 +83,17 @@ printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_GATE_LOG"
 printf '%s\\n' "${"$"}{REGRESSION_FIXTURE_GATE_PROOF:-MERGE GATE: PASS $1}"
 exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
 `);
-  executable(join(bin, "api"), `#!/bin/sh
-printf 'api %s\\n' "$*" >> "$REGRESSION_FIXTURE_ARGV_LOG"
-body="$(cat)"
-printf '%s\\n' "$body" >> "$REGRESSION_FIXTURE_REQUESTS"
-printf '{"ok":true}\\n'
-`);
   return {
-    root, work, origin, baseSha, branchSha, requests, leaseLog, gateLog, argvLog,
+    root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog,
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
-      AGENTOS_API_URL: "http://agentos.invalid",
-      AGENTOS_SESSION_TOKEN: "session-token",
       AGENTOS_RUN_ID: "run-1",
-      AGENTOS_FENCING_TOKEN: "fence-1",
       AGENTOS_WORKSPACE_PATH: work,
       AGENTOS_CHAIN_ID: "chain-1",
       AGENTOS_PULL_REQUEST_BASE: "main",
       REGRESSION_MERGE_LEASE: join(bin, "merge-lease"),
       REGRESSION_GATE_DISPATCH: join(bin, "gate-dispatch"),
-      REGRESSION_API_CLIENT: join(bin, "api"),
-      REGRESSION_FIXTURE_REQUESTS: requests,
       REGRESSION_FIXTURE_LEASE_LOG: leaseLog,
       REGRESSION_FIXTURE_GATE_LOG: gateLog,
       REGRESSION_FIXTURE_ARGV_LOG: argvLog,
@@ -124,8 +112,16 @@ const run = (seeded: Fixture, ...args: string[]) => spawnSync("bash", [script, .
   encoding: "utf8",
 });
 
-const requestBodies = (seeded: Fixture): Array<Record<string, unknown>> => readFileSync(seeded.requests, "utf8")
-  .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+type Handoff = {
+  schemaVersion: number;
+  runId: string;
+  kind: string;
+  body: string;
+  commitSha: string;
+};
+
+const handoff = (seeded: Fixture): Handoff =>
+  JSON.parse(readFileSync(seeded.output, "utf8")) as Handoff;
 
 test("prepare refreshes before semantic review without acquiring the merge lease", () => {
   const seeded = fixture();
@@ -134,10 +130,10 @@ test("prepare refreshes before semantic review without acquiring the merge lease
   assert.match(prepared.stdout, /^REGRESSION PREPARE: ready [0-9a-f]{40} [0-9a-f]{40}\n$/u);
   assert.equal(git(seeded.work, "merge-base", "--is-ancestor", seeded.baseSha, "HEAD"), "");
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "prepare held no lease");
-  assert.equal(readFileSync(seeded.requests, "utf8"), "", "prepare emitted no final output");
+  assert.equal(existsSync(seeded.output), false, "prepare emitted no final output");
 });
 
-test("finalize persists the dispatch PASS before readiness acquires the lease", () => {
+test("finalize publishes the dispatch PASS handoff before readiness acquires the lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   seeded.env.REGRESSION_FIXTURE_GATE_NOISE = "verbose gate detail that stays platform-side";
@@ -148,8 +144,8 @@ test("finalize persists the dispatch PASS before readiness acquires the lease", 
   assert.match(headSha, SHA);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "Regression never touches the merge lease");
   assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${headSha} --master ${seeded.baseSha}`);
-  const [request] = requestBodies(seeded);
-  const verdict = JSON.parse(String(request?.body)) as Record<string, unknown>;
+  const published = handoff(seeded);
+  const verdict = JSON.parse(published.body) as Record<string, unknown>;
   assert.deepEqual(verdict, {
     schemaVersion: 2,
     outcome: "pass",
@@ -158,22 +154,26 @@ test("finalize persists the dispatch PASS before readiness acquires the lease", 
     gateVerdict: "PASS",
     gateProof: `MERGE GATE: PASS ${headSha}`,
   });
-  assert.equal(request?.kind, "regression-verification-v2");
-  assert.equal(request?.commitSha, headSha);
-  assert.deepEqual(request, requestFor("task_output", {
+  assert.deepEqual(published, {
+    schemaVersion: 1,
+    runId: "run-1",
     kind: "regression-verification-v2",
     body: JSON.stringify(verdict),
-  }, { fencingToken: "fence-1", commitSha: headSha }).body);
+    commitSha: headSha,
+  });
+  assert.equal(statSync(seeded.output).mode & 0o077, 0, "handoff is private to the Run user");
   assert.equal(finalized.stdout, `REGRESSION FINALIZE: pass ${headSha}\n`);
   assert.doesNotMatch(finalized.stdout, /verbose gate detail/u);
 });
 
-test("session and fencing credentials stay out of every spawned argv", () => {
+test("the mechanical handoff requires no session or fencing credentials", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   assert.equal(run(seeded, "review-fail", "review summary").status, 0);
   const argv = readFileSync(seeded.argvLog, "utf8");
   assert.doesNotMatch(argv, /session-token|fence-1/u);
+  assert.equal(seeded.env.AGENTOS_SESSION_TOKEN, undefined);
+  assert.equal(seeded.env.AGENTOS_FENCING_TOKEN, undefined);
 });
 
 test("an unreachable target fails prepare and finalize without persisting output", () => {
@@ -183,7 +183,7 @@ test("an unreachable target fails prepare and finalize without persisting output
   assert.notEqual(prepared.status, 0);
   assert.match(prepared.stderr, /target fetch failed after 3 attempts/u);
   assert.doesNotMatch(prepared.stdout, /refresh-conflict/u);
-  assert.equal(readFileSync(prepareFixture.requests, "utf8"), "");
+  assert.equal(existsSync(prepareFixture.output), false);
 
   const finalizeFixture = fixture();
   assert.equal(run(finalizeFixture, "prepare").status, 0);
@@ -192,7 +192,7 @@ test("an unreachable target fails prepare and finalize without persisting output
   assert.notEqual(finalized.status, 0);
   assert.match(finalized.stderr, /target fetch failed after 3 attempts/u);
   assert.doesNotMatch(finalized.stdout, /refresh-conflict/u);
-  assert.equal(readFileSync(finalizeFixture.requests, "utf8"), "");
+  assert.equal(existsSync(finalizeFixture.output), false);
 });
 
 test("finalize refreshes drift outside the lease and requires semantic recheck", () => {
@@ -210,7 +210,7 @@ test("finalize refreshes drift outside the lease and requires semantic recheck",
   assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "drift was detected before acquire");
   assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
-  assert.equal(readFileSync(seeded.requests, "utf8"), "");
+  assert.equal(existsSync(seeded.output), false);
   assert.equal(readFileSync(join(seeded.work, "drift.txt"), "utf8"), "drift\n");
 });
 
@@ -232,7 +232,7 @@ printf 'MERGE GATE: PASS %s\n' "$1"
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 77, finalized.stderr);
   assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
-  assert.equal(readFileSync(seeded.requests, "utf8"), "");
+  assert.equal(existsSync(seeded.output), false);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   assert.equal(readFileSync(join(seeded.work, "during-gate.txt"), "utf8"), "drift during gate\n");
 });
@@ -244,8 +244,7 @@ test("review-fail is emitted mechanically without acquiring or dispatching", () 
   assert.equal(failed.status, 0, failed.stderr);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
-  const [request] = requestBodies(seeded);
-  const verdict = JSON.parse(String(request?.body)) as Record<string, unknown>;
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
   assert.equal(verdict.outcome, "review-fail");
   assert.equal(verdict.summary, "RF-2 remains open");
   assert.equal(verdict.baseHeadSha, seeded.baseSha);
@@ -259,8 +258,7 @@ test("gate FAIL preserves its proof without touching the merge lease", () => {
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
-  const [request] = requestBodies(seeded);
-  assert.deepEqual(JSON.parse(String(request?.body)), {
+  assert.deepEqual(JSON.parse(handoff(seeded).body), {
     schemaVersion: 2,
     outcome: "gate-fail",
     headSha: git(seeded.work, "rev-parse", "HEAD"),
@@ -290,8 +288,7 @@ test("prepare emits refresh-conflict mechanically and leaves a deliverable works
   assert.equal(git(seeded.work, "rev-parse", "HEAD"), preRefreshHead);
   assert.equal(git(seeded.work, "status", "--porcelain"), "");
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
-  const [request] = requestBodies(seeded);
-  const verdict = JSON.parse(String(request?.body)) as Record<string, unknown>;
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
   assert.equal(verdict.outcome, "refresh-conflict");
   assert.equal(verdict.headSha, preRefreshHead);
   assert.equal(verdict.summary, "base.txt");
@@ -311,11 +308,11 @@ test("a non-conflict merge failure aborts loudly without persisting output", () 
   assert.notEqual(prepared.status, 0);
   assert.match(prepared.stderr, /fixture hook refused merge/u);
   assert.match(prepared.stderr, /merge failed without conflicts/u);
-  assert.equal(readFileSync(seeded.requests, "utf8"), "");
+  assert.equal(existsSync(seeded.output), false);
   assert.equal(git(seeded.work, "status", "--porcelain"), "");
 });
 
-test("a gate without a verdict records failure and dies loudly without a lease", () => {
+test("a gate without a verdict dies loudly without publishing a handoff or taking a lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "gate exited before verdict";
@@ -326,7 +323,5 @@ test("a gate without a verdict records failure and dies loudly without a lease",
   assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 1 attempt\(s\) \(exit 143\)/u);
   assert.doesNotMatch(finalized.stdout, /gate exited before verdict/u);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
-  const [request] = requestBodies(seeded);
-  assert.equal(request?.actorType, "agent");
-  assert.match(String(request?.body), /no admissible verdict after attempt 1 \(exit 143\)/u);
+  assert.equal(existsSync(seeded.output), false);
 });
