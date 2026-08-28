@@ -1,6 +1,6 @@
 import { AssigneeType, CodexServiceTier, PrismaClient } from "@prisma/client";
 
-import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
+import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
   applyCanonicalInstallation,
@@ -121,19 +121,9 @@ const main = async (): Promise<void> => {
   for (const role of sources.roles) {
     const existing = await prisma.agent.findUnique({
       where: { projectId_name: { projectId: project.id, name: role.name } },
-      select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+      select: { runtimeConfigCustomized: true },
     });
-    const transition = CANONICAL_AGENT_RUNTIME_TRANSITIONS.get(role.name);
-    const isCanonicalRuntimeTransition = existing !== null
-      && existing.runtimeConfigCustomized === false
-      && transition?.from.model === existing.model
-      && transition.from.runnerPreference === existing.runnerPreference
-      && transition.to.model === role.model
-      && transition.to.runnerPreference === role.runnerPreference;
-    const runtimeConfigCustomized = existing?.runtimeConfigCustomized === true
-      || (existing !== null
-        && !isCanonicalRuntimeTransition
-        && (existing.model !== role.model || existing.runnerPreference !== role.runnerPreference));
+    const runtimeConfigCustomized = existing?.runtimeConfigCustomized === true;
     const useCanonicalRuntimeConfig = !runtimeConfigCustomized;
     await prisma.agent.upsert({
       where: { projectId_name: { projectId: project.id, name: role.name } },
@@ -141,7 +131,6 @@ const main = async (): Promise<void> => {
         environmentId: environment.id,
         title: role.title,
         ...(useCanonicalRuntimeConfig ? { model: role.model, runnerPreference: role.runnerPreference } : {}),
-        runtimeConfigCustomized,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
         rolePrompt: role.rolePrompt,

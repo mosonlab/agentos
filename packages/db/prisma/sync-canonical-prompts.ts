@@ -1,6 +1,6 @@
 import { PrismaClient, Prisma, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
-import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
+import { catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
   applyCanonicalInstallation,
@@ -390,52 +390,52 @@ const main = async (): Promise<void> => {
       }
       const updatedRoles: Record<string, number> = {};
       let adoptedAgentDefaults = 0;
-      let preservedAgentOverrides = 0;
       let runtimeDriftNotices = 0;
+      const runtimeConfigAdoptions: Array<{
+        name: string;
+        from: { model: string; runnerPreference: RunnerPreference };
+        to: { model: string; runnerPreference: RunnerPreference };
+      }> = [];
       for (const name of roleNames) {
         const role = rolesByName.get(name)!;
         for (const agent of agentsByName.get(name)!) {
           const differences = roleSourceStructureDifferences(agent, role);
           const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
           const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
-          const transition = CANONICAL_AGENT_RUNTIME_TRANSITIONS.get(name);
           const adoptsCanonicalDefaults = structuralDifferences.length === 0
             && runtimeDifferences.length > 0
-            && !agent.runtimeConfigCustomized
-            && transition?.from.model === agent.model
-            && transition.from.runnerPreference === agent.runnerPreference
-            && transition.to.model === role.model
-            && transition.to.runnerPreference === role.runnerPreference;
+            && !agent.runtimeConfigCustomized;
           if (structuralDifferences.length > 0) {
             throw new Error(`Agent ${name} (${agent.id}) differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`);
           }
           if (runtimeDifferences.length > 0 && runtimeConfigRefusal(agent)) {
             throw new Error(`Agent ${name} (${agent.id}) has an invalid runtime configuration: ${runtimeConfigRefusal(agent)}`);
           }
-          let runtimeConfigCustomized = agent.runtimeConfigCustomized;
           if (adoptsCanonicalDefaults) {
-            await tx.agent.update({
-              where: { id: agent.id },
-              data: { ...transition.to, runtimeConfigDriftNoticeFingerprint: null },
-            });
-            adoptedAgentDefaults += 1;
-          } else if (runtimeDifferences.length > 0 && !runtimeConfigCustomized) {
-            const promoted = await tx.agent.updateMany({
+            const adopted = await tx.agent.updateMany({
               where: {
                 id: agent.id,
                 model: agent.model,
                 runnerPreference: agent.runnerPreference,
                 runtimeConfigCustomized: false,
               },
-              data: { runtimeConfigCustomized: true },
+              data: {
+                model: role.model,
+                runnerPreference: role.runnerPreference,
+                runtimeConfigDriftNoticeFingerprint: null,
+              },
             });
-            if (promoted.count !== 1) {
-              throw new Error(`Agent ${name} (${agent.id}) changed while its runtime configuration was being preserved`);
+            if (adopted.count !== 1) {
+              throw new Error(`Agent ${name} (${agent.id}) changed while its canonical runtime configuration was being adopted`);
             }
-            runtimeConfigCustomized = true;
-            preservedAgentOverrides += 1;
+            adoptedAgentDefaults += 1;
+            runtimeConfigAdoptions.push({
+              name,
+              from: { model: agent.model, runnerPreference: agent.runnerPreference },
+              to: { model: role.model, runnerPreference: role.runnerPreference },
+            });
           }
-          if (runtimeDifferences.length > 0 && runtimeConfigCustomized) {
+          if (runtimeDifferences.length > 0 && agent.runtimeConfigCustomized) {
             const fingerprint = JSON.stringify({
               canonical: { model: role.model, runnerPreference: role.runnerPreference },
               production: { model: agent.model, runnerPreference: agent.runnerPreference },
@@ -468,7 +468,7 @@ const main = async (): Promise<void> => {
                   `Agent: ${name}`,
                   `Canonical: model=${role.model}, runner=${role.runnerPreference}`,
                   `Production: model=${agent.model}, runner=${agent.runnerPreference}`,
-                  `runtimeConfigCustomized=${runtimeConfigCustomized}`,
+                  `runtimeConfigCustomized=${agent.runtimeConfigCustomized}`,
                 ].join("\n"),
                 ...(thread ? { threadId: thread.id } : {}),
               } });
@@ -512,8 +512,8 @@ const main = async (): Promise<void> => {
         migratedTasks,
         preservedTaskAssignments,
         adoptedAgentDefaults,
-        preservedAgentOverrides,
         runtimeDriftNotices,
+        runtimeConfigAdoptions,
         updatedSteps,
         updatedRoles,
       };
@@ -524,7 +524,15 @@ const main = async (): Promise<void> => {
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);
-    console.log(JSON.stringify({ ...result, updated }));
+    for (const adoption of result.runtimeConfigAdoptions) {
+      console.log(
+        `Canonical runtime config adopted for Agent ${adoption.name}: `
+        + `from model=${adoption.from.model}, runnerPreference=${adoption.from.runnerPreference} `
+        + `to model=${adoption.to.model}, runnerPreference=${adoption.to.runnerPreference}`,
+      );
+    }
+    const { runtimeConfigAdoptions: _runtimeConfigAdoptions, ...summary } = result;
+    console.log(JSON.stringify({ ...summary, updated }));
   } finally {
     await prisma.$disconnect();
   }

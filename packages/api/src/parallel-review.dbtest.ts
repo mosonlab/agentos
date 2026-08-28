@@ -1,10 +1,7 @@
 import "./test-workspace-root.js";
 
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { after, before, beforeEach, test } from "node:test";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import {
   DIRECT_TEMPLATE_NAME,
@@ -20,11 +17,10 @@ import {
 
 import { createApp } from "./test-app.js";
 import { GitHubReadError } from "./github-read.js";
-import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
+import { runDbScript } from "./test-db-script.js";
+import { resetTestDb, setupTestDb } from "./testdb.js";
 import { instantiateTemplate } from "./templates.js";
 
-const execFileAsync = promisify(execFile);
-const DB_DIRECTORY = fileURLToPath(new URL("../../db", import.meta.url));
 const RUNNER_TOKEN = "parallel-review-runner-token";
 const OPERATOR_TOKEN = "parallel-review-operator-token";
 const IMPLEMENTATION_BASE = "1".repeat(40);
@@ -135,23 +131,6 @@ after(async () => {
   if (previousEnvironment.operator === undefined) delete process.env.OPERATOR_TOKEN;
   else process.env.OPERATOR_TOKEN = previousEnvironment.operator;
 });
-
-const runDbScript = async (script: string): Promise<void> => {
-  try {
-    await execFileAsync(
-      process.execPath,
-      ["--import", "tsx", `prisma/${script}`],
-      {
-        cwd: DB_DIRECTORY,
-        env: { ...process.env, DATABASE_URL: testDatabaseUrl },
-        maxBuffer: 8 * 1024 * 1024,
-      },
-    );
-  } catch (error: unknown) {
-    const failure = error as { stdout?: string; stderr?: string; message?: string };
-    throw new Error(`canonical ${script} failed\n${failure.stdout ?? ""}${failure.stderr ?? ""}${failure.message ?? ""}`);
-  }
-};
 
 const request = async (
   path: string,

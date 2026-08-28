@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import { RunnerPreference } from "@prisma/client";
 
-import { assertCanonicalAgentSources, CANONICAL_AGENT_DEFAULTS } from "./agent-contract.js";
+import { assertCanonicalAgentSources } from "./agent-contract.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
 const agentsRoot = fileURLToPath(new URL("../../../agents/", import.meta.url));
@@ -119,24 +119,18 @@ export type StarterAgentSource = {
  *
  * The whole role set is loaded and asserted first on purpose. `agents/` is one
  * reviewed contract, and a starter selected out of a directory that no longer
- * satisfies it is not the reviewed starter. The CODEX/model pair is then
- * re-checked against `CANONICAL_AGENT_DEFAULTS` here as well, because the
- * v0.1 readiness gate is a Codex gate: an installation that silently seeded a
- * Claude starter would present a runner the rehearsal never proved.
+ * satisfies it is not the reviewed starter. The CODEX runner requirement is
+ * checked here as well, because the v0.1 readiness gate is a Codex gate: an
+ * installation that silently seeded a Claude starter would present a runner
+ * the rehearsal never proved. The model itself remains owned by the role
+ * frontmatter loaded above.
  */
 export const loadStarterAgentSource = async (): Promise<StarterAgentSource> => {
   const sources = await loadAgentSources();
   const role = sources.roles.find((candidate) => candidate.name === PUBLIC_STARTER_ROLE_NAME);
   if (!role) throw new Error(`agents/ contract is missing the ${PUBLIC_STARTER_ROLE_NAME} starter role`);
-  const expected = CANONICAL_AGENT_DEFAULTS.find((candidate) => candidate.name === PUBLIC_STARTER_ROLE_NAME);
-  if (!expected) throw new Error(`agents/ contract names no canonical ${PUBLIC_STARTER_ROLE_NAME} starter`);
-  if (expected.runner !== RunnerPreference.CODEX) {
-    throw new Error(`the public starter must be a CODEX agent; the contract names ${expected.runner}`);
-  }
-  if (role.runnerPreference !== expected.runner || role.model !== expected.model) {
-    throw new Error(
-      `the ${PUBLIC_STARTER_ROLE_NAME} starter must be ${expected.runner}/${expected.model}; found ${role.runnerPreference}/${role.model}`,
-    );
+  if (role.runnerPreference !== RunnerPreference.CODEX) {
+    throw new Error(`the public starter must be a CODEX agent; the role source names ${role.runnerPreference}`);
   }
   if (sources.foundationalPrompt.length === 0) throw new Error("agents/foundational.md has an empty body");
   if (role.rolePrompt.length === 0) throw new Error(`agents/roles/${PUBLIC_STARTER_ROLE_NAME}.md has an empty body`);

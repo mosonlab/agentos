@@ -49,7 +49,7 @@ structure: the source here is the record, canonical sync's closed contract
 decides what may replace what, and a change reaches production as an ordinary
 pull request through the merge gate.
 
-Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort: canonical values apply to new or uncustomized Agents, and an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege — granted only where the role contract requires talking to the human; the role frontmatter is the live roster.
+Exact canonical model and runner defaults live in the role frontmatter; `packages/db/src/agent-sources.ts` is the loader consumed by the seed, canonical sync, onboarding, and contract checks. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort: canonical values apply to new or uncustomized Agents, and an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege — granted only where the role contract requires talking to the human; the role frontmatter is the live roster.
 
 Approval is task metadata, not an Agent personality. Roles read the current
 task's `approvalGate`; they do not hard-code a pause or send a second Inbox
