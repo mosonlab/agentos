@@ -20,7 +20,12 @@ import { installDom, reactDom } from "./dom-harness";
  * the message. So every assertion here counts requests as well as reading
  * markup.
  */
-type Scripted = { status: number; body?: string } | { throws: true };
+type Scripted = { status: number; body?: string } | { throws: true } | { timesOut: true };
+
+/** What `AbortSignal.timeout` makes `fetch` reject with: a connection that was
+ *  accepted and then never answered, which is the API-restart case rather than
+ *  the API-absent one. */
+const timeoutError = (): Error => new DOMException("The operation timed out.", "TimeoutError");
 
 /** A recorded request. `polling` separates the pollers that mount after the gate
  *  succeeds — they alone send `cache: "no-store"` — from the gate's own
@@ -58,6 +63,7 @@ const mounted = async (
     const at = init?.cache === "no-store" ? Math.max(0, index - 1) : index++;
     const scripted = bootstrap[Math.min(at, bootstrap.length - 1)] ?? { status: 500 };
     if ("throws" in scripted) throw new TypeError("Failed to fetch");
+    if ("timesOut" in scripted) throw timeoutError();
     return new Response(scripted.body ?? "", { status: scripted.status, headers: { "Content-Type": "application/json" } });
   } });
   const root = (await reactDom()).createRoot(container);
@@ -134,6 +140,39 @@ test("an unanswered control plane is its own state, with the start command and n
   assert.match(markup, /data-startup-state="unreachable"/u);
   assert.match(markup, /npm run dev:api/u);
   assert.doesNotMatch(markup, /\.env/u);
+});
+
+/**
+ * The failure the gate could not previously describe.
+ *
+ * A control plane that accepts the connection and then answers nothing — an API
+ * restart overlapping the first load — left `fetch` pending for the life of the
+ * socket, so the gate stayed on `pending` and the page said "Checking the local
+ * control plane…" indefinitely. The client's own bound is what turns that into a
+ * screen with a Retry on it.
+ */
+test("a first request that never answers becomes a bounded, retryable screen rather than permanent loading", async () => {
+  const { calls, markup } = await mounted(() => <App />, [{ timesOut: true }]);
+  assert.deepEqual(calls.map((call) => call.path), ["/api/projects"]);
+  assert.match(markup, /data-startup-state="timeout"/u);
+  assert.doesNotMatch(markup, /data-startup-state="pending"/u);
+  // The bound is stated, so the screen is evidence of a decision rather than of
+  // a guess, and Retry is the operator's move — nothing retries silently.
+  assert.match(markup, /15 seconds/u);
+  assert.match(markup, /Try again/u);
+  // Nothing answered, so nothing about credentials can be inferred.
+  assert.doesNotMatch(markup, /\.env|setup:local/u);
+});
+
+test("retry after a timeout mounts the application once the control plane answers", async () => {
+  const { calls, markup } = await mounted(
+    () => <App />,
+    [{ timesOut: true }, { status: 200, body: '[{"id":"p1","name":"Vibeville","slug":"vibeville"}]' }],
+    async (dom, settle) => { await clickText(dom, "Try again", settle); },
+  );
+  assert.deepEqual(bootstrapCalls(calls), ["/api/projects", "/api/projects"], "one bootstrap request per attempt");
+  assert.doesNotMatch(markup, /data-startup-state="timeout"/u);
+  assert.match(markup, /Vibeville/u);
 });
 
 test("a 500 is neither a refusal nor an outage, and says so without inventing a cause", async () => {

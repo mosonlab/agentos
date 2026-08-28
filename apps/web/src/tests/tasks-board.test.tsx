@@ -4,7 +4,7 @@ import { act, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
-import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
+import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
@@ -685,6 +685,24 @@ test("a re-fetched but unchanged row keeps its object identity", () => {
 
 test("TaskCard is memoized", () => {
   assert.equal((TaskCard as unknown as { $$typeof: symbol }).$$typeof, Symbol.for("react.memo"));
+});
+
+test("desktop columns mount one fixed page as completed history grows", () => {
+  for (const total of [CARD_PAGE_SIZE + 1, CARD_PAGE_SIZE * 20]) {
+    const rows = Array.from({ length: total }, (_, index) => task({ id: `done-${index}`, status: "DONE" }));
+    const markup = column("DONE", rows);
+    assert.equal((markup.match(/data-card=/gu) ?? []).length, CARD_PAGE_SIZE);
+    assert.match(markup, new RegExp(`Done<span[^>]*>${total}</span>`));
+    assert.match(markup, new RegExp(`Show ${Math.min(CARD_PAGE_SIZE, total - CARD_PAGE_SIZE)} more`));
+  }
+});
+
+test("mobile task lists mount one fixed page as completed history grows", () => {
+  const total = CARD_PAGE_SIZE * 20;
+  const rows = Array.from({ length: total }, (_, index) => task({ id: `done-${index}`, status: "DONE" }));
+  const markup = mobile("DONE", rows, rows);
+  assert.equal((markup.match(/data-card=/gu) ?? []).length, CARD_PAGE_SIZE);
+  assert.match(markup, new RegExp(`Show ${CARD_PAGE_SIZE} more`));
 });
 
 /* -------------------------------------------------------------- the notice */
