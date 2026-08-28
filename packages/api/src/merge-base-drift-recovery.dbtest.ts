@@ -237,8 +237,6 @@ test("fresh server-owned readiness authorization alone activates the recovery me
 
 test("recovery holds the full chain mutex before mutation and a concurrent chain writer completes without deadlock or lost recovery", { timeout: 20_000 }, async () => {
   const seeded = await seedStopped("canonical-compound-readiness", "recovery-lock-order");
-  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
-  await recordRecoveryPass(seeded, BASE_2);
 
   let lockObserved!: () => void;
   let releaseRecovery!: () => void;
@@ -269,7 +267,7 @@ test("recovery holds the full chain mutex before mutation and a concurrent chain
   const writerDb = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
   const priorToken = process.env.OPERATOR_TOKEN;
   try {
-    const recovery = readinessTick(recoveryDb, reader(snapshot(BASE_2)), new Date(), 5, releaseChainLease, runWithMergeLease);
+    const recovery = baseDriftRecoveryTick(recoveryDb, reader(snapshot(BASE_2)));
     await recoveryHasChain;
     process.env.OPERATOR_TOKEN = OPERATOR;
     const writer = createApp(writerDb).request(`/tasks/${seeded.integratorTask!.id}`, {
@@ -280,15 +278,15 @@ test("recovery holds the full chain mutex before mutation and a concurrent chain
     await new Promise((resolve) => setTimeout(resolve, 50));
     releaseRecovery();
     const [tick, response] = await Promise.all([recovery, writer]);
-    assert.equal(tick.authorized, 1);
+    assert.equal(tick.recovered, 1);
     assert.equal(response.status, 200, await response.text());
   } finally {
     if (priorToken === undefined) delete process.env.OPERATOR_TOKEN;
     else process.env.OPERATOR_TOKEN = priorToken;
     await writerDb.$disconnect();
   }
-  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
-  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } })).status, "SUCCEEDED");
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } })).status, "REPAIRING");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).description, "concurrent writer completed after recovery");
 });
 

@@ -11,6 +11,7 @@ import {
   enqueueTaskRun,
   isMergeReadinessStep,
   latestRecordedStop,
+  lockChainRows,
   openStopQuestion,
   parseMergeResult,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
@@ -26,38 +27,23 @@ import {
 } from "@agentos/db";
 
 import { createGitHubReader, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import {
+  recoveryDecision,
+  type CandidateLoad,
+  type CandidateRefusalCode,
+  type RecoveryCandidate,
+  type RecoveryIdentity,
+} from "./base-drift-recovery-decision.js";
+import { stopMergeTail } from "./merge-tail-actions.js";
 
 type DbReader = PrismaClient | Prisma.TransactionClient;
 
 const SHA = /^[0-9a-f]{40}$/u;
-const RECOVERY_NOTIFICATION_PREFIX = "merge-base-drift-recovery";
 
 export const baseDriftRecoveryPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
 };
-
-type RecoveryIdentity = {
-  repository: string;
-  prNumber: number;
-  targetBranch: string;
-  authorizedHeadSha: string;
-  authorizedBaseSha: string;
-  observedBaseSha: string;
-};
-
-type RecoveryCandidate = RecoveryIdentity & {
-  integratorTaskId: string;
-  readinessTaskId: string;
-  regressionTaskId: string;
-  sourceRunId: string;
-  stopId: string;
-  authorizationActivityId: string;
-};
-
-type CandidateLoad =
-  | { ok: true; candidate: RecoveryCandidate }
-  | { ok: false; reason: string; stopId: string; retryable: boolean };
 
 const recoveryAttemptFor = async (
   db: DbReader,
@@ -112,42 +98,62 @@ const parseBaseDriftEvidence = (evidence: string): { observed: string; authorize
   return { observed: record.observed, authorized: record.authorized };
 };
 
-const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<CandidateLoad | null> => {
+/**
+ * Base-drift recovery mutates the three merge-tail Steps together, so it uses
+ * the same ordered, whole-Chain mutex as every other chained-task writer.
+ * Chain identity is immutable after dispatch and can select that mutex before
+ * any mutable state is read.
+ */
+const lockRecoveryChain = async (
+  tx: Prisma.TransactionClient,
+  integratorTaskId: string,
+): Promise<boolean> => {
+  const identity = await tx.task.findUnique({
+    where: { id: integratorTaskId },
+    select: { projectId: true, chainId: true },
+  });
+  const chainId = identity?.chainId;
+  if (!identity || !chainId) return false;
+  const taskIds = await lockChainRows(tx, { projectId: identity.projectId, chainId });
+  return taskIds.includes(integratorTaskId);
+};
+
+const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<CandidateLoad> => {
   const task = await db.task.findUnique({
     where: { id: integratorTaskId },
     include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true },
   });
-  if (!task || !taskIsIntegratorStep(task)) return null;
+  if (!task || !taskIsIntegratorStep(task)) return { kind: "skip" };
   const stop = await latestRecordedStop(db as Prisma.TransactionClient, task.id);
-  if (!stop || stop.condition !== "base-drift") return null;
+  if (!stop || stop.condition !== "base-drift") return { kind: "skip" };
   const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
-  if (existingAttempt && existingAttempt.status !== MergeRecoveryStatus.VALIDATING) return null;
-  const fail = (reason: string, retryable = false): CandidateLoad => ({
-    ok: false, reason, stopId: stop.stopId, retryable,
+  if (existingAttempt && existingAttempt.status !== MergeRecoveryStatus.VALIDATING) return { kind: "skip" };
+  const refuse = (code: CandidateRefusalCode, detail?: string): CandidateLoad => ({
+    kind: "refused", code, stopId: stop.stopId, ...(detail ? { detail } : {}),
   });
-  if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repo) return fail("chain or repository identity is incomplete");
-  if (!stop.sourceRunId) return fail("stop is not bound to an executor run");
+  if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repo) return refuse("identity-incomplete");
+  if (!stop.sourceRunId) return refuse("source-run-unbound");
   const evidence = parseBaseDriftEvidence(stop.evidence);
-  if (!evidence) return fail("base-drift evidence is malformed or is not a SHA-only drift payload");
+  if (!evidence) return refuse("evidence-invalid");
 
   const sourceRun = await db.run.findUnique({
     where: { id: stop.sourceRunId },
     include: { session: { select: { id: true } } },
   });
   if (!sourceRun || sourceRun.taskId !== task.id || sourceRun.status !== "SUCCEEDED" || !sourceRun.session) {
-    return fail("source executor run identity or terminal state does not match the stop");
+    return refuse("source-run-mismatch");
   }
   const active = await db.run.count({
     where: { task: { projectId: task.projectId, chainId: task.chainId }, status: { in: ACTIVE_RUN_STATUSES } },
   });
-  if (active !== 0) return fail("the chain has an active foreign run while recovery is being classified", true);
+  if (active !== 0) return refuse("chain-active");
 
   const output = await db.taskStepOutput.findUnique({ where: { taskId: task.id } });
   const outputResult = parseMergeResult(output);
   if (output?.runId !== sourceRun.id || output?.kind !== INTEGRATOR_OUTPUT_KIND
     || outputResult.outcome !== "stopped" || outputResult.condition !== "base-drift"
     || outputResult.evidence !== stop.evidence) {
-    return fail("executor output does not exactly match the recorded source stop");
+    return refuse("output-mismatch");
   }
 
   const [readiness, regression] = await Promise.all([
@@ -164,10 +170,10 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
     }),
   ]);
   if (!readiness || !isMergeReadinessStep(readiness.templateStep) || !regression) {
-    return fail("current direct/compound regression and readiness tail cannot be resolved");
+    return refuse("tail-unresolved");
   }
   if (task.status !== TaskStatus.REVIEW || readiness.status !== TaskStatus.DONE || regression.status !== TaskStatus.DONE) {
-    return fail("merge tail task state is not the completed-readiness/stopped-executor shape");
+    return refuse("tail-state-mismatch");
   }
 
   const activities = await db.taskActivity.findMany({
@@ -185,7 +191,7 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
   const selection = selectAuthorization(
     activities as CandidateActivity[], decisions as DecisionRow[], cards as CardRow[], readiness.id,
   );
-  if (!selection.authorization || selection.refusal) return fail(`authorized readiness evidence is ${selection.refusal ?? "missing"}`);
+  if (!selection.authorization || selection.refusal) return refuse("authorization-invalid", selection.refusal ?? "missing");
   const authorization = selection.authorization;
 
   const intentRows = await db.taskActivity.findMany({
@@ -193,28 +199,28 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
     orderBy: { createdAt: "asc" }, select: { metadata: true },
   });
   const intents = intentRows.map((row) => asJsonObject(row.metadata)).filter((metadata) => metadata?.sourceRunId === sourceRun.id);
-  if (intents.length !== 1) return fail("source executor run does not have exactly one server-bound merge intent");
+  if (intents.length !== 1) return refuse("intent-count");
   const intent = intents[0]!;
   if (intent.authorizationActivityId !== authorization.activityId
     || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha) {
-    return fail("executor intent does not match the selected authorization");
+    return refuse("intent-mismatch");
   }
-  if (evidence.authorized !== authorization.baseSha) return fail("stop evidence does not match the authorized base SHA");
-  if (readiness.stepOutput?.commitSha !== authorization.headSha) return fail("readiness output does not match the authorized head SHA");
+  if (evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");
+  if (readiness.stepOutput?.commitSha !== authorization.headSha) return refuse("readiness-head-mismatch");
 
   const target = await resolveChainTarget(db as Prisma.TransactionClient, task);
-  if (!target.resolved) return fail(`pull-request identity is ${target.unresolvable}`);
+  if (!target.resolved) return refuse("target-unresolved", target.unresolvable);
   if (target.repository !== authorization.repository || target.prNumber !== authorization.prNumber) {
-    return fail("resolved repository or pull-request identity differs from the authorization");
+    return refuse("target-mismatch");
   }
   const firstRun = await db.run.findFirst({
     where: { task: { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } } },
     orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }], select: { targetBranch: true },
   });
   if (firstRun?.targetBranch !== authorization.baseRef || task.targetBranch !== authorization.baseRef) {
-    return fail("authorized target ref differs from the chain target branch");
+    return refuse("target-branch-mismatch");
   }
-  return { ok: true, candidate: {
+  return { kind: "candidate", candidate: {
     integratorTaskId: task.id,
     readinessTaskId: readiness.id,
     regressionTaskId: regression.id,
@@ -229,25 +235,6 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
     observedBaseSha: evidence.observed,
   } };
 };
-
-const snapshotRefusal = (candidate: RecoveryCandidate, snapshot: PullRequestSnapshot): string | null => {
-  if (snapshot.repository !== candidate.repository || snapshot.number !== candidate.prNumber) return "fresh repository or pull-request identity mismatches the authorization";
-  if (snapshot.state !== "OPEN" || snapshot.merged !== false) return "pull request is no longer an unmerged OPEN pull request";
-  if (snapshot.isDraft !== false) return "pull request draft state changed after authorization";
-  if (snapshot.autoMergeRequest !== null || snapshot.mergeQueueEntry !== null) return "pull request entered foreign automatic merge machinery";
-  if (snapshot.baseRefName !== candidate.targetBranch) return "target ref changed after authorization";
-  if (snapshot.headRefOid !== candidate.authorizedHeadSha || snapshot.headCommitOid !== candidate.authorizedHeadSha) {
-    return "pull-request head changed after authorization";
-  }
-  if (!snapshot.baseSha || !SHA.test(snapshot.baseSha) || snapshot.baseSha === candidate.authorizedBaseSha) {
-    return "fresh target base does not prove an advanced SHA";
-  }
-  return null;
-};
-
-const notificationBody = (state: "ineligible" | "exhausted", stopId: string, reason: string): string => (
-  `Automatic pre-merge base-drift recovery ${state} for stop ${stopId}: ${reason}. No regression run or re-authorization was created.`
-);
 
 const openAbandonQuestion = async (
   tx: Prisma.TransactionClient,
@@ -282,31 +269,25 @@ const settleIneligibleLocked = async (
   identity?: Partial<RecoveryIdentity>,
 ): Promise<void> => {
   const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
-  await tx.mergeRecoveryAttempt.update({ where: { id: attempt.id }, data: {
-    status: MergeRecoveryStatus.FAILED,
-    failureReason: reason,
-    endedAt: new Date(),
-    ...(identity?.repository ? { repository: identity.repository } : {}),
-    ...(identity?.prNumber ? { prNumber: identity.prNumber } : {}),
-    ...(identity?.targetBranch ? { targetBranch: identity.targetBranch } : {}),
-    ...(identity?.authorizedHeadSha ? { authorizedHeadSha: identity.authorizedHeadSha } : {}),
-    ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
-    ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
-  } });
-  await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body: `Automatic pre-merge base-drift recovery refused: ${reason}`,
-    metadata: { state: "ineligible", ...identity, integratorTaskId, sourceStopId: stopId, reason },
+  await stopMergeTail(tx, {
+    phase: "recovery-validation",
+    aggregateId: attempt.id,
+    integratorTaskId,
+    sourceStopId: stopId,
+    reason,
+    at: new Date(),
+    attempt: attempt.attempt,
+    recoveryData: {
+      ...(identity?.repository ? { repository: identity.repository } : {}),
+      ...(identity?.prNumber ? { prNumber: identity.prNumber } : {}),
+      ...(identity?.targetBranch ? { targetBranch: identity.targetBranch } : {}),
+      ...(identity?.authorizedHeadSha ? { authorizedHeadSha: identity.authorizedHeadSha } : {}),
+      ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
+      ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
+    },
+    markerMetadata: { ...identity },
   });
-  const dedupeKey = `${RECOVERY_NOTIFICATION_PREFIX}:ineligible:${stopId}`;
-  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
-    from: "AGENT", taskId: integratorTaskId, kind: "TEXT",
-    body: notificationBody("ineligible", stopId, reason), dedupeKey,
-  }, update: {} });
   await openAbandonQuestion(tx, integratorTaskId, stopId);
-  await tx.task.update({ where: { id: integratorTaskId }, data: {
-    status: TaskStatus.REVIEW, failureReason: `Automatic base-drift recovery refused: ${reason}`,
-  } });
 };
 
 const settleIneligible = async (
@@ -316,7 +297,7 @@ const settleIneligible = async (
   reason: string,
   identity?: Partial<RecoveryIdentity>,
 ): Promise<boolean> => db.$transaction(async (tx) => {
-  await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE`;
+  if (!await lockRecoveryChain(tx, integratorTaskId)) return false;
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
   if (currentStop?.stopId !== stopId) return false;
   const existing = await recoveryAttemptFor(tx, integratorTaskId, stopId);
@@ -331,21 +312,30 @@ const recordClassificationRetry = async (
   stopId: string,
   reason: string,
 ): Promise<"retryable" | "ineligible" | "skipped"> => db.$transaction(async (tx) => {
-  await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE`;
+  if (!await lockRecoveryChain(tx, integratorTaskId)) return "skipped";
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
   if (currentStop?.stopId !== stopId) return "skipped";
   const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
   if (attempt.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
-  const classificationAttempt = attempt.validationAttempts + 1;
-  if (classificationAttempt > MAX_BASE_DRIFT_CLASSIFICATION_RETRIES) {
+  const decision = recoveryDecision({
+    stage: "classification-retry",
+    reason,
+    validationAttempts: attempt.validationAttempts,
+    maxAttempts: MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
+  });
+  if (decision.kind === "ineligible") {
     await settleIneligibleLocked(
       tx,
       integratorTaskId,
       stopId,
-      `classification retry limit ${MAX_BASE_DRIFT_CLASSIFICATION_RETRIES} reached after transient failure: ${reason}`,
+      decision.reason,
     );
     return "ineligible";
   }
+  if (decision.kind !== "retry" || decision.classificationAttempt === undefined) {
+    throw new Error(`Unexpected classification retry decision ${decision.kind}`);
+  }
+  const classificationAttempt = decision.classificationAttempt;
   await tx.mergeRecoveryAttempt.update({
     where: { id: attempt.id },
     data: { validationAttempts: classificationAttempt, failureReason: reason },
@@ -364,24 +354,22 @@ const recordClassificationRetry = async (
   return "retryable";
 });
 
+type QueueRecoveryResult =
+  | { kind: "recovered" }
+  | { kind: "exhausted" }
+  | { kind: "skip" }
+  | { kind: "ineligible"; reason: string }
+  | { kind: "retry"; reason: string };
+
 const queueRecovery = async (
   db: PrismaClient,
   expected: RecoveryCandidate,
   currentBaseSha: string,
   now: Date,
-): Promise<"recovered" | "exhausted" | "skipped" | "ineligible" | "retryable"> => db.$transaction(async (tx) => {
-  await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${expected.integratorTaskId} FOR UPDATE`;
+): Promise<QueueRecoveryResult> => db.$transaction(async (tx) => {
+  if (!await lockRecoveryChain(tx, expected.integratorTaskId)) return { kind: "skip" };
   const aggregate = await ensureValidationAttemptLocked(tx, expected.integratorTaskId, expected.stopId, expected);
-  if (aggregate.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
   const loaded = await loadCandidate(tx, expected.integratorTaskId);
-  if (!loaded) return "ineligible";
-  if (!loaded.ok) return loaded.retryable ? "retryable" : "ineligible";
-  const fields: Array<keyof RecoveryCandidate> = [
-    "integratorTaskId", "readinessTaskId", "regressionTaskId", "sourceRunId", "stopId",
-    "authorizationActivityId", "repository", "prNumber", "targetBranch", "authorizedHeadSha",
-    "authorizedBaseSha", "observedBaseSha",
-  ];
-  if (fields.some((field) => loaded.candidate[field] !== expected[field])) return "ineligible";
 
   // A recovery spends an attempt only once it owns a fresh regression Run.
   // Validation refusals remain visible aggregate rows but do not consume the
@@ -395,6 +383,19 @@ const queueRecovery = async (
     targetBranch: expected.targetBranch,
     recoveryRunId: { not: null },
   } });
+  const decision = recoveryDecision({
+    stage: "durable",
+    expected,
+    load: loaded,
+    aggregateValidating: aggregate.status === MergeRecoveryStatus.VALIDATING,
+    recoveryCount: attempts,
+    maxRecoveries: MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+    currentBaseSha,
+  });
+  if (decision.kind === "skip") return { kind: "skip" };
+  if (decision.kind === "retry") return { kind: "retry", reason: decision.reason };
+  if (decision.kind === "ineligible") return { kind: "ineligible", reason: decision.reason };
+  if (decision.kind === "inspect") throw new Error("Durable recovery decision cannot request another remote inspection");
   const attempt = aggregate.attempt;
   const common = {
     sourceStopId: expected.stopId,
@@ -412,39 +413,32 @@ const queueRecovery = async (
     readinessTaskId: expected.readinessTaskId,
     regressionTaskId: expected.regressionTaskId,
   };
-  if (attempts >= MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) {
-    const reason = `automatic recovery limit ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES} reached for ${expected.repository}#${expected.prNumber} targeting ${expected.targetBranch}`;
-    await tx.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
-      status: MergeRecoveryStatus.FAILED,
-      failureReason: reason,
-      endedAt: now,
-      boundSourceRunId: expected.sourceRunId,
-      authorizationActivityId: expected.authorizationActivityId,
-      readinessTaskId: expected.readinessTaskId,
-      regressionTaskId: expected.regressionTaskId,
-      repository: expected.repository,
-      prNumber: expected.prNumber,
-      targetBranch: expected.targetBranch,
-      authorizedHeadSha: expected.authorizedHeadSha,
-      authorizedBaseSha: expected.authorizedBaseSha,
-      observedBaseSha: expected.observedBaseSha,
-      currentBaseSha,
-    } });
-    await writeMarker(tx, expected.integratorTaskId, "baseDriftRecovery", {
-      actorType: "control-plane",
-      body: `Automatic pre-merge base-drift recovery exhausted at attempt ${attempt}`,
-      metadata: { ...common, state: "exhausted", reason },
+  if (decision.kind === "exhausted") {
+    await stopMergeTail(tx, {
+      phase: "recovery-exhausted",
+      aggregateId: aggregate.id,
+      integratorTaskId: expected.integratorTaskId,
+      sourceStopId: expected.stopId,
+      reason: decision.reason,
+      at: now,
+      attempt,
+      recoveryData: {
+        boundSourceRunId: expected.sourceRunId,
+        authorizationActivityId: expected.authorizationActivityId,
+        readinessTaskId: expected.readinessTaskId,
+        regressionTaskId: expected.regressionTaskId,
+        repository: expected.repository,
+        prNumber: expected.prNumber,
+        targetBranch: expected.targetBranch,
+        authorizedHeadSha: expected.authorizedHeadSha,
+        authorizedBaseSha: expected.authorizedBaseSha,
+        observedBaseSha: expected.observedBaseSha,
+        currentBaseSha,
+      },
+      markerMetadata: common,
     });
-    const dedupeKey = `${RECOVERY_NOTIFICATION_PREFIX}:exhausted:${expected.stopId}`;
-    await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
-      from: "AGENT", taskId: expected.integratorTaskId, kind: "TEXT",
-      body: notificationBody("exhausted", expected.stopId, reason), dedupeKey,
-    }, update: {} });
     await openAbandonQuestion(tx, expected.integratorTaskId, expected.stopId);
-    await tx.task.update({ where: { id: expected.integratorTaskId }, data: {
-      status: TaskStatus.REVIEW, failureReason: reason,
-    } });
-    return "exhausted";
+    return { kind: "exhausted" };
   }
 
   await tx.task.update({ where: { id: expected.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
@@ -482,7 +476,7 @@ const queueRecovery = async (
     body: `Automatic base-drift recovery ${attempt} verifies ${expected.authorizedHeadSha} against current base ${currentBaseSha}`,
     metadata,
   });
-  return "recovered";
+  return { kind: "recovered" };
 });
 
 export type BaseDriftRecoveryTickResult = { examined: number; recovered: number; exhausted: number; ineligible: number };
@@ -513,82 +507,97 @@ export const baseDriftRecoveryTick = async (
       cursor = task.id;
       if (result.examined >= limit) break;
       const loaded = await loadCandidate(db, task.id);
-      if (!loaded) continue;
+      const candidateDecision = recoveryDecision({ stage: "candidate", load: loaded });
+      if (candidateDecision.kind === "skip") continue;
       result.examined += 1;
-      if (!loaded.ok) {
-        if (loaded.retryable) {
-          const outcome = await recordClassificationRetry(db, task.id, loaded.stopId, loaded.reason);
+      if (candidateDecision.kind === "retry" || candidateDecision.kind === "ineligible") {
+        if (loaded.kind !== "refused") throw new Error(`Candidate ${task.id} has no refusal binding`);
+        if (candidateDecision.kind === "retry") {
+          const outcome = await recordClassificationRetry(db, task.id, loaded.stopId, candidateDecision.reason);
           if (outcome === "ineligible") result.ineligible += 1;
-        } else if (await settleIneligible(db, task.id, loaded.stopId, loaded.reason)) {
+        } else if (await settleIneligible(db, task.id, loaded.stopId, candidateDecision.reason)) {
           result.ineligible += 1;
         }
         continue;
       }
-      const candidate = loaded.candidate;
+      if (candidateDecision.kind !== "inspect") {
+        throw new Error(`Unexpected candidate recovery decision ${candidateDecision.kind}`);
+      }
+      const candidate = candidateDecision.candidate;
       const validation = await db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${candidate.integratorTaskId} FOR UPDATE`;
+        if (!await lockRecoveryChain(tx, candidate.integratorTaskId)) return false;
         const attempt = await ensureValidationAttemptLocked(tx, candidate.integratorTaskId, candidate.stopId, candidate);
         return attempt.status === MergeRecoveryStatus.VALIDATING;
       });
       if (!validation) continue;
       if (!reader) {
+        const decision = recoveryDecision({ stage: "reader-unavailable" });
+        if (decision.kind !== "retry") throw new Error(`Unexpected reader decision ${decision.kind}`);
         const outcome = await recordClassificationRetry(
-          db, task.id, candidate.stopId, "server-side GitHub reader is unavailable",
+          db, task.id, candidate.stopId, decision.reason,
         );
         if (outcome === "ineligible") result.ineligible += 1;
         continue;
       }
-    let snapshot: PullRequestSnapshot;
-    let advancementRefusal: string | null = null;
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8_000);
+      let snapshot: PullRequestSnapshot;
+      let authorizedAdvance: { status: string; behindBy: number } | null = null;
+      let observedAdvance: { status: string; behindBy: number } | null = null;
       try {
-        snapshot = await reader.readPullRequest(candidate.repository, candidate.prNumber, candidate.targetBranch, controller.signal);
-        if (!reader.compareCommits) {
-          advancementRefusal = "server-side ancestry comparison is unavailable";
-        } else if (!snapshot.baseSha) {
-          advancementRefusal = "fresh target base SHA is unavailable";
-        } else {
-          const advanced = await reader.compareCommits(
-            candidate.repository, candidate.authorizedBaseSha, snapshot.baseSha, controller.signal,
-          );
-          if (advanced.status !== "ahead" || advanced.behindBy !== 0) {
-            advancementRefusal = `target base change is not a forward advancement (${advanced.status}, behind_by=${advanced.behindBy})`;
-          } else if (candidate.observedBaseSha !== snapshot.baseSha) {
-            const sinceStop = await reader.compareCommits(
-              candidate.repository, candidate.observedBaseSha, snapshot.baseSha, controller.signal,
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8_000);
+        try {
+          snapshot = await reader.readPullRequest(candidate.repository, candidate.prNumber, candidate.targetBranch, controller.signal);
+          if (reader.compareCommits && snapshot.baseSha) {
+            authorizedAdvance = await reader.compareCommits(
+              candidate.repository, candidate.authorizedBaseSha, snapshot.baseSha, controller.signal,
             );
-            if ((sinceStop.status !== "ahead" && sinceStop.status !== "identical") || sinceStop.behindBy !== 0) {
-              advancementRefusal = `current target base does not descend from the executor-observed base (${sinceStop.status}, behind_by=${sinceStop.behindBy})`;
+            if (authorizedAdvance.status === "ahead" && authorizedAdvance.behindBy === 0
+              && candidate.observedBaseSha !== snapshot.baseSha) {
+              observedAdvance = await reader.compareCommits(
+                candidate.repository, candidate.observedBaseSha, snapshot.baseSha, controller.signal,
+              );
             }
           }
+        } finally {
+          clearTimeout(timer);
         }
-      } finally {
-        clearTimeout(timer);
+      } catch (error: unknown) {
+        const decision = recoveryDecision({
+          stage: "reader-failure",
+          reason: `fresh server-side repository read failed (${error instanceof Error ? error.name : "unknown error"})`,
+        });
+        if (decision.kind !== "retry") throw new Error(`Unexpected reader failure decision ${decision.kind}`);
+        const outcome = await recordClassificationRetry(db, task.id, candidate.stopId, decision.reason);
+        if (outcome === "ineligible") result.ineligible += 1;
+        continue;
       }
-    } catch (error: unknown) {
-      const reason = `fresh server-side repository read failed (${error instanceof Error ? error.name : "unknown error"})`;
-      const outcome = await recordClassificationRetry(db, task.id, candidate.stopId, reason);
-      if (outcome === "ineligible") result.ineligible += 1;
-      continue;
-    }
-    const refusal = snapshotRefusal(candidate, snapshot) ?? advancementRefusal;
-    if (refusal) {
-      if (await settleIneligible(db, task.id, candidate.stopId, refusal, candidate)) result.ineligible += 1;
-      continue;
-    }
-    const outcome = await queueRecovery(db, candidate, snapshot.baseSha!, now);
-    if (outcome === "recovered") result.recovered += 1;
-    else if (outcome === "exhausted") result.exhausted += 1;
-    else if (outcome === "ineligible") {
-      if (await settleIneligible(db, task.id, candidate.stopId, "durable chain state changed during fresh recovery verification", candidate)) result.ineligible += 1;
-    } else if (outcome === "retryable") {
-      const retry = await recordClassificationRetry(
-        db, task.id, candidate.stopId, "the chain became temporarily active during durable recovery verification",
-      );
-      if (retry === "ineligible") result.ineligible += 1;
-    }
+      const fresh = recoveryDecision({
+        stage: "fresh",
+        candidate,
+        snapshot,
+        comparisonAvailable: reader.compareCommits !== undefined,
+        authorizedAdvance,
+        observedAdvance,
+      });
+      if (fresh.kind === "ineligible") {
+        if (await settleIneligible(db, task.id, candidate.stopId, fresh.reason, candidate)) result.ineligible += 1;
+        continue;
+      }
+      if (fresh.kind === "retry") {
+        const outcome = await recordClassificationRetry(db, task.id, candidate.stopId, fresh.reason);
+        if (outcome === "ineligible") result.ineligible += 1;
+        continue;
+      }
+      if (fresh.kind !== "queue") throw new Error(`Unexpected fresh recovery decision ${fresh.kind}`);
+      const outcome = await queueRecovery(db, candidate, fresh.currentBaseSha, now);
+      if (outcome.kind === "recovered") result.recovered += 1;
+      else if (outcome.kind === "exhausted") result.exhausted += 1;
+      else if (outcome.kind === "ineligible") {
+        if (await settleIneligible(db, task.id, candidate.stopId, outcome.reason, candidate)) result.ineligible += 1;
+      } else if (outcome.kind === "retry") {
+        const retry = await recordClassificationRetry(db, task.id, candidate.stopId, outcome.reason);
+        if (retry === "ineligible") result.ineligible += 1;
+      }
     }
     if (tasks.length < pageSize) break;
   }

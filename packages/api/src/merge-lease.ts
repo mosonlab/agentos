@@ -6,8 +6,11 @@ import {
   executionModeFor,
   isRegressionVerificationOutputKind,
   latestMarker,
+  MERGE_TAIL_KIND,
   readMarkers,
+  RunStatus,
   type Prisma,
+  type PrismaClient,
 } from "@agentos/db";
 
 const execFileAsync = promisify(execFile);
@@ -134,10 +137,16 @@ const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): v
  * window the completion path reads because it is the same question, which is
  * why the window no longer needs restating here.
  */
-export const mergeTailLeaseChainId = async (
+export type LeaseHolder = {
+  chainId: string;
+  taskId: string;
+  role: "mechanical" | "regression" | "auxiliary";
+};
+
+export const leaseHolderFor = async (
   tx: Prisma.TransactionClient,
   taskId: string | null,
-): Promise<string | null> => {
+): Promise<LeaseHolder | null> => {
   if (!taskId) return null;
   const task = await tx.task.findUnique({
     where: { id: taskId },
@@ -151,19 +160,141 @@ export const mergeTailLeaseChainId = async (
     },
   });
   if (!task) return null;
+  const directRole = executionModeFor(task.templateStep) === "mechanical"
+    ? "mechanical" as const
+    : isRegressionVerificationOutputKind(task.templateStep?.outputKind)
+      ? "regression" as const
+      : null;
+  if (directRole) return task.chainId ? { chainId: task.chainId, taskId, role: directRole } : null;
   const markers = await readMarkers(tx, taskId);
   const auxiliaryRegressionTaskId = latestMarker(markers, "repairAttempt")?.regressionTaskId ?? null;
-  const tail = executionModeFor(task.templateStep) === "mechanical"
-    || isRegressionVerificationOutputKind(task.templateStep?.outputKind)
-    || auxiliaryRegressionTaskId !== null;
-  if (!tail) return null;
-  if (task.chainId) return task.chainId;
   if (!auxiliaryRegressionTaskId) return null;
   const regression = await tx.task.findUnique({
     where: { id: auxiliaryRegressionTaskId },
     select: { chainId: true },
   });
-  return regression?.chainId ?? null;
+  return regression?.chainId
+    ? { chainId: regression.chainId, taskId, role: "auxiliary" }
+    : null;
+};
+
+export type LeaseSettlementOutcome = "continue" | "stop";
+export type LeaseSettlement = {
+  disposition: "retain" | "release";
+  leaseToRelease: string | null;
+};
+
+/** Decide the Lease disposition from one terminal-control outcome. */
+export const settleLease = async (
+  tx: Prisma.TransactionClient,
+  input: { taskId: string | null; outcome: LeaseSettlementOutcome },
+): Promise<LeaseSettlement> => {
+  if (input.outcome === "continue") return { disposition: "retain", leaseToRelease: null };
+  const holder = await leaseHolderFor(tx, input.taskId);
+  return { disposition: "release", leaseToRelease: holder?.chainId ?? null };
+};
+
+const LEASE_HANDOFF_GRACE_MS = 60_000;
+
+/** Persist the queued Run that must consume a retained Chain Lease. */
+export const noteLeaseHandoff = async (
+  tx: Prisma.TransactionClient,
+  input: { chainId: string; toRunId: string; at: Date },
+): Promise<void> => {
+  const run = await tx.run.findUnique({ where: { id: input.toRunId }, select: { taskId: true } });
+  if (!run?.taskId) throw new Error(`Lease handoff target Run ${input.toRunId} has no Task`);
+  await tx.taskActivity.create({ data: {
+    taskId: run.taskId,
+    actorType: "control-plane",
+    body: `Chain Lease handed to queued Run ${input.toRunId}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: input.chainId,
+      toRunId: input.toRunId,
+      handedOffAt: input.at.toISOString(),
+    },
+  } });
+};
+
+/** Find retained handoffs whose queued Run never became a Lease consumer. */
+export const leaseHandoffsWithoutConsumer = async (
+  tx: Prisma.TransactionClient,
+  now: Date,
+): Promise<Array<{ chainId: string; toRunId: string; taskId: string }>> => {
+  const rows = await tx.taskActivity.findMany({
+    where: {
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
+    },
+    select: { taskId: true, metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const pending = new Map<string, { chainId: string; toRunId: string; taskId: string }>();
+  const settled = new Set<string>();
+  for (const row of rows) {
+    const raw = row.metadata;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const metadata = raw as Record<string, unknown>;
+    if (typeof metadata.toRunId !== "string") continue;
+    if (metadata.state === "released") {
+      settled.add(metadata.toRunId);
+      continue;
+    }
+    const handedOffAt = typeof metadata.handedOffAt === "string" ? Date.parse(metadata.handedOffAt) : Number.NaN;
+    if (metadata.state === "pending" && typeof metadata.chainId === "string"
+      && Number.isFinite(handedOffAt) && handedOffAt < now.getTime() - LEASE_HANDOFF_GRACE_MS
+      && !settled.has(metadata.toRunId) && !pending.has(metadata.toRunId)) {
+      pending.set(metadata.toRunId, { chainId: metadata.chainId, toRunId: metadata.toRunId, taskId: row.taskId });
+    }
+  }
+  if (pending.size === 0) return [];
+  const queued = await tx.run.findMany({
+    where: { id: { in: [...pending.keys()] }, status: RunStatus.QUEUED, claimedAt: null, startedAt: null },
+    select: { id: true },
+  });
+  return queued.flatMap((run) => {
+    const handoff = pending.get(run.id);
+    return handoff ? [handoff] : [];
+  });
+};
+
+/** Record a completed orphan-handoff release after the external release attempt. */
+export const noteLeaseHandoffReleased = async (
+  tx: Prisma.TransactionClient,
+  input: { chainId: string; toRunId: string; taskId: string; at: Date },
+): Promise<void> => {
+  await tx.taskActivity.create({ data: {
+    taskId: input.taskId,
+    actorType: "control-plane",
+    body: `Queued Run ${input.toRunId} did not consume its Chain Lease handoff`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "released",
+      chainId: input.chainId,
+      toRunId: input.toRunId,
+      releasedAt: input.at.toISOString(),
+    },
+  } });
+};
+
+export type TransactionLeaseDisposition<T> = {
+  value: T;
+  lease: LeaseSettlement;
+};
+
+/** Commit database state before carrying out its post-commit Lease release. */
+export const commitWithLeaseDisposition = async <T>(
+  db: PrismaClient,
+  fn: (tx: Prisma.TransactionClient) => Promise<TransactionLeaseDisposition<T> | null>,
+  release: ReleaseMergeLease = releaseMergeLease,
+  options?: { isolationLevel: Prisma.TransactionIsolationLevel },
+): Promise<T | null> => {
+  const committed = await db.$transaction(fn, options);
+  if (committed === null) return null;
+  if (committed.lease.disposition === "release") await release(committed.lease.leaseToRelease);
+  return committed.value;
 };
 
 /**
@@ -213,7 +344,9 @@ const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
   }
 };
 
-export type LeaseDisposition = "release" | "retain";
+export type LeaseDisposition =
+  | { kind: "release" }
+  | { kind: "retain"; handoffRunId: string };
 
 export type MergeLeaseDependencies = {
   acquire: MergeLeaseAcquirer;
@@ -251,13 +384,13 @@ export const withMergeLease = async <T>(
     throw new Error(`merge lease acquire is unreachable: ${acquisition.detail}`);
   }
 
-  let disposition: LeaseDisposition = "release";
+  let disposition: LeaseDisposition = { kind: "release" };
   try {
     const result = await fn();
     disposition = result.disposition;
     return { outcome: "ran", value: result.value };
   } finally {
-    if (disposition === "release") {
+    if (disposition.kind === "release") {
       await releaseMergeLeaseWith(dependencies.release, chainId);
     }
   }

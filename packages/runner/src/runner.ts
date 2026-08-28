@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   ADAPTER_VERSION,
   adapterExecutionSucceeded,
@@ -9,28 +11,19 @@ import {
   outputTail,
   PREFLIGHT_CLASS,
   promptHashFor,
-  CODEX_STARTER_MODEL,
+  RUNNER_DEFINITIONS,
   type AdapterEvent,
   type CliAdapter,
   type ExitEvidence,
   type RuntimeHandle,
 } from "./adapters.js";
 import {
-  appendActivity,
-  appendEvents,
-  acknowledgeCancellation,
-  claimTask,
-  completeRun,
-  heartbeat as sendHeartbeat,
-  readSessionTaskOutputStatus,
-  recordPublishedBranch,
-  recordLeaseIndependentCleanup,
-  reportCliAvailability,
-  reportPreflight,
-  startRun,
+  controlPlane as defaultControlPlane,
   type ClaimedTask,
   type CancellationRequest,
+  type ControlPlane,
   type SessionEventPayload,
+  type SessionTaskOutputStatus,
 } from "./api.js";
 import {
   probeSupportedCliAvailability,
@@ -47,12 +40,14 @@ import {
   type FailurePhase,
   RUNNER_EXCEPTION_REASON,
   runnerExceptionEnvelope,
+  summarizeEvidence,
 } from "./envelope.js";
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
+import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import {
-  captureWorkspaceResult, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
-  provisionWorkspace, reuseWorkspace, sessionConfigRootExists, workspaceEnvironment, writeSessionCredentials,
-  type AgentScratch, type Workspace,
+  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
+  provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
+  type AgentScratch, type Workspace, type WorkspaceSnapshot,
 } from "./workspace.js";
 import { observeExternalWorktrees } from "./worktree-observer.js";
 
@@ -65,11 +60,6 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-const runnerUsesSessionConfig = (runner: RunnerKind): boolean => runner !== "CLAUDE";
-
-const retainedSessionConfigPath = async (runner: RunnerKind, scratch: AgentScratch | null): Promise<string | null> =>
-  runnerUsesSessionConfig(runner) && scratch && await sessionConfigRootExists(scratch) ? scratch.configRoot : null;
-
 const appendRetainedSessionConfig = (reason: string, path: string | null): string =>
   `${reason}${path ? `; session CLI config retained at ${path}` : ""}`;
 
@@ -80,18 +70,40 @@ const missingOutputRemediationInput = (outputKind: string): string => [
   "If the write is rejected, correct the body and retry. Then call task_status and finish only after it reports outputPersisted: true for this Run.",
 ].join("\n");
 
+const sameWorkspaceSnapshot = (left: WorkspaceSnapshot, right: WorkspaceSnapshot): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
+
+const workspaceSnapshotEvidence = (snapshot: WorkspaceSnapshot): Record<string, unknown> => ({
+  headSha: snapshot.headSha,
+  treeDigest: createHash("sha256").update(JSON.stringify(snapshot)).digest("hex"),
+  dirty: snapshot.status.length > 0,
+});
+
+const exitEvidencePayload = (evidence: ExitEvidence): Record<string, unknown> => ({
+  exitCode: evidence.exitCode,
+  signal: evidence.signal,
+  terminalEventSeen: evidence.terminalEventSeen,
+  terminalSuccess: evidence.terminalSuccess,
+  terminationReason: evidence.terminationReason,
+  finalOutputTail: summarizeEvidence(evidence.finalOutput),
+  providerErrorTail: summarizeEvidence(evidence.providerError),
+  stdoutTail: summarizeEvidence(evidence.stdout),
+  stderrTail: summarizeEvidence(evidence.stderr),
+});
+
 const cleanup = async (
   config: RunnerConfig,
   claim: ClaimedTask,
   workspace: Workspace | null,
   retain: boolean,
   alreadyDurable = false,
+  controlPlane: ControlPlane = defaultControlPlane,
 ): Promise<WorkspaceDisposal> => {
   if (!workspace) return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage: null };
   return disposeWorkspace(config, { source: "runner", claim }, {
     ...workspace,
     pinnedBaseSha: workspace.pinnedBaseSha ?? null,
-  }, { retain, alreadyDurable });
+  }, { retain, alreadyDurable }, controlPlane);
 };
 
 const preflightEvidence = (message: string): ExitEvidence => ({
@@ -115,6 +127,7 @@ export type ExecuteClaimDependencies = {
   writeSessionCredentials?: typeof writeSessionCredentials;
   /** The CLI the run is executed through. Defaults to the claim's runner kind. */
   adapter?: CliAdapter;
+  controlPlane?: ControlPlane;
 };
 
 export const executeClaim = async (
@@ -123,31 +136,45 @@ export const executeClaim = async (
   dependencies: ExecuteClaimDependencies = {},
 ): Promise<void> => {
   const adapter = dependencies.adapter ?? adapters[claim.runner];
+  const controlPlane = dependencies.controlPlane ?? defaultControlPlane;
   let workspace: Workspace | null = null;
   let scratch: AgentScratch | null = null;
   let handle: RuntimeHandle | null = null;
   let heartbeatTimer: NodeJS.Timeout | undefined;
   let lease: DeliveryLease | null = null;
+  let sessionConfigLease: SessionConfigLease | null = null;
   let heartbeatBusy = false;
   let fencingRejected = false;
   let waitingInbox = false;
   let cancellation: CancellationRequest | null = null;
   let cancellationPromise: Promise<void> | null = null;
-  let closeProviderLaunch!: () => void;
-  const providerLaunchSettled = new Promise<void>((resolve) => {
+  let providerLaunchSettled = Promise.resolve();
+  let closeProviderLaunch = (): void => undefined;
+  const openProviderLaunch = (): void => {
     let closed = false;
+    let resolveLaunch!: () => void;
+    providerLaunchSettled = new Promise<void>((resolve) => { resolveLaunch = resolve; });
     closeProviderLaunch = () => {
       if (closed) return;
       closed = true;
-      resolve();
+      resolveLaunch();
     };
-  });
+  };
+  // Cancellation may arrive at any provisioning point before the first start.
+  openProviderLaunch();
+  const providerKillPromises = new WeakMap<RuntimeHandle, Promise<void>>();
+  const drainProviderHandle = (target: RuntimeHandle, reason: string): Promise<void> => {
+    const active = providerKillPromises.get(target);
+    if (active) return active;
+    const draining = adapter.kill(target, reason).then((killed) => {
+      if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+    });
+    providerKillPromises.set(target, draining);
+    return draining;
+  };
   let budgetReason: string | null = null;
-  // A session CLI's root is retained until the run is known to have succeeded, so a
-  // provisioning or execution failure can be inspected and resumed without
-  // ever falling back to the host CLI configuration.
-  let retainSessionConfig = false;
-  let sessionConfigRemoved = false;
+  let remediationFailureReason: string | null = null;
+  let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
   // agent's own work, everything else is this process's plumbing.
@@ -176,7 +203,7 @@ export const executeClaim = async (
           workspace.path,
         );
       } catch (error: unknown) {
-        await appendActivity(
+        await controlPlane.appendActivity(
           config,
           claim,
           `Unable to observe run worktree containment: ${errorMessage(error)}`,
@@ -212,24 +239,21 @@ export const executeClaim = async (
         // therefore remains the head of the queue for the next flush attempt,
         // while the single worker prevents a later batch overtaking it.
         const batch = pendingEvents.slice(0, 250);
-        await appendEvents(config, claim, batch, handle?.providerConversationId);
+        await controlPlane.appendEvents(config, claim, batch, handle?.providerConversationId);
         pendingEvents.splice(0, batch.length);
       }
     })().finally(() => { eventFlushPromise = null; });
     return eventFlushPromise;
   };
 
-  const isFencingError = (error: unknown): error is { status: number; code?: string } =>
-    typeof error === "object" && error !== null && (error as { status?: number }).status === 409;
-
   const noteFencingError = async (error: unknown): Promise<void> => {
-    if (!isFencingError(error)) return;
-    waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
+    const authority = controlPlane.authorityFor(error);
+    if (authority.held) return;
+    waitingInbox = authority.reason === "waiting-inbox";
     fencingRejected = true;
     if (handle) {
       try {
-        const killed = await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
-        if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+        await drainProviderHandle(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
       } catch (killError: unknown) {
         console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(killError)}`);
       }
@@ -246,10 +270,9 @@ export const executeClaim = async (
       // either abandoned or has produced the handle that must be killed.
       await providerLaunchSettled;
       if (handle) {
-        const killed = await adapter.kill(handle, request.reason);
-        if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+        await drainProviderHandle(handle, request.reason);
       }
-      await acknowledgeCancellation(
+      await controlPlane.acknowledgeCancellation(
         config,
         claim,
         request,
@@ -260,9 +283,14 @@ export const executeClaim = async (
     await cancellationPromise;
   };
 
+  // Cancellation and fencing are mutated by heartbeat continuations, which
+  // TypeScript cannot observe across the awaited provider launch.
+  const providerStopReason = (): string => cancellation?.reason
+    ?? (waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
+
   const observeEventFlush = async (error: unknown): Promise<void> => {
     await noteFencingError(error);
-    if (!isFencingError(error)) console.error("Event flush failed", error);
+    if (controlPlane.authorityFor(error).held) console.error("Event flush failed", error);
   };
 
   const drainEventsUnderLease = async (openLease: DeliveryLease): Promise<void> => {
@@ -296,7 +324,7 @@ export const executeClaim = async (
     // misconfigured; the run is failed closed and non-retryable rather than
     // executed, because retrying it here would just repeat the violation.
     if (claim.executionMode === "mechanical") {
-      await completeRun(config, claim, {
+      await controlPlane.completeRun(config, claim, {
         exitCode: null,
         terminalEventSeen: false,
         terminalSuccess: false,
@@ -312,8 +340,8 @@ export const executeClaim = async (
     // `maxRunsPerTask` is the persisted authorization written by `openRun`;
     // this boot gate consumes that verdict and must not recompute a Task budget.
     if (claim.run.runNumber > claim.run.maxRunsPerTask) {
-      const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, false);
-      await completeRun(config, claim, {
+      const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, false, false, controlPlane);
+      await controlPlane.completeRun(config, claim, {
         exitCode: null,
         terminalEventSeen: false,
         terminalSuccess: false,
@@ -335,7 +363,7 @@ export const executeClaim = async (
 
     const provisionStartedAt = new Date();
     heartbeatTimer = setInterval(() => {
-      void sendHeartbeat(config, claim, {
+      void controlPlane.heartbeat(config, claim, {
         processAlive: true,
         lastProgressEventAt: provisionStartedAt,
         inFlightTool: {
@@ -345,11 +373,13 @@ export const executeClaim = async (
           lastProgressAt: provisionStartedAt.toISOString(),
         },
       }).then(async (result) => {
-        if (result.cancellation) await acceptCancellation(result.cancellation);
+        const authority = controlPlane.authorityAfterHeartbeat(result);
+        if (!authority.held && authority.reason === "cancelled") await acceptCancellation(authority.request);
         else leaseRenewedAt = Date.now();
       }).catch((error: unknown) => {
-        if (isFencingError(error)) {
-          waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
+        const authority = controlPlane.authorityFor(error);
+        if (!authority.held) {
+          waitingInbox = authority.reason === "waiting-inbox";
           fencingRejected = true;
         }
         else console.error("Provisioning heartbeat failed", error);
@@ -358,8 +388,10 @@ export const executeClaim = async (
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
-    retainSessionConfig = runnerUsesSessionConfig(claim.runner);
-    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, { reuse: claim.resume !== null });
+    sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies);
+    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
+      reuse: claim.resume !== null,
+    });
     const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
@@ -369,9 +401,9 @@ export const executeClaim = async (
         await cancellationPromise;
         return;
       }
-      const cleaned = await cleanup(config, claim, workspace, false);
+      const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-      await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+      await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
         console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
       });
       return;
@@ -381,9 +413,9 @@ export const executeClaim = async (
       const evidence = preflightEvidence(preflight.error ?? "Preflight failed");
       const classified = adapter.classifyError(evidence);
       const worktreeReport = await worktreeContainmentReport();
-      const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
-      const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
-      await completeRun(config, claim, {
+      const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0, false, controlPlane);
+      const retainedPath = await sessionConfigLease.retainedPath();
+      await controlPlane.completeRun(config, claim, {
         ...evidence,
         failureClass: classified.failureClass,
         failureReason: appendRetainedSessionConfig(preflight.error ?? "Preflight failed", retainedPath),
@@ -431,7 +463,7 @@ export const executeClaim = async (
     // invocation actually handed to the provider.
     const dispatchedPrompt = claim.resume?.input ?? prompt;
     const manifest = manifestFor(spec, dispatchedPrompt);
-    await startRun(config, claim, {
+    await controlPlane.startRun(config, claim, {
       adapterVersion: ADAPTER_VERSION,
       cliVersion: preflight.cliVersion ?? "unknown",
       authMode: preflight.authMode,
@@ -468,19 +500,20 @@ export const executeClaim = async (
         });
         if (!decision.allowed && snapshot.processAlive) {
           budgetReason = `${decision.gate}: ${decision.reason}`;
-          await adapter.kill(heartbeatHandle, budgetReason);
+          await drainProviderHandle(heartbeatHandle, budgetReason);
         }
         try {
-          const result = await sendHeartbeat(config, claim, {
+          const result = await controlPlane.heartbeat(config, claim, {
             processAlive: snapshot.processAlive,
             lastProgressEventAt: snapshot.lastProgressEventAt,
             inFlightTool: serializeTool(snapshot.inFlightTool),
           });
-          if (result.cancellation) await acceptCancellation(result.cancellation);
+          const authority = controlPlane.authorityAfterHeartbeat(result);
+          if (!authority.held && authority.reason === "cancelled") await acceptCancellation(authority.request);
           else if (snapshot.processAlive) leaseRenewedAt = Date.now();
         } catch (error: unknown) {
           await noteFencingError(error);
-          if (!isFencingError(error)) console.error("Run heartbeat failed", error);
+          if (controlPlane.authorityFor(error).held) console.error("Run heartbeat failed", error);
         }
         // Event delivery is deliberately detached from the heartbeat attempt:
         // a failed or slow append must not occupy heartbeatBusy or suppress the
@@ -488,7 +521,7 @@ export const executeClaim = async (
         if (!fencingRejected) void flushEvents().catch(observeEventFlush);
       })().catch(async (error: unknown) => {
         await noteFencingError(error);
-        if (!isFencingError(error)) console.error("Run heartbeat failed", error);
+        if (controlPlane.authorityFor(error).held) console.error("Run heartbeat failed", error);
       }).finally(() => { heartbeatBusy = false; });
     }, config.heartbeatIntervalMs);
 
@@ -498,9 +531,9 @@ export const executeClaim = async (
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
       && !fencingRejected) {
-      let outputStatus: Awaited<ReturnType<typeof readSessionTaskOutputStatus>> = null;
+      let outputStatus: SessionTaskOutputStatus | null = null;
       try {
-        outputStatus = await readSessionTaskOutputStatus(config, claim);
+        outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
       } catch (error: unknown) {
         sink({
           source: "RUNNER",
@@ -508,48 +541,109 @@ export const executeClaim = async (
           payload: { message: errorMessage(error) },
         });
       }
-      if (outputStatus?.outputRequired
-        && outputStatus.outputRemediationAllowed
-        && !outputStatus.outputPersisted) {
+      if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
         const outputKind = outputStatus.outputKind;
         const providerConversationId = completedHandle.providerConversationId;
-        if (outputKind && providerConversationId && !fencingRejected) {
+        if (outputStatus.outputSatisfiedByPriorRun) {
           sink({
             source: "RUNNER",
-            type: "TASK_OUTPUT_REMEDIATION_STARTED",
-            payload: { outputKind },
+            type: "TASK_OUTPUT_REMEDIATION_SKIPPED",
+            payload: { outputKind, reason: "immutable-output-satisfied-by-prior-run" },
           });
-          handle = await adapter.resume({
-            ...spec,
-            providerConversationId,
-            input: missingOutputRemediationInput(outputKind),
-          }, sink);
-          const remediationEvidence = await handle.exit;
-          let remediated = false;
-          try {
-            remediated = (await readSessionTaskOutputStatus(config, claim))?.outputPersisted === true;
-          } catch (error: unknown) {
+        } else if (outputStatus.outputRemediationAllowed
+          && outputKind
+          && providerConversationId
+          && !fencingRejected) {
+          const beforeRemediation = await captureWorkspaceSnapshot(config, workspace);
+          // Snapshotting is asynchronous. Cancellation may have been ACKed
+          // against the already-closed first launch while it ran, so no second
+          // provider launch may be opened without this fresh fence check.
+          if (!fencingRejected) {
             sink({
               source: "RUNNER",
-              type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
-              payload: { message: errorMessage(error) },
+              type: "TASK_OUTPUT_REMEDIATION_STARTED",
+              payload: { outputKind, workspace: workspaceSnapshotEvidence(beforeRemediation) },
             });
+            let remediationHandle: RuntimeHandle | null = null;
+            openProviderLaunch();
+            try {
+              remediationHandle = await adapter.resume({
+                ...spec,
+                providerConversationId,
+                input: missingOutputRemediationInput(outputKind),
+              }, sink);
+              handle = remediationHandle;
+            } finally {
+              closeProviderLaunch();
+            }
+            // A cancellation can win while adapter.resume is constructing the
+            // process group. Recheck before awaiting its exit and drain the newly
+            // returned handle; the ACK waits on this same deduplicated kill.
+            if (fencingRejected && remediationHandle) {
+              await drainProviderHandle(
+                remediationHandle,
+                providerStopReason(),
+              );
+              if (cancellation) await cancellationPromise;
+            }
+            if (!fencingRejected && remediationHandle) {
+              const remediationEvidence = await remediationHandle.exit;
+              const afterRemediation = await captureWorkspaceSnapshot(config, workspace);
+              const workspaceChanged = !sameWorkspaceSnapshot(beforeRemediation, afterRemediation);
+              let remediated = false;
+              let statusCheckError: string | null = null;
+              if (!workspaceChanged) {
+                try {
+                  const remediatedStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
+                  remediated = remediatedStatus?.outputPersisted === true
+                    || remediatedStatus?.outputSatisfiedByPriorRun === true;
+                } catch (error: unknown) {
+                  statusCheckError = errorMessage(error);
+                  sink({
+                    source: "RUNNER",
+                    type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
+                    payload: { message: statusCheckError },
+                  });
+                }
+              }
+              if (workspaceChanged) {
+                workspacePublicationForbidden = true;
+                remediationFailureReason = `Task output remediation changed workspace HEAD or tree for Run ${claim.run.id}`;
+              } else if (!remediated) {
+                remediationFailureReason = statusCheckError
+                  ? `Task output remediation status check failed for Run ${claim.run.id}: ${statusCheckError}`
+                  : `Task output remediation finished without persisting ${outputKind} output for Run ${claim.run.id}`;
+              }
+              sink({
+                source: "RUNNER",
+                type: "TASK_OUTPUT_REMEDIATION_FINISHED",
+                payload: {
+                  outputKind,
+                  outputPersisted: remediated,
+                  terminalSuccess: adapterExecutionSucceeded(remediationEvidence),
+                  evidence: exitEvidencePayload(remediationEvidence),
+                  workspaceChanged,
+                  ...(workspaceChanged ? {
+                    workspaceBefore: workspaceSnapshotEvidence(beforeRemediation),
+                    workspaceAfter: workspaceSnapshotEvidence(afterRemediation),
+                  } : {}),
+                  ...(statusCheckError ? { statusCheckError } : {}),
+                },
+              });
+            }
           }
-          sink({
-            source: "RUNNER",
-            type: "TASK_OUTPUT_REMEDIATION_FINISHED",
-            payload: {
-              outputKind,
-              outputPersisted: remediated,
-              terminalSuccess: adapterExecutionSucceeded(remediationEvidence),
-            },
-          });
         } else {
+          remediationFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
+            !outputStatus.outputRemediationAllowed ? "remediation is not allowed"
+              : !outputKind ? "output kind is unavailable"
+                : "provider conversation id is unavailable"
+          }`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
             payload: {
               outputKind,
+              outputRemediationAllowed: outputStatus.outputRemediationAllowed,
               providerConversationIdAvailable: providerConversationId !== null,
             },
           });
@@ -569,7 +663,11 @@ export const executeClaim = async (
     // renews the lease across it, refuses to let the phase outlive the lease,
     // and — the part a bare heartbeat loop would miss — reports when the
     // control plane has revoked this runner's authority.
-    lease = await openDeliveryLease(config, claim, leaseRenewedAt);
+    lease = await openDeliveryLease(config, claim, leaseRenewedAt, {
+      send: controlPlane.heartbeat,
+      authorityFor: controlPlane.authorityFor,
+      authorityAfterHeartbeat: controlPlane.authorityAfterHeartbeat,
+    });
     const adoptLeaseVerdict = (openLease: DeliveryLease): void => {
       if (!openLease.rejected) return;
       fencingRejected = true;
@@ -587,18 +685,20 @@ export const executeClaim = async (
         return;
       }
       if (waitingInbox) return;
-      const cleaned = await cleanup(config, claim, workspace, false);
+      const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-      await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+      await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
         console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
       });
       return;
     }
-    const executionSucceeded = adapterExecutionSucceeded(evidence);
+    const executionSucceeded = adapterExecutionSucceeded(evidence)
+      && remediationFailureReason === null
+      && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
     try { gitResult = await captureWorkspaceResult(config, workspace); } catch (error: unknown) {
-      await appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
+      await controlPlane.appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
     }
     // Bound outside the closures below: `workspace` is nullable at the top of
     // this function, and the narrowing does not survive into a callback.
@@ -619,7 +719,7 @@ export const executeClaim = async (
           claim,
           delivered,
           undefined,
-          (branch) => recordPublishedBranch(config, claim, branch),
+          (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
           retryOptions,
         ));
     }
@@ -636,47 +736,39 @@ export const executeClaim = async (
       // A failed PR operation can follow a successful, acknowledged push. That
       // branch is already durable even though the run must fail, so salvaging it
       // would publish a second ref and replace the primary delivery evidence.
-      succeeded || Boolean(workspace.pinnedBaseSha) || Boolean(primaryDelivery?.pushedBranch),
+      succeeded
+        || workspacePublicationForbidden
+        || Boolean(workspace.pinnedBaseSha)
+        || Boolean(primaryDelivery?.pushedBranch),
+      controlPlane,
     );
     if (!succeeded && cleaned.salvage) {
       delivery = cleaned.salvage;
       if (cleaned.salvage.headSha) gitResult = { ...gitResult, headSha: cleaned.salvage.headSha };
-      await appendActivity(config, claim,
+      await controlPlane.appendActivity(config, claim,
         cleaned.salvage.deliveryInstructions ?? cleaned.salvage.pushError ?? "WIP salvage attempted",
         { stream: "runner" }).catch(() => undefined);
     }
-    retainSessionConfig = !succeeded;
-    let scratchCleanupFailure: string | null = null;
-    if (scratch) {
-      try {
-        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig });
-        sessionConfigRemoved = runnerUsesSessionConfig(claim.runner) && !retainSessionConfig;
-      } catch (error: unknown) {
-        scratchCleanupFailure = errorMessage(error);
-        retainSessionConfig = true;
-        if (runnerUsesSessionConfig(claim.runner) && !await sessionConfigRootExists(scratch)) {
-          try {
-            await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
-          } catch (restoreError: unknown) {
-            scratchCleanupFailure = `${scratchCleanupFailure}; unable to restore session CLI config: ${errorMessage(restoreError)}`;
-          }
-        }
-      }
-    }
+    const sessionDisposal = await sessionConfigLease.settle(succeeded ? "succeeded" : "failed");
     const { salvage: _salvage, ...finishedCleanup } = cleaned;
-    const classified = succeeded ? null : primaryDelivery?.failureClass
-      ? { failureClass: primaryDelivery.failureClass, retryable: false }
-      : adapter.classifyError(evidence);
+    const classified = succeeded ? null
+      : budgetReason
+        ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
+        : remediationFailureReason
+          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: true }
+          : primaryDelivery?.failureClass
+            ? { failureClass: primaryDelivery.failureClass, retryable: false }
+            : adapter.classifyError(evidence);
     // The normal delivery failure remains the failure-envelope evidence even
     // when terminal salvage subsequently succeeds. The wire publication is the
     // salvage result, because it names the ref that actually became durable.
     const { failure: deliveryFailure } = primaryDelivery ?? {};
     const { failure: _deliveryError, ...deliveryPayload } = delivery ?? { pushStatus: "NOT_REQUESTED" as const };
-    const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
+    const retainedPath = sessionDisposal.retainedPath;
     const cleanupFailureReason = [
       finishedCleanup.cleanupFailureReason,
-      scratchCleanupFailure
-        ? appendRetainedSessionConfig(`Session CLI config cleanup failed: ${scratchCleanupFailure}`, retainedPath)
+      sessionDisposal.cleanupFailureReason
+        ? appendRetainedSessionConfig(`Session CLI config cleanup failed: ${sessionDisposal.cleanupFailureReason}`, retainedPath)
         : null,
     ].filter((reason): reason is string => reason !== undefined && reason !== null).join("; ");
     const completionCleanup = cleanupFailureReason
@@ -687,17 +779,28 @@ export const executeClaim = async (
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     lease.close();
-    await completeRun(config, claim, {
+    // The primary provider may have ended cleanly while the required
+    // remediation protocol failed afterwards. Reflect that protocol failure in
+    // the structured envelope too; otherwise the API correctly distrusts the
+    // runner's asserted class and would classify the clean primary evidence as
+    // TASK_FAILED instead of PROTOCOL_ERROR.
+    const completionEvidence = remediationFailureReason
+      ? { ...evidence, terminalSuccess: false }
+      : evidence;
+    await controlPlane.completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: evidence.signal,
       terminalEventSeen: evidence.terminalEventSeen,
       terminalSuccess: succeeded && evidence.terminalSuccess,
       terminationReason: budgetReason ?? evidence.terminationReason,
-      ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
+      ...(classified ? { failureClass: classified.failureClass, retryable: classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
       ...(!succeeded ? {
         failureReason: appendRetainedSessionConfig(
-          budgetReason ?? (executionSucceeded ? primaryDelivery?.pushError : null) ?? failureReasonFromEvidence(evidence),
+          budgetReason
+            ?? remediationFailureReason
+            ?? (executionSucceeded ? primaryDelivery?.pushError : null)
+            ?? failureReasonFromEvidence(evidence),
           retainedPath,
         ),
       } : {}),
@@ -709,9 +812,9 @@ export const executeClaim = async (
       ...(succeeded ? {} : {
         failureEnvelope: completionEnvelope({
           executionSucceeded,
-          evidence,
+          evidence: completionEvidence,
           deliveryFailure,
-          runnerClass: budgetReason ? "BUDGET_EXCEEDED" : classified?.failureClass ?? null,
+          runnerClass: classified?.failureClass ?? null,
           terminationReason: budgetReason ?? evidence.terminationReason,
         }),
       }),
@@ -724,11 +827,12 @@ export const executeClaim = async (
   } catch (error: unknown) {
     closeProviderLaunch();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if ((error as { status?: number; code?: string }).status === 409 && (error as { code?: string }).code === "WAITING_INBOX") {
-      waitingInbox = true;
+    const authority = controlPlane.authorityFor(error);
+    if (!authority.held) {
+      waitingInbox = authority.reason === "waiting-inbox";
       fencingRejected = true;
-      if (handle) await adapter.kill(handle, "waiting for Inbox reply").catch(() => undefined);
-      return;
+      if (handle) await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
+      if (waitingInbox) return;
     }
     const message = errorMessage(error);
     if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
@@ -739,9 +843,9 @@ export const executeClaim = async (
       }
       if (waitingInbox) return;
       if (workspace) {
-        const cleaned = await cleanup(config, claim, workspace, false);
+        const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
         const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-        await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((reportError: unknown) => {
+        await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((reportError: unknown) => {
           console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(reportError)}`);
         });
       }
@@ -750,36 +854,18 @@ export const executeClaim = async (
     const evidence = preflightEvidence(message);
     const classified = adapter.classifyError(evidence);
     const worktreeReport = await worktreeContainmentReport();
-    const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
+    const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0, false, controlPlane);
     const { salvage, ...finishedCleanup } = cleaned;
-    let restorationFailure: string | null = null;
-    if (runnerUsesSessionConfig(claim.runner) && scratch && sessionConfigRemoved) {
-      try {
-        await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
-        sessionConfigRemoved = false;
-        retainSessionConfig = true;
-      } catch (restoreError: unknown) {
-        restorationFailure = errorMessage(restoreError);
-      }
+    const sessionDisposal = sessionConfigLease && scratch
+      ? await sessionConfigLease.settle("failed")
+      : { retainedPath: null, cleanupFailureReason: null };
+    if (sessionDisposal.cleanupFailureReason === null) scratch = null;
+    let failureReason = appendRetainedSessionConfig(message, sessionDisposal.retainedPath);
+    if (sessionDisposal.cleanupFailureReason) {
+      failureReason = `${failureReason}; scratch cleanup failed: ${sessionDisposal.cleanupFailureReason}`;
     }
-    let scratchCleanupFailure: string | null = null;
-    const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
-    if (scratch) {
-      try {
-        // An exception is a failed run, so the session CLI config must remain
-        // available for diagnosis or resume. Claude has no provisioned config root, and
-        // cleanupAgentScratch safely removes its absent path.
-        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: runnerUsesSessionConfig(claim.runner) });
-        scratch = null;
-      } catch (cleanupError: unknown) {
-        scratchCleanupFailure = errorMessage(cleanupError);
-      }
-    }
-    let failureReason = appendRetainedSessionConfig(message, retainedPath);
-    if (restorationFailure) failureReason = `${failureReason}; unable to restore session CLI config after completion failure: ${restorationFailure}`;
-    if (scratchCleanupFailure) failureReason = `${failureReason}; scratch cleanup failed: ${scratchCleanupFailure}`;
-    await appendActivity(config, claim, message, { stream: "stderr" }).catch(() => undefined);
-    await completeRun(config, claim, {
+    await controlPlane.appendActivity(config, claim, message, { stream: "stderr" }).catch(() => undefined);
+    await controlPlane.completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: null,
       terminalEventSeen: false,
@@ -799,9 +885,9 @@ export const executeClaim = async (
       ...(salvage ?? {}),
       ...worktreeReport,
       ...finishedCleanup,
-      ...(scratchCleanupFailure ? {
+      ...(sessionDisposal.cleanupFailureReason ? {
         cleanupStatus: "FAILED" as const,
-        cleanupFailureReason: [finishedCleanup.cleanupFailureReason, scratchCleanupFailure].filter(Boolean).join("; "),
+        cleanupFailureReason: [finishedCleanup.cleanupFailureReason, sessionDisposal.cleanupFailureReason].filter(Boolean).join("; "),
       } : {}),
     });
   } finally {
@@ -811,17 +897,28 @@ export const executeClaim = async (
     // Throwaway by construction, so losing it costs nothing and leaving it
     // behind would leak a directory per run.
     if (scratch) {
-      await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig })
-        .catch((error: unknown) => console.error(`Agent scratch cleanup failed${runnerUsesSessionConfig(claim.runner) ? `; session config ${scratch?.configRoot} retained or may require manual recovery` : ""}`, error));
+      if (sessionConfigLease) {
+        const disposal = await sessionConfigLease.settle("failed");
+        if (disposal.cleanupFailureReason) {
+          console.error(`Agent scratch cleanup failed${disposal.retainedPath ? `; session config retained at ${disposal.retainedPath}` : ""}: ${disposal.cleanupFailureReason}`);
+        }
+      } else {
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, {
+          retainConfigRoot: RUNNER_DEFINITIONS[claim.runner].isolatesSessionConfig,
+        }).catch((cleanupError: unknown) => console.error("Agent scratch cleanup failed", cleanupError));
+      }
     }
   }
 };
 
-export const pollForTask = async (config: RunnerConfig): Promise<boolean> => {
-  const claim = await claimTask(config);
+export const pollForTask = async (
+  config: RunnerConfig,
+  controlPlane: ControlPlane = defaultControlPlane,
+): Promise<boolean> => {
+  const claim = await controlPlane.claim(config);
   if (!claim) return false;
   console.log(`Claimed run ${claim.run.id} for task ${claim.task.id} via ${claim.runner.toLowerCase()}`);
-  await executeClaim(config, claim);
+  await executeClaim(config, claim, { controlPlane });
   return true;
 };
 
@@ -832,6 +929,7 @@ export type StartupReportRetryOptions = {
   wait?: (attempt: number) => Promise<void>;
   onRetry?: (runner: RunnerKind, attempt: number, attempts: number) => void;
   onAvailability?: (availability: CliAvailability) => void;
+  controlPlane?: ControlPlane;
 };
 
 const waitBeforeStartupReportRetry = async (attempt: number): Promise<void> => {
@@ -842,16 +940,12 @@ const waitBeforeStartupReportRetry = async (attempt: number): Promise<void> => {
   await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 };
 
-const startupApiMayBecomeReady = (error: unknown): boolean => {
-  const status = (error as { status?: unknown }).status;
-  return status === undefined || (typeof status === "number" && status >= 500);
-};
-
 const reportStartupStateWithRetry = async (
   runner: RunnerKind,
   send: () => Promise<void>,
   options: StartupReportRetryOptions,
 ): Promise<void> => {
+  const controlPlane = options.controlPlane ?? defaultControlPlane;
   const attempts = options.attempts ?? STARTUP_REPORT_ATTEMPTS;
   if (!Number.isSafeInteger(attempts) || attempts < 1) throw new Error("startup report attempts must be a positive integer");
   const wait = options.wait ?? waitBeforeStartupReportRetry;
@@ -864,7 +958,7 @@ const reportStartupStateWithRetry = async (
       await send();
       return;
     } catch (error: unknown) {
-      if (attempt >= attempts || !startupApiMayBecomeReady(error)) throw error;
+      if (attempt >= attempts || !controlPlane.retriableStartupError(error)) throw error;
       onRetry(runner, attempt, attempts);
       await wait(attempt);
     }
@@ -874,10 +968,10 @@ const reportStartupStateWithRetry = async (
 const reportPreflightWithRetry = async (
   config: RunnerConfig,
   runner: RunnerKind,
-  result: Parameters<typeof reportPreflight>[2],
+  result: Parameters<ControlPlane["reportPreflight"]>[2],
   options: StartupReportRetryOptions,
 ): Promise<void> => reportStartupStateWithRetry(
-  runner, () => reportPreflight(config, runner, result), options,
+  runner, () => (options.controlPlane ?? defaultControlPlane).reportPreflight(config, runner, result), options,
 );
 
 const reportAvailabilityWithRetry = async (
@@ -886,7 +980,7 @@ const reportAvailabilityWithRetry = async (
   options: StartupReportRetryOptions,
 ): Promise<void> => reportStartupStateWithRetry(
   availability.runner,
-  async () => { await reportCliAvailability(config, availability); },
+  async () => { await (options.controlPlane ?? defaultControlPlane).reportCliAvailability(config, availability); },
   options,
 );
 
@@ -923,6 +1017,7 @@ export const runStartupPreflight = async (
 export type AvailabilityHeartbeatOptions = {
   onReportError?: (availability: CliAvailability, error: unknown) => void;
   onPreflightError?: (availability: CliAvailability, error: unknown) => void;
+  controlPlane?: ControlPlane;
 };
 
 const runBackendPreflight = async (
@@ -930,9 +1025,8 @@ const runBackendPreflight = async (
   runner: RunnerKind,
   env = workspaceEnvironment(config),
 ) => {
-  const model = runner === "PI" ? "openai-codex/gpt-5.6-luna"
-    : runner === "CODEX" ? CODEX_STARTER_MODEL : runner.toLowerCase();
-  return adapters[runner].preflight({ config, runner, model, env });
+  const definition = RUNNER_DEFINITIONS[runner];
+  return definition.adapter.preflight({ config, runner, model: definition.startupPreflightModel, env });
 };
 
 /** One cheap daemon heartbeat. Every backend is attempted independently so a
@@ -941,6 +1035,7 @@ export const reportCliAvailabilityHeartbeat = async (
   config: RunnerConfig,
   options: AvailabilityHeartbeatOptions = {},
 ): Promise<void> => {
+  const controlPlane = options.controlPlane ?? defaultControlPlane;
   const availability = await probeSupportedCliAvailability(config);
   const onReportError = options.onReportError ?? ((probe: CliAvailability, error: unknown) => {
     console.error(`Failed to report ${probe.runner.toLowerCase()} runner CLI availability`, error);
@@ -951,14 +1046,14 @@ export const reportCliAvailabilityHeartbeat = async (
   for (const runner of SUPPORTED_RUNNERS) {
     let revalidatePreflight = false;
     try {
-      ({ revalidatePreflight } = await reportCliAvailability(config, availability[runner]));
+      ({ revalidatePreflight } = await controlPlane.reportCliAvailability(config, availability[runner]));
     } catch (error: unknown) {
       onReportError(availability[runner], error);
       continue;
     }
     if (revalidatePreflight && availability[runner].available) {
       try {
-        await reportPreflight(config, runner, await runBackendPreflight(config, runner));
+        await controlPlane.reportPreflight(config, runner, await runBackendPreflight(config, runner));
       } catch (error: unknown) {
         onPreflightError(availability[runner], error);
       }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   enqueueTaskRun,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
+  mergeRecoveryTransitionAllowed,
   MergeRecoveryStatus,
   parseRegressionVerdict,
   Prisma,
@@ -14,6 +15,7 @@ import {
 } from "@agentos/db";
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
+import { settleLease } from "./merge-lease.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,
@@ -104,51 +106,225 @@ export const baseDriftRecoveryContext = async (
   return recoveryContext(row);
 };
 
-export const stopBaseDriftRecoveryTail = async (
-  tx: DbTx,
-  context: RecoveryContext,
-  phase: "regression",
-  reason: string,
-): Promise<void> => {
-  const body = `Automatic base-drift recovery ${context.attempt} stopped at ${phase}: ${reason}`;
-  await tx.mergeRecoveryAttempt.update({ where: { id: context.aggregateId }, data: {
-    status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-    failureReason: reason,
-    endedAt: new Date(),
-  } });
-  await tx.task.updateMany({
-    where: { id: { in: [context.regressionTaskId, context.readinessTaskId, context.integratorTaskId] } },
-    data: { status: TaskStatus.REVIEW, failureReason: body },
-  });
-  const dedupeKey = `merge-base-drift-recovery-tail-stop:${context.sourceStopId}:${phase}`;
-  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
-    from: "AGENT", taskId: context.regressionTaskId, kind: "TEXT", body, dedupeKey,
-  }, update: {} });
-  const metadata = { ...context, state: "tail-stopped", phase, reason, dedupeKey };
-  for (const taskId of [context.integratorTaskId, context.regressionTaskId]) {
-    await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
+type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateInput;
+
+export type StopMergeTailInput =
+  | {
+    phase: "regression";
+    regressionTaskId: string;
+    reason: string;
+    at: Date;
+    recovery: RecoveryContext | null;
+    agentId: string;
+    sessionId?: string;
   }
+  | {
+    phase: "readiness";
+    readinessTaskId: string;
+    regressionTaskId: string;
+    reason: string;
+    at: Date;
+    recovery: RecoveryContext | null;
+  }
+  | {
+    phase: "recovery-validation" | "recovery-exhausted";
+    aggregateId: string;
+    integratorTaskId: string;
+    sourceStopId: string;
+    reason: string;
+    at: Date;
+    attempt: number;
+    recoveryData: RecoveryStopData;
+    markerMetadata: Record<string, unknown>;
+  }
+  | {
+    phase: "repair";
+    regressionTaskId: string;
+    repairTaskId: string;
+    repairKind: string | null;
+    startHeadSha: string | null;
+    targetHeadSha: string | null;
+    resolvedHeadSha: string | null;
+    reason: string;
+    at: Date;
+    agentId: string;
+    sessionId?: string;
+  };
+
+export type StopMergeTailResult = { leaseToRelease: string | null };
+
+const transitionRecovery = async (
+  tx: DbTx,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data: RecoveryStopData,
+): Promise<void> => {
+  const aggregate = await tx.mergeRecoveryAttempt.findUnique({
+    where: { id: aggregateId },
+    select: { status: true },
+  });
+  if (!aggregate) throw new Error(`Merge recovery aggregate ${aggregateId} is absent`);
+  if (!mergeRecoveryTransitionAllowed(aggregate.status, target)) {
+    throw new Error(`Illegal merge recovery transition ${aggregate.status} -> ${target} for ${aggregateId}`);
+  }
+  await tx.mergeRecoveryAttempt.update({
+    where: { id: aggregateId },
+    data: { ...data, status: target },
+  });
 };
 
-/**
- * Resolves the agent that repairs what this chain's merge tail found: the
- * chain's own fix step assignee, or `senior-dev` when the chain has none.
- */
-export const mergeTailFixAgentName = async (
+const stopNotice = async (
   tx: DbTx,
-  regression: { projectId: string; chainId: string | null; templateId: string | null } | null,
-): Promise<string> => {
-  if (!regression) return "senior-dev";
-  const fixTask = await tx.task.findFirst({
-    where: {
-      projectId: regression.projectId,
-      chainId: regression.chainId,
-      templateId: regression.templateId,
-      templateStep: { outputKind: "fixed-implementation" },
-    },
-    select: { assigneeAgent: { select: { name: true } } },
+  input: { taskId: string; body: string; dedupeKey: string; agentId?: string; sessionId?: string },
+): Promise<void> => {
+  await tx.inboxMessage.upsert({ where: { dedupeKey: input.dedupeKey }, create: {
+    from: "AGENT",
+    ...(input.agentId ? { agentId: input.agentId } : {}),
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    taskId: input.taskId,
+    kind: "TEXT",
+    body: input.body,
+    dedupeKey: input.dedupeKey,
+  }, update: {} });
+};
+
+/** Persist one merge-tail stop and return the Chain Lease its caller may release after commit. */
+export const stopMergeTail = async (
+  tx: DbTx,
+  input: StopMergeTailInput,
+): Promise<StopMergeTailResult> => {
+  if (input.phase === "regression" || input.phase === "readiness") {
+    const recovery = input.recovery;
+    const body = recovery
+      ? `Automatic base-drift recovery ${recovery.attempt} stopped at ${input.phase}: ${input.reason}`
+      : input.phase === "readiness"
+        ? `Autonomous merge readiness stopped: ${input.reason}`
+        : `Autonomous merge tail stopped: ${input.reason}`;
+    if (recovery) {
+      await transitionRecovery(tx, recovery.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
+        failureReason: input.reason,
+        endedAt: input.at,
+      });
+      if (input.phase === "regression") {
+        await tx.task.updateMany({
+          where: { id: { in: [recovery.regressionTaskId, recovery.readinessTaskId, recovery.integratorTaskId] } },
+          data: { status: TaskStatus.REVIEW, failureReason: body },
+        });
+      } else {
+        await tx.task.updateMany({
+          where: { id: { in: [input.readinessTaskId, input.regressionTaskId] } },
+          data: { status: TaskStatus.REVIEW, failureReason: input.reason },
+        });
+        await tx.task.update({
+          where: { id: recovery.integratorTaskId },
+          data: { status: TaskStatus.REVIEW, failureReason: body },
+        });
+      }
+      const dedupeKey = `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:${input.phase}`;
+      const metadata = { ...recovery, state: "tail-stopped", phase: input.phase, reason: input.reason, dedupeKey };
+      for (const taskId of [recovery.integratorTaskId, recovery.regressionTaskId]) {
+        await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
+      }
+      await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey });
+    } else if (input.phase === "readiness") {
+      await tx.task.updateMany({
+        where: { id: { in: [input.readinessTaskId, input.regressionTaskId] } },
+        data: { status: TaskStatus.REVIEW, failureReason: input.reason },
+      });
+    } else {
+      await tx.task.update({
+        where: { id: input.regressionTaskId },
+        data: { status: TaskStatus.REVIEW, failureReason: input.reason },
+      });
+    }
+    if (!recovery && input.phase === "regression") {
+      await writeMarker(tx, input.regressionTaskId, "regression", {
+        actorType: "control-plane",
+        body: `Regression did not advance: ${input.reason}`,
+        metadata: { state: "stopped", reason: input.reason },
+      });
+      await openMergeTailStopNotice(tx, {
+        taskId: input.regressionTaskId,
+        agentId: input.agentId,
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        reason: input.reason,
+      });
+    }
+    if (input.phase === "readiness") {
+      await writeMarker(tx, input.regressionTaskId, "readiness", {
+        actorType: "control-plane",
+        body: `Merge readiness stopped at regression: ${input.reason}`,
+        metadata: { state: "stopped", reason: input.reason },
+      });
+      if (!recovery) {
+        const dedupeKey = `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
+        await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey });
+      }
+    }
+    const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
+    return { leaseToRelease: lease.leaseToRelease };
+  }
+
+  if (input.phase === "repair") {
+    await tx.task.update({
+      where: { id: input.regressionTaskId },
+      data: { status: TaskStatus.REVIEW, failureReason: input.reason },
+    });
+    await writeMarker(tx, input.regressionTaskId, "repairResult", {
+      actorType: "control-plane",
+      body: `Automatic ${input.repairKind} attempt failed: ${input.startHeadSha} -> ${input.resolvedHeadSha ?? "no-delivered-head"}`,
+      metadata: {
+        repairKind: input.repairKind,
+        repairTaskId: input.repairTaskId,
+        startHeadSha: input.startHeadSha,
+        targetHeadSha: input.targetHeadSha,
+        resolvedHeadSha: input.resolvedHeadSha,
+        state: "failed",
+      },
+    });
+    await openMergeTailStopNotice(tx, {
+      taskId: input.regressionTaskId,
+      agentId: input.agentId,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      reason: input.reason,
+    });
+    const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
+    return { leaseToRelease: lease.leaseToRelease };
+  }
+
+  await transitionRecovery(tx, input.aggregateId, MergeRecoveryStatus.FAILED, {
+    ...input.recoveryData,
+    failureReason: input.reason,
+    endedAt: input.at,
   });
-  return fixTask?.assigneeAgent?.name ?? "senior-dev";
+  const state = input.phase === "recovery-validation" ? "ineligible" : "exhausted";
+  const body = input.phase === "recovery-validation"
+    ? `Automatic pre-merge base-drift recovery refused: ${input.reason}`
+    : `Automatic pre-merge base-drift recovery exhausted at attempt ${input.attempt}`;
+  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+    actorType: "control-plane",
+    body,
+    metadata: {
+      state,
+      ...input.markerMetadata,
+      integratorTaskId: input.integratorTaskId,
+      sourceStopId: input.sourceStopId,
+      reason: input.reason,
+    },
+  });
+  const dedupeKey = `merge-base-drift-recovery:${state}:${input.sourceStopId}`;
+  await stopNotice(tx, {
+    taskId: input.integratorTaskId,
+    body: `Automatic pre-merge base-drift recovery ${state} for stop ${input.sourceStopId}: ${input.reason}. No regression run or re-authorization was created.`,
+    dedupeKey,
+  });
+  await tx.task.update({ where: { id: input.integratorTaskId }, data: {
+    status: TaskStatus.REVIEW,
+    failureReason: input.phase === "recovery-validation"
+      ? `Automatic base-drift recovery refused: ${input.reason}`
+      : input.reason,
+  } });
+  return { leaseToRelease: null };
 };
 
 export const createMergeTailRepairTask = async (
@@ -277,17 +453,15 @@ export const handleRegressionCompletion = async (
   const recovery = await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
   const parsed = parseRegressionVerdict(output?.body, output?.kind);
   const stop = async (reason: string): Promise<"handled"> => {
-    if (recovery) {
-      await stopBaseDriftRecoveryTail(tx, recovery, "regression", reason);
-      return "handled";
-    }
-    await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-    await writeMarker(tx, input.task.id, "regression", {
-      actorType: "control-plane",
-      body: `Regression did not advance: ${reason}`,
-      metadata: { state: "stopped", reason },
+    await stopMergeTail(tx, {
+      phase: "regression",
+      regressionTaskId: input.task.id,
+      reason,
+      at: input.now,
+      recovery,
+      agentId: input.run.agentId,
+      sessionId: input.run.sessionId,
     });
-    await openMergeTailStopNotice(tx, { taskId: input.task.id, agentId: input.run.agentId, sessionId: input.run.sessionId, reason });
     return "handled";
   };
   if (parsed.status === "invalid") return stop(parsed.reason);
@@ -312,11 +486,14 @@ export const handleRegressionCompletion = async (
   }
 
   if (recovery) {
-    await stopBaseDriftRecoveryTail(
-      tx,
+    await stopMergeTail(tx, {
+      phase: "regression",
+      regressionTaskId: input.task.id,
       recovery,
-      "regression",
-      truncateFailureReason(
+      agentId: input.run.agentId,
+      sessionId: input.run.sessionId,
+      at: input.now,
+      reason: truncateFailureReason(
         verdict.outcome === "refresh-conflict"
           ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
           : verdict.outcome === "review-fail"
@@ -324,7 +501,7 @@ export const handleRegressionCompletion = async (
             : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
         FAILURE_REASON_LIMIT,
       ),
-    );
+    });
     return "handled";
   }
 

@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   AUTHORIZED_MERGE_METHOD,
   MergeRecoveryStatus,
   Prisma,
+  RunStatus,
   TaskStatus,
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
@@ -20,7 +21,7 @@ import {
 } from "@agentos/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
-import { openDefenseAuditNotice } from "./merge-tail-actions.js";
+import { openDefenseAuditNotice, stopMergeTail } from "./merge-tail-actions.js";
 import { createGitHubReader, type PullRequestReader } from "./github-read.js";
 import {
   evaluateReadiness,
@@ -29,6 +30,7 @@ import {
   type ReadinessInput,
 } from "./readiness-decision.js";
 import {
+  noteLeaseHandoff,
   releaseMergeLease,
   withMergeLease,
   type ReleaseMergeLease,
@@ -130,66 +132,25 @@ const stopReadiness = async (
   },
   releaseChainLease: ReleaseMergeLease,
 ): Promise<boolean> => {
-  const recoveryBody = input.recovery
-    ? `Automatic base-drift recovery ${input.recovery.attempt} stopped at readiness: ${input.reason}`
-    : null;
-  const dedupeKey = input.recovery
-    ? `merge-base-drift-recovery-tail-stop:${input.recovery.sourceStopId}:readiness`
-    : `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
   const transition = await db.$transaction(async (tx) => {
     await lockTaskMutationRows(tx, input.readinessTaskId);
-    const readiness = await tx.task.findUnique({
-      where: { id: input.readinessTaskId },
-      select: { chainId: true },
-    });
     const held = await tx.task.updateMany({
       where: { id: input.readinessTaskId, status: TaskStatus.DOING, failureReason: input.claimReason },
-      data: { status: TaskStatus.REVIEW, failureReason: input.reason },
+      data: { failureReason: input.claimReason },
     });
-    if (held.count !== 1) return { applied: false as const, chainId: readiness?.chainId ?? null };
-    await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
-    if (input.recovery) {
-      await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
-        status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-        failureReason: input.reason,
-        endedAt: new Date(),
-      } });
-      await tx.task.update({
-        where: { id: input.recovery.integratorTaskId },
-        data: { status: TaskStatus.REVIEW, failureReason: recoveryBody },
-      });
-      const metadata = {
-        ...input.recovery,
-        state: "tail-stopped",
-        phase: "readiness",
-        reason: input.reason,
-        dedupeKey,
-      } as Prisma.InputJsonObject;
-      await tx.taskActivity.createMany({ data: [
-        { taskId: input.recovery.integratorTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
-        { taskId: input.regressionTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
-      ] });
-    }
-    await writeMarker(tx, input.regressionTaskId, "readiness", {
-      actorType: "control-plane",
-      body: `Merge readiness stopped at regression: ${input.reason}`,
-      metadata: { state: "stopped", reason: input.reason },
+    if (held.count !== 1) return { applied: false as const, leaseToRelease: null };
+    const stopped = await stopMergeTail(tx, {
+      phase: "readiness",
+      readinessTaskId: input.readinessTaskId,
+      regressionTaskId: input.regressionTaskId,
+      reason: input.reason,
+      recovery: input.recovery,
+      at: new Date(),
     });
-    await tx.inboxMessage.upsert({
-      where: { dedupeKey },
-      create: {
-        from: "AGENT",
-        taskId: input.regressionTaskId,
-        kind: "TEXT",
-        body: recoveryBody ?? `Autonomous merge readiness stopped: ${input.reason}`,
-        dedupeKey,
-      },
-      update: {},
-    });
-    return { applied: true as const, chainId: readiness?.chainId ?? null };
+    return { applied: true as const, leaseToRelease: stopped.leaseToRelease };
   });
   if (!transition.applied) return false;
-  await releaseChainLease(transition.chainId);
+  await releaseChainLease(transition.leaseToRelease);
   return true;
 };
 
@@ -462,8 +423,20 @@ const applyReadinessDecision = async (
       const activeSuccessor = current?.status === TaskStatus.DONE
         || (current?.status === TaskStatus.DOING
           && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
+      const handoff = activeSuccessor && readiness.chainId
+        ? await db.run.findFirst({
+          where: {
+            task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+            status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+          },
+          select: { id: true },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        })
+        : null;
       return {
-        disposition: activeSuccessor ? "retain" as const : "release" as const,
+        disposition: handoff
+          ? { kind: "retain" as const, handoffRunId: handoff.id }
+          : { kind: "release" as const },
         value: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
       };
     }
@@ -484,7 +457,20 @@ const applyReadinessDecision = async (
         const activeSuccessor = current?.status === TaskStatus.DONE
           || (current?.status === TaskStatus.DOING
             && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
-        return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+        const handoff = activeSuccessor && readiness.chainId
+          ? await tx.run.findFirst({
+            where: {
+              task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+              status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+            },
+            select: { id: true },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          })
+          : null;
+        return {
+          kind: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
+          handoffRunId: handoff?.id ?? null,
+        };
       }
       const binding = `mechanical:${readiness.id}:${randomUUID()}`;
       const payload = {
@@ -548,24 +534,32 @@ const applyReadinessDecision = async (
           recoverySourceStopId: recovery?.sourceStopId ?? null,
         },
       });
-      if (recovery) {
-        await activateRecoveryIntegratorSuccessor(tx, {
+      const activated = recovery
+        ? await activateRecoveryIntegratorSuccessor(tx, {
           readinessTaskId: readiness.id,
           integratorTaskId: recovery.integratorTaskId,
           sourceStopId: recovery.sourceStopId,
           recoveryRunId: recovery.recoveryRunId,
           authorizationActivityId: activity.id,
-        }, read.input.now);
-      } else {
-        await activateChainSuccessor(tx, readiness, {}, read.input.now);
+        }, read.input.now)
+        : await activateChainSuccessor(tx, readiness, {}, read.input.now);
+      const handoff = activated.nextTaskId
+        ? await tx.run.findFirst({
+          where: { taskId: activated.nextTaskId, status: RunStatus.QUEUED },
+          select: { id: true },
+          orderBy: { runNumber: "desc" },
+        })
+        : null;
+      if (handoff && readiness.chainId) {
+        await noteLeaseHandoff(tx, { chainId: readiness.chainId, toRunId: handoff.id, at: read.input.now });
       }
-      return "authorized" as const;
+      return { kind: "authorized" as const, handoffRunId: handoff?.id ?? null };
     });
     return {
-      disposition: authorization === "authorized" || authorization === "claim-lost-active"
-        ? "retain" as const
-        : "release" as const,
-      value: authorization,
+      disposition: authorization.handoffRunId
+        ? { kind: "retain" as const, handoffRunId: authorization.handoffRunId }
+        : { kind: "release" as const },
+      value: authorization.kind,
     };
   });
   if (leased.outcome === "contended") return;

@@ -21,6 +21,41 @@ export type CodexServiceTier = "DEFAULT" | "FAST";
 export type CancellationRequest = { requestId: string; reason: string; requestedAt: string };
 export type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null };
 
+export class ControlPlaneError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+
+  constructor(status: number, responseBody: string, code?: string) {
+    super(`AgentOS API ${status}: ${responseBody}`);
+    this.name = "ControlPlaneError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** The runner's domain verdict for whether its current Run authority remains. */
+export type Authority =
+  | { held: true }
+  | { held: false; reason: "revoked" }
+  | { held: false; reason: "waiting-inbox" }
+  | { held: false; reason: "cancelled"; request: CancellationRequest };
+
+export const authorityFor = (error: unknown): Authority => {
+  if (!(error instanceof ControlPlaneError) || error.status !== 409) return { held: true };
+  return error.code === "WAITING_INBOX"
+    ? { held: false, reason: "waiting-inbox" }
+    : { held: false, reason: "revoked" };
+};
+
+export const authorityAfterHeartbeat = (result: HeartbeatResult): Authority =>
+  result.cancellation
+    ? { held: false, reason: "cancelled", request: result.cancellation }
+    : { held: true };
+
+/** Startup may retry transport failures and control-plane 5xx responses only. */
+export const retriableStartupError = (error: unknown): boolean =>
+  !(error instanceof ControlPlaneError) || error.status >= 500;
+
 export type ClaimedTask = {
   /**
    * Server-computed from the claimed task's template step (§D-P1 rule 4).
@@ -146,6 +181,8 @@ export type SessionEventPayload = {
 const request = async (config: RunnerConfig, path: string, init: RequestInit): Promise<Response> => {
   const response = await fetch(`${config.apiUrl}${path}`, {
     ...init,
+    // Endpoint-specific credentials intentionally come last. Session routes
+    // must replace the runner principal rather than sending runner auth.
     headers: { Authorization: `Bearer ${config.runnerToken}`, "Content-Type": "application/json", ...init.headers },
     signal: AbortSignal.timeout(config.apiTimeoutMs),
   }).catch((error: unknown) => {
@@ -162,9 +199,7 @@ const request = async (config: RunnerConfig, path: string, init: RequestInit): P
     const responseBody = await response.text();
     let code: string | undefined;
     try { code = (JSON.parse(responseBody) as { code?: string }).code; } catch { /* non-JSON error */ }
-    const error = new Error(`AgentOS API ${response.status}: ${responseBody}`);
-    Object.assign(error, { status: response.status, code });
-    throw error;
+    throw new ControlPlaneError(response.status, responseBody, code);
   }
   return response;
 };
@@ -264,6 +299,7 @@ export type SessionTaskOutputStatus = {
   outputKind: string | null;
   outputRequired: boolean;
   outputRemediationAllowed: boolean;
+  outputSatisfiedByPriorRun: boolean;
   outputPersisted: boolean;
 };
 
@@ -282,6 +318,7 @@ export const readSessionTaskOutputStatus = async (
       outputKind?: unknown;
       outputRequired?: unknown;
       outputRemediationAllowed?: unknown;
+      outputSatisfiedByPriorRun?: unknown;
       outputPersisted?: unknown;
     } | null;
   };
@@ -290,6 +327,7 @@ export const readSessionTaskOutputStatus = async (
     || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
     || typeof payload.task.outputRequired !== "boolean"
     || typeof payload.task.outputRemediationAllowed !== "boolean"
+    || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
     || typeof payload.task.outputPersisted !== "boolean") {
     throw new Error(`AgentOS API returned an invalid task output status for Run ${claim.run.id}`);
   }
@@ -297,6 +335,7 @@ export const readSessionTaskOutputStatus = async (
     outputKind: payload.task.outputKind,
     outputRequired: payload.task.outputRequired,
     outputRemediationAllowed: payload.task.outputRemediationAllowed,
+    outputSatisfiedByPriorRun: payload.task.outputSatisfiedByPriorRun,
     outputPersisted: payload.task.outputPersisted,
   };
 };
@@ -465,7 +504,7 @@ export const fetchReclaimPlan = async (
     method: "POST",
     body: JSON.stringify(inventory),
   }).catch((error: unknown) => {
-    if ((error as { status?: number }).status === 404) return null;
+    if (error instanceof ControlPlaneError && error.status === 404) return null;
     throw error;
   });
   return response ? await response.json() as ReclaimPlan : null;
@@ -479,7 +518,7 @@ export const reportReclaimOutcomes = async (
     method: "POST",
     body: JSON.stringify(report),
   }).catch((error: unknown) => {
-    if ((error as { status?: number }).status === 404) return null;
+    if (error instanceof ControlPlaneError && error.status === 404) return null;
     throw error;
   });
 };
@@ -522,3 +561,50 @@ export const reportCliAvailability = async (
   const body = JSON.parse(responseBody) as { revalidatePreflight?: boolean };
   return { revalidatePreflight: body.revalidatePreflight === true };
 };
+
+/**
+ * The runner-to-control-plane seam. The HTTP adapter below owns route paths,
+ * fencing envelopes, timeout translation, and error decoding; callers consume
+ * domain operations and classify authority through this interface.
+ */
+export interface ControlPlane {
+  claim: typeof claimTask;
+  startRun: typeof startRun;
+  heartbeat: typeof heartbeat;
+  appendEvents: typeof appendEvents;
+  appendActivity: typeof appendActivity;
+  completeRun: typeof completeRun;
+  readSessionTaskOutputStatus: typeof readSessionTaskOutputStatus;
+  recordPublishedBranch: typeof recordPublishedBranch;
+  recordLeaseIndependentCleanup: typeof recordLeaseIndependentCleanup;
+  acknowledgeCancellation: typeof acknowledgeCancellation;
+  fetchReclaimPlan: typeof fetchReclaimPlan;
+  reportReclaimOutcomes: typeof reportReclaimOutcomes;
+  recordReclaimPublication: typeof recordReclaimPublication;
+  reportPreflight: typeof reportPreflight;
+  reportCliAvailability: typeof reportCliAvailability;
+  authorityFor(error: unknown): Authority;
+  authorityAfterHeartbeat(result: HeartbeatResult): Authority;
+  retriableStartupError(error: unknown): boolean;
+}
+
+export const controlPlane: ControlPlane = Object.freeze({
+  claim: claimTask,
+  startRun,
+  heartbeat,
+  appendEvents,
+  appendActivity,
+  completeRun,
+  readSessionTaskOutputStatus,
+  recordPublishedBranch,
+  recordLeaseIndependentCleanup,
+  acknowledgeCancellation,
+  fetchReclaimPlan,
+  reportReclaimOutcomes,
+  recordReclaimPublication,
+  reportPreflight,
+  reportCliAvailability,
+  authorityFor,
+  authorityAfterHeartbeat,
+  retriableStartupError,
+});

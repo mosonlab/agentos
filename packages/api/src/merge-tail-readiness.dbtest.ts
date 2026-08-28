@@ -443,7 +443,7 @@ test("an unreachable merge lease acquire stops with a durable reason", async () 
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
 });
 
-test("a worker that acquired then lost its claim releases unless a successor owns the lease window", async () => {
+test("a worker that acquired then lost its claim releases without a concrete successor Run", async () => {
   const abandoned = await seedReadiness();
   const loseToOperator: MergeLeaseAcquirer = async () => {
     await db.task.update({
@@ -472,7 +472,7 @@ test("a worker that acquired then lost its claim releases unless a successor own
     await readinessTick(db, reader(), new Date(), 5, releaseChainLease, leaseRunner(loseToWorker)),
     { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
   );
-  assert.deepEqual(releasedChainLeases, []);
+  assert.deepEqual(releasedChainLeases, [succeeded.readiness.chainId]);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).failureReason, NEWER_CLAIM);
 });
 
