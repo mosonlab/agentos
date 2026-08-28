@@ -199,10 +199,15 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
     orderBy: { createdAt: "asc" }, select: { metadata: true },
   });
   const intents = intentRows.map((row) => asJsonObject(row.metadata)).filter((metadata) => metadata?.sourceRunId === sourceRun.id);
-  if (intents.length !== 1) return refuse("intent-count");
-  const intent = intents[0]!;
-  if (intent.authorizationActivityId !== authorization.activityId
-    || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha) {
+  // The executor's first pull-request read can observe base drift before the
+  // irreversible path writes an intent. A successful, run-bound stop with no
+  // intent is therefore the expected pre-intent shape and is safe to recover.
+  // Once an intent exists it must still bind the selected authorization, and
+  // multiple rows remain ambiguous rather than being guessed through.
+  if (intents.length > 1) return refuse("intent-count");
+  const intent = intents[0];
+  if (intent && (intent.authorizationActivityId !== authorization.activityId
+    || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha)) {
     return refuse("intent-mismatch");
   }
   if (evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");
