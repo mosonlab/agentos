@@ -18,6 +18,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
+import { readChainControl } from "./chain-control.js";
 import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
 import { readChainControl } from "./chain-control.js";
 import { requireGateAttestation } from "./gate-attestation.js";
@@ -1698,6 +1699,13 @@ const activateChainSuccessorInternal = async (
   }
 
   const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  // The full-chain lock is already held here. Read the persisted control only
+  // after taking it so a completion and an operator Hold have one defined
+  // winner, rather than allowing a stale pre-lock read to leak activation.
+  const chainControl = await readChainControl(tx, {
+    projectId: task.projectId,
+    chainId: task.chainId,
+  });
   const boundSuccessor = current.status === TaskStatus.DONE
     ? await tx.task.findUnique({
       where: { dispatchAfterTaskId: current.id },
@@ -1707,7 +1715,7 @@ const activateChainSuccessorInternal = async (
   if (!currentRows.every((row) => row.status === TaskStatus.DONE)) {
     // The first review completion exits here while its blind sibling is still
     // unfinished; the second completion owns the join.
-    if (boundSuccessor) {
+    if (boundSuccessor && !chainControl.held) {
       await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
     }
     return { nextTaskId: null, gated: false };
@@ -1730,9 +1738,26 @@ const activateChainSuccessorInternal = async (
     // cannot complete an archived task, but retaining this check also keeps
     // legacy/directly-seeded rows inert instead of dispatching from archived
     // history when an activation replay is attempted.
-    if (boundSuccessor && current.archivedAt === null) {
+    if (boundSuccessor && current.archivedAt === null && !chainControl.held) {
       await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, predecessorComplete);
     }
+    return { nextTaskId: null, gated: false };
+  }
+
+  if (chainControl.held && (chainControl.heldLayer === null || nextLayer > chainControl.heldLayer)) {
+    await tx.taskActivity.create({ data: {
+      taskId: current.id,
+      actorType: "control-plane",
+      body: chainControl.heldLayer === null
+        ? "Predecessor layer completed; successor activation withheld because Chain is held"
+        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
+      metadata: {
+        kind: "chainControl.activationWithheld",
+        schemaVersion: 1,
+        heldLayer: chainControl.heldLayer,
+        nextLayer,
+      },
+    } });
     return { nextTaskId: null, gated: false };
   }
 

@@ -546,6 +546,7 @@ test("chain advancement parks an archived successor without throwing or enqueuei
     taskActivity: {
       create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
     },
+    chainControl: { findMany: async () => [] },
   } as any;
   assert.deepEqual(await advanceTemplateTask(tx, "task-1", "run-1", null), {
     gated: false,
