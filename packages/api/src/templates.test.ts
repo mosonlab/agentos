@@ -42,10 +42,10 @@ test("composed task descriptions derive the prior-output reminder from declared 
   }
 });
 
-test("implementation route parsing accepts only a complete machine-readable line", () => {
+test("implementation route parsing accepts the machine-readable name before an optional reason", () => {
   assert.equal(parseImplementationRoute("Build it\nRoute: implementation=senior-dev\n"), "senior-dev");
   assert.equal(parseImplementationRoute("Route: implementation=frontend-dev"), "frontend-dev");
-  assert.equal(parseImplementationRoute("Route: implementation=senior-dev - reason"), null);
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev - step renumbering crosses contracts"), "senior-dev");
   assert.equal(parseImplementationRoute("Route: implementation=senior-dev "), null);
   assert.equal(parseImplementationRoute("Route: implementation=unknown"), "unknown");
   assert.equal(parseImplementationRoute(undefined), null);
@@ -484,7 +484,11 @@ test("step override structural refusals happen before template reads and carry s
   }
 });
 
-test("Route overrides the direct implementation step by role after its step index is renumbered", async () => {
+test("an unbound direct chain omits revalidation while Route overrides the renumbered implementation", async () => {
+  const revalidator = {
+    id: "agent-revalidator", name: "spec-revalidator", projectId: "project-1", archivedAt: null,
+    model: "openai-codex/gpt-5.6-luna:xhigh", foundationalPrompt: "foundation", rolePrompt: "role",
+  };
   const canonical = {
     id: "agent-luna", name: "senior-dev-luna", projectId: "project-1", archivedAt: null,
     model: "gpt-5.6-luna:max", foundationalPrompt: "foundation", rolePrompt: "role",
@@ -495,16 +499,22 @@ test("Route overrides the direct implementation step by role after its step inde
   };
   const steps = [
     {
-      id: "step-implementation", stepIndex: 41, name: "Implementation", prompt: "implement {{chainId}}",
-      outputKind: "implementation", attachmentsFromPrevious: false, priorOutputKinds: [],
-      assigneeType: AssigneeType.AGENT, assigneeAgentId: canonical.id, assigneeAgent: canonical,
-      approvalGate: false, opensPullRequest: true, layer: 1, baseFromStepIndex: null, runner: null,
+      id: "step-revalidation", stepIndex: 1, name: "Revalidate", prompt: "revalidate {{chainId}}",
+      outputKind: "revalidation", attachmentsFromPrevious: false, priorOutputKinds: [],
+      assigneeType: AssigneeType.AGENT, assigneeAgentId: revalidator.id, assigneeAgent: revalidator,
+      approvalGate: false, opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null,
     },
     {
-      id: "step-review", stepIndex: 42, name: "Review", prompt: "review {{chainId}}",
+      id: "step-implementation", stepIndex: 2, name: "Implementation", prompt: "implement {{chainId}}",
+      outputKind: "implementation", attachmentsFromPrevious: false, priorOutputKinds: [],
+      assigneeType: AssigneeType.AGENT, assigneeAgentId: canonical.id, assigneeAgent: canonical,
+      approvalGate: false, opensPullRequest: true, layer: 2, baseFromStepIndex: null, runner: null,
+    },
+    {
+      id: "step-review", stepIndex: 3, name: "Review", prompt: "review {{chainId}}",
       outputKind: "sol-findings", attachmentsFromPrevious: true, priorOutputKinds: ["implementation"],
       assigneeType: AssigneeType.AGENT, assigneeAgentId: canonical.id, assigneeAgent: canonical,
-      approvalGate: false, opensPullRequest: false, layer: 2, baseFromStepIndex: 41, runner: null,
+      approvalGate: false, opensPullRequest: false, layer: 3, baseFromStepIndex: 2, runner: null,
     },
   ];
   const created: Array<Record<string, unknown>> = [];
@@ -546,4 +556,7 @@ test("Route overrides the direct implementation step by role after its step inde
 
   assert.equal(result.tasks.length, 2);
   assert.deepEqual(created.map((task) => task.assigneeAgentId), [routed.id, canonical.id]);
+  assert.deepEqual(created.map((task) => task.chainIndex), [1, 2]);
+  assert.deepEqual(created.map((task) => task.chainLayer), [1, 2]);
+  assert.deepEqual(created.map((task) => task.targetBranch), ["main", result.branchName]);
 });

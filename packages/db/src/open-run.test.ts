@@ -11,6 +11,7 @@ import {
 import {
   type OpenRunIntent,
   openRun,
+  pinnedImplementationRange,
   runBudgetCeiling,
 } from "./workflow.js";
 
@@ -149,6 +150,46 @@ const integratorStep = {
   baseFromStepIndex: null,
   taskTemplate: { name: "compound-engineer-workflow" },
 };
+
+test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
+  const headSha = "2".repeat(40);
+  let where: unknown;
+  const range = await pinnedImplementationRange({
+    taskStepOutput: {
+      findFirst: async (query: { where: unknown }) => {
+        where = query.where;
+        return {
+          kind: "implementation",
+          commitSha: headSha,
+          body: JSON.stringify({
+            schemaVersion: 1,
+            baseSha: "1".repeat(40),
+            headSha,
+          }),
+        };
+      },
+    },
+  } as never, {
+    id: "review-task",
+    projectId: "project-1",
+    templateId: "direct-template",
+    chainId: "direct-chain",
+    templateStep: { baseFromStepIndex: 2 },
+  });
+
+  assert.deepEqual(range, {
+    implementationBaseSha: "1".repeat(40),
+    implementationHeadSha: headSha,
+  });
+  assert.deepEqual(where, {
+    task: {
+      projectId: "project-1",
+      templateId: "direct-template",
+      chainId: "direct-chain",
+      templateStep: { stepIndex: 2 },
+    },
+  });
+});
 
 test("every OpenRunIntent applies shared Run-birth invariants unless its branch names the exception", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };

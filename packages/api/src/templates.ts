@@ -36,7 +36,7 @@ export type InstantiateTemplateInput = {
 
 const stepOverrideKey = /^[1-9]\d*$/u;
 
-const implementationRouteLine = /^Route: implementation=([A-Za-z0-9-]+)$/mu;
+const implementationRouteLine = /^Route: implementation=([A-Za-z0-9-]+)(?: - .+)?$/mu;
 const implementationRouteAgents = new Set([
   "senior-dev-luna",
   "senior-dev",
@@ -230,6 +230,15 @@ export const instantiateTemplate = async (
   }
   assertValidBaseReferences(template.steps);
 
+  const conditionalRevalidation = template.name === "direct-engineer-workflow"
+    ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
+    : null;
+  const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
+  const instantiatedTemplateSteps = omitRevalidation
+    ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
+    : template.steps;
+  if (instantiatedTemplateSteps.length === 0) throw new Error("Template has no instantiable steps");
+
   if (implementationRoute !== null) {
     const implementationStep = template.steps.find((step) => isDirectImplementationStep({
       outputKind: step.outputKind,
@@ -278,7 +287,7 @@ export const instantiateTemplate = async (
     });
     for (const row of rows) overrideAgents.set(row.id, row);
   }
-  const effectiveSteps = template.steps.map((step): EffectiveTemplateStep => {
+  const effectiveSteps = instantiatedTemplateSteps.map((step): EffectiveTemplateStep => {
     const override = effectiveStepOverrides[String(step.stepIndex)];
     const assigneeAgentId = override?.assigneeAgentId ?? step.assigneeAgentId;
     return {
@@ -462,7 +471,9 @@ export const instantiateTemplate = async (
         // can change whether the assignee is a mechanical integrator or the
         // pinned compound implementation agent. One id-ordered statement, so
         // two instantiations sharing agents cannot deadlock.
-        const canonicalAgentIds = template.steps.flatMap((step) => step.assigneeAgentId ? [step.assigneeAgentId] : []);
+        const canonicalAgentIds = effectiveSteps.flatMap((effective) => (
+          effective.step.assigneeAgentId ? [effective.step.assigneeAgentId] : []
+        ));
         const lockedAgents = await lockAgentRows(
           tx,
           [...new Set([...canonicalAgentIds, ...overrideAgentIds])].sort(),
@@ -532,6 +543,7 @@ export const instantiateTemplate = async (
         const promptVariables = { ...input.variables, chainId };
         for (const [index, effective] of effectiveSteps.entries()) {
           const { step } = effective;
+          const conditionalOrdinalOffset = omitRevalidation ? 1 : 0;
           const context = composeTemplateTaskDescription({
             prompt: interpolate(step.prompt, promptVariables),
             featureBrief: input.description,
@@ -550,11 +562,11 @@ export const instantiateTemplate = async (
             approvalGate: step.approvalGate,
             opensPullRequest: step.opensPullRequest,
             chainId,
-            chainIndex: step.stepIndex,
-            chainLayer: step.layer,
+            chainIndex: step.stepIndex - conditionalOrdinalOffset,
+            chainLayer: step.layer - conditionalOrdinalOffset,
             status: TaskStatus.TODO,
             source: options.source ?? TaskSource.MANUAL,
-            targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
+            targetBranch: index === 0 ? repo.defaultBranch : branchName,
             ...(index === 0 && input.afterTaskId ? { dispatchAfterTaskId: input.afterTaskId } : {}),
           } }));
         }
