@@ -880,7 +880,9 @@ curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=full&archived=false" -H "Author
   `assigneeType` (`AGENT`), `assigneeAgentId` (`null`), `approvalGate`
   (`false`), `opensPullRequest` (`true`), `maxDurationMin` (`240`),
   `stallTimeoutMin` (`10`), `maxSessionsPerTask` (`5`), `scheduleKind`
-  (`NOW`), `runAt` (`null`), `cron` (`null`), and `timezone` (`null`).
+  (`NOW`), `runAt` (`null`), `cron` (`null`), `timezone` (`null`), and `status`
+  (`TODO`). At creation, `status` may be `TODO` or `BACKLOG`; `DOING`,
+  `REVIEW`, and `DONE` are rejected rather than normalized.
   `chainId` and `chainIndex` are optional but must be supplied together.
   For the default `AGENT` type, `repoId` and `assigneeAgentId` are required by
   the route's project/access checks.
