@@ -330,6 +330,21 @@ curl -X PATCH "$BASE_URL/agents/$AGENT_ID" \
   -d '{"title":"Senior builder"}'
 ```
 
+### POST `/agents/:agentId/reset-runtime-config`
+
+- Required path parameter: `agentId`.
+- Required JSON: none. The agent must have a canonical role source and must
+  not be archived. The canonical role's `model` and `runnerPreference` are
+  applied immediately, and the agent becomes eligible for future canonical
+  runtime updates. A stored non-default `codexServiceTier` must also be valid
+  for the canonical model and runner; if reset refuses that combination, first
+  PATCH `codexServiceTier` to `DEFAULT`, then retry the reset.
+
+```sh
+curl -X POST "$BASE_URL/agents/$AGENT_ID/reset-runtime-config" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
 ### DELETE `/agents/:agentId`
 
 - Required path parameter: `agentId`.
