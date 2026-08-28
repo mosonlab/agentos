@@ -110,8 +110,8 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
   assert.deepEqual(canonical.get("regression-verifier"), {
     name: "regression-verifier",
-    model: "claude-opus-5:medium",
-    runner: RunnerPreference.CLAUDE,
+    model: "gpt-5.6-luna:max",
+    runner: RunnerPreference.CODEX,
   });
   assert.deepEqual(canonical.get("librarian"), {
     name: "librarian",
@@ -175,8 +175,8 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   assert.doesNotMatch(blindReview, /service[-_ ]tier/iu);
   assert.doesNotMatch(blindReview, /codex exec review/u);
 
-  assert.equal(frontmatterValue(regressionVerification, "model"), "claude-opus-5:medium");
-  assert.equal(frontmatterValue(regressionVerification, "runner"), "claude");
+  assert.equal(frontmatterValue(regressionVerification, "model"), "gpt-5.6-luna:max");
+  assert.equal(frontmatterValue(regressionVerification, "runner"), "codex");
   assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
   assert.match(regressionVerification, /complete persisted review package/u);
   assert.match(regressionVerification, /Review the whole fix diff/u);

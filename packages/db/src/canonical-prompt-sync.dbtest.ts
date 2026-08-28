@@ -518,8 +518,8 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   const verifier = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
   });
-  assert.equal(verifier.model, "claude-opus-5:medium");
-  assert.equal(verifier.runnerPreference, RunnerPreference.CLAUDE);
+  assert.equal(verifier.model, "gpt-5.6-luna:max");
+  assert.equal(verifier.runnerPreference, RunnerPreference.CODEX);
   assert.equal(verifier.inboxAccess, false);
   const canonicalSteps = regressionSteps.filter(({ taskTemplate }) =>
     taskTemplate.name === "compound-engineer-workflow" || taskTemplate.name === "direct-engineer-workflow");

@@ -71,13 +71,13 @@ and every role carries its own runner, model and reasoning effort.
 | 1 | Write a spec | `spec` | Turns the task into the specification of record | Claude | Claude Opus 5 · high |
 | 2 | Plan | `plan` | Cuts the spec into parallel vertical tracer-bullet slices | Claude | Claude Fable 5 · medium |
 | 3 | Plan review | `review-coordinator` | Reviews every slice against the spec and the frozen base | Pi | GPT-5.6 Sol · xhigh |
-| 4 | Revise plan | `plan-reviser` | Edits the slice set against the findings, in a fresh session | Claude | Claude Opus 5 · medium |
+| 4 | Revise plan | `plan-reviser` | Edits the slice set against the findings, in a fresh session | Codex | GPT-5.6 Sol · high |
 | 5 | Implementation | `implementation-plan-executioner` | Executes the slice set from the live dependency frontier and opens the pull request | Codex | GPT-5.6 Sol · high, with GPT-5.6 Luna · max subagents |
 | 6 | Code review | `review-coordinator-sol` | Reviews the integrated diff at the pinned base and head | Pi | GPT-5.6 Sol · xhigh |
 | 7 | Blind code review | `review-coordinator-opus` | Reviews the same diff again, blind to step 6's findings | Claude | Claude Opus 5 · high |
 | 8 | Apply review fixes | `senior-dev` | Dispositions every finding from both reviews and applies the adopted ones | Codex | GPT-5.6 Sol · high |
 | 9 | Documentation | `librarian` | Updates internal documentation to match the delivered code | Pi | GPT-5.6 Luna · xhigh |
-| 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Claude | Claude Opus 5 · medium |
+| 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · max |
 | 11 | Merge readiness | — | Recomputes the head, requires every open review to clear, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
 

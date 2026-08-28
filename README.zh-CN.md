@@ -62,13 +62,13 @@ AgentOS 自带的 Full Assurance 模板。每一步绑定一个角色，每个�
 | 1 | 写规格 | `spec` | 把任务转成作准的规格说明 | Claude | Claude Opus 5 · high |
 | 2 | 规划 | `plan` | 把规格切成可并行的垂直曳光弹切片 | Claude | Claude Fable 5 · medium |
 | 3 | 规划评审 | `review-coordinator` | 对着规格与冻结基线逐片评审 | Pi | GPT-5.6 Sol · xhigh |
-| 4 | 修订规划 | `plan-reviser` | 在全新会话里按评审结论就地改切片 | Claude | Claude Opus 5 · medium |
+| 4 | 修订规划 | `plan-reviser` | 在全新会话里按评审结论就地改切片 | Codex | GPT-5.6 Sol · high |
 | 5 | 实现 | `implementation-plan-executioner` | 从活的依赖前沿执行切片集，并开出 PR | Codex | GPT-5.6 Sol · high，子代理为 GPT-5.6 Luna · max |
 | 6 | 代码评审 | `review-coordinator-sol` | 在钉死的 base 与 head 上评审集成后的 diff | Pi | GPT-5.6 Sol · xhigh |
 | 7 | 盲评 | `review-coordinator-opus` | 对同一份 diff 再评一次，看不到第 6 步的结论 | Claude | Claude Opus 5 · high |
 | 8 | 应用评审修复 | `senior-dev` | 对两份评审的每条结论逐条裁决，并落实采纳项 | Codex | GPT-5.6 Sol · high |
 | 9 | 文档 | `librarian` | 把内部文档更新到与交付代码一致 | Pi | GPT-5.6 Luna · xhigh |
-| 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Claude | Claude Opus 5 · medium |
+| 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Codex | GPT-5.6 Luna · max |
 | 11 | 合并就绪 | — | 重算 head，要求每份未结评审清空，签发精确 head 的合并授权 | — | 机械步，不跑模型 |
 | 12 | 执行合并 | `merge-integrator` | 对着线上 PR 重新校验每一项前置条件，然后合并 | — | 机械步，不跑模型 |
 

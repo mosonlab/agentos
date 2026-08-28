@@ -15,8 +15,8 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "merge-integrator", model: "mechanical/merge-executor-v1", runner: RunnerPreference.INHERIT },
   { name: "merge-resolver", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "plan-reviser", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
-  { name: "regression-verifier", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
+  { name: "plan-reviser", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
+  { name: "regression-verifier", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
@@ -54,20 +54,26 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
     from: { model: "gpt-5.6-terra:high", runnerPreference: RunnerPreference.CODEX },
     to: { model: "openai-codex/gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.PI },
   }],
+  // 2026-08-27 ruling: regression verification is a narrow task with an
+  // objective test bedrock, the sweet spot for Luna at maximum effort; the
+  // cross-vendor value of a Claude pass is smallest where tests, not model
+  // judgement, hold the verdict. Supersedes the 2026-08-24 re-pin, whose
+  // target this from-value matches.
   ["regression-verifier", {
-    from: { model: "openai-codex/gpt-5.6-sol:medium", runnerPreference: RunnerPreference.PI },
-    to: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+    from: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+    to: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CODEX },
   }],
   ["senior-dev", {
     from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },
     to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
   }],
-  // 2026-08-27 ruling: revision adjudicates the reviewer's findings against
-  // the plan and its output authorizes implementation, so it buys the
-  // adjudication tier. Supersedes the 2026-08-26 bounded-revision ruling.
+  // 2026-08-27 ruling: revision is finding-bounded editing whose quality gate
+  // already sits in the step-3 review, so it buys Sol at high effort and stays
+  // vendor-aligned with the review it consumes. Supersedes the earlier
+  // adjudication-tier ruling, whose target this from-value matches.
   ["plan-reviser", {
-    from: { model: "claude-fable-5:medium", runnerPreference: RunnerPreference.CLAUDE },
-    to: { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE },
+    from: { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE },
+    to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
   }],
   // 2026-08-26 ruling: the spec is the specification of record every later step
   // is measured against, and the blind review is the only independent second

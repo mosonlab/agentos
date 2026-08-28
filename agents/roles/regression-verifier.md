@@ -1,8 +1,8 @@
 ---
 name: regression-verifier
 title: Regression Verifier
-model: claude-opus-5:medium
-runner: claude
+model: gpt-5.6-luna:max
+runner: codex
 inboxAccess: false
 collaborators: []
 ---
