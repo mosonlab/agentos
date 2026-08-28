@@ -1189,15 +1189,20 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 - Only the bound chain's `spec-revalidator` Run may call this route. The
   implementation task is derived server-side; no task ID or chain ID is
   accepted. The fenced write replaces the brief while preserving the
-  platform-authored prompt and output instructions.
+  platform-authored prompt and output instructions. The server rejects changes
+  to Goal, Changes-item intent, Out of scope, Constraints, Acceptance, Route,
+  or the section structure; only Background and code-shaped descriptive
+  references inside Changes may drift with the tree.
 
 ### POST `/session/runs/:runId/revalidation/cancel`
 
 - Session bearer authentication must name the same `runId` as the path.
 - Required JSON field: `fencingToken`.
-- Only the bound chain's `spec-revalidator` Run may call this route. It records
-  cancellation intent for the current Run; the owning runner performs provider
-  cleanup and terminalization, leaving downstream chain tasks blocked.
+- Only the bound chain's `spec-revalidator` Run may call this route, and only
+  after the same Run's premise-collapse Inbox question has an answered
+  `cancel-chain` decision. It records cancellation intent for the current Run,
+  parks every unfinished task in the bound chain, and revokes the session token;
+  the owning runner then performs provider cleanup and terminalization.
 
 ### GET `/runs/:runId/events`
 

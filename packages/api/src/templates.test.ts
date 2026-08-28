@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -117,7 +118,7 @@ test("instantiating the canonical feature template copies every layer and writes
     rolePrompt: "role",
   }]));
   const steps = canonicalTemplateSteps.map((contract) => {
-    const agent = contract.agentName ? agents.get(contract.agentName)! : null;
+    const agent = contract.agentName ? agents.get(String(contract.agentName))! : null;
     return {
       id: `step-${contract.stepIndex}`,
       stepIndex: contract.stepIndex,
@@ -485,6 +486,8 @@ test("step override structural refusals happen before template reads and carry s
 });
 
 test("an unbound direct chain omits revalidation while Route overrides the renumbered implementation", async () => {
+  let templateName = "direct-engineer-workflow";
+  let lockedRouteAgentName = "senior-dev";
   const revalidator = {
     id: "agent-revalidator", name: "spec-revalidator", projectId: "project-1", archivedAt: null,
     model: "openai-codex/gpt-5.6-luna:xhigh", foundationalPrompt: "foundation", rolePrompt: "role",
@@ -521,8 +524,10 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
   const tx = {
     $queryRaw: async () => [
       canonical,
-      routed,
+      revalidator,
+      { ...routed, name: lockedRouteAgentName },
       { agentId: canonical.id, repoId: "repo-1" },
+      { agentId: revalidator.id, repoId: "repo-1" },
       { agentId: routed.id, repoId: "repo-1" },
     ],
     agentRepoAccess: { count: async () => 1 },
@@ -537,7 +542,7 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
   };
   const db = {
     taskTemplate: {
-      findFirst: async () => ({ id: "template-1", name: "direct-engineer-workflow", variables: [], steps }),
+      findFirst: async () => ({ id: "template-1", name: templateName, variables: [], steps }),
     },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agent: {
@@ -559,4 +564,116 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
   assert.deepEqual(created.map((task) => task.chainIndex), [1, 2]);
   assert.deepEqual(created.map((task) => task.chainLayer), [1, 2]);
   assert.deepEqual(created.map((task) => task.targetBranch), ["main", result.branchName]);
+
+  await assert.rejects(
+    () => instantiateTemplate(db, "project-1", "template-1", {
+      repoId: "repo-1",
+      variables: {},
+      description: "Build it\nRoute: implementation=senior-dev\n",
+      stepOverrides: { "2": { assigneeAgentId: routed.id } },
+    }),
+    (error: unknown) => isTemplateInstantiationRefusal(error)
+      && error.code === "implementation_route_conflicts_with_step_override",
+  );
+
+  lockedRouteAgentName = "renamed-senior-dev";
+  await assert.rejects(
+    () => instantiateTemplate(db, "project-1", "template-1", {
+      repoId: "repo-1",
+      variables: {},
+      description: "Build it\nRoute: implementation=senior-dev\n",
+    }),
+    (error: unknown) => isTemplateInstantiationRefusal(error)
+      && error.code === "implementation_route_agent_renamed",
+  );
+
+  lockedRouteAgentName = routed.name;
+  for (const nonDirectName of ["custom-workflow", "compound-engineer-workflow"]) {
+    templateName = nonDirectName;
+    const originalOutputKind = steps[1]!.outputKind;
+    if (nonDirectName === "compound-engineer-workflow") steps[1]!.outputKind = "documentation";
+    for (const route of ["senior-dev", "unknown-agent"]) {
+      const nonDirect = await instantiateTemplate(db, "project-1", "template-1", {
+        repoId: "repo-1",
+        variables: {},
+        description: `Route: implementation=${route}`,
+      });
+      assert.equal(nonDirect.tasks.length, 3, `${nonDirectName} must ignore ${route}`);
+    }
+    steps[1]!.outputKind = originalOutputKind;
+  }
+});
+
+test("canonical unbound direct instantiation retains the seven-task prompt snapshot", async () => {
+  const source = await loadTemplateStepSources("direct-engineer-workflow");
+  const agents = new Map(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
+    id: `snapshot-agent-${index}`,
+    name: contract.name,
+    projectId: "project-1",
+    archivedAt: null,
+    model: contract.model,
+    runnerPreference: contract.runner,
+    codexServiceTier: CodexServiceTier.DEFAULT,
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  }]));
+  const steps = source.map((contract) => {
+    const agent = contract.agentName
+      ? agents.get(contract.agentName as (typeof CANONICAL_AGENT_DEFAULTS)[number]["name"])!
+      : null;
+    return {
+      id: `snapshot-step-${contract.stepIndex}`,
+      ...contract,
+      prompt: contract.prompt,
+      assigneeAgentId: agent?.id ?? null,
+      assigneeAgent: agent,
+      assigneeType: agent ? AssigneeType.AGENT : AssigneeType.HUMAN,
+      runner: null,
+    };
+  });
+  const created: Array<Record<string, unknown>> = [];
+  const lockedRows = [
+    ...agents.values(),
+    ...[...agents.values()].map((agent) => ({ agentId: agent.id, repoId: "repo-1" })),
+  ];
+  const tx = {
+    $queryRaw: async () => lockedRows,
+    agentRepoAccess: { count: async () => 1 },
+    task: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const row = { id: `snapshot-task-${created.length + 1}`, ...data };
+        created.push(row);
+        return row;
+      },
+    },
+    taskActivity: { createMany: async () => ({ count: created.length }) },
+  };
+  const db = {
+    taskTemplate: { findFirst: async () => ({
+      id: "template-direct", name: "direct-engineer-workflow", variables: ["branchName"], steps,
+    }) },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agent: { findMany: async () => [], findFirst: async () => null },
+    agentRepoAccess: { findFirst: async () => ({ id: "grant" }) },
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+
+  const result = await instantiateTemplate(db, "project-1", "template-direct", {
+    repoId: "repo-1",
+    variables: { branchName: "snapshot-branch" },
+    description: "Snapshot brief.",
+  });
+  assert.equal(result.tasks.length, 7);
+  assert.deepEqual(created.map((row) => ({
+    name: row.name,
+    descriptionSha256: createHash("sha256").update(String(row.description)).digest("hex"),
+  })), [
+    { name: "direct-engineer-workflow: Implementation", descriptionSha256: "e666b3d2ea9a3ea056e97a9100d3307f3c04dd21228ce3880e5db29b83e296e0" },
+    { name: "direct-engineer-workflow: Code review (Sol)", descriptionSha256: "a2b87e8e7b8f21b36278087d88c171c26b92fe92cc1e9d182cb423a82f2efd30" },
+    { name: "direct-engineer-workflow: Code review (Opus blind)", descriptionSha256: "01bac02c8aba8aaedbfe7bb6933fdd685bc38a814b37e52d9d212d59e30baac8" },
+    { name: "direct-engineer-workflow: Apply review fixes", descriptionSha256: "543a100bbae7ee3809580d4feeead995a3a2e07f476fb91596d0deef8641ce19" },
+    { name: "direct-engineer-workflow: Regression verification", descriptionSha256: "872ccf8617bf3c086b4968e3304f99828e1f6e1a91be04785a570f772b27311c" },
+    { name: "direct-engineer-workflow: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
+    { name: "direct-engineer-workflow: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
+  ]);
 });

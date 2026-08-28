@@ -57,7 +57,7 @@ const generationOf = (templateName: CanonicalTemplateRegistryName, marker: strin
   return generation;
 };
 
-const PROMPT_ROLLOVER_TEMPLATES = ["compound-engineer-workflow"] as const;
+const PROMPT_ROLLOVER_TEMPLATES = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
 
 test("canonical identity parses current names and every registered generation", () => {
   for (const [canonicalName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
@@ -159,11 +159,13 @@ test("the regression step split is registered as a prompt-only rollover that can
     assert.ok(current, `${templateName} must load from source`);
     const successor = asPersisted(current);
 
-    // Registered as structure-identical: the successor still matches the shape.
+    // Compound remains structure-identical. Direct's later revalidation
+    // rollover intentionally changed its shape, but the old prompt generation
+    // must still target the current source digest.
     assert.equal(
       legacyGenerationMatches({ marker: generation.marker, shape: generation.shape }, successor),
-      true,
-      `${templateName} rollover must be structure-identical`,
+      templateName === "compound-engineer-workflow",
+      `${templateName} rollover shape expectation`,
     );
     // But not the generation, because the prompts moved on.
     assert.notEqual(templatePromptGenerationDigest(successor), generation.promptDigest);
@@ -256,7 +258,6 @@ test("bound direct revalidation is a registered structural rollover", async () =
 test("the internal npm scope rename is a registered prompt-only rollover", async () => {
   const sources = await loadAllTemplateStepSources();
   const retiredDigests = {
-    "direct-engineer-workflow": "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
     "compound-engineer-workflow": "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
   } as const;
 
@@ -271,14 +272,26 @@ test("the internal npm scope rename is a registered prompt-only rollover", async
   }
 });
 
-test("every compound prompt-only generation can roll straight to the current source", async () => {
-  const current = (await loadAllTemplateStepSources()).get("compound-engineer-workflow");
-  assert.ok(current);
-  for (const marker of [
-    "pre-regression-step-split",
-    "pre-internal-npm-scope-rename",
-  ]) {
-    assert.equal(successorPromptDrift("compound-engineer-workflow", marker, current), null, marker);
+test("every prompt-only generation can roll straight to the current source", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const markers = {
+    "direct-engineer-workflow": [
+      "pre-blind-review-retirement",
+      "pre-platform-spec-materialization",
+      "pre-regression-step-split",
+      "pre-internal-npm-scope-rename",
+    ],
+    "compound-engineer-workflow": [
+      "pre-regression-step-split",
+      "pre-internal-npm-scope-rename",
+    ],
+  } as const;
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+    for (const marker of markers[templateName]) {
+      assert.equal(successorPromptDrift(templateName, marker, current), null, `${templateName}:${marker}`);
+    }
   }
 });
 

@@ -78,10 +78,10 @@ Tier answers how hard the diff is; chain shape answers how settled the spec
 is — a brief that cannot reach mechanical Acceptance is compound-shaped
 regardless of tier.
 
-Until the platform parses the `Route:` line (tracked on the revalidate-step
-chain), the line is documentation only: the dispatcher must also pass the
-matching stepOverrides at instantiation, or PATCH the implementation task's
-assignee before start.
+Direct-template instantiation parses and validates the `Route:` line and applies
+it to the implementation step. Explicit `stepOverrides` are a separate API
+mechanism; do not supply both for that step. Compound and custom templates do
+not interpret Route-looking prose.
 
 ## Skeleton
 

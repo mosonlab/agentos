@@ -1,6 +1,8 @@
 import {
   lockChainRows,
+  InboxStatus,
   Prisma,
+  TaskStatus,
   type PrismaClient,
 } from "@anneal/db";
 
@@ -12,7 +14,7 @@ import {
   withFencedRun,
 } from "./run-fence.js";
 import { type Refusal } from "./refusal.js";
-import { rewriteBrief } from "./task-brief.js";
+import { readBrief, rewriteBrief } from "./task-brief.js";
 
 /** The only Agent identity allowed to use the revalidation capability. */
 export const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator";
@@ -32,8 +34,10 @@ const revalidationTaskSelect = {
   templateStepId: true,
   templateStep: {
     select: {
+      stepIndex: true,
       outputKind: true,
       priorOutputKinds: true,
+      taskTemplate: { select: { name: true } },
     },
   },
 } as const satisfies Prisma.TaskSelect;
@@ -80,6 +84,11 @@ export const deriveBoundImplementationTask = (
   if (caller.assigneeAgentId !== caller.agentId) {
     return callerRefusal("Revalidation Run is not assigned to its spec-revalidator Agent");
   }
+  if (caller.templateStep?.outputKind !== "revalidation"
+    || caller.templateStep.stepIndex !== 1
+    || caller.templateStep.taskTemplate.name !== "direct-engineer-workflow") {
+    return callerRefusal("Revalidation capability belongs only to the canonical direct-engineer-workflow revalidation step");
+  }
   if (caller.chainId === null || caller.chainIndex === null || caller.dispatchAfterTaskId === null) {
     return boundTaskRefusal("Revalidation is available only for a bound direct chain");
   }
@@ -88,6 +97,10 @@ export const deriveBoundImplementationTask = (
     return boundTaskRefusal(`Expected exactly one same-chain implementation task; found ${candidates.length}`);
   }
   const implementation = candidates[0]!;
+  if (implementation.templateId !== caller.templateId
+    || implementation.templateStep?.taskTemplate.name !== "direct-engineer-workflow") {
+    return boundTaskRefusal("The downstream implementation task does not share the canonical direct template");
+  }
   const callerLayer = executionLayer(caller);
   const implementationLayer = executionLayer(implementation);
   if (implementation.id === caller.id || callerLayer === null || implementationLayer === null
@@ -100,7 +113,6 @@ export const deriveBoundImplementationTask = (
 const revalidationActivity = (input: {
   taskId: string;
   agentId: string;
-  runId: string;
   body: string;
   metadata?: Record<string, string | number | boolean | null>;
 }): Prisma.TaskActivityUncheckedCreateInput => ({
@@ -110,6 +122,66 @@ const revalidationActivity = (input: {
   body: input.body,
   ...(input.metadata ? { metadata: input.metadata } : {}),
 });
+
+type BriefSectionName = "Background" | "Changes" | "Out of scope" | "Constraints" | "Acceptance" | "Route";
+
+type ParsedProductBrief = {
+  goal: string;
+  sections: Map<BriefSectionName, string>;
+  order: BriefSectionName[];
+};
+
+const productBriefSection = /^(Background|Changes|Out of scope|Constraints|Acceptance|Route):/gmu;
+
+const parseProductBrief = (brief: string): ParsedProductBrief | null => {
+  const matches = [...brief.matchAll(productBriefSection)];
+  const background = matches.find((match) => match[1] === "Background");
+  const changes = matches.find((match) => match[1] === "Changes");
+  const outOfScope = matches.find((match) => match[1] === "Out of scope");
+  const acceptance = matches.find((match) => match[1] === "Acceptance");
+  if (!background || !changes || !outOfScope || !acceptance) return null;
+  const sections = new Map<BriefSectionName, string>();
+  for (const [index, match] of matches.entries()) {
+    const name = match[1] as BriefSectionName;
+    if (sections.has(name) || match.index === undefined) return null;
+    const end = matches[index + 1]?.index ?? brief.length;
+    sections.set(name, brief.slice(match.index, end));
+  }
+  return {
+    goal: brief.slice(0, background.index),
+    sections,
+    order: matches.map((match) => match[1] as BriefSectionName),
+  };
+};
+
+const descriptiveReference = /`[^`\n]+`|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.\/-]+|\/[A-Za-z0-9_.\/-]+|\b(?:GET|POST|PUT|PATCH|DELETE)\b|\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b|\b[A-Za-z]+[A-Z][A-Za-z0-9]*\b/gu;
+
+const changesIntentSignature = (section: string): string => section.replace(descriptiveReference, "<reference>");
+
+/** Enforce the immutable Product Contract boundary on a proposed brief. */
+export const validateRevalidatedBrief = (stored: string, proposed: string): Refusal | null => {
+  const before = parseProductBrief(stored);
+  const after = parseProductBrief(proposed);
+  if (!before || !after) {
+    return { reason: "invalid-request", message: "Revalidation brief must retain the canonical Product Contract sections" };
+  }
+  if (before.goal !== after.goal) {
+    return { reason: "invalid-request", message: "Revalidation cannot change Goal" };
+  }
+  if (before.order.join("\0") !== after.order.join("\0")) {
+    return { reason: "invalid-request", message: "Revalidation cannot add, remove, or reorder Product Contract sections" };
+  }
+  for (const name of ["Out of scope", "Constraints", "Acceptance", "Route"] as const) {
+    if (before.sections.get(name) !== after.sections.get(name)) {
+      return { reason: "invalid-request", message: `Revalidation cannot change ${name}` };
+    }
+  }
+  if (changesIntentSignature(before.sections.get("Changes")!)
+    !== changesIntentSignature(after.sections.get("Changes")!)) {
+    return { reason: "invalid-request", message: "Revalidation cannot change the intent of a Changes item" };
+  }
+  return null;
+};
 
 const loadChainRows = async (
   tx: Prisma.TransactionClient,
@@ -154,7 +226,6 @@ const failureActivity = async (
     data: revalidationActivity({
       taskId: caller.id,
       agentId: caller.agentId,
-      runId: fence.runId,
       body: `Revalidation failed: ${result.message}`,
       metadata: { kind: "revalidation-failure", runId: fence.runId, reason: result.reason },
     }),
@@ -162,12 +233,38 @@ const failureActivity = async (
   return result;
 };
 
+type LockedRevalidationTarget = {
+  caller: RevalidationCaller;
+  rows: RevalidationTask[];
+  target: BoundImplementationTask;
+};
+
+const lockedRevalidationTarget = async (
+  tx: Prisma.TransactionClient,
+  run: RevalidationRun,
+  caller: RevalidationCaller,
+  fence: RunFence,
+): Promise<LockedRevalidationTarget | Refusal> => {
+  if (caller.chainId === null) {
+    return failureActivity(tx, caller, fence, boundTaskRefusal("Revalidation is not part of a chain"));
+  }
+  await lockChainRows(tx, { projectId: caller.projectId, chainId: caller.chainId });
+  const currentCaller = await tx.task.findUnique({ where: { id: caller.id }, select: revalidationTaskSelect });
+  if (!currentCaller) {
+    return failureActivity(tx, caller, fence, { reason: "not-found", message: "Revalidation task not found" });
+  }
+  const lockedCaller = { ...currentCaller, agentId: run.agentId, agentName: run.agent.name };
+  const rows = await loadChainRows(tx, currentCaller);
+  const target = deriveBoundImplementationTask(lockedCaller, rows);
+  if ("message" in target) return failureActivity(tx, lockedCaller, fence, target);
+  return { caller: lockedCaller, rows, target };
+};
+
 /**
  * Patch the derived implementation brief under the complete Run fence.
  *
- * `rewriteBrief` preserves the platform-owned prompt and output suffix. The
- * description supplied by the revalidator is therefore a brief replacement,
- * not an escape hatch for changing intent or platform instructions.
+ * `rewriteBrief` preserves the platform-owned prompt and output suffix, while
+ * validateRevalidatedBrief enforces the Product Contract's immutable bars.
  */
 export const patchBoundImplementationDescription = async (
   db: PrismaClient,
@@ -181,25 +278,28 @@ export const patchBoundImplementationDescription = async (
       if (generationRefusal) return generationRefusal;
       const caller = callerFromRun(run);
       if ("message" in caller) return caller;
-      if (caller.chainId === null) return failureActivity(tx, caller, fence, boundTaskRefusal("Revalidation is not part of a chain"));
 
       // The chain lock is acquired after withFencedRun's Run -> source Task
       // order, matching completion and every other chained-task writer.
-      await lockChainRows(tx, { projectId: caller.projectId, chainId: caller.chainId });
-      const currentCaller = await tx.task.findUnique({ where: { id: caller.id }, select: revalidationTaskSelect });
-      if (!currentCaller) return failureActivity(tx, caller, fence, { reason: "not-found", message: "Revalidation task not found" });
-      const currentRows = await loadChainRows(tx, currentCaller);
-      const target = deriveBoundImplementationTask(
-        { ...currentCaller, agentId: run.agentId, agentName: run.agent.name },
-        currentRows,
-      );
-      if ("message" in target) return failureActivity(tx, { ...currentCaller, agentId: run.agentId, agentName: run.agent.name }, fence, target);
-      const targetRow = currentRows.find((row) => row.id === target.id)!;
+      const locked = await lockedRevalidationTarget(tx, run, caller, fence);
+      if ("message" in locked) return locked;
+      const targetRow = locked.rows.find((row) => row.id === locked.target.id)!;
+      const storedBrief = readBrief(targetRow.description, {
+        legacyAttachmentsFromPrevious: (targetRow.templateStep?.priorOutputKinds.length ?? 0) > 0,
+      });
+      if ("unparseable" in storedBrief) {
+        return failureActivity(tx, locked.caller, fence, {
+          reason: "invalid-request",
+          message: `Cannot read implementation task brief: ${storedBrief.unparseable}`,
+        });
+      }
+      const boundaryRefusal = validateRevalidatedBrief(storedBrief.brief, description);
+      if (boundaryRefusal) return failureActivity(tx, locked.caller, fence, boundaryRefusal);
       const rewritten = rewriteBrief(targetRow.description, description, {
         legacyAttachmentsFromPrevious: (targetRow.templateStep?.priorOutputKinds.length ?? 0) > 0,
       });
       if (typeof rewritten !== "string") {
-        return failureActivity(tx, { ...currentCaller, agentId: run.agentId, agentName: run.agent.name }, fence, {
+        return failureActivity(tx, locked.caller, fence, {
           reason: "invalid-request",
           message: `Cannot rewrite implementation task brief: ${rewritten.unparseable}`,
         });
@@ -211,9 +311,8 @@ export const patchBoundImplementationDescription = async (
       });
       await tx.taskActivity.create({
         data: revalidationActivity({
-          taskId: currentCaller.id,
+          taskId: locked.caller.id,
           agentId: run.agentId,
-          runId: fence.runId,
           body: `Revalidated implementation task ${targetRow.id} description`,
           metadata: { kind: "revalidation", targetTaskId: targetRow.id, runId: fence.runId },
         }),
@@ -238,15 +337,27 @@ export const readBoundImplementationTask = async (
   const caller = callerFromRun(run);
   if ("message" in caller) return caller;
   if (caller.chainId === null) return boundTaskRefusal("Revalidation is not part of a chain");
-  const chainRows = await db.task.findMany({
-    where: { projectId: caller.projectId, chainId: caller.chainId },
-    orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-    select: revalidationTaskSelect,
-  });
+  const chainRows = await loadChainRows(db, caller);
   return deriveBoundImplementationTask(caller, chainRows);
 };
 
 const revalidationCancelRequestId = (runId: string): string => `revalidation:${runId}:cancel`;
+
+const premiseCollapseChoices = [
+  { id: "cancel-chain", label: "cancel this chain" },
+  { id: "operator-rewrite", label: "operator rewrites the brief, then continue" },
+  { id: "proceed-reading", label: "proceed with the step's proposed reading" },
+] as const;
+
+const hasPremiseCollapseChoices = (value: Prisma.JsonValue): boolean => (
+  Array.isArray(value)
+  && value.length === premiseCollapseChoices.length
+  && premiseCollapseChoices.every((expected, index) => {
+    const actual = value[index];
+    return typeof actual === "object" && actual !== null && !Array.isArray(actual)
+      && actual.id === expected.id && actual.label === expected.label;
+  })
+);
 
 /**
  * Record cancellation intent for a collapsed premise. Runner heartbeat and
@@ -264,21 +375,37 @@ export const cancelBoundRevalidationRun = async (
       ...callerSelect,
       status: true,
       cancelRequestId: true,
+      session: { select: { id: true } },
     }, async (run) => {
       const generationRefusal = sessionGenerationRefusal(run, expectedLeaseGeneration);
       if (generationRefusal) return generationRefusal;
       const caller = callerFromRun(run);
       if ("message" in caller) return caller;
-      if (caller.chainId === null) return failureActivity(tx, caller, fence, boundTaskRefusal("Revalidation is not part of a chain"));
-      await lockChainRows(tx, { projectId: caller.projectId, chainId: caller.chainId });
-      const currentCaller = await tx.task.findUnique({ where: { id: caller.id }, select: revalidationTaskSelect });
-      if (!currentCaller) return failureActivity(tx, caller, fence, { reason: "not-found", message: "Revalidation task not found" });
-      const rows = await loadChainRows(tx, currentCaller);
-      const target = deriveBoundImplementationTask(
-        { ...currentCaller, agentId: run.agentId, agentName: run.agent.name },
-        rows,
-      );
-      if ("message" in target) return failureActivity(tx, { ...currentCaller, agentId: run.agentId, agentName: run.agent.name }, fence, target);
+      const locked = await lockedRevalidationTarget(tx, run, caller, fence);
+      if ("message" in locked) return locked;
+      const decision = await tx.inboxDecision.findFirst({
+        where: { runId: fence.runId },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: {
+          id: true,
+          decision: true,
+          inboxMessage: {
+            select: { status: true, selectedChoiceId: true, sessionId: true, taskId: true, choices: true },
+          },
+        },
+      });
+      if (!decision
+        || decision.decision !== "cancel-chain"
+        || decision.inboxMessage.status !== InboxStatus.ANSWERED
+        || decision.inboxMessage.selectedChoiceId !== "cancel-chain"
+        || decision.inboxMessage.sessionId !== run.session?.id
+        || decision.inboxMessage.taskId !== locked.caller.id
+        || !hasPremiseCollapseChoices(decision.inboxMessage.choices)) {
+        return failureActivity(tx, locked.caller, fence, {
+          reason: "forbidden",
+          message: "Revalidation cancellation requires this Run's answered cancel-chain Inbox decision",
+        });
+      }
       const requestId = revalidationCancelRequestId(fence.runId);
       const reason = "Revalidation premise collapsed; operator selected cancel this chain";
       const requested = await tx.run.updateMany({
@@ -295,18 +422,40 @@ export const cancelBoundRevalidationRun = async (
         },
       });
       if (requested.count !== 1) {
-        return failureActivity(tx, { ...currentCaller, agentId: run.agentId, agentName: run.agent.name }, fence, {
+        return failureActivity(tx, locked.caller, fence, {
           reason: "conflict",
           message: "Run changed while revalidation cancellation was being requested",
         });
       }
+      const parked = await tx.task.updateMany({
+        where: {
+          id: { in: locked.rows.map((row) => row.id) },
+          archivedAt: null,
+          status: { not: TaskStatus.DONE },
+        },
+        data: { status: TaskStatus.BACKLOG, failureReason: reason },
+      });
+      await tx.taskActivity.createMany({
+        data: locked.rows.map((row) => ({
+          taskId: row.id,
+          actorType: "operator",
+          body: `Bound chain cancelled: ${reason}`,
+          metadata: { kind: "revalidation-cancel", runId: fence.runId, requestId, decisionId: decision.id },
+        })),
+      });
       await tx.taskActivity.create({
         data: revalidationActivity({
-          taskId: currentCaller.id,
+          taskId: locked.caller.id,
           agentId: run.agentId,
-          runId: fence.runId,
           body: "Revalidation cancelled the bound chain after premise collapse",
-          metadata: { kind: "revalidation-cancel", runId: fence.runId, requestId, targetTaskId: target.id },
+          metadata: {
+            kind: "revalidation-cancel",
+            runId: fence.runId,
+            requestId,
+            decisionId: decision.id,
+            targetTaskId: locked.target.id,
+            parkedTaskCount: parked.count,
+          },
         }),
       });
       return { cancelRequested: true, requestId, reason };
@@ -332,7 +481,6 @@ export const recordRevalidationFailure = async (
       data: revalidationActivity({
         taskId: run.taskId,
         agentId: run.agentId,
-        runId,
         body: `Revalidation failed: ${errorMessage(error)}`,
         metadata: { kind: "revalidation-failure", runId, reason: "tool-error" },
       }),

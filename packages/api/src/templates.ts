@@ -186,13 +186,6 @@ export const instantiateTemplate = async (
       `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
     );
   }
-  const implementationRoute = parseImplementationRoute(input.description);
-  if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
-    throw overrideRefusal(
-      "implementation_route_unknown_agent",
-      `Unknown implementation route agent ${implementationRoute}; expected one of senior-dev-luna, senior-dev, frontend-dev`,
-    );
-  }
   let effectiveStepOverrides: Record<string, { assigneeAgentId: string }> = {
     ...(input.stepOverrides ?? {}),
   };
@@ -221,6 +214,15 @@ export const instantiateTemplate = async (
   if (!template) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
   if (template.steps.length === 0) throw new Error("Template has no steps");
+  const implementationRoute = template.name === "direct-engineer-workflow"
+    ? parseImplementationRoute(input.description)
+    : null;
+  if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
+    throw overrideRefusal(
+      "implementation_route_unknown_agent",
+      `Unknown implementation route agent ${implementationRoute}; expected one of senior-dev-luna, senior-dev, frontend-dev`,
+    );
+  }
   const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
   if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
@@ -239,12 +241,20 @@ export const instantiateTemplate = async (
     : template.steps;
   if (instantiatedTemplateSteps.length === 0) throw new Error("Template has no instantiable steps");
 
+  let routedImplementationStepIndex: number | null = null;
   if (implementationRoute !== null) {
     const implementationStep = template.steps.find((step) => isDirectImplementationStep({
       outputKind: step.outputKind,
       taskTemplate: { name: template.name },
     }));
     if (implementationStep) {
+      const stepKey = String(implementationStep.stepIndex);
+      if (effectiveStepOverrides[stepKey]) {
+        throw overrideRefusal(
+          "implementation_route_conflicts_with_step_override",
+          `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
+        );
+      }
       const routeAgent = await db.agent.findFirst({
         where: { projectId, name: implementationRoute },
         select: { id: true, name: true, projectId: true, archivedAt: true },
@@ -257,8 +267,9 @@ export const instantiateTemplate = async (
       }
       effectiveStepOverrides = {
         ...effectiveStepOverrides,
-        [String(implementationStep.stepIndex)]: { assigneeAgentId: routeAgent.id },
+        [stepKey]: { assigneeAgentId: routeAgent.id },
       };
+      routedImplementationStepIndex = implementationStep.stepIndex;
       overrideEntries = Object.entries(effectiveStepOverrides);
       if (overrideEntries.length > 64) {
         throw overrideRefusal(
@@ -499,6 +510,14 @@ export const instantiateTemplate = async (
               );
             }
             throw new Error(`Template step ${step.name} agent ${lockedAgent.name} is archived`);
+          }
+          if (implementationRoute !== null
+            && step.stepIndex === routedImplementationStepIndex
+            && lockedAgent.name !== implementationRoute) {
+            throw overrideRefusal(
+              "implementation_route_agent_renamed",
+              `Implementation route agent ${implementationRoute} changed identity before the chain was created`,
+            );
           }
           const lockedBindingRefusal = canonicalIntegratorBindingRefusal(lockedAgent.name, {
             stepIndex: step.stepIndex,
