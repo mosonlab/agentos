@@ -7,6 +7,7 @@ import {
   executionModeFor,
   FailureClass,
   integratorBindingRefusal,
+  INTEGRATOR_OUTPUT_KIND,
   isMergeReadinessStep,
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
@@ -178,62 +179,51 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         take: 20,
       })
       : await (async () => {
-        // The general lane ranks all statically eligible rows before applying
-        // its candidate window. Otherwise an earlier FIFO window can hide a
-        // nearly complete chain behind newer chains with more work remaining.
-        const queued = await tx.run.findMany({
-          ...candidateWhere,
-          select: {
-            id: true,
-            readyAt: true,
-            createdAt: true,
-            task: { select: { projectId: true, chainId: true } },
-          },
-          orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
-        });
-        const chainKey = (projectId: string, chainId: string): string => JSON.stringify([projectId, chainId]);
-        const queuedChains = new Map<string, { projectId: string; chainId: string }>();
-        for (const { task } of queued) {
-          if (task?.chainId !== null && task?.chainId !== undefined) {
-            queuedChains.set(chainKey(task.projectId, task.chainId), {
-              projectId: task.projectId,
-              chainId: task.chainId,
-            });
-          }
-        }
-        const unfinishedGroups = queuedChains.size === 0 ? [] : await tx.task.groupBy({
-          by: ["projectId", "chainId"],
-          where: {
-            OR: [...queuedChains.values()],
-            status: { not: TaskStatus.DONE },
-          },
-          _count: { _all: true },
-        });
-        const unfinishedByChain = new Map(unfinishedGroups.flatMap((group) =>
-          group.chainId === null
-            ? []
-            : [[chainKey(group.projectId, group.chainId), group._count._all] as const]
-        ));
-        const priority = (candidate: (typeof queued)[number]): number => {
-          const task = candidate.task;
-          if (task?.chainId === null || task?.chainId === undefined) return 1;
-          return unfinishedByChain.get(chainKey(task.projectId, task.chainId)) ?? 1;
-        };
-        const selectedIds = queued
-          .sort((left, right) => priority(left) - priority(right)
-            || left.readyAt.getTime() - right.readyAt.getTime()
-            || left.createdAt.getTime() - right.createdAt.getTime())
-          .slice(0, 20)
-          .map(({ id }) => id);
+        // Rank in PostgreSQL before applying the window so the transaction
+        // returns only the candidates it can inspect. Mechanical rows are not
+        // in the ordinary runner's lane and therefore cannot consume that
+        // window; claimantMayTake remains the final execution-mode authority.
+        const selectedIds = (await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT candidate."id"
+          FROM "Run" AS candidate
+          JOIN "Task" AS task
+            ON task."id" = candidate."taskId"
+           AND task."projectId" = candidate."projectId"
+          JOIN "Agent" AS agent
+            ON agent."id" = candidate."agentId"
+           AND agent."projectId" = candidate."projectId"
+          LEFT JOIN "Run" AS blocker ON blocker."id" = candidate."blockedByRunId"
+          LEFT JOIN "TaskTemplateStep" AS template_step ON template_step."id" = task."templateStepId"
+          LEFT JOIN LATERAL (
+            SELECT count(*)::integer AS "unfinished"
+            FROM "Task" AS chain_task
+            WHERE chain_task."projectId" = task."projectId"
+              AND chain_task."chainId" = task."chainId"
+              AND chain_task."status" <> lower(${TaskStatus.DONE})::"TaskStatus"
+          ) AS chain_priority ON task."chainId" IS NOT NULL
+          WHERE candidate."status" = lower(${RunStatus.QUEUED})::"RunStatus"
+            AND candidate."readyAt" <= ${now}
+            AND agent."archivedAt" IS NULL
+            AND task."status" IN (lower(${TaskStatus.TODO})::"TaskStatus", lower(${TaskStatus.DOING})::"TaskStatus")
+            AND task."assigneeType" = lower(${AssigneeType.AGENT})::"AssigneeType"
+            AND task."archivedAt" IS NULL
+            AND (candidate."blockedByRunId" IS NULL OR blocker."status" = lower(${RunStatus.SUCCEEDED})::"RunStatus")
+            AND COALESCE(template_step."outputKind", '') <> ${INTEGRATOR_OUTPUT_KIND}
+          ORDER BY COALESCE(chain_priority."unfinished", 1) ASC,
+            candidate."readyAt" ASC,
+            candidate."createdAt" ASC
+          LIMIT 20
+        `).map(({ id }) => id);
         if (selectedIds.length === 0) return [];
         const selected = await tx.run.findMany({
           where: { id: { in: selectedIds } },
           ...candidateInclude,
         });
         const selectedById = new Map(selected.map((candidate) => [candidate.id, candidate]));
-        return selectedIds.flatMap((id) => {
+        return selectedIds.map((id) => {
           const candidate = selectedById.get(id);
-          return candidate ? [candidate] : [];
+          if (!candidate) throw new Error(`Prioritized queued candidate ${id} could not be loaded`);
+          return candidate;
         });
       })();
     const executorRunnerIds = mergeExecutorRunnerIds();

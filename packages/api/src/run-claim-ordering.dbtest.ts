@@ -214,6 +214,27 @@ test("priority is established before the candidate list is truncated to twenty",
   );
 });
 
+test("merge-executor-only runs cannot consume the general candidate window", async () => {
+  const executor = await seedExecutor();
+  const agentChain = await seedChain(executor, [TaskStatus.TODO, TaskStatus.TODO], 0, EARLIER);
+  const mechanicalRunIds: string[] = [];
+  for (let index = 0; index < 20; index += 1) {
+    const mechanical = await seedIntegratorChain(db, { label: `general-lane-mechanical-${index}` });
+    assert.ok(mechanical.integratorTask);
+    await db.task.update({ where: { id: mechanical.gateTask.id }, data: { status: TaskStatus.DONE } });
+    const run = await db.$transaction((tx) => enqueueTaskRun(tx, mechanical.integratorTask!.id, LATER));
+    mechanicalRunIds.push(run.id);
+  }
+
+  const claimed = await claim("general-lane-runner");
+
+  assert.equal(claimed.run.id, agentChain.run.id);
+  assert.equal(
+    await db.run.count({ where: { id: { in: mechanicalRunIds }, status: RunStatus.QUEUED } }),
+    mechanicalRunIds.length,
+  );
+});
+
 test("merge-executor claims retain FIFO ordering instead of chain priority", async () => {
   const earlier = await seedIntegratorChain(db, { label: "executor-fifo-earlier" });
   const later = await seedIntegratorChain(db, { label: "executor-fifo-later" });

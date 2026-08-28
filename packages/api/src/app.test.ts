@@ -1544,6 +1544,7 @@ test("claim query filters archived agents before take so active work cannot star
       session: null,
       task: {
         id: `task-${id}`, status: "TODO",
+        projectId: "project-1",
         chainId: archivedAt ? null : "chain-1", chainIndex: archivedAt ? null : 1,
         templateStep: null,
       },
@@ -1561,19 +1562,23 @@ test("claim query filters archived agents before take so active work cannot star
       ...Array.from({ length: 20 }, (_, index) => candidate(`archived-${index}`, old, index)),
       candidate("active", null, 100),
     ];
-    let claimWhere: Record<string, unknown> | undefined;
+    let claimQuery: string | undefined;
     let claimedId: string | undefined;
     const tx = {
-      $queryRaw: async () => [{ granted: true }],
+      $queryRaw: async (query: unknown) => {
+        const sql = Array.isArray(query)
+          ? query.join("?")
+          : (query as { strings?: string[] }).strings?.join("?") ?? "";
+        if (sql.includes('SELECT candidate."id"')) {
+          claimQuery = sql;
+          return [{ id: "active" }];
+        }
+        return [{ granted: true }];
+      },
       // The claim loop brackets every candidate in a savepoint.
       $executeRawUnsafe: async () => 0,
       run: {
         findMany: async ({ where, take }: { where: Record<string, any>; take?: number }) => {
-          if (where.agent) {
-            claimWhere = where;
-            const filtered = seeded.filter((run) => run.agent.archivedAt === where.agent.archivedAt);
-            return take === undefined ? filtered : filtered.slice(0, take);
-          }
           const selectedIds = where.id?.in as string[] | undefined;
           return selectedIds ? seeded.filter((run) => selectedIds.includes(run.id)) : [];
         },
@@ -1585,7 +1590,6 @@ test("claim query filters archived agents before take so active work cannot star
       session: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "session-1", ...data }) },
       sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
       task: {
-        groupBy: async () => [{ projectId: "project-1", chainId: "chain-1", _count: { _all: 1 } }],
         findUnique: async ({ where }: { where: { id: string } }) => {
           const found = seeded.find((entry) => entry.task.id === where.id)?.task;
           return found ? { ...found, projectId: "project-1", archivedAt: null, assigneeAgentId: null } : null;
@@ -1610,7 +1614,8 @@ test("claim query filters archived agents before take so active work cannot star
     });
     assert.equal(response.status, 200);
     const claim = await response.json() as { priorOutputs: Array<{ body: string }> };
-    assert.deepEqual(claimWhere?.agent, { archivedAt: null });
+    assert.ok(claimQuery?.includes('agent."archivedAt" IS NULL'));
+    assert.ok(claimQuery.indexOf('agent."archivedAt" IS NULL') < claimQuery.indexOf("LIMIT 20"));
     assert.equal(claimedId, "active");
     assert.equal(claim.priorOutputs[0]?.body, completePriorOutput);
   });
@@ -1628,7 +1633,12 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
       },
       taskActivity: { createMany: async () => ({ count: 0 }) },
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
-        $queryRaw: async () => [{ granted: true }],
+        $queryRaw: async (query: unknown) => {
+          const sql = Array.isArray(query)
+            ? query.join("?")
+            : (query as { strings?: string[] }).strings?.join("?") ?? "";
+          return sql.includes('SELECT candidate."id"') ? [] : [{ granted: true }];
+        },
         run: { findMany: async () => [] },
         taskActivity: { findMany: async () => [] },
       }),
