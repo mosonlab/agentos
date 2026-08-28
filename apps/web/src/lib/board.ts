@@ -15,6 +15,10 @@ export const COLUMNS: Array<{ status: TaskStatus; labelKey: string }> = [
 
 export const STATUSES: TaskStatus[] = COLUMNS.map((column) => column.status);
 
+/** One page per status keeps mounted card and reconciliation work independent
+ * of how much completed history the project retains. */
+export const CARD_PAGE_SIZE = 20;
+
 export const statusLabel = (status: TaskStatus): string =>
   formatT(COLUMNS.find((column) => column.status === status)?.labelKey ?? `status.task.${status}`);
 

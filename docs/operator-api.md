@@ -12,6 +12,11 @@ spelling as the route definitions in `packages/api/src/app.ts`. Fields called
 “at least one” is validated by a patch schema and must contain one or more of
 the named fields.
 
+The polled collection routes `GET /projects`, `GET /projects/:projectId/agents`,
+`GET /projects/:projectId/repos`, `GET /tasks`, `GET /inbox/messages`, and
+`GET /inbox/messages/summary` return an `ETag`. Send it back in
+`If-None-Match`; unchanged data returns `304 Not Modified` with an empty body.
+
 ## Service, status, and onboarding
 
 ### GET `/` — Public
@@ -1080,6 +1085,15 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
 
 ```sh
 curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### GET `/inbox/messages/summary`
+
+- Required parameters: none.
+- Returns the small global count used by the sidebar: `{ "needsReply": number }`.
+
+```sh
+curl "$BASE_URL/inbox/messages/summary" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
 ### GET `/inbox/messages/:messageId`

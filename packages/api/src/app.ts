@@ -1208,7 +1208,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(result.installation, 201);
   });
 
-  app.get("/projects", async (context) => context.json(await db.project.findMany({ orderBy: { createdAt: "asc" } })));
+  app.get("/projects", async (context) => validated(context, await db.project.findMany({ orderBy: { createdAt: "asc" } })));
   app.post("/projects", async (context) => context.json(await db.project.create({ data: await readJson(context.req.raw, projectInput) }), 201));
   app.get("/projects/:projectId", async (context) => {
     const project = await db.project.findUnique({ where: { id: id.parse(context.req.param("projectId")) } });
@@ -1311,7 +1311,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   // rather than hidden so an operator can still see that it exists and read its
   // role prompt, but `assignable: false` is what the pickers filter on — and
   // `POST /projects/:projectId/tasks` refuses it regardless of any client.
-  app.get("/projects/:projectId/agents", async (context) => context.json((await db.agent.findMany({
+  app.get("/projects/:projectId/agents", async (context) => validated(context, (await db.agent.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
   })).map((agent) => {
@@ -1615,7 +1615,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "MCP binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/repos", async (context) => context.json(await db.repo.findMany({
+  app.get("/projects/:projectId/repos", async (context) => validated(context, await db.repo.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
   })));
@@ -2749,6 +2749,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }), 201);
   });
 
+  app.get("/inbox/messages/summary", async (context) => {
+    const messages = await db.inboxMessage.findMany({
+      where: { status: InboxStatus.OPEN, replyToMessageId: null },
+      select: { id: true, status: true, from: true, kind: true, gateTaskId: true, replyToMessageId: true },
+    });
+    const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
+    const needsReply = messages.filter((message) => (
+      message.status === InboxStatus.OPEN && !withDismissible(message, blocked).dismissible
+    )).length;
+    return validated(context, { needsReply });
+  });
   app.get("/inbox/messages", async (context) => {
     const projectId = context.req.query("projectId");
     const messages = await db.inboxMessage.findMany({
@@ -2765,7 +2776,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     orderBy: { createdAt: "desc" },
     });
     const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
-    return context.json(messages.map((message) => withDismissible(withArtifactTask(message), blocked)));
+    return validated(context, messages.map((message) => withDismissible(withArtifactTask(message), blocked)));
   });
   app.get("/inbox/messages/:messageId", async (context) => {
     const message = await db.inboxMessage.findUnique({

@@ -17,6 +17,26 @@
  *  same-origin and the browser never holds or sends a credential of its own. */
 export const apiBase = "/api";
 
+/**
+ * How long any control-plane request may take before the client gives up.
+ *
+ * `fetch` has no timeout of its own: a connection that is accepted and then
+ * never answered leaves the promise pending for as long as the socket lives.
+ * That is what turned an API restart into a permanent Loading screen — the
+ * bootstrap `GET /projects` overlapped the restart (observed 2026-08-28: the
+ * dev proxy reported ETIMEDOUT at 05:09 and ECONNREFUSED through the 05:23
+ * restart), `StartupGate` stayed in its pending state, and nothing on the page
+ * could say so or offer a retry.
+ *
+ * 15s is well past a healthy localhost round trip, including the slowest
+ * enriched board read, and well inside an operator's patience.
+ */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** `ApiError.code` for a request the client abandoned. Not a status: nothing
+ *  answered, so there is no status to report. */
+export const TIMEOUT_CODE = "TIMEOUT";
+
 export class ApiError extends Error {
   readonly status: number;
   readonly path: string;
@@ -40,10 +60,30 @@ export class ApiError extends Error {
   get unauthorized(): boolean {
     return this.status === 401 || this.status === 403;
   }
+
+  /** The request was abandoned at `REQUEST_TIMEOUT_MS`, so the control plane
+   *  never answered and retrying is the only thing left to offer. */
+  get timedOut(): boolean {
+    return this.code === TIMEOUT_CODE;
+  }
 }
 
+const transportError = (path: string, reason: unknown): ApiError => (
+  isTimeout(reason)
+    ? new ApiError(0, path, `No answer within ${REQUEST_TIMEOUT_MS / 1_000}s`, TIMEOUT_CODE)
+    : new ApiError(0, path, reason instanceof Error ? reason.message : "Network error")
+);
+
+const responseText = async (response: Response, path: string): Promise<string> => {
+  try {
+    return await response.text();
+  } catch (reason: unknown) {
+    throw transportError(path, reason);
+  }
+};
+
 const parseError = async (response: Response, path: string): Promise<ApiError> => {
-  const text = await response.text().catch(() => "");
+  const text = await responseText(response, path);
   let detail = text;
   let code: string | null = null;
   let reason: string | null = null;
@@ -58,17 +98,27 @@ const parseError = async (response: Response, path: string): Promise<ApiError> =
   return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`, code, reason);
 };
 
+/** `AbortSignal.timeout` rejects the fetch with a `TimeoutError`. Chromium may
+ *  report `AbortError` when the same signal expires during a response body
+ *  read; this client installs no other abort source, so both names mean its
+ *  request bound fired. */
+const isTimeout = (reason: unknown): boolean =>
+  reason instanceof Error && (reason.name === "TimeoutError" || reason.name === "AbortError");
+
 const requestRaw = async (path: string, init?: RequestInit): Promise<Response> => {
   try {
     return await fetch(`${apiBase}${path}`, {
       ...init,
+      // Every request is bounded, polls included: a poll that never settles
+      // holds a connection and its state for the life of the page.
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: {
         "Content-Type": "application/json",
         ...init?.headers,
       },
     });
   } catch (reason: unknown) {
-    throw new ApiError(0, path, reason instanceof Error ? reason.message : "Network error");
+    throw transportError(path, reason);
   }
 };
 
@@ -76,7 +126,7 @@ const requestText = async (path: string, init?: RequestInit): Promise<string> =>
   const response = await requestRaw(path, init);
   if (!response.ok) throw await parseError(response, path);
   if (response.status === 204) return "";
-  return response.text();
+  return responseText(response, path);
 };
 
 /** One poll's answer: whether anything arrived, and the validator to send next
@@ -106,7 +156,7 @@ const requestPolled = async (path: string, etag: string | null): Promise<Polled>
   if (response.status === 304) return { changed: false, body: "", etag: nextTag ?? etag };
   if (!response.ok) throw await parseError(response, path);
   if (response.status === 204) return { changed: true, body: "", etag: nextTag };
-  return { changed: true, body: await response.text(), etag: nextTag };
+  return { changed: true, body: await responseText(response, path), etag: nextTag };
 };
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {

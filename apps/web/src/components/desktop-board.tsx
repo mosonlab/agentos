@@ -1,6 +1,6 @@
 import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { COLUMNS, type Edges, clampScroll, columnStep, edgeState, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type Edges, clampScroll, columnStep, edgeState, sameEdges, scrollKey, storedScroll } from "../lib/board";
 import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
@@ -58,6 +58,9 @@ const COLUMN_HEAD = "sticky top-0 z-[2] flex h-[36px] flex-none items-center gap
 const COLUMN_BODY = "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] content-start gap-[10px] rounded-xl border border-[color:var(--border-soft)] bg-[color-mix(in_srgb,var(--foreground)_1%,transparent)] p-[10px]";
 const COLUMN_BODY_OVER = "border-[color:var(--primary-soft)] bg-[color-mix(in_srgb,var(--primary)_4%,transparent)]";
 const COLUMN_EMPTY = "px-0 py-[26px] text-center text-[12px] text-[color:var(--faint)]";
+const COLUMN_PAGER = "flex items-center justify-center gap-[8px] pt-[2px]";
+
+export { CARD_PAGE_SIZE };
 
 /** One board column, extracted so its three rules — the head, the `Archive All`
  *  presence rule and the empty-state drop invitation — can be asserted from
@@ -74,6 +77,16 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   actions: CardActions;
 }): ReactNode => {
   const t = useT();
+  const [page, setPage] = useState(0);
+  const lastPage = Math.max(0, Math.ceil(tasks.length / CARD_PAGE_SIZE) - 1);
+  const visiblePage = Math.min(page, lastPage);
+  const start = visiblePage * CARD_PAGE_SIZE;
+  const visibleTasks = tasks.slice(start, start + CARD_PAGE_SIZE);
+  const nextCount = Math.min(CARD_PAGE_SIZE, Math.max(0, tasks.length - start - CARD_PAGE_SIZE));
+  const previousCount = Math.min(CARD_PAGE_SIZE, start);
+  useEffect(() => {
+    if (page > lastPage) setPage(lastPage);
+  }, [lastPage, page]);
   return <div className={COLUMN}>
     <div className={COLUMN_HEAD}>
       {t(column.labelKey)}<span className={COUNT}>{tasks.length}</span>
@@ -97,7 +110,21 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
         onDrop(event.dataTransfer.getData("text/plain"), column.status);
       }}
     >
-      {tasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} draggable />)}
+      {visibleTasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} draggable />)}
+      {previousCount > 0 || nextCount > 0 ? (
+        <div className={COLUMN_PAGER}>
+          {previousCount > 0 ? (
+            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage - 1)}>
+              {t("tasks.column.previous", { n: previousCount })}
+            </Button>
+          ) : null}
+          {nextCount > 0 ? (
+            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage + 1)}>
+              {t("tasks.column.more", { n: nextCount })}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       {/* Every column gets the same invitation, Backlog included (E16). */}
       {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{t(loading ? "common.loading" : "tasks.column.drop")}</div> : null}
     </div>
@@ -331,7 +358,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
           <div className={BOARD_GRID}>
             {COLUMNS.map((column) => (
               <BoardColumn
-                key={column.status}
+                key={`${projectId}:${column.status}`}
                 column={column}
                 tasks={byStatus.get(column.status) ?? []}
                 loading={loading}

@@ -644,6 +644,16 @@ export type InboxMessage = {
   replies?: InboxMessage[];
 };
 
+/** `GET /inbox/messages/summary`: the sidebar badge's whole payload.
+ *
+ *  The badge used to be a by-product of `GET /inbox/messages`, which every page
+ *  polled every 5s for the complete message history — 490 KB and 231 messages
+ *  to render one number. The count is the same one `needsReply` computes card by
+ *  card; the API applies that rule server-side. */
+export type InboxSummary = {
+  needsReply: number;
+};
+
 export type Goal = {
   id: string;
   projectId: string;
