@@ -61,6 +61,7 @@ import {
   type DecisionRow,
   mergeRecoveryPhase,
   type MergeRecoveryAttempt,
+  loadAgentSources,
 } from "@anneal/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -325,6 +326,17 @@ const executionerRuntimeRefusal = (agent: {
     && catalogRunnerForModel(agent.model) === RunnerPreference.CODEX) return null;
   return "implementation-plan-executioner requires a Codex gpt-* model";
 };
+
+const runtimeConfigRefusal = (agent: {
+  name: string;
+  model: string;
+  runnerPreference: RunnerPreference;
+  codexServiceTier: CodexServiceTier;
+}): string | null => (
+  runnerModelRefusal(agent)
+  ?? executionerRuntimeRefusal(agent)
+  ?? codexServiceTierRefusal(agent)
+);
 
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
@@ -1307,12 +1319,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/projects/:projectId/agents", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, agentInput);
-    const modelRefusal = runnerModelRefusal(body);
-    if (modelRefusal) return context.json({ error: modelRefusal }, 400);
-    const executionerRefusal = executionerRuntimeRefusal(body);
-    if (executionerRefusal) return context.json({ error: executionerRefusal }, 400);
-    const tierRefusal = codexServiceTierRefusal(body);
-    if (tierRefusal) return context.json({ error: tierRefusal }, 400);
+    const runtimeRefusal = runtimeConfigRefusal(body);
+    if (runtimeRefusal) return context.json({ error: runtimeRefusal }, 400);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
     const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
@@ -1351,12 +1359,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (before.name === "implementation-plan-executioner" && merged.name !== before.name) {
         return refusal("invalid-request", "implementation-plan-executioner is a canonical Agent name and cannot be changed");
       }
-      const modelRefusal = runnerModelRefusal(merged);
-      if (modelRefusal) return refusal("invalid-request", modelRefusal);
-      const executionerRefusal = executionerRuntimeRefusal(merged);
-      if (executionerRefusal) return refusal("invalid-request", executionerRefusal);
-      const tierRefusal = codexServiceTierRefusal(merged);
-      if (tierRefusal) return refusal("invalid-request", tierRefusal);
+      const runtimeRefusal = runtimeConfigRefusal(merged);
+      if (runtimeRefusal) return refusal("invalid-request", runtimeRefusal);
       if (body.environmentId) {
         const environment = await tx.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
         if (!environment) return refusal("invalid-request", "Environment does not belong to this project");
@@ -1370,6 +1374,39 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             ? { runtimeConfigCustomized: true }
             : {}),
         } as Prisma.AgentUncheckedUpdateInput,
+      }) };
+    });
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result.agent);
+  });
+  app.post("/agents/:agentId/reset-runtime-config", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    // Load the complete role contract before opening the write transaction. A
+    // missing or malformed source is a release error and must not turn into a
+    // best-effort reset that guesses at the canonical values.
+    const sources = await loadAgentSources();
+    const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+    const result = await db.$transaction(async (tx) => {
+      const before = await lockAgentRow(tx, agentId);
+      if (!before) return refusal("not-found", "Agent not found");
+      if (before.archivedAt) return refusal("conflict", "Cannot reset runtime configuration for an archived Agent");
+      const role = rolesByName.get(before.name);
+      if (!role) return refusal("invalid-request", `Agent ${before.name} has no canonical role source`);
+      const runtimeRefusal = runtimeConfigRefusal({
+        name: before.name,
+        model: role.model,
+        runnerPreference: role.runnerPreference,
+        codexServiceTier: before.codexServiceTier,
+      });
+      if (runtimeRefusal) return refusal("invalid-request", runtimeRefusal);
+      return { agent: await tx.agent.update({
+        where: { id: agentId },
+        data: {
+          model: role.model,
+          runnerPreference: role.runnerPreference,
+          runtimeConfigCustomized: false,
+          runtimeConfigDriftNoticeFingerprint: null,
+        },
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
@@ -3204,7 +3241,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being acknowledged"));
     if ("message" in result) return refusalJson(context, result);
     const { leaseToRelease, ...settlement } = result;
-    await releaseChainLease(leaseToRelease);
+    // Cancellation is a terminal write. The lease target is deliberately
+    // released only after that transaction commits, when the release adapter
+    // can also record the confirmed deletion and its hold window.
+    await releaseChainLease(leaseToRelease, db);
     return context.json(settlement);
   });
 
@@ -3936,7 +3976,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (result === null) return refusalJson(context, refusal("conflict", "Run changed while cancellation was being settled"));
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...cancellation } = result;
-    await releaseChainLease(releaseMergeLeaseTask);
+    // A queued cancellation is the final consumer when no runner ever claims
+    // the Run. Keep the release post-commit so a rollback cannot free a lease
+    // whose cancellation state was not durably written.
+    await releaseChainLease(releaseMergeLeaseTask, db);
     return context.json(cancellation);
   });
 

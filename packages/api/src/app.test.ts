@@ -6,11 +6,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CodexServiceTier,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   Prisma,
   RunStatus,
   RunnerKind,
   RunnerPreference,
+  loadAgentSources,
   type PrismaClient,
 } from "@anneal/db";
 
@@ -1523,6 +1525,85 @@ test("Agent API does not mark unchanged runtime fields as an operator override",
       model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
     });
+  });
+});
+
+test("reset-runtime-config restores canonical runtime values and refuses invalid reset targets", async () => {
+  await withTokens(async () => {
+    const roles = (await loadAgentSources()).roles;
+    const canonicalRole = roles.find(({ name }) => name === "default");
+    const nonCodexRole = roles.find(({ runnerPreference }) => runnerPreference === RunnerPreference.CLAUDE);
+    assert.ok(canonicalRole);
+    assert.ok(nonCodexRole);
+    const updates: Array<Record<string, unknown>> = [];
+    const canonical = lockedAgent({
+      id: "agent-default",
+      name: "default",
+      model: "custom-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      runtimeConfigCustomized: true,
+      runtimeConfigDriftNoticeFingerprint: "stale-fingerprint",
+    });
+    const tx = {
+      $queryRaw: async (_strings: unknown, agentId: string) => agentId === "missing" ? [] : [{ id: agentId }],
+      agent: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          if (where.id === "agent-custom") return lockedAgent({
+            id: "agent-custom",
+            name: "operator-agent",
+            model: "custom-model",
+            runnerPreference: RunnerPreference.CLAUDE,
+          });
+          if (where.id === "agent-archived") return lockedAgent({
+            id: "agent-archived",
+            name: "default",
+            archivedAt: new Date(),
+            model: canonical!.model,
+            runnerPreference: canonical!.runnerPreference,
+          });
+          if (where.id === "agent-fast-tier") return lockedAgent({
+            id: "agent-fast-tier",
+            name: nonCodexRole.name,
+            model: "gpt-5.6-sol:high",
+            runnerPreference: RunnerPreference.CODEX,
+            codexServiceTier: CodexServiceTier.FAST,
+            runtimeConfigCustomized: true,
+          });
+          if (where.id === canonical!.id) return canonical;
+          return null;
+        },
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          updates.push(data);
+          return { ...canonical, ...data };
+        },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const request = (agentId: string) => app.request(`/agents/${agentId}/reset-runtime-config`, {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal((await request("missing")).status, 404);
+    assert.equal((await request("agent-custom")).status, 400);
+    assert.equal((await request("agent-archived")).status, 409);
+    const tierRefusal = await request("agent-fast-tier");
+    assert.equal(tierRefusal.status, 400);
+    assert.deepEqual(await tierRefusal.json(), {
+      error: "Fast service tier requires a Codex gpt-* model or a PI openai-codex/* model",
+    });
+    const reset = await request(canonical!.id);
+    assert.equal(reset.status, 200);
+    assert.deepEqual(updates, [{
+      model: canonicalRole.model,
+      runnerPreference: canonicalRole.runnerPreference,
+      runtimeConfigCustomized: false,
+      runtimeConfigDriftNoticeFingerprint: null,
+    }]);
   });
 });
 

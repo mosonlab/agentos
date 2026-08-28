@@ -28,13 +28,14 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
-import { readinessTick } from "./merge-readiness-worker.js";
+import { readinessTick, reopenRecoveryHeadAdoptionFailures } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const HEAD = "a".repeat(40);
+const HEAD_2 = "f".repeat(40);
 const BASE = "b".repeat(40);
 const BASE_2 = "c".repeat(40);
 const BASE_3 = "d".repeat(40);
@@ -43,7 +44,7 @@ const OPERATOR = "base-drift-recovery-operator";
 const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
 const releaseLeaseAdapter: MergeLeaseReleaser = async () => ({ outcome: "not-held" });
 const releaseChainLease: ReleaseMergeLease = async () => {};
-const runWithMergeLease: WithMergeLease = (chainId, fn) => withMergeLease(chainId, fn, {
+const runWithMergeLease: WithMergeLease = (target, fn, db) => withMergeLease(target, fn, db, {
   acquire: acquireChainLease,
   release: releaseLeaseAdapter,
 });
@@ -168,15 +169,16 @@ const seedStopped = async (shape: "canonical-direct" | "canonical-compound-readi
 const recordRecoveryPass = async (
   seeded: Awaited<ReturnType<typeof seedIntegratorChain>>,
   baseSha: string,
+  headSha = HEAD,
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
-  await db.run.update({ where: { id: run.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.run.update({ where: { id: run.id }, data: { status: "SUCCEEDED", headSha } });
   await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
     taskId: seeded.gateTask.id, runId: run.id, kind: "regression-verification",
-    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: HEAD,
+    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: headSha,
   }, update: {
     runId: run.id, kind: "regression-verification",
-    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: HEAD,
+    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: headSha,
   } });
   await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
   return run;
@@ -236,6 +238,72 @@ test("fresh server-owned readiness authorization alone activates the recovery me
   assert.equal(aggregate.status, "SUCCEEDED");
   assert.equal(aggregate.authorizationActivityId, authorization.id);
   assert.equal(aggregate.endedAt !== null, true);
+});
+
+test("recovery adopts the verified head produced by merging the current base before authorization", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-adopts-regression-head");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+
+  await recordRecoveryPass(seeded, BASE_2, HEAD_2);
+  const tick = await readinessTick(
+    db,
+    reader(snapshot(BASE_2, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    new Date(),
+    5,
+    releaseChainLease,
+    runWithMergeLease,
+  );
+  assert.equal(tick.authorized, 1);
+
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  assert.equal(aggregate.status, "SUCCEEDED");
+  assert.equal(aggregate.authorizedHeadSha, HEAD_2);
+  const authorization = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: seeded.readinessTask!.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } },
+    orderBy: { createdAt: "desc" },
+  });
+  const parsed = parseAuthorizationMetadata(authorization.metadata);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status === "ok") assert.equal(parsed.payload.headSha, HEAD_2);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
+});
+
+test("the deployed head-adoption fix reopens its exact legacy downstream stop once", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-reopens-head-adoption-stop");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await recordRecoveryPass(seeded, BASE_2, HEAD_2);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const failure = "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
+  await db.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
+    status: "BLOCKED_DOWNSTREAM", failureReason: failure, endedAt: new Date(),
+  } });
+  await db.task.updateMany({
+    where: { id: { in: [seeded.gateTask.id, seeded.readinessTask!.id, seeded.integratorTask!.id] } },
+    data: { status: TaskStatus.REVIEW, failureReason: failure },
+  });
+
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 1);
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status, "REPAIRING");
+
+  const tick = await readinessTick(
+    db,
+    reader(snapshot(BASE_2, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    new Date(),
+    5,
+    releaseChainLease,
+    runWithMergeLease,
+  );
+  assert.equal(tick.authorized, 1);
+  const completed = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(completed.status, "SUCCEEDED");
+  assert.equal(completed.authorizedHeadSha, HEAD_2);
 });
 
 test("recovery holds the full chain mutex before mutation and a concurrent chain writer completes without deadlock or lost recovery", { timeout: 20_000 }, async () => {
@@ -420,6 +488,43 @@ test("pre-intent base drift recovers without inventing an intent while duplicate
     where: { integratorTaskId: ambiguous.integratorTask!.id },
   })).failureReason, "source executor run has multiple server-bound merge intents");
   assert.equal(await db.run.count({ where: { taskId: ambiguous.gateTask.id } }), 1);
+});
+
+test("a legacy zero-intent validation failure reopens the same aggregate and recovers", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "recover-legacy-pre-intent", shape: "canonical-compound-readiness" });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  const sourceRun = await mechanicalStop(
+    seeded,
+    authorization.id,
+    BASE,
+    BASE_2,
+    "base-drift",
+    JSON.stringify({ observed: BASE_2, authorized: BASE }),
+    false,
+  );
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  const legacy = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: "FAILED",
+    failureReason: "source executor run does not have exactly one server-bound merge intent",
+    endedAt: new Date(),
+  } });
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: legacy.id } });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.boundSourceRunId, sourceRun.id);
+  assert.equal(aggregate.failureReason, null);
+  assert.equal(aggregate.endedAt, null);
+  assert.equal(await db.mergeRecoveryAttempt.count({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } }), 1, "the durable failed aggregate is reopened instead of replaced");
 });
 
 test("two distinct executor drifts recover; the third queues no run and notifies once", async () => {

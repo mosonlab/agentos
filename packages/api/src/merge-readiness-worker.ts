@@ -11,6 +11,7 @@ import {
   authorizationMetadata,
   enqueueTaskRun,
   isMergeReadinessStep,
+  latestRecordedStop,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
@@ -37,6 +38,7 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
@@ -56,6 +58,89 @@ const READINESS_REGRESSION_INCLUDE = {
   runs: { orderBy: { runNumber: "desc" as const }, take: 1, select: { id: true } },
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
+
+const LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE =
+  "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
+
+export const reopenRecoveryHeadAdoptionFailures = async (
+  db: PrismaClient,
+  limit = 5,
+): Promise<number> => {
+  const candidates = await db.mergeRecoveryAttempt.findMany({
+    where: {
+      status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+      failureReason: LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE,
+    },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    take: limit,
+  });
+  let reopened = 0;
+  for (const candidate of candidates) {
+    if (!candidate.readinessTaskId || !candidate.regressionTaskId || !candidate.recoveryRunId) continue;
+    const applied = await db.$transaction(async (tx) => {
+      if (!await lockTaskMutationRows(tx, candidate.readinessTaskId!)) return false;
+      const [attempt, regression, readiness, integrator, run, output, stop] = await Promise.all([
+        tx.mergeRecoveryAttempt.findUnique({ where: { id: candidate.id } }),
+        tx.task.findUnique({ where: { id: candidate.regressionTaskId! }, select: { status: true } }),
+        tx.task.findUnique({ where: { id: candidate.readinessTaskId! }, select: { status: true } }),
+        tx.task.findUnique({ where: { id: candidate.integratorTaskId }, select: { status: true } }),
+        tx.run.findUnique({ where: { id: candidate.recoveryRunId! }, select: { id: true, taskId: true, status: true, headSha: true } }),
+        tx.taskStepOutput.findUnique({ where: { taskId: candidate.regressionTaskId! } }),
+        latestRecordedStop(tx, candidate.integratorTaskId),
+      ]);
+      const verdict = parseRegressionVerdict(output?.body ?? "", output?.kind ?? "");
+      if (!attempt
+        || attempt.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
+        || attempt.failureReason !== LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
+        || attempt.recoveryRunId !== candidate.recoveryRunId
+        || attempt.currentBaseSha === null
+        || regression?.status !== TaskStatus.REVIEW
+        || readiness?.status !== TaskStatus.REVIEW
+        || integrator?.status !== TaskStatus.REVIEW
+        || run?.taskId !== candidate.regressionTaskId
+        || run.status !== RunStatus.SUCCEEDED
+        || verdict.status !== "ok"
+        || verdict.verdict.outcome !== "pass"
+        || output?.runId !== run.id
+        || output?.commitSha !== verdict.verdict.headSha
+        || run.headSha !== verdict.verdict.headSha
+        || verdict.verdict.baseHeadSha !== attempt.currentBaseSha
+        || stop?.stopId !== attempt.sourceStopId) return false;
+
+      const updated = await tx.mergeRecoveryAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+          failureReason: LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE,
+        },
+        data: { status: MergeRecoveryStatus.REPAIRING, failureReason: null, endedAt: null },
+      });
+      if (updated.count !== 1) return false;
+      await tx.task.update({ where: { id: candidate.regressionTaskId! }, data: { status: TaskStatus.DONE, failureReason: null } });
+      await tx.task.update({ where: { id: candidate.readinessTaskId! }, data: { status: TaskStatus.TODO, failureReason: null } });
+      await tx.task.update({ where: { id: candidate.integratorTaskId }, data: {
+        status: TaskStatus.REVIEW,
+        failureReason: `Automatic base-drift recovery ${candidate.attempt} resumed after verified regression head adoption`,
+      } });
+      const body = `Automatic base-drift recovery ${candidate.attempt} reopened the verified Regression result for fresh readiness authorization`;
+      const metadata = {
+        aggregateId: candidate.id,
+        sourceStopId: candidate.sourceStopId,
+        recoveryRunId: candidate.recoveryRunId,
+        state: "reopened-head-adoption",
+      };
+      await writeMarker(tx, candidate.integratorTaskId, "baseDriftRecovery", {
+        actorType: "control-plane", body, metadata,
+      });
+      await writeMarker(tx, candidate.regressionTaskId!, "baseDriftRecovery", {
+        actorType: "control-plane", body, metadata,
+      });
+      return true;
+    });
+    if (applied) reopened += 1;
+  }
+  return reopened;
+};
 
 const readinessCandidates = async function* (
   db: PrismaClient,
@@ -151,7 +236,10 @@ const stopReadiness = async (
     return { applied: true as const, leaseToRelease: stopped.leaseToRelease };
   });
   if (!transition.applied) return false;
-  await releaseChainLease(transition.leaseToRelease);
+  // `stopMergeTail` resolves the owning project and chain while the mutation is
+  // locked. Pass that target through unchanged so a shared chainId cannot be
+  // attributed to the readiness project's neighboring tail.
+  await releaseChainLease(transition.leaseToRelease, db);
   return true;
 };
 
@@ -423,7 +511,10 @@ const applyReadinessDecision = async (
     });
     if (requeued) {
       result.requeued += 1;
-      await releaseChainLease(readiness.chainId);
+      const target: MergeLeaseTarget | null = readiness.chainId
+        ? { projectId: readiness.projectId, chainId: readiness.chainId }
+        : null;
+      await releaseChainLease(target, db);
     }
     return requeued;
   };
@@ -447,7 +538,10 @@ const applyReadinessDecision = async (
   // From the base this authorization pins to the merge that consumes it,
   // `main` must not move. The callback makes the sole lawful handoff explicit:
   // only an authorized mechanical merge retains the Lease.
-  const leased = await runWithMergeLease(readiness.chainId, async () => {
+  const target: MergeLeaseTarget | null = readiness.chainId
+    ? { projectId: readiness.projectId, chainId: readiness.chainId }
+    : null;
+  const leased = await runWithMergeLease(target, async () => {
     // The acquire is the only network call outside the GitHub read budget. A
     // stale worker that lost its claim while taking the Lease must classify the
     // new owner before choosing release or retain.
@@ -463,7 +557,11 @@ const applyReadinessDecision = async (
       const handoff = activeSuccessor && readiness.chainId
         ? await db.run.findFirst({
           where: {
-            task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+            task: {
+              projectId: readiness.projectId,
+              chainId: readiness.chainId,
+              chainIndex: { gt: readiness.chainIndex ?? -1 },
+            },
             status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
           },
           select: { id: true },
@@ -534,7 +632,11 @@ const applyReadinessDecision = async (
         const handoff = activeSuccessor && readiness.chainId
           ? await tx.run.findFirst({
             where: {
-              task: { chainId: readiness.chainId, chainIndex: { gt: readiness.chainIndex ?? -1 } },
+              task: {
+                projectId: readiness.projectId,
+                chainId: readiness.chainId,
+                chainIndex: { gt: readiness.chainIndex ?? -1 },
+              },
               status: { in: [RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
             },
             select: { id: true },
@@ -557,6 +659,24 @@ const applyReadinessDecision = async (
           inboxMessageId: binding,
         },
       };
+      if (recovery) {
+        // Recovery regression merges the current base before it proves the
+        // candidate, so its gated head may legitimately replace the head that
+        // first stopped on base drift. Adopt only the head re-read under the
+        // merge lease, and bind the CAS to this recovery run and exact base.
+        const adopted = await tx.mergeRecoveryAttempt.updateMany({
+          where: {
+            id: recovery.aggregateId,
+            status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+            recoveryRunId: recovery.recoveryRunId,
+            currentBaseSha: leasedDecision.evidence.baseSha,
+          },
+          data: { authorizedHeadSha: leasedDecision.evidence.headSha },
+        });
+        if (adopted.count !== 1) {
+          throw new Error("Recovery authorization could not adopt the verified regression head");
+        }
+      }
       const activity = await tx.taskActivity.create({ data: {
         taskId: readiness.id,
         actorType: "control-plane",
@@ -635,7 +755,7 @@ const applyReadinessDecision = async (
         : { kind: "release" as const },
       value: authorization.kind,
     };
-  });
+  }, db);
   if (leased.outcome === "contended") return;
   if (leased.outcome === "unreachable") {
     await recordLeaseDeferral(db, {
@@ -690,6 +810,11 @@ export const readinessTick = async (
         claimReason: read.claimReason,
       }, releaseChainLease);
       if (stopped) result.stopped += 1;
+      // A failed release/hold recording can happen after stopMergeTail has
+      // already committed its state transition. A second stop then returns
+      // false and must not turn that failure into a successful-looking tick.
+      // Surface it to the worker caller so the missing evidence is observable.
+      if (!stopped) throw error;
     }
   }
   return result;
@@ -703,7 +828,15 @@ export const startReadinessWorker = (
   const timer = setInterval(() => {
     if (inFlight) return;
     inFlight = true;
-    void readinessTick(db, reader, new Date(), 5, releaseMergeLease, withMergeLease)
+    void reopenRecoveryHeadAdoptionFailures(db)
+      .then(() => readinessTick(
+        db,
+        reader,
+        new Date(),
+        5,
+        releaseMergeLease,
+        withMergeLease,
+      ))
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {
         inFlight = false;

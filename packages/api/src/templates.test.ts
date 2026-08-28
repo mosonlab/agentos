@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   AssigneeType,
-  CANONICAL_AGENT_DEFAULTS,
   CodexServiceTier,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
@@ -12,6 +11,7 @@ import {
   Prisma,
   RunnerKind,
   RunnerPreference,
+  loadAgentSources,
   loadTemplateStepSources,
   type PrismaClient,
 } from "@anneal/db";
@@ -87,6 +87,7 @@ test("mechanical cards retain only their canonical prompt while model cards reta
 
 test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {
   const canonicalTemplateSteps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
+  const canonicalRoles = (await loadAgentSources()).roles;
   const created: Array<Record<string, any>> = [];
   const runs: Array<Record<string, any>> = [];
   const agents = new Map<string, {
@@ -97,11 +98,11 @@ test("instantiating the canonical feature template copies every layer and writes
     codexServiceTier: CodexServiceTier;
     foundationalPrompt: string;
     rolePrompt: string;
-  }>(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
+  }>(canonicalRoles.map((role, index) => [role.name, {
     id: `agent-${index + 1}`,
-    name: contract.name,
-    model: contract.model,
-    runnerPreference: contract.runner,
+    name: role.name,
+    model: role.model,
+    runnerPreference: role.runnerPreference,
     codexServiceTier: CodexServiceTier.DEFAULT,
     foundationalPrompt: "foundation",
     rolePrompt: "role",

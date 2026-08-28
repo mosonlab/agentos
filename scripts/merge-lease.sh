@@ -336,8 +336,8 @@ delete_lease() {
 release_outcome() {
   case "$1" in
     released)
-      printf 'merge-lease: released %s (%s)\nMERGE LEASE: released %s %s\n' \
-        "$LEASE_REF" "$2" "$LEASE_REF" "$2" ;;
+      printf 'merge-lease: released %s (%s)\nMERGE LEASE: released %s %s %s\n' \
+        "$LEASE_REF" "$2" "$LEASE_REF" "$2" "$LEASE_ACQUIRED_AT" ;;
     not-held)
       printf 'merge-lease: no lease held\nMERGE LEASE: not-held\n' ;;
     skipped)
