@@ -20,7 +20,6 @@ import {
 import { sharedChainBranch } from "./chain-branch.js";
 import { readChainControl } from "./chain-control.js";
 import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
-import { readChainControl } from "./chain-control.js";
 import { requireGateAttestation } from "./gate-attestation.js";
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
