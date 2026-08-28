@@ -76,12 +76,7 @@ set -eu
 
 message_file=$1
 source=\${2-}
-[ "$source" != "commit" ] || exit 0
 [ "\${AGENTOS_RUN_ID-}" = ${shellLiteral(claim.run.id)} ] || exit 0
-[ ! -e "$(git rev-parse --git-path CHERRY_PICK_HEAD 2>/dev/null)" ] || exit 0
-[ ! -e "$(git rev-parse --git-path REVERT_HEAD 2>/dev/null)" ] || exit 0
-[ ! -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || exit 0
-[ ! -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ] || exit 0
 
 actual_common=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd -P) || exit 0
 actual_top=$(cd "$(git rev-parse --show-toplevel 2>/dev/null)" && pwd -P) || exit 0
@@ -90,6 +85,31 @@ case "$actual_top" in
   ${shellLiteral(workspacePath)}|${shellLiteral(`${workspacePath}/`)}*) ;;
   *) exit 0 ;;
 esac
+
+strip_anneal_provenance() {
+  temporary=$(mktemp "\${message_file}.anneal.XXXXXX") || exit 1
+  trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  awk '
+    {
+      lower = tolower($0)
+      if (lower ~ /^x-anneal-[^:]*:/) next
+      if (lower ~ /^co-authored-by:[[:space:]]*anneal chain[[:space:]]*<chain@anneal[.]invalid>[[:space:]]*$/) next
+      print
+    }
+  ' "$message_file" > "$temporary"
+  cat "$temporary" > "$message_file"
+  rm -f "$temporary"
+  trap - EXIT HUP INT TERM
+}
+
+if [ "$source" = "commit" ] \
+  || [ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD 2>/dev/null)" ] \
+  || [ -e "$(git rev-parse --git-path REVERT_HEAD 2>/dev/null)" ] \
+  || [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] \
+  || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; then
+  strip_anneal_provenance
+  exit 0
+fi
 
 parsed=$(git interpret-trailers --parse "$message_file")
 if printf '%s\n' "$parsed" | grep -Eiq '^(X-Anneal-[^:]*:|Co-Authored-By:.*<chain@anneal\.invalid>[[:space:]]*$)'; then

@@ -218,19 +218,31 @@ test("rewrite operations remain unmarked and conflicting provenance fails the co
     const workspace = await provisionWorkspace(configured, claimed);
     const env = providerEnvironment(configured, claimed, workspace);
 
-    await writeFile(join(workspace.path, "base.txt"), "amended base\n");
-    git(workspace.path, ["add", "base.txt"], env);
+    await writeFile(join(workspace.path, "provider.txt"), "provider change\n");
+    git(workspace.path, ["add", "provider.txt"], env);
+    git(workspace.path, ["commit", "-m", "provider commit"], env);
+    assert.match(commitMessage(workspace.path), /X-Anneal-Run: run-rewrite-789/u);
+
+    await writeFile(join(workspace.path, "provider.txt"), "amended provider change\n");
+    git(workspace.path, ["add", "provider.txt"], env);
     git(workspace.path, ["commit", "--amend", "--no-edit"], env);
-    assert.doesNotMatch(commitMessage(workspace.path), /X-Anneal-Run:/u, "--amend has source=commit and stays unmarked");
+    assert.doesNotMatch(commitMessage(workspace.path), /X-Anneal-|Anneal Chain/u, "--amend strips inherited provenance");
 
     git(workspace.path, ["switch", "-c", "cherry-source"], workspaceEnvironment(configured));
     await writeFile(join(workspace.path, "cherry.txt"), "source\n");
     git(workspace.path, ["add", "cherry.txt"], workspaceEnvironment(configured));
-    git(workspace.path, ["commit", "-m", "cherry source"], workspaceEnvironment(configured));
+    git(workspace.path, ["commit", "-m", [
+      "cherry source",
+      "",
+      "Co-Authored-By: Anneal Chain <chain@anneal.invalid>",
+      "X-Anneal-Run: run-from-another-chain",
+      "X-Anneal-Step: 1: Earlier step",
+      "X-Anneal-Provider: claude",
+    ].join("\n")], workspaceEnvironment(configured));
     const cherry = git(workspace.path, ["rev-parse", "HEAD"]);
     git(workspace.path, ["switch", "-C", workspace.branch, "HEAD^"], workspaceEnvironment(configured));
     git(workspace.path, ["cherry-pick", cherry], env);
-    assert.doesNotMatch(commitMessage(workspace.path), /X-Anneal-Run:/u, "CHERRY_PICK_HEAD keeps copied commits unmarked");
+    assert.doesNotMatch(commitMessage(workspace.path), /X-Anneal-|Anneal Chain/u, "CHERRY_PICK_HEAD strips copied provenance");
 
     await writeFile(join(workspace.path, "conflict.txt"), "conflict\n");
     git(workspace.path, ["add", "conflict.txt"], env);
