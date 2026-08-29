@@ -66,6 +66,7 @@
     { "glob": "docs/adr/0001-merge-lease-hold-window.md", "purpose": "diagnosis of the merge-lease hold window and the proposed narrowing of it" },
     { "glob": "docs/adr/0002-coordinate-main-delivery-with-merge-trains.md", "purpose": "accepted fixed-width cumulative-prefix design for concurrent host delivery" },
     { "glob": "docs/adr/0003-acquire-merge-lease-in-readiness.md", "purpose": "accepted readiness-owned merge-lease boundary and retry semantics" },
+    { "glob": "docs/adr/0004-artifact-based-deployment-ledger.md", "purpose": "narrowed host-built artifact deployment target and durable per-deployment ledger" },
     { "glob": "docs/runbooks/gate-worker.md", "purpose": "the offshore merge-gate worker and gate dispatcher runbook: slot model, red lines, deployment, troubleshooting" },
     { "glob": "docs/runbooks/merge-executor.md", "purpose": "public GitHub App merge-executor provisioning, service isolation, verification, rotation, upgrade, and recovery authority" },
     { "glob": "docs/runbooks/quiet-window-auto-deploy.md", "purpose": "production macOS quiet-window auto-deploy installation, refusal, observation and recovery runbook" },
