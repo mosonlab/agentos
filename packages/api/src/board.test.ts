@@ -3,7 +3,18 @@ import test from "node:test";
 
 import { markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
 
-import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, readBoard, repairBinding, taskChainName } from "./board.js";
+import {
+  type BoardChainMember,
+  type BoardRow,
+  boardCard,
+  chainAggregate,
+  chainDisplayByTask,
+  etagFor,
+  etagMatches,
+  readBoard,
+  repairBinding,
+  taskChainName,
+} from "./board.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
   nativeChildUsed: false, costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
@@ -35,14 +46,40 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   ...overrides,
 });
 
+const member = (overrides: Partial<BoardChainMember> = {}): BoardChainMember => ({
+  id: "step-1",
+  projectId: "p1",
+  name: "Release: Step 1",
+  displayName: "Step 1",
+  chainId: "c1",
+  chainIndex: 0,
+  chainLayer: 0,
+  status: "TODO" as BoardChainMember["status"],
+  failureReason: null,
+  dispatchAfterTaskId: null,
+  createdAt: new Date("2026-08-15T00:00:00.000Z"),
+  updatedAt: new Date("2026-08-16T00:00:00.000Z"),
+  templateStep: { name: "Step 1" },
+  runs: [],
+  ...overrides,
+});
+
 const boardReadDatabase = ({
   rows,
   chainRows = [],
   related = [],
+  activities = [],
 }: {
   rows: BoardRow[];
   chainRows?: Array<Record<string, unknown>>;
-  related?: Array<{ id: string; name: string; status: BoardRow["status"] }>;
+  related?: Array<{
+    id: string;
+    name?: string;
+    status?: BoardRow["status"];
+    projectId?: string;
+    chainId?: string | null;
+  }>;
+  activities?: Array<{ taskId: string; metadata: Record<string, unknown> }>;
 }): { db: PrismaClient; predecessorLookups: string[][] } => {
   const predecessorLookups: string[][] = [];
   const db = {
@@ -58,7 +95,7 @@ const boardReadDatabase = ({
         return rows;
       },
     },
-    taskActivity: { findMany: async () => [] },
+    taskActivity: { findMany: async () => activities },
   } as unknown as PrismaClient;
   return { db, predecessorLookups };
 };
@@ -108,7 +145,7 @@ test("the board projection carries every field the board consumes and nothing el
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
-    "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron", "displayName",
+    "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron", "displayName",
     "failureReason", "id", "latestRun", "mergeOutcome", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
     "taskCost", "templateId", "timezone", "updatedAt",
   ]);
@@ -134,6 +171,103 @@ test("a repair task is bound to the chain of the regression task its marker name
     boardCard(row(), null, undefined, null, { chainId: "c1", chainName: "Release", repairKind: "review-fix" }).repairOf,
     { chainId: "c1", chainName: "Release", repairKind: "review-fix" },
   );
+});
+
+test("chainAggregate derives primary progress and every board column from the frontier", () => {
+  const allTodo = chainAggregate("c1", "Release", [
+    member({ id: "step-1", name: "Release: Build", displayName: "Build", chainIndex: 0, chainLayer: 0 }),
+    member({ id: "step-2", name: "Release: Review", displayName: "Review", chainIndex: 1, chainLayer: 1 }),
+    member({ id: "step-3", name: "Release: Ship", displayName: "Ship", chainIndex: 2, chainLayer: 2 }),
+  ], []);
+  assert.equal(allTodo.status, "TODO");
+  assert.equal(allTodo.stepCount, 3);
+  assert.deepEqual(allTodo.statusCounts, { BACKLOG: 0, TODO: 3, DOING: 0, REVIEW: 0, DONE: 0 });
+  assert.deepEqual(allTodo.frontier, {
+    taskId: "step-1", title: "Build", status: "TODO", latestRun: null, failureReason: null, position: 1,
+  });
+  assert.deepEqual(allTodo.activation, { state: "parked-unactivated", predecessor: null, taskId: "step-1" });
+
+  const doing = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
+    member({ id: "step-2", status: "DOING", chainIndex: 1, chainLayer: 1 }),
+    member({ id: "step-3", status: "TODO", chainIndex: 2, chainLayer: 2 }),
+  ], []);
+  assert.equal(doing.status, "DOING");
+  assert.equal(doing.frontier.taskId, "step-2");
+  assert.equal(doing.activation.state, "running");
+
+  const review = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
+    member({ id: "step-2", status: "REVIEW", failureReason: "needs approval", chainIndex: 1, chainLayer: 1 }),
+  ], []);
+  assert.equal(review.status, "REVIEW");
+  assert.equal(review.activation.state, "idle");
+  assert.deepEqual(review.frontier, {
+    taskId: "step-2", title: "Step 1", status: "REVIEW", latestRun: null, failureReason: "needs approval", position: 2,
+  });
+
+  const done = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
+    member({ id: "step-2", status: "DONE", chainIndex: 1, chainLayer: 1 }),
+  ], []);
+  assert.equal(done.status, "DONE");
+  assert.equal(done.activation.state, "settled");
+  assert.equal(done.frontier.taskId, "step-2");
+});
+
+test("chainAggregate reports a predecessor-bound chain and never offers parked activation", () => {
+  const predecessor = { id: "previous-task", name: "Finish source", status: "DOING" as BoardRow["status"] };
+  const aggregate = chainAggregate("c1", "Release", [
+    member({ dispatchAfterTaskId: predecessor.id }),
+    member({ id: "step-2", chainIndex: 1, chainLayer: 1 }),
+  ], [], new Map([[predecessor.id, predecessor]]));
+
+  assert.deepEqual(aggregate.activation, {
+    state: "waiting-on-predecessor",
+    predecessor: { taskId: predecessor.id, taskName: predecessor.name },
+    taskId: "step-1",
+  });
+});
+
+test("chainAggregate offers activation after a bound predecessor has settled", () => {
+  const predecessor = { id: "previous-task", name: "Finish source", status: "DONE" as BoardRow["status"] };
+  const aggregate = chainAggregate("c1", "Release", [
+    member({ dispatchAfterTaskId: predecessor.id }),
+    member({ id: "step-2", chainIndex: 1, chainLayer: 1 }),
+  ], [], new Map([[predecessor.id, predecessor]]));
+
+  assert.deepEqual(aggregate.activation, {
+    state: "parked-unactivated",
+    predecessor: null,
+    taskId: "step-1",
+  });
+});
+
+test("chainAggregate sums member usage and groups a detached repair without inflating steps", () => {
+  const aggregate = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0, runs: [
+      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "1.25" }) },
+    ] }),
+    member({ id: "step-2", status: "DONE", chainIndex: 1, chainLayer: 1 }),
+  ], [
+    member({
+      id: "repair", name: "Merge-tail repair", displayName: "Merge-tail repair", chainId: null,
+      chainIndex: null, chainLayer: null, status: "TODO", runs: [
+        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "0.50" }) },
+      ],
+    }),
+  ]);
+
+  assert.equal(aggregate.stepCount, 2);
+  assert.deepEqual(aggregate.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
+  assert.equal(aggregate.status, "TODO");
+  assert.deepEqual(aggregate.frontier, {
+    taskId: "repair", title: "Merge-tail repair", status: "TODO", latestRun: {
+      id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", costUsd: "0.50", startedAt: null, endedAt: null,
+    }, failureReason: null,
+  });
+  assert.equal(aggregate.activation.state, "idle");
+  assert.equal(aggregate.totalCost?.costUsd, "1.75");
 });
 
 test("blockedOn is projected from the resolved predecessor without storing its status", () => {
@@ -174,6 +308,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     taskCost: null,
     mergeOutcome: null,
     repairOf: null,
+    chainAggregate: null,
   });
 });
 
@@ -337,6 +472,74 @@ test("readBoard computes chainProgress from the complete chain lookup", async ()
     chainId: "c1", done: 1, total: 2, activeStepName: "Implementation",
     activeStatus: "todo", currentLayer: 1, layerCount: 2, position: 1,
   });
+});
+
+test("readBoard carries one aggregate for visible chain members and repair", async () => {
+  const regression = row({
+    id: "regression", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
+  });
+  const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
+  const { db } = boardReadDatabase({
+    rows: [regression, repair],
+    related: [{ id: regression.id, projectId: "p1", chainId: "c1" }],
+    activities: [{ taskId: repair.id, metadata: {
+      schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: regression.id,
+    } }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  const primary = cards.find((card) => card.id === regression.id)!;
+  const detachedRepair = cards.find((card) => card.id === repair.id)!;
+  const projection = primary.chainAggregate ?? detachedRepair.chainAggregate;
+  assert.ok(projection);
+  assert.equal([primary, detachedRepair].filter((card) => card.chainAggregate !== null).length, 1);
+  assert.equal(projection.stepCount, 1);
+  assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 });
+  assert.equal(projection.status, "TODO");
+  assert.equal(detachedRepair.repairOf?.chainId, "c1");
+  assert.equal(projection.frontier.taskId, repair.id);
+  assert.equal(projection.detailTaskId, regression.id);
+});
+
+test("readBoard restores archived primary facts when only a detached repair is visible", async () => {
+  const regression = row({
+    id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
+    name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
+    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", session: session({ costUsd: "1.25" }) }],
+  });
+  const implementation = row({
+    id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE",
+  });
+  const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
+  const { db } = boardReadDatabase({
+    rows: [repair],
+    chainRows: [implementation, regression],
+    related: [{ id: regression.id, projectId: "p1", chainId: "c1" }],
+    activities: [{ taskId: repair.id, metadata: {
+      schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: regression.id,
+    } }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  const projection = cards[0]?.chainAggregate;
+  assert.ok(projection);
+  assert.equal(projection.stepCount, 2);
+  assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
+  assert.equal(projection.totalCost?.costUsd, "1.25");
+  assert.equal(projection.frontier.taskId, repair.id);
+  assert.equal(projection.detailTaskId, implementation.id);
+});
+
+test("readBoard does not invent a direct-chain name from a duplicated single row", async () => {
+  const direct = row({ id: "solo", chainId: "direct", chainIndex: 0, name: "Release: Build" });
+  const { db } = boardReadDatabase({ rows: [direct], chainRows: [direct] });
+
+  const [card] = await readBoard(db, { projectId: "p1", archived: "false" });
+  assert.equal(card?.chainName, null);
+  assert.equal(card?.displayName, "Release: Build");
+  assert.equal(card?.chainAggregate?.chainName, null);
 });
 
 test("the failure reason is carried in full, because Copy error hands it over", () => {

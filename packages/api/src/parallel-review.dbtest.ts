@@ -231,6 +231,7 @@ const instantiateBoundDirect = async (brief = BOUND_SPECIFICATION_BRIEF): Promis
       chainIndex: 1,
       chainLayer: 1,
       status: TaskStatus.TODO,
+      assigneeType: "HUMAN",
     },
   });
   const branchName = `parallel/bound-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
@@ -1299,11 +1300,9 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
     const blindBeforeImplementation = fixture.blindTaskId;
 
     if (mode === "parked") {
-      const parked = await operatorRequest(`/tasks/${blindBeforeImplementation}`, "PATCH", { status: TaskStatus.BACKLOG });
-      assert.equal(parked.status, 200, JSON.stringify(parked.body));
+      await db.task.update({ where: { id: blindBeforeImplementation }, data: { status: TaskStatus.BACKLOG } });
     } else if (mode === "archived-agent") {
-      const parked = await operatorRequest(`/tasks/${blindBeforeImplementation}`, "PATCH", { status: TaskStatus.BACKLOG });
-      assert.equal(parked.status, 200, JSON.stringify(parked.body));
+      await db.task.update({ where: { id: blindBeforeImplementation }, data: { status: TaskStatus.BACKLOG } });
       const blindTask = await db.task.findUniqueOrThrow({
         where: { id: blindBeforeImplementation },
         select: { assigneeAgentId: true },
@@ -1347,8 +1346,7 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
       assert.ok(blindTask.assigneeAgentId);
       const unarchived = await operatorRequest(`/agents/${blindTask.assigneeAgentId}/unarchive`, "POST");
       assert.equal(unarchived.status, 200, JSON.stringify(unarchived.body));
-      const parked = await operatorRequest(`/tasks/${fixture.blindTaskId}`, "PATCH", { status: TaskStatus.BACKLOG });
-      assert.equal(parked.status, 200, JSON.stringify(parked.body));
+      await db.task.update({ where: { id: fixture.blindTaskId }, data: { status: TaskStatus.BACKLOG } });
       const started = await operatorRequest(`/tasks/${fixture.blindTaskId}/start`, "POST");
       assert.equal(started.status, 201, JSON.stringify(started.body));
       repairedClaim = await claim("archived-agent-blind-repair");

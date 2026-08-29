@@ -391,8 +391,8 @@ test("N19 flag-incident is not an exit: the guard holds and the promised later c
     inboxMessageId: followUp!.id, externalEventId: "evt-accept", decision: "accept-foreign-merge",
   }));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, "DONE");
-  // And only now does an ordinary route work again.
-  assert.equal((await call("PATCH", `/tasks/${chain.integratorTask!.id}`, { status: "REVIEW" })).status, 200);
+  // The stop is resolved, but chain-derived status ownership remains intact.
+  assert.equal((await call("PATCH", `/tasks/${chain.integratorTask!.id}`, { status: "REVIEW" })).status, 409);
 });
 
 test("N19 abandon closes the chain with the abandonment explicit, never as a delivery", async () => {

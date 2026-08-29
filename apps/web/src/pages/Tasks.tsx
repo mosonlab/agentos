@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { COLUMNS, type Counts, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey } from "../lib/board";
+import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, operatorMoveTargets, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -13,6 +13,7 @@ import { cn } from "../lib/utils";
 import { DesktopBoard } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { TasksPageHead } from "../components/tasks-tabs";
+import { type ChainAggregateActions } from "../components/chain-aggregate-card";
 import { type CardActions } from "../components/task-card";
 import { EmptyState, ErrorNotice, InfoNotice, KeyValue, Modal, Page, STACK } from "../components/ui";
 import { Button } from "../components/ui/button";
@@ -62,9 +63,20 @@ export const ChainFilterControl = ({ name, onClear }: { name: string; onClear: (
 
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
-export const moveAction = (origin: "drop" | "menu", status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
-  origin === "drop" && status === "DOING" && startable ? "confirm-start" : "patch"
+export const moveAction = (status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
+  status === "DOING" && startable ? "confirm-start" : "patch"
 );
+
+export const startabilityRefusal = (verdict: TaskStartability): string => {
+  const reasons = Object.entries(verdict.checklist)
+    .filter(([, satisfied]) => !satisfied)
+    .map(([key]) => formatT(`taskDetail.startability.${key}`))
+    .join(", ");
+  return formatT("tasks.startRefused", { reasons });
+};
+
+export const moveNotAllowedNotice = (task: Pick<BoardTask, "name">, status: TaskStatus): string =>
+  formatT("tasks.notice.moveNotAllowed", { name: task.name, status: statusLabel(status) });
 
 /** Keeps the previous object for every row whose serialization is unchanged.
  *
@@ -128,7 +140,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
   request: TaskStartability | null;
   pending: boolean;
   error: string | null;
-  requestForDrop: (taskId: string) => Promise<boolean>;
+  requestForMove: (taskId: string) => Promise<boolean>;
   confirm: () => Promise<void>;
   cancel: () => void;
 } => {
@@ -136,9 +148,9 @@ export const useTaskStartConfirmation = (reload: () => void): {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const requestForDrop = useCallback(async (taskId: string): Promise<boolean> => {
+  const requestForMove = useCallback(async (taskId: string): Promise<boolean> => {
     const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
-    if (moveAction("drop", "DOING", verdict.startable) === "patch") return false;
+    if (moveAction("DOING", verdict.startable) === "patch") throw new Error(startabilityRefusal(verdict));
     setError(null);
     setRequest(verdict);
     return true;
@@ -165,7 +177,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
     setError(null);
   }, [pending]);
 
-  return { request, pending, error, requestForDrop, confirm, cancel };
+  return { request, pending, error, requestForMove, confirm, cancel };
 };
 
 export const TasksPage = (): ReactNode => {
@@ -189,16 +201,12 @@ export const TasksPage = (): ReactNode => {
   // reconcile. The breakpoint is the same 900px the stylesheet uses.
   const narrow = useMediaQuery("(max-width: 900px)");
 
-  const byStatus = useMemo(() => {
-    const groups = new Map<TaskStatus, BoardTask[]>(COLUMNS.map((column) => [column.status, []]));
-    for (const task of tasks) groups.get(task.status)?.push(task);
-    // Ordered here rather than in either shell: the desktop column and the phone
-    // list both page their slice of this, and a column paged in one order and
-    // read in another would put its first card on its second page.
-    for (const [status, rows] of groups) groups.set(status, orderColumn(status, rows));
-    return groups;
-  }, [tasks]);
-  const counts: Counts = useMemo(() => countByStatus(tasks), [tasks]);
+  const entries = useMemo<BoardEntry[]>(
+    () => chainFilter === null ? boardEntries(allTasks) : tasks.map(taskBoardEntry),
+    [allTasks, chainFilter, tasks],
+  );
+  const byStatus = useMemo(() => boardEntriesByStatus(entries), [entries]);
+  const counts: Counts = useMemo(() => countByStatus(entries), [entries]);
 
   /* ------------------------------------------------------- the phone's tab */
 
@@ -275,24 +283,24 @@ export const TasksPage = (): ReactNode => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
     void run(async () => {
+      if (status === "DOING" && await start.requestForMove(taskId)) return;
       recordMove(task, status);
       await api.patch(`/tasks/${taskId}`, { status });
       reload();
     });
-  }, [run, reload, recordMove]);
+  }, [run, reload, recordMove, start]);
 
   const drop = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
-    if (status !== "DOING") { move(taskId, status); return; }
-    void run(async () => {
-      if (!await start.requestForDrop(taskId)) {
-        recordMove(task, status);
-        await api.patch(`/tasks/${taskId}`, { status });
-        reload();
-      }
-    });
-  }, [move, run, recordMove, reload, start]);
+    if (!operatorMoveTargets(task).includes(status)) {
+      const message = moveNotAllowedNotice(task, status);
+      setNotice(message);
+      setAnnouncement(message);
+      return;
+    }
+    move(taskId, status);
+  }, [move]);
 
   // Focus follows the card. It runs when a payload lands, which is when the move
   // has actually taken effect — `move` itself only sends the request.
@@ -341,6 +349,26 @@ export const TasksPage = (): ReactNode => {
       if (chain !== null) setChainFilter({ id: chain.id, name: chainBindingLabel(chain) });
     },
   }), [move, retry, archive, remove, copyError]);
+
+  /** Aggregate cards use the same startability/confirmation surface as a
+   * task dropped onto Doing. Keeping this callback at the page boundary means
+   * stale-view 4xx responses remain visible in StartTaskDialog. */
+  const aggregateActions: ChainAggregateActions = useMemo(() => ({
+    onActivate: (taskId) => {
+      void run(async () => { await start.requestForMove(taskId); });
+    },
+    onFilter: (aggregate) => setChainFilter({ id: aggregate.chainId, name: aggregate.chainName ?? aggregate.chainId.slice(0, 8) }),
+    // The aggregate owns the visible members returned by this board read.
+    // Archived siblings are already absent; settling the rest through the
+    // existing idempotent task route removes the aggregate without inventing a
+    // second chain-execution mutation.
+    onArchive: (_aggregate, taskIds) => {
+      void run(async () => {
+        for (const taskId of taskIds) await api.post(`/tasks/${taskId}/archive`, {});
+        reload();
+      });
+    },
+  }), [run, reload, start]);
 
   /** `api.post` is called for its payload, which `useAction.run` discards — but
    *  the call still runs *inside* `run`, so failures land in the same
@@ -392,6 +420,7 @@ export const TasksPage = (): ReactNode => {
             onSelectTab={selectTab}
             onArchiveDone={() => void archiveDone()}
             actions={actions}
+            aggregateActions={aggregateActions}
             listRef={listRef}
           />
         ) : (
@@ -403,6 +432,7 @@ export const TasksPage = (): ReactNode => {
             onMove={drop}
             onArchiveDone={() => void archiveDone()}
             actions={actions}
+            aggregateActions={aggregateActions}
             boardRef={boardRef}
             projectId={projectId}
           />

@@ -311,7 +311,7 @@ test("direct-engineer-workflow Implementation PATCH still accepts senior-dev-hig
 });
 
 for (const route of ["patch", "inbox"] as const) {
-  test(`legacy-invalid compound successor makes ${route} approval return the named 409 with a full rollback`, async () => {
+  test(`legacy-invalid compound successor makes ${route} approval fail closed with a full rollback`, async () => {
     const { predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
     const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
     const response = await requestCompoundApproval(
@@ -321,16 +321,18 @@ for (const route of ["patch", "inbox"] as const) {
       `legacy-invalid-${route}`,
     );
     assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), {
-      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
-      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
-    });
+    assert.deepEqual(await response.json(), route === "patch"
+      ? { error: "Chain task statuses are controlled by chain execution" }
+      : {
+          error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+          code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+        });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
   });
 }
 
 for (const route of ["patch", "inbox"] as const) {
-  test(`HUMAN/null compound successor makes ${route} approval return the named 409 with a full rollback`, async () => {
+  test(`HUMAN/null compound successor makes ${route} approval fail closed with a full rollback`, async () => {
     const { predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
     await db.task.update({
       where: { id: successor.id },
@@ -344,16 +346,18 @@ for (const route of ["patch", "inbox"] as const) {
       `human-null-${route}`,
     );
     assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), {
-      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
-      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
-    });
+    assert.deepEqual(await response.json(), route === "patch"
+      ? { error: "Chain task statuses are controlled by chain execution" }
+      : {
+          error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+          code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+        });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
   });
 }
 
 for (const route of ["patch", "inbox"] as const) {
-  test(`archived compound executioner makes ${route} approval return the same named 409 with a full rollback`, async () => {
+  test(`archived compound executioner makes ${route} approval fail closed with a full rollback`, async () => {
     const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
     await db.agent.update({ where: { id: executioner.id }, data: { archivedAt: new Date() } });
     const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
@@ -364,21 +368,21 @@ for (const route of ["patch", "inbox"] as const) {
       `archived-executioner-${route}`,
     );
     assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), {
-      error: "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step",
-    });
+    assert.deepEqual(await response.json(), route === "patch"
+      ? { error: "Chain task statuses are controlled by chain execution" }
+      : { error: "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step" });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
   });
 }
 
-test("session-less gate PATCH refuses before writing any approval state", async () => {
+test("session-less Inbox approval finds no decision-bound question and writes nothing", async () => {
   const { predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
   await db.inboxMessage.update({ where: { id: gate.id }, data: { sessionId: null } });
   const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
-  const response = await requestCompoundApproval("patch", predecessor.id, gate.id, "session-less");
+  const response = await requestCompoundApproval("inbox", predecessor.id, gate.id, "session-less");
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), {
-    error: "Gate card has no session run to bind a decision to",
+    error: "No matching Inbox question",
   });
   assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
 });
@@ -640,16 +644,16 @@ test("automatic advancement skips a legacy DONE gap and queues the later TODO", 
   assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
 });
 
-test("repeating DONE after the successor finished never resurrects or requeues it", async () => {
+test("an idempotent DONE replay after the successor finished never resurrects or requeues it", async () => {
   const { predecessor, successor } = await seedExecutableChain();
-  await db.task.update({ where: { id: predecessor.id }, data: { status: "REVIEW" } });
+  const completed = await db.task.update({ where: { id: predecessor.id }, data: { status: "DONE" } });
+  await db.$transaction((tx) => activateChainSuccessor(tx, completed, {}, new Date()));
   const priorToken = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = "operator-db-token";
   const patchDone = () => createApp(db).request(`/tasks/${predecessor.id}`, {
     method: "PATCH", headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" }, body: JSON.stringify({ status: "DONE" }),
   });
   try {
-    assert.equal((await patchDone()).status, 200);
     await db.run.updateMany({ where: { taskId: successor.id }, data: { status: "SUCCEEDED" } });
     await db.task.update({ where: { id: successor.id }, data: { status: "DONE" } });
     assert.equal((await patchDone()).status, 200);
@@ -841,7 +845,7 @@ test("completion status CAS preserves a concurrent operator DONE decision", asyn
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
 });
 
-test("operator DONE answers the gate with one decision and a later approval is a duplicate no-op", async () => {
+test("AGENT-chain DONE is refused and Inbox approval remains the sole gate decision", async () => {
   const { project, agent, repo, predecessor } = await seedExecutableChain();
   await db.task.update({ where: { id: predecessor.id }, data: { status: "REVIEW", approvalGate: true } });
   const run = await db.run.create({ data: {
@@ -859,21 +863,22 @@ test("operator DONE answers the gate with one decision and a later approval is a
     const response = await createApp(db).request(`/tasks/${predecessor.id}`, {
       method: "PATCH", headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" }, body: JSON.stringify({ status: "DONE" }),
     });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 409);
   } finally {
     if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
   }
   const answeredGate = await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } });
-  assert.equal(answeredGate.status, "ANSWERED");
-  assert.equal(answeredGate.selectedChoiceId, "approve");
-  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
+  assert.equal(answeredGate.status, "OPEN");
+  assert.equal(answeredGate.selectedChoiceId, null);
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 0);
   const result = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
     inboxMessageId: gate.id, externalEventId: `late-${Date.now()}`, decision: "approve",
   }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-  assert.equal(result.duplicate, true);
+  assert.equal(result.gateAction, "approved");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
 });
 
-test("template gate PATCH and Inbox approval have one winner and queue the successor at most once", async () => {
+test("template gate PATCH cannot beat Inbox approval or queue the successor twice", async () => {
   const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
   const template = await db.taskTemplate.create({ data: {
     projectId: project.id, name: "Race template", description: "race", variables: [],
@@ -907,8 +912,8 @@ test("template gate PATCH and Inbox approval have one winner and queue the succe
         inboxMessageId: gate.id, externalEventId: `race-approve-${Date.now()}`, decision: "approve",
       }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }),
     ]);
-    assert.equal(patch.status, 200);
-    assert.equal(decision.duplicate || decision.gateAction === "approved", true);
+    assert.ok([200, 409].includes(patch.status));
+    assert.equal(decision.gateAction, "approved");
   } finally {
     if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
   }
@@ -920,9 +925,7 @@ test("template gate PATCH and Inbox approval have one winner and queue the succe
     body: { in: ["Approval gate approved", "Status changed: REVIEW → DONE"] },
   } });
   assert.equal(winnerActivities, 1);
-  assert.ok(["ANSWERED", "CLOSED"].includes(
-    (await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status,
-  ));
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
 
   // Both channel replays remain side-effect free after the race settles.
   const replay = await db.$transaction((tx) => applyInboxDecisionTx(tx, {

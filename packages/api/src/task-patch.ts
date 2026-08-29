@@ -44,6 +44,33 @@ type GateWinner = {
   runId: string;
 } | null;
 
+/**
+ * The status transitions owned by the board operator.
+ *
+ * Execution code does not call this action: runners and the chain control
+ * plane write their machine-owned states through their own fenced paths.  A
+ * board PATCH may therefore only move standalone work between its two queue
+ * states, or record the one terminal decision a Human owns.  Chain state is a
+ * projection of chain execution, with that Human completion as its sole
+ * operator-owned exception.
+ */
+export const operatorStatusTransitionRefusal = (
+  task: Pick<Task, "assigneeType" | "chainId" | "status">,
+  next: TaskStatus,
+): string | null => {
+  if (next === task.status) return null;
+  if (task.assigneeType === "HUMAN" && next === TaskStatus.DONE) return null;
+  if (task.chainId !== null) return "Chain task statuses are controlled by chain execution";
+  const queueTransition = (
+    (task.status === TaskStatus.BACKLOG && next === TaskStatus.TODO)
+    || (task.status === TaskStatus.TODO && next === TaskStatus.BACKLOG)
+  );
+  if (queueTransition) return null;
+  return task.assigneeType === "AGENT"
+    ? "Doing, Review, and Done for agent tasks are controlled by execution"
+    : "Human tasks may move between Backlog and Todo or be marked Done";
+};
+
 /** A refusal from `writeTask` in this action's terms: the task is gone, or the
  *  assignee the request named may not be written onto it. */
 const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => (
@@ -213,8 +240,7 @@ export const patchTask = async (
         }
         if (typeof locked.dispatchAfterTaskId === "string"
           && locked.dispatchAfter?.status !== TaskStatus.DONE
-          && body.status !== locked.status
-          && body.status !== TaskStatus.TODO) {
+          && body.status !== locked.status) {
           const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
           return refuse(`Cannot change bound task status before predecessor ${predecessorName} is done`);
         }
@@ -252,6 +278,12 @@ export const patchTask = async (
         if (stopped && body.status !== undefined && body.status !== locked.status) {
           return refuse(stopStateRefusal(stopped));
         }
+        // Ownership is the generic boundary. A forbidden board move must not
+        // hide the more actionable reason that this same write is impossible
+        // anyway. The shared guards are above; DONE's active-run and chain-
+        // predecessor guards run below before its ownership refusal.
+        const operatorRefusal = operatorStatusTransitionRefusal(locked, body.status!);
+        if (body.status !== TaskStatus.DONE && operatorRefusal !== null) return refuse(operatorRefusal);
         let gate: GateWinner = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
@@ -271,6 +303,7 @@ export const patchTask = async (
               return refuse(`Cannot complete ${before.name}; predecessor ${blocker.name} is not done`);
             }
           }
+          if (operatorRefusal !== null) return refuse(operatorRefusal);
           // A Human approval has one durable decision identity on both API
           // channels. The earliest OPEN card is the deterministic winner; the
           // gate Task lock the module took makes this selection and the Inbox

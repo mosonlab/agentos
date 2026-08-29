@@ -368,7 +368,7 @@ test("approval-gate approval dispatches a bound successor through the inbox comp
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
 
-test("run completion, approval, and operator DONE replay dispatch one run on the same binding", async () => {
+test("run completion and approval dispatch once while operator DONE replay is idempotent", async () => {
   const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
   await db.task.update({ where: { id: fixture.predecessor.id }, data: { approvalGate: true } });
   const running = await seedRunningPredecessor(fixture);
@@ -403,15 +403,15 @@ test("run completion, approval, and operator DONE replay dispatch one run on the
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
 
-test("operator DONE dispatches a bound successor through the production PATCH route", async () => {
+test("operator DONE cannot dispatch an AGENT successor binding through PATCH", async () => {
   const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
   const response = await createApp(db).request(`/tasks/${fixture.predecessor.id}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ status: TaskStatus.DONE }),
   });
-  assert.equal(response.status, 200);
-  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
+  assert.equal(response.status, 409);
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 0);
 });
 
 test("concurrent terminal completion attempts queue exactly one bound successor run", { timeout: 20_000 }, async () => {

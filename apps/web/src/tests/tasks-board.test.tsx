@@ -11,8 +11,8 @@ import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
-import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, stableRows, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
-import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
+import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
+import type { BoardTask, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
 import { installDom, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
@@ -103,10 +103,22 @@ test("the board has five columns, in order, with Backlog first", () => {
 
 test("only a startable desktop drop onto Doing asks for start confirmation", () => {
   for (const { status } of COLUMNS) {
-    assert.equal(moveAction("drop", status, true), status === "DOING" ? "confirm-start" : "patch");
-    assert.equal(moveAction("drop", status, false), "patch");
-    assert.equal(moveAction("menu", status, true), "patch");
+    assert.equal(moveAction(status, true), status === "DOING" ? "confirm-start" : "patch");
+    assert.equal(moveAction(status, false), "patch");
   }
+});
+
+test("start and drop refusals explain the observed server verdict", () => {
+  const verdict = {
+    startable: false,
+    checklist: {
+      repoBound: true, agentAssignee: true, repoAccessGrant: true,
+      budgetRemaining: true, noActiveRun: false, predecessorsDone: true,
+    },
+    task: { id: "t1", name: "Ship", agent: null, repo: null, targetBranch: null },
+  } satisfies TaskStartability;
+  assert.equal(startabilityRefusal(verdict), "Task cannot start: No active run");
+  assert.equal(moveNotAllowedNotice(task({ name: "Ship" }), "REVIEW"), "Cannot move Ship to Review");
 });
 
 type BoardRequest = { method: string; path: string; body: unknown };
@@ -114,7 +126,7 @@ type BoardRequest = { method: string; path: string; body: unknown };
 const StartFlowHarness = (): ReactNode => {
   const start = useTaskStartConfirmation(() => undefined);
   return <div>
-    <button type="button" onClick={() => void start.requestForDrop("t1")}>Drop to Doing</button>
+    <button type="button" onClick={() => void start.requestForMove("t1")}>Drop to Doing</button>
     {start.request === null ? null : <section data-confirmation="">
       <span>{start.request.task.name}</span>
       {start.error === null ? null : <div role="alert">{start.error}</div>}
@@ -335,9 +347,16 @@ test("a non-template chain uses the API-derived badge and short card title", () 
 test("Archive All confirms the project-wide Done scope even while one chain is visible", async () => {
   const { dom, container } = installDom();
   storage.set("agentos.projectId", "p1");
+  const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
+    chainId, chainName, detailTaskId: taskId, stepCount: 1,
+    statusCounts: { DONE: 1 }, status: "DONE" as const,
+    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, failureReason: null, position: 1 },
+    activation: { state: "settled" as const, predecessor: null, taskId }, totalCost: null,
+    createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
+  });
   const rows = [
-    task({ id: "visible", name: "Alpha: Review", displayName: "Review", status: "DONE", chainId: "alpha", chainName: "Alpha", chainProgress: progress({ chainId: "alpha" }) }),
-    task({ id: "hidden", name: "Beta: Review", displayName: "Review", status: "DONE", chainId: "beta", chainName: "Beta", chainProgress: progress({ chainId: "beta" }) }),
+    task({ id: "visible", name: "Alpha: Review", displayName: "Review", status: "DONE", chainId: "alpha", chainName: "Alpha", chainProgress: progress({ chainId: "alpha" }), chainAggregate: settledAggregate("alpha", "Alpha", "visible") }),
+    task({ id: "hidden", name: "Beta: Review", displayName: "Review", status: "DONE", chainId: "beta", chainName: "Beta", chainProgress: progress({ chainId: "beta" }), chainAggregate: settledAggregate("beta", "Beta", "hidden") }),
   ];
   const originalFetch = globalThis.fetch;
   const confirmations: string[] = [];

@@ -1,11 +1,12 @@
 import { type ReactNode, useEffect, useState } from "react";
 
-import { CARD_PAGE_SIZE, COLUMNS, type Counts } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Counts, normalizeBoardEntries } from "../lib/board";
 import { useT } from "../lib/i18n";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { COUNT } from "./ui";
 import { Button } from "./ui/button";
+import { ChainAggregateCard, type ChainAggregateActions } from "./chain-aggregate-card";
 import { type CardActions, TaskCard } from "./task-card";
 
 /**
@@ -30,23 +31,25 @@ const LIST_EMPTY = "px-0 py-[40px] text-center text-[12.5px] text-[color:var(--f
 const LIST_TOOLBAR = "mt-[14px] flex items-center gap-[10px]";
 const LIST_PAGER = "flex items-center justify-center gap-[8px]";
 
-export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArchiveDone, actions, listRef }: {
+export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArchiveDone, actions, aggregateActions, listRef }: {
   tab: TaskStatus;
   counts: Counts;
-  tasks: BoardTask[];
+  tasks: readonly (BoardEntry | BoardTask)[];
   loading: boolean;
   onSelectTab: (status: TaskStatus) => void;
   onArchiveDone: () => void;
   actions: CardActions;
+  aggregateActions?: ChainAggregateActions | undefined;
   listRef: React.RefObject<HTMLDivElement | null>;
 }): ReactNode => {
   const t = useT();
+  const entries = normalizeBoardEntries(tasks);
   const [page, setPage] = useState(0);
-  const lastPage = Math.max(0, Math.ceil(tasks.length / CARD_PAGE_SIZE) - 1);
+  const lastPage = Math.max(0, Math.ceil(entries.length / CARD_PAGE_SIZE) - 1);
   const visiblePage = Math.min(page, lastPage);
   const start = visiblePage * CARD_PAGE_SIZE;
-  const visibleTasks = tasks.slice(start, start + CARD_PAGE_SIZE);
-  const nextCount = Math.min(CARD_PAGE_SIZE, Math.max(0, tasks.length - start - CARD_PAGE_SIZE));
+  const visibleTasks = entries.slice(start, start + CARD_PAGE_SIZE);
+  const nextCount = Math.min(CARD_PAGE_SIZE, Math.max(0, entries.length - start - CARD_PAGE_SIZE));
   const previousCount = Math.min(CARD_PAGE_SIZE, start);
   useEffect(() => { setPage(0); }, [tab]);
   useEffect(() => {
@@ -84,7 +87,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
 
     {/* Archive All lives here on a phone rather than in a column head there is
         no room for, and only on the tab it acts on (K7). */}
-    {tab === "DONE" && tasks.length > 0 ? (
+    {tab === "DONE" && entries.length > 0 ? (
       <div className={LIST_TOOLBAR}>
         <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
           {t("tasks.archiveAll")}
@@ -102,7 +105,9 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
     >
       {/* No `draggable`: HTML5 drag does not fire on touch, and a card that
           looks draggable and is not is worse than one that does not (K15). */}
-      {visibleTasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} />)}
+      {visibleTasks.map((entry) => entry.kind === "chain"
+        ? <ChainAggregateCard key={entry.id} aggregate={entry.aggregate} members={entry.members} representativeTaskId={entry.representativeTaskId} actions={aggregateActions} />
+        : <TaskCard key={entry.id} task={entry.task} actions={actions} />)}
       {previousCount > 0 || nextCount > 0 ? (
         <div className={LIST_PAGER}>
           {previousCount > 0 ? (
@@ -117,7 +122,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
           ) : null}
         </div>
       ) : null}
-      {tasks.length === 0 ? <div className={LIST_EMPTY}>{t(loading ? "common.loading" : "tasks.column.nothing")}</div> : null}
+      {entries.length === 0 ? <div className={LIST_EMPTY}>{t(loading ? "common.loading" : "tasks.column.nothing")}</div> : null}
     </div>
   </>;
 };

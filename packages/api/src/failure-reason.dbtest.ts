@@ -156,7 +156,7 @@ test("a patched failure reason is bounded by the same truncation", async () => {
 test("a failure reason clears on the same request that moves the status", async () => {
   const { task } = await seedTask();
   await db.task.update({ where: { id: task.id }, data: {
-    status: TaskStatus.REVIEW, failureReason: "gate formed no verdict",
+    status: TaskStatus.BACKLOG, failureReason: "gate formed no verdict",
   } });
 
   const patched = await call("PATCH", `/tasks/${task.id}`, OPERATOR, { status: "TODO", failureReason: null });

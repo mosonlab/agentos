@@ -1,6 +1,6 @@
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
-import type { BoardTask, RunStatus, TaskStatus } from "./types";
+import type { BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
 
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
@@ -74,6 +74,79 @@ export const chainBinding = (task: Pick<BoardTask, "chainId" | "chainName" | "re
  *  and a short form of its id where it could not. */
 export const chainBindingLabel = (binding: ChainBinding): string => binding.name ?? binding.id.slice(0, 8);
 
+/* --------------------------------------------------------------- projection */
+
+export type TaskBoardEntry = { kind: "task"; id: string; status: TaskStatus; task: BoardTask };
+export type ChainBoardEntry = {
+  kind: "chain";
+  id: string;
+  status: TaskStatus;
+  aggregate: ChainAggregate;
+  /** Raw members are retained only for the chain filter and for resolving a
+   * representative step when an older projection omitted its ordinal. */
+  members: BoardTask[];
+  representativeTaskId: string;
+};
+export type BoardEntry = TaskBoardEntry | ChainBoardEntry;
+
+export const taskBoardEntry = (task: BoardTask): TaskBoardEntry => ({
+  kind: "task", id: task.id, status: task.status, task,
+});
+
+export const isBoardEntry = (value: BoardEntry | BoardTask): value is BoardEntry =>
+  "kind" in value && (value.kind === "task" || value.kind === "chain");
+
+/** Collapse raw board rows into the entries both board shells render. Grouping
+ * uses `chainBinding`, so chain-detached merge-tail repairs stay with their
+ * chain even though they have no chain columns of their own. */
+export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
+  const order: Array<TaskBoardEntry | { kind: "chain-group"; id: string }> = [];
+  const groups = new Map<string, { binding: ChainBinding; members: BoardTask[] }>();
+  for (const task of tasks) {
+    const binding = chainBinding(task);
+    if (binding === null) {
+      order.push(taskBoardEntry(task));
+      continue;
+    }
+    const group = groups.get(binding.id);
+    if (group) group.members.push(task);
+    else {
+      groups.set(binding.id, { binding, members: [task] });
+      order.push({ kind: "chain-group", id: binding.id });
+    }
+  }
+  return order.map((item): BoardEntry => {
+    if (item.kind !== "chain-group") return item;
+    const group = groups.get(item.id)!;
+    const { binding, members } = group;
+    const aggregate = members.find((member) => member.chainAggregate !== null && member.chainAggregate !== undefined)?.chainAggregate;
+    if (aggregate === null || aggregate === undefined) {
+      throw new Error(`Board response omitted the aggregate for chain ${binding.id}`);
+    }
+    const representativeTaskId = aggregate.detailTaskId;
+    return {
+      kind: "chain",
+      id: `chain:${aggregate.chainId}`,
+      status: aggregate.status,
+      aggregate,
+      members,
+      representativeTaskId,
+    };
+  });
+};
+
+/** Normalize a board column input. Keeping raw-task compatibility here makes
+ * the extracted column easy to use from existing callers and focused tests. */
+export const normalizeBoardEntries = (entries: readonly (BoardEntry | BoardTask)[]): BoardEntry[] =>
+  entries.map((entry) => isBoardEntry(entry) ? entry : taskBoardEntry(entry));
+
+export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskStatus, BoardEntry[]> => {
+  const groups = new Map<TaskStatus, BoardEntry[]>(COLUMNS.map((column) => [column.status, []]));
+  for (const entry of entries) groups.get(entry.status)?.push(entry);
+  for (const [status, rows] of groups) groups.set(status, orderColumn(status, rows));
+  return groups;
+};
+
 /* ------------------------------------------------------------- the schedule */
 
 export type ScheduleSubject = Pick<
@@ -142,14 +215,18 @@ export const scheduleLabel = (task: ScheduleSubject): string | null => {
  * preserves the API's id-ascending tiebreak when timestamps are equal; a plain
  * reverse would silently invert that stable order.
  */
-export const orderColumn = (status: TaskStatus, tasks: readonly BoardTask[]): BoardTask[] =>
-  status === "BACKLOG"
+export const orderColumn = <T extends BoardTask | BoardEntry>(status: TaskStatus, tasks: readonly T[]): T[] => {
+  const createdAt = (entry: T): string => isBoardEntry(entry)
+    ? entry.kind === "task" ? entry.task.createdAt : entry.aggregate.createdAt
+    : entry.createdAt;
+  return status === "BACKLOG"
     ? [...tasks].sort((left, right) => (
-        left.createdAt < right.createdAt ? -1
-          : left.createdAt > right.createdAt ? 1
+        createdAt(left) < createdAt(right) ? -1
+          : createdAt(left) > createdAt(right) ? 1
             : left.id.localeCompare(right.id)
       ))
     : [...tasks];
+};
 
 /* -------------------------------------------------------------- the actions */
 
@@ -172,9 +249,41 @@ export const retryable = (
   return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
 };
 
-/** Where a card may be moved to: everywhere it is not. */
-export const moveTargets = (status: TaskStatus): TaskStatus[] =>
-  STATUSES.filter((candidate) => candidate !== status);
+/**
+ * The status destinations an operator may ask the board to perform.
+ *
+ * Backlog and Todo are operator-owned queue states. A human may also settle a
+ * task by marking it Done; agent execution states are owned by the runner and
+ * are therefore never exposed as ordinary status PATCH destinations. Doing for
+ * an unstarted agent task is the one exception in the returned list: the card
+ * routes that destination through the startability/confirmation flow, so it is
+ * not a bare machine-status write.
+ *
+ * A chain (including a merge-tail repair task) derives its status from the
+ * chain projection. A task bound to a predecessor is similarly not an
+ * operator-owned status surface, even when an older board response has no
+ * chain binding on the row.
+ */
+export const operatorMoveTargets = (task: Pick<BoardTask, "status" | "assigneeType" | "chainId" | "chainName" | "repairOf"> & {
+  blockedOn?: BoardTask["blockedOn"];
+  chainProgress?: BoardTask["chainProgress"];
+}, startable = true): TaskStatus[] => {
+  if (chainBinding(task) !== null
+    || task.chainProgress !== null && task.chainProgress !== undefined
+    || task.blockedOn !== null && task.blockedOn !== undefined) return [];
+
+  const queueTargets = task.status === "BACKLOG"
+    ? ["TODO" as const]
+    : task.status === "TODO"
+      ? ["BACKLOG" as const]
+      : [];
+  if (task.assigneeType === "HUMAN") {
+    return task.status === "DONE" ? queueTargets : [...queueTargets, "DONE"];
+  }
+  // Doing is a start action for an unstarted agent task. Its callback must use
+  // `moveAction`, which turns it into the same confirmation flow as a drop.
+  return startable && (task.status === "TODO" || task.status === "BACKLOG") ? [...queueTargets, "DOING"] : queueTargets;
+};
 
 /* -------------------------------------------------------------- persistence */
 

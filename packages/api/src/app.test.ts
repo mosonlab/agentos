@@ -271,11 +271,11 @@ test("task status patch does not apply create defaults to other fields", async (
     const tx = {
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId, status: "REVIEW", archivedAt: null }],
       task: {
-        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null }),
+        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null }),
         // §D-P7's stop-state guard loads the task with its template step before
         // any status write. An ordinary task has no step, and the guard is then
         // a no-op — but it still asks.
-        findUnique: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, templateStep: null }),
+        findUnique: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null, templateStep: null }),
         update: async ({ data }: { data: unknown }) => { updateData = data; return { id: "task-1", status: "DONE" }; },
       },
       run: { count: async () => 0 },
@@ -393,7 +393,7 @@ test("public task creation assigns a linear layer and rejects layer/dependency i
   });
 });
 
-test("operator DONE on a chain task closes its open gate and queues the CAS-claimed successor", async () => {
+test("operator DONE on an AGENT chain task is refused without closing its gate", async () => {
   await withTokens(async () => {
     let closed = false;
     const successor = {
@@ -403,7 +403,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
       repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
-    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
     const tx = {
       // The status write takes the Task-row mutex before advancing the chain.
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
@@ -440,8 +440,9 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({ status: "DONE" }),
     });
-    assert.equal(response.status, 200);
-    assert.equal(closed, true);
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json() as { error: string }).error), /controlled by chain execution/u);
+    assert.equal(closed, false);
   });
 });
 
