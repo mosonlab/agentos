@@ -23,6 +23,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
+  mergeOutcome: null, repairOf: null, chainAggregate: null,
   ...overrides,
 });
 
@@ -347,7 +348,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
   storage.set("agentos.projectId", "p1");
   const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
-    statusCounts: { DONE: 1 }, status: "DONE" as const,
+    statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
     frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, failureReason: null, position: 1 },
     activation: { state: "settled" as const, predecessor: null, taskId }, totalCost: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",

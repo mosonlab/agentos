@@ -52,7 +52,7 @@ const chainFor = (taskId: string): Chain => ({
     status: "TODO", approvalGate: false, assigneeType: "AGENT", executionOwner: "agent",
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
     failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
-    currentExecution: false,
+    blockedOn: null, currentExecution: false, mergeRecovery: null,
   }],
 });
 
