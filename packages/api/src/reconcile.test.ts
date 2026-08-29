@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CleanupStatus, RunStatus, SessionExecutionStatus, TaskStatus, type PrismaClient } from "@anneal/db";
+import { CleanupStatus, Prisma, RunStatus, SessionExecutionStatus, TaskStatus, type PrismaClient } from "@anneal/db";
 
 import {
   createArchivedRunNoticeScheduler,
@@ -201,9 +201,15 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
         : queued ? [{ id: "retry-2", taskId: "task-1", runNumber: 2, agent: { name: "Archived", archivedAt: now } }] : [],
     },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
-      $queryRaw: async (strings: TemplateStringsArray) => strings.join("").includes("TaskActivity")
-        ? []
-        : [{ id: "task-1", archivedAt: null }],
+      $queryRaw: async (query: TemplateStringsArray | Prisma.Sql, ...parameters: unknown[]) => {
+        const sql = "sql" in query ? query.sql : query.join("");
+        const values = "values" in query ? query.values : parameters;
+        if (sql.includes('FROM "TaskActivity" AS deferred')) {
+          assert.deepEqual(values, [100]);
+          return [];
+        }
+        return sql.includes("TaskActivity") ? [] : [{ id: "task-1", archivedAt: null }];
+      },
       agent: { findUnique: async () => ({ id: "agent-1", name: "Archived", archivedAt: now }) },
       run: {
         findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
