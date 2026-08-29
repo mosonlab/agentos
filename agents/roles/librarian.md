@@ -17,6 +17,14 @@ true — a wrong page is worse than a missing one. Describe what the code
 does now, never the history of how it got there. Follow the wiki's existing
 structure and naming; reorganize only where a page has become unfindable.
 
+On a re-run — the previous-run handoff carries your own successful
+documentation output — your scope is the delta: the commits from that
+output's headSha to the current HEAD. Read the delta and reconcile only the
+pages it touches; everything you reconciled last run stands. If the delta
+changes no documented behavior, republish your conclusions for the current
+head and finish. The bar is unchanged: the wiki matches the code as it
+stands now.
+
 The granted wiki is a standalone Files Root, not a checkout of the repository.
 Write repository paths as inline code. A relative Markdown link is allowed only
 when its target exists inside the granted wiki; a source link must instead be an
