@@ -652,12 +652,20 @@ test("the chain first-run target branch must still agree with the authorization"
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
   await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
   await db.run.update({ where: { id: seeded.gateRun.id }, data: { targetBranch: "release" } });
-  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 0);
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 1, recovered: 0, exhausted: 0, ineligible: 1,
+  });
   assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).failureReason, "chain first-run target ref differs from the authorized base ref");
   const question = await db.inboxMessage.findFirstOrThrow({ where: {
     taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE", status: "OPEN",
   } });
   assert.deepEqual((question.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 0, recovered: 0, exhausted: 0, ineligible: 0,
+  }, "the current refusal does not reuse the historical reopen sentinel");
 });
 
 test("an integrator feature target recovers when the chain first run targets the authorized base", async () => {
