@@ -6,7 +6,9 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   AssigneeType,
   ChainControlState,
+  holdChain,
   PrismaClient,
+  resumeChain,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -40,10 +42,45 @@ after(async () => {
   else process.env.RUNNER_TOKEN = priorRunnerToken;
 });
 
-const hold = (chain: Awaited<ReturnType<typeof seedBasicChain>>, requestId: string, reason = "inspect", client = db) =>
-  operatorRequest(client, `/tasks/${chain.second.id}/chain/hold`, { requestId, reason });
+const hold = async (
+  chain: Awaited<ReturnType<typeof seedBasicChain>>,
+  requestId: string,
+  reason = "inspect",
+  client = db,
+) => {
+  const body = await client.$transaction((tx) => holdChain(tx, {
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+    taskId: chain.second.id,
+    requestId,
+    reason,
+  }));
+  if ("message" in body) assert.fail(body.message);
+  return { status: 200, body };
+};
 
-const resume = (taskId: string, requestId: string, client = db) =>
+const resume = async (
+  taskId: string,
+  requestId: string,
+  client = db,
+): Promise<{ status: number; body: any }> => {
+  const task = await client.task.findUniqueOrThrow({
+    where: { id: taskId },
+    select: { projectId: true, chainId: true },
+  });
+  const chainId = task.chainId;
+  if (!chainId) assert.fail("direct Resume requires a Chain task");
+  const body = await client.$transaction((tx) => resumeChain(tx, {
+    projectId: task.projectId,
+    chainId,
+    taskId,
+    requestId,
+  }, new Date()));
+  if ("message" in body) assert.fail(body.message);
+  return { status: 200, body };
+};
+
+const resumeHttp = (taskId: string, requestId: string, client = db) =>
   operatorRequest(client, `/tasks/${taskId}/chain/resume`, { requestId });
 
 const completion = (run: { id: string; runnerId: string | null; fencingToken: string | null }, output = "completion output", client = db) =>
@@ -106,6 +143,37 @@ test("two concurrent Resume requests have one release, event, and activation", a
   assert.equal(await db.chainControlEvent.count({ where: { chainControlId: chain.control!.id, kind: ChainControlState.RELEASED } }), 1);
   assert.equal(await db.run.count({ where: { taskId: chain.second.id, status: RunStatus.QUEUED } }), 1);
   assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+});
+
+test("a Resume that loses the holdGeneration compare-and-set is an idempotent success", async () => {
+  const chain = await seedBasicChain(db);
+  const body = await db.$transaction((tx) => {
+    const instrumented = new Proxy(tx, {
+      get(target, property, receiver) {
+        if (property !== "chainControl") return Reflect.get(target, property, receiver);
+        return new Proxy(target.chainControl, {
+          get(delegate, operation, delegateReceiver) {
+            if (operation === "updateMany") return async () => ({ count: 0 });
+            const value = Reflect.get(delegate, operation, delegateReceiver);
+            return typeof value === "function" ? value.bind(delegate) : value;
+          },
+        });
+      },
+    });
+    return resumeChain(instrumented, {
+      projectId: chain.project.id,
+      chainId: chain.chainId,
+      taskId: chain.first.id,
+      requestId: "resume-cas-loser",
+    }, new Date());
+  });
+  if ("message" in body) assert.fail(body.message);
+  assert.equal(body.duplicate, true);
+  assert.equal(body.control?.state, "held");
+  assert.equal((await db.chainControl.findUniqueOrThrow({ where: { id: chain.control!.id } })).state, ChainControlState.HELD);
+  assert.equal(await db.chainControlEvent.count({
+    where: { chainControlId: chain.control!.id, kind: ChainControlState.RELEASED },
+  }), 0);
 });
 
 test("concurrent Resume activates every node in one eligible fan-out layer exactly once", async () => {
@@ -227,7 +295,7 @@ test("Resume refuses an approval successor when the completed layer has no succe
     approvalGate: true,
   } });
   await seedRun(db, chain, chain.first.id, { status: RunStatus.CANCELLED });
-  const resumed = await resume(chain.first.id, "resume-approval-without-source");
+  const resumed = await resumeHttp(chain.first.id, "resume-approval-without-source");
   assert.equal(resumed.status, 409, JSON.stringify(resumed.body));
   assert.equal((await db.chainControl.findUniqueOrThrow({ where: { id: chain.control!.id } })).state, ChainControlState.HELD);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.TODO);
@@ -278,9 +346,9 @@ test("chainless and unknown Resume addresses are rejected without creating contr
       description: "chainless",
     },
   });
-  const chainlessResponse = await resume(chainless.id, "resume-chainless");
+  const chainlessResponse = await resumeHttp(chainless.id, "resume-chainless");
   assert.equal(chainlessResponse.status, 409);
-  const unknownResponse = await resume("task-does-not-exist", "resume-unknown");
+  const unknownResponse = await resumeHttp("task-does-not-exist", "resume-unknown");
   assert.equal(unknownResponse.status, 404);
   assert.equal(await db.chainControl.count(), 0);
 });
