@@ -523,6 +523,8 @@ model Task {
   workingDirectory        String?
   targetBranch            String?
   failureReason           String?
+  readinessClaimToken     String?
+  readinessClaimExpiresAt DateTime?
   status                  TaskStatus           @default(TODO)
   source                  TaskSource           @default(MANUAL)
   archivedAt              DateTime?
