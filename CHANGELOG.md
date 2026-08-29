@@ -17,7 +17,7 @@ resumed exactly once, and the console's Sessions and new Costs pages make what
 a chain did and what it cost readable without leaving the browser. As with
 every 0.x minor, behaviour changes below are breaking-eligible, and there is
 still no upgrade path between previews other than a fresh install. This release
-adds seven migrations.
+adds eight migrations.
 
 ### The rename
 
@@ -77,6 +77,10 @@ adds seven migrations.
 - A new project cost aggregation endpoint backs the page, and cached input
   tokens are normalized at the write boundary with the historical rows
   backfilled.
+- Native child sessions are priced from what was actually observed rather than
+  from a guess: an unsplit native child bills at the parent's rates, a
+  cost-only model total is preserved instead of discarded, and the unobserved
+  Claude fallback is removed.
 - Every control-plane request from the console is bounded, board columns are
   bounded, the Inbox badge polls a summary instead of the full list, and a card
   is labelled with its run's model snapshot rather than the agent's current
