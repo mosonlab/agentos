@@ -55,6 +55,25 @@ const validationData = (identity: RecoveryValidationIdentity): RecoveryValidatio
   observedBaseSha: identity.observedBaseSha,
 });
 
+const fillValidationIdentity = async (
+  tx: DbTx,
+  attempt: MergeRecoveryAttempt,
+  identity: RecoveryValidationIdentity,
+): Promise<MergeRecoveryAttempt> => {
+  const supplied = validationData(identity);
+  const missing: Partial<RecoveryValidationData> = {};
+  for (const key of Object.keys(supplied) as Array<keyof RecoveryValidationData>) {
+    const current = attempt[key];
+    if (current !== null && current !== supplied[key]) {
+      throw new Error(`Merge recovery ${attempt.id} ${key} conflicts with the validated tail identity`);
+    }
+    if (current === null) Object.assign(missing, { [key]: supplied[key] });
+  }
+  return Object.keys(missing).length === 0
+    ? attempt
+    : tx.mergeRecoveryAttempt.update({ where: { id: attempt.id }, data: missing });
+};
+
 export const recoveryIsReopenableLegacyRefusal = (attempt: MergeRecoveryAttempt): boolean => (
   (attempt.status === MergeRecoveryStatus.FAILED
     && attempt.failureReason === LEGACY_PRE_INTENT_REFUSAL
@@ -91,6 +110,9 @@ export const ensureRecoveryValidation = async (
     orderBy: [{ attempt: "desc" }, { id: "desc" }],
   });
   if (existing) {
+    if (existing.status === MergeRecoveryStatus.VALIDATING && input.identity) {
+      return fillValidationIdentity(tx, existing, input.identity);
+    }
     if (!input.identity || !recoveryIsReopenableLegacyRefusal(existing)) return existing;
     const reopened = await transitionMergeRecovery(tx, existing.id, MergeRecoveryStatus.VALIDATING, {
       failureReason: null,
@@ -184,10 +206,12 @@ export const enterRepair = async (
     throw new Error(`Merge recovery ${input.aggregateId} repair intent does not match ${aggregate.status}`);
   }
 
-  await closeIntegratorQuestions(tx, context.integratorTaskId);
-  await tx.taskStepOutput.deleteMany({
-    where: { taskId: { in: [context.regressionTaskId, context.readinessTaskId] } },
-  });
+  if (!requeue) {
+    await closeIntegratorQuestions(tx, context.integratorTaskId);
+    await tx.taskStepOutput.deleteMany({
+      where: { taskId: { in: [context.regressionTaskId, context.readinessTaskId] } },
+    });
+  }
   await tx.task.update({
     where: { id: context.regressionTaskId },
     data: { status: TaskStatus.TODO, failureReason: null },
@@ -196,15 +220,15 @@ export const enterRepair = async (
     where: { id: context.readinessTaskId },
     data: { status: TaskStatus.TODO, failureReason: null },
   });
-  await tx.task.update({
-    where: { id: context.integratorTaskId },
-    data: requeue
-      ? { status: TaskStatus.REVIEW }
-      : {
-          status: TaskStatus.REVIEW,
-          failureReason: `Automatic base-drift recovery ${String(context.attempt)} queued from stop ${context.sourceStopId}`,
-        },
-  });
+  if (!requeue) {
+    await tx.task.update({
+      where: { id: context.integratorTaskId },
+      data: {
+        status: TaskStatus.REVIEW,
+        failureReason: `Automatic base-drift recovery ${String(context.attempt)} queued from stop ${context.sourceStopId}`,
+      },
+    });
+  }
   const run = await enqueueTaskRun(
     tx,
     context.regressionTaskId,
@@ -227,19 +251,16 @@ export const enterRepair = async (
     recoveryRunId: run.id,
     state: requeue ? "readiness-requeued" : "queued",
   };
-  await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body,
-    metadata,
-  });
-  await writeMarker(tx, context.regressionTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body: requeue
-      ? body
-      : `Automatic base-drift recovery ${String(context.attempt)} verifies ${context.authorizedHeadSha} against current base ${input.currentBaseSha}`,
-    metadata,
-  });
   if (requeue) {
+    const requeueMetadata = {
+      ...context,
+      currentBaseSha: input.currentBaseSha,
+      recoveryRunId: run.id,
+    } as Prisma.InputJsonObject;
+    await tx.taskActivity.createMany({ data: [
+      { taskId: context.integratorTaskId, actorType: "control-plane", body, metadata: requeueMetadata },
+      { taskId: context.regressionTaskId, actorType: "control-plane", body, metadata: requeueMetadata },
+    ] });
     await writeMarker(tx, context.regressionTaskId, "readiness", {
       actorType: "control-plane",
       body: `Merge readiness returned to regression: ${requeue.reason}; ${requeue.staleBaseSha} -> ${input.currentBaseSha}`,
@@ -249,6 +270,17 @@ export const enterRepair = async (
         staleBaseSha: requeue.staleBaseSha,
         currentBaseSha: input.currentBaseSha,
       },
+    });
+  } else {
+    await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
+      body,
+      metadata,
+    });
+    await writeMarker(tx, context.regressionTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
+      body: `Automatic base-drift recovery ${String(context.attempt)} verifies ${context.authorizedHeadSha} against current base ${input.currentBaseSha}`,
+      metadata,
     });
   }
   return { recoveryRunId: run.id };
@@ -264,31 +296,6 @@ export const awaitAuthorization = async (
     MergeRecoveryStatus.AWAITING_AUTHORIZATION,
     { failureReason: null },
   );
-  await tx.task.update({
-    where: { id: recovery.regressionTaskId },
-    data: { status: TaskStatus.DONE, failureReason: null },
-  });
-  await tx.task.update({
-    where: { id: recovery.readinessTaskId },
-    data: { status: TaskStatus.TODO, failureReason: null },
-  });
-  await tx.task.update({
-    where: { id: recovery.integratorTaskId },
-    data: { status: TaskStatus.REVIEW },
-  });
-  const body = `Automatic base-drift recovery ${String(recovery.attempt)} awaits fresh readiness authorization`;
-  const metadata = { ...recovery, state: "awaiting-authorization" };
-  await writeMarker(tx, recovery.integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane", body, metadata,
-  });
-  await writeMarker(tx, recovery.regressionTaskId, "baseDriftRecovery", {
-    actorType: "control-plane", body, metadata,
-  });
-  await writeMarker(tx, recovery.readinessTaskId, "readiness", {
-    actorType: "control-plane",
-    body: "Predecessor layer completed; server-side merge readiness queued",
-    metadata: { state: "queued", sourceRunId: recovery.recoveryRunId },
-  });
 };
 
 export const blockDownstream = async (
@@ -335,18 +342,27 @@ export const blockDownstream = async (
 export const reopenAfterHeadAdoption = async (
   tx: DbTx,
   input: { recovery: RecoveryContext; expectedFailureReason: string },
-): Promise<void> => {
-  const aggregate = await tx.mergeRecoveryAttempt.findUnique({
-    where: { id: input.recovery.aggregateId },
-    select: { failureReason: true },
-  });
-  if (aggregate?.failureReason !== input.expectedFailureReason) {
-    throw new Error(`Merge recovery ${input.recovery.aggregateId} head-adoption failure changed before reopen`);
-  }
-  await transitionMergeRecovery(tx, input.recovery.aggregateId, MergeRecoveryStatus.REPAIRING, {
+): Promise<boolean> => {
+  const transitioned = await transitionMergeRecovery(tx, input.recovery.aggregateId, MergeRecoveryStatus.REPAIRING, {
     failureReason: null,
     endedAt: null,
+  }, {
+    status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+    failureReason: input.expectedFailureReason,
+    boundSourceRunId: input.recovery.sourceRunId,
+    authorizationActivityId: input.recovery.authorizationActivityId,
+    recoveryRunId: input.recovery.recoveryRunId,
+    readinessTaskId: input.recovery.readinessTaskId,
+    regressionTaskId: input.recovery.regressionTaskId,
+    repository: input.recovery.repository,
+    prNumber: input.recovery.prNumber,
+    targetBranch: input.recovery.targetBranch,
+    authorizedHeadSha: input.recovery.authorizedHeadSha,
+    authorizedBaseSha: input.recovery.authorizedBaseSha,
+    observedBaseSha: input.recovery.observedBaseSha,
+    currentBaseSha: input.recovery.currentBaseSha,
   });
+  if (!transitioned) return false;
   await tx.taskStepOutput.deleteMany({ where: { taskId: input.recovery.readinessTaskId } });
   await tx.task.update({
     where: { id: input.recovery.regressionTaskId },
@@ -373,6 +389,7 @@ export const reopenAfterHeadAdoption = async (
   for (const taskId of [input.recovery.integratorTaskId, input.recovery.regressionTaskId]) {
     await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
   }
+  return true;
 };
 
 export const exhaust = async (

@@ -1,4 +1,4 @@
-import { MergeRecoveryStatus, type Prisma } from "@prisma/client";
+import { MergeRecoveryStatus, type MergeRecoveryAttempt, type Prisma } from "@prisma/client";
 
 import { stepRole } from "./step-role.js";
 
@@ -71,7 +71,9 @@ export const mergeRecoveryTransitionAllowed = (
   to: MergeRecoveryStatus,
 ): boolean => from === to || RECOVERY_TRANSITIONS[from].has(to);
 
-export type MergeRecoveryTransitionData = Omit<Prisma.MergeRecoveryAttemptUpdateInput, "status">;
+export type MergeRecoveryTransitionData = Omit<Prisma.MergeRecoveryAttemptUpdateManyMutationInput, "status">;
+
+export type MergeRecoveryTransitionGuard = Prisma.MergeRecoveryAttemptWhereInput;
 
 /**
  * The fail-loud persistence primitive for every recovery status change. Named
@@ -79,17 +81,48 @@ export type MergeRecoveryTransitionData = Omit<Prisma.MergeRecoveryAttemptUpdate
  * activation module also uses this primitive for its authorization-bound
  * terminal success.
  */
-export const transitionMergeRecovery = async (
+export function transitionMergeRecovery(
+  tx: Prisma.TransactionClient,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data?: MergeRecoveryTransitionData,
+): Promise<MergeRecoveryAttempt>;
+export function transitionMergeRecovery(
+  tx: Prisma.TransactionClient,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data: MergeRecoveryTransitionData,
+  expected: MergeRecoveryTransitionGuard,
+): Promise<MergeRecoveryAttempt | null>;
+export async function transitionMergeRecovery(
   tx: Prisma.TransactionClient,
   aggregateId: string,
   target: MergeRecoveryStatus,
   data: MergeRecoveryTransitionData = {},
-) => {
+  expected?: MergeRecoveryTransitionGuard,
+): Promise<MergeRecoveryAttempt | null> {
   const aggregate = await tx.mergeRecoveryAttempt.findUnique({
     where: { id: aggregateId },
     select: { status: true },
   });
-  if (!aggregate) throw new Error(`Merge recovery aggregate ${aggregateId} is absent`);
+  if (!aggregate) {
+    if (expected) return null;
+    throw new Error(`Merge recovery aggregate ${aggregateId} is absent`);
+  }
+  if (expected) {
+    const guardedFrom = typeof expected.status === "string" ? expected.status : aggregate.status;
+    if (!mergeRecoveryTransitionAllowed(guardedFrom, target)) {
+      throw new Error(`Illegal merge recovery transition ${guardedFrom} -> ${target} for ${aggregateId}`);
+    }
+    if (aggregate.status !== guardedFrom) return null;
+    const updated = await tx.mergeRecoveryAttempt.updateMany({
+      where: { AND: [{ id: aggregateId, status: aggregate.status }, expected] },
+      data: { ...data, status: target },
+    });
+    return updated.count === 1
+      ? tx.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregateId } })
+      : null;
+  }
   if (!mergeRecoveryTransitionAllowed(aggregate.status, target)) {
     throw new Error(`Illegal merge recovery transition ${aggregate.status} -> ${target} for ${aggregateId}`);
   }
@@ -97,7 +130,7 @@ export const transitionMergeRecovery = async (
     where: { id: aggregateId },
     data: { ...data, status: target },
   });
-};
+}
 
 export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPhase => (
   status === MergeRecoveryStatus.VALIDATING ? "validation"

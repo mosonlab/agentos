@@ -5,8 +5,11 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   AUTHORIZED_MERGE_METHOD,
   applyInboxDecisionTx,
+  advanceTemplateTask,
   enqueueTaskRun,
+  holdChain,
   MERGE_INTEGRATOR_KIND,
+  MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
   TaskStatus,
@@ -21,8 +24,14 @@ import {
 
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";
+import {
+  awaitAuthorization,
+  ensureRecoveryValidation,
+  enterRepair,
+} from "./merge-tail-state.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import {
+  settleLease,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
@@ -181,8 +190,28 @@ const recordRecoveryPass = async (
     runId: run.id, kind: "regression-verification",
     body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: headSha,
   } });
-  await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
-  return run;
+  const completion = await db.$transaction(async (tx) => {
+    const outcome = await handleRegressionCompletion(tx, {
+      task: seeded.gateTask,
+      run: {
+        id: run.id,
+        agentId: run.agentId,
+        branch: run.branch,
+        headSha,
+        sessionId: seeded.gateSession.id,
+      },
+      now: new Date(),
+    });
+    if (outcome === "advance") {
+      await advanceTemplateTask(tx, seeded.gateTask.id, run.id, null);
+    }
+    const lease = await settleLease(tx, {
+      taskId: seeded.gateTask.id,
+      outcome: outcome === "advance" ? "continue" : "stop",
+    });
+    return { outcome, lease };
+  });
+  return { run, ...completion };
 };
 
 const finishRecoveryPass = async (
@@ -230,6 +259,137 @@ test("queued recovery keeps generic PATCH, retry, and enqueue blocked until read
   await assertIntegratorGuarded(seeded.integratorTask!.id);
   assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.REVIEW);
+});
+
+test("a recovery pass delegates activation to the held-Chain seam and retains the Lease", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "recovery-pass-held-chain");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const held = await db.$transaction((tx) => holdChain(tx, {
+    projectId: seeded.project.id,
+    chainId: seeded.chainId,
+    taskId: seeded.gateTask.id,
+    requestId: "hold-recovery-pass",
+  }));
+  assert.equal("message" in held, false);
+
+  const completion = await recordRecoveryPass(seeded, BASE_2);
+
+  assert.equal(completion.outcome, "advance");
+  assert.deepEqual(completion.lease, { disposition: "retain", leaseToRelease: null });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.readinessTask!.id,
+    metadata: { path: ["sourceRunId"], equals: completion.run.id },
+  } }), 0, "the held Chain did not activate readiness");
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "AWAITING_AUTHORIZATION");
+});
+
+test("enterRepair directly owns both declared repair edges", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "direct-enter-repair-edges");
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  }, orderBy: { createdAt: "desc" } });
+  const source = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.integratorTask!.id } });
+  const authorization = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.readinessTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
+  }, orderBy: { createdAt: "desc" } });
+  const attempt = await db.$transaction((tx) => ensureRecoveryValidation(tx, {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    identity: {
+      sourceRunId: source.runId!,
+      authorizationActivityId: authorization.id,
+      readinessTaskId: seeded.readinessTask!.id,
+      regressionTaskId: seeded.gateTask.id,
+      repository: "acme/widgets",
+      prNumber: 123,
+      targetBranch: "master",
+      authorizedHeadSha: HEAD,
+      authorizedBaseSha: BASE,
+      observedBaseSha: BASE_2,
+    },
+  }));
+
+  const first = await db.$transaction((tx) => enterRepair(tx, {
+    aggregateId: attempt.id,
+    currentBaseSha: BASE_2,
+    now: new Date(),
+  }));
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).status, "REPAIRING");
+
+  await db.run.update({ where: { id: first.recoveryRunId }, data: { status: "SUCCEEDED" } });
+  await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
+  const context = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+  await db.$transaction((tx) => awaitAuthorization(tx, {
+    aggregateId: context.id,
+    attempt: context.attempt,
+    sourceStopId: context.sourceStopId,
+    sourceRunId: context.boundSourceRunId!,
+    authorizationActivityId: context.authorizationActivityId!,
+    repository: context.repository!,
+    prNumber: context.prNumber!,
+    targetBranch: context.targetBranch!,
+    authorizedHeadSha: context.authorizedHeadSha!,
+    authorizedBaseSha: context.authorizedBaseSha!,
+    observedBaseSha: context.observedBaseSha!,
+    currentBaseSha: context.currentBaseSha!,
+    readinessTaskId: context.readinessTaskId!,
+    regressionTaskId: context.regressionTaskId!,
+    integratorTaskId: context.integratorTaskId,
+    recoveryRunId: context.recoveryRunId!,
+  }));
+  await db.$transaction((tx) => enterRepair(tx, {
+    aggregateId: attempt.id,
+    currentBaseSha: BASE_3,
+    now: new Date(),
+    readinessRequeue: { staleBaseSha: BASE_2, reason: "base advanced" },
+  }));
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).status, "REPAIRING");
+});
+
+test("an unexpired readiness claim prevents the recovery fallback transition", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "recovery-readiness-claim-order");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const run = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id },
+    orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: run.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
+    taskId: seeded.gateTask.id,
+    runId: run.id,
+    kind: "regression-verification",
+    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE_2, gateVerdict: "PASS" }),
+    commitSha: HEAD,
+  }, update: {
+    runId: run.id,
+    body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE_2, gateVerdict: "PASS" }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
+  const foreignToken = "merge-readiness-claim:foreign-owner";
+  const expiresAt = new Date(Date.now() + 60_000);
+  await db.task.update({ where: { id: seeded.readinessTask!.id }, data: {
+    status: TaskStatus.DOING,
+    readinessClaimToken: foreignToken,
+    readinessClaimExpiresAt: expiresAt,
+  } });
+
+  const tick = await readinessTick(db, reader(snapshot(BASE_2)), new Date(), 5, releaseChainLease, runWithMergeLease);
+
+  assert.equal(tick.claimed, 0);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "REPAIRING");
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } });
+  assert.equal(readiness.status, TaskStatus.DOING);
+  assert.equal(readiness.readinessClaimToken, foreignToken);
+  assert.equal(readiness.readinessClaimExpiresAt?.getTime(), expiresAt.getTime());
 });
 
 test("fresh server-owned readiness authorization alone activates the recovery merge executor", async () => {
@@ -472,7 +632,29 @@ test("recovery freshness requeue preserves the run binding through fresh authori
   const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-second-freshness");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
 
-  const firstRecoveryRun = await recordRecoveryPass(seeded, BASE_2);
+  const { run: firstRecoveryRun } = await recordRecoveryPass(seeded, BASE_2);
+  const regressionOutput = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.gateTask.id } });
+  const readinessOutput = await db.taskStepOutput.create({ data: {
+    taskId: seeded.readinessTask!.id,
+    kind: "merge-authorization",
+    body: "stale readiness output retained until replacement",
+    commitSha: HEAD,
+  } });
+  const question = await db.inboxMessage.create({ data: {
+    from: "AGENT",
+    taskId: seeded.integratorTask!.id,
+    kind: "MULTIPLE_CHOICE",
+    status: "OPEN",
+    body: "operator question must survive readiness requeue",
+    choices: [{ id: "continue", label: "Continue" }],
+    dedupeKey: `requeue-side-effects:${seeded.integratorTask!.id}`,
+  } });
+  const integratorTimestamp = new Date("2026-08-01T00:00:00.000Z");
+  const integratorFailure = "initial recovery remains operator-visible";
+  await db.task.update({ where: { id: seeded.integratorTask!.id }, data: {
+    failureReason: integratorFailure,
+    updatedAt: integratorTimestamp,
+  } });
 
   assert.equal((await readinessTick(db, reader(snapshot(BASE_3)), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued, 1);
   const secondRecoveryRun = await db.run.findFirstOrThrow({
@@ -484,6 +666,12 @@ test("recovery freshness requeue preserves the run binding through fresh authori
   assert.equal(aggregate.status, "REPAIRING");
   assert.equal(aggregate.recoveryRunId, secondRecoveryRun.id);
   assert.equal(aggregate.currentBaseSha, BASE_3);
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.gateTask.id } })).id, regressionOutput.id);
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.readinessTask!.id } })).id, readinessOutput.id);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: question.id } })).status, "OPEN");
+  const integrator = await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } });
+  assert.equal(integrator.failureReason, integratorFailure);
+  assert.equal(integrator.updatedAt.getTime(), integratorTimestamp.getTime());
   const integratorBinding = await db.taskActivity.findFirst({
     where: {
       taskId: seeded.integratorTask!.id,
@@ -548,7 +736,7 @@ test("eligible direct and compound stops recover once under duplicate ticks and 
       (await readMarkerHistory(db, seeded.integratorTask!.id))
         .filter((entry) => entry.kind === "baseDriftRecovery")
         .map((entry) => entry.state),
-      ["awaiting-authorization", "queued"],
+      ["queued"],
     );
   }
 });
@@ -883,6 +1071,42 @@ test("a transient reader outage is retried and later recovers", async () => {
   assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 2);
 });
 
+test("a chain-active retry fills its existing VALIDATING identity before later repair", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "chain-active-identity-fill");
+  const active = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.gateTask.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.gateTask.id}:run:2`,
+    runner: "CLAUDE",
+    model: seeded.agent.model,
+    promptHash: "chain-active",
+    status: "RUNNING",
+  } });
+
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 1, recovered: 0, exhausted: 0, ineligible: 0,
+  });
+  const validating = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  assert.equal(validating.status, "VALIDATING");
+  assert.equal(validating.boundSourceRunId, null);
+  assert.equal(validating.readinessTaskId, null);
+  assert.equal(validating.validationAttempts, 1);
+
+  await db.run.update({ where: { id: active.id }, data: { status: "SUCCEEDED" } });
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const repaired = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: validating.id } });
+  assert.equal(repaired.status, "REPAIRING");
+  assert.equal(repaired.boundSourceRunId !== null, true);
+  assert.equal(repaired.readinessTaskId, seeded.readinessTask!.id);
+  assert.equal(repaired.regressionTaskId, seeded.gateTask.id);
+  assert.equal(repaired.recoveryRunId !== null, true);
+});
+
 test("older irrelevant REVIEW integrators cannot starve a later eligible stop", async () => {
   const prefix = await seedIntegratorChain(db, { label: "starvation-prefix", shape: "canonical-compound-readiness" });
   await db.task.createMany({ data: Array.from({ length: 55 }, (_, index) => ({
@@ -996,6 +1220,63 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
   assert.equal(await db.inboxMessage.count({ where: {
     dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
   } }), 0);
+});
+
+test("a repair attempt beyond the recent marker window still prevents a free retry", async () => {
+  const seeded = await seedIntegratorChain(db, {
+    label: "repair-attempt-full-history",
+    shape: "canonical-compound-readiness",
+  });
+  await db.agent.update({ where: { id: seeded.agent.id }, data: { name: "senior-dev" } });
+  await db.run.update({ where: { id: seeded.gateRun.id }, data: { headSha: HEAD } });
+  const verdict = JSON.stringify({
+    schemaVersion: 1,
+    outcome: "gate-fail",
+    headSha: HEAD,
+    baseHeadSha: BASE,
+    gateVerdict: "FAIL",
+    summary: "gate failed",
+  });
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.gateTask.id,
+    runId: seeded.gateRun.id,
+    kind: "regression-verification",
+    body: verdict,
+    commitSha: HEAD,
+  } });
+  const completion = {
+    task: seeded.gateTask,
+    run: {
+      id: seeded.gateRun.id,
+      agentId: seeded.agent.id,
+      branch: "agentos/chain/demo",
+      headSha: HEAD,
+      sessionId: seeded.gateSession.id,
+    },
+    now: new Date(),
+  };
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, completion)), "handled");
+  assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: gate-fix" } }), 1);
+
+  for (let index = 0; index < 25; index += 1) {
+    await writeMarker(db, seeded.gateTask.id, "regression", {
+      actorType: "control-plane",
+      body: `later regression activity ${String(index)}`,
+      metadata: { outcome: "pass", headSha: HEAD, baseHeadSha: BASE },
+    });
+  }
+  const recent = await db.taskActivity.findMany({
+    where: { taskId: seeded.gateTask.id },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 20,
+    select: { metadata: true },
+  });
+  assert.equal(recent.some(({ metadata }) => (
+    (metadata as Record<string, unknown>).kind === MERGE_TAIL_KIND.repairAttempt
+  )), false, "the first attempt is outside the recent-state window");
+
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, completion)), "handled");
+  assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: gate-fix" } }), 1);
 });
 
 test("a recovery regression conflict, semantic failure, or gate failure stops without an auxiliary repair task", async () => {

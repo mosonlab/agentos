@@ -129,11 +129,10 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         || stop?.stopId !== attempt.sourceStopId
         || stop.sourceRunId !== context.sourceRunId) return false;
 
-      await reopenAfterHeadAdoption(tx, {
+      return reopenAfterHeadAdoption(tx, {
         recovery: context,
         expectedFailureReason: attempt.failureReason,
       });
-      return true;
     });
     if (applied) reopened += 1;
   }
@@ -322,12 +321,11 @@ const readReadiness = async (
   }
 
   let recovery: RecoveryContext | null = null;
+  let recoveryStatus: MergeRecoveryStatus | null = null;
   try {
     const recoveryRead = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
     recovery = recoveryRead?.context ?? null;
-    if (recovery && recoveryRead?.status === MergeRecoveryStatus.REPAIRING) {
-      await db.$transaction((tx) => awaitAuthorization(tx, recovery!));
-    }
+    recoveryStatus = recoveryRead?.status ?? null;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -348,6 +346,15 @@ const readReadiness = async (
       claim,
       input,
     });
+    if (recovery && recoveryStatus === MergeRecoveryStatus.REPAIRING) {
+      const transition = await db.$transaction((tx) => claim.settle(tx, {
+        kind: "keep",
+        apply: async (client) => awaitAuthorization(client, recovery!),
+      }));
+      if (!transition.settled) {
+        return { claimed: false, input: { ...context, stage: "claim-lost" } };
+      }
+    }
     if (!regression.stepOutput) {
       return claimedRead({ ...context, stage: "missing-regression-evidence" });
     }

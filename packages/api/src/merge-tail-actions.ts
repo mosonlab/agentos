@@ -217,7 +217,7 @@ export const baseDriftRecoveryContext = async (
   return recoveryContext(row);
 };
 
-type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateInput;
+type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateManyMutationInput;
 
 export type StopMergeTailInput =
   | {
@@ -706,7 +706,6 @@ export const handleRegressionCompletion = async (
     await recordVerdict();
     if (recovery) {
       await awaitAuthorization(tx, recovery);
-      return "handled";
     }
     return "advance";
   }

@@ -5,12 +5,14 @@ import {
   MergeRecoveryStatus,
   Prisma,
   TaskStatus,
+  type MergeRecoveryAttempt,
   type RecoveryContext,
 } from "@anneal/db";
 
 import {
   awaitAuthorization,
   blockDownstream,
+  ensureRecoveryValidation,
   exhaust,
   reopenAfterHeadAdoption,
 } from "./merge-tail-state.js";
@@ -34,7 +36,11 @@ const recovery: RecoveryContext = {
   recoveryRunId: "recovery-run-1",
 };
 
-const stateTx = (status: MergeRecoveryStatus, failureReason = "head adoption failed") => {
+const stateTx = (
+  status: MergeRecoveryStatus,
+  failureReason = "head adoption failed",
+  casCount = 1,
+) => {
   const recoveryUpdates: Array<Record<string, any>> = [];
   const taskUpdates: Array<Record<string, any>> = [];
   const outputDeletes: Array<Record<string, any>> = [];
@@ -49,6 +55,11 @@ const stateTx = (status: MergeRecoveryStatus, failureReason = "head adoption fai
         recoveryUpdates.push(args);
         return { id: recovery.aggregateId, status: args.data.status };
       },
+      updateMany: async (args: Record<string, any>) => {
+        recoveryUpdates.push(args);
+        return { count: casCount };
+      },
+      findUniqueOrThrow: async () => ({ id: recovery.aggregateId, status: MergeRecoveryStatus.REPAIRING }),
     },
     task: {
       update: async (args: Record<string, any>) => {
@@ -78,21 +89,14 @@ const stateTx = (status: MergeRecoveryStatus, failureReason = "head adoption fai
   return { tx, recoveryUpdates, taskUpdates, outputDeletes, activities, notices };
 };
 
-test("awaitAuthorization atomically owns the recovery Task tuple and marker", async () => {
+test("awaitAuthorization changes only aggregate authority before the activation seam runs", async () => {
   const observed = stateTx(MergeRecoveryStatus.REPAIRING);
 
   await awaitAuthorization(observed.tx, recovery);
 
   assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.AWAITING_AUTHORIZATION);
-  assert.deepEqual(observed.taskUpdates, [
-    { where: { id: recovery.regressionTaskId }, data: { status: TaskStatus.DONE, failureReason: null } },
-    { where: { id: recovery.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } },
-    { where: { id: recovery.integratorTaskId }, data: { status: TaskStatus.REVIEW } },
-  ]);
-  assert.deepEqual(
-    observed.activities.map((activity) => activity.metadata.state),
-    ["awaiting-authorization", "awaiting-authorization", "queued"],
-  );
+  assert.deepEqual(observed.taskUpdates, []);
+  assert.deepEqual(observed.activities, []);
 });
 
 test("blockDownstream atomically parks all three Tasks and writes its deduped marker", async () => {
@@ -125,10 +129,10 @@ test("blockDownstream atomically parks all three Tasks and writes its deduped ma
 test("reopenAfterHeadAdoption takes the declared BLOCKED_DOWNSTREAM reopen edge", async () => {
   const observed = stateTx(MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
 
-  await reopenAfterHeadAdoption(observed.tx, {
+  assert.equal(await reopenAfterHeadAdoption(observed.tx, {
     recovery,
     expectedFailureReason: "head adoption failed",
-  });
+  }), true);
 
   assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.REPAIRING);
   assert.deepEqual(
@@ -144,6 +148,114 @@ test("reopenAfterHeadAdoption takes the declared BLOCKED_DOWNSTREAM reopen edge"
     "reopened-head-adoption",
     "reopened-head-adoption",
   ]);
+});
+
+test("reopenAfterHeadAdoption skips a stale full-snapshot CAS without touching Tasks", async () => {
+  const observed = stateTx(MergeRecoveryStatus.FAILED, "head adoption failed", 0);
+
+  assert.equal(await reopenAfterHeadAdoption(observed.tx, {
+    recovery,
+    expectedFailureReason: "head adoption failed",
+  }), false);
+
+  assert.equal(observed.recoveryUpdates.length, 0);
+  assert.deepEqual(observed.taskUpdates, []);
+  assert.deepEqual(observed.outputDeletes, []);
+  assert.deepEqual(observed.activities, []);
+});
+
+test("ensureRecoveryValidation owns the declared FAILED legacy reopen edge", async () => {
+  const legacy = {
+    id: recovery.aggregateId,
+    integratorTaskId: recovery.integratorTaskId,
+    sourceStopId: recovery.sourceStopId,
+    attempt: recovery.attempt,
+    status: MergeRecoveryStatus.FAILED,
+    failureReason: "source executor run does not have exactly one server-bound merge intent",
+    boundSourceRunId: null,
+    authorizationActivityId: null,
+    recoveryRunId: null,
+    readinessTaskId: null,
+    regressionTaskId: null,
+    repository: null,
+    prNumber: null,
+    targetBranch: null,
+    authorizedHeadSha: null,
+    authorizedBaseSha: null,
+    observedBaseSha: null,
+    currentBaseSha: null,
+  } as MergeRecoveryAttempt;
+  const observed = stateTx(MergeRecoveryStatus.FAILED);
+  const tx = observed.tx as unknown as {
+    mergeRecoveryAttempt: { findFirst: (args: unknown) => Promise<MergeRecoveryAttempt | null> };
+  };
+  tx.mergeRecoveryAttempt.findFirst = async () => legacy;
+
+  await ensureRecoveryValidation(observed.tx, {
+    integratorTaskId: recovery.integratorTaskId,
+    sourceStopId: recovery.sourceStopId,
+    identity: {
+      sourceRunId: recovery.sourceRunId,
+      authorizationActivityId: recovery.authorizationActivityId,
+      readinessTaskId: recovery.readinessTaskId,
+      regressionTaskId: recovery.regressionTaskId,
+      repository: recovery.repository,
+      prNumber: recovery.prNumber,
+      targetBranch: recovery.targetBranch,
+      authorizedHeadSha: recovery.authorizedHeadSha,
+      authorizedBaseSha: recovery.authorizedBaseSha,
+      observedBaseSha: recovery.observedBaseSha,
+    },
+  });
+
+  assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.VALIDATING);
+  assert.equal(observed.activities[0]?.metadata.state, "legacy-validation-reopened");
+});
+
+test("ensureRecoveryValidation fails loudly instead of overwriting conflicting VALIDATING identity", async () => {
+  const validating = {
+    id: recovery.aggregateId,
+    integratorTaskId: recovery.integratorTaskId,
+    sourceStopId: recovery.sourceStopId,
+    attempt: recovery.attempt,
+    status: MergeRecoveryStatus.VALIDATING,
+    boundSourceRunId: "different-source-run",
+    authorizationActivityId: null,
+    recoveryRunId: null,
+    readinessTaskId: null,
+    regressionTaskId: null,
+    repository: null,
+    prNumber: null,
+    targetBranch: null,
+    authorizedHeadSha: null,
+    authorizedBaseSha: null,
+    observedBaseSha: null,
+    currentBaseSha: null,
+  } as MergeRecoveryAttempt;
+  const observed = stateTx(MergeRecoveryStatus.VALIDATING);
+  const tx = observed.tx as unknown as {
+    mergeRecoveryAttempt: { findFirst: (args: unknown) => Promise<MergeRecoveryAttempt | null> };
+  };
+  tx.mergeRecoveryAttempt.findFirst = async () => validating;
+
+  await assert.rejects(ensureRecoveryValidation(observed.tx, {
+    integratorTaskId: recovery.integratorTaskId,
+    sourceStopId: recovery.sourceStopId,
+    identity: {
+      sourceRunId: recovery.sourceRunId,
+      authorizationActivityId: recovery.authorizationActivityId,
+      readinessTaskId: recovery.readinessTaskId,
+      regressionTaskId: recovery.regressionTaskId,
+      repository: recovery.repository,
+      prNumber: recovery.prNumber,
+      targetBranch: recovery.targetBranch,
+      authorizedHeadSha: recovery.authorizedHeadSha,
+      authorizedBaseSha: recovery.authorizedBaseSha,
+      observedBaseSha: recovery.observedBaseSha,
+    },
+  }), /boundSourceRunId conflicts with the validated tail identity/u);
+
+  assert.deepEqual(observed.recoveryUpdates, []);
 });
 
 test("exhaust atomically fails validation and parks the integrator", async () => {
