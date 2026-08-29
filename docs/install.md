@@ -27,8 +27,8 @@ and a machine without them is a complete installation. Anneal never logs you
 into a provider and never reads a credential store.
 
 ```sh
-git clone https://github.com/mosonlab/agentos.git
-cd agentos
+git clone https://github.com/mosonlab/anneal.git
+cd anneal
 git checkout v0.4.0
 npm ci
 npm run setup:local

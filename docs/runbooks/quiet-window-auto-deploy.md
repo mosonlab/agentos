@@ -2,8 +2,9 @@
 
 This job advances the macOS appliance from the release named by `current` to an
 exact `main` commit. It controls `com.agentos.api`, `com.agentos.inbox`, ten
-runner labels, `com.agentos.web`, and the resident merge executor. It never
-deploys an Anneal run workspace.
+runner labels, and `com.agentos.web`. The release artifact also carries the
+resident merge-executor runtime, but that process is outside this thirteen-label
+activation set. The job never deploys an Anneal run workspace.
 
 ## Runtime layout
 

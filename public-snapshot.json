@@ -43,7 +43,7 @@
     { "glob": "biome.jsonc", "purpose": "lint gate rule set" },
     { "glob": "docker-compose.yml", "purpose": "local development services" },
     { "glob": "eslint.config.mjs", "purpose": "type-aware lint gate rule" },
-    { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by AGENTS.md" },
+    { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by the task-routing contract" },
     { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents list with each agent's role, model, effort and runner" },
     { "glob": "docs/media/chain.png", "purpose": "README screenshot: a twelve-step assurance chain with assigned agent roles" },
     { "glob": "docs/media/parallel-tasks.gif", "purpose": "README hero: multiple tasks running in parallel across the task board" },
@@ -67,7 +67,6 @@
     { "glob": "docs/adr/0001-merge-lease-hold-window.md", "purpose": "diagnosis of the merge-lease hold window and the proposed narrowing of it" },
     { "glob": "docs/adr/0002-coordinate-main-delivery-with-merge-trains.md", "purpose": "accepted fixed-width cumulative-prefix design for concurrent host delivery" },
     { "glob": "docs/adr/0003-acquire-merge-lease-in-readiness.md", "purpose": "accepted readiness-owned merge-lease boundary and retry semantics" },
-    { "glob": "docs/adr/0004-artifact-based-deployment-ledger.md", "purpose": "narrowed host-built artifact deployment target and durable per-deployment ledger" },
     { "glob": "docs/runbooks/gate-worker.md", "purpose": "the offshore merge-gate worker and gate dispatcher runbook: slot model, red lines, deployment, troubleshooting" },
     { "glob": "docs/runbooks/merge-executor.md", "purpose": "public GitHub App merge-executor provisioning, service isolation, verification, rotation, upgrade, and recovery authority" },
     { "glob": "docs/runbooks/quiet-window-auto-deploy.md", "purpose": "production macOS quiet-window auto-deploy installation, refusal, observation and recovery runbook" },
@@ -189,11 +188,6 @@
     { "glob": "**/*.stdout", "category": "generated-runtime-data", "reason": "captured stdout is runtime data and closed by default repository-wide" }
   ],
   "exclude": [
-    {
-      "glob": "records/**",
-      "disposition": "later-release-follow-up",
-      "reason": "internal migration audits and operator cutover plans are evidence about host state rather than product source"
-    },
     {
       "glob": ".chain/**",
       "disposition": "later-release-follow-up",

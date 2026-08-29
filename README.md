@@ -36,11 +36,13 @@ resells no subscription. See
 
 ## What it changes
 
-A task chain covers the whole delivery path: specification, plan, plan review,
-implementation, two independent code reviews, fix application, regression
-verification, merge readiness and the merge itself. Each step carries its own
-role, prompt, model and reasoning effort, and each step's output becomes the
-next step's input.
+A Full Assurance task chain covers the whole delivery path: specification,
+plan, plan review, implementation, two independent code reviews, fix
+application, regression verification, merge readiness and the merge itself. A
+Direct chain omits the specification and planning stages. Agent steps carry
+their own role, prompt, model and reasoning effort; mechanical readiness and
+merge steps do not. Outputs flow only to the downstream consumers declared by
+the template, including both parallel review findings flowing to the fix step.
 
 Once a chain starts it advances on its own. You step in when an agent asks you
 something through the Inbox, when a step you marked as gated needs a human

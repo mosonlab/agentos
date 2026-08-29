@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security report
-    url: https://github.com/mosonlab/agentos/blob/main/SECURITY.md
+    url: https://github.com/mosonlab/anneal/blob/main/SECURITY.md
     about: Never open a public issue for a security problem. Use the private channel.
   - name: Question or idea
-    url: https://github.com/mosonlab/agentos/discussions
+    url: https://github.com/mosonlab/anneal/discussions
     about: Discussions, not issues. Issues are for defects and documentation errors.
   - name: What is supported
-    url: https://github.com/mosonlab/agentos/blob/main/docs/release/support-matrix.md
+    url: https://github.com/mosonlab/anneal/blob/main/docs/release/support-matrix.md
     about: The authoritative support statement. Read it before reporting unsupported behaviour.

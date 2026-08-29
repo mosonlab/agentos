@@ -86,6 +86,24 @@ const artifactPaths = [
   "node_modules",
 ];
 
+test("rejects a missing artifact inventory for an invalid workspace layout", () => {
+  const context = fixture();
+  try {
+    assert.throws(
+      () => assembleReleaseDirectory({
+        stageRoot: context.stageRoot,
+        deployRoot: context.deployRoot,
+        revision,
+      }),
+      (error) => error instanceof DeployFailure
+        && error.reason === "workspace-layout-invalid"
+        && error.detail === "artifact-paths-missing",
+    );
+  } finally {
+    cleanup(context);
+  }
+});
+
 test("assembles a deterministic versioned release and excludes shared/secrets", () => {
   const context = fixture();
   try {
