@@ -34,7 +34,7 @@ import {
   acquireProcessLock,
   blockingRunsStatement,
   pruneDeployHistory,
-} from "./quiet-window-adapters.mjs";
+} from "./deploy-preflight.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { runCommandWithRetry } from "./quiet-window-retry.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
