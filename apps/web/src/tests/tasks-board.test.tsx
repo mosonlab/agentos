@@ -105,7 +105,7 @@ test("only a startable desktop drop onto Doing asks for start confirmation", () 
   for (const { status } of COLUMNS) {
     assert.equal(moveAction("drop", status, true), status === "DOING" ? "confirm-start" : "patch");
     assert.equal(moveAction("drop", status, false), "patch");
-    assert.equal(moveAction("menu", status, true), "patch");
+    assert.equal(moveAction("menu", status, true), status === "DOING" ? "confirm-start" : "patch");
   }
 });
 

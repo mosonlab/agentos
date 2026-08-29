@@ -64,7 +64,7 @@ export const ChainFilterControl = ({ name, onClear }: { name: string; onClear: (
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
 export const moveAction = (origin: "drop" | "menu", status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
-  origin === "drop" && status === "DOING" && startable ? "confirm-start" : "patch"
+  (origin === "drop" || origin === "menu") && status === "DOING" && startable ? "confirm-start" : "patch"
 );
 
 /** Keeps the previous object for every row whose serialization is unchanged.
@@ -129,6 +129,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
   request: TaskStartability | null;
   pending: boolean;
   error: string | null;
+  requestForMove: (origin: "drop" | "menu", taskId: string, requireStart?: boolean) => Promise<boolean>;
   requestForDrop: (taskId: string) => Promise<boolean>;
   requestForStart: (taskId: string) => Promise<boolean>;
   confirm: () => Promise<void>;
@@ -138,13 +139,20 @@ export const useTaskStartConfirmation = (reload: () => void): {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const requestForStart = useCallback(async (taskId: string): Promise<boolean> => {
+  const requestForMove = useCallback(async (origin: "drop" | "menu", taskId: string, requireStart = false): Promise<boolean> => {
     const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
-    if (moveAction("drop", "DOING", verdict.startable) === "patch") return false;
+    if (moveAction(origin, "DOING", verdict.startable) === "patch") {
+      if (requireStart) throw new Error("Task is not currently startable");
+      return false;
+    }
     setError(null);
     setRequest(verdict);
     return true;
   }, []);
+
+  const requestForStart = useCallback((taskId: string): Promise<boolean> => requestForMove("drop", taskId), [requestForMove]);
+
+  const requestForDrop = useCallback((taskId: string): Promise<boolean> => requestForMove("drop", taskId), [requestForMove]);
 
   const confirm = useCallback(async (): Promise<void> => {
     if (!request) return;
@@ -167,7 +175,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
     setError(null);
   }, [pending]);
 
-  return { request, pending, error, requestForDrop: requestForStart, requestForStart, confirm, cancel };
+  return { request, pending, error, requestForMove, requestForDrop, requestForStart, confirm, cancel };
 };
 
 export const TasksPage = (): ReactNode => {
@@ -269,28 +277,22 @@ export const TasksPage = (): ReactNode => {
     setAnnouncement(t("tasks.announcement.moved", { name: task.name, status: statusLabel(status) }));
   }, [t]);
 
-  const move = useCallback((taskId: string, status: TaskStatus): void => {
+  const move = useCallback((taskId: string, status: TaskStatus, origin: "drop" | "menu" = "menu"): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
     void run(async () => {
+      if (status === "DOING" && await start.requestForMove(origin, taskId, task.assigneeType === "AGENT")) return;
       recordMove(task, status);
       await api.patch(`/tasks/${taskId}`, { status });
       reload();
     });
-  }, [run, reload, recordMove]);
+  }, [run, reload, recordMove, start]);
 
   const drop = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
-    if (status !== "DOING") { move(taskId, status); return; }
-    void run(async () => {
-      if (!await start.requestForDrop(taskId)) {
-        recordMove(task, status);
-        await api.patch(`/tasks/${taskId}`, { status });
-        reload();
-      }
-    });
-  }, [move, run, recordMove, reload, start]);
+    move(taskId, status, "drop");
+  }, [move]);
 
   // Focus follows the card. It runs when a payload lands, which is when the move
   // has actually taken effect — `move` itself only sends the request.
@@ -329,7 +331,7 @@ export const TasksPage = (): ReactNode => {
   }, [t]);
 
   const actions: CardActions = useMemo(() => ({
-    onMove: (task, status) => move(task.id, status),
+    onMove: (task, status, origin = "menu") => move(task.id, status, origin),
     onRetry: retry,
     onArchive: archive,
     onDelete: remove,

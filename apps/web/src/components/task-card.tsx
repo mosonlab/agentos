@@ -2,7 +2,7 @@ import { type DragEvent, type MouseEvent, type ReactNode, memo, useEffect, useSt
 
 import { chainPositionMarker } from "../lib/chain";
 import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
-import { chainBinding, chainBindingLabel, moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
+import { chainBinding, chainBindingLabel, operatorMoveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
 import { navigate } from "../lib/router";
@@ -94,7 +94,7 @@ const Assignee = ({ name, label }: { name: string; label: string }): ReactNode =
 };
 
 export type CardActions = {
-  onMove: (task: BoardTask, status: TaskStatus) => void;
+  onMove: (task: BoardTask, status: TaskStatus, origin?: "menu" | "drop") => void;
   onRetry: (task: BoardTask) => void;
   onArchive: (task: BoardTask) => void;
   onDelete: (task: BoardTask) => void;
@@ -158,7 +158,9 @@ export const RunningCardTime = ({ task, t }: { task: BoardTask; t: Translate }):
   return <>{cardTime(task, t, now)}</>;
 };
 
-const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => [
+const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => {
+  const targets = operatorMoveTargets(task);
+  return [
   ...(retryable(task, task.latestRun) ? [{ label: t("common.retry"), onSelect: () => actions.onRetry(task) }] : []),
   // Only where there is an error to copy, and it copies the whole of it — the
   // card shows three lines and hover-to-expand a 2KB log is not an answer.
@@ -166,12 +168,13 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
   { label: t("tasks.menu.archive"), onSelect: () => actions.onArchive(task) },
   { label: t("common.delete"), danger: true, onSelect: () => actions.onDelete(task) },
   // The keyboard's and touch's replacement for the drag (K15/K16).
-  { kind: "heading" as const, label: t("tasks.menu.moveTo") },
-  ...moveTargets(task.status).map((status) => ({
+  ...(targets.length === 0 ? [] : [{ kind: "heading" as const, label: t("tasks.menu.moveTo") }]),
+  ...targets.map((status) => ({
     label: statusLabel(status),
-    onSelect: () => actions.onMove(task, status),
+    onSelect: () => actions.onMove(task, status, "menu"),
   })),
-];
+  ];
+};
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
