@@ -6,6 +6,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -31,13 +32,12 @@ import {
 import {
   acquireProcessLock,
   blockingRunsStatement,
-  deployArtifactPaths,
+  deployReleaseArtifactPaths,
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
   inspectProductionCheckout,
   pruneDeployHistory,
-  publishDirectories,
   workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
@@ -47,13 +47,25 @@ import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
+import {
+  assembleReleaseDirectory,
+  pruneReleaseDirectories,
+  verifyReleaseDirectory,
+} from "./release-directory.mjs";
+import { activateReleasePointer, rollbackReleasePointer } from "./release-pointer.mjs";
+import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
+import { serviceWrapperPath } from "./install-launchd.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 const STATE_DIR = join(REPOSITORY_ROOT, ".agentos-deploy");
 const LOCK_PATH = join(STATE_DIR, "lock");
 const ESCALATION_PATH = join(STATE_DIR, "escalated.json");
-const API_BUILD_STAMP = join(REPOSITORY_ROOT, "packages/api/dist/build-info.json");
+const LEGACY_API_BUILD_STAMP = join(REPOSITORY_ROOT, "packages/api/dist/build-info.json");
+const CURRENT_PATH = join(REPOSITORY_ROOT, "current");
+const CURRENT_API_BUILD_STAMP = join(CURRENT_PATH, "packages/api/dist/build-info.json");
+const RELEASES_PATH = join(REPOSITORY_ROOT, "releases");
+const SHARED_PATH = join(REPOSITORY_ROOT, "shared");
 const POLL_SECONDS_TEXT = process.env.QUIET_WINDOW_POLL_SECONDS ?? "60";
 const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT) : Number.NaN;
 const POLL_MS = POLL_SECONDS * 1_000;
@@ -179,12 +191,26 @@ const readJson = (path, reason) => {
 };
 
 const readDeployedRevision = () => {
-  const stamp = readJson(API_BUILD_STAMP, "deployed-revision-unreadable");
+  let stampPath = LEGACY_API_BUILD_STAMP;
+  try {
+    const current = lstatSync(CURRENT_PATH);
+    if (!current.isSymbolicLink()) fail("deployed-revision-unreadable", "current-is-not-a-symlink");
+    stampPath = CURRENT_API_BUILD_STAMP;
+  } catch (error) {
+    if (error instanceof DeployFailure) throw error;
+    if (error?.code !== "ENOENT") fail("deployed-revision-unreadable", "current-pointer-unreadable");
+  }
+  const stamp = readJson(stampPath, "deployed-revision-unreadable");
   const refusal = deployedBuildStampRefusal(stamp);
   if (refusal) {
     fail("deployed-revision-unreadable", `api-dist-stamp-${refusal}`);
   }
   return stamp.commit;
+};
+
+const environmentFilePath = () => {
+  const sharedEnvironment = join(SHARED_PATH, ".env");
+  return existsSync(sharedEnvironment) ? sharedEnvironment : join(REPOSITORY_ROOT, ".env");
 };
 
 const remoteMainRevision = async () => {
@@ -199,7 +225,7 @@ const remoteMainRevision = async () => {
 };
 
 const loadEnvironment = async () => {
-  const envPath = join(REPOSITORY_ROOT, ".env");
+  const envPath = environmentFilePath();
   if (!existsSync(envPath) || !statSync(envPath).isFile()) fail("environment-unreadable", ".env-missing-or-not-a-file");
   if ((statSync(envPath).mode & 0o777) !== 0o600) fail("environment-unreadable", ".env-mode-must-be-0600");
   const { config } = await import("dotenv").catch(() => fail("environment-unreadable", "dotenv-module-unavailable"));
@@ -463,8 +489,11 @@ const parseArgs = (args) => {
 
 const pruneHistory = () => {
   const result = pruneDeployHistory({ stateDir: STATE_DIR });
-  log(`PRUNE deploy-history previous-kept=${result.keptPrevious} previous-removed=${result.removedPrevious} backups-kept=${result.keptBackups} backups-removed=${result.removedBackups}`);
-  return result;
+  const releases = existsSync(RELEASES_PATH)
+    ? pruneReleaseDirectories({ deployRoot: REPOSITORY_ROOT })
+    : { kept: 0, removed: 0, protected: [] };
+  log(`PRUNE deploy-history previous-kept=${result.keptPrevious} previous-removed=${result.removedPrevious} releases-kept=${releases.kept} releases-removed=${releases.removed} backups-kept=${result.keptBackups} backups-removed=${result.removedBackups}`);
+  return { ...result, releases };
 };
 
 const serviceState = async () => {
@@ -474,6 +503,38 @@ const serviceState = async () => {
     if (result.code !== 0 || !/^\s*state = running\s*$/mu.test(result.stdout)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
+};
+
+/** Prove the wrapper-first migration before any new pointer is activated. Each
+ * loaded definition must name the stable shared wrapper, each label must still
+ * be running from the old current target, and the API must report that exact
+ * current release commit. */
+const verifyStableServicePaths = async () => {
+  const wrapper = serviceWrapperPath(REPOSITORY_ROOT);
+  try {
+    return await verifyServiceInventory({
+      repositoryRoot: REPOSITORY_ROOT,
+      start: async (invocation) => {
+        const result = await command("/bin/launchctl", ["print", `${domain()}/${invocation.label}`], { capture: true });
+        const running = result.code === 0 && /^\s*state = running\s*$/mu.test(result.stdout);
+        const wrapped = result.stdout.includes(wrapper) && result.stdout.includes(invocation.label);
+        return { ok: running && wrapped, targetReleaseId: invocation.releaseIdentity };
+      },
+      readiness: async ({ label, invocation }) => {
+        if (label !== "com.agentos.api") return { ok: true, releaseIdentity: invocation.releaseIdentity };
+        const port = process.env.API_PORT ?? "3000";
+        const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+        const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+        const payload = version.ok ? await version.json() : {};
+        return {
+          ok: health.ok && version.ok && payload.commit === invocation.releaseCommit && payload.dirty === false,
+          releaseIdentity: invocation.releaseIdentity,
+        };
+      },
+    });
+  } catch (error) {
+    fail("service-wrapper-verification-failed", error instanceof Error ? error.message : String(error));
+  }
 };
 
 const repositoryState = async (target) => {
@@ -583,11 +644,11 @@ const main = async () => {
     let stage = null;
     let artifactPaths = null;
     let optionalArtifacts = null;
+    let preparedRelease = null;
     let barrier = null;
     let ledger = null;
     const transactionId = randomUUID();
     const backupDirectory = join(STATE_DIR, "backups");
-    const previousDirectory = join(STATE_DIR, `previous-${transactionId}`);
     try {
       ledger = createDeploymentLedger({ stateDir: STATE_DIR, deploymentId: transactionId, targetCommit: to });
       ledger.start({ targetCommit: to });
@@ -636,7 +697,7 @@ const main = async () => {
         const stamp = readJson(join(stage, "packages/api/dist/build-info.json"), "build-stamp-invalid");
         if (stamp.commit !== to || stamp.dirty !== false) fail("build-stamp-invalid", "staged-api-dist-does-not-match-target");
         optionalArtifacts = [...DEPLOY_OPTIONAL_ARTIFACT_PATHS, ...workspaceDependencyPaths(stage)];
-        artifactPaths = deployArtifactPaths(stage);
+        artifactPaths = deployReleaseArtifactPaths(stage);
         for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
         return {
           buildStamp: {
@@ -663,7 +724,7 @@ const main = async () => {
         return { backupIdentity: basename(output) };
       },
       guardedMigration: async () => {
-        copyFileSync(join(REPOSITORY_ROOT, ".env"), join(stage, ".env"));
+        copyFileSync(environmentFilePath(), join(stage, ".env"));
         chmodSync(join(stage, ".env"), 0o600);
         const migrationTailBefore = await migrationTail();
         await checked("guarded-migration-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:migrate-goal-execution"], {
@@ -679,20 +740,53 @@ const main = async () => {
           fail("runtime-prisma-client-missing", "staged-generated-client-is-absent");
         }
       },
+      materializeRelease: async () => {
+        if (!artifactPaths || !optionalArtifacts) fail("build-output-missing", "artifact-inventory-not-prepared");
+        preparedRelease = assembleReleaseDirectory({
+          stageRoot: stage,
+          deployRoot: REPOSITORY_ROOT,
+          revision: to,
+          artifactPaths,
+          optionalArtifactPaths: optionalArtifacts,
+          retention: false,
+          probeImmutability: true,
+        });
+      },
+      verifyStableServicePaths: async () => {
+        await verifyStableServicePaths();
+      },
       assertQuietBeforeRestart: async () => {
         if (!await barrier.verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");
         const blockers = await blockingRuns();
         if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
       },
       publishBuild: async () => {
-        if (!artifactPaths || !optionalArtifacts) fail("build-output-missing", "artifact-inventory-not-prepared");
-        return publishDirectories({
-          root: REPOSITORY_ROOT,
-          stage,
-          previousDirectory,
-          paths: artifactPaths,
-          optionalMissingPaths: optionalArtifacts,
+        if (!preparedRelease) fail("release-directory-missing", "verified-release-not-prepared");
+        verifyReleaseDirectory({
+          releaseDirectory: preparedRelease.releaseDirectory,
+          revision: to,
+          digest: preparedRelease.digest,
         });
+        const activated = activateReleasePointer({ root: REPOSITORY_ROOT, release: preparedRelease.releaseName });
+        const relativeTarget = (target) => target === null ? null : `releases/${target}`;
+        const pointerTransition = Object.freeze({
+          oldTarget: relativeTarget(activated.oldTarget),
+          newTarget: relativeTarget(activated.newTarget),
+          previousTarget: relativeTarget(activated.previousTarget),
+        });
+        return {
+          releaseDirectoryIdentity: preparedRelease.releaseName,
+          releaseIdentity: {
+            name: preparedRelease.releaseName,
+            commit: preparedRelease.revision,
+            digest: preparedRelease.digest,
+          },
+          pointerOldTarget: pointerTransition.oldTarget,
+          pointerNewTarget: pointerTransition.newTarget,
+          pointerTransition,
+          rollback: async () => rollbackReleasePointer({ root: REPOSITORY_ROOT }),
+          commit: async () => undefined,
+        };
       },
       restartServices: async () => {
         for (const label of SERVICE_LABELS) await launchctl("service-restart-failed", ["kickstart", "-k", `${domain()}/${label}`]);

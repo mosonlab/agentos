@@ -1,25 +1,54 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   accessSync,
   chmodSync,
   constants as fsConstants,
+  copyFileSync,
   existsSync,
   linkSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  SERVICE_INVENTORY,
+  SERVICE_LABELS,
+  resolveCurrentRelease,
+} from "./launchd-service-wrapper.mjs";
+import {
+  DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+  deployReleaseArtifactPaths,
+  workspaceDependencyPaths,
+} from "./quiet-window-adapters.mjs";
+import { assembleReleaseDirectory } from "./release-directory.mjs";
+import { activateReleasePointer } from "./release-pointer.mjs";
+import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 const TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.plist.in");
 const LABEL = "com.agentos.auto-deploy";
+const SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.plist.in");
+const SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.mjs");
+const SERVICE_INSTALL_ROOT = ".agentos-deploy/launchd";
+const SHARED_RUNTIME_DIRECTORIES = Object.freeze([
+  "files",
+  "runs",
+  "dependency-cache",
+  "repo-mirrors",
+  "state",
+]);
 
 const xml = (value) => value
   .replaceAll("&", "&amp;")
@@ -174,6 +203,455 @@ export const renderLaunchdPlist = (template, values) => {
   rendered = rendered.replaceAll("__BACKUP_ENVIRONMENT__", backupEnvironment(values.backup));
   if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-template-has-unresolved-placeholder");
   return rendered;
+};
+
+/** Stable paths and plist rendering for the service side of the wrapper-first
+ * migration. The auto-deploy plist above intentionally remains a separate
+ * definition: installing or reverting service wrappers must not alter the
+ * deployment scheduler. */
+export const serviceWrapperPath = (repositoryRoot) =>
+  join(resolve(repositoryRoot), "shared", "bin", "agentos-service-wrapper.mjs");
+
+/** Materialize the still-serving checkout as the initial immutable release.
+ * Existing service definitions continue to run from the checkout during this
+ * step; only after current identifies the same bytes can the independently
+ * revertible plist migration point them at the stable wrapper. */
+export const bootstrapCurrentRelease = ({
+  repositoryRoot,
+  artifactPaths,
+  optionalArtifactPaths,
+} = {}) => {
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const sharedEnvironment = join(root, "shared", ".env");
+  if (!existsSync(sharedEnvironment)) throw new Error("shared-environment-missing");
+  if (existsSync(join(root, "current"))) {
+    const current = resolveCurrentRelease({ repositoryRoot: root });
+    return Object.freeze({
+      releaseName: current.releaseIdentity,
+      commit: current.releaseCommit,
+      releaseDirectory: current.releaseRoot,
+      bootstrapped: false,
+    });
+  }
+  let stamp;
+  try { stamp = JSON.parse(readFileSync(join(root, "packages/api/dist/build-info.json"), "utf8")); }
+  catch { throw new Error("bootstrap-build-stamp-unreadable"); }
+  if (typeof stamp?.commit !== "string" || !/^[0-9a-f]{40}$/u.test(stamp.commit) || stamp.dirty !== false) {
+    throw new Error("bootstrap-build-stamp-invalid");
+  }
+  const selected = artifactPaths ?? deployReleaseArtifactPaths(root);
+  const optional = optionalArtifactPaths ?? (artifactPaths === undefined ? [
+    ...DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+    ...workspaceDependencyPaths(root),
+  ] : []);
+  const release = assembleReleaseDirectory({
+    stageRoot: root,
+    deployRoot: root,
+    revision: stamp.commit,
+    artifactPaths: selected,
+    optionalArtifactPaths: optional,
+    allowDeployRootInsideStage: true,
+    retention: false,
+    probeImmutability: true,
+  });
+  activateReleasePointer({ root, release: release.releaseName });
+  return Object.freeze({
+    releaseName: release.releaseName,
+    commit: release.revision,
+    releaseDirectory: release.releaseDirectory,
+    bootstrapped: true,
+  });
+};
+
+export const servicePlistValues = ({
+  label,
+  nodeBinary,
+  repositoryRoot,
+  sharedRoot = join(repositoryRoot, "shared"),
+  stdoutPath,
+  stderrPath,
+  path,
+  wrapperPath = serviceWrapperPath(repositoryRoot),
+}) => {
+  if (!SERVICE_INVENTORY[label]) throw new Error(`service-label-unknown:${String(label)}`);
+  if (!nodeBinary || !repositoryRoot || !stdoutPath || !stderrPath || !path) {
+    throw new Error("service-plist-values-incomplete");
+  }
+  return Object.freeze({
+    label,
+    nodeBinary,
+    repositoryRoot: resolve(repositoryRoot),
+    sharedRoot: resolve(sharedRoot),
+    sharedEnvironmentPath: join(resolve(sharedRoot), ".env"),
+    stdoutPath,
+    stderrPath,
+    path,
+    ...(SERVICE_INVENTORY[label].runnerId
+      ? { runnerId: SERVICE_INVENTORY[label].runnerId, runnerPath: path }
+      : {}),
+    wrapperPath,
+  });
+};
+
+export const renderServiceLaunchdPlist = (template, values) => {
+  const replacements = {
+    __LABEL__: values.label,
+    __NODE_BINARY__: values.nodeBinary,
+    __WRAPPER_PATH__: values.wrapperPath,
+    __REPOSITORY_ROOT__: values.repositoryRoot,
+    __SHARED_ROOT__: values.sharedRoot,
+    __SHARED_ENV_FILE__: values.sharedEnvironmentPath,
+    __PATH__: values.path,
+    __STDOUT_PATH__: values.stdoutPath,
+    __STDERR_PATH__: values.stderrPath,
+  };
+  let rendered = template;
+  for (const [placeholder, value] of Object.entries(replacements)) rendered = rendered.replaceAll(placeholder, xml(value));
+  const runnerEnvironment = values.runnerId
+    ? `    <key>RUNNER_ID</key>\n    <string>${xml(values.runnerId)}</string>\n    <key>RUNNER_PATH</key>\n    <string>${xml(values.runnerPath)}</string>`
+    : "";
+  rendered = rendered.replaceAll("__RUNNER_ENVIRONMENT__", runnerEnvironment);
+  if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-service-template-has-unresolved-placeholder");
+  return rendered;
+};
+
+/** Verify the complete rendered inventory before any LaunchAgent file is
+ * touched. The checks intentionally inspect the launchd contract itself, not
+ * only the source inputs: a plist that still contains a source checkout path
+ * or an unresolved placeholder must never reach launchctl. */
+export const verifyServicePlistDefinitions = (definitions, labels = SERVICE_LABELS) => {
+  if (!definitions || !Array.isArray(labels) || labels.length !== SERVICE_LABELS.length || new Set(labels).size !== labels.length) {
+    throw new Error("launchd-service-inventory-invalid");
+  }
+  for (const label of labels) {
+    const rendered = definitions[label];
+    if (typeof rendered !== "string") throw new Error(`launchd-service-definition-missing:${label}`);
+    if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`launchd-service-definition-unresolved:${label}`);
+    if (!new RegExp(`<key>Label</key>\\s*<string>${xml(label)}</string>`, "u").test(rendered)) {
+      throw new Error(`launchd-service-definition-label-mismatch:${label}`);
+    }
+    if (!rendered.includes("<key>ProgramArguments</key>")) throw new Error(`launchd-service-definition-program-missing:${label}`);
+    if (!rendered.includes("AGENTOS_REPOSITORY_ROOT") || !rendered.includes("AGENTOS_SHARED_ROOT")) {
+      throw new Error(`launchd-service-definition-path-environment-missing:${label}`);
+    }
+    if (!rendered.includes("AGENTOS_CURRENT_POINTER") || !rendered.includes("<string>current</string>")) {
+      throw new Error(`launchd-service-definition-current-pointer-missing:${label}`);
+    }
+    if (/<string>\s*<\/string>/u.test(rendered)) throw new Error(`launchd-service-definition-empty-string:${label}`);
+  }
+  return true;
+};
+
+const PLUTIL = "/usr/bin/plutil";
+const PYTHON3 = "/usr/bin/python3";
+
+// launchd installation is a macOS operation, but the merge gate exercises the
+// migration on Linux. Python's standard plistlib keeps that test on the real
+// plist mutation path without adding a production runtime dependency.
+const PYTHON_PLISTLIB = String.raw`
+import json
+import plistlib
+import sys
+
+args = sys.argv[1:]
+path = args[-1]
+with open(path, "rb") as source:
+    root = plistlib.load(source)
+
+def parent_for(key_path):
+    parts = key_path.split(".")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[part]
+    return parent, parts[-1]
+
+if args[0] == "-convert" and args[1] == "json":
+    print(json.dumps(root))
+    sys.exit(0)
+
+if args[0] == "-remove":
+    parent, key = parent_for(args[1])
+    del parent[key]
+elif args[0] in ("-replace", "-insert"):
+    parent, key = parent_for(args[1])
+    value_type = args[2]
+    if value_type == "-dictionary":
+        value = {}
+    elif value_type == "-json":
+        value = json.loads(args[3])
+    elif value_type == "-string":
+        value = args[3]
+    else:
+        raise ValueError(f"unsupported plist value type: {value_type}")
+    parent[key] = value
+elif not (args[0] == "-convert" and args[1] == "xml1"):
+    raise ValueError(f"unsupported plist operation: {args}")
+
+with open(path, "wb") as destination:
+    plistlib.dump(root, destination, fmt=plistlib.FMT_XML, sort_keys=False)
+`;
+
+const execPlist = (args, options) => {
+  if (existsSync(PLUTIL)) return execFileSync(PLUTIL, args, options);
+  if (!existsSync(PYTHON3)) throw new Error(`plist-tool-unavailable:${PLUTIL}:${PYTHON3}`);
+  return execFileSync(PYTHON3, ["-c", PYTHON_PLISTLIB, ...args], options);
+};
+
+const plistObject = (path) => {
+  try {
+    return JSON.parse(execPlist(["-convert", "json", "-o", "-", path], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }));
+  } catch (error) {
+    throw new DeployFailure("launchd-service-definition-invalid", `${path}:${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
+const setPlistValue = (path, existing, keyPath, type, value) => {
+  const action = existing ? "-replace" : "-insert";
+  const args = [action, keyPath, type];
+  if (value !== undefined) args.push(value);
+  args.push(path);
+  execPlist(args, { stdio: ["ignore", "ignore", "pipe"] });
+};
+
+/** Patch only the stable wrapper boundary into an existing definition. plutil
+ * performs the mutation so unknown launchd value types and lifecycle keys stay
+ * byte-for-byte meaningful instead of being reinterpreted by this installer. */
+const renderMigratedServicePlist = ({ sourcePath, values }) => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "agentos-launchd-plist-"));
+  const temporary = join(temporaryRoot, "service.plist");
+  try {
+    copyFileSync(sourcePath, temporary);
+    const original = plistObject(temporary);
+    if (original.Label !== values.label) throw new DeployFailure("launchd-service-definition-label-mismatch", values.label);
+    const environment = original.EnvironmentVariables && typeof original.EnvironmentVariables === "object"
+      && !Array.isArray(original.EnvironmentVariables)
+      ? original.EnvironmentVariables
+      : {};
+    setPlistValue(temporary, Object.hasOwn(original, "ProgramArguments"), "ProgramArguments", "-json", JSON.stringify([
+      values.nodeBinary,
+      values.wrapperPath,
+      values.label,
+    ]));
+    setPlistValue(temporary, Object.hasOwn(original, "WorkingDirectory"), "WorkingDirectory", "-string", values.repositoryRoot);
+    if (!Object.hasOwn(original, "EnvironmentVariables")) {
+      setPlistValue(temporary, false, "EnvironmentVariables", "-dictionary");
+    }
+    const controlled = {
+      DEPLOY_NODE_BINARY: values.nodeBinary,
+      AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
+      AGENTOS_SHARED_ROOT: values.sharedRoot,
+      AGENTOS_SHARED_ENV_FILE: values.sharedEnvironmentPath,
+      AGENTOS_CURRENT_POINTER: "current",
+      AGENTOS_RELEASES_DIRECTORY: "releases",
+      AGENTOS_SERVICE_LABEL: values.label,
+    };
+    if (!Object.hasOwn(environment, "PATH")) controlled.PATH = values.path;
+    if (values.runnerId) {
+      controlled.RUNNER_ID = values.runnerId;
+      if (typeof environment.RUNNER_PATH !== "string" || environment.RUNNER_PATH === "") {
+        controlled.RUNNER_PATH = values.runnerPath;
+      }
+    }
+    for (const [key, value] of Object.entries(controlled)) {
+      setPlistValue(temporary, Object.hasOwn(environment, key), `EnvironmentVariables.${key}`, "-string", value);
+    }
+    for (const key of values.runnerId ? [] : ["RUNNER_ID", "RUNNER_PATH"]) {
+      if (environment[key] === "") execPlist(["-remove", `EnvironmentVariables.${key}`, temporary], { stdio: "ignore" });
+    }
+    execPlist(["-convert", "xml1", temporary], { stdio: ["ignore", "ignore", "pipe"] });
+    return readFileSync(temporary, "utf8");
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+};
+
+export const renderServicePlists = ({
+  template = readFileSync(SERVICE_TEMPLATE, "utf8"),
+  labels = SERVICE_LABELS,
+  ...values
+} = {}) => {
+  const rendered = Object.fromEntries(labels.map((label) => {
+    const serviceValues = servicePlistValues({ label, ...values });
+    return [label, renderServiceLaunchdPlist(template, serviceValues)];
+  }));
+  verifyServicePlistDefinitions(rendered, labels);
+  return Object.freeze(rendered);
+};
+
+const sha256 = (contents) => createHash("sha256").update(contents).digest("hex");
+
+const writeAtomic = (destination, contents, mode) => {
+  mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+  const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporary, contents, { flag: "wx", mode });
+  chmodSync(temporary, mode);
+  try { renameSync(temporary, destination); } finally { rmSync(temporary, { force: true }); }
+};
+
+const safeServiceFileName = (label) => label.replaceAll(/[^A-Za-z0-9_.-]/gu, "_");
+
+const serviceManifestPath = (repositoryRoot) => join(resolve(repositoryRoot), SERVICE_INSTALL_ROOT, "manifest.json");
+
+const validateServiceManifest = (manifest, repositoryRoot) => {
+  if (!manifest || manifest.schemaVersion !== 1 || manifest.repositoryRoot !== resolve(repositoryRoot)) {
+    throw new Error("launchd-service-manifest-invalid");
+  }
+  if (!Array.isArray(manifest.entries) || manifest.entries.length !== SERVICE_LABELS.length + 1) {
+    throw new Error("launchd-service-manifest-invalid");
+  }
+  return manifest;
+};
+
+/** Install all service plists and one standalone wrapper. No launchctl command
+ * or pointer operation is performed here; the caller can load/reload the
+ * definitions and verify readiness as a separately revertible rollout step. */
+export const installLaunchdServices = ({
+  repositoryRoot,
+  userHome,
+  nodeBinary = process.execPath,
+  gitBinary = null,
+  path = null,
+  apply = false,
+  revert = false,
+  replaceExisting = false,
+} = {}) => {
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const home = resolve(userHome ?? homedir());
+  const launchAgents = join(home, "Library/LaunchAgents");
+  const logs = join(home, "Library/Logs/Anneal");
+  const sharedRoot = join(root, "shared");
+  const wrapper = serviceWrapperPath(root);
+  const manifestPath = serviceManifestPath(root);
+  if (revert) {
+    if (!existsSync(manifestPath)) throw new Error("launchd-service-manifest-missing");
+    const manifest = validateServiceManifest(JSON.parse(readFileSync(manifestPath, "utf8")), root);
+    const observed = new Map();
+    for (const entry of manifest.entries) {
+      const current = existsSync(entry.path) ? readFileSync(entry.path) : null;
+      const currentSha = current === null ? null : sha256(current);
+      observed.set(entry.path, currentSha);
+      const recognized = currentSha === entry.installedSha256
+        || (entry.existed && currentSha === entry.originalSha256)
+        || (!entry.existed && currentSha === null);
+      if (!recognized) {
+        throw new Error(`launchd-service-definition-drift:${entry.path}`);
+      }
+      if (entry.existed && currentSha === entry.installedSha256) {
+        if (!entry.backupPath || !existsSync(entry.backupPath) || sha256(readFileSync(entry.backupPath)) !== entry.originalSha256) {
+          throw new DeployFailure("launchd-service-backup-missing", entry.backupPath ?? entry.path);
+        }
+      }
+    }
+    if (!apply) return { applied: false, reverted: false, entries: manifest.entries.map((entry) => entry.path) };
+    for (const entry of manifest.entries) {
+      if (entry.existed) {
+        if (observed.get(entry.path) !== entry.originalSha256) {
+          const backup = readFileSync(entry.backupPath);
+          writeAtomic(entry.path, backup, entry.mode ?? 0o600);
+        }
+      } else rmSync(entry.path, { force: true });
+      if (entry.backupPath) rmSync(entry.backupPath, { force: true });
+    }
+    rmSync(manifestPath, { force: true });
+    return { applied: true, reverted: true, entries: manifest.entries.map((entry) => entry.path) };
+  }
+  if (existsSync(manifestPath)) throw new Error("launchd-service-install-active");
+  const resolvedNode = resolve(nodeBinary);
+  const resolvedGit = gitBinary ? resolve(gitBinary) : resolvedNode;
+  const controlledPath = path ?? controlledLaunchdPath({ nodeBinary: resolvedNode, gitBinary: resolvedGit });
+  const logPath = (label, stream) => join(logs, `${safeServiceFileName(label)}.${stream}.log`);
+  const rendered = Object.freeze(Object.fromEntries(SERVICE_LABELS.map((label) => {
+    const values = servicePlistValues({
+      label,
+      nodeBinary: resolvedNode,
+      repositoryRoot: root,
+      sharedRoot,
+      stdoutPath: logPath(label, "stdout"),
+      stderrPath: logPath(label, "stderr"),
+      path: controlledPath,
+      wrapperPath: wrapper,
+    });
+    const destination = join(launchAgents, `${label}.plist`);
+    return [label, existsSync(destination) && replaceExisting
+      ? renderMigratedServicePlist({ sourcePath: destination, values })
+      : renderServiceLaunchdPlist(readFileSync(SERVICE_TEMPLATE, "utf8"), values)];
+  })));
+  verifyServicePlistDefinitions(rendered);
+  const entries = [{
+    path: wrapper,
+    existed: existsSync(wrapper),
+    mode: existsSync(wrapper) ? statSync(wrapper).mode & 0o777 : 0o755,
+    backupPath: existsSync(wrapper)
+      ? join(root, SERVICE_INSTALL_ROOT, "backups", "agentos-service-wrapper.mjs")
+      : null,
+    originalSha256: existsSync(wrapper) ? sha256(readFileSync(wrapper)) : null,
+    installedSha256: sha256(readFileSync(SERVICE_WRAPPER_SOURCE)),
+  }];
+  for (const label of SERVICE_LABELS) {
+    const destination = join(launchAgents, `${label}.plist`);
+    const contents = rendered[label];
+    if (existsSync(destination) && readFileSync(destination, "utf8") !== contents && !replaceExisting) {
+      throw new Error(`launchd-service-definition-conflict:${destination}`);
+    }
+    entries.push({
+      path: destination,
+      existed: existsSync(destination),
+      mode: existsSync(destination) ? statSync(destination).mode & 0o777 : 0o600,
+      backupPath: existsSync(destination)
+        ? join(root, SERVICE_INSTALL_ROOT, "backups", `${safeServiceFileName(label)}.plist`)
+        : null,
+      originalSha256: existsSync(destination) ? sha256(readFileSync(destination)) : null,
+      installedSha256: sha256(contents),
+      contents,
+    });
+  }
+  if (!apply) return {
+    applied: false,
+    reverted: false,
+    wrapper,
+    entries: entries.map(({ path: entryPath }) => entryPath),
+    rendered,
+  };
+  if (!existsSync(join(sharedRoot, ".env"))) throw new Error("shared-environment-missing");
+  for (const directory of SHARED_RUNTIME_DIRECTORIES) {
+    mkdirSync(join(sharedRoot, directory), { recursive: true, mode: 0o700 });
+  }
+  const bootstrap = bootstrapCurrentRelease({ repositoryRoot: root });
+  if (entries[0].existed && readFileSync(wrapper, "utf8") !== readFileSync(SERVICE_WRAPPER_SOURCE, "utf8") && !replaceExisting) {
+    throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
+  }
+  mkdirSync(join(root, SERVICE_INSTALL_ROOT, "backups"), { recursive: true, mode: 0o700 });
+  for (const entry of entries) {
+    if (!entry.existed || !existsSync(entry.backupPath)) continue;
+    if (sha256(readFileSync(entry.backupPath)) !== entry.originalSha256) {
+      throw new DeployFailure("launchd-service-backup-conflict", `remove-or-recover:${entry.backupPath}`);
+    }
+  }
+  const manifest = {
+    schemaVersion: 1,
+    repositoryRoot: root,
+    entries: entries.map(({ contents: _contents, ...entry }) => entry),
+  };
+  writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n", 0o600);
+  for (const entry of entries) {
+    if (entry.existed && !existsSync(entry.backupPath)) {
+      writeFileSync(entry.backupPath, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
+    }
+  }
+  writeAtomic(wrapper, readFileSync(SERVICE_WRAPPER_SOURCE), 0o755);
+  for (const entry of entries.slice(1)) {
+    writeAtomic(entry.path, entry.contents, 0o600);
+  }
+  return {
+    applied: true,
+    reverted: false,
+    wrapper,
+    bootstrap,
+    entries: entries.map(({ path: entryPath }) => entryPath),
+  };
 };
 
 export const installLaunchd = (args) => {

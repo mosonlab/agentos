@@ -23,6 +23,7 @@ import test from "node:test";
 
 import {
   DeployFailure,
+  DEPLOY_STEPS,
   DeploymentLedgerError,
   SERVICE_LABELS,
   deployedBuildStampRefusal,
@@ -44,6 +45,7 @@ import {
   acquireProcessLock,
   blockingRunsStatement,
   deployArtifactPaths,
+  deployReleaseArtifactPaths,
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
@@ -117,6 +119,8 @@ const fixture = (failure = null) => {
     generatePrismaClient: step("generate-prisma-client"),
     syncCanonicalPrompts: step("canonical-prompt-sync"),
     verifyRuntimePrismaClient: step("verify-runtime-prisma-client"),
+    materializeRelease: step("materialize-release"),
+    verifyStableServicePaths: step("verify-stable-service-paths"),
     assertQuietBeforeRestart: step("quiet-recheck"),
     publishBuild: step("publish-build", async () => {
       state.serving = "candidate";
@@ -204,6 +208,21 @@ test("published artifacts derive every workspace dependency tree from the target
   assert.ok(artifacts.includes("packages/api/dist"));
   assert.ok(artifacts.includes("packages/cli/dist"));
   for (const path of nested) assert.ok(artifacts.includes(path));
+  const releaseArtifacts = deployReleaseArtifactPaths(root);
+  for (const path of [
+    "package.json",
+    "package-lock.json",
+    "packages/db/prisma",
+    "packages/build-info/index.mjs",
+    "packages/api/build/Release/control_plane_directory.node",
+    "packages/runner/assets",
+    "apps/web/vite.config.ts",
+    "apps/web/src/lib/local-origin.ts",
+    "agents/foundational.md",
+    "agents/roles",
+    "agents/templates",
+    "scripts/merge-lease.sh",
+  ]) assert.ok(releaseArtifacts.includes(path), path);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -250,7 +269,8 @@ test("successful upgrade runs the safety sequence in order", async () => {
   assert.deepEqual(await executeUpgrade(host, revisions), { ok: true });
   assert.deepEqual(calls, [
     "fast-forward", "create-stage", "install-dependencies", "build", "backup",
-    "guarded-migration", "generate-prisma-client", "canonical-prompt-sync", "verify-runtime-prisma-client", "quiet-recheck",
+    "guarded-migration", "generate-prisma-client", "canonical-prompt-sync", "verify-runtime-prisma-client",
+    "materialize-release", "verify-stable-service-paths", "quiet-recheck",
     "publish-build", "restart-services", "verify-services", "notify-success", "commit-build", "cleanup-stage",
   ]);
   assert.equal(state.serving, "candidate");
@@ -321,6 +341,56 @@ test("SIGTERM after publication enters the failure path and restores the previou
   assert.ok(calls.includes("notify-failure"));
 });
 
+test("pointer activation is durably recorded before restart and rollback outcome reaches the terminal ledger event", async () => {
+  const { host, calls, state } = fixture();
+  const records = [];
+  const releaseIdentity = {
+    name: `${revisions.to}-${"c".repeat(64)}`,
+    commit: revisions.to,
+    digest: "c".repeat(64),
+  };
+  const pointerTransition = {
+    oldTarget: `releases/${revisions.from}-${"d".repeat(64)}`,
+    newTarget: `releases/${releaseIdentity.name}`,
+  };
+  host.publishBuild = async () => {
+    calls.push("publish-build");
+    state.serving = "candidate";
+    return {
+      releaseIdentity,
+      pointerTransition,
+      rollback: async () => {
+        calls.push("rollback-build");
+        state.serving = "previous";
+        return { outcome: "rolled-back", ...pointerTransition };
+      },
+      commit: async () => { calls.push("commit-build"); },
+    };
+  };
+  host.restartServices = async () => {
+    calls.push("restart-services");
+    assert.equal(records.at(-1)?.state, "ACTIVATED");
+    assert.deepEqual(records.at(-1)?.metadata.pointerTransition, pointerTransition);
+    throw new DeployFailure("service-restart-failed", "fixture");
+  };
+  const ledger = {
+    record: (stateName, metadata) => { records.push({ state: stateName, metadata }); },
+  };
+
+  const result = await executeUpgrade(host, revisions, { ledger });
+
+  assert.equal(result.ok, false);
+  assert.equal(state.serving, "previous");
+  const activated = records.find(({ state: phase }) => phase === "ACTIVATED")?.metadata;
+  assert.deepEqual(activated?.releaseIdentity, releaseIdentity);
+  assert.equal(activated?.releaseDirectoryIdentity, releaseIdentity.name);
+  assert.equal(records.at(-1)?.state, "FAILED");
+  assert.deepEqual(records.at(-1)?.metadata.releaseIdentity, releaseIdentity);
+  assert.deepEqual(records.at(-1)?.metadata.pointerTransition, pointerTransition);
+  assert.equal(records.at(-1)?.metadata.rollbackPointerOutcome, "rolled-back");
+  assert.equal(records.at(-1)?.metadata.reasonCode, "service-restart-failed");
+});
+
 test("a service that exits after kickstart rolls back before success", async () => {
   const { host, calls, state } = fixture("verify-services");
   const result = await executeUpgrade(host, revisions);
@@ -389,6 +459,46 @@ test("a successful upgrade records every ledger boundary and a terminal state", 
     ]) assert.equal(alias in persisted, false, alias);
   }
   assert.equal(events.some((event) => JSON.stringify(event).includes("DATABASE_URL")), false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("ledger records release identity, pointer transitions, and rollback outcomes without adding resume state", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-pointer-evidence-"));
+  const ledger = createDeploymentLedger({ stateDir: root, targetCommit: revisions.to });
+  const releaseDirectoryIdentity = `${revisions.to}-${"d".repeat(64)}`;
+  const previousTarget = `${"a".repeat(40)}-${"e".repeat(64)}`;
+
+  ledger.start();
+  const activation = ledger.record("ACTIVATED", {
+    releaseDirectoryIdentity,
+    pointerOldTarget: previousTarget,
+    pointerNewTarget: releaseDirectoryIdentity,
+  });
+  const rollback = ledger.record("FAILED", {
+    reasonCode: "service-verification-failed",
+    rollbackPointerOutcome: "restored-previous",
+  });
+  const state = JSON.parse(readFileSync(ledger.statePath, "utf8"));
+  const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+
+  assert.equal(activation.release_directory_identity, releaseDirectoryIdentity);
+  assert.equal(activation.pointer_old_target, previousTarget);
+  assert.equal(activation.pointer_new_target, releaseDirectoryIdentity);
+  assert.equal(activation.rollback_pointer_outcome, null);
+  assert.equal(rollback.release_directory_identity, releaseDirectoryIdentity);
+  assert.equal(rollback.pointer_old_target, previousTarget);
+  assert.equal(rollback.pointer_new_target, releaseDirectoryIdentity);
+  assert.equal(rollback.rollback_pointer_outcome, "restored-previous");
+  assert.equal(state.release_directory_identity, releaseDirectoryIdentity);
+  assert.equal(state.pointer_old_target, previousTarget);
+  assert.equal(state.pointer_new_target, releaseDirectoryIdentity);
+  assert.equal(state.rollback_pointer_outcome, "restored-previous");
+  for (const persisted of [state, ...events]) {
+    for (const alias of [
+      "releaseDirectoryIdentity", "pointerOldTarget", "pointerNewTarget", "rollbackPointerOutcome",
+      "resume", "resumeAuthority", "resume_authority",
+    ]) assert.equal(alias in persisted, false, alias);
+  }
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -799,7 +909,7 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
   assert.equal(result.quiet, true);
   assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "backup"]));
   assert.ok(result.lines.includes("DRY-RUN backup=ready mode=container"));
-  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 11);
+  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, DEPLOY_STEPS.length);
 });
 
 const buildCacheFixture = (root, revision, buildKey) => {

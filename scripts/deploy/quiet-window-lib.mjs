@@ -9,6 +9,8 @@ export const DEPLOY_STEPS = Object.freeze([
   "generate-prisma-client",
   "canonical-prompt-sync",
   "verify-runtime-prisma-client",
+  "materialize-release",
+  "verify-stable-service-paths",
   "publish-build",
   "restart-services",
   "verify-services",
@@ -142,19 +144,33 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
     await host.generatePrismaClient();
     await host.syncCanonicalPrompts();
     await host.verifyRuntimePrismaClient();
+    await host.materializeRelease();
+    await host.verifyStableServicePaths();
     await host.assertQuietBeforeRestart();
     activationAttempted = true;
     try {
       publication = await host.publishBuild();
       activationOutcomeProven = publication !== null && publication !== undefined;
     } catch (error) {
-      if (error instanceof DeployFailure && error.reason === "build-swap-failed") {
+      if (error instanceof DeployFailure && ["build-swap-failed", "release-pointer-activation-failed"].includes(error.reason)) {
         activationOutcomeProven = true;
       }
       throw error;
     }
     try {
-      context = { ...context, activatedBuildStamp: candidateBuildStamp };
+      context = {
+        ...context,
+        activatedBuildStamp: candidateBuildStamp,
+        ...(publication?.releaseDirectoryIdentity
+          ? { releaseDirectoryIdentity: publication.releaseDirectoryIdentity }
+          : publication?.releaseIdentity?.name
+            ? { releaseDirectoryIdentity: publication.releaseIdentity.name }
+            : {}),
+        ...(publication?.pointerOldTarget !== undefined ? { pointerOldTarget: publication.pointerOldTarget } : {}),
+        ...(publication?.pointerNewTarget !== undefined ? { pointerNewTarget: publication.pointerNewTarget } : {}),
+        ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
+        ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
+      };
       await recordLedger("ACTIVATED");
       await host.restartServices();
       const verification = await host.verifyServices(revisions);
@@ -167,7 +183,15 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       await host.notify({ outcome: "success", reason: "deployed", ...revisions });
     } catch (error) {
       try {
-        await publication.rollback();
+        const rollbackPointerOutcome = await publication.rollback();
+        if (rollbackPointerOutcome !== null && rollbackPointerOutcome !== undefined) {
+          const durableOutcome = typeof rollbackPointerOutcome === "string"
+            ? rollbackPointerOutcome
+            : rollbackPointerOutcome.operation && rollbackPointerOutcome.oldTarget && rollbackPointerOutcome.newTarget
+              ? `${rollbackPointerOutcome.operation}:${rollbackPointerOutcome.oldTarget}->${rollbackPointerOutcome.newTarget}`
+              : String(rollbackPointerOutcome.outcome ?? rollbackPointerOutcome);
+          context = { ...context, rollbackPointerOutcome: durableOutcome };
+        }
         await host.restorePreviousServices();
         activationOutcomeProven = true;
       } catch (recoveryError) {

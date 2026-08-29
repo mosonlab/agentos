@@ -13,14 +13,32 @@ LaunchAgents. Do not run the installer as root.
 
 The checkout must have:
 
-- a clean, stamped build in `packages/api/dist/build-info.json`;
-- its existing mode-0600 `.env`, including `DATABASE_URL` and the existing
-  Inbox/Feishu settings;
+- a clean, stamped build in `packages/api/dist/build-info.json` before the
+  wrapper migration, then a valid `current/packages/api/dist/build-info.json`;
+- a mode-0600 `shared/.env`, including `DATABASE_URL` and the existing
+  Inbox/Feishu settings. The original root `.env` is retained only for the
+  legacy publication retreat path during this migration card;
 - `git`, `node`, `npm`, Docker CLI, and `launchctl` on the host;
 - the running PostgreSQL container `agentos-postgres-1`, with executable
   `/usr/local/bin/pg_dump` inside it (the path used by the supported
   `postgres:16-alpine` image);
 - all thirteen service labels above already loaded.
+
+The serving layout is:
+
+```text
+releases/<commit>-<digest>/   immutable runtime tree
+shared/.env                   stable secret configuration
+shared/{files,runs,state,...} mutable operator data
+current -> releases/...       sole activation authority
+previous -> releases/...      rollback target
+```
+
+Release trees contain dist output, runtime `node_modules`, generated Prisma
+Client and migration material, build stamps, native/runtime assets, and the
+canonical agent sources loaded at runtime. They never contain `.env` or
+persistent operator state. `current` and `previous` are relative symlinks whose
+targets must be direct children of `releases/`.
 
 `com.agentos.web` serves the published `apps/web/dist` tree with Vite preview;
 never point the production label at the Vite development server. The live
@@ -94,6 +112,71 @@ execution order. Container verification runs read-only `docker inspect` and
 block. `queued` and `waiting-inbox` do not.
 
 Do not install after a non-zero dry-run. Resolve the named condition first.
+
+## Wrapper-first service migration
+
+Complete this migration before allowing the deploy job to activate a new
+release pointer. It is a separate, revertible change from auto-deploy itself.
+
+First establish the stable shared configuration without printing it:
+
+```sh
+install -d -m 0700 shared
+install -m 0600 .env shared/.env
+```
+
+Before applying, move any existing persistent files into the corresponding
+`shared/` directories and set `FILES_ROOT`, `RUNNER_WORKSPACE_ROOT`,
+`RUNNER_DEPENDENCY_CACHE_ROOT`, `RUNNER_REPO_MIRROR_ROOT`, and
+`CONTROL_PLANE_STATE_DIR` in `shared/.env` to absolute paths beneath this
+`shared/` root. Preserve ownership and modes, and verify the moved bytes before
+removing an old copy. The installer creates missing shared directories but does
+not guess how to merge operator data. The wrapper refuses any configured
+persistent path outside `shared/` rather than silently starting against an old
+checkout or an empty fallback.
+
+Plan the complete 13-service replacement. `--replace-existing` is explicit
+because these are the already-loaded production definitions, not new labels:
+
+```sh
+node scripts/deploy/install-launchd-services.mjs --replace-existing
+```
+
+Apply it only in a quiet window:
+
+```sh
+node scripts/deploy/install-launchd-services.mjs --replace-existing --apply
+```
+
+Before replacing any plist, the installer assembles the still-serving checkout
+as an immutable release and creates `current` with one symlink rename. The old
+service definitions continue to serve the checkout during that bootstrap. The
+installer then records exact backups, installs one stable wrapper under
+`shared/bin/`, and replaces all thirteen plists. It does not call `launchctl`,
+so the filesystem installation and service reload remain separate revertible
+boundaries.
+
+Reload every service definition from `~/Library/LaunchAgents`, then require:
+
+- every `launchctl print "gui/$(id -u)/<label>"` to show `state = running`, the
+  shared wrapper path, and its exact label argument;
+- every service log to begin with `SERVICE-WRAPPER service=<label>
+  release=<commit>-<digest>` for the same `current` target;
+- `/health` to pass and `/version` to report the commit in
+  `current/packages/api/dist/build-info.json`;
+- no release tree to contain `.env`, and every service definition to name
+  `shared/.env`.
+
+If any check fails, restore the recorded definitions and reload them:
+
+```sh
+node scripts/deploy/install-launchd-services.mjs --revert --apply
+```
+
+Do not proceed to pointer activation until the wrapper path passes all checks.
+The deploy itself repeats this loaded-definition, running-state, health, and
+version proof immediately before every pointer switch and fails without a
+fallback if it does not pass.
 
 ## Install
 
@@ -203,11 +286,23 @@ The job then performs exactly this sequence and stops at the first failure:
    semantics or moving operator-owned trigger state implicitly. A quiescent
    chain moves under the legacy identity intact and does not block it. The same guarded rollover preserves both pre-merge-lease
    canonical templates before installing their mechanically-owned Regression prompts;
-7. verify the staged generated Prisma client, recheck the barrier and blocking
-   statuses, swap the staged `dist/` trees and target `node_modules`, and
-   restart the services;
-8. require every launchd service to be running, `/health` to pass, and
-   `/version` to report the exact target commit before reporting success.
+7. verify the staged generated Prisma client, then assemble
+   `releases/<commit>-<digest>/` from the exact runtime inventory. Verify the
+   content digest and API stamp, remove all write bits, perform a real
+   post-verification write probe, and verify the digest again. `.env` and
+   mutable operator paths are excluded rather than linked into the release;
+8. while `current` still names the old release, prove every loaded service uses
+   the stable shared wrapper, is running, and reports the old `current` release
+   identity. Recheck the deploy barrier and blocking statuses. A missing,
+   dangling, or checkout-backed `current`, a stale plist, or any readiness
+   failure stops here without changing activation;
+9. update `previous` to the old `current` target, replace `current` with one
+   same-directory symlink `rename(2)`, and synchronously record the release
+   directory plus old/new pointer targets in the deployment ledger. The ledger
+   `ACTIVATED` event is durable before the first service restart begins;
+10. restart all services, require every launchd label to be running, `/health`
+    to pass, and `/version` to report the exact target commit. Only then record
+    `VERIFIED` and `SUCCEEDED`.
 
 The release snapshot is only a local acceleration path. The exact-head merge
 gate publishes its revision index after the final clean-tree drift proof, and
@@ -223,13 +318,19 @@ services do not create a synchronized Serializable write burst. The API retries
 at most two `P2034` conflicts for this one global availability transaction and
 surfaces a third conflict normally.
 
-The old `dist/` trees and `node_modules` stay in a private `previous-*`
-transaction directory. A
-build, migration, sync, swap, notification, or restart failure restores or
-retains the previous build. Database migration rollback is not attempted.
+For the active release path, a post-switch build, notification, restart, health,
+or version failure atomically points `current` back at `previous`, records the
+rollback pointer outcome in the terminal ledger event, and restarts the previous
+services. There is no silent checkout fallback. Database migration rollback is
+not attempted. The legacy `publishDirectories()` and `previous-*` restoration
+code remain available as the retreat implementation for this card, but the
+normal deployment path no longer uses multi-directory rename publication.
+
 After a successful deploy, and on every no-op invocation, retention keeps the
-newest three successful `previous-*` directories. It keeps the newest fourteen
-database dumps plus the newest dump for each UTC day in the last thirty days.
+newest three immutable release directories while always protecting both
+`current` and `previous`. The existing policy also keeps the newest three
+legacy `previous-*` directories, the newest fourteen database dumps, and the
+newest dump for each UTC day in the last thirty days.
 Only names produced by this deployer are eligible; active stages, the live
 build, locks, escalation state, and unrecognized entries are never touched.
 Retention runs under the deploy process lock after publication has committed
@@ -261,10 +362,12 @@ that persisted notification until the Inbox row exists, then exit with
 The process lock records PID and process-start identity. SIGINT and SIGTERM
 during the idle quiet-window wait exit without a sticky escalation because no
 upgrade has started; the next scheduled invocation resumes waiting normally.
-After the upgrade pipeline starts, the same signals abort the active child,
-enter the normal failure path, roll back published artifacts and restart the
-previous services when publication already occurred, persist the interruption,
-then release the deploy barrier and process lock. After an uncatchable death,
+After the upgrade pipeline starts, the same signals abort the active child and
+enter the normal failure path. If `current` already moved, the durable
+`ACTIVATED` event and the two filesystem pointers identify both sides of the
+transition; recovery points `current` back, records the rollback outcome, and
+restarts the previous services before releasing the deploy barrier and process
+lock. After an uncatchable death,
 the next invocation reclaims a provably stale owner, records
 `stale-deploy-owner-recovered`, sends it to Inbox, and remains escalated instead
 of starting another upgrade.
