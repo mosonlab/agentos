@@ -12,6 +12,7 @@ import {
   legacyTemplateName,
   PrismaClient,
   TaskStatus,
+  enqueueTaskRun,
   latestMarker,
   readMarkers,
 } from "@anneal/db";
@@ -41,7 +42,11 @@ const IMPLEMENTATION_BODY = "Feature brief: reject unregistered graphs at every 
 const SOL_FINDINGS_BODY = "sol-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
 const BLIND_FINDINGS_BODY = "blind-findings: the manual fire path repeats the same bypass and the board reads the retired field.";
 
-type RegressionSeedOptions = { withLibrarian?: boolean; templateName?: string };
+type RegressionSeedOptions = {
+  withLibrarian?: boolean;
+  withLibrarianHistory?: boolean;
+  templateName?: string;
+};
 
 const seedRegression = async (options: RegressionSeedOptions = {}) => {
   // A test may seed several chains in one millisecond, and both the slug and the
@@ -139,6 +144,26 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     name: "Librarian", description: "document", assigneeType: AssigneeType.AGENT, assigneeAgentId: librarianAgent.id,
     status: TaskStatus.DONE, chainId, chainIndex: librarianIndex, chainLayer: librarianLayer, targetBranch: "main",
   } }) : null;
+  if (librarian && options.withLibrarianHistory) {
+    const librarianRun = await db.run.create({ data: {
+      projectId: project.id, taskId: librarian.id, agentId: librarianAgent.id, repoId: repo.id,
+      runNumber: 1, dedupeKey: `task:${librarian.id}:run:1`, runner: "CODEX", model: librarianAgent.model,
+      promptHash: "hash", status: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+      targetBranch: "main", headSha: HEAD,
+    } });
+    await db.taskStepOutput.create({ data: {
+      taskId: librarian.id,
+      runId: librarianRun.id,
+      kind: "documentation",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        headSha: HEAD,
+        summary: "Original documentation is current.",
+        changes: [],
+      }),
+      commitSha: HEAD,
+    } });
+  }
   const regression = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: regressionStep.id,
     name: "Regression", description: "verify", assigneeType: AssigneeType.AGENT, assigneeAgentId: regressionAgent.id,
@@ -269,6 +294,74 @@ const completeRepair = async (
     if (prior === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = prior;
   }
+};
+
+const completeDocumentation = async (
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
+  headSha: string,
+) => {
+  assert.ok(seeded.librarian);
+  const run = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.librarian.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" },
+  });
+  const step = await db.taskTemplateStep.findUniqueOrThrow({ where: { id: seeded.librarian.templateStepId! } });
+  const runnerId = `librarian-runner-${run.id}`;
+  const fencingToken = `librarian:${run.id}:1`;
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: seeded.project.id,
+    agentId: seeded.librarian.assigneeAgentId!,
+    taskId: seeded.librarian.id,
+    runner: "CODEX",
+    executionStatus: "RUNNING",
+  } });
+  await db.task.update({ where: { id: seeded.librarian.id }, data: { status: TaskStatus.DOING } });
+  const output = {
+    runId: run.id,
+    kind: step.outputKind,
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha,
+      summary: "Documentation refreshed for the repaired head.",
+      changes: [],
+    }),
+    commitSha: headSha,
+  };
+  await db.taskStepOutput.upsert({
+    where: { taskId: seeded.librarian.id },
+    create: { taskId: seeded.librarian.id, ...output },
+    update: output,
+  });
+
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "merge-tail-librarian-token";
+  try {
+    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-librarian-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId,
+        fencingToken,
+        exitCode: 0,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        cleanupStatus: "SUCCEEDED",
+        branch: BRANCH,
+        pushedBranch: BRANCH,
+        pushStatus: "SUCCEEDED",
+        headSha,
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+  return db.run.findUniqueOrThrow({ where: { id: run.id } });
 };
 
 const claimNext = async () => {
@@ -434,6 +527,12 @@ test("all five merge-tail repairs grant the sixth Regression run without changin
     maxRunsPerTask: 10,
     budgetGrants: 5,
   });
+  assert.equal(await db.taskActivity.count({
+    where: {
+      taskId: seeded.regression.id,
+      metadata: { path: ["kind"], equals: "mergeTail.requeue" },
+    },
+  }), 0);
 });
 
 test("a repair task carries only the chain outputs its repair kind reads", async () => {
@@ -490,72 +589,153 @@ test("a Full Assurance documentation requeue grants the following Regression hop
   const seeded = await exercise("review-fail", { withLibrarian: true });
   const repair = await repairFor(seeded, "review-fix");
   await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.", RESOLVED);
-  assert.ok(seeded.librarian);
-
-  const librarianRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.librarian.id } });
-  const runnerId = `librarian-runner-${librarianRun.id}`;
-  const fencingToken = `librarian:${librarianRun.id}:1`;
-  await db.run.update({ where: { id: librarianRun.id }, data: {
-    status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
-  } });
-  await db.session.create({
-    data: {
-      runId: librarianRun.id,
-      projectId: seeded.project.id,
-      agentId: seeded.librarian.assigneeAgentId!,
-      taskId: seeded.librarian.id,
-      runner: "CODEX",
-      executionStatus: "RUNNING",
-    },
-  });
-  await db.task.update({ where: { id: seeded.librarian.id }, data: { status: TaskStatus.DOING } });
-  await db.taskStepOutput.create({ data: {
-    taskId: seeded.librarian.id,
-    runId: librarianRun.id,
-    kind: "documentation",
-    body: JSON.stringify({
-      schemaVersion: 1,
-      headSha: RESOLVED,
-      summary: "Documentation refreshed for the repaired head.",
-      changes: [],
-    }),
-    commitSha: RESOLVED,
-  } });
-
-  const prior = process.env.RUNNER_TOKEN;
-  process.env.RUNNER_TOKEN = "merge-tail-librarian-token";
-  try {
-    const response = await createApp(db).request(`/runner/runs/${librarianRun.id}/complete`, {
-      method: "POST",
-      headers: { Authorization: "Bearer merge-tail-librarian-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId,
-        fencingToken,
-        exitCode: 0,
-        terminalEventSeen: true,
-        terminalSuccess: true,
-        cleanupStatus: "SUCCEEDED",
-        branch: BRANCH,
-        pushedBranch: BRANCH,
-        pushStatus: "SUCCEEDED",
-        headSha: RESOLVED,
-      }),
-    });
-    assert.equal(response.status, 200, await response.text());
-  } finally {
-    if (prior === undefined) delete process.env.RUNNER_TOKEN;
-    else process.env.RUNNER_TOKEN = prior;
-  }
-
-  const completedDocumentation = await db.run.findUniqueOrThrow({ where: { id: librarianRun.id } });
+  const completedDocumentation = await completeDocumentation(seeded, RESOLVED);
   assert.equal(completedDocumentation.maxRunsPerTask, 6);
   assert.equal(completedDocumentation.budgetGrants, 1);
+  assert.deepEqual((await db.taskActivity.findFirstOrThrow({
+    where: {
+      taskId: seeded.librarian!.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: "mergeTail.requeue" },
+    },
+    select: { metadata: true },
+  })).metadata, {
+    kind: "mergeTail.requeue",
+    runId: completedDocumentation.id,
+    schemaVersion: 1,
+  });
   const regressionRun = await db.run.findFirstOrThrow({
     where: { taskId: seeded.regression.id, runNumber: 2 },
   });
   assert.equal(regressionRun.status, "QUEUED");
   assert.equal(regressionRun.maxRunsPerTask, 6);
   assert.equal(regressionRun.budgetGrants, 1);
+});
+
+test("non-control-plane requeue metadata cannot grant an ordinary Documentation successor", async () => {
+  const seeded = await seedRegression({ withLibrarian: true });
+  assert.ok(seeded.librarian);
+  await db.task.update({ where: { id: seeded.librarian.id }, data: { status: TaskStatus.TODO } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.REVIEW } });
+  const run = await db.$transaction((tx) => enqueueTaskRun(tx, seeded.librarian!.id));
+  for (const actorType of ["agent", "operator"]) {
+    await db.taskActivity.create({ data: {
+      taskId: seeded.librarian.id,
+      actorType,
+      body: `${actorType} supplied colliding metadata`,
+      metadata: {
+        kind: "mergeTail.requeue",
+        schemaVersion: 1,
+        state: "queued",
+        runId: run.id,
+      },
+    } });
+  }
+
+  await completeDocumentation(seeded, HEAD);
+  const regressionRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id, runNumber: 2 },
+  });
+  assert.equal(regressionRun.maxRunsPerTask, 5);
+  assert.equal(regressionRun.budgetGrants, 0);
+});
+
+test("a durable Documentation requeue survives more than twenty later activity rows", async () => {
+  const seeded = await exercise("review-fail", { withLibrarian: true });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.", RESOLVED);
+  assert.ok(seeded.librarian);
+  await db.taskActivity.createMany({ data: Array.from({ length: 25 }, (_, index) => ({
+    taskId: seeded.librarian!.id,
+    actorType: "agent",
+    body: `Routine documentation progress ${String(index + 1)}`,
+  })) });
+
+  await completeDocumentation(seeded, RESOLVED);
+  const regressionRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id, runNumber: 2 },
+  });
+  assert.equal(regressionRun.maxRunsPerTask, 6);
+  assert.equal(regressionRun.budgetGrants, 1);
+});
+
+test("a version-suffixed Documentation output preserves its merge-tail successor grant", async () => {
+  const seeded = await exercise("review-fail", { withLibrarian: true });
+  assert.ok(seeded.librarian);
+  await db.taskTemplateStep.update({
+    where: { id: seeded.librarian.templateStepId! },
+    data: { outputKind: "documentation-v1" },
+  });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.", RESOLVED);
+  await completeDocumentation(seeded, RESOLVED);
+
+  const regressionRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id, runNumber: 2 },
+  });
+  assert.equal(regressionRun.maxRunsPerTask, 6);
+  assert.equal(regressionRun.budgetGrants, 1);
+});
+
+test("all five Full Assurance repairs grant sixth Documentation and Regression runs", async () => {
+  const seeded = await exercise("review-fail", { withLibrarian: true, withLibrarianHistory: true });
+  assert.ok(seeded.librarian);
+  const heads = [RESOLVED, REPAIRED, "e".repeat(40), "f".repeat(40), "1".repeat(40), "2".repeat(40)];
+  const repairOutput = "Repair completed and the focused verification passed.";
+  const completeLatest = async (kind: "refresh-conflict" | "review-fix" | "gate-fix", headSha: string) => {
+    const repair = await db.task.findFirstOrThrow({
+      where: { projectId: seeded.project.id, name: `Autonomous merge tail: ${kind}` },
+      orderBy: { createdAt: "desc" },
+    });
+    const output = kind === "refresh-conflict"
+      ? JSON.stringify({
+        schemaVersion: 1,
+        outcome: "resolved",
+        startHeadSha: heads[4],
+        targetHeadSha: BASE,
+        resolvedHeadSha: headSha,
+        tradeOffs: [],
+        changedTestExpectations: [],
+      })
+      : repairOutput;
+    await completeRepair(seeded, repair.id, output, headSha);
+  };
+
+  await completeLatest("review-fix", heads[1]!);
+  await completeDocumentation(seeded, heads[1]!);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 2, heads[1]!), "handled");
+  await completeLatest("gate-fix", heads[2]!);
+  await completeDocumentation(seeded, heads[2]!);
+  assert.equal(await failRegressionAgain(seeded, "review-fail", 3, heads[2]!), "handled");
+  await completeLatest("review-fix", heads[3]!);
+  await completeDocumentation(seeded, heads[3]!);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 4, heads[3]!), "handled");
+  await completeLatest("gate-fix", heads[4]!);
+  await completeDocumentation(seeded, heads[4]!);
+  assert.equal(await failRegressionAgain(seeded, "refresh-conflict", 5, heads[4]!), "handled");
+  await completeLatest("refresh-conflict", heads[5]!);
+
+  const documentationRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.librarian.id, runNumber: 6 },
+  });
+  assert.deepEqual({
+    status: documentationRun.status,
+    maxRunsPerTask: documentationRun.maxRunsPerTask,
+    budgetGrants: documentationRun.budgetGrants,
+  }, { status: "QUEUED", maxRunsPerTask: 10, budgetGrants: 5 });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).maxSessionsPerTask, 5);
+
+  await completeDocumentation(seeded, heads[5]!);
+  const regressionRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id, runNumber: 6 },
+  });
+  assert.deepEqual({
+    status: regressionRun.status,
+    maxRunsPerTask: regressionRun.maxRunsPerTask,
+    budgetGrants: regressionRun.budgetGrants,
+  }, { status: "QUEUED", maxRunsPerTask: 10, budgetGrants: 5 });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).maxSessionsPerTask, 5);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
 test("repairs on every previously omitted legacy generation reopen the Librarian Step", async () => {

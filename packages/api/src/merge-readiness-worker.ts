@@ -289,13 +289,13 @@ const requeueRegression = async (
     });
     if (held.count !== 1) return false;
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
-    const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now, { budgetGrant: 1 });
     // The prior Regression run succeeded; the control plane invalidated its
     // exact-base evidence after a remote read. This retry is therefore external
     // compensation, not another attempt charged to the agent. Without the
     // grant, a requeue at the configured ceiling creates run N+1 with ceiling N
     // and the runner rejects it before launch -- exactly the stuck state the
     // readiness transition was supposed to recover.
+    const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now, { budgetGrant: 1 });
     if (input.recovery) {
       await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
         status: MergeRecoveryStatus.REPAIRING,

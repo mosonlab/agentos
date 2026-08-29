@@ -32,6 +32,7 @@ import {
   recordIntegratorStop,
   runBudgetCeiling,
   RunStatus,
+  stepRole,
   TaskStatus,
   writeMarker,
 } from "@anneal/db";
@@ -54,6 +55,7 @@ import {
 } from "./execution.js";
 import {
   handleRegressionCompletion,
+  mergeTailRequeueForRun,
   openMergeTailStopNotice,
   recordMergeTailRequeue,
   regressionVerdictForRun,
@@ -69,6 +71,9 @@ import {
 } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
 import { lockTask, lockTaskMutationRows } from "./task-write.js";
+
+const isDocumentationStep = (step: { outputKind: string } | null | undefined): boolean =>
+  Boolean(step && stepRole(step) === "documentation");
 
 const failureEnvelopeV1Input = z.object({
   version: z.number().int().positive(),
@@ -148,7 +153,9 @@ const activateMergeTailTarget = async (
   if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
   try {
     const queued = await enqueueTaskRun(tx, taskId, now, { budgetGrant: 1 });
-    await recordMergeTailRequeue(tx, { taskId, runId: queued.id });
+    if (isDocumentationStep(target.templateStep)) {
+      await recordMergeTailRequeue(tx, { taskId, runId: queued.id });
+    }
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
   } catch (error: unknown) {
     if (hasSavepoint) {
@@ -374,18 +381,17 @@ export const completeRun = async (
     // above the read.
     const failureIsFinal = !succeeded
       && (durableNegativeRegressionVerdict || !(retryable && run.runNumber < budgetCeiling));
-    const mergeTailDocumentationTarget = succeeded
-      && run.task?.templateStep?.outputKind === "documentation";
+    const documentationStepSucceeded = succeeded
+      && isDocumentationStep(run.task?.templateStep);
     const tailMarkers = run.task && (failureIsFinal
-      || (succeeded && (!run.task.templateId && !run.task.chainId || mergeTailDocumentationTarget)))
+      || (succeeded && !run.task.templateId && !run.task.chainId))
       ? await readMarkers(tx, run.task.id)
       : [];
     const succeededMarkers = succeeded ? tailMarkers : [];
-    const mergeTailRequeueMarker = latestMarker(succeededMarkers, "requeue", "queued");
     const mergeTailSuccessorRequeue = Boolean(
-      mergeTailDocumentationTarget
-      && mergeTailRequeueMarker
-      && mergeTailRequeueMarker.raw.runId === run.id,
+      documentationStepSucceeded
+      && run.task
+      && await mergeTailRequeueForRun(tx, { taskId: run.task.id, runId: run.id }),
     );
     const repairMarker = latestMarker(succeededMarkers, "repairAttempt");
     const repairRegression = repairMarker?.regressionTaskId
@@ -409,7 +415,7 @@ export const completeRun = async (
     const repairDocumentationOrdinals = repairTemplateIdentity?.canonicalName === INTEGRATOR_TEMPLATE_NAME
       ? canonicalStepOrdinals(repairTemplateIdentity.canonicalName, repairTemplateIdentity.generation)
       : null;
-    const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
+    const repairDocumentationCandidate = repairRegression?.chainId && repairRegression.templateId
       && repairDocumentationOrdinals
       && repairRegression.templateStep
       && isRegressionVerificationOutputKind(repairRegression.templateStep.outputKind)
@@ -423,11 +429,15 @@ export const completeRun = async (
             templateId: repairRegression.templateId,
             chainIndex: repairDocumentationOrdinals.documentation,
             archivedAt: null,
-            templateStep: { stepIndex: repairDocumentationOrdinals.documentation, outputKind: "documentation" },
+            templateStep: { stepIndex: repairDocumentationOrdinals.documentation },
           },
           orderBy: { chainIndex: "desc" },
-          select: { id: true },
+          select: { id: true, templateStep: { select: { outputKind: true } } },
         })
+      : null;
+    const repairDocumentationTask = repairDocumentationCandidate
+      && isDocumentationStep(repairDocumentationCandidate.templateStep)
+      ? repairDocumentationCandidate
       : null;
     // An auxiliary task is one whose own marker names the Regression it serves.
     const mergeTailAuxiliary = Boolean(repairMarker?.regressionTaskId);

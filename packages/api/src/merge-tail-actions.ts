@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 
 import {
+  asJsonObject,
   enqueueTaskRun,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
+  MERGE_TAIL_KIND,
+  MERGE_TAIL_SCHEMA_VERSION,
   mergeRecoveryTransitionAllowed,
   MergeRecoveryStatus,
   parseRegressionVerdict,
@@ -43,12 +46,35 @@ export const recordMergeTailRequeue = async (
   await writeMarker(tx, input.taskId, "requeue", {
     actorType: "control-plane",
     body: `Merge-tail target requeued with one budget grant (Run ${input.runId})`,
-    metadata: {
-      state: "queued",
-      runId: input.runId,
-      budgetGrant: 1,
-    },
+    metadata: { runId: input.runId },
   });
+};
+
+/**
+ * Qualifies the durable authority for a Documentation-to-Regression grant.
+ * Activity metadata authored by agents or operators is never control-plane
+ * authority, and an exact Run binding avoids propagating a prior requeue.
+ */
+export const mergeTailRequeueForRun = async (
+  tx: DbTx,
+  input: { taskId: string; runId: string },
+): Promise<boolean> => {
+  const row = await tx.taskActivity.findFirst({
+    where: {
+      taskId: input.taskId,
+      actorType: "control-plane",
+      AND: [
+        { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.requeue } },
+        { metadata: { path: ["schemaVersion"], equals: MERGE_TAIL_SCHEMA_VERSION } },
+        { metadata: { path: ["runId"], equals: input.runId } },
+      ],
+    },
+    select: { metadata: true },
+  });
+  const metadata = asJsonObject(row?.metadata);
+  return metadata?.kind === MERGE_TAIL_KIND.requeue
+    && metadata.schemaVersion === MERGE_TAIL_SCHEMA_VERSION
+    && metadata.runId === input.runId;
 };
 
 type RegressionTaskIdentity = {
