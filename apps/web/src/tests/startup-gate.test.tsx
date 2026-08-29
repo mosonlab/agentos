@@ -104,7 +104,7 @@ test("a 401 first load is one request, one blocking screen, and nothing else mou
   // No routed page, no Shell, no runner provider: their polls are the reason the
   // request list above has exactly one entry.
   assert.doesNotMatch(markup, /data-runner-state=|Runner/u);
-  assert.doesNotMatch(markup, /Set up AgentOS/u);
+  assert.doesNotMatch(markup, /Set up Anneal/u);
 });
 
 test("a 403 is the same blocking state as a 401, since both are local configuration", async () => {
@@ -196,7 +196,7 @@ test("the pending state renders loading only, and never the application", async 
     const markup = dom.window.document.body.innerHTML;
     assert.equal(calls, 1);
     assert.match(markup, /data-startup-state="pending"/u);
-    assert.doesNotMatch(markup, /data-runner-state=|Set up AgentOS/u);
+    assert.doesNotMatch(markup, /data-runner-state=|Set up Anneal/u);
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
     await act(async () => root.unmount());
@@ -211,7 +211,7 @@ test("a populated control plane mounts the application and no wizard", async () 
   );
   assert.deepEqual(bootstrapCalls(calls), ["/api/projects"]);
   assert.match(markup, /Vibeville/u);
-  assert.doesNotMatch(markup, /Set up AgentOS/u);
+  assert.doesNotMatch(markup, /Set up Anneal/u);
 });
 
 test("the gate hands its children the projects it already fetched", async () => {
@@ -269,7 +269,7 @@ test("under StrictMode an empty control plane opens the wizard", async () => {
   // counted is the bootstrap, which happens once.
   assert.deepEqual(bootstrapCalls(calls).filter((path) => path === "/api/projects"), ["/api/projects"]);
   assert.doesNotMatch(markup, /data-startup-state="pending"/u);
-  assert.match(markup, /Set up AgentOS/u);
+  assert.match(markup, /Set up Anneal/u);
 });
 
 test("under StrictMode retry is still one request per attempt", async () => {

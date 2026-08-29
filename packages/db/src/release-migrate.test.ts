@@ -391,7 +391,7 @@ describe("compose model", () => {
   });
 
   it("normalises the compose project name the way Docker Compose does", () => {
-    assert.equal(normaliseComposeProject("AgentOS"), "agentos");
+    assert.equal(normaliseComposeProject("Anneal"), "anneal");
     assert.equal(normaliseComposeProject("agentos-worktrees.b0"), "agentos-worktreesb0");
   });
 });

@@ -85,7 +85,7 @@ test("task deletion followed by policy, check, and merge-method drift still reco
   const tuple = authorizedTuple();
   const marker = markerComment(renderMarker({ tuple, delegationExpiresAt: "2026-08-19T00:00:00Z" }));
 
-  // The AgentOS task is gone: no stage-1, stage-2, or stage-3 record survives,
+  // The Anneal task is gone: no stage-1, stage-2, or stage-3 record survives,
   // and GET /tasks/<id> answers 404 while GET /tasks/<id>/activity answers 200 [].
   // Everything below rebuilds from GitHub alone.
   const live = driftedLiveReads();

@@ -8,7 +8,7 @@ import { mergeBadge } from "../lib/merge-outcome";
 import { navigate } from "../lib/router";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
-import { IconRobot } from "./icons";
+import { IconRobot, IconUser } from "./icons";
 import { DOT, DOT_TONE, Pill, ROW, RowMenu, type RowMenuEntry } from "./ui";
 
 /* The card's geometry, stated once for both layout shells.
@@ -48,7 +48,9 @@ const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-mut
 // kanban-tasks-board-t1560.jpg; pills are reserved for the task detail header.
 const runLabel = (task: BoardTask, t: Translate): ReactNode => {
   const run = task.latestRun;
-  if (!run) return <span className="text-[color:var(--faint)]">{t("tasks.card.noRuns")}</span>;
+  // A card with no run says nothing about runs. "no runs" is what every fresh
+  // card said, and a row that is a constant is a row that is not read.
+  if (!run) return null;
   // §SF-1. The card's whole run line is one status word, so a mechanical merge
   // that stopped has nowhere else to say so: SUCCEEDED here reads as a merge
   // that happened. The badge is bound server-side to this very run.
@@ -173,7 +175,10 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
-  const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  const assignee = task.assigneeAgent?.title ?? null;
+  const schedule = scheduleLabel(task);
+  const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
+  const run = runLabel(task, t);
   const model = cardModel(task);
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
@@ -198,18 +203,20 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
     <div className={TASK_META}>
-      <div className={TASK_META_ROW}>
+      {hasScheduleRow ? <div data-card-schedule="" className={TASK_META_ROW}>
         {/* Two lines, not one ellipsized one. Measured in a 170px content box:
             "Waiting for previous step" came out as "Waiting for previous st…"
             and a cron's prose as "At 09:00 AM, only on M…". This line is the
             answer to "what starts this task" — an answer cut off two characters
-            from the end is not a shorter answer, it is no answer. */}
-        <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{scheduleLabel(task)}</span>
+            from the end is not a shorter answer, it is no answer.
+            A plain `NOW` task has no row at all; approval and source pills keep
+            this shared row when they carry the card's only information. */}
+        {schedule === null ? null : <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{schedule}</span>}
         {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.approval")}</Pill> : null}
         {/* MANUAL renders nothing: most tasks are manual, and a pill on every
             card would be noise rather than provenance ([A8]). */}
         {task.source === "CRON" ? <Pill tone="grey" className={TASK_PILL}>{t("tasks.pill.cron")}</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent" className={TASK_PILL}>{t("tasks.pill.webhook")}</Pill> : null}
-      </div>
+      </div> : null}
       {task.blockedOn ? (
         <div data-card-blocked-on="" className={TASK_META_ROW}>
           <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">
@@ -239,12 +246,12 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           {repair === null
             ? null
             : <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.repair", { kind: repair.repairKind })}</Pill>}
-          {/* The marker keeps the card's node ordinal and the API-derived dense
-              execution-layer progress together, without recomputing either. */}
+          {/* The board needs only the task's ordinal. Execution layers are a
+              scheduling concept rendered by the chain detail page. */}
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </div>
       )}
-      <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
+      {run === null ? null : <div className={TASK_META_ROW}>{run}</div>}
       {model === null ? null : (
         <div className={TASK_META_ROW}>
           <span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model })}>
@@ -255,9 +262,17 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, TASK_FAILURE)}>{task.failureReason}</div>}
     </div>
     <div className={TASK_FOOT}>
-      <span className={cn(ROW, "min-w-0 gap-[6px]")}>
-        <IconRobot />
-        <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
+      {/* Human ownership is complete without an agent name. A missing agent on
+          an AGENT task is different: it is a misconfiguration worth naming. */}
+      <span
+        data-card-assignee={task.assigneeType === "HUMAN" ? "human" : assignee === null ? "unassigned-agent" : "agent"}
+        className={cn(ROW, "min-w-0 gap-[6px]")}
+      >
+        {task.assigneeType === "HUMAN"
+          ? <IconUser />
+          : assignee === null
+            ? <><IconRobot /><span>{t("ui.chip.unassigned")}</span></>
+            : <><IconRobot /><Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} /></>}
       </span>
       <span className="flex-1" />
       {task.taskCost !== null && !hasTokenFallback

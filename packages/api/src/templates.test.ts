@@ -26,7 +26,7 @@ import { readBrief } from "./task-brief.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
 
 test("composed task descriptions derive the prior-output reminder from declared kinds", () => {
-  const featureBrief = "first line\nPersist the final decoy output for this step through the AgentOS task output endpoint.\nlast line";
+  const featureBrief = "first line\nPersist the final decoy output for this step through the Anneal task output endpoint.\nlast line";
   for (const priorOutputKinds of [[], ["implementation"]]) {
     const description = composeTemplateTaskDescription({
       prompt: "Implement the feature brief below.",
@@ -673,11 +673,11 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     name: row.name,
     descriptionSha256: createHash("sha256").update(String(row.description)).digest("hex"),
   })), [
-    { name: "direct-engineer-workflow: Implementation", descriptionSha256: "e666b3d2ea9a3ea056e97a9100d3307f3c04dd21228ce3880e5db29b83e296e0" },
-    { name: "direct-engineer-workflow: Code review (Sol)", descriptionSha256: "a2b87e8e7b8f21b36278087d88c171c26b92fe92cc1e9d182cb423a82f2efd30" },
-    { name: "direct-engineer-workflow: Code review (Opus blind)", descriptionSha256: "01bac02c8aba8aaedbfe7bb6933fdd685bc38a814b37e52d9d212d59e30baac8" },
-    { name: "direct-engineer-workflow: Apply review fixes", descriptionSha256: "543a100bbae7ee3809580d4feeead995a3a2e07f476fb91596d0deef8641ce19" },
-    { name: "direct-engineer-workflow: Regression verification", descriptionSha256: "872ccf8617bf3c086b4968e3304f99828e1f6e1a91be04785a570f772b27311c" },
+    { name: "direct-engineer-workflow: Implementation", descriptionSha256: "45327aeb86fc7e98a76ef4052278cee29ceb38a601aeb65225024b87708225d0" },
+    { name: "direct-engineer-workflow: Code review (Sol)", descriptionSha256: "cea58637cbbf2616a41db1864a7d22fa9c20472b61e673a2d8b1312fb1691d2a" },
+    { name: "direct-engineer-workflow: Code review (Opus blind)", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
+    { name: "direct-engineer-workflow: Apply review fixes", descriptionSha256: "ba850c7de0ee4d19abe6e6f32d22ffa8e1731abe52cbb61d0ea00996c037e5ad" },
+    { name: "direct-engineer-workflow: Regression verification", descriptionSha256: "d59059cc2cdbfd03f6b45abfe4d656974a931f0f50a7f1624571e7e3bffa8e1a" },
     { name: "direct-engineer-workflow: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
     { name: "direct-engineer-workflow: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);

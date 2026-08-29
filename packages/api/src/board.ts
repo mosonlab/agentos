@@ -9,6 +9,7 @@ import {
   sumUsageCosts,
   TaskStatus,
   type Agent,
+  type AssigneeType,
   type MergeOutcomeProjection,
   type Prisma,
   type PrismaClient,
@@ -36,8 +37,9 @@ import { chainKey, chainProgressByChain, positions, type ChainProgress } from ".
  * the same list the full response serves, and two routes would let the two
  * drift. `?view=board` is the caller saying which fields it will actually read.
  *
- * Every field here is rendered by `TaskCard`. Adding one is a deliberate act:
- * the point of the shape is that its cost is legible.
+ * Every field here is consumed by the board surface: nearly all by `TaskCard`,
+ * with `createdAt` used by `TasksPage` to order the Backlog queue. Adding one is
+ * a deliberate act; the point of the shape is that its cost is legible.
  */
 export type BoardCard = {
   id: string;
@@ -45,6 +47,7 @@ export type BoardCard = {
   /** Display-only title with a verified chain prefix removed. */
   displayName: string;
   status: TaskStatusType;
+  assigneeType: AssigneeType;
   /** Full text, not a truncation: the card clamps it to three lines but the
    *  card menu's `Copy error` hands the operator the whole thing. */
   failureReason: string | null;
@@ -59,6 +62,7 @@ export type BoardCard = {
   chainIndex: number | null;
   chainName: string | null;
   blockedOn: { taskId: string; taskName: string } | null;
+  createdAt: Date;
   updatedAt: Date;
   assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: (ChainProgress & { position: number | null }) | null;
@@ -105,6 +109,7 @@ export type BoardRow = {
   projectId: string;
   name: string;
   status: TaskStatusType;
+  assigneeType: AssigneeType;
   failureReason: string | null;
   scheduleKind: ScheduleKind;
   runAt: Date | null;
@@ -117,6 +122,7 @@ export type BoardRow = {
   chainIndex: number | null;
   chainLayer: number | null;
   dispatchAfterTaskId: string | null;
+  createdAt: Date;
   updatedAt: Date;
   assigneeAgent: { id: string; title: string; model: string } | null;
   templateStep: { name: string } | null;
@@ -221,6 +227,7 @@ export const boardCard = (
     name: row.name,
     displayName: display.displayName,
     status: row.status,
+    assigneeType: row.assigneeType,
     failureReason: row.failureReason,
     scheduleKind: row.scheduleKind,
     runAt: row.runAt,
@@ -235,6 +242,7 @@ export const boardCard = (
     blockedOn: row.dispatchAfterTaskId !== null && predecessor !== null && predecessor.status !== TaskStatus.DONE
       ? { taskId: predecessor.id, taskName: predecessor.name }
       : null,
+    createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     assigneeAgent: row.assigneeAgent === null
       ? null
@@ -376,9 +384,9 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     where: taskWhere(scope),
     orderBy: taskOrderBy,
     select: {
-      id: true, projectId: true, name: true, status: true, failureReason: true,
+      id: true, projectId: true, name: true, status: true, assigneeType: true, failureReason: true,
       scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
-      templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
+      templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, createdAt: true, updatedAt: true,
       dispatchAfterTaskId: true,
       assigneeAgent: { select: { id: true, title: true, model: true } },
       templateStep: { select: { name: true } },

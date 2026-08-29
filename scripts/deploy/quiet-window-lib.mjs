@@ -39,6 +39,21 @@ export class DeployFailure extends Error {
   }
 }
 
+/** A record-only ledger write failed. Keep this as a concrete DeployFailure so
+ * unrelated errors with a coincidental `reason` property are not reclassified. */
+export class DeploymentLedgerError extends DeployFailure {
+  constructor(operation, cause) {
+    const causeCode = typeof cause?.code === "string"
+      ? cause.code
+      : typeof cause?.name === "string"
+        ? cause.name
+        : "filesystem-write-failed";
+    super("deployment-ledger-write-failed", `${operation}-${causeCode}`);
+    this.name = "DeploymentLedgerError";
+    this.cause = cause;
+  }
+}
+
 export const quietWindowIsOpen = (runs) =>
   runs.every((run) => !BLOCKING_RUN_STATUSES.includes(String(run.status).toLowerCase()));
 
@@ -62,7 +77,7 @@ export const gitPreflightFailure = ({ branch, dirty, head, target, fastForward }
 export const shouldPersistFailure = ({ dryRun, reason, upgradeStarted = true }) =>
   !dryRun && reason !== "usage" && (reason !== "deploy-interrupted" || upgradeStarted);
 
-const failureOf = (error) => error instanceof DeployFailure
+export const failureOf = (error) => error instanceof DeployFailure
   ? error
   : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
 
@@ -71,35 +86,114 @@ const failureOf = (error) => error instanceof DeployFailure
  * harness can prove ordering and stop-on-first-failure without a live checkout,
  * launchd, or PostgreSQL.
  */
-export const executeUpgrade = async (host, initialRevisions) => {
+export const executeUpgrade = async (host, initialRevisions, options = {}) => {
+  const ledger = options?.ledger ?? host.ledger;
+  const ledgerStarted = options?.ledgerStarted === true || ledger?.started === true;
   let publication = null;
   let revisions = initialRevisions;
+  let schemaAdvanced = false;
+  let activationAttempted = false;
+  let activationOutcomeProven = false;
+  let candidateBuildStamp = null;
+  let context = {};
+  const ledgerError = (operation, error) => error instanceof DeploymentLedgerError
+    ? error
+    : new DeploymentLedgerError(operation, error);
+  const recordLedger = async (state, metadata = {}) => {
+    if (typeof ledger?.record !== "function") return;
+    try {
+      await ledger.record(state, {
+        targetCommit: revisions.to,
+        ...context,
+        ...metadata,
+      });
+    } catch (error) {
+      throw ledgerError("record", error);
+    }
+  };
   try {
+    if (ledger && !ledgerStarted) {
+      if (typeof ledger.start === "function") {
+        try {
+          await ledger.start({ targetCommit: revisions.to });
+        } catch (error) {
+          throw ledgerError("start", error);
+        }
+      }
+      else await recordLedger("STARTED");
+    }
     const to = await host.fastForward();
     revisions = Object.freeze({ from: initialRevisions.from, to });
     await host.createStage();
     await host.installDependencies();
-    await host.build();
-    await host.backup();
-    await host.guardedMigration();
+    const build = await host.build();
+    candidateBuildStamp = build?.buildStamp ?? null;
+    const backup = await host.backup();
+    context = { ...context, backupIdentity: backup?.backupIdentity ?? null };
+    await recordLedger("BACKED_UP");
+    const migration = await host.guardedMigration();
+    context = {
+      ...context,
+      migrationTailBefore: migration?.migrationTailBefore ?? null,
+      migrationTailAfter: migration?.migrationTailAfter ?? null,
+    };
+    schemaAdvanced = true;
+    await recordLedger("SCHEMA_ADVANCED");
     await host.generatePrismaClient();
     await host.syncCanonicalPrompts();
     await host.verifyRuntimePrismaClient();
     await host.assertQuietBeforeRestart();
-    publication = await host.publishBuild();
+    activationAttempted = true;
     try {
+      publication = await host.publishBuild();
+      activationOutcomeProven = publication !== null && publication !== undefined;
+    } catch (error) {
+      if (error instanceof DeployFailure && error.reason === "build-swap-failed") {
+        activationOutcomeProven = true;
+      }
+      throw error;
+    }
+    try {
+      context = { ...context, activatedBuildStamp: candidateBuildStamp };
+      await recordLedger("ACTIVATED");
       await host.restartServices();
-      await host.verifyServices(revisions);
+      const verification = await host.verifyServices(revisions);
+      context = {
+        ...context,
+        activatedBuildStamp: verification?.activatedBuildStamp ?? context.activatedBuildStamp,
+      };
+      await recordLedger("VERIFIED");
+      await recordLedger("SUCCEEDED");
       await host.notify({ outcome: "success", reason: "deployed", ...revisions });
     } catch (error) {
-      await publication.rollback();
-      await host.restorePreviousServices();
+      try {
+        await publication.rollback();
+        await host.restorePreviousServices();
+        activationOutcomeProven = true;
+      } catch (recoveryError) {
+        activationOutcomeProven = false;
+        throw recoveryError;
+      }
       throw error;
     }
     await publication.commit();
     return { ok: true };
   } catch (error) {
     const failure = failureOf(error);
+    let terminalLedgerFailure = null;
+    if (ledger && failure.reason !== "deployment-ledger-write-failed") {
+      const terminalState = schemaAdvanced && activationAttempted && !activationOutcomeProven
+        ? "MANUAL_RECOVERY"
+        : "FAILED";
+      try {
+        await recordLedger(terminalState, { reasonCode: failure.reason });
+      } catch (ledgerError) {
+        terminalLedgerFailure = failureOf(ledgerError);
+        host.log?.(`STOP ${terminalLedgerFailure.reason}${terminalLedgerFailure.detail ? ` detail=${terminalLedgerFailure.detail}` : ""}; original=${failure.reason}`);
+      }
+    } else if (failure.reason === "deployment-ledger-write-failed") {
+      host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
+    }
     const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
     await host.escalate(record);
     try {
@@ -108,7 +202,11 @@ export const executeUpgrade = async (host, initialRevisions) => {
     } catch (notificationError) {
       host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
     }
-    return { ok: false, failure };
+    return {
+      ok: false,
+      failure,
+      ...(terminalLedgerFailure ? { ledgerFailure: terminalLedgerFailure } : {}),
+    };
   } finally {
     await host.cleanupStage();
   }

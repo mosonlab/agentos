@@ -83,7 +83,7 @@ manifest_for() { printf '%s/%s.manifest' "$MANIFEST_DIR" "$1"; }
 dscl_value()   { dscl . -read "$1" "$2" 2>/dev/null | awk '{ $1=""; sub(/^ /,""); print }' || true; }
 sha256_of()    { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || true; }
 
-printf 'AgentOS runner plists — %s%s\n' \
+printf 'Anneal runner plists — %s%s\n' \
   "$([ "$REVERT" = 1 ] && echo 'REVERT ' || echo '')" \
   "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
 printf '  LaunchAgents: %s\n' "$AGENT_DIR"

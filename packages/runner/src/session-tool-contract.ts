@@ -43,7 +43,7 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
   {
     name: "task_activity_log",
     title: "Append to the task activity log",
-    description: "Record notable progress on the current AgentOS task. This is the routine progress channel; it never interrupts a human.",
+    description: "Record notable progress on the current Anneal task. This is the routine progress channel; it never interrupts a human.",
     inputSchema: {
       type: "object",
       properties: {
@@ -59,7 +59,7 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
   {
     name: "task_output",
     title: "Persist the task output",
-    description: "Persist this Step's deliverable as the AgentOS task output. Later Steps in the Chain read it, and the Approval gate shows it to the human. Canonical Steps may require a phase-specific write sequence from the task contract. A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
+    description: "Persist this Step's deliverable as the Anneal task output. Later Steps in the Chain read it, and the Approval gate shows it to the human. Canonical Steps may require a phase-specific write sequence from the task contract. A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
     inputSchema: {
       type: "object",
       properties: {
@@ -76,7 +76,7 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
   {
     name: "task_status",
     title: "Read the task and Run status",
-    description: "Read the current AgentOS task and Run: name, status, Approval gate, Run number and budget, branch, and whether an output has already been persisted.",
+    description: "Read the current Anneal task and Run: name, status, Approval gate, Run number and budget, branch, and whether an output has already been persisted.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     manifest: "- task_status(): read the current task and Run status, budget, branch, and whether an output exists.",
     transports: INTERACTIVE_TRANSPORTS,
@@ -99,7 +99,7 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
   {
     name: "inbox_ask",
     title: "Ask the human a question",
-    description: "Ask the human a question through the AgentOS Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
+    description: "Ask the human a question through the Anneal Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
     inputSchema: {
       type: "object",
       properties: {

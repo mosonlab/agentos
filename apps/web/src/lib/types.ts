@@ -349,6 +349,7 @@ export type BoardTask = {
   name: string;
   displayName: string;
   status: TaskStatus;
+  assigneeType: AssigneeType;
   failureReason: string | null;
   scheduleKind: "NOW" | "AT" | "CRON";
   runAt: string | null;
@@ -360,6 +361,7 @@ export type BoardTask = {
   chainId: string | null;
   chainIndex: number | null;
   chainName: string | null;
+  createdAt: string;
   updatedAt: string;
   assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: ChainProgress | null;

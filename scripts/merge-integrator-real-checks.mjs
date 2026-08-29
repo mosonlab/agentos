@@ -515,7 +515,7 @@ const runStartupGate = async () => {
     const record = direction("N23-live", "the full cross-principal attempt list, run as a real BASH-enabled agent");
     // NOT IMPLEMENTED, and deliberately not dressed up as a run that is merely
     // waiting for infrastructure: this harness contains no code that could ever
-    // execute this direction. It needs a running non-production AgentOS
+    // execute this direction. It needs a running non-production Anneal
     // deployment with a BASH-enabled agent and the merge executor installed
     // under its own OS user — provisioning and service operation, which the
     // plan's scope note puts outside the implementation chain. Whoever builds

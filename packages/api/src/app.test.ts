@@ -54,7 +54,7 @@ const lockedAgent = <T extends Record<string, unknown>>(agent: T | null): (T & R
 test("public root reports the execution kernel without touching Prisma", async () => {
   const response = await createApp({} as PrismaClient).request("/");
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { name: "AgentOS control plane", phase: "execution-kernel" });
+  assert.deepEqual(await response.json(), { name: "Anneal control plane", phase: "execution-kernel" });
 });
 
 test("API routes reject requests without a principal token", async () => {

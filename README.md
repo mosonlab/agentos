@@ -65,6 +65,39 @@ trigger, not by a standing objective. See [Status](#status).
 
 </div>
 
+## Board columns
+
+The board shows where work sits in the intent-to-delivery flow. The [Backlog
+card lifecycle](docs/governance/task-routing-v1.md#backlog-card-lifecycle) in
+the task-routing contract defines card creation, dispatch, and archival; the
+definitions here cover the column semantics.
+
+- **Backlog — intent.** An un-instantiated brief that is still being refined,
+  awaits a decision, or is deliberately parked; it is not connected to
+  execution. For an indefinitely parked HUMAN card, prefix its title with
+  `Parked:`.
+- **Todo — runnable execution.** An instantiated chain or step whose
+  specification of record is final, runnable now or waiting for activation or
+  a dependency unlock. The entry boundary is explicit: un-instantiated intent
+  enters the board in Backlog; instantiated chains and their steps enter in
+  Todo and then move through the later columns.
+- **Doing — active execution.** The runner has activated an AGENT task and work
+  is in progress.
+- **Review — awaiting a lifecycle decision.** An AGENT task is paused for an
+  approval or review gate, or has surfaced a run issue that needs attention
+  before the chain can continue.
+- **Done — complete.** The task or chain step is finished.
+
+An operator can stop and park a running chain step, which returns it to Backlog
+as a parked step. Resume it with **Start now** or **Recover parked step**, not
+ordinary card dispatch.
+
+The operator owns Backlog and Todo transitions and marking HUMAN tasks Done.
+The runner and chain scheduler own Doing, Review, and Done transitions for
+AGENT tasks. In the usual flow, the operator moves finalized intent from
+Backlog to Todo, then the runner advances each instantiated step through Doing,
+Review, and Done.
+
 ## It is built by its own chains
 
 The pull requests in this repository are specified, planned, reviewed,
@@ -122,7 +155,7 @@ and the models in [`agents/roles/`](agents/roles). A model or effort changed in
 the console is a persisted runtime override and is not replaced by a later
 seed.
 
-> **Developer Preview 3 (v0.3.0).** Interfaces, configuration and stored data
+> **Developer Preview 4 (v0.4.0).** Interfaces, configuration and stored data
 > shapes may change between preview releases, and the only upgrade path is a
 > fresh install.
 >
@@ -142,7 +175,7 @@ macOS account. Claude Code and Pi are optional.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.3.0
+git checkout v0.4.0
 npm ci
 npm run setup:local
 npm run build
@@ -209,7 +242,7 @@ and makes no compatibility promise for a CLI provider.
   anything you care about.
 - [Migration and recovery](docs/release/migration-and-recovery.md): read
   before putting data in it.
-- [Release notes](docs/release/v0.3.0-release-notes.md) ·
+- [Release notes](docs/release/v0.4.0-release-notes.md) ·
   [Contributing](CONTRIBUTING.md)
 
 ## Support

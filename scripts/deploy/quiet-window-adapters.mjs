@@ -18,10 +18,12 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 import { BLOCKING_RUN_STATUSES, DeployFailure, gitPreflightFailure } from "./quiet-window-lib.mjs";
+import { DEPLOYMENT_LEDGER_RETENTION_COUNT, pruneDeploymentLedgers } from "./deployment-ledger.mjs";
 
 export const DEPLOY_PREVIOUS_RETENTION_COUNT = 3;
 export const DEPLOY_BACKUP_RETENTION_COUNT = 14;
 export const DEPLOY_BACKUP_DAILY_RETENTION_DAYS = 30;
+export { DEPLOYMENT_LEDGER_RETENTION_COUNT };
 
 const PREVIOUS_DIRECTORY = /^previous-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const BACKUP_FILE = /^(\d{4}-\d{2}-\d{2})T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{12}-[0-9a-f]{12}\.dump$/u;
@@ -61,6 +63,7 @@ export const pruneDeployHistory = ({
   previousLimit = DEPLOY_PREVIOUS_RETENTION_COUNT,
   backupLimit = DEPLOY_BACKUP_RETENTION_COUNT,
   dailyRetentionDays = DEPLOY_BACKUP_DAILY_RETENTION_DAYS,
+  ledgerLimit = DEPLOYMENT_LEDGER_RETENTION_COUNT,
 } = {}) => {
   if (typeof stateDir !== "string" || stateDir.length === 0) {
     throw new DeployFailure("deploy-retention-refused", "state-directory-missing");
@@ -69,6 +72,7 @@ export const pruneDeployHistory = ({
     ["previous-limit", previousLimit],
     ["backup-limit", backupLimit],
     ["daily-retention-days", dailyRetentionDays],
+    ["ledger-limit", ledgerLimit],
   ]) {
     if (!Number.isSafeInteger(value) || value < 0) throw new DeployFailure("deploy-retention-refused", `${name}-invalid`);
   }
@@ -95,6 +99,7 @@ export const pruneDeployHistory = ({
 
   for (const entry of removedPrevious) rmSync(entry.path, { recursive: true, force: true });
   for (const entry of removedBackups) rmSync(entry.path, { force: true });
+  pruneDeploymentLedgers({ stateDir, limit: ledgerLimit });
 
   return Object.freeze({
     keptPrevious: previous.length - removedPrevious.length,

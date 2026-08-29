@@ -1,4 +1,4 @@
-# AgentOS Developer Preview — quickstart
+# Anneal Developer Preview — quickstart
 
 > **Correction (2026-08-19).** The install sequence shipped with `v0.1.0`
 > omitted the required runtime build and did not state several prerequisites
@@ -18,7 +18,7 @@ platform it targets. It is written to be followed literally: every command is
 the command, in the order it must run, and where a step can refuse, this page
 says what the refusal looks like and what it means.
 
-**Read this first.** The Developer Preview is for evaluating AgentOS on a
+**Read this first.** The Developer Preview is for evaluating Anneal on a
 machine you own, with repositories you are willing to have an agent write to. It
 is not a production install. Nothing here is packaged, notarized, or
 self-updating, and there is no upgrade path between preview builds other than a
@@ -33,10 +33,10 @@ fresh install.
 | npm | 10.9.2 or newer, the npm generation floor recorded for this release. Use it with Node.js 22.17.0. |
 | Docker | Docker Desktop must be running, with Docker Compose available. The supported local shape needs loopback ports `5432`, `3000`, and `5173` free. |
 | Git | Any recent version, with `user.name` and `user.email` configured for the runner account. The source must be a working clone. |
-| Codex CLI | The official Codex CLI, already installed **and already signed in**, under the same macOS account that will run the AgentOS runner. The runner does not inherit your interactive shell's `PATH`; see the preflight below. |
-| GitHub CLI | Optional for branch-only delivery and the deterministic smoke task. `gh` is required for automatic pull-request creation and must be authenticated as the runner account. If a run must open a pull request and `gh` cannot record one, AgentOS preserves the pushed branch and fails the run for retry. Manual PR instructions are reserved for non-GitHub remotes, where automatic creation is impossible by design. |
+| Codex CLI | The official Codex CLI, already installed **and already signed in**, under the same macOS account that will run the Anneal runner. The runner does not inherit your interactive shell's `PATH`; see the preflight below. |
+| GitHub CLI | Optional for branch-only delivery and the deterministic smoke task. `gh` is required for automatic pull-request creation and must be authenticated as the runner account. If a run must open a pull request and `gh` cannot record one, Anneal preserves the pushed branch and fails the run for retry. Manual PR instructions are reserved for non-GitHub remotes, where automatic creation is impossible by design. |
 
-AgentOS orchestrates a coding CLI you already have. It bundles no subscription
+Anneal orchestrates a coding CLI you already have. It bundles no subscription
 and resells no capacity: your provider account, its plan limits, its rate
 limits, and its availability remain yours.
 
@@ -52,7 +52,7 @@ installation.
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.3.0
+git checkout v0.4.0
 ```
 
 Check out the exact tag or commit the release names. A branch tip is not a
@@ -122,7 +122,7 @@ By default, Files Root is `~/Documents/agentos`. On Macs with iCloud Desktop &
 Documents enabled, agent writes may be uploaded and dataless placeholders may
 fail to read. Set an absolute `FILES_ROOT` outside synced folders if that matters.
 With the shipped same-user runner, Filesystem Grants authorize and audit
-AgentOS's Files API; they do not stop the coding CLI from accessing files the
+Anneal's Files API; they do not stop the coding CLI from accessing files the
 macOS user itself can access.
 
 If setup is interrupted, first make sure no other setup process is running, then
@@ -171,7 +171,7 @@ The service publishes on `127.0.0.1:5432` only. The wait is required: `running`
 does not mean PostgreSQL is ready to accept the release migration, and the
 60-second bound makes a failed health check return control instead of waiting
 forever. If Compose cannot bind the port, stop the existing service on 5432; do
-not point AgentOS at an unknown PostgreSQL instance.
+not point Anneal at an unknown PostgreSQL instance.
 
 ### 6. Create the schema
 
@@ -219,11 +219,11 @@ codex login status
 ```
 
 Replace `<REMOTE>` and `main` with the values you will enter. Verify
-the values before opening the wizard. On Install, AgentOS repeats the identity
+the values before opening the wizard. On Install, Anneal repeats the identity
 and exact-branch checks, fetches that branch into a temporary bare repository,
 and runs `git push --dry-run` before opening the installation transaction. A
 missing identity, unreachable remote, absent branch, interactive credential
-prompt, or refused write leaves the database untouched. AgentOS sets
+prompt, or refused write leaves the database untouched. Anneal sets
 `GIT_TERMINAL_PROMPT=0`; shell-only authentication such as an inherited
 `SSH_AUTH_SOCK` is not passed into its controlled Git environment.
 
@@ -234,7 +234,7 @@ path or set `RUNNER_PATH` in `.env`.
 
 The starter agent uses `gpt-5.6-sol:medium`. A green startup preflight proves
 that the Codex CLI exists, exposes the `exec`/resume flags and stdin/JSON
-protocol AgentOS uses, and reports a signed-in session. Its capability report is
+protocol Anneal uses, and reports a signed-in session. Its capability report is
 bound to that starter model; version 0.148.0 is the recorded compatible CLI. The
 preflight does not spend a model turn, so the deterministic smoke task remains
 the first entitlement and end-to-end model-access check.
@@ -347,10 +347,10 @@ telling you something specific.
 | The console shows one blocking screen saying local configuration was refused | The API answered 401 or 403. `.env` and the running API disagree about the operator token. Regenerating configuration is a recovery, not a retry — see §3. |
 | The console says the control plane did not answer | `npm run dev:api` is not running, or not on `127.0.0.1:3000`. |
 | The wizard's Install button is inactive and the Codex step says the CLI was not found | The runner reported that `codex --version` did not answer. Check the fixed default `RUNNER_PATH` described in step 7, then set `CODEX_BINARY` or `RUNNER_PATH` and restart the runner. |
-| The wizard says Codex is not signed in | Run `codex login` yourself, in a terminal, then restart the runner. Nothing in AgentOS runs it for you or stores what it produces. |
+| The wizard says Codex is not signed in | Run `codex login` yourself, in a terminal, then restart the runner. Nothing in Anneal runs it for you or stores what it produces. |
 | The wizard says it is waiting for the local runner | Nothing has reported yet, or the last report is more than a minute old. Start `npm run dev:runner`; the screen updates on its own. This is not a failure and does not mean anything is missing. |
 | `STOP release-migrate …` or `STOP preflight …` | See [`migration-and-recovery.md`](migration-and-recovery.md), which lists every condition. |
-| `AgentOS API startup configuration refused: <reasons>`, exit code 78 | The API read its environment and refused before doing anything at all — no socket bound, no database touched. Exit 78 is `EX_CONFIG`: restarting it changes nothing until a value does. The reasons are stable codes plus a variable name and never a value; see below. |
+| `Anneal API startup configuration refused: <reasons>`, exit code 78 | The API read its environment and refused before doing anything at all — no socket bound, no database touched. Exit 78 is `EX_CONFIG`: restarting it changes nothing until a value does. The reasons are stable codes plus a variable name and never a value; see below. |
 
 ### Startup configuration refusals
 
@@ -391,7 +391,7 @@ match it.
 ## What this preview does not do
 
 - It does not sandbox the agent. The provider adapters run with non-interactive
-  permission-bypass flags, and AgentOS grants are a control-plane authorization
+  permission-bypass flags, and Anneal grants are a control-plane authorization
   and audit boundary, not host containment. See
   [`security.md`](security.md).
 - It does not enforce network isolation, and it does not claim to.

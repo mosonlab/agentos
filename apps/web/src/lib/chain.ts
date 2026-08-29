@@ -16,16 +16,16 @@ export const chainMarker = (
   return `${progress.done}/${progress.total} · ${progress.activeStepName} · ${progress.activeStatus}`;
 };
 
-/** A board card describes its own place, not the chain's current execution. */
+/**
+ * A board card describes its own place, not the chain's current execution.
+ *
+ * Step only. The execution layer is a scheduling coordinate — which steps the
+ * control plane may enqueue together — and it answers a question the board is
+ * not asking; the chain detail page groups its steps by layer and is where that
+ * fact belongs. On the card it was a second pair of numbers per chain row,
+ * pushing the title into its clamp for nothing the operator reads here.
+ */
 export const chainPositionMarker = (
-  progress: Pick<ChainProgress, "position" | "total">
-    & Partial<Pick<ChainProgress, "currentLayer" | "layerCount">>
-    | null
-    | undefined,
-): string | null => {
-  if (!progress || progress.position === null) return null;
-  const step = `step ${progress.position}/${progress.total}`;
-  return progress.currentLayer === undefined || progress.layerCount === undefined
-    ? step
-    : `${step} · layer ${progress.currentLayer}/${progress.layerCount}`;
-};
+  progress: Pick<ChainProgress, "position" | "total"> | null | undefined,
+): string | null =>
+  (!progress || progress.position === null ? null : `step ${progress.position}/${progress.total}`);

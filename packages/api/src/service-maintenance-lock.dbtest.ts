@@ -1,5 +1,5 @@
 /**
- * The claim the #164 review said nothing proved: a *running* AgentOS API is
+ * The claim the #164 review said nothing proved: a *running* Anneal API is
  * visible to the exclusive maintenance lock.
  *
  * Everything here is the shipped entrypoint. `packages/api/dist/index.js` is
@@ -144,7 +144,7 @@ test("api shared maintenance lock real-process acceptance", {
   await t.test("a serving API is one shared holder, and a migrator is refused while it serves", async () => {
     const api = spawnApi(common);
     children.add(api.child);
-    const ready = await waitFor(api.child, /AgentOS API listening/u, api.output);
+    const ready = await waitFor(api.child, /Anneal API listening/u, api.output);
     assert.match(ready, /api step=maintenance-lock role=shared result=acquired schema=/u);
     // The lock is taken before the database is served, not after: reconciliation
     // is already a statement against the schema.
@@ -181,9 +181,9 @@ test("api shared maintenance lock real-process acceptance", {
       children.add(api.child);
       const stopped = await exited(api.child);
       assert.equal(stopped.code, SERVICE_LOCK_CONTENTION_EXIT_CODE);
-      assert.match(api.output.value, /AgentOS API startup refused: exclusive-maintenance-lock-held-by-another-session/u);
+      assert.match(api.output.value, /Anneal API startup refused: exclusive-maintenance-lock-held-by-another-session/u);
       assert.ok(
-        !/AgentOS API listening/u.test(api.output.value),
+        !/Anneal API listening/u.test(api.output.value),
         "a control plane that could not take the shared lock must not serve a request",
       );
     } finally {
@@ -194,7 +194,7 @@ test("api shared maintenance lock real-process acceptance", {
   await t.test("an API reacquires shared after its lock backend is lost", async () => {
     const api = spawnApi(common);
     children.add(api.child);
-    await waitFor(api.child, /AgentOS API listening/u, api.output);
+    await waitFor(api.child, /Anneal API listening/u, api.output);
     const holders = await holderPids(observer, schema);
     assert.equal(holders.length, 1);
     await observer.$queryRawUnsafe("SELECT pg_terminate_backend($1::int4)", holders[0]);
@@ -215,7 +215,7 @@ test("api shared maintenance lock real-process acceptance", {
   await t.test("an API stops when maintenance wins after its shared backend is lost", async () => {
     const api = spawnApi(common);
     children.add(api.child);
-    await waitFor(api.child, /AgentOS API listening/u, api.output);
+    await waitFor(api.child, /Anneal API listening/u, api.output);
     const holders = await holderPids(observer, schema);
     assert.equal(holders.length, 1);
     await observer.$queryRawUnsafe("SELECT pg_terminate_backend($1::int4)", holders[0]);
@@ -231,7 +231,7 @@ test("api shared maintenance lock real-process acceptance", {
       );
       const stopped = await exited(api.child);
       assert.equal(stopped.code, SERVICE_LOCK_CONTENTION_EXIT_CODE);
-      assert.match(api.output.value, /AgentOS API stopping: shared-service-lock-was-not-retained/u);
+      assert.match(api.output.value, /Anneal API stopping: shared-service-lock-was-not-retained/u);
       assert.deepEqual(await inspectMaintenanceLock(target, prismaMaintenanceLockSession), {
         exclusive: 1, shared: 0, waiting: 0,
       });

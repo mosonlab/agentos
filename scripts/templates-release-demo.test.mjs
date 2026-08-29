@@ -51,7 +51,7 @@ test("authority artifacts are approved, commit-bound, scoped, and attributed", (
   };
   assert.equal(validateAuthority(approved, commit, "providerPath").approver, "the operator");
   assert.throws(() => validateAuthority({ ...approved, status: "pending" }, commit, "providerPath"), /not approved/);
-  assert.throws(() => validateAuthority({ ...approved, agentosCommit: "b".repeat(40) }, commit, "providerPath"), /another AgentOS commit/);
+  assert.throws(() => validateAuthority({ ...approved, agentosCommit: "b".repeat(40) }, commit, "providerPath"), /another Anneal commit/);
   assert.throws(() => validateAuthority({ ...approved, scopes: {} }, commit, "providerPath"), /does not approve/);
 });
 

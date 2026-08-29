@@ -11,7 +11,7 @@ export const questionCard = (message: { id: string; body: string; choices: Choic
   config: { wide_screen_mode: true },
   header: {
     template: "blue",
-    title: { tag: "plain_text", content: message.choices.length > 0 ? "AgentOS 需要你的决策" : "AgentOS 任务提问" },
+    title: { tag: "plain_text", content: message.choices.length > 0 ? "Anneal 需要你的决策" : "Anneal 任务提问" },
   },
   elements: [
     { tag: "div", text: { tag: "lark_md", content: cardBody(message.body) } },
