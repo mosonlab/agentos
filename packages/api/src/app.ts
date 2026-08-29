@@ -90,7 +90,7 @@ import {
   type TaskReadScope,
 } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
-import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, readProjectCosts } from "./costs.js";
+import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts } from "./costs.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import {
@@ -1433,6 +1433,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
 
   app.get("/projects/:projectId/costs", async (context) => {
+    const timeZone = context.req.query("tz");
+    if (timeZone === undefined || !isValidTimeZone(timeZone)) {
+      return context.json({ error: "tz must be a recognized IANA timezone" }, 400);
+    }
     const raw = context.req.query("days");
     const days = raw === undefined
       ? COSTS_DEFAULT_DAYS
@@ -1442,7 +1446,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (days === undefined) {
       return context.json({ error: `days must be one of ${COSTS_RANGE_DAYS.join(", ")}` }, 400);
     }
-    return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days));
+    return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days, timeZone));
   });
 
   app.get("/projects/:projectId/environments", async (context) => context.json(await db.environment.findMany({
