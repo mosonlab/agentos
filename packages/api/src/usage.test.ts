@@ -280,6 +280,15 @@ test("an unusable modelUsage falls back to the top-level usage block", () => {
   assert.deepEqual(extractUsage({ usage: { input_tokens: 4 }, modelUsage: "nope" }), { inputTokens: 4 });
 });
 
+test("a cost-only modelUsage keeps its cost and falls back to top-level tokens", () => {
+  const usage = extractUsage({
+    usage: { input_tokens: 4 },
+    modelUsage: { m: { costUSD: 0.01 } },
+  });
+  assert.equal(usage.inputTokens, 4);
+  assert.equal(usage.costUsd?.toString(), "0.01");
+});
+
 test("one malformed modelUsage entry does not discard the others", () => {
   assert.deepEqual(extractUsage({ modelUsage: { a: 7, b: { inputTokens: 5 } } }), { inputTokens: 5 });
 });

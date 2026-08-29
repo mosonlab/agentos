@@ -67,15 +67,15 @@ const tokenCount = (value: unknown, field: string): number | null => {
  * once at the column boundary. Adding binary JS numbers first is not exact —
  * 0.000001 + 0.000049 lands just below the half-unit and rounds to 0.0000.
  */
-const costAmount = (value: unknown): Prisma.Decimal | null => {
+const costAmount = (value: unknown, field = "total_cost_usd"): Prisma.Decimal | null => {
   if (value === undefined) return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    console.warn(`[usage] ignoring total_cost_usd=${render(value)}: not a storable cost`);
+    console.warn(`[usage] ignoring ${field}=${render(value)}: not a storable cost`);
     return null;
   }
   const decimal = new Prisma.Decimal(String(value));
   if (decimal.toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
-    console.warn(`[usage] ignoring total_cost_usd=${render(value)}: exceeds Decimal(12, 4)`);
+    console.warn(`[usage] ignoring ${field}=${render(value)}: exceeds Decimal(12, 4)`);
     return null;
   }
   return decimal;
@@ -85,6 +85,7 @@ type ModelTotals = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  costUsd: Prisma.Decimal | null;
 };
 
 /** Fold a provider's disjoint cached subset into canonical input exactly once.
@@ -105,14 +106,14 @@ const canonicalInputTokens = (uncached: number | null, cached: number | null): n
  * EXCLUSIVE, and the two vocabularies never share a key list.
  *
  * The returned input total is canonical: each model's provider-reported
- * uncached input has its cache-read/creation input added exactly once. Returns
- * null when nothing usable was found, which is what routes an absent, malformed
- * or empty `modelUsage` back to the top-level branch.
+ * uncached input has its cache-read/creation input added exactly once. Token
+ * usability remains independent of cost usability so a cost-only breakdown can
+ * preserve its cost while top-level `usage` supplies the token columns.
  */
 const extractModelUsage = (value: unknown): ModelTotals | null => {
   const models = asRecord(value);
   if (!models) return null;
-  const totals: ModelTotals = { inputTokens: null, outputTokens: null, cachedInputTokens: null };
+  const totals: ModelTotals = { inputTokens: null, outputTokens: null, cachedInputTokens: null, costUsd: null };
   for (const entry of Object.values(models)) {
     const model = asRecord(entry);
     if (!model) continue;                       // one malformed entry must not discard the others
@@ -125,11 +126,13 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
     if (cacheRead !== null || cacheCreation !== null) {
       totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0);
     }
+    const cost = costAmount(model.costUSD, "modelUsage.costUSD");
+    if (cost !== null) totals.costUsd = (totals.costUsd ?? new Prisma.Decimal(0)).plus(cost);
   }
   totals.inputTokens = canonicalInputTokens(totals.inputTokens, totals.cachedInputTokens);
-  // Usability is not a separate probe: `modelUsage` was usable iff this one pass
-  // produced something. Two traversals would be free to diverge.
-  return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null
+  // The breakdown is usable iff this one pass produced tokens or cost. Token
+  // usability is checked separately by the caller without traversing it again.
+  return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null && totals.costUsd === null
     ? null
     : totals;
 };
@@ -212,8 +215,9 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
  *   The snake_case top-level `usage.{input_tokens,output_tokens,
  *   cache_read_input_tokens,cache_creation_input_tokens}` describes the primary
  *   model alone and is the fallback for payloads carrying no usable
- *   `modelUsage`. Cost comes from the top-level `total_cost_usd` in both cases:
- *   it already equals the sum of the per-model `costUSD` values.
+ *   `modelUsage`. Cost prefers the top-level `total_cost_usd`, which already
+ *   equals the per-model sum, and falls back to that sum when the total is
+ *   absent.
  * - CODEX `turn.completed`: `usage.{input_tokens,cached_input_tokens,output_tokens}`,
  *   no `modelUsage`, no cost anywhere — the fallback branch. Its input is
  *   already cache-inclusive, so the cached subset is not added again.
@@ -235,7 +239,10 @@ export const extractUsage = (payload: unknown): SessionUsage => {
   const result: SessionUsage = {};
 
   const models = extractModelUsage(event.modelUsage);
-  if (models) {
+  const hasModelTokens = models !== null && (
+    models.inputTokens !== null || models.outputTokens !== null || models.cachedInputTokens !== null
+  );
+  if (hasModelTokens) {
     // Absence survives the branch: a breakdown that reports only input leaves
     // outputTokens absent, never 0. `exactOptionalPropertyTypes` is what keeps
     // that mechanical — guard and skip, never assign undefined.
@@ -263,7 +270,10 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     if (canonicalInput !== null) result.inputTokens = canonicalInput;
   }
 
-  const cost = costAmount(event.total_cost_usd);
+  // Token and cost usability are independent: a cost-only model breakdown must
+  // not suppress valid top-level tokens, but its valid cost must still survive.
+  // A reported terminal total remains authoritative when both sources exist.
+  const cost = costAmount(event.total_cost_usd) ?? models?.costUsd ?? null;
   if (cost !== null) result.costUsd = cost;
   return result;
 };
