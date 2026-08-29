@@ -148,7 +148,7 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       publication = await host.publishBuild();
       activationOutcomeProven = publication !== null && publication !== undefined;
     } catch (error) {
-      if (error instanceof DeployFailure && error.reason === "build-swap-failed") {
+      if (error instanceof DeployFailure && ["build-swap-failed", "release-pointer-activation-failed"].includes(error.reason)) {
         activationOutcomeProven = true;
       }
       throw error;
@@ -157,6 +157,13 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       context = {
         ...context,
         activatedBuildStamp: candidateBuildStamp,
+        ...(publication?.releaseDirectoryIdentity
+          ? { releaseDirectoryIdentity: publication.releaseDirectoryIdentity }
+          : publication?.releaseIdentity?.name
+            ? { releaseDirectoryIdentity: publication.releaseIdentity.name }
+            : {}),
+        ...(publication?.pointerOldTarget !== undefined ? { pointerOldTarget: publication.pointerOldTarget } : {}),
+        ...(publication?.pointerNewTarget !== undefined ? { pointerNewTarget: publication.pointerNewTarget } : {}),
         ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
         ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
       };
@@ -174,7 +181,12 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       try {
         const rollbackPointerOutcome = await publication.rollback();
         if (rollbackPointerOutcome !== null && rollbackPointerOutcome !== undefined) {
-          context = { ...context, rollbackPointerOutcome };
+          const durableOutcome = typeof rollbackPointerOutcome === "string"
+            ? rollbackPointerOutcome
+            : rollbackPointerOutcome.operation && rollbackPointerOutcome.oldTarget && rollbackPointerOutcome.newTarget
+              ? `${rollbackPointerOutcome.operation}:${rollbackPointerOutcome.oldTarget}->${rollbackPointerOutcome.newTarget}`
+              : String(rollbackPointerOutcome.outcome ?? rollbackPointerOutcome);
+          context = { ...context, rollbackPointerOutcome: durableOutcome };
         }
         await host.restorePreviousServices();
         activationOutcomeProven = true;

@@ -162,6 +162,31 @@ export const deployArtifactPaths = (root) => Object.freeze([
   "node_modules",
 ]);
 
+/** Runtime material that is not part of the legacy rename publication. These
+ * paths complete the immutable release around its dist trees and dependency
+ * graph: native addons, Prisma migrations, runtime-loaded canonical sources,
+ * and Vite/runner assets all resolve relative to the release root. */
+export const DEPLOY_RELEASE_EXTRA_ARTIFACT_PATHS = Object.freeze([
+  "package.json",
+  "package-lock.json",
+  "packages/db/prisma",
+  "packages/build-info/index.mjs",
+  "packages/build-info/index.d.ts",
+  "packages/build-info/package.json",
+  "packages/api/build/Release/control_plane_directory.node",
+  "packages/runner/assets",
+  "apps/web/vite.config.ts",
+  "apps/web/src/lib/local-origin.ts",
+  "agents/foundational.md",
+  "agents/roles",
+  "agents/templates",
+]);
+
+export const deployReleaseArtifactPaths = (root) => Object.freeze([
+  ...deployArtifactPaths(root),
+  ...DEPLOY_RELEASE_EXTRA_ARTIFACT_PATHS,
+]);
+
 export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES) => {
   const placeholders = statuses.map((_, index) => `$${index + 1}`).join(",");
   return {

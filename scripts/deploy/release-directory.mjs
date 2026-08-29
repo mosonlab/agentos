@@ -444,7 +444,10 @@ export const assembleReleaseDirectory = (options = {}) => {
   const revision = options.revision ?? options.commit;
   if (!REVISION.test(revision ?? "")) invalid("revision-must-be-a-40-character-sha");
   const releasesRoot = releaseRootFrom(options);
-  if (pathInside(stageRoot, releasesRoot) || pathInside(releasesRoot, stageRoot)) failure("release-directory-invalid", "stage-and-releases-overlap");
+  const overlappingLayout = pathInside(stageRoot, releasesRoot) || pathInside(releasesRoot, stageRoot);
+  if (overlappingLayout && options.allowDeployRootInsideStage !== true) {
+    failure("release-directory-invalid", "stage-and-releases-overlap");
+  }
   ensureDestinationDirectory(dirname(releasesRoot), "deploy-root");
   ensureDestinationDirectory(releasesRoot, "releases-root");
   const sharedRoot = ensureShared({ deployRoot: options.deployRoot ?? dirname(releasesRoot), sharedRoot: options.sharedRoot, releasesRoot });
@@ -456,6 +459,9 @@ export const assembleReleaseDirectory = (options = {}) => {
     optionalArtifactPaths: options.optionalArtifactPaths,
     optionalPaths: options.optionalPaths,
   });
+  if (overlappingLayout && inputs.paths.some((path) => ["releases", "shared", "current", "previous"].includes(path.split("/")[0]))) {
+    failure("release-directory-invalid", "artifact-inventory-overlaps-deploy-layout");
+  }
   const temporary = join(releasesRoot, `.${revision}.${process.pid}.${randomUUID()}.tmp`);
   let finalized = false;
   try {

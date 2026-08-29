@@ -44,6 +44,7 @@ import {
   acquireProcessLock,
   blockingRunsStatement,
   deployArtifactPaths,
+  deployReleaseArtifactPaths,
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
@@ -204,6 +205,20 @@ test("published artifacts derive every workspace dependency tree from the target
   assert.ok(artifacts.includes("packages/api/dist"));
   assert.ok(artifacts.includes("packages/cli/dist"));
   for (const path of nested) assert.ok(artifacts.includes(path));
+  const releaseArtifacts = deployReleaseArtifactPaths(root);
+  for (const path of [
+    "package.json",
+    "package-lock.json",
+    "packages/db/prisma",
+    "packages/build-info/index.mjs",
+    "packages/api/build/Release/control_plane_directory.node",
+    "packages/runner/assets",
+    "apps/web/vite.config.ts",
+    "apps/web/src/lib/local-origin.ts",
+    "agents/foundational.md",
+    "agents/roles",
+    "agents/templates",
+  ]) assert.ok(releaseArtifacts.includes(path), path);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -361,14 +376,13 @@ test("pointer activation is durably recorded before restart and rollback outcome
 
   assert.equal(result.ok, false);
   assert.equal(state.serving, "previous");
-  assert.deepEqual(records.find(({ state: phase }) => phase === "ACTIVATED")?.metadata.releaseIdentity, releaseIdentity);
+  const activated = records.find(({ state: phase }) => phase === "ACTIVATED")?.metadata;
+  assert.deepEqual(activated?.releaseIdentity, releaseIdentity);
+  assert.equal(activated?.releaseDirectoryIdentity, releaseIdentity.name);
   assert.equal(records.at(-1)?.state, "FAILED");
   assert.deepEqual(records.at(-1)?.metadata.releaseIdentity, releaseIdentity);
   assert.deepEqual(records.at(-1)?.metadata.pointerTransition, pointerTransition);
-  assert.deepEqual(records.at(-1)?.metadata.rollbackPointerOutcome, {
-    outcome: "rolled-back",
-    ...pointerTransition,
-  });
+  assert.equal(records.at(-1)?.metadata.rollbackPointerOutcome, "rolled-back");
   assert.equal(records.at(-1)?.metadata.reasonCode, "service-restart-failed");
 });
 

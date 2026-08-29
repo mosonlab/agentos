@@ -211,7 +211,10 @@ const envWithSharedConfig = (environment, shared) => {
   // release or back into a home-directory checkout.
   const sharedDefault = (key, suffix) => {
     const configured = values[key];
-    if (typeof configured === "string" && configured !== "" && isInside(shared.sharedRoot, resolve(configured))) return;
+    if (typeof configured === "string" && configured !== "") {
+      if (isInside(shared.sharedRoot, resolve(configured))) return;
+      throw new Error(`shared-persistent-path-outside-root:${key}`);
+    }
     values[key] = join(shared.sharedRoot, suffix);
   };
   sharedDefault("FILES_ROOT", "files");

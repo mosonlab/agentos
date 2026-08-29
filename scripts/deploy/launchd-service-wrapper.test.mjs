@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -21,11 +23,20 @@ import {
   verifyServiceInventory,
 } from "./launchd-service-wrapper.mjs";
 import {
+  bootstrapCurrentRelease,
   installLaunchdServices,
   renderServicePlists,
   serviceWrapperPath,
   verifyServicePlistDefinitions,
 } from "./install-launchd.mjs";
+
+const makeWritable = (path) => {
+  if (!existsSync(path)) return;
+  const status = lstatSync(path);
+  if (status.isSymbolicLink()) return;
+  chmodSync(path, status.isDirectory() ? 0o700 : 0o600);
+  if (status.isDirectory()) for (const entry of readdirSync(path)) makeWritable(join(path, entry));
+};
 
 const releaseFixture = () => {
   const root = mkdtempSync(join(tmpdir(), "agentos-launchd-wrapper-"));
@@ -65,6 +76,7 @@ test("every service starts from current and receives shared config and release i
     const ready = [];
     const result = await verifyServiceInventory({
       repositoryRoot: fixture.root,
+      environment: {},
       start: async (invocation) => {
         starts.push(invocation);
         return { targetReleaseId: invocation.releaseIdentity };
@@ -117,7 +129,7 @@ test("the wrapper fixture can launch an entrypoint and propagate the target iden
     const entrypoint = join(fixture.release, "packages/api/dist/index.js");
     writeFileSync(entrypoint, "process.stdout.write(`${process.env.AGENTOS_SERVICE_LABEL}:${process.env.AGENTOS_RELEASE_ID}:${process.env.DOTENV_CONFIG_PATH}`);\n");
     chmodSync(entrypoint, 0o555);
-    const invocation = resolveServiceInvocation({ repositoryRoot: fixture.root, label: "com.agentos.api" });
+    const invocation = resolveServiceInvocation({ repositoryRoot: fixture.root, label: "com.agentos.api", environment: {} });
     const observed = {
       label: invocation.env.AGENTOS_SERVICE_LABEL,
       release: invocation.env.AGENTOS_RELEASE_ID,
@@ -202,5 +214,73 @@ test("service installation refuses an operator plist it does not own", () => {
     assert.equal(readFileSync(destination, "utf8"), "operator-owned-definition\n");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit wrapper migration replaces existing service definitions and revert restores them", () => {
+  const fixture = releaseFixture();
+  const home = join(fixture.root, "operator-home");
+  const launchAgents = join(home, "Library/LaunchAgents");
+  try {
+    mkdirSync(launchAgents, { recursive: true });
+    for (const label of SERVICE_LABELS) {
+      writeFileSync(join(launchAgents, `${label}.plist`), `legacy-definition:${label}\n`);
+    }
+    const installed = installLaunchdServices({
+      repositoryRoot: fixture.root,
+      userHome: home,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      replaceExisting: true,
+      apply: true,
+    });
+    assert.equal(installed.applied, true);
+    for (const label of SERVICE_LABELS) {
+      assert.match(readFileSync(join(launchAgents, `${label}.plist`), "utf8"), /agentos-service-wrapper\.mjs/u);
+    }
+    // A killed installer can leave any entry either original or installed.
+    // The pre-written manifest must make both states mechanically revertible.
+    writeFileSync(join(launchAgents, `${SERVICE_LABELS[0]}.plist`), `legacy-definition:${SERVICE_LABELS[0]}\n`);
+    const reverted = installLaunchdServices({
+      repositoryRoot: fixture.root,
+      userHome: home,
+      revert: true,
+      apply: true,
+    });
+    assert.equal(reverted.reverted, true);
+    for (const label of SERVICE_LABELS) {
+      assert.equal(readFileSync(join(launchAgents, `${label}.plist`), "utf8"), `legacy-definition:${label}\n`);
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("wrapper migration can bootstrap current from the still-serving checkout before replacing plists", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-launchd-bootstrap-"));
+  try {
+    mkdirSync(join(root, "packages/api/dist"), { recursive: true });
+    writeFileSync(join(root, "packages/api/package.json"), JSON.stringify({ name: "@anneal/api" }));
+    writeFileSync(join(root, "packages/api/dist/index.js"), "// old serving API\n");
+    writeFileSync(join(root, "packages/api/dist/build-info.json"), JSON.stringify({
+      packageName: "@anneal/api",
+      commit: "c".repeat(40),
+      dirty: false,
+    }));
+    mkdirSync(join(root, "shared"));
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=postgresql://fixture\n");
+
+    const bootstrapped = bootstrapCurrentRelease({
+      repositoryRoot: root,
+      artifactPaths: ["packages/api/dist"],
+    });
+
+    assert.equal(bootstrapped.commit, "c".repeat(40));
+    assert.equal(existsSync(join(root, "current/packages/api/dist/index.js")), true);
+    assert.equal(existsSync(join(root, "current/.env")), false);
+    assert.match(bootstrapped.releaseName, /^c{40}-[0-9a-f]{64}$/u);
+  } finally {
+    makeWritable(root);
+    rmSync(root, { recursive: true, force: true });
   }
 });

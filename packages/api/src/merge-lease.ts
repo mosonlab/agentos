@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -20,7 +21,12 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
+export const mergeLeaseScriptPath = (environment: NodeJS.ProcessEnv = process.env): string =>
+  environment.AGENTOS_REPOSITORY_ROOT
+    ? join(resolve(environment.AGENTOS_REPOSITORY_ROOT), "scripts/merge-lease.sh")
+    : fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
+
+const mergeLeaseScript = mergeLeaseScriptPath();
 
 /**
  * What one `merge-lease.sh release` did. The script has four outcomes and three

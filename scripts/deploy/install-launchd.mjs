@@ -22,7 +22,15 @@ import { fileURLToPath } from "node:url";
 import {
   SERVICE_INVENTORY,
   SERVICE_LABELS,
+  resolveCurrentRelease,
 } from "./launchd-service-wrapper.mjs";
+import {
+  DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+  deployReleaseArtifactPaths,
+  workspaceDependencyPaths,
+} from "./quiet-window-adapters.mjs";
+import { assembleReleaseDirectory } from "./release-directory.mjs";
+import { activateReleasePointer } from "./release-pointer.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
@@ -31,6 +39,13 @@ const LABEL = "com.agentos.auto-deploy";
 const SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.plist.in");
 const SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.mjs");
 const SERVICE_INSTALL_ROOT = ".agentos-deploy/launchd";
+const SHARED_RUNTIME_DIRECTORIES = Object.freeze([
+  "files",
+  "runs",
+  "dependency-cache",
+  "repo-mirrors",
+  "state",
+]);
 
 const xml = (value) => value
   .replaceAll("&", "&amp;")
@@ -194,6 +209,57 @@ export const renderLaunchdPlist = (template, values) => {
 export const serviceWrapperPath = (repositoryRoot) =>
   join(resolve(repositoryRoot), "shared", "bin", "agentos-service-wrapper.mjs");
 
+/** Materialize the still-serving checkout as the initial immutable release.
+ * Existing service definitions continue to run from the checkout during this
+ * step; only after current identifies the same bytes can the independently
+ * revertible plist migration point them at the stable wrapper. */
+export const bootstrapCurrentRelease = ({
+  repositoryRoot,
+  artifactPaths,
+  optionalArtifactPaths,
+} = {}) => {
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const sharedEnvironment = join(root, "shared", ".env");
+  if (!existsSync(sharedEnvironment)) throw new Error("shared-environment-missing");
+  if (existsSync(join(root, "current"))) {
+    const current = resolveCurrentRelease({ repositoryRoot: root });
+    return Object.freeze({
+      releaseName: current.releaseIdentity,
+      commit: current.releaseCommit,
+      releaseDirectory: current.releaseRoot,
+      bootstrapped: false,
+    });
+  }
+  let stamp;
+  try { stamp = JSON.parse(readFileSync(join(root, "packages/api/dist/build-info.json"), "utf8")); }
+  catch { throw new Error("bootstrap-build-stamp-unreadable"); }
+  if (typeof stamp?.commit !== "string" || !/^[0-9a-f]{40}$/u.test(stamp.commit) || stamp.dirty !== false) {
+    throw new Error("bootstrap-build-stamp-invalid");
+  }
+  const selected = artifactPaths ?? deployReleaseArtifactPaths(root);
+  const optional = optionalArtifactPaths ?? (artifactPaths === undefined ? [
+    ...DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+    ...workspaceDependencyPaths(root),
+  ] : []);
+  const release = assembleReleaseDirectory({
+    stageRoot: root,
+    deployRoot: root,
+    revision: stamp.commit,
+    artifactPaths: selected,
+    optionalArtifactPaths: optional,
+    allowDeployRootInsideStage: true,
+    retention: false,
+    probeImmutability: true,
+  });
+  activateReleasePointer({ root, release: release.releaseName });
+  return Object.freeze({
+    releaseName: release.releaseName,
+    commit: release.revision,
+    releaseDirectory: release.releaseDirectory,
+    bootstrapped: true,
+  });
+};
+
 export const servicePlistValues = ({
   label,
   nodeBinary,
@@ -317,6 +383,7 @@ export const installLaunchdServices = ({
   path = null,
   apply = false,
   revert = false,
+  replaceExisting = false,
 } = {}) => {
   const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
   const home = resolve(userHome ?? homedir());
@@ -330,7 +397,11 @@ export const installLaunchdServices = ({
     const manifest = validateServiceManifest(JSON.parse(readFileSync(manifestPath, "utf8")), root);
     for (const entry of manifest.entries) {
       const current = existsSync(entry.path) ? readFileSync(entry.path) : null;
-      if (current === null || sha256(current) !== entry.installedSha256) {
+      const currentSha = current === null ? null : sha256(current);
+      const recognized = currentSha === entry.installedSha256
+        || (entry.existed && currentSha === entry.originalSha256)
+        || (!entry.existed && currentSha === null);
+      if (!recognized) {
         throw new Error(`launchd-service-definition-drift:${entry.path}`);
       }
     }
@@ -371,12 +442,13 @@ export const installLaunchdServices = ({
     backupPath: existsSync(wrapper)
       ? join(root, SERVICE_INSTALL_ROOT, "backups", "agentos-service-wrapper.mjs")
       : null,
+    originalSha256: existsSync(wrapper) ? sha256(readFileSync(wrapper)) : null,
     installedSha256: sha256(readFileSync(SERVICE_WRAPPER_SOURCE)),
   }];
   for (const label of SERVICE_LABELS) {
     const destination = join(launchAgents, `${label}.plist`);
     const contents = rendered[label];
-    if (existsSync(destination) && readFileSync(destination, "utf8") !== contents) {
+    if (existsSync(destination) && readFileSync(destination, "utf8") !== contents && !replaceExisting) {
       throw new Error(`launchd-service-definition-conflict:${destination}`);
     }
     entries.push({
@@ -386,6 +458,7 @@ export const installLaunchdServices = ({
       backupPath: existsSync(destination)
         ? join(root, SERVICE_INSTALL_ROOT, "backups", `${safeServiceFileName(label)}.plist`)
         : null,
+      originalSha256: existsSync(destination) ? sha256(readFileSync(destination)) : null,
       installedSha256: sha256(contents),
       contents,
     });
@@ -398,16 +471,16 @@ export const installLaunchdServices = ({
     rendered,
   };
   if (!existsSync(join(sharedRoot, ".env"))) throw new Error("shared-environment-missing");
-  if (entries[0].existed && readFileSync(wrapper, "utf8") !== readFileSync(SERVICE_WRAPPER_SOURCE, "utf8")) {
+  for (const directory of SHARED_RUNTIME_DIRECTORIES) {
+    mkdirSync(join(sharedRoot, directory), { recursive: true, mode: 0o700 });
+  }
+  const bootstrap = bootstrapCurrentRelease({ repositoryRoot: root });
+  if (entries[0].existed && readFileSync(wrapper, "utf8") !== readFileSync(SERVICE_WRAPPER_SOURCE, "utf8") && !replaceExisting) {
     throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
   }
   mkdirSync(join(root, SERVICE_INSTALL_ROOT, "backups"), { recursive: true, mode: 0o700 });
   for (const entry of entries) {
     if (entry.existed) writeFileSync(entry.backupPath, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
-  }
-  if (!entries[0].existed) writeAtomic(wrapper, readFileSync(SERVICE_WRAPPER_SOURCE), 0o755);
-  for (const entry of entries.slice(1)) {
-    if (!entry.existed) writeAtomic(entry.path, entry.contents, 0o600);
   }
   const manifest = {
     schemaVersion: 1,
@@ -415,7 +488,17 @@ export const installLaunchdServices = ({
     entries: entries.map(({ contents: _contents, ...entry }) => entry),
   };
   writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n", 0o600);
-  return { applied: true, reverted: false, wrapper, entries: entries.map(({ path: entryPath }) => entryPath) };
+  writeAtomic(wrapper, readFileSync(SERVICE_WRAPPER_SOURCE), 0o755);
+  for (const entry of entries.slice(1)) {
+    writeAtomic(entry.path, entry.contents, 0o600);
+  }
+  return {
+    applied: true,
+    reverted: false,
+    wrapper,
+    bootstrap,
+    entries: entries.map(({ path: entryPath }) => entryPath),
+  };
 };
 
 export const installLaunchd = (args) => {
