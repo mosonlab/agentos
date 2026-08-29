@@ -4,7 +4,7 @@ import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import type { Chain, ChainStep } from "../lib/types";
 import { IconLock, IconUser } from "./icons";
-import { COUNT, HINT, ROW, AgentChip, Card, Pill, TaskPill } from "./ui";
+import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, Pill, TaskPill } from "./ui";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
@@ -28,6 +28,27 @@ export type ChainLayerGroup = {
   ordinal: number;
   steps: ChainStep[];
   blockers: ChainStep[];
+};
+
+const executionLayer = (step: Pick<ChainStep, "layer" | "chainIndex">): number | null => (
+  step.layer ?? step.chainIndex
+);
+
+/** The held layer is stored in the same coordinate system as each Step's
+ * `layer`; the API owns every per-Step barrier decision. */
+export const chainHeldLayer = (chain: Pick<Chain, "control">): number | null => (
+  chain.control?.state === "held" ? chain.control.heldLayer : null
+);
+
+/** A held Chain is waiting on its operator only after every Step in the held
+ * layer is DONE and no active execution remains anywhere in the Chain. */
+export const heldChainWaitingOnOperator = (chain: Chain): boolean => {
+  const heldLayer = chainHeldLayer(chain);
+  if (heldLayer === null) return false;
+  const heldSteps = chain.steps.filter((step) => executionLayer(step) === heldLayer);
+  return heldSteps.length > 0
+    && heldSteps.every((step) => step.status === "DONE" && !step.currentExecution)
+    && chain.steps.every((step) => !step.currentExecution);
 };
 
 /**
@@ -78,16 +99,19 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
 };
 
-export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
+export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, onStart }: {
   step: ChainStep;
   here: boolean;
   pending: boolean;
   blockedBy: readonly ChainStep[];
+  heldLayer: number | null;
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
   const blockedOn = step.blockedOn ?? null;
   const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
+  const held = step.holdRefusal !== null;
+  const showStart = step.startAction !== null || blockedOn !== null || held;
   return (
     <div data-chain-node={step.taskId} className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
       <span className={STEP_POSITION}>{step.position}</span>
@@ -96,6 +120,11 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
         {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.viewedHere")}</span> : null}
         {step.currentExecution ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.currentExecution")}</span> : null}
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
+        {held ? (
+          <span data-chain-held-hint="" className={cn(HINT, "mt-[3px] block")}>
+            {t("chain.startHeldHint", { n: heldLayer ?? "?" })}
+          </span>
+        ) : null}
         {blockedOn ? (
           <span data-chain-blocked-on="" className={cn(HINT, "mt-[3px] block")}>
             {t("chain.blockedOnPredecessor", { name: blockedOn.name })}
@@ -111,13 +140,13 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
       {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
       <TaskPill status={step.status} />
       {step.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
-      {step.startAction !== null || blockedOn !== null ? (
+      {showStart ? (
         <Button
           type="button"
           variant="legacy"
           size="legacySmall"
           className="shadow-none"
-          disabled={pending || !step.startable || blockedOn !== null}
+          disabled={pending || !step.startable || blockedOn !== null || held}
           onClick={() => onStart(step)}
         >
           {t(step.startAction === "recover" ? "chain.recoverParked" : "chain.startNext")}
@@ -134,14 +163,32 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
  * able to disagree with the board about how far along a chain is, nor with the
  * route about whether a step may be started.
  */
-export const ChainList = ({ chain, taskId, pending, onStart }: {
+export const ChainList = ({ chain, taskId, pending, onStart, onControl }: {
   chain: Chain;
   taskId: string;
   pending: boolean;
   onStart: (step: ChainStep) => void;
+  onControl?: () => void;
 }): ReactNode => {
   const [all, setAll] = useState(false);
   const t = useT();
+  const held = chain.control?.state === "held";
+  const heldLayer = chainHeldLayer(chain);
+  const waitingOnOperator = heldChainWaitingOnOperator(chain);
+  const headerControl = (
+    <div className={ROW_WRAP}>
+      {held && heldLayer !== null ? (
+        <span data-chain-held-badge=""><Pill tone="amber">{t("chain.heldAfter", { n: heldLayer })}</Pill></span>
+      ) : null}
+      {held && chain.control?.holdReason ? (
+        <span data-chain-hold-reason="" className={HINT}>{t("chain.holdReason", { reason: chain.control.holdReason })}</span>
+      ) : null}
+      <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => onControl?.()}>
+        {t(held ? "chain.resume" : "chain.stopAfterLayer")}
+      </Button>
+      <span className={COUNT}>{t("chain.completed", { done: chain.done, total: chain.total })}</span>
+    </div>
+  );
   const shown = all ? chain.steps : chain.steps.slice(0, CHAIN_PAGE);
   const shownIds = new Set(shown.map((step) => step.taskId));
   const groups = chainLayerGroups(chain.steps).flatMap((group) => {
@@ -149,7 +196,12 @@ export const ChainList = ({ chain, taskId, pending, onStart }: {
     return visibleSteps.length === 0 ? [] : [{ ...group, steps: visibleSteps }];
   });
   return (
-    <Card title={t("chain.title")} extra={<span className={COUNT}>{t("chain.completed", { done: chain.done, total: chain.total })}</span>} flush>
+    <Card title={t("chain.title")} extra={headerControl} flush>
+      {waitingOnOperator ? (
+        <div data-chain-waiting-operator="" className={cn(HINT, "border-t border-[color:var(--border-soft)] px-[20px] py-[11px]")}>
+          {t("chain.waitingOperator")}
+        </div>
+      ) : null}
       {groups.map((group) => (
         <section
           key={group.storedLayer}
@@ -162,7 +214,15 @@ export const ChainList = ({ chain, taskId, pending, onStart }: {
           )}
         >
           {group.steps.map((step) => (
-            <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} blockedBy={group.blockers} onStart={onStart} />
+            <ChainRow
+              key={step.taskId}
+              step={step}
+              here={step.taskId === taskId}
+              pending={pending}
+              blockedBy={group.blockers}
+              heldLayer={heldLayer}
+              onStart={onStart}
+            />
           ))}
         </section>
       ))}

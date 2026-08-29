@@ -181,6 +181,7 @@ test("instantiating the canonical feature template copies every layer and writes
       update: async ({ data }: { data: Record<string, any> }) => { Object.assign(runs[0]!, data); return runs[0]; },
     },
     taskActivity: { createMany: async () => ({ count: 12 }) },
+    chainControl: { findMany: async () => [] },
     taskTemplateStep: {
       findUnique: async ({ where }: { where: { id: string } }) => steps.find((step) => step.id === where.id) ?? null,
     },

@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  ChainControlState,
   CleanupStatus,
   type ClaimantClass,
   claimantMayTake,
@@ -80,6 +81,36 @@ export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
 const SPECIFICATION_READ_DEFERRAL_CONDITION = "specification-read-claim-deferred";
 const SPECIFICATION_READ_DEFERRAL_BUDGET_MS = 5 * 60_000;
 const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
+
+/**
+ * The Prisma claim lane cannot express the comparison between a candidate
+ * Task's layer and the held layer in a relation filter: ChainControl is keyed
+ * by the project/Chain pair, while the two layer values live on different
+ * rows. Resolve the held Task ids first, then add that set to the Prisma
+ * candidate predicate. The layer expression deliberately mirrors the raw
+ * runner query below and the shared Chain layer fallback used by the rest of
+ * the Chain control paths.
+ */
+const heldChainTaskIdsForClaim = async (tx: Prisma.TransactionClient): Promise<string[]> => {
+  const controls = await tx.chainControl.findMany({
+    where: { state: ChainControlState.HELD },
+    select: { projectId: true, chainId: true, heldLayer: true },
+  });
+  const heldChains = controls.flatMap(({ projectId, chainId, heldLayer }) => {
+    if (heldLayer === null) return [{ projectId, chainId }];
+    return [{
+      projectId,
+      chainId,
+      OR: [
+        { chainLayer: { gt: heldLayer } },
+        { chainLayer: null, chainIndex: { gt: heldLayer } },
+      ],
+    }];
+  });
+  if (heldChains.length === 0) return [];
+  const tasks = await tx.task.findMany({ where: { OR: heldChains }, select: { id: true } });
+  return tasks.map(({ id }) => id);
+};
 
 /**
  * Operator notes are a claim-time handoff. Run 1 uses the task's creation
@@ -177,12 +208,24 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       },
     } satisfies Pick<Prisma.RunFindManyArgs, "include">;
     const candidates = claimantClass === "merge-executor"
-      ? await tx.run.findMany({
-        ...candidateWhere,
-        ...candidateInclude,
-        orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
-        take: 20,
-      })
+      ? await (async () => {
+        const heldChainTaskIds = await heldChainTaskIdsForClaim(tx);
+        const where = heldChainTaskIds.length === 0
+          ? candidateWhere.where
+          : {
+            ...candidateWhere.where,
+            task: {
+              ...candidateWhere.where.task,
+              id: { notIn: heldChainTaskIds },
+            },
+          };
+        return tx.run.findMany({
+          where,
+          ...candidateInclude,
+          orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
+          take: 20,
+        });
+      })()
       : await (async () => {
         // Rank in PostgreSQL before applying the window so the transaction
         // returns only the candidates it can inspect. Mechanical rows are not
@@ -214,6 +257,18 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             AND task."archivedAt" IS NULL
             AND (candidate."blockedByRunId" IS NULL OR blocker."status" = lower(${RunStatus.SUCCEEDED})::"RunStatus")
             AND COALESCE(template_step."outputKind", '') <> ${INTEGRATOR_OUTPUT_KIND}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM "ChainControl" AS chain_control
+              WHERE chain_control."projectId" = task."projectId"
+                AND chain_control."chainId" = task."chainId"
+                AND chain_control."state" = lower(${ChainControlState.HELD})::"ChainControlState"
+                AND (
+                  chain_control."heldLayer" IS NULL
+                  OR COALESCE(task."chainLayer", task."chainIndex") IS NULL
+                  OR COALESCE(task."chainLayer", task."chainIndex") > chain_control."heldLayer"
+                )
+            )
           ORDER BY COALESCE(chain_priority."unfinished", 1) ASC,
             candidate."readyAt" ASC,
             candidate."createdAt" ASC
@@ -673,6 +728,30 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       const fencingToken = makeFencingToken(candidate.id, generation);
       const sessionCredential = issueSessionToken();
       const leaseExpiresAt = new Date(now.getTime() + body.leaseSeconds * 1000);
+      const lockedTask = await lockTaskMutationRows(tx, candidate.task.id);
+      if (!lockedTask) return SKIP;
+      if (candidate.task.chainId !== null) {
+        // `claimRun` is SERIALIZABLE, so its transaction snapshot predates a
+        // Hold that committed while this claim waited for the Chain mutex.
+        // Read through a fresh connection after taking that mutex. Hold and
+        // Resume both need the same Task locks, so this live row cannot change
+        // until the claim transaction decides and releases them.
+        const control = await db.chainControl.findUnique({
+          where: { projectId_chainId: {
+            projectId: candidate.task.projectId,
+            chainId: candidate.task.chainId,
+          } },
+          select: { state: true, heldLayer: true },
+        });
+        const taskLayer = candidate.task.chainLayer ?? candidate.task.chainIndex;
+        if (control?.state === ChainControlState.HELD
+          && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
+          // The Chain mutex was acquired after the candidate scan. Hold may
+          // have won that race, so the live authority under this lock decides.
+          // End the scan while retaining lock order; the Run stays QUEUED.
+          return HALT;
+        }
+      }
       const won = await tx.run.updateMany({
         where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
         data: {
@@ -690,7 +769,6 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         },
       });
       if (won.count !== 1) return SKIP;
-      await lockTaskMutationRows(tx, candidate.task.id);
       const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
         providerConversationId: candidate.session.providerConversationId,
         input: candidate.session.resumeInput,

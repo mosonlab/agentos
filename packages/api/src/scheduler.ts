@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  isChainHeldError,
   enqueueTaskRun,
   INTEGRATOR_AGENT_NAME,
   Prisma,
@@ -195,7 +196,11 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       if (!locked) return false;
       const current = await tx.task.findUniqueOrThrow({
         where: { id: task.id },
-        select: { status: true, archivedAt: true, _count: { select: { runs: true } } },
+        select: {
+          status: true,
+          archivedAt: true,
+          _count: { select: { runs: true } },
+        },
       });
       if (current.archivedAt !== null || current.status !== TaskStatus.TODO) return false;
       // An AT task fires exactly once — the same predicate the poll uses. Before
@@ -207,7 +212,11 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       return true;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   } catch (error: unknown) {
-    if (uniqueConflict(error)) return false;
+    // A held successor is intentionally left due: the scheduler must be able
+    // to try it again after Resume releases the live Chain authority. The
+    // shared Run-open seam has already rolled the transaction back, so this is
+    // an ordinary no-fire result rather than a quarantinable schedule error.
+    if (uniqueConflict(error) || isChainHeldError(error)) return false;
     throw error;
   }
 };
@@ -225,6 +234,9 @@ export const schedulerTick = async (db: PrismaClient, now = new Date()): Promise
       scheduleKind: ScheduleKind.AT,
       status: TaskStatus.TODO,
       runAt: { lte: now },
+      // A cancelled predecessor is terminal and cannot be resumed. It does
+      // not consume the AT definition's one fresh enqueue, while every other
+      // prior Run status keeps the original one-shot behavior.
       runs: { none: {} },
       assigneeType: AssigneeType.AGENT,
       archivedAt: null,

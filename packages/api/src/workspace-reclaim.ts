@@ -1,9 +1,11 @@
 import { resolve } from "node:path";
 
 import {
-  CleanupStatus, enqueueTaskRun, FailureClass, resolveRunBranches, RunStatus, SessionExecutionStatus,
+  CleanupStatus, enqueueTaskRun, FailureClass, isChainHeldError, resolveRunBranches, RunStatus, SessionExecutionStatus,
   type Prisma, type PrismaClient,
 } from "@anneal/db";
+
+import { lockTaskMutationRows } from "./task-write.js";
 
 /**
  * Workspace GC ownership (issue #115).
@@ -447,6 +449,12 @@ export const repairReplacementAfterSalvage = async (
   tx: Prisma.TransactionClient,
   run: { taskId: string; runNumber: number; branch: string | null },
 ): Promise<ReplacementRepair> => {
+  // Salvage can arrive after Hold has committed but before this replacement
+  // reaches /start. Join the same Task/Chain mutex as every other Run producer,
+  // before observing it: otherwise this transaction can observe RELEASED,
+  // wait on the Task foreign key, and commit a later-layer Run after Hold
+  // returns.
+  if (!await lockTaskMutationRows(tx, run.taskId)) return "already-started";
   const replacement = await tx.run.findFirst({
     where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
     select: { id: true, status: true, startedAt: true },
@@ -477,7 +485,15 @@ export const repairReplacementAfterSalvage = async (
         failureReason: "Claim invalidated before start because late salvage changed its clone base",
       },
     });
-    await enqueueTaskRun(tx, run.taskId, revokedAt);
+    try {
+      await enqueueTaskRun(tx, run.taskId, revokedAt);
+    } catch (error) {
+      if (!isChainHeldError(error)) throw error;
+      // The stale clone is revoked, but Hold owns when the next Run may exist.
+      // Ordinary completion/Resume activation will enqueue from the durable
+      // salvage base after the barrier is released.
+      return "repaired";
+    }
     return "requeued";
   } else if (replacement.status !== RunStatus.QUEUED) {
     return "already-started";

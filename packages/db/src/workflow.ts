@@ -18,6 +18,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
+import { readChainControl } from "./chain-control.js";
 import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
 import { requireGateAttestation } from "./gate-attestation.js";
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
@@ -200,6 +201,26 @@ export class IntegratorStoppedError extends Error {
     this.name = "IntegratorStoppedError";
   }
 }
+
+/** A Run producer reached the single Run-birth seam while its Chain barrier
+ * was still held above the Task's execution layer. The transaction caller may
+ * safely roll this refusal back and retry after the operator releases it. */
+export class ChainHeldError extends Error {
+  constructor(
+    readonly taskId: string,
+    readonly chainId: string,
+    readonly taskLayer: number | null,
+    readonly heldLayer: number | null,
+  ) {
+    super(taskLayer === null || heldLayer === null
+      ? `Chain ${chainId} is held; Task ${taskId} cannot queue a Run`
+      : `Chain ${chainId} is held after layer ${heldLayer}; Task ${taskId} at layer ${taskLayer} cannot queue a Run`);
+    this.name = "ChainHeldError";
+  }
+}
+
+export const isChainHeldError = (error: unknown): error is ChainHeldError =>
+  error instanceof Error && error.name === "ChainHeldError";
 
 export const isIntegratorStoppedError = (error: unknown): error is IntegratorStoppedError =>
   error instanceof Error && error.name === "IntegratorStoppedError";
@@ -696,12 +717,16 @@ export type OpenRunRefusal = {
     | "compound-implementation-assignee"
     | "archived-assignee"
     | "archived-task"
-    | "integrator-stopped";
+    | "integrator-stopped"
+    | "chain-held";
   message: string;
   detail?: Readonly<Record<string, string | number | boolean | null>>;
   context?: Readonly<{
     taskId?: string;
     taskName?: string;
+    chainId?: string;
+    taskLayer?: number | null;
+    heldLayer?: number | null;
     agentName?: string;
     condition?: string;
     code?: string;
@@ -863,6 +888,25 @@ export const openRun = async (
     return openRunRefusal("conflict", "Run budget exhausted");
   }
 
+  // `chainLayer` is the post-expand authority, with `chainIndex` as the
+  // compatibility fallback for legacy chain rows. Keep the read inside this
+  // transaction and before any Run-birth work so a held successor produces no
+  // Run or queue activity. The database prevents a HELD control without a
+  // layer; malformed legacy Task rows still fail closed at this seam.
+  const taskLayer = task.chainLayer ?? task.chainIndex;
+  if (task.chainId) {
+    const control = await readChainControl(tx, { projectId: task.projectId, chainId: task.chainId });
+    if (control.held && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
+      const error = new ChainHeldError(task.id, task.chainId, taskLayer, control.heldLayer);
+      return openRunRefusal(
+        "chain-held",
+        error.message,
+        { chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
+        { taskId: task.id, chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
+      );
+    }
+  }
+
   const branches = intent.kind === "integrator-authorized"
     ? { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch }
     : !task.repo
@@ -963,6 +1007,14 @@ const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
     return new IntegratorStoppedError(
       String(refusal.context?.taskId ?? "unknown"),
       String(refusal.context?.condition ?? "unknown"),
+    );
+  }
+  if (refusal.reason === "chain-held") {
+    return new ChainHeldError(
+      String(refusal.context?.taskId ?? "unknown"),
+      String(refusal.context?.chainId ?? "unknown"),
+      Number(refusal.context?.taskLayer ?? 0),
+      Number(refusal.context?.heldLayer ?? 0),
     );
   }
   if (refusal.reason === "compound-implementation-assignee") {
@@ -1650,6 +1702,13 @@ const activateChainSuccessorInternal = async (
   }
 
   const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  // The full-chain lock is already held here. Read the persisted control only
+  // after taking it so a completion and an operator Hold have one defined
+  // winner, rather than allowing a stale pre-lock read to leak activation.
+  const chainControl = await readChainControl(tx, {
+    projectId: task.projectId,
+    chainId: task.chainId,
+  });
   const boundSuccessor = current.status === TaskStatus.DONE
     ? await tx.task.findUnique({
       where: { dispatchAfterTaskId: current.id },
@@ -1689,11 +1748,28 @@ const activateChainSuccessorInternal = async (
   }
 
   // A binding to a non-terminal layer is rejected at instantiation time. If a
-  // legacy row or a direct fixture nevertheless carries one, park it while the
-  // predecessor chain still has work above this layer instead of silently
-  // leaving the successor inert forever.
+  // legacy row or direct fixture nevertheless carries one, park it while the
+  // predecessor Chain still has work. Bound dispatch belongs to the
+  // successor's Chain, so a hold here must not change that outcome.
   if (boundSuccessor) {
     await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+  }
+
+  if (chainControl.held && (chainControl.heldLayer === null || nextLayer > chainControl.heldLayer)) {
+    await tx.taskActivity.create({ data: {
+      taskId: current.id,
+      actorType: "control-plane",
+      body: chainControl.heldLayer === null
+        ? "Predecessor layer completed; successor activation withheld because Chain is held"
+        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
+      metadata: {
+        kind: "chainControl.activationWithheld",
+        schemaVersion: 1,
+        heldLayer: chainControl.heldLayer,
+        nextLayer,
+      },
+    } });
+    return { nextTaskId: null, gated: false };
   }
 
   const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
