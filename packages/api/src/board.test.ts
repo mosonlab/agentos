@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma, type PrismaClient } from "@anneal/db";
+import { markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
 
 import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, readBoard, repairBinding, taskChainName } from "./board.js";
 
@@ -117,17 +117,17 @@ test("the board projection carries every field the board consumes and nothing el
 test("a repair task is bound to the chain of the regression task its marker names", () => {
   const chain = (): { chainId: string; chainName: string | null } => ({ chainId: "c1", chainName: "Release" });
   assert.deepEqual(
-    repairBinding({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "reg-1" }, chain),
+    repairBinding(markerFromMetadata({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "reg-1" }), chain),
     { chainId: "c1", chainName: "Release", repairKind: "gate-fix" },
   );
   // The regression side of the same marker names the repair task, not a chain
   // this card could be put under, so it is not this card's binding.
   assert.equal(
-    repairBinding({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", repairTaskId: "fix-1" }, chain),
+    repairBinding(markerFromMetadata({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", repairTaskId: "fix-1" }), chain),
     null,
   );
   // A regression task that is itself chain-detached binds nothing.
-  assert.equal(repairBinding({ repairKind: "review-fix", regressionTaskId: "reg-1" }, () => null), null);
+  assert.equal(repairBinding(markerFromMetadata({ kind: "mergeTail.repairAttempt", repairKind: "review-fix", regressionTaskId: "reg-1" }), () => null), null);
   assert.equal(repairBinding(null, chain), null);
   assert.equal(boardCard(row(), null).repairOf, null);
   assert.deepEqual(

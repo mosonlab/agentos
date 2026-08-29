@@ -412,6 +412,27 @@ export const lockAgentRows = async (
 };
 
 /**
+ * Serializes structural mutations for one Chain, including the empty state
+ * after deletion where there is no Task row left to lock. The two-int advisory
+ * namespace keeps this mutex distinct from row locks and other advisory lock
+ * families; hash collisions only serialize unrelated Chains.
+ */
+export const CHAIN_STRUCTURE_LOCK_CLASS = 1128812105;
+
+export const lockChainStructure = async (
+  tx: Tx,
+  input: { projectId: string; chainId: string },
+): Promise<void> => {
+  const identity = JSON.stringify([input.projectId, input.chainId]);
+  await tx.$queryRaw`
+    SELECT pg_advisory_xact_lock(
+      ${CHAIN_STRUCTURE_LOCK_CLASS}::int,
+      hashtext(${identity})
+    )::text AS locked
+  `;
+};
+
+/**
  * Locks every existing row in one chain in the single order shared by every
  * chained-task mutation. A prefix lock is insufficient for a layered join:
  * two siblings can complete concurrently while each only locks its own

@@ -7,6 +7,7 @@ import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import {
   MERGE_TAIL_MARKER_SCAN,
   latestMarker,
+  markerFromMetadata,
   readMarkerHistory,
   readMarkers,
   recoveryContext,
@@ -88,7 +89,26 @@ test("both reads keep only merge-tail markers and narrow their persisted fields"
   assert.equal(repair.state, null);
   assert.equal(repair.headSha, null);
   assert.equal(repair.regressionTaskId, "reg-1");
+  assert.equal(repair.repairTaskId, null);
   assert.equal(repair.raw.state, 7);
+});
+
+test("markerFromMetadata narrows both sides of a repair binding", () => {
+  const repairSide = markerFromMetadata({
+    kind: MERGE_TAIL_KIND.repairAttempt,
+    repairKind: "gate-fix",
+    regressionTaskId: "regression-1",
+  });
+  const chainSide = markerFromMetadata({
+    kind: MERGE_TAIL_KIND.repairAttempt,
+    repairKind: "gate-fix",
+    repairTaskId: "repair-1",
+  });
+
+  assert.equal(repairSide?.regressionTaskId, "regression-1");
+  assert.equal(repairSide?.repairTaskId, null);
+  assert.equal(chainSide?.regressionTaskId, null);
+  assert.equal(chainSide?.repairTaskId, "repair-1");
 });
 
 test("latestMarker selects from the newest end", () => {
