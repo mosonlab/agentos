@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { constants as fsConstants } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -24,6 +24,7 @@ import {
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
+  failureOf,
   runLocked,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
@@ -45,6 +46,7 @@ import { runCommandWithRetry } from "./quiet-window-retry.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
+import { createDeploymentLedger } from "./deployment-ledger.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
@@ -241,6 +243,21 @@ const database = async () => {
   const module = await import("@prisma/client").catch(() => fail("database-client-unavailable", "prisma-client-import-failed"));
   prisma = new module.PrismaClient();
   return prisma;
+};
+
+// A migration tail is evidence only. An unreadable history must not invent a
+// deploy refusal or change the existing migration command's control flow; the
+// ledger records null when the read cannot be proved.
+const migrationTail = async () => {
+  try {
+    const db = await database();
+    const rows = await db.$queryRawUnsafe(
+      'SELECT "migration_name" AS "name" FROM "_prisma_migrations" WHERE "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL ORDER BY "finished_at" DESC, "migration_name" DESC LIMIT 1',
+    );
+    return typeof rows[0]?.name === "string" ? rows[0].name : null;
+  } catch {
+    return null;
+  }
 };
 
 const blockingRuns = async () => {
@@ -553,9 +570,7 @@ const main = async () => {
       to = await remoteMainRevision();
       assertProductionCheckout();
     } catch (error) {
-      const failure = error instanceof DeployFailure
-        ? error
-        : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
+      const failure = failureOf(error);
       await persistAndNotifyFailure(failure, from, to);
       return { ok: false, reason: failure.reason };
     }
@@ -569,15 +584,20 @@ const main = async () => {
     let artifactPaths = null;
     let optionalArtifacts = null;
     let barrier = null;
+    let ledger = null;
     const transactionId = randomUUID();
     const backupDirectory = join(STATE_DIR, "backups");
     const previousDirectory = join(STATE_DIR, `previous-${transactionId}`);
     try {
+      ledger = createDeploymentLedger({ stateDir: STATE_DIR, deploymentId: transactionId, targetCommit: to });
+      ledger.start({ targetCommit: to });
       barrier = await waitForQuiet();
     } catch (error) {
-      const failure = error instanceof DeployFailure
-        ? error
-        : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
+      const failure = failureOf(error);
+      if (ledger && failure.reason !== "deployment-ledger-write-failed") {
+        try { ledger.record("FAILED", { targetCommit: to, reasonCode: failure.reason }); }
+        catch (ledgerError) { log(`STOP deployment-ledger-write-failed detail=${ledgerError instanceof Error ? ledgerError.name : "unknown"}`); }
+      }
       if (!shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted: false })) {
         log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}; no-upgrade-started`);
         return { ok: false, reason: failure.reason };
@@ -618,6 +638,13 @@ const main = async () => {
         optionalArtifacts = [...DEPLOY_OPTIONAL_ARTIFACT_PATHS, ...workspaceDependencyPaths(stage)];
         artifactPaths = deployArtifactPaths(stage);
         for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
+        return {
+          buildStamp: {
+            packageName: stamp.packageName,
+            commit: stamp.commit,
+            dirty: stamp.dirty,
+          },
+        };
       },
       backup: async () => {
         mkdirSync(backupDirectory, { recursive: true, mode: 0o700 });
@@ -633,13 +660,17 @@ const main = async () => {
           throwIfInterrupted();
           fail("database-backup-failed", error instanceof Error ? error.message : String(error));
         }
+        return { backupIdentity: basename(output) };
       },
       guardedMigration: async () => {
         copyFileSync(join(REPOSITORY_ROOT, ".env"), join(stage, ".env"));
         chmodSync(join(stage, ".env"), 0o600);
+        const migrationTailBefore = await migrationTail();
         await checked("guarded-migration-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:migrate-goal-execution"], {
           cwd: stage,
         });
+        const migrationTailAfter = await migrationTail();
+        return { migrationTailBefore, migrationTailAfter };
       },
       generatePrismaClient: () => checked("prisma-client-generation-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:generate"], { cwd: stage }),
       syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:sync-canonical-prompts"], { cwd: stage }),
@@ -680,7 +711,13 @@ const main = async () => {
               const payload = version.ok ? await version.json() : {};
               if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
                 throwIfInterrupted();
-                return;
+                return {
+                  activatedBuildStamp: {
+                    packageName: payload.packageName,
+                    commit: payload.commit,
+                    dirty: payload.dirty,
+                  },
+                };
               }
               lastReason = `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
             } catch (error) {
@@ -717,7 +754,7 @@ const main = async () => {
         if (cleanupFailure) throw cleanupFailure;
       },
     });
-    const result = await executeUpgrade(host, { from, to });
+    const result = await executeUpgrade(host, { from, to }, { ledger, ledgerStarted: true });
     if (result.ok) pruneHistory();
     return result.ok ? { ok: true } : { ok: false, reason: result.failure.reason };
   }).then((result) => result.ok ? 0 : 1);
@@ -734,7 +771,7 @@ let exitCode = 1;
 try {
   exitCode = await main();
 } catch (error) {
-  const failure = error instanceof DeployFailure ? error : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
+  const failure = failureOf(error);
   log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
   const dryRunMode = process.argv.includes("--dry-run");
   if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && !existsSync(ESCALATION_PATH)) {

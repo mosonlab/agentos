@@ -19,6 +19,7 @@ const en = (key: string, vars?: Record<string, string | number>): string => tran
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
+  assigneeType: "HUMAN", createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
@@ -234,7 +235,9 @@ test("cards in one chain render their own positions and never the active-step na
   const fourth = card({ chainProgress: progress({ position: 4 }), chainId: "c1", chainIndex: 4, chainName: "Release" });
   assert.match(first, /step 1\/9/);
   assert.match(fourth, /step 4\/9/);
-  assert.match(fourth, /layer 2\/7/);
+  // The execution layer is a scheduling coordinate; the chain detail page groups
+  // its steps by it, and the card has no question it answers.
+  assert.doesNotMatch(first + fourth, /layer/);
   assert.doesNotMatch(first + fourth, /Implementation · doing/);
   assert.doesNotMatch(card(), /·/);
 });
@@ -379,6 +382,40 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
   }
 });
 
+test("the board renders Backlog oldest first and leaves every other column in the API's order", async () => {
+  const { dom, container } = installDom();
+  storage.set("agentos.projectId", "p1");
+  // As `GET /tasks` answers: newest first, for every column.
+  const rows = [
+    task({ id: "backlog-new", status: "BACKLOG", createdAt: "2026-08-18T00:00:00.000Z" }),
+    task({ id: "backlog-mid", status: "BACKLOG", createdAt: "2026-08-17T00:00:00.000Z" }),
+    task({ id: "backlog-old", status: "BACKLOG", createdAt: "2026-08-16T00:00:00.000Z" }),
+    task({ id: "done-new", status: "DONE" }),
+    task({ id: "done-old", status: "DONE" }),
+  ];
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string) => {
+    const path = String(input);
+    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
+    if (path.includes("/api/tasks?")) return Response.json(rows);
+    return Response.json([]);
+  } });
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
+    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+    const rendered = [...container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
+    // Backlog is a queue dispatched from the top, so a numbered queue has to
+    // read top-to-bottom in dispatch order; Done reports what just happened.
+    assert.deepEqual(rendered, ["backlog-old", "backlog-mid", "backlog-new", "done-new", "done-old"]);
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+    storage.remove("agentos.projectId");
+  }
+});
+
 test("running, ended, and absent runs render only durations their timestamps prove", () => {
   const originalNow = Date.now;
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
@@ -498,7 +535,7 @@ test("Copy error is offered only when there is an error to copy", () => {
 test("the assignee is one line with a keyboard-reachable way to see the rest", () => {
   // 59 of 112 cards truncated this name with no reveal at all: `title` is a
   // hover affordance, which is none on touch and none from the keyboard.
-  const markup = card({ assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" } });
+  const markup = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" } });
   assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>Implementation Plan Executioner<\/button>/);
   assert.match(markup, /title="Implementation Plan Executioner"/);
   assert.match(markup, /gpt-5\.6-sol:medium/);
@@ -537,8 +574,46 @@ test("a card with neither a run nor an assignee has no model line", () => {
   assert.equal(cardModel(task()), null);
 });
 
-test("a card with no assignee still says so", () => {
-  assert.match(card(), /Unassigned/);
+test("a HUMAN card shows a person, an unassigned AGENT warns, and an assigned AGENT is unchanged", () => {
+  // "Unassigned" beside a robot was on every card a human owns, which is most of
+  // them, and it named a state that is not a problem.
+  const markup = card({ assigneeType: "HUMAN", assigneeAgent: null });
+  assert.doesNotMatch(markup, /Unassigned/);
+  assert.match(markup, /data-card-assignee="human"/);
+  const unassignedAgent = card({ assigneeType: "AGENT", assigneeAgent: null });
+  assert.match(unassignedAgent, /data-card-assignee="unassigned-agent"/);
+  assert.match(unassignedAgent, /Unassigned/);
+  // An agent, named, is unchanged.
+  const assigned = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" } });
+  assert.match(assigned, new RegExp(`aria-label="${en("tasks.card.assignee", { name: "merge-resolver" })}"`));
+  assert.match(assigned, />merge-resolver</);
+});
+
+/* ------------------------------------------------------------- the card's diet */
+
+test("a NOW card carries no schedule row, and every informative schedule still does", () => {
+  // "Once" is the default and was on nearly every card: three of a Backlog
+  // card's five rows were constants while its title clamped.
+  const now = card();
+  assert.doesNotMatch(now, /Once/);
+  assert.doesNotMatch(now, /data-card-schedule=/);
+  const cron = card({ scheduleKind: "CRON", cron: "0 9 * * 1" });
+  assert.match(cron, /data-card-schedule=""/);
+  assert.match(cron, /At 09:00 AM, only on Monday/);
+  assert.match(
+    card({ status: "BACKLOG", scheduleKind: "AT", runAt: "2099-01-01T00:00:00.000Z", chainId: "c1", chainIndex: 4, chainProgress: progress({ position: 4 }) }),
+    new RegExp(en("tasks.schedule.waitingForPrevious")),
+  );
+  assert.match(card({ scheduleKind: "AT", runAt: "2026-08-20T14:30:00.000Z" }), /At \w{3} \d{1,2}/);
+});
+
+test("a card with no runs has no run row, and a card with a run reads exactly as before", () => {
+  assert.doesNotMatch(card(), /no runs/);
+  const withRun = card({
+    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+  });
+  assert.match(withRun, new RegExp(en("tasks.card.run", { n: 3 })));
+  assert.match(withRun, new RegExp(en("status.run.SUCCEEDED")));
 });
 
 /* ---------------------------------------------------------- the board frame */

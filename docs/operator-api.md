@@ -888,6 +888,10 @@ creation), `approvalGate`, `opensPullRequest`,
   `false`); `view` (`full` or `board`, default `full`); `enrich` (`true` or
   `false`, default `true`).
 
+The `board` view is a compact card projection. It includes `createdAt` for
+stable queue ordering and `assigneeType` so a human-owned task can be
+distinguished from an agent task whose agent assignment is missing.
+
 ```sh
 curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=full&archived=false" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
