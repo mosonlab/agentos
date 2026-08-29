@@ -220,10 +220,16 @@ export const KeyValue = ({ items, columns }: {
   </div>
 );
 
-export const Metric = ({ label, value }: { label: string; value: ReactNode }): ReactNode => (
-  <div className="rounded-xl border border-border bg-card px-[16px] py-[14px]">
+export const MetricFigure = ({ label, value }: { label: string; value: ReactNode }): ReactNode => (
+  <div>
     <div className="text-[12px] text-muted-foreground">{label}</div>
     <div className="mt-[6px] text-[15px] font-bold">{value}</div>
+  </div>
+);
+
+export const Metric = ({ label, value }: { label: string; value: ReactNode }): ReactNode => (
+  <div className="rounded-xl border border-border bg-card px-[16px] py-[14px]">
+    <MetricFigure label={label} value={value} />
   </div>
 );
 

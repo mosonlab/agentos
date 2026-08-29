@@ -39,7 +39,7 @@ test("Chinese dictionary values do not repeat English prose outside technical id
     "English", "Environment ID", "Glob", "Grep", "Inbox", "Pi", "Pull request",
     "Runner", "Slug", "cron", "provider/model:effort", "rev", "webhook",
     "Implement feat/inbox-search", "runner {runner}", "{runner} CLI {version}",
-    "{position}/{total}", "{agent} · {date} · {amount}",
+    "{position}/{total}", "{agent} · {date} · {amount}", "{model} · {amount} · {share}",
   ]);
   const repeatedProse = Object.keys(en).filter((key) =>
     en[key] === zh[key] && /[A-Za-z]{2}/u.test(en[key]!) && !technicalValues.has(en[key]!),
