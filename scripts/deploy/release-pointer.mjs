@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
+  fsyncSync,
   lstatSync,
+  openSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -22,7 +25,10 @@ const invalid = (detail) => {
 };
 
 const filesystemFrom = (overrides) => ({
+  closeSync,
+  fsyncSync,
   lstatSync,
+  openSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -31,6 +37,16 @@ const filesystemFrom = (overrides) => ({
   unlinkSync,
   ...(overrides ?? {}),
 });
+
+const syncPointerRoot = (layout) => {
+  let descriptor;
+  try {
+    descriptor = layout.filesystem.openSync(layout.rootPath, "r");
+    layout.filesystem.fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== undefined) layout.filesystem.closeSync(descriptor);
+  }
+};
 
 const statusAt = (filesystem, path, label) => {
   try {
@@ -209,12 +225,29 @@ const activate = (layout, release) => {
     if (previousUpdated) {
       try {
         restorePrevious(layout, previousBefore);
+        syncPointerRoot(layout);
       } catch (restoreError) {
         throw new DeployFailure(
           "release-pointer-activation-failed",
           `${failureDetail(error)}-restore-${failureDetail(restoreError)}`,
         );
       }
+    }
+    throw new DeployFailure("release-pointer-activation-failed", failureDetail(error));
+  }
+  try {
+    syncPointerRoot(layout);
+  } catch (error) {
+    try {
+      if (pointers.current === null) removePointer(layout, RELEASE_POINTER_NAMES.current);
+      else replacePointer(layout, RELEASE_POINTER_NAMES.current, pointers.current);
+      restorePrevious(layout, previousBefore);
+      syncPointerRoot(layout);
+    } catch (restoreError) {
+      throw new DeployFailure(
+        "release-pointer-activation-failed",
+        `${failureDetail(error)}-restore-${failureDetail(restoreError)}`,
+      );
     }
     throw new DeployFailure("release-pointer-activation-failed", failureDetail(error));
   }
@@ -247,12 +280,28 @@ const rollback = (layout) => {
     if (previousUpdated) {
       try {
         replacePointer(layout, RELEASE_POINTER_NAMES.previous, pointers.previous);
+        syncPointerRoot(layout);
       } catch (restoreError) {
         throw new DeployFailure(
           "release-pointer-rollback-failed",
           `${failureDetail(error)}-restore-${failureDetail(restoreError)}`,
         );
       }
+    }
+    throw new DeployFailure("release-pointer-rollback-failed", failureDetail(error));
+  }
+  try {
+    syncPointerRoot(layout);
+  } catch (error) {
+    try {
+      replacePointer(layout, RELEASE_POINTER_NAMES.current, pointers.current);
+      replacePointer(layout, RELEASE_POINTER_NAMES.previous, pointers.previous);
+      syncPointerRoot(layout);
+    } catch (restoreError) {
+      throw new DeployFailure(
+        "release-pointer-rollback-failed",
+        `${failureDetail(error)}-restore-${failureDetail(restoreError)}`,
+      );
     }
     throw new DeployFailure("release-pointer-rollback-failed", failureDetail(error));
   }
@@ -293,18 +342,3 @@ export const rollbackReleasePointer = ({ root, filesystem: overrides } = {}) => 
   const layout = { ...prepareLayout({ root, filesystem }), filesystem };
   return rollback(layout);
 };
-
-/** Convenience facade for deploy hosts that keep one pointer transaction. */
-export const createReleasePointer = ({ root, filesystem: overrides } = {}) => {
-  const options = { root, filesystem: overrides };
-  return Object.freeze({
-    inspect: () => inspectReleasePointers(options),
-    activate: (release) => activateReleasePointer({ ...options, release }),
-    rollback: () => rollbackReleasePointer(options),
-  });
-};
-
-// Short aliases keep the primitive usable by hosts whose terminology is
-// already "activate"/"rollback" while the explicit names document the paths.
-export const activateRelease = activateReleasePointer;
-export const rollbackRelease = rollbackReleasePointer;

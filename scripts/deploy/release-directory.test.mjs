@@ -20,6 +20,7 @@ import { DeployFailure } from "./quiet-window-lib.mjs";
 import {
   assembleReleaseDirectory,
   computeReleaseDigest,
+  probeReleaseImmutability,
   pruneReleaseDirectories,
   RELEASE_DIRECTORY_RETENTION_COUNT,
   verifyReleaseDirectory,
@@ -149,9 +150,64 @@ test("verification catches a post-finalization mutation as a deployment failure"
     chmodSync(join(result.releaseDirectory, "packages/api/dist/index.js"), 0o644);
     writeFileSync(join(result.releaseDirectory, "packages/api/dist/index.js"), "mutated\n");
     assert.throws(
-      () => verifyReleaseDirectory(result.releaseDirectory),
+      () => verifyReleaseDirectory({ releaseDirectory: result.releaseDirectory }),
       (error) => error instanceof DeployFailure && error.reason === "release-digest-mismatch",
     );
+  } finally {
+    cleanup(context);
+  }
+});
+
+test("an absent optional artifact is skipped through a symlinked stage root", () => {
+  const context = fixture();
+  const rootLink = `${context.root}-link`;
+  try {
+    symlinkSync(context.root, rootLink, "dir");
+    const result = assembleReleaseDirectory({
+      stageRoot: join(rootLink, "stage"),
+      deployRoot: context.deployRoot,
+      revision,
+      artifactPaths: [...artifactPaths, "packages/cli/dist"],
+      optionalArtifactPaths: ["packages/cli/dist"],
+    });
+    assert.equal(existsSync(join(result.releaseDirectory, "packages/cli/dist")), false);
+  } finally {
+    cleanup(context);
+    rmSync(rootLink, { force: true });
+  }
+});
+
+test("the production write probe accepts a finalized release without leaving a marker", () => {
+  const context = fixture();
+  try {
+    const result = assembleReleaseDirectory({
+      stageRoot: context.stageRoot,
+      deployRoot: context.deployRoot,
+      revision,
+      artifactPaths,
+    });
+    assert.equal(probeReleaseImmutability(result.releaseDirectory), true);
+    assert.equal(existsSync(join(result.releaseDirectory, ".release-write-probe")), false);
+  } finally {
+    cleanup(context);
+  }
+});
+
+test("the production write probe rejects a writable release and removes its marker", () => {
+  const context = fixture();
+  try {
+    const result = assembleReleaseDirectory({
+      stageRoot: context.stageRoot,
+      deployRoot: context.deployRoot,
+      revision,
+      artifactPaths,
+    });
+    chmodSync(result.releaseDirectory, 0o700);
+    assert.throws(
+      () => probeReleaseImmutability(result.releaseDirectory),
+      (error) => error instanceof DeployFailure && error.reason === "release-not-immutable",
+    );
+    assert.equal(existsSync(join(result.releaseDirectory, ".release-write-probe")), false);
   } finally {
     cleanup(context);
   }

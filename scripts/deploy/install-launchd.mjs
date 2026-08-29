@@ -5,8 +5,10 @@ import {
   accessSync,
   chmodSync,
   constants as fsConstants,
+  copyFileSync,
   existsSync,
   linkSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -15,7 +17,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +33,7 @@ import {
 } from "./quiet-window-adapters.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { activateReleasePointer } from "./release-pointer.mjs";
+import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
@@ -283,8 +286,9 @@ export const servicePlistValues = ({
     stdoutPath,
     stderrPath,
     path,
-    runnerId: SERVICE_INVENTORY[label].runnerId ?? "",
-    runnerPath: SERVICE_INVENTORY[label].runnerId ? path : "",
+    ...(SERVICE_INVENTORY[label].runnerId
+      ? { runnerId: SERVICE_INVENTORY[label].runnerId, runnerPath: path }
+      : {}),
     wrapperPath,
   });
 };
@@ -298,13 +302,15 @@ export const renderServiceLaunchdPlist = (template, values) => {
     __SHARED_ROOT__: values.sharedRoot,
     __SHARED_ENV_FILE__: values.sharedEnvironmentPath,
     __PATH__: values.path,
-    __RUNNER_ID__: values.runnerId,
-    __RUNNER_PATH__: values.runnerPath,
     __STDOUT_PATH__: values.stdoutPath,
     __STDERR_PATH__: values.stderrPath,
   };
   let rendered = template;
   for (const [placeholder, value] of Object.entries(replacements)) rendered = rendered.replaceAll(placeholder, xml(value));
+  const runnerEnvironment = values.runnerId
+    ? `    <key>RUNNER_ID</key>\n    <string>${xml(values.runnerId)}</string>\n    <key>RUNNER_PATH</key>\n    <string>${xml(values.runnerPath)}</string>`
+    : "";
+  rendered = rendered.replaceAll("__RUNNER_ENVIRONMENT__", runnerEnvironment);
   if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-service-template-has-unresolved-placeholder");
   return rendered;
 };
@@ -321,7 +327,7 @@ export const verifyServicePlistDefinitions = (definitions, labels = SERVICE_LABE
     const rendered = definitions[label];
     if (typeof rendered !== "string") throw new Error(`launchd-service-definition-missing:${label}`);
     if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`launchd-service-definition-unresolved:${label}`);
-    if (!rendered.includes(`<key>Label</key>\n  <string>${xml(label)}</string>`)) {
+    if (!new RegExp(`<key>Label</key>\\s*<string>${xml(label)}</string>`, "u").test(rendered)) {
       throw new Error(`launchd-service-definition-label-mismatch:${label}`);
     }
     if (!rendered.includes("<key>ProgramArguments</key>")) throw new Error(`launchd-service-definition-program-missing:${label}`);
@@ -331,8 +337,82 @@ export const verifyServicePlistDefinitions = (definitions, labels = SERVICE_LABE
     if (!rendered.includes("AGENTOS_CURRENT_POINTER") || !rendered.includes("<string>current</string>")) {
       throw new Error(`launchd-service-definition-current-pointer-missing:${label}`);
     }
+    if (/<string>\s*<\/string>/u.test(rendered)) throw new Error(`launchd-service-definition-empty-string:${label}`);
   }
   return true;
+};
+
+const PLUTIL = "/usr/bin/plutil";
+
+const plistObject = (path) => {
+  try {
+    return JSON.parse(execFileSync(PLUTIL, ["-convert", "json", "-o", "-", path], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }));
+  } catch (error) {
+    throw new DeployFailure("launchd-service-definition-invalid", `${path}:${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
+const setPlistValue = (path, existing, keyPath, type, value) => {
+  const action = existing ? "-replace" : "-insert";
+  const args = [action, keyPath, type];
+  if (value !== undefined) args.push(value);
+  args.push(path);
+  execFileSync(PLUTIL, args, { stdio: ["ignore", "ignore", "pipe"] });
+};
+
+/** Patch only the stable wrapper boundary into an existing definition. plutil
+ * performs the mutation so unknown launchd value types and lifecycle keys stay
+ * byte-for-byte meaningful instead of being reinterpreted by this installer. */
+const renderMigratedServicePlist = ({ sourcePath, values }) => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "agentos-launchd-plist-"));
+  const temporary = join(temporaryRoot, "service.plist");
+  try {
+    copyFileSync(sourcePath, temporary);
+    const original = plistObject(temporary);
+    if (original.Label !== values.label) throw new DeployFailure("launchd-service-definition-label-mismatch", values.label);
+    const environment = original.EnvironmentVariables && typeof original.EnvironmentVariables === "object"
+      && !Array.isArray(original.EnvironmentVariables)
+      ? original.EnvironmentVariables
+      : {};
+    setPlistValue(temporary, Object.hasOwn(original, "ProgramArguments"), "ProgramArguments", "-json", JSON.stringify([
+      values.nodeBinary,
+      values.wrapperPath,
+      values.label,
+    ]));
+    setPlistValue(temporary, Object.hasOwn(original, "WorkingDirectory"), "WorkingDirectory", "-string", values.repositoryRoot);
+    if (!Object.hasOwn(original, "EnvironmentVariables")) {
+      setPlistValue(temporary, false, "EnvironmentVariables", "-dictionary");
+    }
+    const controlled = {
+      DEPLOY_NODE_BINARY: values.nodeBinary,
+      AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
+      AGENTOS_SHARED_ROOT: values.sharedRoot,
+      AGENTOS_SHARED_ENV_FILE: values.sharedEnvironmentPath,
+      AGENTOS_CURRENT_POINTER: "current",
+      AGENTOS_RELEASES_DIRECTORY: "releases",
+      AGENTOS_SERVICE_LABEL: values.label,
+    };
+    if (!Object.hasOwn(environment, "PATH")) controlled.PATH = values.path;
+    if (values.runnerId) {
+      controlled.RUNNER_ID = values.runnerId;
+      if (typeof environment.RUNNER_PATH !== "string" || environment.RUNNER_PATH === "") {
+        controlled.RUNNER_PATH = values.runnerPath;
+      }
+    }
+    for (const [key, value] of Object.entries(controlled)) {
+      setPlistValue(temporary, Object.hasOwn(environment, key), `EnvironmentVariables.${key}`, "-string", value);
+    }
+    for (const key of values.runnerId ? [] : ["RUNNER_ID", "RUNNER_PATH"]) {
+      if (environment[key] === "") execFileSync(PLUTIL, ["-remove", `EnvironmentVariables.${key}`, temporary], { stdio: "ignore" });
+    }
+    execFileSync(PLUTIL, ["-convert", "xml1", temporary], { stdio: ["ignore", "ignore", "pipe"] });
+    return readFileSync(temporary, "utf8");
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 };
 
 export const renderServicePlists = ({
@@ -395,21 +475,30 @@ export const installLaunchdServices = ({
   if (revert) {
     if (!existsSync(manifestPath)) throw new Error("launchd-service-manifest-missing");
     const manifest = validateServiceManifest(JSON.parse(readFileSync(manifestPath, "utf8")), root);
+    const observed = new Map();
     for (const entry of manifest.entries) {
       const current = existsSync(entry.path) ? readFileSync(entry.path) : null;
       const currentSha = current === null ? null : sha256(current);
+      observed.set(entry.path, currentSha);
       const recognized = currentSha === entry.installedSha256
         || (entry.existed && currentSha === entry.originalSha256)
         || (!entry.existed && currentSha === null);
       if (!recognized) {
         throw new Error(`launchd-service-definition-drift:${entry.path}`);
       }
+      if (entry.existed && currentSha === entry.installedSha256) {
+        if (!entry.backupPath || !existsSync(entry.backupPath) || sha256(readFileSync(entry.backupPath)) !== entry.originalSha256) {
+          throw new DeployFailure("launchd-service-backup-missing", entry.backupPath ?? entry.path);
+        }
+      }
     }
     if (!apply) return { applied: false, reverted: false, entries: manifest.entries.map((entry) => entry.path) };
     for (const entry of manifest.entries) {
       if (entry.existed) {
-        const backup = readFileSync(entry.backupPath);
-        writeAtomic(entry.path, backup, entry.mode ?? 0o600);
+        if (observed.get(entry.path) !== entry.originalSha256) {
+          const backup = readFileSync(entry.backupPath);
+          writeAtomic(entry.path, backup, entry.mode ?? 0o600);
+        }
       } else rmSync(entry.path, { force: true });
       if (entry.backupPath) rmSync(entry.backupPath, { force: true });
     }
@@ -432,7 +521,10 @@ export const installLaunchdServices = ({
       path: controlledPath,
       wrapperPath: wrapper,
     });
-    return [label, renderServiceLaunchdPlist(readFileSync(SERVICE_TEMPLATE, "utf8"), values)];
+    const destination = join(launchAgents, `${label}.plist`);
+    return [label, existsSync(destination) && replaceExisting
+      ? renderMigratedServicePlist({ sourcePath: destination, values })
+      : renderServiceLaunchdPlist(readFileSync(SERVICE_TEMPLATE, "utf8"), values)];
   })));
   verifyServicePlistDefinitions(rendered);
   const entries = [{
@@ -480,7 +572,10 @@ export const installLaunchdServices = ({
   }
   mkdirSync(join(root, SERVICE_INSTALL_ROOT, "backups"), { recursive: true, mode: 0o700 });
   for (const entry of entries) {
-    if (entry.existed) writeFileSync(entry.backupPath, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
+    if (!entry.existed || !existsSync(entry.backupPath)) continue;
+    if (sha256(readFileSync(entry.backupPath)) !== entry.originalSha256) {
+      throw new DeployFailure("launchd-service-backup-conflict", `remove-or-recover:${entry.backupPath}`);
+    }
   }
   const manifest = {
     schemaVersion: 1,
@@ -488,6 +583,11 @@ export const installLaunchdServices = ({
     entries: entries.map(({ contents: _contents, ...entry }) => entry),
   };
   writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n", 0o600);
+  for (const entry of entries) {
+    if (entry.existed && !existsSync(entry.backupPath)) {
+      writeFileSync(entry.backupPath, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
+    }
+  }
   writeAtomic(wrapper, readFileSync(SERVICE_WRAPPER_SOURCE), 0o755);
   for (const entry of entries.slice(1)) {
     writeAtomic(entry.path, entry.contents, 0o600);

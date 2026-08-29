@@ -22,8 +22,8 @@ import {
 const execFileAsync = promisify(execFile);
 
 export const mergeLeaseScriptPath = (environment: NodeJS.ProcessEnv = process.env): string =>
-  environment.AGENTOS_REPOSITORY_ROOT
-    ? join(resolve(environment.AGENTOS_REPOSITORY_ROOT), "scripts/merge-lease.sh")
+  environment.AGENTOS_RELEASE_ROOT
+    ? join(resolve(environment.AGENTOS_RELEASE_ROOT), "scripts/merge-lease.sh")
     : fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
 
 const mergeLeaseScript = mergeLeaseScriptPath();

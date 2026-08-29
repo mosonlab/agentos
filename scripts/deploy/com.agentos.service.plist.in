@@ -30,10 +30,7 @@
     <string>releases</string>
     <key>AGENTOS_SERVICE_LABEL</key>
     <string>__LABEL__</string>
-    <key>RUNNER_ID</key>
-    <string>__RUNNER_ID__</string>
-    <key>RUNNER_PATH</key>
-    <string>__RUNNER_PATH__</string>
+__RUNNER_ENVIRONMENT__
   </dict>
   <key>RunAtLoad</key>
   <true/>

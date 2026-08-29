@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readlinkSync,
   renameSync,
   rmSync,
@@ -44,14 +47,18 @@ const cleanup = (root) => rmSync(root, { recursive: true, force: true });
 test("activation updates previous before atomically swapping current", () => {
   const { root, next } = fixture();
   try {
-    const renames = [];
+    const events = [];
     const result = activateReleasePointer({
       root,
       release: next,
       filesystem: {
         renameSync: (from, to) => {
-          renames.push({ from, to, current: readlinkSync(join(root, "current")) });
+          events.push({ kind: "rename", from, to, current: readlinkSync(join(root, "current")) });
           return renameSync(from, to);
+        },
+        fsyncSync: (fd) => {
+          events.push({ kind: "fsync" });
+          return fsyncSync(fd);
         },
       },
     });
@@ -70,11 +77,12 @@ test("activation updates previous before atomically swapping current", () => {
     assert.equal(readlinkSync(join(root, "previous")), "releases/old-release");
     assert.equal(lstatSync(join(root, "current")).isSymbolicLink(), true);
     assert.equal(lstatSync(join(root, "previous")).isSymbolicLink(), true);
-    assert.equal(renames.length, 2);
-    assert.equal(renames[0].to, join(root, "previous"));
-    assert.equal(renames[0].current, "releases/old-release");
-    assert.equal(renames[1].to, join(root, "current"));
-    assert.equal(renames[1].current, "releases/old-release");
+    assert.equal(events.length, 3);
+    assert.equal(events[0].to, join(root, "previous"));
+    assert.equal(events[0].current, "releases/old-release");
+    assert.equal(events[1].to, join(root, "current"));
+    assert.equal(events[1].current, "releases/old-release");
+    assert.equal(events[2].kind, "fsync");
     assert.deepEqual(inspectReleasePointers({ root }), {
       current: "next-release",
       previous: "old-release",
@@ -87,7 +95,20 @@ test("activation updates previous before atomically swapping current", () => {
 test("rollback points current at previous and preserves the failed target as previous", () => {
   const { root } = fixture();
   try {
-    const result = rollbackReleasePointer({ root });
+    const events = [];
+    const result = rollbackReleasePointer({
+      root,
+      filesystem: {
+        renameSync: (from, to) => {
+          events.push(`rename:${to.endsWith("/current") ? "current" : "previous"}`);
+          return renameSync(from, to);
+        },
+        fsyncSync: (fd) => {
+          events.push("fsync");
+          return fsyncSync(fd);
+        },
+      },
+    });
     assert.deepEqual(result, {
       operation: "rollback",
       changed: true,
@@ -102,6 +123,42 @@ test("rollback points current at previous and preserves the failed target as pre
       current: "older-release",
       previous: "old-release",
     });
+    assert.deepEqual(events, ["rename:previous", "rename:current", "fsync"]);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("a restored failed activation is fsynced before the failure returns", () => {
+  const { root } = fixture();
+  try {
+    const events = [];
+    assert.throws(
+      () => activateReleasePointer({
+        root,
+        release: "next-release",
+        filesystem: {
+          openSync,
+          closeSync,
+          renameSync: (from, to) => {
+            if (to === join(root, "current")) {
+              events.push("current-failed");
+              const error = new Error("simulated current rename failure");
+              error.code = "EIO";
+              throw error;
+            }
+            events.push("previous-renamed");
+            return renameSync(from, to);
+          },
+          fsyncSync: (fd) => {
+            events.push("fsync-restored");
+            return fsyncSync(fd);
+          },
+        },
+      }),
+      (error) => error instanceof DeployFailure && error.reason === "release-pointer-activation-failed",
+    );
+    assert.deepEqual(events, ["previous-renamed", "current-failed", "previous-renamed", "fsync-restored"]);
   } finally {
     cleanup(root);
   }

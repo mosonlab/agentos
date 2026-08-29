@@ -9,6 +9,8 @@ export const DEPLOY_STEPS = Object.freeze([
   "generate-prisma-client",
   "canonical-prompt-sync",
   "verify-runtime-prisma-client",
+  "materialize-release",
+  "verify-stable-service-paths",
   "publish-build",
   "restart-services",
   "verify-services",
@@ -142,6 +144,8 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
     await host.generatePrismaClient();
     await host.syncCanonicalPrompts();
     await host.verifyRuntimePrismaClient();
+    await host.materializeRelease();
+    await host.verifyStableServicePaths();
     await host.assertQuietBeforeRestart();
     activationAttempted = true;
     try {

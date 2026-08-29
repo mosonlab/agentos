@@ -180,6 +180,7 @@ export const DEPLOY_RELEASE_EXTRA_ARTIFACT_PATHS = Object.freeze([
   "agents/foundational.md",
   "agents/roles",
   "agents/templates",
+  "scripts/merge-lease.sh",
 ]);
 
 export const deployReleaseArtifactPaths = (root) => Object.freeze([

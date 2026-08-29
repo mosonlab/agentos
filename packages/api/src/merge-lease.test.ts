@@ -48,12 +48,18 @@ const holderTx = (input: {
   },
 } as unknown as Prisma.TransactionClient);
 
-test("release runtime resolves the Git-owned lease script through the stable source checkout", () => {
+test("release runtime executes the current release's helper while keeping the Git checkout separate", () => {
   assert.equal(
-    mergeLeaseScriptPath({ AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source" }),
-    "/srv/agentos/source/scripts/merge-lease.sh",
+    mergeLeaseScriptPath({
+      AGENTOS_RELEASE_ROOT: "/srv/agentos/current",
+      AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source",
+    }),
+    "/srv/agentos/current/scripts/merge-lease.sh",
   );
-  assert.match(mergeLeaseScriptPath({}), /\/scripts\/merge-lease\.sh$/u);
+  assert.match(
+    mergeLeaseScriptPath({ AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source" }),
+    /\/scripts\/merge-lease\.sh$/u,
+  );
 });
 
 test("leaseHolderFor owns every merge-tail Task shape, including a failed auxiliary", async () => {

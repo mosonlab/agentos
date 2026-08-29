@@ -57,7 +57,13 @@ export const SERVICE_INVENTORY = Object.freeze(Object.fromEntries([
   ...SERVICE_LABELS
     .filter((label) => label.startsWith("com.agentos.runner"))
     .map((label) => definition(label, "packages/runner/dist/index.js")),
-  definition("com.agentos.web", "node_modules/vite/bin/vite.js", "apps/web", ["preview", "--host", "127.0.0.1"]),
+  definition("com.agentos.web", "node_modules/vite/bin/vite.js", "apps/web", [
+    "preview",
+    "--host",
+    "127.0.0.1",
+    "--configLoader",
+    "runner",
+  ]),
 ].map((entry) => [entry.label, entry])));
 
 const isInside = (parent, child) => {
@@ -148,12 +154,32 @@ export const resolveCurrentRelease = ({
   });
 };
 
-const parseQuotedValue = (value) => {
-  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1).replaceAll(/\\([\\"nrt])/gu, (_match, escaped) => ({ "\\": "\\", '"': '"', n: "\n", r: "\r", t: "\t" }[escaped]));
+const closingQuote = (value, quote) => {
+  for (let index = 1; index < value.length; index += 1) {
+    if (value[index] !== quote) continue;
+    if (quote === '"') {
+      let escapes = 0;
+      for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) escapes += 1;
+      if (escapes % 2 === 1) continue;
+    }
+    return index;
   }
-  return value.replace(/\s+#.*$/u, "").trimEnd();
+  return -1;
+};
+
+const parseEnvironmentValue = (value, lineNumber) => {
+  const quote = value[0];
+  if (quote !== '"' && quote !== "'") return value.replace(/\s+#.*$/u, "").trimEnd();
+  const end = closingQuote(value, quote);
+  if (end === -1) throw new Error(`shared-environment-unbalanced-quote-line-${lineNumber}`);
+  const trailing = value.slice(end + 1).trim();
+  if (trailing !== "" && !trailing.startsWith("#")) {
+    throw new Error(`shared-environment-unparseable-line-${lineNumber}`);
+  }
+  const contents = value.slice(1, end);
+  return quote === '"'
+    ? contents.replaceAll(/\\([\\"nrt])/gu, (_match, escaped) => ({ "\\": "\\", '"': '"', n: "\n", r: "\r", t: "\t" }[escaped]))
+    : contents;
 };
 
 /** Parse only the portable dotenv subset needed by the launchd environment.
@@ -162,12 +188,23 @@ const parseQuotedValue = (value) => {
 export const parseSharedEnvironment = (contents) => {
   if (typeof contents !== "string") throw new Error("shared-environment-invalid");
   const values = {};
-  for (const line of contents.split(/\r?\n/u)) {
+  const lines = contents.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
     const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/u.exec(trimmed);
-    if (!match) continue;
-    values[match[1]] = parseQuotedValue(match[2]);
+    if (!match) throw new Error(`shared-environment-unparseable-line-${index + 1}`);
+    const startLine = index + 1;
+    let rawValue = match[2];
+    const quote = rawValue[0];
+    if (quote === '"' || quote === "'") {
+      while (closingQuote(rawValue, quote) === -1 && index + 1 < lines.length) {
+        index += 1;
+        rawValue += `\n${lines[index]}`;
+      }
+    }
+    values[match[1]] = parseEnvironmentValue(rawValue, startLine);
   }
   return Object.freeze(values);
 };
@@ -201,10 +238,6 @@ const envWithSharedConfig = (environment, shared) => {
   values.AGENTOS_SHARED_ROOT = shared.sharedRoot;
   values.DEPLOY_SHARED_ROOT = shared.sharedRoot;
   values.AGENTOS_SHARED_ENV_FILE = shared.sharedEnvironmentPath;
-  // Existing service modules load dotenv relative to their module URL. The
-  // file is intentionally absent from releases; this path gives the same
-  // configuration source to those modules through inherited process.env.
-  values.DOTENV_CONFIG_PATH = shared.sharedEnvironmentPath;
   // A launchd environment can outlive the checkout that created it. Preserve
   // an explicit operator path only when it is already below shared/; stale
   // values inherited from an old plist must not send mutable state into a

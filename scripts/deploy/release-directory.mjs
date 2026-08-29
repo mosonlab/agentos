@@ -15,7 +15,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
@@ -68,7 +68,15 @@ const normalizeRelativePath = (value, label = "path") => {
 
 const pathInside = (root, candidate) => {
   const canonical = (path) => {
-    try { return realpathSync(path); } catch { return resolve(path); }
+    let existing = resolve(path);
+    const missing = [];
+    while (!existsSync(existing)) {
+      const parent = dirname(existing);
+      if (parent === existing) break;
+      missing.unshift(basename(existing));
+      existing = parent;
+    }
+    return resolve(realpathSync(existing), ...missing);
   };
   const resolvedRoot = canonical(root);
   const resolvedCandidate = canonical(candidate);
@@ -222,6 +230,9 @@ const copySelectedPaths = ({ stageRoot, releaseDirectory, requiredPaths, optiona
   const copied = [];
   const optional = new Set(optionalPaths);
   for (const path of requiredPaths) {
+    const normalized = normalizeRelativePath(path, "stage-path");
+    const candidate = resolve(stageRoot, normalized);
+    if (!existsSync(candidate) && optional.has(normalized)) continue;
     const { relativePath, child } = absoluteChild(stageRoot, path, "stage-path");
     if (forbiddenPath(relativePath)) failure("release-secret-detected", relativePath);
     if (!existsSync(child)) {
@@ -245,8 +256,8 @@ const runtimeManifestPaths = (stageRoot, paths) => {
   return manifests;
 };
 
-const resolveInputs = ({ stageRoot, artifactPaths, paths, optionalArtifactPaths, optionalPaths }) => {
-  const supplied = artifactPaths ?? paths;
+const resolveInputs = ({ stageRoot, artifactPaths, optionalArtifactPaths }) => {
+  const supplied = artifactPaths;
   if (supplied !== undefined && !Array.isArray(supplied)) invalid("artifact-paths-must-be-an-array");
   const explicitlySupplied = supplied !== undefined;
   let selected;
@@ -256,7 +267,7 @@ const resolveInputs = ({ stageRoot, artifactPaths, paths, optionalArtifactPaths,
     // exact makes an omitted runtime component a loud missing-artifact failure
     // instead of silently changing the deploy contract under the caller.
     selected = [...supplied];
-    optional = optionalArtifactPaths ?? optionalPaths ?? [];
+    optional = optionalArtifactPaths ?? [];
   } else {
     let discovered;
     try { discovered = deployArtifactPaths(stageRoot); } catch {
@@ -370,14 +381,11 @@ const readReleaseManifest = (releaseDirectory) => {
 /** Verify a finalized tree before activation or reuse. A changed byte, changed
  * symlink target, wrong API stamp, or restored write permission is a deployment
  * failure, even if the directory name still looks like a valid release. */
-export const verifyReleaseDirectory = (releaseDirectoryOrOptions, maybeOptions = {}) => {
-  const options = typeof releaseDirectoryOrOptions === "string"
-    ? { ...maybeOptions, releaseDirectory: releaseDirectoryOrOptions }
-    : releaseDirectoryOrOptions ?? {};
-  const releaseDirectory = resolve(options.releaseDirectory ?? options.path ?? "");
+export const verifyReleaseDirectory = (options = {}) => {
+  const releaseDirectory = resolve(options.releaseDirectory ?? "");
   assertDirectory(releaseDirectory, "release-directory");
   const manifest = readReleaseManifest(releaseDirectory);
-  const expectedRevision = options.revision ?? options.commit ?? manifest.commit;
+  const expectedRevision = options.revision ?? manifest.commit;
   if (!REVISION.test(expectedRevision ?? "") || manifest.commit !== expectedRevision) failure("release-manifest-invalid", "commit-mismatch");
   const expectedDigest = options.digest ?? manifest.digest;
   if (!DIGEST.test(expectedDigest ?? "")) failure("release-manifest-invalid", "digest-mismatch");
@@ -441,7 +449,7 @@ const ensureShared = ({ deployRoot, sharedRoot, releasesRoot }) => {
 export const assembleReleaseDirectory = (options = {}) => {
   const stageRoot = resolve(options.stageRoot ?? "");
   assertDirectory(stageRoot, "stage-root");
-  const revision = options.revision ?? options.commit;
+  const revision = options.revision;
   if (!REVISION.test(revision ?? "")) invalid("revision-must-be-a-40-character-sha");
   const releasesRoot = releaseRootFrom(options);
   const overlappingLayout = pathInside(stageRoot, releasesRoot) || pathInside(releasesRoot, stageRoot);
@@ -455,9 +463,7 @@ export const assembleReleaseDirectory = (options = {}) => {
   const inputs = resolveInputs({
     stageRoot,
     artifactPaths: options.artifactPaths,
-    paths: options.paths,
     optionalArtifactPaths: options.optionalArtifactPaths,
-    optionalPaths: options.optionalPaths,
   });
   if (overlappingLayout && inputs.paths.some((path) => ["releases", "shared", "current", "previous"].includes(path.split("/")[0]))) {
     failure("release-directory-invalid", "artifact-inventory-overlaps-deploy-layout");
@@ -472,6 +478,10 @@ export const assembleReleaseDirectory = (options = {}) => {
       requiredPaths: inputs.paths,
       optionalPaths: inputs.optional,
     });
+    const copiedApiBuildStamp = readApiBuildStamp(join(temporary, RELEASE_API_STAMP_PATH), revision);
+    if (JSON.stringify(copiedApiBuildStamp) !== JSON.stringify(apiBuildStamp)) {
+      failure("release-build-stamp-invalid", "copied-api-stamp-does-not-match-stage");
+    }
     const files = inventory(temporary);
     const digest = digestForInventory(files);
     if (options.digest !== undefined && options.digest !== digest) failure("release-digest-mismatch", `expected-${options.digest}-observed-${digest}`);
@@ -483,13 +493,21 @@ export const assembleReleaseDirectory = (options = {}) => {
       commit: revision,
       digest,
       files,
-      apiBuildStamp,
+      apiBuildStamp: copiedApiBuildStamp,
       sharedPath: relative(temporary, sharedRoot).split(sep).join("/"),
     };
     writeFileSync(manifestAt(temporary), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
     makeImmutable(temporary);
-    const verified = verifyReleaseDirectory({ releaseDirectory: temporary, revision, digest });
-    const postVerificationWriteProbe = options.postVerificationWriteProbe ?? options.writeProbe;
+    assertImmutablePermissions(temporary);
+    const verified = Object.freeze({
+      releaseDirectory: temporary,
+      releaseName,
+      revision,
+      digest,
+      files,
+      apiBuildStamp: copiedApiBuildStamp,
+    });
+    const postVerificationWriteProbe = options.postVerificationWriteProbe;
     if (typeof postVerificationWriteProbe === "function") {
       postVerificationWriteProbe(temporary);
       verifyReleaseDirectory({ releaseDirectory: temporary, revision, digest });
@@ -510,7 +528,7 @@ export const assembleReleaseDirectory = (options = {}) => {
     }
     renameSync(temporary, destination);
     finalized = true;
-    const result = verifyReleaseDirectory({ releaseDirectory: destination, revision, digest });
+    const result = Object.freeze({ ...verified, releaseDirectory: destination });
     if (options.probeImmutability === true) probeReleaseImmutability(destination);
     if (options.retention !== false) {
       pruneReleaseDirectories({
@@ -604,10 +622,3 @@ export const pruneReleaseDirectories = ({
     protected: [...protectedNames].sort(),
   });
 };
-
-// Names used by callers that describe the operation as materialization rather
-// than assembly. Keeping these aliases costs no compatibility path in the
-// filesystem implementation and makes the narrow module easy to integrate.
-export const materializeReleaseDirectory = assembleReleaseDirectory;
-export const createReleaseDirectory = assembleReleaseDirectory;
-export const verifyRelease = verifyReleaseDirectory;

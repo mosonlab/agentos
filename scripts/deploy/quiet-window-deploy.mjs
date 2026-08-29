@@ -739,6 +739,8 @@ const main = async () => {
         if (!generatedPrismaClientIsComplete(stage)) {
           fail("runtime-prisma-client-missing", "staged-generated-client-is-absent");
         }
+      },
+      materializeRelease: async () => {
         if (!artifactPaths || !optionalArtifacts) fail("build-output-missing", "artifact-inventory-not-prepared");
         preparedRelease = assembleReleaseDirectory({
           stageRoot: stage,
@@ -749,12 +751,9 @@ const main = async () => {
           retention: false,
           probeImmutability: true,
         });
+      },
+      verifyStableServicePaths: async () => {
         await verifyStableServicePaths();
-        verifyReleaseDirectory({
-          releaseDirectory: preparedRelease.releaseDirectory,
-          revision: to,
-          digest: preparedRelease.digest,
-        });
       },
       assertQuietBeforeRestart: async () => {
         if (!await barrier.verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");

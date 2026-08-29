@@ -1,6 +1,7 @@
 const METHODS = Object.freeze([
   "fastForward", "createStage", "installDependencies", "build", "backup",
   "guardedMigration", "generatePrismaClient", "syncCanonicalPrompts", "verifyRuntimePrismaClient",
+  "materializeRelease", "verifyStableServicePaths",
   "assertQuietBeforeRestart", "publishBuild", "restartServices", "verifyServices",
   "restorePreviousServices", "escalate", "notify", "cleanupStage",
 ]);
