@@ -45,7 +45,11 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import {
+  isMergeReadinessStep,
+  isRegressionVerificationOutputKind,
+  MERGE_TAIL_KIND,
+} from "./merge-tail.js";
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
@@ -711,6 +715,7 @@ type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: string };
 
 export type OpenRunIntent =
   | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
+  | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1 }
   | { kind: "task-created"; readyAt: Date }
   | { kind: "retry"; readyAt: Date }
   | { kind: "integrator-authorized"; readyAt: Date }
@@ -808,7 +813,10 @@ export const openRun = async (
   if (!task.assigneeAgent) {
     return openRunRefusal("conflict", "Task assignee no longer exists; assign an agent before retrying");
   }
-  if (!task.repo && (intent.kind === "enqueue" || intent.kind === "task-created" || intent.kind === "integrator-authorized")) {
+  if (!task.repo && (intent.kind === "enqueue"
+    || intent.kind === "merge-tail-requeue"
+    || intent.kind === "task-created"
+    || intent.kind === "integrator-authorized")) {
     return openRunRefusal("invalid-request", `Task ${task.id} cannot open a ${intent.kind} Run without a Repo`);
   }
   // Checked before the assignee, because an archived task is archived whoever
@@ -880,7 +888,9 @@ export const openRun = async (
   if (intent.kind === "task-created" && prior) {
     return openRunRefusal("conflict", `Task ${task.name} already has a Run`);
   }
-  if ((intent.kind === "retry" || intent.kind === "integrator-authorized" || sourceRetryIntent(intent)) && !prior) {
+  if ((intent.kind === "retry"
+    || intent.kind === "integrator-authorized"
+    || sourceRetryIntent(intent)) && !prior) {
     return openRunRefusal("conflict", `Task ${task.name} has no Run to continue`);
   }
   if (sourceRetryIntent(intent) && prior?.id !== intent.sourceRunId) {
@@ -895,6 +905,13 @@ export const openRun = async (
   let maxRunsPerTask: number;
   if (intent.kind === "integrator-authorized") {
     budgetGrants = Math.max(budgetGrants, runNumber - task.maxSessionsPerTask);
+    maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
+  } else if (intent.kind === "merge-tail-requeue") {
+    // A control-plane merge-tail refresh is not an agent failure. Carry the
+    // grants already earned by the task and refund exactly this one requeue;
+    // the running ceiling therefore follows the same derivation as every
+    // other budget grant without introducing a merge-tail-specific cap.
+    budgetGrants += intent.budgetGrant;
     maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
   } else if (intent.kind === "retry-after-completion") {
     budgetGrants = intent.sourceBudgetGrants + intent.budgetGrant;
@@ -1052,14 +1069,29 @@ const enqueueTaskRunInternal = async (
   taskId: string,
   now: Date,
   stopBypass: IntegratorStopBypass | null,
+  options: EnqueueTaskRunOptions = {},
 ): Promise<Run> => {
-  const opened = await openRun(tx, taskId, { kind: "enqueue", readyAt: now, stopBypass });
+  const opened = await openRun(tx, taskId, options.budgetGrant === 1
+    ? { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 }
+    : { kind: "enqueue", readyAt: now, stopBypass });
   if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
   return opened.run;
 };
 
-export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =>
-  enqueueTaskRunInternal(tx, taskId, now, null);
+/**
+ * The only enqueue option that may alter a task's budget. It is deliberately
+ * a literal one-shot grant rather than a caller-supplied number: merge-tail
+ * retries are platform compensation for a successful run, not agent failure,
+ * and every other enqueue/retry path must retain its existing budget rule.
+ */
+export type EnqueueTaskRunOptions = { budgetGrant?: never } | { budgetGrant: 1 };
+
+export const enqueueTaskRun = async (
+  tx: Tx,
+  taskId: string,
+  now = new Date(),
+  options: EnqueueTaskRunOptions = {},
+) => enqueueTaskRunInternal(tx, taskId, now, null, options);
 
 // The card body is one string serving two readers. Feishu is the binding one:
 // `cards.ts` caps the rendered body at 3 000 characters because Feishu rejects
@@ -1632,6 +1664,8 @@ type ChainSuccessorOptions = {
   sourceRunId?: string | null;
   chatId?: string | null;
   archivedAssignee?: "park" | "throw";
+  /** The Documentation -> Regression hop after a merge-tail repair. */
+  mergeTailRequeue?: boolean;
 };
 
 const parkStoppedIntegratorSuccessor = async (
@@ -1917,7 +1951,15 @@ const activateChainSuccessorInternal = async (
     const savepoint = "chain_layer_enqueue";
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
     try {
-      await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
+      await enqueueTaskRunInternal(
+        tx,
+        successor.id,
+        now,
+        stopBypass,
+        options.mergeTailRequeue && isRegressionVerificationOutputKind(successorStep?.outputKind)
+          ? { budgetGrant: 1 }
+          : {},
+      );
       if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
     } catch (error: unknown) {
       if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
@@ -2088,6 +2130,7 @@ export const advanceTemplateTask = async (
   chatId: string | null,
   now = new Date(),
   expectedStatus?: TaskStatus,
+  options: Pick<ChainSuccessorOptions, "mergeTailRequeue"> = {},
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
@@ -2131,7 +2174,7 @@ export const advanceTemplateTask = async (
   } else {
     await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
   }
-  return activateChainSuccessor(tx, task, { sourceRunId, chatId }, now);
+  return activateChainSuccessor(tx, task, { sourceRunId, chatId, ...options }, now);
 };
 
 /**
