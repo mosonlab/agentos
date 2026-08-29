@@ -23,6 +23,7 @@ import {
   hasActiveRun,
   isLiveStatus,
   reactivationBlocked,
+  type TaskActivityInput,
   writeTask,
   type TaskWriteRefusal,
 } from "./task-write.js";
@@ -31,6 +32,14 @@ import { withoutUndefined } from "./without-undefined.js";
 export type TaskPatchRefusal = Refusal;
 
 export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
+
+export const taskStatusChangedActivity = (
+  previousStatus: TaskStatus,
+  status: TaskStatus,
+): TaskActivityInput => ({
+  actorType: "operator",
+  body: `Status changed: ${previousStatus} → ${status}`,
+});
 
 /** What the status write plans under the lock: a refusal this action owns, a
  *  replay of an already-decided gate, or the write itself. */
@@ -347,7 +356,7 @@ export const patchTask = async (
         return {
           update: updateData,
           activity: statusChanged
-            ? { actorType: "operator", body: `Status changed: ${locked.status} → ${body.status}` }
+            ? taskStatusChangedActivity(locked.status, body.status!)
             : null,
           value: { gate, previousStatus: locked.status },
         };

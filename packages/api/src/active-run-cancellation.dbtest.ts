@@ -5,6 +5,7 @@ import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@an
 
 import { suspendForInbox } from "./inbox.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
+import { acknowledgeCancellation, cancelRun } from "./run-cancel.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -89,14 +90,28 @@ test("every live provider status exposes one idempotent cancellation through hea
   for (const status of [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING]) {
     const seeded = await seed(status);
     const requestId = `cancel-${status.toLowerCase()}`;
-    const requested = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, { requestId, reason: `stop ${status}` });
-    assert.equal(requested.status, 200);
-    assert.equal(requested.body.cancellationState, "requested");
+    const requested = await cancelRun(db, seeded.run.id, {
+      requestId,
+      reason: `stop ${status}`,
+      parkTask: false,
+    });
+    assert.ok(!("message" in requested));
+    assert.equal(requested.cancellationState, "requested");
 
-    const duplicate = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, { requestId, reason: "ignored duplicate wording" });
-    assert.equal(duplicate.status, 200);
-    assert.equal(duplicate.body.requestId, requestId);
-    assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, { requestId: `${requestId}-other`, reason: "other" })).status, 409);
+    const duplicate = await cancelRun(db, seeded.run.id, {
+      requestId,
+      reason: "ignored duplicate wording",
+      parkTask: false,
+    });
+    assert.ok(!("message" in duplicate));
+    assert.equal(duplicate.requestId, requestId);
+    const conflict = await cancelRun(db, seeded.run.id, {
+      requestId: `${requestId}-other`,
+      reason: "other",
+      parkTask: false,
+    });
+    assert.ok("message" in conflict);
+    assert.equal(conflict.reason, "conflict");
 
     const lateEvents = await call("POST", `/runner/runs/${seeded.run.id}/events`, RUNNER, {
       runnerId: RUNNER_ID,
@@ -115,14 +130,15 @@ test("every live provider status exposes one idempotent cancellation through hea
     assert.equal(observed.body.cancellation.requestId, requestId);
     assert.equal(observed.body.cancellation.reason, `stop ${status}`);
 
-    const acknowledged = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
-      runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, requestId,
+    const acknowledged = await acknowledgeCancellation(db, seeded.run.id, {
+      runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken!, requestId,
     });
-    assert.equal(acknowledged.status, 200);
-    assert.equal(acknowledged.body.status, RunStatus.CANCELLED);
-    assert.equal((await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
-      runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, requestId,
-    })).status, 200);
+    assert.ok(!("message" in acknowledged));
+    assert.equal(acknowledged.status, RunStatus.CANCELLED);
+    const acknowledgementReplay = await acknowledgeCancellation(db, seeded.run.id, {
+      runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken!, requestId,
+    });
+    assert.ok(!("message" in acknowledgementReplay));
 
     const [run, task, successor, runs] = await Promise.all([
       db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
@@ -167,49 +183,66 @@ test("mechanical merge Runs refuse cancellation before recording an intent", asy
   } });
   await db.task.update({ where: { id: seeded.task.id }, data: { templateId: template.id, templateStepId: step.id } });
 
-  const response = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+  const response = await cancelRun(db, seeded.run.id, {
     requestId: "cancel-mechanical",
     reason: "must be refused",
+    parkTask: false,
   });
-  assert.equal(response.status, 409);
-  assert.match(response.body.error, /Mechanical merge Runs cannot be cancelled/u);
+  assert.ok("message" in response);
+  assert.match(response.message, /Mechanical merge Runs cannot be cancelled/u);
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(run.cancelRequestId, null);
   assert.equal(run.cancelRequestedAt, null);
+
+  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, RUNNER, {
+    requestId: "cancel-mechanical",
+    reason: "runner lacks operator authority",
+  })).status, 403);
+  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId: "cancel-mechanical",
+    reason: "map module conflict",
+  })).status, 409);
 
   await db.run.update({ where: { id: seeded.run.id }, data: {
     cancelRequestId: "legacy-mechanical-cancel",
     cancelReason: "persisted before upgrade",
     cancelRequestedAt: new Date(),
   } });
-  const replay = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+  const replay = await cancelRun(db, seeded.run.id, {
     requestId: "legacy-mechanical-cancel",
     reason: "same request replay",
+    parkTask: false,
   });
-  assert.equal(replay.status, 200);
-  assert.equal(replay.body.cancellationState, "requested");
-  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+  assert.ok(!("message" in replay));
+  assert.equal(replay.cancellationState, "requested");
+  const replayConflict = await cancelRun(db, seeded.run.id, {
     requestId: "different-mechanical-cancel",
     reason: "must conflict",
-  })).status, 409);
+    parkTask: false,
+  });
+  assert.ok("message" in replayConflict);
+  assert.equal(replayConflict.reason, "conflict");
 });
 
 test("cancellation acknowledgement persists a provisioning workspace before terminalizing", async () => {
   const seeded = await seed(RunStatus.PROVISIONING);
   await db.run.update({ where: { id: seeded.run.id }, data: { workspacePath: null, branch: null, baseSha: null } });
   const requestId = "cancel-with-workspace";
-  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+  const requested = await cancelRun(db, seeded.run.id, {
     requestId,
     reason: "retain provisioning evidence",
-  })).status, 200);
-  assert.equal((await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+    parkTask: false,
+  });
+  assert.ok(!("message" in requested));
+  const acknowledged = await acknowledgeCancellation(db, seeded.run.id, {
     runnerId: RUNNER_ID,
-    fencingToken: seeded.run.fencingToken,
+    fencingToken: seeded.run.fencingToken!,
     requestId,
     workspacePath: "/scratch/provisioning-evidence",
     branch: "codex/provisioning-evidence",
     baseSha: "a".repeat(40),
-  })).status, 200);
+  });
+  assert.ok(!("message" in acknowledged));
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(run.status, RunStatus.CANCELLED);
   assert.equal(run.workspacePath, "/scratch/provisioning-evidence");
@@ -270,18 +303,18 @@ test("start and cancellation acknowledgement serialize to one Run and Session ou
     await reached;
     let cancellationSettled = false;
     const cancellation = (async () => {
-      const requested = await createApp(db).request(`/runs/${seeded.run.id}/cancel`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ requestId: "cancel-start-race", reason: "operator stop" }),
+      const requested = await cancelRun(db, seeded.run.id, {
+        requestId: "cancel-start-race",
+        reason: "operator stop",
+        parkTask: false,
       });
-      assert.equal(requested.status, 200, await requested.text());
-      const acknowledged = await createApp(db).request(`/runner/runs/${seeded.run.id}/cancel/acknowledge`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, requestId: "cancel-start-race" }),
+      assert.ok(!("message" in requested));
+      const acknowledged = await acknowledgeCancellation(db, seeded.run.id, {
+        runnerId: RUNNER_ID,
+        fencingToken: seeded.run.fencingToken!,
+        requestId: "cancel-start-race",
       });
-      assert.equal(acknowledged.status, 200, await acknowledged.text());
+      assert.ok(!("message" in acknowledged));
       cancellationSettled = true;
     })();
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
@@ -305,43 +338,43 @@ test("start and cancellation acknowledgement serialize to one Run and Session ou
 
 test("only an unclaimed QUEUED cancellation settles without runner acknowledgement", async () => {
   const queued = await seed(RunStatus.QUEUED);
-  const queuedResponse = await call("POST", `/runs/${queued.run.id}/cancel`, OPERATOR, {
-    requestId: "cancel-immediate-queued", reason: "operator stop",
+  const queuedResponse = await cancelRun(db, queued.run.id, {
+    requestId: "cancel-immediate-queued", reason: "operator stop", parkTask: false,
   });
-  assert.equal(queuedResponse.status, 200);
-  assert.equal(queuedResponse.body.cancellationState, "acknowledged");
+  assert.ok(!("message" in queuedResponse));
+  assert.equal(queuedResponse.cancellationState, "acknowledged");
   assert.ok((await db.run.findUniqueOrThrow({ where: { id: queued.run.id } })).cancelAcknowledgedAt);
 
   const waiting = await seed(RunStatus.WAITING_INBOX);
   const requestId = "cancel-waiting-provider-cleanup";
-  const waitingResponse = await call("POST", `/runs/${waiting.run.id}/cancel`, OPERATOR, {
-    requestId, reason: "operator stop",
+  const waitingResponse = await cancelRun(db, waiting.run.id, {
+    requestId, reason: "operator stop", parkTask: false,
   });
-  assert.equal(waitingResponse.status, 200);
-  assert.equal(waitingResponse.body.cancellationState, "requested");
+  assert.ok(!("message" in waitingResponse));
+  assert.equal(waitingResponse.cancellationState, "requested");
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: waiting.run.id } })).status, RunStatus.WAITING_INBOX);
-  const acknowledged = await call("POST", `/runner/runs/${waiting.run.id}/cancel/acknowledge`, RUNNER, {
-    runnerId: RUNNER_ID, fencingToken: waiting.run.fencingToken, requestId,
+  const acknowledged = await acknowledgeCancellation(db, waiting.run.id, {
+    runnerId: RUNNER_ID, fencingToken: waiting.run.fencingToken!, requestId,
   });
-  assert.equal(acknowledged.status, 200);
+  assert.ok(!("message" in acknowledged));
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: waiting.run.id } })).status, RunStatus.CANCELLED);
 });
 
 test("stop-and-park records cancellation intent and keeps the Task in Backlog after acknowledgement", async () => {
   const seeded = await seed(RunStatus.RUNNING);
   const requestId = "cancel-and-park";
-  const requested = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+  const requested = await cancelRun(db, seeded.run.id, {
     requestId, reason: "pause implementation", parkTask: true,
   });
-  assert.equal(requested.status, 200);
-  assert.equal(requested.body.cancellationState, "requested");
+  assert.ok(!("message" in requested));
+  assert.equal(requested.cancellationState, "requested");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.BACKLOG);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.successor.id } })).status, TaskStatus.TODO);
 
-  const acknowledged = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
-    runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, requestId,
+  const acknowledged = await acknowledgeCancellation(db, seeded.run.id, {
+    runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken!, requestId,
   });
-  assert.equal(acknowledged.status, 200);
+  assert.ok(!("message" in acknowledged));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.BACKLOG);
   assert.equal(await db.run.count({ where: { taskId: seeded.task.id, status: { in: [
     RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX,
@@ -398,16 +431,16 @@ test("stop-and-park takes the full-chain mutex while a sibling row is locked", {
   try {
     await siblingLockHeld;
     let cancellationSettled = false;
-    const cancellation = call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    const cancellation = cancelRun(instrumentedCancellationClient, seeded.run.id, {
       requestId: "cancel-chain-mutex",
       reason: "pause chained implementation",
       parkTask: true,
-    }, instrumentedCancellationClient).finally(() => { cancellationSettled = true; });
+    }).finally(() => { cancellationSettled = true; });
     assert.equal(await observedLockScope, true);
     assert.equal(cancellationSettled, false);
     releaseSibling();
     const response = await cancellation;
-    assert.equal(response.status, 200);
+    assert.ok(!("message" in response));
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.BACKLOG);
   } finally {
     releaseSibling();
@@ -446,16 +479,23 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
     baseSha: null,
   } });
   assert.equal(await reconcileDatabaseRuns(db, now), 1);
-  const response = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+  const replay = await cancelRun(db, seeded.run.id, {
+    requestId: "cancel-reconciled-first",
+    reason: "replayed after runner loss",
+    parkTask: false,
+  });
+  assert.ok(!("message" in replay));
+  assert.equal(replay.cancellationState, "unconfirmed");
+  const response = await acknowledgeCancellation(db, seeded.run.id, {
     runnerId: RUNNER_ID,
-    fencingToken: seeded.run.fencingToken,
+    fencingToken: seeded.run.fencingToken!,
     requestId: "cancel-reconciled-first",
     workspacePath: "/scratch/reconciled-first",
     branch: "codex/reconciled-first",
     baseSha: "b".repeat(40),
     worktreeContainmentViolations: ["/operator/worktrees/reconciled-first"],
   });
-  assert.equal(response.status, 200);
+  assert.ok(!("message" in response));
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(run.status, RunStatus.CANCELLED);
   assert.ok(run.cancelAcknowledgedAt);
@@ -464,16 +504,16 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
   assert.equal(run.baseSha, "b".repeat(40));
   assert.deepEqual(run.worktreeContainmentViolations, ["/operator/worktrees/reconciled-first"]);
 
-  const conflicting = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+  const conflicting = await acknowledgeCancellation(db, seeded.run.id, {
     runnerId: RUNNER_ID,
-    fencingToken: seeded.run.fencingToken,
+    fencingToken: seeded.run.fencingToken!,
     requestId: "cancel-reconciled-first",
     workspacePath: "/scratch/must-not-overwrite",
     branch: "codex/must-not-overwrite",
     baseSha: "c".repeat(40),
     worktreeContainmentViolations: ["/operator/worktrees/must-not-overwrite"],
   });
-  assert.equal(conflicting.status, 200);
+  assert.ok(!("message" in conflicting));
   const preserved = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(preserved.workspacePath, "/scratch/reconciled-first");
   assert.equal(preserved.branch, "codex/reconciled-first");
@@ -484,18 +524,19 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
 test("cancellation acknowledgement persists containment evidence without changing cancellation", async () => {
   const seeded = await seed(RunStatus.RUNNING);
   const requestId = "cancel-with-containment";
-  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
-    requestId, reason: "stop after worktree escape",
-  })).status, 200);
+  const requested = await cancelRun(db, seeded.run.id, {
+    requestId, reason: "stop after worktree escape", parkTask: false,
+  });
+  assert.ok(!("message" in requested));
   const violations = ["/operator/worktrees/one", "/operator/worktrees/two"];
-  const acknowledged = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+  const acknowledged = await acknowledgeCancellation(db, seeded.run.id, {
     runnerId: RUNNER_ID,
-    fencingToken: seeded.run.fencingToken,
+    fencingToken: seeded.run.fencingToken!,
     requestId,
     worktreeContainmentViolations: violations,
   });
-  assert.equal(acknowledged.status, 200);
-  assert.equal(acknowledged.body.status, RunStatus.CANCELLED);
+  assert.ok(!("message" in acknowledged));
+  assert.equal(acknowledged.status, RunStatus.CANCELLED);
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(run.status, RunStatus.CANCELLED);
   assert.deepEqual(run.worktreeContainmentViolations, violations);
@@ -536,12 +577,13 @@ test("reconciliation re-reads cancellation after its stale candidate snapshot", 
   try {
     const reconciliation = reconcileDatabaseRuns(reconcileDb, now);
     await reached;
-    const cancellation = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    const cancellation = await cancelRun(db, seeded.run.id, {
       requestId: "cancel-after-snapshot",
       reason: "operator stop",
+      parkTask: false,
     });
-    assert.equal(cancellation.status, 200);
-    assert.equal(cancellation.body.cancellationState, "requested");
+    assert.ok(!("message" in cancellation));
+    assert.equal(cancellation.cancellationState, "requested");
     releaseSnapshot();
     assert.equal(await reconciliation, 1);
   } finally {
@@ -562,11 +604,11 @@ test("a cancellation intent fences out a late Inbox suspension", async () => {
     where: { id: seeded.session!.id },
     data: { providerConversationId: "conversation-before-cancel" },
   });
-  const requested = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
-    requestId: "cancel-before-inbox", reason: "stop before question",
+  const requested = await cancelRun(db, seeded.run.id, {
+    requestId: "cancel-before-inbox", reason: "stop before question", parkTask: false,
   });
-  assert.equal(requested.status, 200);
-  assert.equal(requested.body.cancellationState, "requested");
+  assert.ok(!("message" in requested));
+  assert.equal(requested.cancellationState, "requested");
   await assert.rejects(
     suspendForInbox(db, {
       runId: seeded.run.id,
@@ -590,11 +632,11 @@ test("a completion that commits first remains authoritative", async () => {
     retryable: false, pushStatus: "NOT_REQUESTED", cleanupStatus: "RETAINED", workspaceRetained: true,
   });
   assert.equal(completed.status, 200);
-  const cancellation = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
-    requestId: "cancel-too-late", reason: "too late",
+  const cancellation = await cancelRun(db, seeded.run.id, {
+    requestId: "cancel-too-late", reason: "too late", parkTask: false,
   });
-  assert.equal(cancellation.status, 200);
-  assert.equal(cancellation.body.cancellationState, "terminal");
+  assert.ok(!("message" in cancellation));
+  assert.equal(cancellation.cancellationState, "terminal");
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(run.status, RunStatus.FAILED);
   assert.equal(run.cancelRequestId, null);
