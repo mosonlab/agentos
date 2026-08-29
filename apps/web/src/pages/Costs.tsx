@@ -7,17 +7,23 @@ import { useProjectScope } from "../lib/project";
 import type { CostsReport } from "../lib/types";
 import { IconRefresh } from "../components/icons";
 import {
-  HINT, METRICS, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP,
+  HINT, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP,
   STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, GapNotice, Metric, Page, Segmented,
+  Card, EmptyState, ErrorNotice, GapNotice, Page, Segmented,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
 /** The windows `GET /projects/:projectId/costs` accepts. The control plane
- *  refuses anything else, so the page offers exactly these. */
-export const COSTS_RANGES = [7, 30, 90] as const;
+ *  refuses anything else, so the page offers exactly these. One day is the
+ *  operator's "what am I spending right now" window and is labelled Today. */
+export const COSTS_RANGES = [1, 7, 30, 90] as const;
 export type CostsRange = typeof COSTS_RANGES[number];
+
+/** The timezone every window bound and daily bucket is computed in. The control
+ *  plane has no default: a day boundary the operator did not pick would file
+ *  their evening's spend under the wrong date, so the browser states its own. */
+export const browserTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /** A cost dashboard is a page an operator returns to; the window they chose last
  *  time is the one they meant. */
@@ -208,19 +214,95 @@ export const ChartLegend = ({ order, colors }: {
   );
 };
 
+/* ---------------------------------------------------------------- by model */
+
+/** A percentage as one decimal, or an em dash when the figure does not exist.
+ *  A missing rate is not a zero rate, and rendering it as `0%` would claim a
+ *  measurement nobody took. */
+export const percent = (value: number | null): string => (value === null ? "—" : `${value.toFixed(1)}%`);
+
+/** Share of the window's total spend, computed from the wire amounts rather than
+ *  from the rounded strings the table shows. `null` when there is no total to
+ *  take a share of. */
+export const modelShare = (usd: string, totalUsd: string): number | null => {
+  const total = Number(totalUsd);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  return (Number(usd) / total) * 100;
+};
+
+/** Spend a run did not buy, as a share of that agent's spend. `null` when the
+ *  agent has no priced spend at all: a rate over nothing is not zero waste. */
+export const wasteShare = (entry: CostsReport["byAgent"][number]): number | null =>
+  modelShare(entry.wastedUsd, entry.usd);
+
+/** One horizontal bar over the model keys. It answers "what is this window
+ *  mostly?" before the reader parses a single number, which is the one question
+ *  a table of six models answers slowly. */
+export const ModelBar = ({ byModel, totalUsd, colors }: {
+  byModel: CostsReport["byModel"];
+  totalUsd: string;
+  colors: (model: string) => string;
+}): ReactNode => {
+  const t = useT();
+  const segments = byModel
+    .map((entry) => ({ model: entry.model, usd: entry.usd, share: modelShare(entry.usd, totalUsd) }))
+    .filter((entry): entry is { model: string; usd: string; share: number } =>
+      entry.share !== null && entry.share > 0);
+  if (segments.length === 0) return null;
+  return (
+    <div
+      className="mb-[14px] flex h-[10px] w-full overflow-hidden rounded-full bg-secondary"
+      role="img"
+      aria-label={t("costs.byModel.aria", { n: byModel.length, amount: usageMoney(totalUsd) })}
+    >
+      {segments.map((segment) => (
+        <span
+          key={segment.model}
+          className="h-full"
+          style={{ width: `${segment.share}%`, background: colors(segment.model) }}
+          title={t("costs.byModel.tooltip", {
+            model: segment.model,
+            amount: usageMoney(segment.usd),
+            share: percent(segment.share),
+          })}
+        />
+      ))}
+    </div>
+  );
+};
+
 /* -------------------------------------------------------------------- page */
 
 const parseRange = (value: string): CostsRange =>
   COSTS_RANGES.find((days) => String(days) === value) ?? 30;
+
+/** The dashboard proper: the chart and the runs behind it on the left, the two
+ *  breakdowns that explain them on the right. One column below 1100px, where
+ *  two would leave neither wide enough to read. */
+export const COSTS_COLUMNS = "grid grid-cols-[minmax(0,1fr)] items-start gap-[16px] [@media(min-width:1100px)]:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]";
+/** One row rather than a wall of tiles: four figures that are read together and
+ *  compared against each other, not four independent headlines. */
+export const COSTS_SUMMARY = "grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-[18px] rounded-xl border border-border bg-card px-[20px] py-[14px]";
+
+const SummaryFigure = ({ label, value }: { label: string; value: ReactNode }): ReactNode => (
+  <div>
+    <div className="text-[12px] text-muted-foreground">{label}</div>
+    <div className="mt-[5px] text-[15px] font-bold">{value}</div>
+  </div>
+);
 
 export const CostsPage = (): ReactNode => {
   const { projectId, project } = useProjectScope();
   const [stored, setStored] = useLocalStorage(RANGE_KEY, "30");
   const days = parseRange(stored);
   const t = useT();
+  // The control plane computes every day boundary in the timezone it is given
+  // and refuses the request without one, so the browser's zone travels with the
+  // window rather than being guessed at the other end.
+  const timeZone = browserTimeZone();
   const path = projectId === ""
     ? null
-    : `/projects/${encodeURIComponent(projectId)}/costs?days=${days}`;
+    : `/projects/${encodeURIComponent(projectId)}/costs?days=${days}&tz=${encodeURIComponent(timeZone)}`;
   // Settled spend over whole days does not move at the board's cadence, and a
   // 30-day aggregate is not free to compute. A minute is well inside the time an
   // operator would take to notice a run finished.
@@ -235,6 +317,13 @@ export const CostsPage = (): ReactNode => {
     const assigned = new Map(order.map((agent, rank) => [agent, seriesColor(rank)]));
     return (agent: string): string => assigned.get(agent) ?? "var(--series-other)";
   }, [order]);
+  /* The model breakdown is its own categorical dimension, so it gets its own
+   * assignment over the same palette: a model and an agent that happen to share
+   * a rank are two different facts, in two different cards. */
+  const modelColors = useMemo(() => {
+    const assigned = new Map((report?.byModel ?? []).map((entry, rank) => [entry.model, seriesColor(rank)]));
+    return (model: string): string => assigned.get(model) ?? "var(--series-other)";
+  }, [report]);
   const daily = report?.daily ?? [];
 
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
@@ -250,7 +339,10 @@ export const CostsPage = (): ReactNode => {
         </div>
         <div className={PAGE_ACTIONS}>
           <Segmented
-            options={COSTS_RANGES.map((value) => ({ value: String(value), label: t("costs.range", { n: value }) }))}
+            options={COSTS_RANGES.map((value) => ({
+              value: String(value),
+              label: value === 1 ? t("costs.range.today") : t("costs.range", { n: value }),
+            }))}
             value={String(days)}
             onChange={setStored}
           />
@@ -268,13 +360,17 @@ export const CostsPage = (): ReactNode => {
 
         {report === null ? null : (
           <>
-            <div className={METRICS}>
-              <Metric label={t("costs.metric.total")} value={usageMoney(report.totalUsd)} />
-              <Metric label={t("costs.metric.runs")} value={report.runCount} />
-              <Metric
+            {/* Wasted spend sits beside the total deliberately: the pair is the
+                page's headline, and a total nobody can compare against the part
+                of it that bought nothing is a number without a verdict. */}
+            <div className={COSTS_SUMMARY}>
+              <SummaryFigure label={t("costs.metric.total")} value={usageMoney(report.totalUsd)} />
+              <SummaryFigure label={t("costs.metric.runs")} value={report.runCount} />
+              <SummaryFigure
                 label={t("costs.metric.avg")}
                 value={report.runCount === report.costUnavailableRuns ? "—" : usageMoney(report.avgUsd)}
               />
+              <SummaryFigure label={t("costs.metric.wasted")} value={usageMoney(report.wastedUsd)} />
             </div>
             {/* Neither number is decoration. An estimated share says part of the
                 total is the control plane's own pricing, and an unavailable
@@ -289,95 +385,152 @@ export const CostsPage = (): ReactNode => {
                 : t("costs.hint.complete")}
             </div>
 
-            <Card title={t("costs.chart.title")}>
-              <DailySpendChart daily={daily} order={order} colors={colors} />
-              {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
-            </Card>
+            <div className={COSTS_COLUMNS}>
+              <div className={STACK}>
+                <Card title={t("costs.chart.title")}>
+                  <DailySpendChart daily={daily} order={order} colors={colors} />
+                  {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
+                </Card>
 
-            <Card title={t("costs.byAgent.title")} flush>
-              {report.byAgent.length === 0
-                ? <EmptyState>{t("costs.byAgent.empty")}</EmptyState>
-                : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>{t("costs.byAgent.agent")}</TableHead>
-                          <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.spend")}</TableHead>
-                          <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.runs")}</TableHead>
-                          <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.avg")}</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {report.byAgent.map((entry) => (
-                          <TableRow key={entry.agent}>
-                            <TableCell className={TABLE_NAME}>
-                              <span className="inline-flex items-center gap-[7px]">
-                                <span className="size-[9px] rounded-[2px]" style={{ background: colors(entry.agent) }} aria-hidden="true" />
-                                {entry.agent}
-                              </span>
-                              {entry.costUnavailableRuns > 0
-                                ? <span className={TABLE_SUB}>{t("costs.byAgent.unavailable", { n: entry.costUnavailableRuns })}</span>
-                                : null}
-                            </TableCell>
-                            <TableCell className={TABLE_TIGHT}>
-                              {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.usd)}
-                            </TableCell>
-                            <TableCell className={TABLE_TIGHT}>{entry.runs}</TableCell>
-                            <TableCell className={TABLE_TIGHT}>
-                              {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.avgUsd)}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-            </Card>
+                <Card title={t("costs.topRuns.title")} flush>
+                  {report.topRuns.length === 0
+                    ? <EmptyState>{t("costs.topRuns.empty")}</EmptyState>
+                    : (
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>{t("costs.topRuns.task")}</TableHead>
+                              <TableHead>{t("costs.topRuns.agent")}</TableHead>
+                              <TableHead>{t("costs.topRuns.model")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.started")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.cost")}</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {report.topRuns.map((run) => (
+                              <TableRow key={run.runId}>
+                                <TableCell className={TABLE_NAME}>
+                                  {/* Task names run long enough to push the four
+                                      columns after them past the table's width. The
+                                      bound goes on a block inside the cell, not the
+                                      cell: an auto-layout table treats a `<td>`
+                                      max-width as advice and widens the column
+                                      anyway. `TableCell` is `whitespace-nowrap`, so
+                                      the block has to re-enable wrapping or the
+                                      bound clips nothing. */}
+                                  <div className="max-w-[420px] whitespace-normal">
+                                    {run.taskName ?? t("costs.topRuns.noTask")}
+                                    <span className={TABLE_SUB}>{run.runId}</span>
+                                  </div>
+                                </TableCell>
+                                <TableCell>{run.agent}</TableCell>
+                                <TableCell>{run.model}</TableCell>
+                                <TableCell className={TABLE_TIGHT}>{formatDateTime(run.startedAt)}</TableCell>
+                                <TableCell className={TABLE_TIGHT}>
+                                  {run.estimated
+                                    ? formatT("format.usageCost.estimated", { amount: usageMoney(run.usd) })
+                                    : usageMoney(run.usd)}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      )}
+                </Card>
+              </div>
+              <div className={STACK}>
+                <Card title={t("costs.byAgent.title")} flush>
+                  {report.byAgent.length === 0
+                    ? <EmptyState>{t("costs.byAgent.empty")}</EmptyState>
+                    : (
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>{t("costs.byAgent.agent")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.spend")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.runs")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.avg")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.cache")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.waste")}</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {report.byAgent.map((entry) => (
+                              <TableRow key={entry.agent}>
+                                <TableCell className={TABLE_NAME}>
+                                  <span className="inline-flex items-center gap-[7px]">
+                                    <span className="size-[9px] rounded-[2px]" style={{ background: colors(entry.agent) }} aria-hidden="true" />
+                                    {entry.agent}
+                                  </span>
+                                  {entry.costUnavailableRuns > 0
+                                    ? <span className={TABLE_SUB}>{t("costs.byAgent.unavailable", { n: entry.costUnavailableRuns })}</span>
+                                    : null}
+                                </TableCell>
+                                <TableCell className={TABLE_TIGHT}>
+                                  {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.usd)}
+                                </TableCell>
+                                <TableCell className={TABLE_TIGHT}>{entry.runs}</TableCell>
+                                <TableCell className={TABLE_TIGHT}>
+                                  {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.avgUsd)}
+                                </TableCell>
+                                {/* An em dash, never 0%: a cache nobody measured
+                                    and a cache nobody hit look nothing alike,
+                                    and neither does an agent with no priced
+                                    spend to have wasted. */}
+                                <TableCell className={TABLE_TIGHT}>{percent(entry.cachePct)}</TableCell>
+                                <TableCell className={TABLE_TIGHT}>{percent(wasteShare(entry))}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      )}
+                </Card>
 
-            <Card title={t("costs.topRuns.title")} flush>
-              {report.topRuns.length === 0
-                ? <EmptyState>{t("costs.topRuns.empty")}</EmptyState>
-                : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>{t("costs.topRuns.task")}</TableHead>
-                          <TableHead>{t("costs.topRuns.agent")}</TableHead>
-                          <TableHead>{t("costs.topRuns.model")}</TableHead>
-                          <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.started")}</TableHead>
-                          <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.cost")}</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {report.topRuns.map((run) => (
-                          <TableRow key={run.runId}>
-                            <TableCell className={TABLE_NAME}>
-                              {/* Task names run long enough to push the four
-                                  columns after them past the table's width. The
-                                  bound goes on a block inside the cell, not the
-                                  cell: an auto-layout table treats a `<td>`
-                                  max-width as advice and widens the column
-                                  anyway. `TableCell` is `whitespace-nowrap`, so
-                                  the block has to re-enable wrapping or the
-                                  bound clips nothing. */}
-                              <div className="max-w-[420px] whitespace-normal">
-                                {run.taskName ?? t("costs.topRuns.noTask")}
-                                <span className={TABLE_SUB}>{run.runId}</span>
-                              </div>
-                            </TableCell>
-                            <TableCell>{run.agent}</TableCell>
-                            <TableCell>{run.model}</TableCell>
-                            <TableCell className={TABLE_TIGHT}>{formatDateTime(run.startedAt)}</TableCell>
-                            <TableCell className={TABLE_TIGHT}>
-                              {run.estimated
-                                ? formatT("format.usageCost.estimated", { amount: usageMoney(run.usd) })
-                                : usageMoney(run.usd)}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-            </Card>
+                <Card title={t("costs.byModel.title")}>
+                  {report.byModel.length === 0
+                    ? <EmptyState>{t("costs.byModel.empty")}</EmptyState>
+                    : (
+                        <>
+                          <ModelBar byModel={report.byModel} totalUsd={report.totalUsd} colors={modelColors} />
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>{t("costs.byModel.model")}</TableHead>
+                                <TableHead className={TABLE_TIGHT}>{t("costs.byModel.spend")}</TableHead>
+                                <TableHead className={TABLE_TIGHT}>{t("costs.byModel.share")}</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {report.byModel.map((entry) => (
+                                <TableRow key={entry.model}>
+                                  {/* The model string is the wire value, provider prefix and
+                                      effort suffix included: two entries that differ only by
+                                      effort are two different prices, and shortening them here
+                                      would merge them on screen. */}
+                                  <TableCell className={TABLE_NAME}>
+                                    <div className="max-w-[260px] whitespace-normal [overflow-wrap:anywhere]">
+                                      <span className="inline-flex items-center gap-[7px]">
+                                        <span className="size-[9px] rounded-[2px]" style={{ background: modelColors(entry.model) }} aria-hidden="true" />
+                                        {entry.model}
+                                      </span>
+                                      {entry.costUnavailableRuns > 0
+                                        ? <span className={TABLE_SUB}>{t("costs.byAgent.unavailable", { n: entry.costUnavailableRuns })}</span>
+                                        : null}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className={TABLE_TIGHT}>
+                                    {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.usd)}
+                                  </TableCell>
+                                  <TableCell className={TABLE_TIGHT}>{percent(modelShare(entry.usd, report.totalUsd))}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </>
+                      )}
+                </Card>
+              </div>
+            </div>
           </>
         )}
       </div>
