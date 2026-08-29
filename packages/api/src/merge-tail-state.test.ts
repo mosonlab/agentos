@@ -151,14 +151,16 @@ test("reopenAfterHeadAdoption takes the declared BLOCKED_DOWNSTREAM reopen edge"
 });
 
 test("reopenAfterHeadAdoption skips a stale full-snapshot CAS without touching Tasks", async () => {
-  const observed = stateTx(MergeRecoveryStatus.FAILED, "head adoption failed", 0);
+  const observed = stateTx(MergeRecoveryStatus.BLOCKED_DOWNSTREAM, "head adoption failed", 0);
 
   assert.equal(await reopenAfterHeadAdoption(observed.tx, {
     recovery,
     expectedFailureReason: "head adoption failed",
   }), false);
 
-  assert.equal(observed.recoveryUpdates.length, 0);
+  assert.equal(observed.recoveryUpdates.length, 1);
+  assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.REPAIRING);
+  assert.equal(observed.recoveryUpdates[0]?.where.AND[1].failureReason, "head adoption failed");
   assert.deepEqual(observed.taskUpdates, []);
   assert.deepEqual(observed.outputDeletes, []);
   assert.deepEqual(observed.activities, []);

@@ -320,24 +320,13 @@ const readReadiness = async (
     return { claimed: false, input: { ...context, stage: "regression-pending" } };
   }
 
-  let recovery: RecoveryContext | null = null;
-  let recoveryStatus: MergeRecoveryStatus | null = null;
-  try {
-    const recoveryRead = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
-    recovery = recoveryRead?.context ?? null;
-    recoveryStatus = recoveryRead?.status ?? null;
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      claimed: false,
-      input: { ...context, stage: "read-failed", failure: { kind: "unexpected", message } },
-    };
-  }
-
   const claim = await claimReadinessStep(db, readiness.id, now);
   if (!claim) return { claimed: false, input: { ...context, stage: "claim-lost" } };
 
+  let recovery: RecoveryContext | null = null;
   try {
+    const recoveryRead = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
+    recovery = recoveryRead?.context ?? null;
     const claimedRead = (input: ReadinessInput): ClaimedReadiness => ({
       claimed: true,
       readiness,
@@ -346,7 +335,7 @@ const readReadiness = async (
       claim,
       input,
     });
-    if (recovery && recoveryStatus === MergeRecoveryStatus.REPAIRING) {
+    if (recovery && recoveryRead?.status === MergeRecoveryStatus.REPAIRING) {
       const transition = await db.$transaction((tx) => claim.settle(tx, {
         kind: "keep",
         apply: async (client) => awaitAuthorization(client, recovery!),

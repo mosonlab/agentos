@@ -392,6 +392,39 @@ test("an unexpired readiness claim prevents the recovery fallback transition", a
   assert.equal(readiness.readinessClaimExpiresAt?.getTime(), expiresAt.getTime());
 });
 
+test("a recovery-context read failure after claim is persisted as a readiness stop", async () => {
+  const seeded = await seedIntegratorChain(db, {
+    label: "recovery-context-read-after-claim",
+    shape: "canonical-compound-readiness",
+  });
+  await db.task.update({ where: { id: seeded.readinessTask!.id }, data: { status: TaskStatus.TODO } });
+  const recoveryDelegate = new Proxy(db.mergeRecoveryAttempt, {
+    get(target, property, receiver) {
+      if (property === "findFirst") {
+        return async () => { throw new Error("recovery-context-read-failed"); };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const failingDb = new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === "mergeRecoveryAttempt") return recoveryDelegate;
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as PrismaClient;
+
+  const tick = await readinessTick(failingDb, null, new Date(), 5, releaseChainLease, runWithMergeLease);
+
+  assert.deepEqual(tick, { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } });
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.equal(readiness.readinessClaimToken, null);
+  assert.equal(readiness.readinessClaimExpiresAt, null);
+  assert.equal(readiness.failureReason, "readiness evaluation failed: recovery-context-read-failed");
+});
+
 test("fresh server-owned readiness authorization alone activates the recovery merge executor", async () => {
   const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-activation");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
