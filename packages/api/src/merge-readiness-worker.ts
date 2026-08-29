@@ -61,6 +61,8 @@ type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REG
 
 const LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE =
   "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
+const CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE =
+  "readiness evaluation failed: Recovery authorization could not adopt the verified regression head";
 
 export const reopenRecoveryHeadAdoptionFailures = async (
   db: PrismaClient,
@@ -69,7 +71,7 @@ export const reopenRecoveryHeadAdoptionFailures = async (
   const candidates = await db.mergeRecoveryAttempt.findMany({
     where: {
       status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      failureReason: LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE,
+      failureReason: { in: [LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE, CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE] },
     },
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     take: limit,
@@ -89,11 +91,20 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         latestRecordedStop(tx, candidate.integratorTaskId),
       ]);
       const verdict = parseRegressionVerdict(output?.body ?? "", output?.kind ?? "");
+      const context = recoveryContext(attempt);
+      const baseBindingMatchesFailure = attempt?.failureReason === LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
+        ? verdict.status === "ok" && verdict.verdict.baseHeadSha === attempt.currentBaseSha
+        : attempt?.failureReason === CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE
+          ? verdict.status === "ok" && verdict.verdict.baseHeadSha !== attempt.currentBaseSha
+          : false;
       if (!attempt
+        || !context
         || attempt.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
-        || attempt.failureReason !== LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
+        || (attempt.failureReason !== LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
+          && attempt.failureReason !== CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE)
+        || attempt.readinessTaskId !== candidate.readinessTaskId
+        || attempt.regressionTaskId !== candidate.regressionTaskId
         || attempt.recoveryRunId !== candidate.recoveryRunId
-        || attempt.currentBaseSha === null
         || regression?.status !== TaskStatus.REVIEW
         || readiness?.status !== TaskStatus.REVIEW
         || integrator?.status !== TaskStatus.REVIEW
@@ -104,14 +115,27 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         || output?.runId !== run.id
         || output?.commitSha !== verdict.verdict.headSha
         || run.headSha !== verdict.verdict.headSha
-        || verdict.verdict.baseHeadSha !== attempt.currentBaseSha
-        || stop?.stopId !== attempt.sourceStopId) return false;
+        || !baseBindingMatchesFailure
+        || stop?.stopId !== attempt.sourceStopId
+        || stop.sourceRunId !== context.sourceRunId) return false;
 
       const updated = await tx.mergeRecoveryAttempt.updateMany({
         where: {
           id: attempt.id,
           status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-          failureReason: LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE,
+          failureReason: attempt.failureReason,
+          boundSourceRunId: context.sourceRunId,
+          authorizationActivityId: context.authorizationActivityId,
+          recoveryRunId: context.recoveryRunId,
+          readinessTaskId: context.readinessTaskId,
+          regressionTaskId: context.regressionTaskId,
+          repository: context.repository,
+          prNumber: context.prNumber,
+          targetBranch: context.targetBranch,
+          authorizedHeadSha: context.authorizedHeadSha,
+          authorizedBaseSha: context.authorizedBaseSha,
+          observedBaseSha: context.observedBaseSha,
+          currentBaseSha: context.currentBaseSha,
         },
         data: { status: MergeRecoveryStatus.REPAIRING, failureReason: null, endedAt: null },
       });
@@ -663,15 +687,20 @@ const applyReadinessDecision = async (
         // Recovery regression merges the current base before it proves the
         // candidate, so its gated head may legitimately replace the head that
         // first stopped on base drift. Adopt only the head re-read under the
-        // merge lease, and bind the CAS to this recovery run and exact base.
+        // merge lease. Bind the CAS to the pre-lease recovery snapshot, then
+        // adopt both exact evidence fields atomically.
         const adopted = await tx.mergeRecoveryAttempt.updateMany({
           where: {
             id: recovery.aggregateId,
             status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
             recoveryRunId: recovery.recoveryRunId,
-            currentBaseSha: leasedDecision.evidence.baseSha,
+            currentBaseSha: recovery.currentBaseSha,
+            authorizedHeadSha: recovery.authorizedHeadSha,
           },
-          data: { authorizedHeadSha: leasedDecision.evidence.headSha },
+          data: {
+            currentBaseSha: leasedDecision.evidence.baseSha,
+            authorizedHeadSha: leasedDecision.evidence.headSha,
+          },
         });
         if (adopted.count !== 1) {
           throw new Error("Recovery authorization could not adopt the verified regression head");
