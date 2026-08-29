@@ -67,6 +67,7 @@ import {
   type MergeRecoveryAttempt,
   loadAgentSources,
 } from "@anneal/db";
+import type { ChainStep as ChainStepContract } from "@anneal/db/board-contract";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -2637,7 +2638,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           ? { taskId: dispatchAfter.id, name: dispatchAfter.name, status: dispatchAfter.status }
           : null,
         mergeRecovery,
-      })),
+      } satisfies ChainStepContract<Date>)),
     });
   });
   app.post("/tasks/:taskId/chain/hold", async (context) => {

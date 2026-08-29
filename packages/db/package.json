@@ -18,6 +18,10 @@
       "types": "./src/model-routing.ts",
       "import": "./dist/model-routing.js"
     },
+    "./board-contract": {
+      "types": "./src/board-contract.ts",
+      "import": "./dist/board-contract.js"
+    },
     "./service-lock": {
       "types": "./src/service-maintenance-lock.ts",
       "import": "./dist/service-maintenance-lock.js"

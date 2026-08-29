@@ -162,7 +162,7 @@ export const ChainRow = ({
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
-  const blockedOn = step.blockedOn ?? null;
+  const blockedOn = step.blockedOn;
   const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
   const held = step.holdRefusal !== null;
   const showStart = step.startAction !== null || blockedOn !== null || held;

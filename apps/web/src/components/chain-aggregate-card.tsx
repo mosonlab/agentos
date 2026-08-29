@@ -35,12 +35,14 @@ const ACTIVE_RUNS = new Set(["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING"]);
 const chainName = (aggregate: ChainAggregate): string => aggregate.chainName ?? aggregate.chainId.slice(0, 8);
 
 const memberPosition = (aggregate: ChainAggregate, members: readonly BoardTask[]): number => {
-  const fromFrontier = aggregate.frontier?.position;
+  const fromFrontier = aggregate.frontier.position;
   if (fromFrontier !== null && fromFrontier !== undefined) return fromFrontier;
-  const frontier = aggregate.frontier === null ? null : members.find((member) => member.id === aggregate.frontier?.taskId);
-  const fromMember = frontier?.chainProgress?.position ?? (frontier?.chainIndex === null || frontier?.chainIndex === undefined ? null : frontier.chainIndex + 1);
+  const frontier = members.find((member) => member.id === aggregate.frontier.taskId);
+  const fromMember = frontier === undefined
+    ? null
+    : frontier.chainProgress?.position ?? (frontier.chainIndex === null ? null : frontier.chainIndex + 1);
   if (fromMember !== null && fromMember !== undefined) return fromMember;
-  const done = aggregate.statusCounts.DONE ?? 0;
+  const done = aggregate.statusCounts.DONE;
   return aggregate.stepCount === 0 ? 0 : Math.min(aggregate.stepCount, done + 1);
 };
 
@@ -48,8 +50,8 @@ const aggregateCost = (value: ChainAggregate["totalCost"]): string =>
   value === null ? "—" : usageCostLabel(value);
 
 const runLine = (aggregate: ChainAggregate, t: Translate): ReactNode => {
-  const run = aggregate.frontier?.latestRun;
-  if (run === null || run === undefined) return null;
+  const run = aggregate.frontier.latestRun;
+  if (run === null) return null;
   const active = ACTIVE_RUNS.has(run.status);
   const tone = run.status === "SUCCEEDED" ? "green" : run.status === "FAILED" || run.status === "TIMED_OUT" || run.status === "LOST" ? "red" : "amber";
   const elapsed = active && run.startedAt !== null ? t("tasks.card.runningDuration", { duration: duration(run.startedAt, null) }) : null;
@@ -86,11 +88,11 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   actions?: ChainAggregateActions | undefined;
 }): ReactNode => {
   const t = useT();
-  const representative = representativeTaskId ?? aggregate.frontier?.taskId ?? members[0]?.id ?? aggregate.chainId;
+  const representative = representativeTaskId ?? aggregate.frontier.taskId;
   const title = chainName(aggregate);
   const position = memberPosition(aggregate, members);
   const state = aggregate.activation.state;
-  const predecessor = aggregate.activation.predecessor ?? null;
+  const predecessor = aggregate.activation.predecessor;
   const memberTaskIds = members.map((member) => member.id);
   const handlers: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
   const frontierRun = runLine(aggregate, t);
@@ -117,22 +119,20 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
         <span>{t("tasks.aggregate.progress", { current: position, total: aggregate.stepCount })}</span>
         <Pill tone={STATE_TONE[state]}>{t(`tasks.aggregate.state.${state}`)}</Pill>
       </div>
-      {aggregate.frontier === null ? null : (
-        <div data-chain-frontier="" className={META_ROW}>
-          <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{aggregate.frontier.title}</span>
-          <button
-            type="button"
-            className="ml-auto flex-none rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
-            title={t("tasks.aggregate.filter")}
-            aria-label={t("tasks.card.filterChain", { name: title })}
-            onClick={(event) => { event.stopPropagation(); handlers.onFilter(aggregate); }}
-          >
-            {t("tasks.aggregate.filter")}
-          </button>
-        </div>
-      )}
+      <div data-chain-frontier="" className={META_ROW}>
+        <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{aggregate.frontier.title}</span>
+        <button
+          type="button"
+          className="ml-auto flex-none rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
+          title={t("tasks.aggregate.filter")}
+          aria-label={t("tasks.card.filterChain", { name: title })}
+          onClick={(event) => { event.stopPropagation(); handlers.onFilter(aggregate); }}
+        >
+          {t("tasks.aggregate.filter")}
+        </button>
+      </div>
       {frontierRun === null ? null : <div className={META_ROW}>{frontierRun}</div>}
-      {aggregate.frontier?.failureReason === null || aggregate.frontier?.failureReason === undefined ? null : (
+      {aggregate.frontier.failureReason === null ? null : (
         <div data-chain-failure="" className={cn(META_ROW, FAILURE)}>{aggregate.frontier.failureReason}</div>
       )}
       {state === "parked-unactivated" && aggregate.activation.taskId !== null ? (

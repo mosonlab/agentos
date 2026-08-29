@@ -361,7 +361,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
 
 test("the card's merge outcome is bound to the run it shows, and is null everywhere else", () => {
   const merged = JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) });
-  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: null };
+  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED" as const, model: "gpt-5.6-sol", budgetGrants: 0, session: null };
   // §SF-1: an ordinary step's output is not a malformed merge result, it is not
   // a merge result at all, and 112 board cards must not each carry a marker.
   assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "code-review", body: "fine", runId: "r1" } }), null, moveContext).mergeOutcome, null);

@@ -11,7 +11,6 @@ import {
   TaskStatus,
   type Agent,
   type AssigneeType,
-  type MergeOutcomeProjection,
   type Marker,
   type Prisma,
   type PrismaClient,
@@ -24,6 +23,17 @@ import {
   type TaskStatus as TaskStatusType,
   type UsageCost,
 } from "@anneal/db";
+import type {
+  BoardCard as BoardContractCard,
+  BoardChainActivationState as BoardContractChainActivationState,
+  BoardChainAggregate as BoardContractChainAggregate,
+  BoardChainFrontier as BoardContractChainFrontier,
+  BoardLatestRun as BoardContractLatestRun,
+  BoardMoveTarget as BoardContractMoveTarget,
+  RepairBinding as BoardContractRepairBinding,
+  RunStatus as BoardRunStatus,
+  UsageCost as BoardUsageCost,
+} from "@anneal/db/board-contract";
 
 import { chainExecutionOwner, type ChainExecutionOwner } from "./chain-execution-owner.js";
 import {
@@ -52,127 +62,25 @@ import { operatorStatusTransitionRefusal } from "./task-patch.js";
  * `moveTargets` routing operator moves. Adding one is a deliberate act; the
  * point of the shape is that its cost is legible.
  */
-export type BoardMoveTarget = { status: TaskStatusType; via: "patch" | "start" };
+export type BoardMoveTarget = BoardContractMoveTarget;
+export type BoardCard = BoardContractCard<Date>;
+export type BoardLatestRun = BoardContractLatestRun<Date>;
+export type BoardChainActivationState = BoardContractChainActivationState;
+export type BoardChainFrontier = BoardContractChainFrontier<Date>;
+export type BoardChainAggregate = BoardContractChainAggregate<Date>;
+export type RepairBinding = BoardContractRepairBinding;
 
-export type BoardCard = {
-  id: string;
-  name: string;
-  /** Display-only title with a verified chain prefix removed. */
-  displayName: string;
-  status: TaskStatusType;
-  assigneeType: AssigneeType;
-  /** Full text, not a truncation: the card clamps it to three lines but the
-   *  card menu's `Copy error` hands the operator the whole thing. */
-  failureReason: string | null;
-  scheduleKind: ScheduleKind;
-  runAt: Date | null;
-  cron: string | null;
-  timezone: string | null;
-  approvalGate: boolean;
-  templateId: string | null;
-  source: TaskSource;
-  chainId: string | null;
-  chainIndex: number | null;
-  chainName: string | null;
-  blockedOn: { taskId: string; taskName: string } | null;
-  createdAt: Date;
-  updatedAt: Date;
-  assigneeAgent: { id: string; title: string; model: string } | null;
-  chainProgress: (ChainProgress & { position: number | null }) | null;
-  moveTargets: BoardMoveTarget[];
-  latestRun: {
-    id: string;
-    runNumber: number;
-    status: string;
-    /** The model snapshot taken when the run was claimed, not the assignee's
-     *  current configuration: a re-tiered agent must not relabel a past run. */
-    model: string;
-    costUsd: string | null;
-    startedAt: Date | null;
-    endedAt: Date | null;
-  } | null;
-  taskCost: SerializedUsageCost | null;
-  /**
-   * §SF-1. Parsed server-side from the task's persisted `merge-result` output,
-   * and null for every non-integrator task. A mechanical merge that stopped ends
-   * its run SUCCEEDED — correctly, because it executed its contract — so a
-   * run-centric card that reads only the protocol status renders a stop or a
-   * post-merge incident as a green Done. This is what the card renders instead.
-   */
-  mergeOutcome: MergeOutcomeProjection | null;
-  /**
-   * The chain a merge-tail repair task repairs.
-   *
-   * A repair task is deliberately chain-detached — no `chainId`, `chainIndex` or
-   * `templateId` — so its own columns say nothing about where it came from, and
-   * the board drew it as a loose card beside the chain that produced it. The
-   * `repairAttempt` marker it carries names the regression task, and that task's
-   * chain is what this reports. Null for every card that is not a repair task.
-   */
-  repairOf: RepairBinding | null;
-  /**
-   * The chain projection, carried once by one visible member. Standalone tasks
-   * and the remaining members carry null; the web groups all rows by binding.
-   */
-  chainAggregate: BoardChainAggregate | null;
-};
-
-export type BoardLatestRun = {
-  id: string;
-  runNumber: number;
-  status: string;
-  /** The model snapshot taken when the run was claimed, not the assignee's
-   * current configuration: a re-tiered agent must not relabel a past run. */
-  model: string;
-  costUsd: string | null;
-  startedAt: Date | null;
-  endedAt: Date | null;
-};
-
-export type BoardChainActivationState =
-  | "parked-unactivated"
-  | "waiting-on-predecessor"
-  | "running"
-  | "idle"
-  | "settled";
-
-export type BoardChainFrontier = {
-  taskId: string;
-  title: string;
-  status: TaskStatusType;
-  latestRun: BoardLatestRun | null;
-  failureReason: string | null;
-  /** Dense one-based position among primary steps; null for a repair frontier. */
-  position?: number | null;
-};
-
-export type BoardChainAggregate = {
-  chainId: string;
-  chainName: string | null;
-  /** Number of primary chain steps. Detached repairs never inflate this. */
-  stepCount: number;
-  /** Status counts for primary steps only, used for progress. */
-  statusCounts: Record<TaskStatusType, number>;
-  /** A persisted primary member whose task page renders the chain detail. */
-  detailTaskId: string;
-  /** Derived board column; this is not a persisted Task status. */
-  status: TaskStatusType;
-  frontier: BoardChainFrontier;
-  activation: {
-    state: BoardChainActivationState;
-    predecessor: { taskId: string; taskName: string } | null;
-    /** Step zero is the only board activation target. */
-    taskId: string | null;
-  };
-  totalCost: SerializedUsageCost | null;
-  /** Earliest member creation and latest member update, for aggregate age. */
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-/** What a repair card needs to sit with its chain: the chain it belongs to and
- *  which kind of repair it is. */
-export type RepairBinding = { chainId: string; chainName: string | null; repairKind: string };
+type JsonSerialized<T> = T extends Date
+  ? string
+  : T extends readonly (infer Item)[]
+    ? JsonSerialized<Item>[]
+    : T extends object
+      ? { [Key in keyof T]: JsonSerialized<T[Key]> }
+      : T;
+type ContractCheck<T extends BoardContractCard> = T;
+/** Compile-time proof that JSON serialization turns the native projection into
+ * the shared browser contract, including every required field. */
+export type SerializedBoardCardProjection = ContractCheck<JsonSerialized<BoardCard>>;
 
 /** The Prisma row shape `boardCard` needs — declared structurally so `readBoard`
  *  can select exactly these columns and nothing else. */
@@ -205,7 +113,7 @@ export type BoardRow = {
   runs: Array<{
     id: string;
     runNumber: number;
-    status: string;
+    status: BoardRunStatus;
     model: string;
     subagentModel?: string | null;
     budgetGrants: number;
@@ -234,7 +142,7 @@ export type BoardBlockedOnTask = {
 const decimal = (value: unknown): string | null =>
   (value === null || value === undefined ? null : String(value));
 
-export type SerializedUsageCost = Omit<UsageCost, "costUsd"> & { costUsd: string | null };
+export type SerializedUsageCost = BoardUsageCost;
 
 export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
   cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
@@ -290,7 +198,7 @@ const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | 
   const run = runs?.[0];
   return run === undefined
     ? null
-    : {
+    : ({
         id: run.id,
         runNumber: run.runNumber,
         status: run.status,
@@ -298,7 +206,7 @@ const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | 
         costUsd: decimal(run.session?.costUsd),
         startedAt: run.session?.startedAt ?? null,
         endedAt: run.session?.endedAt ?? null,
-      };
+      } satisfies BoardLatestRun);
 };
 
 const memberUsageCost = (member: Pick<BoardChainMember, "runs">): UsageCost | null =>
@@ -431,7 +339,7 @@ export const chainAggregate = (
     totalCost: serializeUsageCost(totalCost),
     createdAt,
     updatedAt,
-  };
+  } satisfies BoardChainAggregate;
 };
 
 /** The instantiated chain name is persisted as the prefix of every task name.
@@ -549,7 +457,7 @@ export const boardCard = (
       : null,
     repairOf,
     chainAggregate: null,
-  };
+  } satisfies BoardCard;
 };
 
 /**
