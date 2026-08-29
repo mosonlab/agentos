@@ -106,6 +106,20 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
 const isReconnectStatus = (message: string | null): boolean =>
   /^Reconnecting\.\.\. \d+\/\d+$/u.test(message?.trim() ?? "");
 
+const observedNativeChild = (item: Record<string, unknown> | null): boolean => {
+  if (!item) return false;
+  const itemType = stringField(item, "type");
+  const tool = stringField(item, "tool");
+  const status = stringField(item, "status");
+  const receiverThreadIds = Array.isArray(item.receiver_thread_ids)
+    ? item.receiver_thread_ids
+    : Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [];
+  return (itemType === "collab_agent_tool_call" || itemType === "collabAgentToolCall")
+    && (tool === "spawn_agent" || tool === "spawnAgent")
+    && status === "completed"
+    && receiverThreadIds.some((value) => typeof value === "string" && value.length > 0);
+};
+
 export const parseCodexEvent = (
   state: AdapterState,
   event: Record<string, unknown>,
@@ -125,6 +139,7 @@ export const parseCodexEvent = (
     } else emitAdapterEvent(state, sink, "MODEL_DELTA", event);
   } else if (type === "item.completed") {
     const item = asRecord(event.item);
+    if (observedNativeChild(item)) emitAdapterEvent(state, sink, "NATIVE_CHILD_STARTED", item ?? {});
     if (stringField(item, "type") === "command_execution") {
       state.inFlightTool = null;
       emitAdapterEvent(state, sink, "TOOL_COMPLETED", item ?? {}, stringField(item, "id"));

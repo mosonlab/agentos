@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Prisma } from "@prisma/client";
 
-import { sessionUsageCost, sumUsageCosts } from "./cost.js";
+import { runSessionUsageCost, sessionUsageCost, sumUsageCosts } from "./cost.js";
 
 test("Codex tokens use the model table, cached rate, and ignore the effort suffix", () => {
   const cost = sessionUsageCost("gpt-5.6-sol:xhigh", {
@@ -25,6 +25,66 @@ test("a provider-prefixed model uses the existing bare model price row", () => {
   });
   assert.equal(cost.costUsd?.toString(), "6.2");
   assert.equal(cost.estimated, true);
+});
+
+test("an unsplit native-child session uses the pinned Luna price", () => {
+  const cost = sessionUsageCost("gpt-5.6-sol:high", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 100_000,
+    outputTokens: 500_000,
+  }, { mixedModels: true });
+  // 900k uncached + 100k cached input and 500k output at Luna rates.
+  assert.equal(cost.costUsd?.toString(), "0.782");
+  assert.equal(cost.estimated, true);
+  assert.deepEqual(
+    { inputTokens: cost.inputTokens, cachedInputTokens: cost.cachedInputTokens, outputTokens: cost.outputTokens },
+    { inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
+  );
+});
+
+test("a native-child grant without an observed child keeps the root model price", () => {
+  const grantedRun = {
+    model: "gpt-5.6-sol:high",
+    subagentModel: "gpt-5.6-luna:max",
+    session: {
+      nativeChildUsed: false,
+      costUsd: null,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 400_000,
+      outputTokens: 100_000,
+    },
+  };
+  const cost = runSessionUsageCost(grantedRun);
+  assert.equal(cost?.costUsd?.toString(), "6.2");
+  assert.equal(cost?.estimated, true);
+});
+
+test("an observed unsplit native child prices the aggregate at Luna", () => {
+  const cost = runSessionUsageCost({
+    model: "gpt-5.6-sol:high",
+    session: {
+      nativeChildUsed: true,
+      costUsd: null,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 100_000,
+      outputTokens: 500_000,
+    },
+  });
+  assert.equal(cost?.costUsd?.toString(), "0.782");
+  assert.equal(cost?.estimated, true);
+});
+
+test("a clean root and child split keeps each model's pricing", () => {
+  const root = sessionUsageCost("gpt-5.6-sol:high", {
+    costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+  });
+  const child = sessionUsageCost("gpt-5.6-luna:max", {
+    costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+  });
+  assert.equal(root.costUsd?.toString(), "6.2");
+  assert.equal(child.costUsd?.toString(), "0.248");
+  assert.equal(sumUsageCosts([root, child])?.costUsd?.toString(), "6.448");
 });
 
 test("an unpriced model exposes tokens and no dollar figure", () => {

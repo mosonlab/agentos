@@ -65,7 +65,7 @@ const NANOS_PER_USD = 1_000_000_000;
 
 const piNumber = (value: unknown, field: string, integral: boolean): number | null => {
   if (value === undefined || value === null) return null;
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integral || Number.isInteger(value))) return value;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integral || Number.isSafeInteger(value))) return value;
   console.warn(JSON.stringify({ audit: "pi-usage", event: "field-dropped", field, value: String(value) }));
   return null;
 };
@@ -118,7 +118,9 @@ const usageGaps = (totals: PiUsageTotals): string[] => {
   if (totals.reported < totals.messages) {
     gaps.push(`PI reported usage on only ${totals.reported} of ${totals.messages} assistant message(s)`);
   }
-  if ((totals.input ?? 0) + (totals.output ?? 0) === 0) gaps.push("PI reported no tokens");
+  const hasTokens = [totals.input, totals.output, totals.cacheRead, totals.cacheWrite]
+    .some((value) => value !== null && value > 0);
+  if (!hasTokens) gaps.push("PI reported no tokens");
   if ((totals.costNanoUsd ?? 0) === 0) gaps.push("PI reported no cost");
   return gaps;
 };

@@ -5,7 +5,7 @@ import {
   MERGE_TAIL_KIND,
   projectMergeOutcome,
   runOwnsMergeOutcome,
-  sessionUsageCost,
+  runSessionUsageCost,
   sumUsageCosts,
   TaskStatus,
   type Agent,
@@ -127,7 +127,8 @@ export type BoardRow = {
     model: string;
     subagentModel?: string | null;
     session: {
-      costUsd: Parameters<typeof sessionUsageCost>[1]["costUsd"];
+      nativeChildUsed: boolean;
+      costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
       inputTokens: number | null;
       cachedInputTokens: number | null;
       outputTokens: number | null;
@@ -214,7 +215,7 @@ export const boardCard = (
   const run = row.runs[0];
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
-    : [sessionUsageCost(item.model, item.session, { mixedModels: item.subagentModel != null })]));
+    : [runSessionUsageCost(item)!]));
   return {
     id: row.id,
     name: row.name,
@@ -387,7 +388,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
           id: true, runNumber: true, status: true, model: true, subagentModel: true,
           session: {
             select: {
-              costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true,
+              nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true,
               startedAt: true, endedAt: true,
             },
           },
