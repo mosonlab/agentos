@@ -384,24 +384,32 @@ test("a semantic FAIL skips the gate path and is repaired twice before it escala
   assert.match(notice.body, /after 2 automatic repair attempts/u);
 });
 
-test("a repair task carries the chain's persisted outputs its own detached row cannot reach", async () => {
+test("a repair task carries only the chain outputs its repair kind reads", async () => {
   for (const outcome of ["review-fail", "gate-fail", "refresh-conflict"] as const) {
     await resetTestDb(db);
     const seeded = await exercise(outcome);
-    const repair = await repairFor(seeded, outcome === "review-fail" ? "review-fix" : outcome === "gate-fail" ? "gate-fix" : "refresh-conflict");
+    const repairKind = outcome === "review-fail" ? "review-fix" : outcome === "gate-fail" ? "gate-fix" : "refresh-conflict";
+    const repair = await repairFor(seeded, repairKind);
     // Chain-detached by design: the claim path's prior-output lookup cannot
     // fire for this row, so the prompt is the only carrier.
     assert.equal(repair.chainId, null, outcome);
     assert.equal(repair.chainIndex, null, outcome);
     assert.match(repair.description, /Persisted outputs from prior template steps:/u, outcome);
     assert.ok(repair.description.includes(IMPLEMENTATION_BODY), outcome);
-    assert.ok(repair.description.includes(SOL_FINDINGS_BODY), outcome);
-    assert.ok(repair.description.includes(BLIND_FINDINGS_BODY), outcome);
-    // Chain order, and nothing from the Regression step that opened the repair.
-    assert.ok(
-      repair.description.indexOf(IMPLEMENTATION_BODY) < repair.description.indexOf(SOL_FINDINGS_BODY),
-      outcome,
-    );
+    if (repairKind === "review-fix") {
+      // Only the repair that traces finding ids reads the review reports,
+      // still in chain order.
+      assert.ok(repair.description.includes(SOL_FINDINGS_BODY), outcome);
+      assert.ok(repair.description.includes(BLIND_FINDINGS_BODY), outcome);
+      assert.ok(
+        repair.description.indexOf(IMPLEMENTATION_BODY) < repair.description.indexOf(SOL_FINDINGS_BODY),
+        outcome,
+      );
+    } else {
+      assert.ok(!repair.description.includes(SOL_FINDINGS_BODY), outcome);
+      assert.ok(!repair.description.includes(BLIND_FINDINGS_BODY), outcome);
+    }
+    // Nothing from the Regression step that opened the repair.
     assert.ok(!repair.description.includes("regression-verification"), outcome);
   }
 });
