@@ -25,6 +25,7 @@ export type Marker = {
   kind: MarkerKind;
   state: string | null;
   regressionTaskId: string | null;
+  repairTaskId: string | null;
   readinessTaskId: string | null;
   repairKind: string | null;
   headSha: string | null;
@@ -44,7 +45,7 @@ const text = (raw: Record<string, unknown>, field: string): string | null => (
   typeof raw[field] === "string" ? raw[field] : null
 );
 
-const asMarker = (metadata: Prisma.JsonValue | null | undefined): Marker | null => {
+export const markerFromMetadata = (metadata: Prisma.JsonValue | null | undefined): Marker | null => {
   const raw = asJsonObject(metadata);
   const kind = raw && typeof raw.kind === "string" ? KIND_BY_VALUE.get(raw.kind) : undefined;
   if (!raw || !kind) return null;
@@ -52,6 +53,7 @@ const asMarker = (metadata: Prisma.JsonValue | null | undefined): Marker | null 
     kind,
     state: text(raw, "state"),
     regressionTaskId: text(raw, "regressionTaskId"),
+    repairTaskId: text(raw, "repairTaskId"),
     readinessTaskId: text(raw, "readinessTaskId"),
     repairKind: text(raw, "repairKind"),
     headSha: text(raw, "headSha"),
@@ -77,7 +79,7 @@ const scan = async (tx: Tx, taskId: string, take?: number): Promise<Marker[]> =>
     ...(take === undefined ? {} : { take }),
   });
   return rows.flatMap((row) => {
-    const marker = asMarker(row.metadata);
+    const marker = markerFromMetadata(row.metadata);
     return marker ? [marker] : [];
   });
 };
