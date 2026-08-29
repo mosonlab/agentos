@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ApiError } from "../lib/api";
 import type { Chain, Run, Task, TaskStepOutput } from "../lib/types";
 import { RunRow } from "../pages/TaskDetail";
+import { installDom, reactDom } from "./dom-harness";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
@@ -47,7 +48,7 @@ const chainFor = (taskId: string): Chain => ({
     taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
     status: "TODO", approvalGate: false, assigneeType: "AGENT", executionOwner: "agent",
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
-    failureReason: null, latestRun: null, startable: true, startAction: "start",
+    failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
     currentExecution: false,
   }],
 });
@@ -230,6 +231,106 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     for (const [name, value] of Object.entries({ window: previous.window, document: previous.document, navigator: previous.navigator })) {
       Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
     }
+    dom.window.close();
+  }
+});
+
+test("the task-detail Chain card reflects a completed held layer on the next poll and deduplicates Resume", async () => {
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    navigator: globalThis.navigator,
+    HTMLElement: globalThis.HTMLElement,
+    HTMLButtonElement: globalThis.HTMLButtonElement,
+    HTMLFormElement: globalThis.HTMLFormElement,
+    HTMLInputElement: globalThis.HTMLInputElement,
+    Element: globalThis.Element,
+    Node: globalThis.Node,
+    MutationObserver: globalThis.MutationObserver,
+    Event: globalThis.Event,
+    InputEvent: globalThis.InputEvent,
+    MouseEvent: globalThis.MouseEvent,
+    fetch: globalThis.fetch,
+  };
+  const { dom, container } = installDom("http://localhost/tasks/hold");
+  const holdTask = task("hold", "Held task", 0, "chain-hold");
+  const runningChain = chainFor("hold");
+  runningChain.chainId = "chain-hold";
+  runningChain.steps[0] = { ...runningChain.steps[0]!, layer: 1, status: "DOING", startable: false, startAction: null, currentExecution: true };
+  runningChain.control = {
+    state: "held", heldLayer: 1,
+    heldAt: now, holdRequestId: "hold-1", holdReason: "inspect output",
+    releasedAt: null,
+  };
+  const completedChain: Chain = {
+    ...runningChain,
+    done: 1,
+    steps: [{ ...runningChain.steps[0]!, status: "DONE", currentExecution: false }],
+  };
+  let latestChain = runningChain;
+  let chainPolls = 0;
+  const mutations: Array<{ url: string; method: string; body: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input).replace(/^.*\/api/, "");
+    const method = init.method ?? "GET";
+    if (method !== "GET") {
+      mutations.push({ url, method, body: String(init.body ?? "") });
+      return new Response("{}", { status: 200 });
+    }
+    if (url === "/tasks/hold") return new Response(JSON.stringify(holdTask), { status: 200 });
+    if (url === "/tasks/hold/output") return new Response("null", { status: 200 });
+    if (url === "/tasks/hold/startability") return new Response(JSON.stringify({
+      startable: false,
+      checklist: { repoBound: true, agentAssignee: true, repoAccessGrant: true, budgetRemaining: true, noActiveRun: true, predecessorsDone: true },
+      task: { id: "hold", name: "Held task", agent: { id: "agent-1", title: "Builder" }, repo: { id: "repo-1", name: "repo" }, targetBranch: "main" },
+    }), { status: 200 });
+    if (url === "/tasks/hold/activity") return new Response("[]", { status: 200 });
+    if (url === "/tasks/hold/chain") {
+      chainPolls += 1;
+      return new Response(JSON.stringify(latestChain), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+  }) as typeof fetch;
+  const { createRoot } = await reactDom();
+  const { TaskDetailPage } = await import("../pages/TaskDetail");
+  const root = createRoot(container);
+  try {
+    act(() => root.render(<TaskDetailPage taskId="hold" />));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    assert.ok(chainPolls >= 1);
+    assert.match(container.textContent ?? "", /Current execution/);
+    assert.doesNotMatch(container.textContent ?? "", /Waiting for the operator to resume/);
+
+    latestChain = completedChain;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_600)); });
+    assert.ok(chainPolls >= 2, `expected a poll after the initial response, got ${chainPolls}`);
+    assert.match(container.textContent ?? "", /Waiting for the operator to resume/);
+
+    const toggle = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Resume Chain"));
+    assert.ok(toggle);
+    latestChain = { ...completedChain, control: null };
+    await act(async () => {
+      toggle!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      toggle!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const resumes = mutations.filter((item) => item.url === "/tasks/hold/chain/resume");
+    assert.equal(resumes.length, 1, JSON.stringify(mutations));
+    assert.match(JSON.parse(resumes[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
+
+    const stop = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Stop after current layer"));
+    assert.ok(stop);
+    await act(async () => {
+      stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const holds = mutations.filter((item) => item.url === "/tasks/hold/chain/hold");
+    assert.equal(holds.length, 1, JSON.stringify(mutations));
+    assert.match(JSON.parse(holds[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
+  } finally {
+    act(() => root.unmount());
+    Object.assign(globalThis, previous);
     dom.window.close();
   }
 });

@@ -119,6 +119,25 @@ test("AT task queues once under sequential and concurrent ticks", async () => {
   assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
 });
 
+test("a cancelled Run still consumes its one-shot AT schedule", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const now = new Date();
+  const task = await db.task.create({ data: {
+    projectId: project.id,
+    assigneeAgentId: agent.id,
+    repoId: repo.id,
+    name: "Cancelled one-shot",
+    description: "work",
+    scheduleKind: "AT",
+    runAt: new Date(now.getTime() - 60_000),
+  } });
+  assert.equal((await schedulerTick(db, now)).atFired, 1);
+  const run = await db.run.findFirstOrThrow({ where: { taskId: task.id } });
+  await db.run.update({ where: { id: run.id }, data: { status: "CANCELLED", endedAt: now } });
+  assert.deepEqual(await schedulerTick(db, new Date(now.getTime() + 1_000)), { cronFired: 0, atFired: 0, quarantined: 0 });
+  assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
+});
+
 test("a task with stored invalid cron can still be disabled without repairing cron", async () => {
   const { project } = await seedExecutor();
   const task = await db.task.create({ data: {

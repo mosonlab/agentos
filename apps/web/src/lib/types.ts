@@ -484,10 +484,21 @@ export type ChainStep = {
    *  and the route's guard must not be able to disagree. */
   startable: boolean;
   startAction: "start" | "recover" | null;
+  /** Server-owned Chain hold refusal; null when the hold does not bar this Step. */
+  holdRefusal: string | null;
   /** API-computed predecessor binding state; absent for older chain responses. */
   blockedOn?: { taskId: string; name: string; status: TaskStatus } | null;
   currentExecution: boolean;
   mergeRecovery?: MergeRecovery | null;
+};
+
+export type ChainControl = {
+  state: "held" | "released";
+  heldLayer: number | null;
+  heldAt: string | null;
+  holdRequestId: string | null;
+  holdReason: string | null;
+  releasedAt: string | null;
 };
 
 export type Chain = {
@@ -495,6 +506,8 @@ export type Chain = {
   total: number;
   done: number;
   steps: ChainStep[];
+  /** Present on a real Chain response; omitted by the legacy chainless envelope. */
+  control?: ChainControl | null;
 };
 
 /** A webhook-configured template. `repo` is nullable: a trigger is defined by

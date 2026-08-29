@@ -419,6 +419,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
         count: async () => 1,
       },
       taskActivity: { create: async () => ({}) },
+      chainControl: { findMany: async () => [] },
       // findFirst answers resolveRunBranches' publication query: nothing in this
       // chain has pushed the shared branch, so the successor bases on the default.
       run: { create: async () => ({ id: "run-1" }), findFirst: async () => null, count: async () => 0 },
@@ -466,6 +467,7 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
         count: async () => 1,
       },
       taskActivity: { create: async () => ({}) },
+      chainControl: { findMany: async () => [] },
     };
     const database = {
       task: { findUniqueOrThrow: async () => before },
@@ -1757,6 +1759,7 @@ test("claim query filters archived agents before take so active work cannot star
     };
     const database = {
       run: { findMany: async () => [] },
+      chainControl: { findUnique: async () => null },
       taskActivity: { createMany: async () => ({ count: 0 }) },
       $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
     } as unknown as PrismaClient;
@@ -1900,6 +1903,7 @@ test("successful completion commits output and parks an archived chain successor
             return {};
           },
         },
+        chainControl: { findMany: async () => [] },
         runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }) },
       };
       const database = {
@@ -2023,6 +2027,7 @@ test("archived successor errors from gate approve and reject map to named 409 re
           updateMany: async () => ({ count: 1 }),
         },
         taskActivity: { create: async () => ({}) },
+        chainControl: { findMany: async () => [] },
         agent: { findUnique: async () => lockedAgent(executable.assigneeAgent) },
         run: { create: async () => { throw new Error("must not create"); } },
       };

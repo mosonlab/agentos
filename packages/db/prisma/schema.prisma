@@ -201,6 +201,14 @@ enum PushStatus {
   FAILED        @map("failed")
 }
 
+/// The persisted operator control for a Chain. Absence of a ChainControl row
+/// is also not-held; RELEASED rows are retained so their release facts and
+/// hold generation remain available to later idempotency checks.
+enum ChainControlState {
+  HELD     @map("held")
+  RELEASED @map("released")
+}
+
 model Project {
   id                 String          @id @default(cuid())
   name               String
@@ -221,6 +229,7 @@ model Project {
   tasks              Task[]
   goals              Goal[]
   runs               Run[]
+  chainControls      ChainControl[]
 }
 
 model Environment {
@@ -603,6 +612,53 @@ model Task {
   @@index([recurringSourceTaskId])
   @@index([goalId, goalDispatchState])
   @@index([goalPredecessorTaskId])
+}
+
+/// One persisted authority for the operator hold state of a project/Chain
+/// pair. `chainId` is unique within a project by convention, so it is scoped
+/// with `projectId` exactly like the existing Chain readers. A released row
+/// keeps the last hold facts and release facts; a missing row is the initial
+/// not-held state.
+model ChainControl {
+  id               String            @id @default(cuid())
+  projectId        String
+  chainId          String
+  state            ChainControlState @default(HELD)
+  heldLayer        Int?
+  heldAt           DateTime?
+  holdRequestId    String?
+  holdReason       String?
+  releasedAt       DateTime?
+  releaseRequestId String?
+  holdGeneration   Int               @default(0)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events           ChainControlEvent[]
+
+  @@unique([projectId, chainId])
+  @@index([projectId, state])
+}
+
+/// Append-only audit history for accepted Chain control transitions. The
+/// uniqueness key deliberately includes the transition kind: a request id is
+/// allowed once for Hold and once for Resume, but never twice for either kind,
+/// even after the mutable ChainControl row has moved on to the opposite state.
+model ChainControlEvent {
+  id             String            @id @default(cuid())
+  chainControlId String
+  kind           ChainControlState
+  layer          Int
+  actorType      String
+  actorId        String?
+  requestId      String
+  reason         String?
+  createdAt      DateTime          @default(now())
+  holdGeneration Int
+  chainControl   ChainControl       @relation(fields: [chainControlId], references: [id], onDelete: Cascade)
+
+  @@unique([chainControlId, kind, requestId])
+  @@index([chainControlId, createdAt])
 }
 
 /// Canonical authority for one automatic pre-merge base-drift recovery.

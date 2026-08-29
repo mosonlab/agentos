@@ -1,6 +1,9 @@
 import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
+  chainControlKey,
+  readChainControls,
+  type ChainControlSnapshot,
   isMergeReadinessStep,
   lockAgentRepoGrant,
   Prisma,
@@ -112,7 +115,7 @@ export const chainProgress = (rows: ChainRow[]): Omit<ChainProgress, "chainId"> 
  * constraint enforces it. Keying by the pair is what stops a task reading a
  * chain that belongs to another project.
  */
-export const chainKey = (row: { projectId: string; chainId: string }): string => `${row.projectId}:${row.chainId}`;
+export const chainKey = chainControlKey;
 
 export const chainProgressByChain = (rows: ChainRow[]): Map<string, ChainProgress> => {
   const groups = new Map<string, ChainRow[]>();
@@ -282,6 +285,9 @@ export type FoundStepAdmission = {
   facts: RunFacts;
   verdict: TaskStartability;
   blocker: { id: string; name: string } | null;
+  /** A Chain control refusal is separate because Retry has terminal-state
+   * rules that deliberately differ from Start's ordinary status ladder. */
+  holdRefusal: Refusal | null;
   refusal: Refusal | null;
 };
 
@@ -295,17 +301,57 @@ export type StepAdmission =
     refusal: Refusal;
   };
 
-type ReadStepAdmissionOptions = { locked: boolean };
+type ReadStepAdmissionOptions = {
+  locked: boolean;
+  /**
+   * A caller that already read the controls in the same transaction can pass
+   * them here. The chain-detail route uses this to project the same authority
+   * row it used for admission without issuing a second ChainControl query.
+   */
+  controls?: ReadonlyMap<string, ChainControlSnapshot | undefined>;
+};
 
 const grantKey = (input: { projectId: string; agentId: string; repoId: string }): string => (
   `${input.projectId}:${input.agentId}:${input.repoId}`
 );
 
+/**
+ * The Chain hold is a control barrier, not another startability checklist
+ * item. Keep its refusal pure and separate so every admission consumer can
+ * use the same layer comparison while Retry can consume only this refusal and
+ * retain its legitimate terminal/status rules.
+ *
+ * `chainLayer` is authoritative for expanded rows; the chainIndex fallback is
+ * required for rows read during the nullable expand migration and for legacy
+ * unit fixtures. A released or absent control is exactly the unheld state.
+ */
+export const refusalForHeldChainStep = (
+  task: Pick<StepAdmissionTask, "projectId" | "chainId" | "chainIndex" | "chainLayer" | "name">,
+  control: ChainControlSnapshot | null | undefined,
+): Refusal | null => {
+  if (!control?.held || task.chainId === null
+    || control.projectId !== task.projectId || control.chainId !== task.chainId) return null;
+  const taskLayer = executionLayer(task);
+  // A held control is only valid with a persisted layer, but fail closed if a
+  // malformed legacy row reaches admission: an unknown layer must not bypass
+  // an active Chain barrier.
+  if (taskLayer === null || control.heldLayer === null) {
+    return { reason: "conflict", message: `Cannot start ${task.name}; Chain is held` };
+  }
+  if (taskLayer <= control.heldLayer) return null;
+  return {
+    reason: "conflict",
+    message: `Cannot start ${task.name}; Chain is held after layer ${control.heldLayer}`,
+  };
+};
+
 const refusalForStepAdmission = (
   task: StepAdmissionTask,
   verdict: TaskStartability,
   blocker: { id: string; name: string } | null,
+  holdRefusal: Refusal | null,
 ): Refusal | null => {
+  if (holdRefusal) return holdRefusal;
   if (!verdict.checklist.predecessorsDone) {
     if (blocker) {
       return { reason: "conflict", message: `Cannot start ${task.name}; predecessor ${blocker.name} is not done` };
@@ -368,15 +414,18 @@ export const readStepAdmissions = async (
       ? [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }]
       : []
   ));
+  // A partial legacy identity still belongs to its persisted Chain control.
+  // Key on chainId alone so a null chainIndex cannot bypass a held barrier;
+  // refusalForHeldChainStep will fail closed when no execution layer exists.
   const chainInputs = [...new Map(tasks.flatMap((task) => (
-    task.chainId !== null && task.chainIndex !== null
+    task.chainId !== null
       ? [[chainKey({ projectId: task.projectId, chainId: task.chainId }), {
         projectId: task.projectId,
         chainId: task.chainId,
       }] as const]
       : []
   ))).values()];
-  const [runGroups, chainRows, grantRows] = await Promise.all([
+  const [runGroups, chainRows, controls, grantRows] = await Promise.all([
     tx.run.groupBy({
       by: ["taskId", "status"],
       where: { taskId: { in: ids } },
@@ -389,6 +438,12 @@ export const readStepAdmissions = async (
         select: { id: true, projectId: true, chainId: true, name: true, status: true, chainIndex: true, chainLayer: true },
       })
       : [],
+    // Keep control reads in the same batch as the existing admission facts.
+    // `readChainControls` returns absent rows as not-held snapshots and issues
+    // one OR query for all Chain keys, never one lookup per Task. A chain-detail
+    // caller may provide its already-read control map so the projection and
+    // admission share one authority query and one transaction snapshot.
+    options.controls ?? readChainControls(tx, chainInputs),
     grantInputs.length === 0
       ? []
       : options.locked
@@ -413,9 +468,12 @@ export const readStepAdmissions = async (
     const facts = factsByTask.get(task.id) ?? { total: 0, active: false, budgetGrants: null };
     const hasRepoGrant = task.assigneeAgentId !== null && task.repoId !== null
       && granted.has(grantKey({ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }));
-    const chain = task.chainId !== null && task.chainIndex !== null
+    const chain = task.chainId !== null
       ? rowsByChain.get(chainKey({ projectId: task.projectId, chainId: task.chainId })) ?? []
       : [];
+    const control = task.chainId !== null
+      ? controls.get(chainKey({ projectId: task.projectId, chainId: task.chainId }))
+      : undefined;
     const blocker = blockingPredecessor(chain, task.id);
     const baseVerdict = taskStartability(
       { ...task, hasRepoGrant },
@@ -423,12 +481,14 @@ export const readStepAdmissions = async (
       task.maxSessionsPerTask,
       blocker === null,
     );
-    const refused = refusalForStepAdmission(task, baseVerdict, blocker);
+    const holdRefusal = refusalForHeldChainStep(task, control);
+    const refused = refusalForStepAdmission(task, baseVerdict, blocker, holdRefusal);
     return [task.id, {
       task,
       facts,
       verdict: { ...baseVerdict, startable: baseVerdict.startable && refused === null },
       blocker: blocker ? { id: blocker.id, name: blocker.name } : null,
+      holdRefusal,
       refusal: refused,
     }];
   }));
