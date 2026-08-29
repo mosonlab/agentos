@@ -250,9 +250,6 @@ export const TaskPrompt = ({ description }: { description: string }): ReactNode 
   );
 };
 
-// BACKLOG first, so the header select can park a task as well as move it on.
-const STATUSES: TaskStatus[] = ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"];
-
 const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<Task>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
@@ -284,6 +281,16 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
   const patch = (body: Record<string, unknown>): void => {
     void run(async () => { await api.patch(`/tasks/${taskId}`, body); reload(); });
+  };
+  const moveStatus = (status: TaskStatus): void => {
+    void run(async () => {
+      const target = task.moveTargets.find((candidate) => candidate.status === status);
+      if (!target) throw new Error(`Task ${task.id} does not expose ${status} as an operator move target`);
+      if (target.via === "start") await api.post(`/tasks/${taskId}/start`, {});
+      else await api.patch(`/tasks/${taskId}`, { status });
+      reload();
+      startability.reload();
+    });
   };
   const retry = (): void => {
     void run(async () => { await api.post(`/tasks/${taskId}/retry`, {}); reload(); });
@@ -362,11 +369,12 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             `select:disabled` rule at all, so this control rendered at full opacity
             with the UA cursor while a patch was in flight. The primitive dims to
             50% and shows `not-allowed` (ui/select.tsx:21). */}
-        {task.chainId === null ? (
-          <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
-            {STATUSES.map((status) => <option key={status} value={status}>{t(`status.task.${status}`)}</option>)}
+        {task.moveTargets.length > 0 ? (
+          <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => moveStatus(event.target.value as TaskStatus)}>
+            <option value={task.status}>{t(`status.task.${task.status}`)}</option>
+            {task.moveTargets.map(({ status }) => <option key={status} value={status}>{t(`status.task.${status}`)}</option>)}
           </Select>
-        ) : <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.chainStatusReadonly")}</span>}
+        ) : task.chainId === null ? null : <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.chainStatusReadonly")}</span>}
         {retryable(task, task.runs[0]) ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
         ) : null}

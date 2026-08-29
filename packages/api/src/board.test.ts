@@ -26,6 +26,10 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   name: "Ship the thing",
   status: "TODO" as BoardRow["status"],
   assigneeType: "AGENT" as BoardRow["assigneeType"],
+  assigneeAgentId: null,
+  repoId: null,
+  archivedAt: null,
+  maxSessionsPerTask: 5,
   failureReason: null,
   scheduleKind: "NOW" as BoardRow["scheduleKind"],
   runAt: null,
@@ -45,6 +49,8 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   runs: [],
   ...overrides,
 });
+
+const moveContext = { hasRepoGrant: false, chainPredecessorsDone: true };
 
 const member = (overrides: Partial<BoardChainMember> = {}): BoardChainMember => ({
   id: "step-1",
@@ -144,11 +150,51 @@ test("readBoard resolves every bound row in one deduplicated predecessor lookup"
 test("the board projection carries every field the board consumes and nothing else", () => {
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
-  assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
+  assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
     "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron", "displayName",
-    "failureReason", "id", "latestRun", "mergeOutcome", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
+    "failureReason", "id", "latestRun", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
     "taskCost", "templateId", "timezone", "updatedAt",
   ]);
+});
+
+test("the board projection carries the operator transition matrix", () => {
+  const targets = (overrides: Partial<BoardRow>, context = moveContext) =>
+    boardCard(row(overrides), null, context).moveTargets;
+  const startableAgent = {
+    assigneeType: "AGENT" as const,
+    assigneeAgentId: "a1",
+    repoId: "r1",
+    assigneeAgent: { id: "a1", title: "Developer", model: "gpt-5.6-sol", archivedAt: null },
+  };
+  const startable = { hasRepoGrant: true, chainPredecessorsDone: true };
+
+  assert.deepEqual(targets({ assigneeType: "HUMAN", status: "TODO" }), [
+    { status: "BACKLOG", via: "patch" }, { status: "DONE", via: "patch" },
+  ]);
+  assert.deepEqual(targets({ assigneeType: "HUMAN", status: "DOING" }), [{ status: "DONE", via: "patch" }]);
+  assert.deepEqual(targets({ assigneeType: "HUMAN", status: "REVIEW" }), [{ status: "DONE", via: "patch" }]);
+  assert.deepEqual(targets({ assigneeType: "HUMAN", status: "DONE" }), []);
+  assert.deepEqual(targets({ ...startableAgent, status: "TODO" }, startable), [
+    { status: "BACKLOG", via: "patch" }, { status: "DOING", via: "start" },
+  ]);
+  assert.deepEqual(targets({ ...startableAgent, status: "BACKLOG" }, startable), [
+    { status: "TODO", via: "patch" }, { status: "DOING", via: "start" },
+  ]);
+  assert.deepEqual(targets({ ...startableAgent, status: "DOING" }, startable), []);
+  assert.deepEqual(targets({ ...startableAgent, status: "REVIEW" }, startable), []);
+  assert.deepEqual(targets({ ...startableAgent, status: "DONE" }, startable), []);
+  assert.deepEqual(targets({ assigneeType: "HUMAN", status: "TODO" }, {
+    hasRepoGrant: false, chainPredecessorsDone: false,
+  }), []);
+
+  const humanApprovalGate = targets({
+    assigneeType: "HUMAN", approvalGate: true, chainId: "c1", chainIndex: 2, status: "TODO",
+  });
+  assert.deepEqual(humanApprovalGate, [{ status: "DONE", via: "patch" }]);
+
+  const agentTargets = targets({ ...startableAgent, status: "TODO" }, startable);
+  assert.deepEqual(agentTargets.find(({ status }) => status === "DOING"), { status: "DOING", via: "start" });
+  assert.equal(agentTargets.some(({ status, via }) => via === "patch" && ["DOING", "REVIEW", "DONE"].includes(status)), false);
 });
 
 test("a repair task is bound to the chain of the regression task its marker names", () => {
@@ -166,9 +212,9 @@ test("a repair task is bound to the chain of the regression task its marker name
   // A regression task that is itself chain-detached binds nothing.
   assert.equal(repairBinding(markerFromMetadata({ kind: "mergeTail.repairAttempt", repairKind: "review-fix", regressionTaskId: "reg-1" }), () => null), null);
   assert.equal(repairBinding(null, chain), null);
-  assert.equal(boardCard(row(), null).repairOf, null);
+  assert.equal(boardCard(row(), null, moveContext).repairOf, null);
   assert.deepEqual(
-    boardCard(row(), null, undefined, null, { chainId: "c1", chainName: "Release", repairKind: "review-fix" }).repairOf,
+    boardCard(row(), null, moveContext, undefined, null, { chainId: "c1", chainName: "Release", repairKind: "review-fix" }).repairOf,
     { chainId: "c1", chainName: "Release", repairKind: "review-fix" },
   );
 });
@@ -246,14 +292,14 @@ test("chainAggregate offers activation after a bound predecessor has settled", (
 test("chainAggregate sums member usage and groups a detached repair without inflating steps", () => {
   const aggregate = chainAggregate("c1", "Release", [
     member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0, runs: [
-      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "1.25" }) },
+      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
     ] }),
     member({ id: "step-2", status: "DONE", chainIndex: 1, chainLayer: 1 }),
   ], [
     member({
       id: "repair", name: "Merge-tail repair", displayName: "Merge-tail repair", chainId: null,
       chainIndex: null, chainLayer: null, status: "TODO", runs: [
-        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "0.50" }) },
+        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: "0.50" }) },
       ],
     }),
   ]);
@@ -272,15 +318,15 @@ test("chainAggregate sums member usage and groups a detached repair without infl
 
 test("blockedOn is projected from the resolved predecessor without storing its status", () => {
   const predecessor = { id: "after-1", name: "Finish the release", status: "DOING" as BoardRow["status"] };
-  const blocked = boardCard(row({ dispatchAfterTaskId: predecessor.id }), null, undefined, predecessor);
+  const blocked = boardCard(row({ dispatchAfterTaskId: predecessor.id }), null, moveContext, undefined, predecessor);
   assert.deepEqual(blocked.blockedOn, { taskId: predecessor.id, taskName: predecessor.name });
 
-  const resolved = boardCard(row({ dispatchAfterTaskId: predecessor.id }), null, undefined, {
+  const resolved = boardCard(row({ dispatchAfterTaskId: predecessor.id }), null, moveContext, undefined, {
     ...predecessor, status: "DONE" as BoardRow["status"],
   });
   assert.equal(resolved.blockedOn, null);
 
-  const unbound = boardCard(row(), null);
+  const unbound = boardCard(row(), null, moveContext);
   assert.equal(unbound.blockedOn, null);
   const { blockedOn: _blockedOn, ...rest } = unbound;
   assert.deepEqual(rest, {
@@ -304,6 +350,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     updatedAt: new Date("2026-08-16T00:00:00.000Z"),
     assigneeAgent: null,
     chainProgress: null,
+    moveTargets: [{ status: "BACKLOG", via: "patch" }],
     latestRun: null,
     taskCost: null,
     mergeOutcome: null,
@@ -314,15 +361,15 @@ test("blockedOn is projected from the resolved predecessor without storing its s
 
 test("the card's merge outcome is bound to the run it shows, and is null everywhere else", () => {
   const merged = JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) });
-  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "gpt-5.6-sol", session: null };
+  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: null };
   // §SF-1: an ordinary step's output is not a malformed merge result, it is not
   // a merge result at all, and 112 board cards must not each carry a marker.
-  assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "code-review", body: "fine", runId: "r1" } }), null).mergeOutcome, null);
-  assert.equal(boardCard(row({ runs: [], stepOutput: { kind: "merge-result", body: merged, runId: "r1" } }), null).mergeOutcome, null);
+  assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "code-review", body: "fine", runId: "r1" } }), null, moveContext).mergeOutcome, null);
+  assert.equal(boardCard(row({ runs: [], stepOutput: { kind: "merge-result", body: merged, runId: "r1" } }), null, moveContext).mergeOutcome, null);
   // A stop recorded by an earlier run is not the newest run's outcome.
-  assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "merge-result", body: merged, runId: "r0" } }), null).mergeOutcome, null);
+  assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "merge-result", body: merged, runId: "r0" } }), null, moveContext).mergeOutcome, null);
   assert.deepEqual(
-    boardCard(row({ runs: [run], stepOutput: { kind: "merge-result", body: merged, runId: "r1" } }), null).mergeOutcome,
+    boardCard(row({ runs: [run], stepOutput: { kind: "merge-result", body: merged, runId: "r1" } }), null, moveContext).mergeOutcome,
     { outcome: "merged", condition: null, incident: false },
   );
 });
@@ -330,11 +377,11 @@ test("the card's merge outcome is bound to the run it shows, and is null everywh
 test("the projection drops the Run and Session columns the board never reads", () => {
   const card = boardCard(row({
     runs: [{
-      id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5",
+      id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", budgetGrants: 0,
       // The real row carries ~45 more columns; only these fields survive.
       session: session({ costUsd: "1.25", startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z") }),
     }],
-  }), null);
+  }), null, moveContext);
   assert.deepEqual(card.latestRun, {
     id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", costUsd: "1.25",
     startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"),
@@ -346,20 +393,20 @@ test("the latest run carries its own claimed model, not the assignee's current o
   // The board card labels the run line with this; a re-tiered agent must not
   // relabel a run that already happened.
   const card = boardCard(row({
-    assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" },
-    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", session: null }],
-  }), null);
+    assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high", archivedAt: null },
+    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", budgetGrants: 0, session: null }],
+  }), null, moveContext);
   assert.equal(card.latestRun?.model, "claude-opus-5:medium");
   assert.equal(card.assigneeAgent?.model, "gpt-5.6-sol:high");
 });
 
 test("a task with no runs reports no latest run rather than an empty one", () => {
-  assert.equal(boardCard(row(), null).latestRun, null);
+  assert.equal(boardCard(row(), null, moveContext).latestRun, null);
 });
 
 test("a run with no session reports a null cost, not a zero one", () => {
   // `0` would read as "this run spent nothing"; the runner simply never said.
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", session: null }] }), null);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", budgetGrants: 0, session: null }] }), null, moveContext);
   assert.equal(card.taskCost, null);
 });
 
@@ -367,7 +414,7 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
   // Prisma hands back a Decimal instance, not a string, and `JSON.stringify`
   // of one is `{"s":1,"e":0,...}` unless it is stringified on the way out.
   const decimal = new Prisma.Decimal("0.42");
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: decimal }) }] }), null);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: decimal }) }] }), null, moveContext);
   assert.equal(card.taskCost?.costUsd, "0.42");
   assert.equal(card.latestRun?.costUsd, "0.42");
   assert.match(JSON.stringify(card), /"costUsd":"0\.42"/);
@@ -375,11 +422,11 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
 
 test("task cost sums every run including failures and marks an estimated summand", () => {
   const card = boardCard(row({ runs: [
-    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", session: session({
+    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", budgetGrants: 0, session: session({
       inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0,
     }) },
-    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", session: session({ costUsd: "1.25" }) },
-  ] }), null);
+    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
+  ] }), null, moveContext);
   assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", costUsd: null, startedAt: null, endedAt: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
@@ -387,10 +434,10 @@ test("task cost sums every run including failures and marks an estimated summand
 
 test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
   const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high",
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", budgetGrants: 0,
     subagentModel: "gpt-5.6-luna:max",
     session: session({ nativeChildUsed: true, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
-  }] }), null);
+  }] }), null, moveContext);
   assert.equal(card.taskCost?.costUsd, "0.32");
   assert.equal(card.taskCost?.estimated, true);
   assert.equal(card.taskCost?.inputTokens, 1_000_000);
@@ -398,22 +445,22 @@ test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
 
 test("a native subagent grant without an observed child uses the root estimate", () => {
   const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high",
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", budgetGrants: 0,
     subagentModel: "gpt-5.6-luna:max",
     session: session({ nativeChildUsed: false, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
-  }] }), null);
+  }] }), null, moveContext);
   assert.equal(card.taskCost?.costUsd, "8");
   assert.equal(card.taskCost?.estimated, true);
 });
 
 test("the assignee carries the model spec the card shows", () => {
-  const card = boardCard(row({ assigneeAgent: { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" } }), null);
+  const card = boardCard(row({ assigneeAgent: { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium", archivedAt: null } }), null, moveContext);
   assert.deepEqual(card.assigneeAgent, { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" });
 });
 
 test("the card carries task ownership even when no agent is assigned", () => {
-  assert.equal(boardCard(row({ assigneeType: "HUMAN", assigneeAgent: null }), null).assigneeType, "HUMAN");
-  assert.equal(boardCard(row({ assigneeType: "AGENT", assigneeAgent: null }), null).assigneeType, "AGENT");
+  assert.equal(boardCard(row({ assigneeType: "HUMAN", assigneeAgent: null }), null, moveContext).assigneeType, "HUMAN");
+  assert.equal(boardCard(row({ assigneeType: "AGENT", assigneeAgent: null }), null, moveContext).assigneeType, "AGENT");
 });
 
 test("chain names are derived only from the exact persisted template-step suffix", () => {
@@ -431,8 +478,8 @@ test("direct chains derive one verified shared display prefix without changing s
   assert.deepEqual(display.get("build"), { chainName: "Release", displayName: "Build" });
   assert.deepEqual(display.get("review"), { chainName: "Release", displayName: "Review" });
   assert.equal(rows[0]!.name, "Release: Build");
-  assert.deepEqual(boardCard(rows[0]!, null, display.get("build")), {
-    ...boardCard(rows[0]!, null), chainName: "Release", displayName: "Build",
+  assert.deepEqual(boardCard(rows[0]!, null, moveContext, display.get("build")), {
+    ...boardCard(rows[0]!, null, moveContext), chainName: "Release", displayName: "Build",
   });
 });
 
@@ -506,7 +553,7 @@ test("readBoard restores archived primary facts when only a detached repair is v
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
     name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
-    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", session: session({ costUsd: "1.25" }) }],
+    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: session({ costUsd: "1.25" }) }],
   });
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
@@ -544,7 +591,7 @@ test("readBoard does not invent a direct-chain name from a duplicated single row
 
 test("the failure reason is carried in full, because Copy error hands it over", () => {
   const long = `${"/very/long/path/segment".repeat(80)} failed`;
-  assert.equal(boardCard(row({ failureReason: long }), null).failureReason, long);
+  assert.equal(boardCard(row({ failureReason: long }), null, moveContext).failureReason, long);
 });
 
 test("a board card is an order of magnitude smaller than the row it projects", () => {
@@ -552,14 +599,14 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   // bar is a 250KB initial payload, so a card has ~2.2KB to spend and uses far
   // less than that whenever the task did not fail.
   const card = boardCard(row({
-    assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" },
-    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "0.42" }) }],
-  }), null);
+    assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium", archivedAt: null },
+    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: "0.42" }) }],
+  }), null, moveContext);
   // The card carries both cost surfaces — the latest run's own cost and the
   // cross-run task total, ownership and the creation timestamp used for queue
-  // order — so the clean-card bound sits at 900, still under half the ~2.2KB
-  // acceptance budget.
-  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 900, "a clean card must stay well inside its budget");
+  // order — so the clean-card bound remains under half the ~2.2KB acceptance
+  // budget even with executable move targets.
+  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 1_100, "a clean card must stay well inside its budget");
 });
 
 /* --------------------------------------------------------------- the ETag */

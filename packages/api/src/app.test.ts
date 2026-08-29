@@ -2367,19 +2367,21 @@ const boardDatabase = (
       },
       groupBy: async () => [],
     },
+    agentRepoAccess: { findMany: async () => [] },
     taskActivity: { findMany: async () => extras.activity ?? [] },
   } as unknown as PrismaClient;
 };
 
 const taskRow = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
-  id: "t1", projectId: "p1", name: "Ship the thing", status: "TODO", failureReason: null,
+  id: "t1", projectId: "p1", name: "Ship the thing", status: "TODO", assigneeType: "AGENT",
+  assigneeAgentId: "a1", repoId: "r1", archivedAt: null, maxSessionsPerTask: 5, failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false,
-  templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
+  templateId: null, source: "MANUAL", chainId: null, chainIndex: null, chainLayer: null, dispatchAfterTaskId: null,
   createdAt: new Date("2026-08-16T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
-  assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium" },
+  assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium", archivedAt: null },
   runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5",
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0,
     session: { costUsd: "0.42", inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null },
   }],
   ...overrides,
@@ -2391,7 +2393,9 @@ const getTasks = async (database: PrismaClient, query: string, headers: Record<s
   });
 
 const taskDetailDatabase = (task: Record<string, unknown>): PrismaClient => ({
-  task: { findUnique: async () => task },
+  task: { findUnique: async () => task, findMany: async () => [task] },
+  run: { groupBy: async () => [] },
+  agentRepoAccess: { findMany: async () => [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }] },
   mergeRecoveryAttempt: { findFirst: async () => null },
 } as unknown as PrismaClient);
 

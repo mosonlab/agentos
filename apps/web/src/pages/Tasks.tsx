@@ -1,14 +1,14 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, operatorMoveTargets, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
+import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { replace, useQuery } from "../lib/router";
 import { storage } from "../lib/storage";
-import type { BoardTask, TaskStartability, TaskStatus } from "../lib/types";
+import type { BoardTask, TaskMoveTarget, TaskStartability, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { DesktopBoard } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
@@ -63,9 +63,8 @@ export const ChainFilterControl = ({ name, onClear }: { name: string; onClear: (
 
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
-export const moveAction = (status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
-  status === "DOING" && startable ? "confirm-start" : "patch"
-);
+export const moveAction = (via: TaskMoveTarget["via"]): "confirm-start" | "patch" =>
+  via === "start" ? "confirm-start" : "patch";
 
 export const startabilityRefusal = (verdict: TaskStartability): string => {
   const reasons = Object.entries(verdict.checklist)
@@ -150,7 +149,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
 
   const requestForMove = useCallback(async (taskId: string): Promise<boolean> => {
     const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
-    if (moveAction("DOING", verdict.startable) === "patch") throw new Error(startabilityRefusal(verdict));
+    if (!verdict.startable) throw new Error(startabilityRefusal(verdict));
     setError(null);
     setRequest(verdict);
     return true;
@@ -282,8 +281,15 @@ export const TasksPage = (): ReactNode => {
   const move = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
+    const target = task.moveTargets.find((candidate) => candidate.status === status);
+    if (!target) {
+      const message = moveNotAllowedNotice(task, status);
+      setNotice(message);
+      setAnnouncement(message);
+      return;
+    }
     void run(async () => {
-      if (status === "DOING" && await start.requestForMove(taskId)) return;
+      if (moveAction(target.via) === "confirm-start" && await start.requestForMove(taskId)) return;
       recordMove(task, status);
       await api.patch(`/tasks/${taskId}`, { status });
       reload();
@@ -293,7 +299,7 @@ export const TasksPage = (): ReactNode => {
   const drop = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
-    if (!operatorMoveTargets(task).includes(status)) {
+    if (!task.moveTargets.some((target) => target.status === status)) {
       const message = moveNotAllowedNotice(task, status);
       setNotice(message);
       setAnnouncement(message);
