@@ -12,14 +12,14 @@ const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
 
 test("platformCommitArgs centralizes the runner commit identity and optional pathspec", () => {
   assert.deepEqual(platformCommitArgs("Materialize direct-chain specification", ".chain/feature/spec.md"), [
-    "-c", "user.name=AgentOS Runner",
+    "-c", "user.name=Anneal Runner",
     "-c", "user.email=runner@agentos.local",
     "-c", "commit.gpgSign=false",
     "-c", "core.hooksPath=/dev/null",
     "commit", "--no-verify", "-m", "Materialize direct-chain specification", "--", ".chain/feature/spec.md",
   ]);
   assert.deepEqual(platformCommitArgs("WIP salvage"), [
-    "-c", "user.name=AgentOS Runner",
+    "-c", "user.name=Anneal Runner",
     "-c", "user.email=runner@agentos.local",
     "-c", "commit.gpgSign=false",
     "-c", "core.hooksPath=/dev/null",

@@ -39,7 +39,7 @@ test("the create form has no Foundation field or request key", async () => {
   const staticMarkup = renderToStaticMarkup(<NewAgent projectId="p" onClose={() => undefined} onCreated={() => undefined}
     initial={{ name: "new-agent", title: "New Agent", environmentId: "e", rolePrompt: "role" }} />);
   assert.equal((staticMarkup.match(/<textarea/gu) ?? []).length, 1, "only the role prompt remains");
-  assert.doesNotMatch(staticMarkup, /AgentOS foundation/iu);
+  assert.doesNotMatch(staticMarkup, /Anneal foundation/iu);
 
   const { dom, container } = installDom();
   const root = createRoot(container);

@@ -474,7 +474,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
       url: `${repo}/git/commits`,
       method: "POST",
       body: {
-        message: `Merge pull request #${reference.number}\n\nAgentOS autonomous exact-head merge`,
+        message: `Merge pull request #${reference.number}\n\nAnneal autonomous exact-head merge`,
         tree: mergeTree,
         parents: [expectedBase.sha, expectedHeadSha],
       },

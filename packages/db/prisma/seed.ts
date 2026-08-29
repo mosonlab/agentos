@@ -101,9 +101,9 @@ const main = async (): Promise<void> => {
     where: { slug: "agentos-example" },
     update: {},
     create: {
-      name: "AgentOS Example",
+      name: "Anneal Example",
       slug: "agentos-example",
-      yamlDocument: "# Managed by AgentOS; YAML sync arrives after v1.\n",
+      yamlDocument: "# Managed by Anneal; YAML sync arrives after v1.\n",
     },
   });
 

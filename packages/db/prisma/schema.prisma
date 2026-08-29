@@ -915,7 +915,7 @@ model Run {
   cliVersion            String?
   model                 String
   /// Immutable launch snapshot. DEFAULT is explicit rather than an omitted
-  /// provider value, so AgentOS never delegates this choice to `auto`.
+  /// provider value, so Anneal never delegates this choice to `auto`.
   codexServiceTier      CodexServiceTier     @default(DEFAULT)
   /// Immutable native-child capability snapshot. Null outside Codex
   /// implementation steps; fixed by the platform rather than Agent setup.

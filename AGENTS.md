@@ -56,7 +56,7 @@ branch, and remove the worktree once merged.
 
 ## Platform runs
 
-For an agent executing inside an AgentOS run: your checkout is exclusive to
+For an agent executing inside an Anneal run: your checkout is exclusive to
 this run. Create any worktree you need inside your own run workspace (a
 relative path such as `./worktrees/<name>`), never outside it — host-window
 rules elsewhere in this file do not move your work off the run workspace.

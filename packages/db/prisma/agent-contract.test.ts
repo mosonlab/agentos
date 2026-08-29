@@ -118,7 +118,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 
   assert.match(firstReview, /implementation step's persisted output/u);
   assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
-  assert.match(firstReview, /only as the AgentOS task output/u);
+  assert.match(firstReview, /only as the Anneal task output/u);
   assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
   assert.match(firstReview, /one session, make two sequential explicit passes over the same reviewed range/u);

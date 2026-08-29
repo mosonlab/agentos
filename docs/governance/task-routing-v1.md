@@ -6,7 +6,7 @@ Status: Active
 
 ## Applies to
 
-This contract governs the design, creation, dispatch, and routing of AgentOS tasks, task chains, and task templates. Every runnable task or chain requires one versioned Product Contract; a chain does not create a separate contract per step.
+This contract governs the design, creation, dispatch, and routing of Anneal tasks, task chains, and task templates. Every runnable task or chain requires one versioned Product Contract; a chain does not create a separate contract per step.
 
 This contract records dispatch-time governance only. Execution structure, step prompts, and model or runner defaults live in their canonical sources named below and are not copied here.
 

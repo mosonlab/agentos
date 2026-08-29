@@ -104,7 +104,7 @@ test("a delayed reclaim salvages an unpublished retained workspace before deleti
   const runPath = join(workspaceRoot, "run-1");
   git(workspaceRoot, "init", "--bare", "--initial-branch=master", remote);
   git(workspaceRoot, "init", "--initial-branch=master", seed);
-  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.name", "Anneal Test");
   git(seed, "config", "user.email", "runner@agentos.local");
   await writeFile(join(seed, "base.txt"), "base\n");
   git(seed, "add", "base.txt");
@@ -142,7 +142,7 @@ test("a delayed reclaim removes a dirty pinned checkout without salvage publicat
   const runPath = join(workspaceRoot, "run-1");
   git(workspaceRoot, "init", "--bare", "--initial-branch=master", remote);
   git(workspaceRoot, "init", "--initial-branch=master", seed);
-  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.name", "Anneal Test");
   git(seed, "config", "user.email", "runner@agentos.local");
   await writeFile(join(seed, "base.txt"), "base\n");
   git(seed, "add", "base.txt");
@@ -180,7 +180,7 @@ test("a delayed salvage ACK refusal retains the workspace after publishing its r
   const runPath = join(workspaceRoot, "run-1");
   git(workspaceRoot, "init", "--bare", "--initial-branch=master", remote);
   git(workspaceRoot, "init", "--initial-branch=master", seed);
-  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.name", "Anneal Test");
   git(seed, "config", "user.email", "runner@agentos.local");
   await writeFile(join(seed, "base.txt"), "base\n");
   git(seed, "add", "base.txt");

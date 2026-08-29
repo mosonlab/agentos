@@ -26,7 +26,7 @@ export class ControlPlaneError extends Error {
   readonly code: string | undefined;
 
   constructor(status: number, responseBody: string, code?: string) {
-    super(`AgentOS API ${status}: ${responseBody}`);
+    super(`Anneal API ${status}: ${responseBody}`);
     this.name = "ControlPlaneError";
     this.status = status;
     this.code = code;
@@ -192,7 +192,7 @@ const request = async (config: RunnerConfig, path: string, init: RequestInit): P
     // lease expiry, which is the same lost run the per-command timeout exists
     // to prevent, one layer up.
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      throw new Error(`AgentOS API request timed out after ${config.apiTimeoutMs}ms: ${path}`);
+      throw new Error(`Anneal API request timed out after ${config.apiTimeoutMs}ms: ${path}`);
     }
     throw error;
   });
@@ -352,7 +352,7 @@ export const readSessionTaskOutputStatus = async (
     || typeof payload.task.outputRemediationAllowed !== "boolean"
     || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
     || typeof payload.task.outputPersisted !== "boolean") {
-    throw new Error(`AgentOS API returned an invalid task output status for Run ${claim.run.id}`);
+    throw new Error(`Anneal API returned an invalid task output status for Run ${claim.run.id}`);
   }
   return {
     outputKind: payload.task.outputKind,

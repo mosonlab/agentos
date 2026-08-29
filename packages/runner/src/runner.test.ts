@@ -283,7 +283,7 @@ const seedRemote = async (root: string): Promise<string> => {
   const seed = join(root, "seed");
   git(root, "init", "--bare", "--initial-branch=master", remote);
   git(root, "init", "--initial-branch=master", seed);
-  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.name", "Anneal Test");
   git(seed, "config", "user.email", "runner@agentos.local");
   await writeFile(join(seed, "tree.txt"), "base\n");
   git(seed, "add", "tree.txt");
@@ -655,7 +655,7 @@ test("startup reports Claude and Pi blocked, keeps their telemetry, and passes C
   }
 });
 
-test("startup blocks a Codex CLI that lacks the exec protocol AgentOS invokes", async () => {
+test("startup blocks a Codex CLI that lacks the exec protocol Anneal invokes", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-incompatible-"));
   try {
     const binary = join(root, "codex.sh");
@@ -678,7 +678,7 @@ test("startup blocks a Codex CLI that lacks the exec protocol AgentOS invokes", 
       { CLAUDE: false, CODEX: false, PI: false },
     );
     const codex = posts.find((post) => post.body.runner === "CODEX" && "error" in post.body)!;
-    assert.equal(codex.body.error, "cli-incompatible: the CLI does not expose the required AgentOS exec protocol");
+    assert.equal(codex.body.error, "cli-incompatible: the CLI does not expose the required Anneal exec protocol");
     assert.equal(codex.body.cliVersion, "codex-cli 0.1.0");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -739,7 +739,7 @@ test("startup does not retry an API authentication refusal", async () => {
         wait: async (attempt) => { waits.push(attempt); },
         onRetry: () => assert.fail("a deterministic refusal must not be retried"),
       }),
-      /AgentOS API 401/u,
+      /Anneal API 401/u,
     );
     assert.equal(calls, 1);
     assert.deepEqual(waits, []);

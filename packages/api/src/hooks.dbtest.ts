@@ -47,7 +47,7 @@ const fire = (
   headers: Record<string, string> = {},
 ) => createApp(db).request(`/hooks/templates/${templateId}`, {
   method: "POST",
-  headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "shared", ...headers },
+  headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "shared", ...headers },
   body: JSON.stringify(payload),
 });
 
@@ -162,7 +162,7 @@ test("a paused trigger answers a correct secret exactly as it answers a wrong on
   const { template } = await seedWebhook();
   const wrong = await createApp(db).request(`/hooks/templates/${template.id}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "not-the-secret" },
+    headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "not-the-secret" },
     body: JSON.stringify({ issue: { title: "Fix race" } }),
   });
   const wrongBody = await wrong.text();
@@ -197,7 +197,7 @@ test("inside the replay window an identical redelivery is a 200 duplicate, not a
 test("the delivery id beats the body hash, so a redelivery with a changed body is still a duplicate", async () => {
   const { template } = await seedWebhook();
   await setWindow(template.id, 300);
-  const headers = { "X-AgentOS-Delivery-Id": "delivery-9" };
+  const headers = { "X-Anneal-Delivery-Id": "delivery-9" };
   assert.equal((await fire(template.id, { issue: { title: "One" } }, headers)).status, 201);
   assert.equal((await fire(template.id, { issue: { title: "Two, retried" } }, headers)).status, 200);
   assert.equal(await db.task.count(), 1);

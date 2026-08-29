@@ -13,7 +13,7 @@ const info: BuildInfo = readBuildInfo(import.meta.url);
 /** The startup line. Printed before anything can fail, because the first thing
  *  an incident asks of a control plane is which build it is. */
 export const apiBuildLine = (buildInfo: BuildInfo = info): string =>
-  `AgentOS API build: ${formatBuildLine(buildInfo)}`;
+  `Anneal API build: ${formatBuildLine(buildInfo)}`;
 
 export type VersionPayload = {
   service: string;

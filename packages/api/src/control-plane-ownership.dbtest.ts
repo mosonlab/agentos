@@ -189,12 +189,12 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   });
   const owner = spawnApi(common(source.url));
   children.add(owner.child);
-  const ready = await waitFor(owner.child, /AgentOS API listening/u, owner.output);
-  assert.match(ready, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*AgentOS API listening/u);
+  const ready = await waitFor(owner.child, /Anneal API listening/u, owner.output);
+  assert.match(ready, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*Anneal API listening/u);
   const canonicalRoot = (JSON.parse(ready.match(/CONTROL_PLANE_OWNERSHIP_ACQUIRED (\{[^\n]+\})/u)?.[1] ?? "{}") as { canonicalWorkspaceRoot?: string }).canonicalWorkspaceRoot;
   assert.equal(canonicalRoot, workspace);
 
-  const listenPort = Number(ready.match(/AgentOS API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
+  const listenPort = Number(ready.match(/Anneal API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
   assert.ok(listenPort > 0);
   const apiBase = `http://127.0.0.1:${listenPort}`;
   const ownershipBeforeFilesAndRunners = await durableStateSnapshot(state);
@@ -324,7 +324,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
     await waitForDatabaseLockWaiter(observer, signalApplicationName);
     signaledDuringReconciliation.child.kill("SIGTERM");
     await waitFor(signaledDuringReconciliation.child, /Received SIGTERM/u, signaledDuringReconciliation.output);
-    assert.doesNotMatch(signaledDuringReconciliation.output.value, /AgentOS API listening/u);
+    assert.doesNotMatch(signaledDuringReconciliation.output.value, /Anneal API listening/u);
   } finally {
     releaseDatabaseLock();
     await blockingTransaction;
@@ -333,7 +333,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await waitFor(signaledDuringReconciliation.child, /CONTROL_PLANE_OWNERSHIP_RELEASED/u, signaledDuringReconciliation.output);
   assert.equal((await exited(signaledDuringReconciliation.child)).code, 0);
   assert.match(signaledDuringReconciliation.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Received SIGTERM[\s\S]*Startup reconciliation:[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
-  assert.doesNotMatch(signaledDuringReconciliation.output.value, /AgentOS API listening/u);
+  assert.doesNotMatch(signaledDuringReconciliation.output.value, /Anneal API listening/u);
   t.diagnostic("RP-OWN-LIFECYCLE signal-during-reconciliation cleanup passed");
 
   const failingSignalRoot = join(container, "signal-failure-root");
@@ -376,8 +376,8 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   }
   await waitFor(signalThenFailure.child, /CONTROL_PLANE_OWNERSHIP_RELEASED/u, signalThenFailure.output);
   assert.equal((await exited(signalThenFailure.child)).code, 1);
-  assert.match(signalThenFailure.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Received SIGTERM[\s\S]*AgentOS API startup failed[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
-  assert.doesNotMatch(signalThenFailure.output.value, /AgentOS API listening/u);
+  assert.match(signalThenFailure.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Received SIGTERM[\s\S]*Anneal API startup failed[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
+  assert.doesNotMatch(signalThenFailure.output.value, /Anneal API listening/u);
   const failedSignalState = await durableStateSnapshot(failingSignalState);
   const failedSignalOwner = JSON.parse(failedSignalState.files.find(({ name }) => name === controlPlaneOwnerFilename)?.bytes.toString("utf8") ?? "{}") as { state?: string; releasedAt?: string };
   assert.equal(failedSignalOwner.state, "released");
@@ -397,7 +397,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
     AGENTOS_TEST_SPAWN_OWNERSHIP_DESCENDANT: "1",
   });
   children.add(recoveryOwner.child);
-  const recoveryOwnerReady = await waitFor(recoveryOwner.child, /AgentOS API listening/u, recoveryOwner.output);
+  const recoveryOwnerReady = await waitFor(recoveryOwner.child, /Anneal API listening/u, recoveryOwner.output);
   const descendantPid = Number(recoveryOwnerReady.match(/OWNERSHIP_PRODUCTION_DESCENDANT_PID (\d+)/u)?.[1]);
   assert.ok(descendantPid > 0);
   let descendantAlive = true;
@@ -422,7 +422,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
     CONTROL_PLANE_STATE_DIR: recoveryState,
   });
   children.add(recoverySuccessor.child);
-  const recoveredReady = await waitFor(recoverySuccessor.child, /AgentOS API listening/u, recoverySuccessor.output);
+  const recoveredReady = await waitFor(recoverySuccessor.child, /Anneal API listening/u, recoverySuccessor.output);
   const recovered = markerFields(recoveredReady, "CONTROL_PLANE_OWNERSHIP_RECOVERED");
   const successorAcquired = markerFields(recoveredReady, "CONTROL_PLANE_OWNERSHIP_ACQUIRED");
   assert.equal(successorAcquired.controlPlaneId, priorAcquired.controlPlaneId);
@@ -430,7 +430,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   assert.equal(recovered.priorIncarnationId, priorAcquired.incarnationId);
   assert.equal(recovered.incarnationId, successorAcquired.incarnationId);
   assert.equal(recovered.priorPid, recoveryOwner.child.pid);
-  assert.match(recoveredReady, /CONTROL_PLANE_OWNERSHIP_RECOVERED[\s\S]*CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*AgentOS API listening/u);
+  assert.match(recoveredReady, /CONTROL_PLANE_OWNERSHIP_RECOVERED[\s\S]*CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*Anneal API listening/u);
   recoverySuccessor.child.kill("SIGTERM");
   assert.equal((await exited(recoverySuccessor.child)).code, 0);
   assert.match(recoverySuccessor.output.value, /CONTROL_PLANE_OWNERSHIP_RELEASED/u);

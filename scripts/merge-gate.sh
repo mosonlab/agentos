@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# AgentOS merge gate. Run this in the worktree you are about to merge.
+# Anneal merge gate. Run this in the worktree you are about to merge.
 #
 #   bash scripts/merge-gate.sh                       # gate the current HEAD
 #   bash scripts/merge-gate.sh --expect-head <oid>   # gate exactly that commit

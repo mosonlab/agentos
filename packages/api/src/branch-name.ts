@@ -9,7 +9,7 @@ const hasControlCharacter = (value: string): boolean => {
 };
 
 /** Shared final authority for every branch name accepted by the API.
- * Mirrors `git check-ref-format --branch` for the supported AgentOS forms. */
+ * Mirrors `git check-ref-format --branch` for the supported Anneal forms. */
 export const isValidBranchName = (value: string): boolean => {
   if (value.length === 0 || value.length > 255) return false;
   if (hasControlCharacter(value) || BRANCH_FORBIDDEN.test(value)) return false;

@@ -12,7 +12,7 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // the log still names the build that failed. The API prints the same line about
 // its own dist, and the two are built separately — the 2026-08-17 incident was
 // one of them being stale while the other was current (issue #140).
-console.log(`AgentOS runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
+console.log(`Anneal runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
 const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }] = await Promise.all([
   import("./config.js"),
@@ -67,7 +67,7 @@ const sharedLock = await holdSharedServiceMaintenanceLock({
   // exit would discard: the reason is the only thing an operator gets, and a
   // supervisor's log is exactly the pipe that loses it.
   await new Promise<void>((resolve) => {
-    process.stderr.write(`AgentOS runner startup refused: ${error.reason}\n`, () => { resolve(); });
+    process.stderr.write(`Anneal runner startup refused: ${error.reason}\n`, () => { resolve(); });
   });
   process.exit(error.exitCode);
 });
@@ -82,7 +82,7 @@ const stop = (signal: string): void => {
 process.once("SIGINT", () => stop("SIGINT"));
 process.once("SIGTERM", () => stop("SIGTERM"));
 
-console.log(`AgentOS local runner ${config.runnerId} polling ${config.apiUrl}`);
+console.log(`Anneal local runner ${config.runnerId} polling ${config.apiUrl}`);
 // Workspace disposal belongs to this process, because it is the one that owns
 // the root (issue #115). The control plane only publishes intents; if nobody
 // sweeps, directories accumulate and nothing is ever wrongly deleted.

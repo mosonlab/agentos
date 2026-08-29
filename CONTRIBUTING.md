@@ -4,7 +4,7 @@ Thank you for reading this before opening something.
 
 ## The current state of contributions
 
-AgentOS v0.3.0 is a Developer Preview published so that people can evaluate it,
+Anneal v0.4.0 is a Developer Preview published so that people can evaluate it,
 read it, and tell us where it is wrong. **We are not yet accepting outside pull
 requests.** The review and merge process this repository uses is built around a
 single gate run by maintainers, and we would rather say that plainly than leave
@@ -129,7 +129,7 @@ something outside the checkout.
   `agents/templates/` and reach production through an ordinary pull request;
   the operator procedure is maintained outside this repository, while the
   closed sync contract remains enforced here.
-- A checkout named by a loaded AgentOS service is an appliance checkout. Follow
+- A checkout named by a loaded Anneal service is an appliance checkout. Follow
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
   use a separate worktree for development. A fresh worktree needs

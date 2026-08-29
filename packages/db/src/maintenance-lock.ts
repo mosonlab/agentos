@@ -24,15 +24,15 @@
  * `(MAINTENANCE_LOCK_CLASS, hash(schema))`:
  *
  *   - the class constant is the ASCII of `AGOS`, so an unrelated application
- *     taking advisory locks in the same database cannot collide with AgentOS
+ *     taking advisory locks in the same database cannot collide with Anneal
  *     by picking a small integer;
  *   - the second word names the *schema*, because that is what a release
- *     migration targets and what the services read. Two AgentOS schemas in one
+ *     migration targets and what the services read. Two Anneal schemas in one
  *     database may be maintained independently, which is correct.
  *
  * A consumer whose unit of work is the whole database rather than one schema —
  * the OSS-D backup dumps a database, not a schema — must therefore hold the
- * lock for every AgentOS schema it covers. In the Compose model this plan
+ * lock for every Anneal schema it covers. In the Compose model this plan
  * targets that is exactly one, but it is a real obligation and not an
  * accident, so it is written down here rather than assumed.
  *
