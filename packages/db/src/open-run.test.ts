@@ -10,6 +10,7 @@ import {
 
 import {
   type OpenRunIntent,
+  enqueueTaskRun,
   openRun,
   pinnedImplementationRange,
   runBudgetCeiling,
@@ -86,6 +87,7 @@ const taskRow = (overrides: Record<string, unknown> = {}) => ({
 
 const intents = (): OpenRunIntent[] => [
   { kind: "enqueue", readyAt: now },
+  { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
   { kind: "task-created", readyAt: now },
   { kind: "retry", readyAt: now },
   { kind: "integrator-authorized", readyAt: now },
@@ -360,6 +362,15 @@ test("each OpenRunIntent creates through one seam with its named budget rule", a
       expected: { runNumber: 4, maxRunsPerTask: 7, budgetGrants: 2 },
     },
     {
+      intent: { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+      task: taskRow({
+        repoId: repo.id,
+        repo,
+        runs: [priorRun({ runNumber: 5, maxRunsPerTask: 5, budgetGrants: 0 })],
+      }),
+      expected: { runNumber: 6, maxRunsPerTask: 6, budgetGrants: 1 },
+    },
+    {
       intent: { kind: "retry", readyAt: now },
       task: taskRow({ maxSessionsPerTask: 5, runs: [priorRun({ runNumber: 2, budgetGrants: 2 })] }),
       expected: { runNumber: 3, maxRunsPerTask: 7, budgetGrants: 2 },
@@ -422,6 +433,25 @@ test("each OpenRunIntent creates through one seam with its named budget rule", a
       item.intent.kind,
     );
   }
+});
+
+test("enqueueTaskRun's merge-tail option grants one attempt and ordinary enqueue does not", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ runNumber: 5, maxRunsPerTask: 5, budgetGrants: 0 })],
+  });
+
+  const ordinary = fakeTx(task);
+  const ordinaryRun = await enqueueTaskRun(ordinary.tx, task.id, now);
+  assert.equal(ordinaryRun.maxRunsPerTask, 5);
+  assert.equal(ordinaryRun.budgetGrants, 0);
+
+  const mergeTail = fakeTx(task);
+  const mergeTailRun = await enqueueTaskRun(mergeTail.tx, task.id, now, { budgetGrant: 1 });
+  assert.equal(mergeTailRun.maxRunsPerTask, 6);
+  assert.equal(mergeTailRun.budgetGrants, 1);
 });
 
 test("runBudgetCeiling is the only ceiling algorithm and clamps negative grants", () => {
