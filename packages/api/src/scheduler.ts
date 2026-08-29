@@ -1,8 +1,11 @@
 import {
   AssigneeType,
+  ACTIVE_RUN_STATUSES,
   isChainHeldError,
   enqueueTaskRun,
   INTEGRATOR_AGENT_NAME,
+  lockChainRows,
+  lockChainStructure,
   Prisma,
   type PrismaClient,
   ScheduleKind,
@@ -221,6 +224,163 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
   }
 };
 
+/** A DONE task is history after one bounded week, not an indefinitely growing
+ * board column. `updatedAt` is the only persisted timestamp that moves with a
+ * status transition, so it is the completion-age clock for this policy. */
+export const DONE_TASK_ARCHIVE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export type DoneTaskArchiveSweepResult = {
+  archived: number;
+  skipped: number;
+};
+
+type DoneArchiveCandidate = {
+  id: string;
+  projectId: string;
+  chainId: string | null;
+};
+
+type DoneArchiveChain = {
+  projectId: string;
+  chainId: string;
+  candidateIds: string[];
+};
+
+/** Re-checks the candidate predicate while taking the Task-row mutex. A task
+ * can leave Done after the unlocked candidate scan; PostgreSQL re-evaluates
+ * this WHERE after a concurrent writer releases the row lock. */
+const lockStandaloneDoneTasks = async (
+  tx: Prisma.TransactionClient,
+  candidates: DoneArchiveCandidate[],
+  cutoff: Date,
+): Promise<string[]> => {
+  if (candidates.length === 0) return [];
+  const ids = candidates.map((candidate) => candidate.id);
+  const projectId = candidates[0]!.projectId;
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task"
+    WHERE "id" = ANY(${ids})
+      AND "projectId" = ${projectId}
+      AND "status" = 'done'::"TaskStatus"
+      AND "archivedAt" IS NULL
+      AND "updatedAt" <= ${cutoff}
+    ORDER BY "id" FOR UPDATE
+  `;
+  return rows.map((row) => row.id);
+};
+
+const archiveTaskRows = async (
+  tx: Prisma.TransactionClient,
+  taskIds: string[],
+  projectId: string,
+  cutoff: Date,
+  archivedAt: Date,
+): Promise<number> => {
+  if (taskIds.length === 0) return 0;
+  const activeRuns = await tx.run.findMany({
+    where: { taskId: { in: taskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+    select: { taskId: true },
+    distinct: ["taskId"],
+  });
+  const busy = new Set(activeRuns.flatMap((run) => run.taskId ? [run.taskId] : []));
+  const archivable = taskIds.filter((taskId) => !busy.has(taskId));
+  if (archivable.length === 0) return 0;
+  const updated = await tx.task.updateMany({
+    where: {
+      id: { in: archivable },
+      projectId,
+      status: TaskStatus.DONE,
+      archivedAt: null,
+      updatedAt: { lte: cutoff },
+    },
+    data: { archivedAt },
+  });
+  if (updated.count > 0) {
+    if (updated.count !== archivable.length) {
+      throw new Error(`Done-task archive changed ${String(updated.count)} of ${String(archivable.length)} locked rows`);
+    }
+    await tx.taskActivity.createMany({ data: archivable.map((taskId) => ({
+      taskId,
+      actorType: "scheduler",
+      body: "Task automatically archived after 7 days in Done",
+    })) });
+  }
+  return updated.count;
+};
+
+/** Archives stale DONE history from the scheduler's existing periodic tick.
+ * Chained candidates are considered as a unit: every persisted member must be
+ * DONE before one of its old members can be hidden, otherwise a live chain
+ * would acquire a hole in its visible step history. */
+export const archiveDoneTasks = async (
+  db: PrismaClient,
+  now = new Date(),
+  ageMs = DONE_TASK_ARCHIVE_AGE_MS,
+): Promise<DoneTaskArchiveSweepResult> => {
+  if (!Number.isSafeInteger(ageMs) || ageMs < 0) {
+    throw new RangeError("Done-task archive age must be a non-negative safe integer");
+  }
+  const cutoff = new Date(now.getTime() - ageMs);
+  const candidates = await db.task.findMany({
+    where: { status: TaskStatus.DONE, archivedAt: null, updatedAt: { lte: cutoff } },
+    select: { id: true, projectId: true, chainId: true },
+  });
+  if (candidates.length === 0) return { archived: 0, skipped: 0 };
+
+  const standalone = new Map<string, DoneArchiveCandidate[]>();
+  const chains = new Map<string, DoneArchiveChain>();
+  for (const candidate of candidates) {
+    if (candidate.chainId === null) {
+      const group = standalone.get(candidate.projectId) ?? [];
+      group.push(candidate);
+      standalone.set(candidate.projectId, group);
+      continue;
+    }
+    const key = JSON.stringify([candidate.projectId, candidate.chainId]);
+    const group = chains.get(key) ?? { projectId: candidate.projectId, chainId: candidate.chainId, candidateIds: [] };
+    group.candidateIds.push(candidate.id);
+    chains.set(key, group);
+  }
+
+  let archived = 0;
+  await db.$transaction(async (tx) => {
+    // Structural locks use the same order as chain append/delete routes. The
+    // row locks then make completion/start/archive races resolve atomically.
+    const orderedChains = [...chains.values()].sort((left, right) => (
+      left.projectId.localeCompare(right.projectId) || left.chainId.localeCompare(right.chainId)
+    ));
+    for (const chain of orderedChains) {
+      await lockChainStructure(tx, { projectId: chain.projectId, chainId: chain.chainId });
+      await lockChainRows(tx, { projectId: chain.projectId, chainId: chain.chainId });
+      const rows = await tx.task.findMany({
+        where: { projectId: chain.projectId, chainId: chain.chainId },
+        select: { id: true, status: true, archivedAt: true, updatedAt: true },
+      });
+      // Empty chains are possible after a concurrent delete. No candidate can
+      // be archived in that case, and all-DONE remains intentionally fail-closed
+      // for malformed chains that contain a non-DONE member.
+      if (rows.length === 0 || !rows.every((row) => row.status === TaskStatus.DONE)) continue;
+      const eligible = chain.candidateIds.filter((taskId) => rows.some((row) => (
+        row.id === taskId
+          && row.status === TaskStatus.DONE
+          && row.archivedAt === null
+          && row.updatedAt <= cutoff
+      )));
+      archived += await archiveTaskRows(tx, eligible, chain.projectId, cutoff, now);
+    }
+
+    // Keep standalone locking after chain locking, matching the manual
+    // Archive All route's lock order and avoiding a chain/standalone deadlock.
+    for (const projectId of [...standalone.keys()].sort()) {
+      const projectCandidates = standalone.get(projectId)!;
+      const locked = await lockStandaloneDoneTasks(tx, projectCandidates, cutoff);
+      archived += await archiveTaskRows(tx, locked, projectId, cutoff, now);
+    }
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+
+  return { archived, skipped: candidates.length - archived };
+};
+
 export const schedulerTick = async (db: PrismaClient, now = new Date()): Promise<{ cronFired: number; atFired: number; quarantined: number }> => {
   const [cronTasks, atTasks] = await Promise.all([
     db.task.findMany({ where: {
@@ -258,6 +418,18 @@ export const schedulerTick = async (db: PrismaClient, now = new Date()): Promise
     } catch (error: unknown) {
       console.error("Scheduled AT task fire failed", { taskId: task.id, error });
     }
+  }
+  try {
+    const archived = await archiveDoneTasks(db, now);
+    if (archived.archived > 0) console.log("Scheduled DONE task archive sweep", archived);
+  } catch (error: unknown) {
+    // A failed sweep must stay visible in the service logs and is retried on
+    // the next scheduler tick; silently abandoning old Done history would make
+    // the bounded-age policy fail in exactly the way it was meant to prevent.
+    console.error("Scheduled DONE task archive sweep failed", {
+      reason: error instanceof Error ? error.message : String(error),
+      error,
+    });
   }
   return { cronFired, atFired, quarantined };
 };
