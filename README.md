@@ -100,9 +100,10 @@ all editable, so you can reshape the chain into your own process.
 
 <div align="center">
 
-<img src="docs/media/chain.png" alt="Task detail: the twelve-step chain with each step's role and status, above the completed run and the task prompt" width="880">
+<img src="docs/media/chain.png" alt="Task detail: a completed twelve-step chain with each step's role and status, the run cost, and the merge-tail repair timeline" width="880">
 
-<sub>A chain in flight: step 4 running, steps 6 and 7 waiting as parallel siblings.</sub>
+<sub>A finished chain: twelve steps done, including four autonomous
+merge-tail repairs during regression verification.</sub>
 
 </div>
 

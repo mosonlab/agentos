@@ -91,9 +91,10 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 
 <div align="center">
 
-<img src="docs/media/chain.png" alt="任务详情：十二步链及各步角色与状态" width="880">
+<img src="docs/media/chain.png" alt="任务详情：一条完成的十二步链、各步角色与状态、运行成本与 merge-tail 修复时间线" width="880">
 
-<sub>一条在飞的链：第 4 步运行中，第 6、7 步作为并行兄弟等待。</sub>
+<sub>一条跑完的链：十二步全部完成，回归验证期间还包含四次自主的
+merge-tail 修复。</sub>
 
 </div>
 
