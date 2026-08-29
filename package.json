@@ -31,7 +31,7 @@
     "test:operator-api-docs": "node --test scripts/operator-api-docs.test.mjs",
     "test:gate-worker": "node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs",
     "test:merge-train": "node --test scripts/merge-train.test.mjs",
-    "test:auto-deploy": "node --test scripts/deploy/quiet-window-deploy.test.mjs",
+    "test:auto-deploy": "node --test scripts/deploy/quiet-window-deploy.test.mjs scripts/deploy/launchd-service-wrapper.test.mjs",
     "snapshot:scan": "node scripts/public-snapshot-scan.mjs",
     "test:snapshot-scan": "node --test scripts/public-snapshot-scan.test.mjs",
     "test:release-docs": "node --test scripts/release-docs.test.mjs scripts/setup-merge-executor.test.mjs",
