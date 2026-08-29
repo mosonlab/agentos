@@ -8,8 +8,8 @@ import {
   isRegressionVerificationOutputKind,
   latestMarker,
   MERGE_TAIL_KIND,
+  Prisma,
   readMarkers,
-  type Prisma,
   type PrismaClient,
 } from "@anneal/db";
 import {
@@ -406,10 +406,7 @@ const noteLeaseReleaseDeferred = async (
   }
 };
 
-export const deferredLeaseReleases = async (
-  tx: Prisma.TransactionClient,
-): Promise<Array<{ activityId: string; taskId: string; target: MergeLeaseTarget }>> => (
-  tx.$queryRaw<Array<{ activityId: string; taskId: string; projectId: string; chainId: string }>>`
+export const deferredLeaseReleasesStatement = Prisma.sql`
     SELECT
       deferred.id AS "activityId",
       deferred."taskId" AS "taskId",
@@ -434,7 +431,14 @@ export const deferredLeaseReleases = async (
       )
     ORDER BY deferred."createdAt" ASC, deferred.id ASC
     LIMIT ${LEASE_RELEASE_QUERY_LIMIT}
-  `
+  `;
+
+export const deferredLeaseReleases = async (
+  tx: Prisma.TransactionClient,
+): Promise<Array<{ activityId: string; taskId: string; target: MergeLeaseTarget }>> => (
+  tx.$queryRaw<Array<{ activityId: string; taskId: string; projectId: string; chainId: string }>>(
+    deferredLeaseReleasesStatement,
+  )
 ).then((rows) => rows.map(({ activityId, taskId, projectId, chainId }) => ({
   activityId,
   taskId,

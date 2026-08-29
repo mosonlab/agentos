@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Prisma, PrismaClient } from "@anneal/db";
+import { MERGE_TAIL_KIND, type Prisma, type PrismaClient } from "@anneal/db";
 
 import {
   commitWithLeaseOutcome,
@@ -188,13 +188,17 @@ test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", 
   assert.ok(parameters.includes(100), "the query has an explicit row limit");
 });
 
+test("the lease-release marker constant matches the indexed SQL literal", () => {
+  assert.equal(MERGE_TAIL_KIND.leaseRelease, "mergeTail.leaseRelease");
+});
+
 test("deferredLeaseReleases returns one bounded unresolved page", async () => {
   let sql = "";
   let parameters: unknown[] = [];
   const tx = {
-    $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      sql = strings.join("?");
-      parameters = values;
+    $queryRaw: async (statement: Prisma.Sql) => {
+      sql = statement.sql;
+      parameters = statement.values;
       return [{ activityId: "deferred-1", taskId: "task-1", projectId: "project-1", chainId: "chain-1" }];
     },
   } as unknown as Prisma.TransactionClient;
@@ -208,7 +212,7 @@ test("deferredLeaseReleases returns one bounded unresolved page", async () => {
   assert.match(sql, /state' = 'release-deferred'/u);
   assert.match(sql, /deferredActivityId/u);
   assert.doesNotMatch(sql, /kind' = \?/u, "the partial-index predicate stays a SQL literal");
-  assert.ok(parameters.includes(100));
+  assert.deepEqual(parameters, [100], "only the bounded page limit is parameterized");
 });
 
 const transactionDb = (tx: Prisma.TransactionClient, events: string[] = []) => ({

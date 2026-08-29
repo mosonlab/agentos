@@ -6,6 +6,7 @@ import {
   type ChangedFile,
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TAIL_KIND,
+  Prisma,
   PrismaClient,
   RunStatus,
   TaskStatus,
@@ -14,6 +15,7 @@ import {
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
   deferredLeaseReleases,
+  deferredLeaseReleasesStatement,
   LeaseReleaseDeferralRecordError,
   withMergeLease,
   type MergeLeaseAcquirer,
@@ -283,33 +285,9 @@ test("the no-deferral sweep uses its partial index without a TaskActivity scan o
   };
   const rows = await db.$transaction(async (tx) => {
     assert.deepEqual(await deferredLeaseReleases(tx), []);
-    return tx.$queryRaw<Array<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>>`
-      EXPLAIN (FORMAT JSON, COSTS OFF)
-      SELECT
-        deferred.id AS "activityId",
-        deferred."taskId" AS "taskId",
-        deferred.metadata->>'projectId' AS "projectId",
-        deferred.metadata->>'chainId' AS "chainId"
-      FROM "TaskActivity" AS deferred
-      WHERE deferred."actorType" = 'control-plane'
-        AND deferred.metadata->>'kind' = 'mergeTail.leaseRelease'
-        AND deferred.metadata->>'state' = 'release-deferred'
-        AND deferred.metadata->>'projectId' IS NOT NULL
-        AND deferred.metadata->>'chainId' IS NOT NULL
-        AND deferred.metadata->>'taskId' = deferred."taskId"
-        AND NOT EXISTS (
-          SELECT 1
-          FROM "TaskActivity" AS terminal
-          WHERE terminal."taskId" = deferred."taskId"
-            AND terminal."createdAt" >= deferred."createdAt"
-            AND terminal."actorType" = 'control-plane'
-            AND terminal.metadata->>'kind' = 'mergeTail.leaseRelease'
-            AND terminal.metadata->>'deferredActivityId' = deferred.id
-            AND terminal.metadata->>'state' IN ('released', 'invalid')
-        )
-      ORDER BY deferred."createdAt" ASC, deferred.id ASC
-      LIMIT ${100}
-    `;
+    return tx.$queryRaw<Array<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>>(
+      Prisma.sql`EXPLAIN (FORMAT JSON, COSTS OFF) ${deferredLeaseReleasesStatement}`,
+    );
   });
 
   const root = rows[0]?.["QUERY PLAN"]?.[0]?.Plan;
