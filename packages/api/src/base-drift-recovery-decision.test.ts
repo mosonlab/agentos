@@ -67,6 +67,13 @@ test("all durable candidate refusal paths decide without a database", () => {
     assert.equal(decision.kind, code === "chain-active" ? "retry" : "ineligible", code);
     assert.notEqual("reason" in decision ? decision.reason : "", "", code);
   }
+  assert.deepEqual(recoveryDecision({
+    stage: "candidate",
+    load: { kind: "refused", code: "target-branch-mismatch", stopId: "stop-1" },
+  }), {
+    kind: "ineligible",
+    reason: "chain first-run target ref differs from the authorized base ref",
+  });
 });
 
 test("all fresh pull-request refusal paths decide without a database", () => {

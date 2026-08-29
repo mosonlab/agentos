@@ -111,7 +111,7 @@ const refusalReason = (refusal: Extract<CandidateLoad, { kind: "refused" }>): st
     case "readiness-head-mismatch": return "readiness output does not match the authorized head SHA";
     case "target-unresolved": return `pull-request identity is ${refusal.detail ?? "unresolved"}`;
     case "target-mismatch": return "resolved repository or pull-request identity differs from the authorization";
-    case "target-branch-mismatch": return "authorized target ref differs from the chain target branch";
+    case "target-branch-mismatch": return "chain first-run target ref differs from the authorized base ref";
   }
 };
 

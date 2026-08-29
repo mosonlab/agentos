@@ -11,10 +11,11 @@ import {
   PrismaClient,
   TaskStatus,
   authorizationMetadata,
+  openStopQuestion,
   parseAuthorizationMetadata,
   readMarkerHistory,
-  writeMarker,
   recordIntegratorStop,
+  writeMarker,
   type StopCondition,
 } from "@anneal/db";
 
@@ -527,6 +528,127 @@ test("a legacy zero-intent validation failure reopens the same aggregate and rec
   } }), 1, "the durable failed aggregate is reopened instead of replaced");
 });
 
+test("a legacy target-branch false negative reopens only the empty failed aggregate", async () => {
+  const seeded = await seedIntegratorChain(db, {
+    label: "recover-legacy-target-branch",
+    shape: "canonical-compound-readiness",
+  });
+  await db.task.update({
+    where: { id: seeded.integratorTask!.id },
+    data: { targetBranch: "agentos/feature-branch" },
+  });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  const sourceRun = await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  const legacy = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: "FAILED",
+    failureReason: "authorized target ref differs from the chain target branch",
+    endedAt: new Date(),
+  } });
+  const session = await db.session.findUniqueOrThrow({ where: { runId: sourceRun.id } });
+  const question = await openStopQuestion(db, {
+    integratorTaskId: seeded.integratorTask!.id,
+    stopId: stop.id,
+    condition: "base-drift",
+    evidence: JSON.stringify({ observed: BASE_2, authorized: BASE }),
+    agentId: seeded.integratorAgent.id,
+    sessionId: session.id,
+  });
+  assert.ok(question);
+  const openQuestion = await db.inboxMessage.findUniqueOrThrow({
+    where: { id: question.id },
+  });
+  assert.equal(openQuestion.status, "OPEN");
+  assert.deepEqual((openQuestion.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: legacy.id } });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.failureReason, null);
+  assert.equal(aggregate.targetBranch, "master");
+  assert.equal(await db.mergeRecoveryAttempt.count({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } }), 1, "the historical false-negative aggregate is reopened instead of replaced");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: question.id } })).status, "CLOSED");
+  assert.deepEqual(await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question.id,
+    externalEventId: "stale-recovery-abandon",
+    decision: "abandon",
+  })), { duplicate: true, resumed: false });
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: legacy.id } })).status, "REPAIRING");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.REVIEW);
+});
+
+test("a legacy target-branch sentinel retires when current validation still refuses the chain", async () => {
+  const seeded = await seedIntegratorChain(db, {
+    label: "retire-legacy-target-branch",
+    shape: "canonical-compound-readiness",
+  });
+  await db.task.update({
+    where: { id: seeded.integratorTask!.id },
+    data: { targetBranch: "agentos/feature-branch" },
+  });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
+  await db.run.update({ where: { id: seeded.gateRun.id }, data: { targetBranch: "release" } });
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  const legacy = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: "FAILED",
+    failureReason: "authorized target ref differs from the chain target branch",
+    endedAt: new Date(),
+  } });
+
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 1, recovered: 0, exhausted: 0, ineligible: 1,
+  });
+  const retired = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: legacy.id } });
+  assert.equal(retired.status, "FAILED");
+  assert.equal(
+    retired.failureReason,
+    "Historical base-drift recovery refusal retired after current validation: chain first-run target ref differs from the authorized base ref",
+  );
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 0, recovered: 0, exhausted: 0, ineligible: 0,
+  });
+});
+
+test("a target-branch failure with durable recovery identity remains terminal", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "retain-bound-target-branch-failure");
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  const failed = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: "FAILED",
+    failureReason: "authorized target ref differs from the chain target branch",
+    repository: "acme/widgets",
+    endedAt: new Date(),
+  } });
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 0);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: failed.id } })).status, "FAILED");
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+});
+
 test("two distinct executor drifts recover; the third queues no run and notifies once", async () => {
   const seeded = await seedStopped("canonical-compound-readiness", "recover-limit");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
@@ -586,17 +708,49 @@ test("identity, target-ref, head, and evidence mismatches fail closed without a 
   }
 });
 
-test("a chain target branch that disagrees with the authorization fails closed", async () => {
+test("the chain first-run target branch must still agree with the authorization", async () => {
   const seeded = await seedIntegratorChain(db, { label: "refuse-chain-target", shape: "canonical-compound-readiness" });
+  await db.task.update({
+    where: { id: seeded.integratorTask!.id },
+    data: { targetBranch: "agentos/feature-branch" },
+  });
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
   await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
   await db.run.update({ where: { id: seeded.gateRun.id }, data: { targetBranch: "release" } });
-  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 0);
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 1, recovered: 0, exhausted: 0, ineligible: 1,
+  });
   assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).failureReason, "chain first-run target ref differs from the authorized base ref");
   const question = await db.inboxMessage.findFirstOrThrow({ where: {
     taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE", status: "OPEN",
   } });
   assert.deepEqual((question.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+  assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), {
+    examined: 0, recovered: 0, exhausted: 0, ineligible: 0,
+  }, "the current refusal does not reuse the historical reopen sentinel");
+});
+
+test("an integrator feature target recovers when the chain first run targets the authorized base", async () => {
+  const seeded = await seedIntegratorChain(db, {
+    label: "recover-integrator-feature-target",
+    shape: "canonical-compound-readiness",
+  });
+  await db.task.update({
+    where: { id: seeded.integratorTask!.id },
+    data: { targetBranch: "agentos/feature-branch" },
+  });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.gateRun.id } })).targetBranch, "master");
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 2);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "REPAIRING");
 });
 
 test("foreign and incident stop conditions never enter automatic base-drift recovery", async () => {
