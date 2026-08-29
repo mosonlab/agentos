@@ -51,7 +51,7 @@ export const piArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     ...denyArgs(spec.claim.agent.disabledTools),
     // Disable PI's $PI_CODING_AGENT_DIR/skills discovery (normally
     // ~/.pi/agent/skills) and the other user resource classes. The config root
-    // is fresh, so only the explicit AgentOS extension below remains enabled.
+    // is fresh, so only the explicit Anneal extension below remains enabled.
     // The reviewer's role prompt supplies its rules, and repository context
     // files remain review material rather than instructions.
     "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
@@ -216,7 +216,7 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
       cliVersion: null,
       authMode: null,
       capabilities,
-      error: "PI openai-codex runs require an explicit AgentOS Codex service tier",
+      error: "PI openai-codex runs require an explicit Anneal Codex service tier",
     };
   }
   const version = await capturePreflight(spec.config, "PI", ["--version"], spec.env);

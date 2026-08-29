@@ -106,7 +106,7 @@ const seedRemote = async (root: string): Promise<string> => {
   const seed = join(root, "seed");
   git(root, "init", "--bare", "--initial-branch=master", remote);
   git(root, "init", "--initial-branch=master", seed);
-  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.name", "Anneal Test");
   git(seed, "config", "user.email", "runner@agentos.local");
   await writeFile(join(seed, "tree.txt"), "base\n");
   git(seed, "add", "tree.txt");
@@ -660,7 +660,7 @@ test("remediation cannot change workspace HEAD or publish its changes", async ()
     await writeFile(agentBinary, remediatingAgent(remediationPrompt, [
       "printf 'remediation edit\\n' > tree.txt",
       "git add tree.txt",
-      "git -c user.name='AgentOS Test' -c user.email='runner@agentos.local' commit -m 'forbidden remediation edit' >/dev/null",
+      "git -c user.name='Anneal Test' -c user.email='runner@agentos.local' commit -m 'forbidden remediation edit' >/dev/null",
     ]));
     await chmod(agentBinary, 0o755);
     let statusReads = 0;

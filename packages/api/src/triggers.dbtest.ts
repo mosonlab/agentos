@@ -297,7 +297,7 @@ test("a manual fire and a webhook delivery released together produce two indepen
     }); })(),
     (async () => { release(); await gate; return app.request(`/hooks/templates/${template.id}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "wh-secret-batch25" },
+      headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "wh-secret-batch25" },
       body: JSON.stringify({ issue: { title: "From the wire" } }),
     }); })(),
   ]));

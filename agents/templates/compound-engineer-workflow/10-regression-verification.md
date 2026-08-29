@@ -18,7 +18,7 @@ Run `scripts/regression-verification.sh prepare`. If it reports
 `refresh-conflict`, the final output is already persisted: record the outcome
 in the activity log and finish. Otherwise read the implementation summary,
 both review reports, and the fixed implementation with its dispositions from
-AgentOS. Review the entire refreshed fix diff as one unit, account for every
+Anneal. Review the entire refreshed fix diff as one unit, account for every
 finding id, rerun focused regressions, and verify that the approved
 specification is preserved without a new defect. Do not modify code or repair
 a failure.

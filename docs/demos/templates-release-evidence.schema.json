@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mosonlab/agentos/docs/demos/templates-release-evidence.schema.json",
-  "title": "AgentOS templates release demo verification",
+  "title": "Anneal templates release demo verification",
   "type": "object",
   "additionalProperties": false,
   "required": ["verdict", "runId", "chainId", "positions", "evidenceDigest"],

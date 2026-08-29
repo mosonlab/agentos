@@ -13,7 +13,7 @@ as current-template acceptance evidence until its implementation is migrated to
 that graph. The canonical source of the current workflow is
 [`agents/README.md`](../../agents/README.md).
 
-The harness proves one serial template execution against exact AgentOS and
+The harness proves one serial template execution against exact Anneal and
 synthetic-target commits. It does not prove fresh installation, universal
 provider compatibility, production readiness, or general template authoring.
 An approved OSS-B artifact separately authorizes fresh-install wording. An
@@ -21,7 +21,7 @@ approved CP-A artifact separately authorizes the named provider path.
 
 ## Prerequisites
 
-- Work in a clean AgentOS clone at the exact commit to record.
+- Work in a clean Anneal clone at the exact commit to record.
 - Use a dedicated database schema named
   `oss_c0_templates_demo_<three run-id digits>`. Run normal migrations and
   `npm run db:seed` there before setup.

@@ -178,7 +178,7 @@ const readPage = async (body: CostsReport): Promise<{ text: string; requested: s
     const url = String(input).replace(/^.*\/api/, "");
     requested.push(url);
     if (url === "/projects") {
-      return new Response(JSON.stringify([{ id: "p1", name: "AgentOS Example", slug: "agentos" }]), { status: 200 });
+      return new Response(JSON.stringify([{ id: "p1", name: "Anneal Example", slug: "agentos" }]), { status: 200 });
     }
     if (url.startsWith("/projects/p1/costs")) return new Response(JSON.stringify(body), { status: 200 });
     return new Response("[]", { status: 200 });

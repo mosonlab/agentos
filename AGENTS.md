@@ -30,7 +30,11 @@ acceptance criterion or caller requires it.
   Runner tests provision real workspaces.
 - Local pre-gate verification is targeted: run only the test files your change
   touches (`npm run test:db -w @anneal/api -- src/<file>.dbtest.ts` runs a
-  subset). The merge gate runs the full suite.
+  subset). Do not run a full database suite by hand. The gate parallelises it
+  across the worker's cores against a tmpfs PostgreSQL with durability off,
+  while a local run is capped at four lanes on real storage; the hand-run is
+  several times slower and proves less. Dispatch the gate instead —
+  `scripts/gate-worker/gate-dispatch.sh <oid>`.
 - Spawn the real API entrypoint in tests through
   `packages/api/src/test-startup-environment.ts`: the entrypoint loads the root
   `.env`, and dotenv restores omitted credentials unless the helper pins them
@@ -56,7 +60,7 @@ branch, and remove the worktree once merged.
 
 ## Platform runs
 
-For an agent executing inside an AgentOS run: your checkout is exclusive to
+For an agent executing inside an Anneal run: your checkout is exclusive to
 this run. Create any worktree you need inside your own run workspace (a
 relative path such as `./worktrees/<name>`), never outside it — host-window
 rules elsewhere in this file do not move your work off the run workspace.

@@ -50,7 +50,7 @@ test("all webhook authentication failures return byte-identical 401 responses", 
     for (const template of cases) {
       const database = { taskTemplate: { findUnique: async () => template } } as unknown as PrismaClient;
       const response = await createApp(database).request("/hooks/templates/template", {
-        method: "POST", headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "wrong" }, body: "{}",
+        method: "POST", headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "wrong" }, body: "{}",
       });
       assert.equal(response.status, 401);
       bodies.push(await response.text());
@@ -70,11 +70,11 @@ test("webhook payload errors and exact public route matching are enforced", asyn
     const template = { id: "template", projectId: "project", variables: [], webhookPayloadMapping: null, webhookSecretId: "secret", webhookRepoId: "repo", webhookSecret: { encryptedValue: encryptSecret("correct"), ciphertextVersion: 1, disabledAt: null } };
     const database = { taskTemplate: { findUnique: async () => template } } as unknown as PrismaClient;
     const invalid = await createApp(database).request("/hooks/templates/template", {
-      method: "POST", headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "correct" }, body: "not-json",
+      method: "POST", headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "correct" }, body: "not-json",
     });
     assert.equal(invalid.status, 400);
     const oversized = await createApp(database).request("/hooks/templates/template", {
-      method: "POST", headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "correct" }, body: JSON.stringify({ value: "x".repeat(1024 * 1024) }),
+      method: "POST", headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "correct" }, body: JSON.stringify({ value: "x".repeat(1024 * 1024) }),
     });
     assert.equal(oversized.status, 413);
     assert.equal((await createApp({} as PrismaClient).request("/hooks/other", { method: "POST" })).status, 401);

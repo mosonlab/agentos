@@ -1000,7 +1000,7 @@ test("a stale branch is mechanically refreshed before exact-head PASS advances",
   const root = await mkdtemp(join(tmpdir(), "agentos-merge-refresh-"));
   try {
     const origin = join(root, "origin.git");
-    const author = ["-c", "user.name=AgentOS Test", "-c", "user.email=test@example.invalid"];
+    const author = ["-c", "user.name=Anneal Test", "-c", "user.email=test@example.invalid"];
     await exec("git", ["init", "--bare", origin]);
     const source = join(root, "source");
     await exec("git", ["clone", origin, source]);

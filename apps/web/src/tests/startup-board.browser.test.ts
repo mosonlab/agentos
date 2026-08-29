@@ -101,6 +101,7 @@ const waitFor = async (cdp: Cdp, expression: string, timeoutMs = 10_000): Promis
 
 const taskRow = (index: number) => ({
   id: `done-${index}`, name: `Completed task ${index}`, displayName: `Completed task ${index}`,
+  assigneeType: "HUMAN", createdAt: "2026-08-27T00:00:00.000Z",
   status: "DONE", failureReason: null, scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-28T00:00:00.000Z", assigneeAgent: null,

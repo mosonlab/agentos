@@ -15,7 +15,7 @@ Local runner -----> ephemeral git workspace
           |
           +----> Codex CLI / Claude Code / Pi
                          |
-                         +----> AgentOS session tools (MCP or Pi extension)
+                         +----> Anneal session tools (MCP or Pi extension)
 ```
 
 - The React/Vite web console and Hono API expose projects, agents, capabilities,
@@ -25,9 +25,9 @@ Local runner -----> ephemeral git workspace
 - The local runner claims work with a fenced lease, clones the selected
   repository into a controlled per-run workspace, creates or resumes the run
   branch, preflights the selected CLI, and records structured provider events.
-- Codex and Claude receive the AgentOS session tools over a per-run stdio MCP
+- Codex and Claude receive the Anneal session tools over a per-run stdio MCP
   server. Pi receives the corresponding task tools through an extension.
-- AgentOS does not ship a repository command-line interface. Operators use the
+- Anneal does not ship a repository command-line interface. Operators use the
   web console and the documented service, database, and runner scripts.
 
 ## A real task workflow
@@ -46,7 +46,7 @@ Local runner -----> ephemeral git workspace
 5. The agent works in the clone, streams provider and tool events, logs notable
    progress, can ask a blocking human question through the Inbox, and persists
    its task output.
-6. AgentOS captures the git result and pushes the run branch. A repository-access
+6. Anneal captures the git result and pushes the run branch. A repository-access
    row is required when the task is created and claimed, but its read/write
    level does not currently gate that push. The Run's `opensPullRequest` setting
    controls whether delivery also attempts to open a pull request. A gated task
@@ -92,7 +92,7 @@ Local runner -----> ephemeral git workspace
   credentials, PII, private absolute paths, and internal-only material.
 
 Important limitation: the current provider adapters use non-interactive
-permission-bypass flags. AgentOS grants constrain its control-plane APIs, but
+permission-bypass flags. Anneal grants constrain its control-plane APIs, but
 they are not by themselves an OS sandbox. With the shipped same-user default,
 Filesystem Grants are an authorization and audit boundary rather than a host
 filesystem containment boundary. This release candidate does not claim enforced

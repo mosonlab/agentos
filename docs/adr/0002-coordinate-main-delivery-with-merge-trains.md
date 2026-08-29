@@ -71,7 +71,7 @@ Each proof is consumed only when its named predecessor is the live `main`.
 This decision changes only concurrent host-side delivery. It deliberately does
 not change:
 
-- AgentOS Chain task state;
+- Anneal Chain task state;
 - regression-verification output schemas;
 - canonical Agent templates;
 - merge-gate semantics or coverage;

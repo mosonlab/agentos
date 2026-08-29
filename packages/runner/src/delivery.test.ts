@@ -430,7 +430,7 @@ test("a failed run commits uncommitted changes, pushes them as WIP, and opens no
   assert.deepEqual(calls, [
     "git add -A",
     "git status --porcelain",
-    "git -c user.name=AgentOS Runner -c user.email=runner@agentos.local -c commit.gpgSign=false -c core.hooksPath=/dev/null commit --no-verify -m WIP salvage for AgentOS run run-2",
+    "git -c user.name=Anneal Runner -c user.email=runner@agentos.local -c commit.gpgSign=false -c core.hooksPath=/dev/null commit --no-verify -m WIP salvage for Anneal run run-2",
     "git rev-parse HEAD",
     "git push origin HEAD:refs/heads/agentos/task-1/run-2",
   ]);

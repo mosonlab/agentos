@@ -1,23 +1,221 @@
 # Changelog
 
-What changed in each release of AgentOS, written for the people who run it.
+What changed in each release of Anneal, written for the people who run it.
 Entries group changes by the part of the product they touch. Versions follow
 Semantic Versioning; before 1.0.0 a minor version may change behaviour, and this
-file says so where it does.
+file says so where it does. Releases up to v0.3.0 were published under the
+project's former name, AgentOS, and their entries below are left as they were
+written.
 
 ## Unreleased
 
+## v0.4.0 — Developer Preview 4
+
+The fourth preview, and the first under the name Anneal. The headline is
+operator control over a running chain: a chain can be held mid-flight and
+resumed exactly once, and the console's Sessions and new Costs pages make what
+a chain did and what it cost readable without leaving the browser. As with
+every 0.x minor, behaviour changes below are breaking-eligible, and there is
+still no upgrade path between previews other than a fresh install. This release
+adds eight migrations.
+
+### The rename
+
+- The project is now called **Anneal**. The repository moved to
+  `mosonlab/anneal`, the internal npm scope is `@anneal/*`, and the product
+  name in the console, the documentation and the release material follows.
+- **Nothing an operator configures was renamed.** The `AGENTOS_*` environment
+  variables, the default `agentos` PostgreSQL database and role, the
+  `~/.agentos/` runtime directories and the `agentos` MCP server name are
+  unchanged in this release, so an existing `.env` and an existing runner host
+  keep working. Renaming them is successor work and will be called out as
+  breaking when it happens.
+- Deployments that were provisioned before the scope rename are recovered
+  rather than reinstalled, and the legacy delivery artifacts of a run that
+  straddles the rename are bridged instead of failing.
+- Two names do change where the product names itself in output: the runner's
+  git identity now reads `Anneal Runner` rather than `AgentOS Runner` (its
+  address is unchanged), and the canonical
+  chain prompts that named the platform are rolled forward under a registered
+  prompt-only template generation (`pre-product-rename-anneal`). An existing
+  install picks the new prompts up through the ordinary canonical sync; an
+  unregistered prompt edit still refuses, as before.
+
+### Chain hold and resume
+
+- A running chain has an explicit control authority. `POST
+  /tasks/:taskId/chain/hold` holds it at its current layer and `POST
+  /tasks/:taskId/chain/resume` releases it; both are idempotent on a request
+  identifier, and a chain's `control` block reports the held layer, who held
+  it, why, and when it was last released.
+- The hold is enforced where work is admitted rather than only in the UI:
+  successor layers do not activate while held, a held step is refused
+  admission, held successor runs are excluded at claim time, and a universal
+  enqueue barrier covers the paths that used to enqueue around the layer
+  machinery. Cancelled runs survive a release instead of being reactivated.
+- The board and task console can hold and resume a chain, and a step shows the
+  hold-specific refusal it would return.
+- Salvage repair is serialized with holds, so a repair raised inside a held
+  chain cannot run ahead of the operator releasing it.
+
+### Sessions, Costs, and the console
+
+- Sessions is rebuilt for reading: rows replace the table, sessions group by
+  calendar day, agent and status filters narrow the list, unseen sessions are
+  tracked locally, and a hover card carries the detail the row drops.
+- The session stream is projected rather than dumped: tool calls group, prose
+  chunks merge into continuous text, markers and operator input render as their
+  own nodes, and output lines are capped so one runaway session cannot make the
+  page unusable.
+- A read-only **Costs** page reports spend over 7, 30 or 90 days: tiles for
+  total spend, run count and average per run, a daily stacked bar chart grouped
+  by agent, and by-agent and top-run tables. The chart is inline SVG with no
+  charting dependency, and the same figures ship as a table beside it because
+  three of the light-theme series colours sit under 3:1 against the card. The
+  tiles state what they cannot include — the estimated share of the total, and
+  the number of settled runs that reported no cost at all.
+- A new project cost aggregation endpoint backs the page, and cached input
+  tokens are normalized at the write boundary with the historical rows
+  backfilled.
+- Native child sessions are priced from what was actually observed rather than
+  from a guess: an unsplit native child bills at the parent's rates, a
+  cost-only model total is preserved instead of discarded, and the unobserved
+  Claude fallback is removed.
+- Every control-plane request from the console is bounded, board columns are
+  bounded, the Inbox badge polls a summary instead of the full list, and a card
+  is labelled with its run's model snapshot rather than the agent's current
+  setting.
+- The Inbox separates notices from cards that owe a reply, and dismissal is
+  based on what actually blocks a run.
+
+### Task chains and canonical agents
+
+- The direct engineer workflow is eight steps and opens with a conditional
+  revalidation of the brief: the step materializes only when the chain is bound
+  to a predecessor task, and the revalidation session runs fenced with its own
+  capability set.
+- Prior outputs a step may read are declared per template and enforced as a
+  whitelist, so a step cannot silently widen its context; the declarations
+  survive an upgrade with their handoffs intact.
+- Canonical template identity is derived rather than matched by name, canonical
+  agent defaults load from the role sources, and a prompt-only canonical
+  rollover can be registered without a structural change.
+- Model routing is re-pinned again: regression verification moves to Luna at
+  max effort, the plan reviser to Sol at high, spec and blind review are pinned
+  to Opus high in the canonical contract, and frontend-heavy implementation
+  routes to `frontend-dev`.
+- Operator model and runner overrides are respected: canonical sync adopts
+  drift only where an operator has not customized the value, notifies on
+  customized drift, and a reset route restores the canonical runtime
+  configuration.
+
+### Regression verification
+
+- Mechanical verification moved into a script and the verifier is narrowed to
+  the semantic recheck it is actually good at.
+- Verdicts are persisted mechanically and settled durably, including after a
+  transport failure, so a verdict that was reached is not lost to a dropped
+  connection.
+- Retries are bound to the salvage branch and the run that produced them, and
+  the recovery regression head is adopted rather than inferred.
+
+### Merge delivery and recovery
+
+- A cumulative merge train replaces one-candidate-at-a-time delivery, with its
+  proof modes documented in
+  [`docs/adr/0002-coordinate-main-delivery-with-merge-trains.md`](docs/adr/0002-coordinate-main-delivery-with-merge-trains.md).
+- The gate's signature is persisted as a merge precondition, and chain-authored
+  commits are attested with stale provenance stripped on rewrite.
+- The merge lease is acquired in readiness rather than at the merge itself, is
+  recorded project-scoped, reports its acquisition time on release, and
+  readiness-owned leases are released against the project target — see
+  [`docs/adr/0003-acquire-merge-lease-in-readiness.md`](docs/adr/0003-acquire-merge-lease-in-readiness.md).
+- Pre-intent and legacy base drift are recovered rather than parked, and the
+  live legacy recovery sentinel is retired.
+- The autonomous merge tail no longer holds a merge for an independent review
+  of a defense-list diff. Defense-list detection stays as an audit record: a
+  match writes one inbox message naming the triggered paths and reasons, and
+  the merge proceeds.
+- **The Ed25519 release-authority attestation layer is removed whole** — the
+  signing and verification module, the mint and check scripts, the tracked key
+  and attestation, the preflight `authority` condition, the resign worker, and
+  the two `GOAL5A0_*` SHA exports every install path used to require. The
+  release-candidate migration set, the gate attestation, the merge lease and
+  the gate's own checks are unchanged.
+- Delivery fails loudly when a GitHub pull request is not recorded, and a
+  pushed branch is preserved when pull request creation fails.
+
+### Control plane and API
+
+- Claim specifications are read from local mirrors at pinned commits against
+  the exact claim remote, review specs are verified at pinned implementation
+  heads, and the spec verdict cache is bound to its repository. Transient read
+  failures are retried and then deferred under a budget rather than parking the
+  work.
+- Claims are prioritized by remaining chain work.
+- A task can be created directly in `BACKLOG` in one call, and it stays parked;
+  mechanical task cards stay prompt-only and promptless mechanical starts are
+  admitted.
+- Upgrade sweeps are decided under a lock rather than from a stale snapshot,
+  and spent sweeps are removed.
+- Refusals are typed through the workflow layer, and run terminalization, step
+  admission, merge lease disposition, base drift recovery decisions and the
+  readiness evaluation each moved behind one seam instead of being decided at
+  every call site.
+- A new [operator API handbook](docs/operator-api.md) documents the routes, and
+  a route change is required to update it in the same change.
+
+### Runner
+
+- Session-created worktrees are contained: escapes from the run root are
+  observed, persisted and reported, including on cancellation.
+- The dispatched prompt's hash is persisted, so what a run was actually given
+  can be checked after the fact.
+- Host-personal skill roots are isolated from a run, with git configuration
+  preserved under that isolation, and Codex resume authorization survives a
+  reconnect.
+- Operator notes reach retry prompts, missing task output is remediated in the
+  session, and reconnect evidence is preserved on a failed exit.
+- Deployment and dependency caches are bounded.
+
+### Development and operations
+
+- The merge gate host was resized and its evidence recorded; the database wave's
+  two long test files are split and a test that waited out a 35-second delivery
+  deadline no longer does.
+- The public snapshot scanner fails when an include glob matches no git-tracked
+  path.
+- The operator handle in published material is replaced with a role name, with
+  a `.mailmap` mapping the second author email; the `.mailmap` itself is not
+  published.
+
 ### Documentation
 
-- Reduced the published documentation surface: the support note and evidence
-  status now live in the README, three operator runbooks are maintained outside
-  this repository, and the Simplified Chinese inner documentation pages have
-  been retired.
+- Both READMEs lead with the problem and a time-lapse of one real chain, state
+  the spec-to-merge value proposition and the subscription authentication
+  model, table the twelve-step chain with role, runner, model and effort, and
+  point at the support matrix rather than copying it. Pi's authentication
+  source is corrected to the Codex login.
+- `AGENTS.md` is a trigger layer: the detail moved to the documents that own it,
+  and the routing contract now records dependency qualification and the backlog
+  card lifecycle.
+- The published documentation surface is smaller: the support note and evidence
+  status live in the README, three operator runbooks are maintained outside
+  this repository, and the Simplified Chinese inner documentation pages are
+  retired.
+- `THIRD_PARTY_NOTICES.md` carries the mattpocock/skills notice the chain
+  prompts require.
 
-### Snapshot safety
+### Known limitations
 
-- The public snapshot scanner now fails when an include glob matches no
-  git-tracked path.
+- There is still no upgrade path between previews. Installing v0.4.0 over a
+  v0.3.0 database is not supported; the supported install is
+  `npm run db:migrate:release -- --fresh` against an empty schema.
+- The migration preflight bypass is still procedural, not technically closed:
+  nothing prevents a hand-run `prisma migrate deploy`.
+- The `--existing` release-migration consumer remains executable but has no
+  supported end-to-end workflow, because this repository does not ship the
+  backup producer that creates its input.
 
 ## v0.3.0 — Developer Preview 3
 

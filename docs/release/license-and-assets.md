@@ -1,4 +1,4 @@
-# AgentOS — license and asset provenance
+# Anneal — license and asset provenance
 
 Every file the snapshot publishes is accounted for here. The rule this
 page exists to enforce is simple: **nothing ships whose origin we cannot name.**
@@ -7,7 +7,7 @@ with a shrug.
 
 ## The license
 
-AgentOS is released under the **MIT License**.
+Anneal is released under the **MIT License**.
 
 | | |
 | --- | --- |

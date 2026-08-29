@@ -6,7 +6,7 @@
  * is a description of nothing — an exclusive lock that nobody contends is
  * always granted, so a release migration would take it while the API is serving
  * the very schema it is about to rewrite, see no holder, and be right by
- * accident. This module is the other half: what an AgentOS service does so that
+ * accident. This module is the other half: what an Anneal service does so that
  * "no service is up" is a fact the server can be asked about rather than an
  * assumption the operator carries.
  *
@@ -109,7 +109,7 @@ export type ServiceLockTargetResolution =
  * Prisma would silently fall back to `public`, and a service that guessed
  * `public` while the migrator locked the schema the URL actually names would
  * hold a lock on the wrong key — worse than holding none, because it looks like
- * participation. Every AgentOS `DATABASE_URL` names its schema already: the API
+ * participation. Every Anneal `DATABASE_URL` names its schema already: the API
  * refuses to start without it (`startup-config.ts`) and the release migrator
  * refuses to plan without it (`local-release-target.ts`).
  */

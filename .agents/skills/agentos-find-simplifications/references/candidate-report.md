@@ -71,4 +71,4 @@ State that selecting a theme approves only its closed candidate list. New deleti
 
 ## Persistence boundary
 
-Present the report in the conversation by default. If the operator asks to persist it, use the existing AgentOS backlog, brief, or private operator-record authority. Do not create an `.agents/notes` tree or a new repository record system.
+Present the report in the conversation by default. If the operator asks to persist it, use the existing Anneal backlog, brief, or private operator-record authority. Do not create an `.agents/notes` tree or a new repository record system.

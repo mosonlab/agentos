@@ -84,7 +84,7 @@ export class StartupConfigError extends Error {
   readonly exitCode = 78;
 
   constructor(reasons: string[]) {
-    super(`AgentOS API refuses to start: ${reasons.join(", ")}`);
+    super(`Anneal API refuses to start: ${reasons.join(", ")}`);
     this.name = "StartupConfigError";
     this.reasons = reasons;
   }

@@ -66,7 +66,7 @@ test("a trigger with no repository says so in the target column", () => {
 test("the endpoint card renders the path and the header names, and no secret value", () => {
   const markup = renderToStaticMarkup(<EndpointCard trigger={detail()} />);
   assert.match(markup, /\/hooks\/templates\/tpl1/);
-  assert.match(markup, /X-AgentOS-Webhook-Secret/);
+  assert.match(markup, /X-Anneal-Webhook-Secret/);
   assert.match(markup, /github-ticket/);
   // The name of the secret, never its value — and no route can supply one.
   assert.doesNotMatch(markup, new RegExp(SECRET));

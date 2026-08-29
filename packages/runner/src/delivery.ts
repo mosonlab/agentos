@@ -265,7 +265,7 @@ export const deliverWorkspace = async (
       "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
       "--head", workspace.branch,
       "--title", pullRequestTitle(claim.task),
-      "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
+      "--body", `Automated delivery for Anneal task ${claim.task.id}.`,
     ];
     // The one creating GitHub write this package makes, and the reason #139
     // exists. A create response can be lost after GitHub has committed the PR,
@@ -443,7 +443,7 @@ export const salvageWorkspace = async (
     if (status) {
       await command(
         "git",
-        platformCommitArgs(`WIP salvage for AgentOS run ${identity.runId}`),
+        platformCommitArgs(`WIP salvage for Anneal run ${identity.runId}`),
         workspace.path,
         env,
       );
