@@ -208,7 +208,7 @@ line at all**. Read a missing verdict line as "no verdict", never as a pass —
 
 ## Operating boundaries
 
-- **No execution plane on the server.** No AgentOS runner, no agent session, no
+- **No execution plane on the server.** No Anneal runner, no agent session, no
   Anthropic API call. The server builds and tests; it never acts.
 - **Credentials are permitted.** Credentials do not block provisioning or gate
   execution. The normal gate path does not require GitHub or agent credentials,

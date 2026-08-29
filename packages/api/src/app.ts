@@ -1167,7 +1167,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   // may read, and the principal check below still decides what is served.
   app.use("*", cors({
     origin: [...LOOPBACK_BROWSER_ORIGINS],
-    allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret", "X-AgentOS-Delivery-Id"],
+    allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-Anneal-Webhook-Secret", "X-Anneal-Delivery-Id"],
   }));
   // The second, independent half of that boundary (review S-2). CORS decides
   // what a browser may *read*; it lets the request run and commit its side
@@ -1205,7 +1205,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     await next();
   });
 
-  app.get("/", (context) => context.json({ name: "AgentOS control plane", phase: "execution-kernel" }));
+  app.get("/", (context) => context.json({ name: "Anneal control plane", phase: "execution-kernel" }));
   app.get("/health", async (context) => {
     try {
       await db.$queryRaw`SELECT 1`;
@@ -1271,7 +1271,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const template = await authenticateWebhook(
       db,
       id.parse(context.req.param("templateId")),
-      context.req.header("X-AgentOS-Webhook-Secret"),
+      context.req.header("X-Anneal-Webhook-Secret"),
     );
     if (!template) return context.json({ error: "Unauthorized" }, 401);
     // The body is read exactly once, as text: the replay key hashes the raw
@@ -1288,7 +1288,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     const window = template.webhookReplayWindowSec ?? 0;
     const dedupeKey = window > 0
-      ? context.req.header("X-AgentOS-Delivery-Id") ?? createHash("sha256").update(raw).digest("hex")
+      ? context.req.header("X-Anneal-Delivery-Id") ?? createHash("sha256").update(raw).digest("hex")
       : null;
     if (dedupeKey) {
       const seen = await db.triggerFire.findFirst({

@@ -456,13 +456,13 @@ fi
   || refuse "env-file-override: this wizard updates the repository .env only"
 (( EUID != 0 )) || refuse "root-execution: run the wizard as the repository operator, never as root"
 [[ -f package.json && -f packages/merge-executor/package.json ]] \
-  || refuse "repository-root: run scripts/setup-merge-executor.sh from the AgentOS repository root"
+  || refuse "repository-root: run scripts/setup-merge-executor.sh from the Anneal repository root"
 [[ ! -L "$ENV_FILE" ]] || refuse "env-symlink: refusing to read or replace a symlink"
 [[ -f "$ENV_FILE" ]] || refuse "env-missing: run npm run setup:local before this wizard"
 require_mode_0600 "$ENV_FILE"
 umask 077
 
-banner "AgentOS merge executor setup"
+banner "Anneal merge executor setup"
 
 stage "Confirm the isolated identities and API binding"
 say "This stage records existing configuration. It does not create users, change groups, or invoke sudo."
@@ -471,7 +471,7 @@ ask MERGE_EXECUTOR_OS_USER "Dedicated merge-executor OS user:"
 ask MERGE_EXECUTOR_PEER_USERS "Comma-separated API and model-runner OS users:"
 ask MERGE_EXECUTOR_RUNNER_ID "Dedicated merge-executor runner id:"
 ask MERGE_EXECUTOR_RUNNER_IDS "API allowlist containing that runner id:"
-ask MERGE_EXECUTOR_API_URL "AgentOS API origin:"
+ask MERGE_EXECUTOR_API_URL "Anneal API origin:"
 validate_identity_boundary
 validate_control_plane_values
 confirm "Have you verified these are distinct service identities, not aliases?" \

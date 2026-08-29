@@ -64,7 +64,7 @@ run() {
   fi
 }
 
-printf 'AgentOS OS isolation rollback — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
+printf 'Anneal OS isolation rollback — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
 
 step "1. is any runner still configured to use these accounts?"
 still_wired=0

@@ -1,4 +1,4 @@
-# AgentOS — what is supported, and on what evidence
+# Anneal — what is supported, and on what evidence
 
 This is the authoritative support statement for the Developer Preview. Anything
 not named here is not supported, and "not named" is not the same as "probably
@@ -50,7 +50,7 @@ has never walked.
 
 ## Provider runtimes
 
-AgentOS orchestrates coding CLIs already installed and signed in on your machine.
+Anneal orchestrates coding CLIs already installed and signed in on your machine.
 It bundles no subscription, resells no capacity, never logs you into a provider
 and never reads a credential store. Provider accounts, authentication,
 subscriptions, usage allowances, rate limits, models and provider-side
@@ -59,7 +59,7 @@ the CLI vendor.
 
 | Provider runtime | Status | Evidence boundary |
 | --- | --- | --- |
-| Codex CLI | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol AgentOS uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor; 0.148.0 is the last version recorded as compatible. Entitlement still requires the deterministic smoke task. |
+| Codex CLI | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol Anneal uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor; 0.148.0 is the last version recorded as compatible. Entitlement still requires the deterministic smoke task. |
 | Claude Code | **Verified** / **Maintainer-verified** | Adapter and runtime are verified. Claude Pro/Max subscription authentication is maintainer-verified on macOS Apple Silicon. |
 | Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. |
 
@@ -72,7 +72,7 @@ the CLI vendor.
 | Local runner: fenced lease, per-run workspace, run branch | **Verified** | Wall-clock and stall bounds apply to every run. |
 | Git delivery: branch push | **Verified** | Requires non-interactive clone/push authentication and a configured Git author identity for the runner account. |
 | Automatic GitHub pull request | **Optional** | Requires the `gh` CLI installed and authenticated as the runner account. A run required to open a pull request fails after preserving its pushed branch when `gh` cannot record one; a non-GitHub remote instead returns manual PR instructions because automatic creation is impossible by design. |
-| Repository and filesystem grants | **Verified as a control-plane boundary** | They authorize and audit AgentOS's own APIs. They are not host containment, and the repository access level does not gate delivery's push. |
+| Repository and filesystem grants | **Verified as a control-plane boundary** | They authorize and audit Anneal's own APIs. They are not host containment, and the repository access level does not gate delivery's push. |
 | Stored secrets (AES-256-GCM) | **Verified** | Neither plaintext nor ciphertext appears in the API's secret representations. There is no rotation command. |
 | Scheduling, webhook triggers, automations | **Verified** | |
 | Blocking human questions through the Inbox | **Verified** | The Inbox *service* (`npm run dev:inbox`) is optional and outside the quickstart sequence. |

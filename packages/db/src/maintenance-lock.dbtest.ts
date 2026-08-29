@@ -78,7 +78,7 @@ describe("holding", () => {
   });
 
   it("is not a lock on a different schema", async () => {
-    // The key names the schema. Two AgentOS schemas in one database are
+    // The key names the schema. Two Anneal schemas in one database are
     // maintained independently, and a migration on one must not be blocked by
     // a service on the other.
     const other = targetFor("hold-other");

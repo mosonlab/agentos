@@ -162,9 +162,9 @@ export const EndpointCard = ({ trigger }: { trigger: TriggerDetail }): ReactNode
     }>
       <div className={CODE_BLOCK}>{shown}</div>
       <KeyValue items={[
-        { k: t("triggers.endpoint.secretHeader"), v: <code>X-AgentOS-Webhook-Secret</code> },
+        { k: t("triggers.endpoint.secretHeader"), v: <code>X-Anneal-Webhook-Secret</code> },
         { k: t("triggers.endpoint.secret"), v: trigger.secretName ?? "—" },
-        { k: t("triggers.endpoint.deliveryHeader"), v: <code>X-AgentOS-Delivery-Id</code> },
+        { k: t("triggers.endpoint.deliveryHeader"), v: <code>X-Anneal-Delivery-Id</code> },
       ]} />
     </Card>
   );

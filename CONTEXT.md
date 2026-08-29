@@ -1,4 +1,4 @@
-# AgentOS
+# Anneal
 
 A control plane that runs engineering work as chains of agent tasks against
 git repositories. This glossary is the domain vocabulary: specs, plans, and

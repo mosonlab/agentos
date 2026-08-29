@@ -106,7 +106,7 @@ staged_dests=(
 )
 staged_modes=(644 644 755 644 644)
 
-printf 'AgentOS OS isolation — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
+printf 'Anneal OS isolation — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
 printf '  operator account : %s\n' "$LAUNCHER_USER"
 # ${accounts[-1]} is bash 4 syntax; macOS ships bash 3.2.
 printf '  runner accounts  : %s..%s (uid %s..%s)\n' \
@@ -182,7 +182,7 @@ if [ -n "$group_gid_now" ]; then
 else
   run dscl . -create "/Groups/$GROUP_NAME"
   run dscl . -create "/Groups/$GROUP_NAME" PrimaryGroupID "$GROUP_GID"
-  run dscl . -create "/Groups/$GROUP_NAME" RealName "AgentOS runner accounts"
+  run dscl . -create "/Groups/$GROUP_NAME" RealName "Anneal runner accounts"
   run dscl . -create "/Groups/$GROUP_NAME" Password "*"
 fi
 
@@ -197,7 +197,7 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
     run dscl . -create "/Users/$account"
     run dscl . -create "/Users/$account" UniqueID "$uid"
     run dscl . -create "/Users/$account" PrimaryGroupID "$GROUP_GID"
-    run dscl . -create "/Users/$account" RealName "AgentOS runner $i"
+    run dscl . -create "/Users/$account" RealName "Anneal runner $i"
     run dscl . -create "/Users/$account" NFSHomeDirectory "$home"
     # A real shell so the operator can `sudo -u <account> -i` to log the CLIs in.
     run dscl . -create "/Users/$account" UserShell "$ACCOUNT_SHELL"

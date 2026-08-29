@@ -1,4 +1,4 @@
-# AgentOS — migrations, refusals, and what recovery does not cover
+# Anneal — migrations, refusals, and what recovery does not cover
 
 Two commands in this repository change a database schema, and they are not
 alternatives. This page says which is which, what each one refuses and why, and
@@ -171,7 +171,7 @@ Read this section before you need it.
 ## A related refusal that is not a migration
 
 An operator whose installation predates a check often meets it as a startup
-refusal rather than a migration one: the API prints `AgentOS API startup
+refusal rather than a migration one: the API prints `Anneal API startup
 configuration refused: <reasons>` and exits 78 (`EX_CONFIG`), before it binds a
 socket or touches the database. A `.env` carried over from an older checkout
 typically fails on all of `missing:AGENTOS_SECRET_ENCRYPTION_KEY` and a

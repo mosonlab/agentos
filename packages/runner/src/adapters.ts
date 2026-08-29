@@ -32,7 +32,7 @@ export const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
   BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit",
 };
 
-// The seat manual tells the agent to use the AgentOS tools; the manifest has to
+// The seat manual tells the agent to use the Anneal tools; the manifest has to
 // name them, or the agent has no way to know what it was actually granted.
 const toolManifest = (claim: ClaimedTask): string[] => [
   "",
@@ -296,7 +296,7 @@ export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): stri
 });
 
 /**
- * The AgentOS MCP server the agent's CLI session spawns for itself. It carries
+ * The Anneal MCP server the agent's CLI session spawns for itself. It carries
  * no credentials: they reach the server through the inherited child environment,
  * so nothing secret ends up in a command line other processes can read.
  */
@@ -408,7 +408,7 @@ export type RunSpec = {
   workingDirectory: string;
   env: NodeJS.ProcessEnv;
   prompt: string;
-  /** 0600 file the AgentOS MCP server reads its session credentials from. */
+  /** 0600 file the Anneal MCP server reads its session credentials from. */
   credentialsPath: string;
 };
 
@@ -698,7 +698,7 @@ export const PREFLIGHT_CLASS = {
 
 export const PREFLIGHT_REASONS = {
   cliMissing: `${PREFLIGHT_CLASS.cliMissing}: the CLI did not answer --version`,
-  cliIncompatible: `${PREFLIGHT_CLASS.cliIncompatible}: the CLI does not expose the required AgentOS exec protocol`,
+  cliIncompatible: `${PREFLIGHT_CLASS.cliIncompatible}: the CLI does not expose the required Anneal exec protocol`,
   notAuthenticated: `${PREFLIGHT_CLASS.notAuthenticated}: the CLI's own login check did not pass`,
   unsupportedModel: `${PREFLIGHT_CLASS.unsupportedModel}: an explicit provider/model is required`,
 } as const;
@@ -886,7 +886,7 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefi
   CLAUDE: Object.freeze<RunnerDefinition>({
     binaryEnvironment: "CLAUDE_BINARY",
     defaultBinary: "claude",
-    toolIntroduction: "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+    toolIntroduction: "Anneal tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
     toolTransport: "mcp-stdio",
     toolEntrypoint: mcpServerPath,
     adapter: deferredAdapter(() => createClaudeAdapter()),
@@ -899,7 +899,7 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefi
   CODEX: Object.freeze<RunnerDefinition>({
     binaryEnvironment: "CODEX_BINARY",
     defaultBinary: "codex",
-    toolIntroduction: "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+    toolIntroduction: "Anneal tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
     toolTransport: "mcp-stdio",
     toolEntrypoint: mcpServerPath,
     adapter: deferredAdapter(() => createCodexAdapter()),
@@ -912,7 +912,7 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefi
   PI: Object.freeze<RunnerDefinition>({
     binaryEnvironment: "PI_BINARY",
     defaultBinary: "pi",
-    toolIntroduction: "AgentOS tools attached to this session (pi extension tools):",
+    toolIntroduction: "Anneal tools attached to this session (pi extension tools):",
     toolTransport: "pi-extension",
     toolEntrypoint: piExtensionPath,
     adapter: deferredAdapter(() => createPiAdapter()),

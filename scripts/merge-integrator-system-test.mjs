@@ -6,7 +6,7 @@
  *   node scripts/merge-integrator-system-test.mjs --out merge-integrator-system-evidence.md
  *
  * The component suites prove their pieces and nothing else. This composes them
- * once, against a real scratch repository and a non-production AgentOS
+ * once, against a real scratch repository and a non-production Anneal
  * deployment, and asserts the thing the pieces cannot: that a server-issued
  * exact-head authorization becomes a merge commit whose parents are the two
  * bound SHAs, executed by a different OS principal, with
@@ -106,7 +106,7 @@ const readTokenFile = (path) => {
 
 const preflight = () => {
   const record = phase(0, "preflight: a non-production deployment and a scratch repository");
-  const apiUrl = requiredEnv("MERGE_SYSTEM_TEST_API_URL", "the demonstration needs a non-production AgentOS control plane to drive");
+  const apiUrl = requiredEnv("MERGE_SYSTEM_TEST_API_URL", "the demonstration needs a non-production Anneal control plane to drive");
   if (apiUrl.replace(/\/$/u, "") === PRODUCTION_API) {
     record.fail("the configured API URL is the reserved production endpoint; this demonstration writes tasks, runs and merges");
   }

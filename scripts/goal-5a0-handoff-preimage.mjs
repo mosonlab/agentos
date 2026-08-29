@@ -22,7 +22,7 @@
 //      carried in the GitHub authorization marker comment, as
 //      `evidence-preimage-b64`. That comment is authored inside GitHub by the
 //      allowlisted human, is server-authenticated, is proved unedited by
-//      `created_at == updated_at`, and survives the deletion of the AgentOS task
+//      `created_at == updated_at`, and survives the deletion of the Anneal task
 //      and its whole activity log, because it lives in a different system. The
 //      digest still governs: the decoded preimage is accepted only when it
 //      recomputes to the `evidence-digest` in the same unedited comment, so the

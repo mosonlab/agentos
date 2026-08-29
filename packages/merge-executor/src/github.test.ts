@@ -128,7 +128,7 @@ test("canonical merge constructs a two-parent tree without .chain and leaves the
     tree: [{ path: ".chain", mode: "040000", type: "tree", sha: null }],
   });
   assert.deepEqual(JSON.parse(requests[3]!.body!), {
-    message: "Merge pull request #7\n\nAgentOS autonomous exact-head merge",
+    message: "Merge pull request #7\n\nAnneal autonomous exact-head merge",
     tree: cleanTree,
     parents: [base, head],
   });

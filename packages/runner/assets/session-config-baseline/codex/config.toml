@@ -1,3 +1,3 @@
-# AgentOS platform baseline. Authentication is copied separately from the
+# Anneal platform baseline. Authentication is copied separately from the
 # runner host's auth.json; no host instruction or personal configuration file
 # is part of this baseline.

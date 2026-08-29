@@ -272,6 +272,26 @@ test("the internal npm scope rename is a registered prompt-only rollover", async
   }
 });
 
+test("the product rename is a registered prompt-only rollover in both templates", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const retiredDigests = {
+    "direct-engineer-workflow": "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
+    "compound-engineer-workflow": "606f9b5a667781cde3400d114cc7f2ebf00bada6995eee07a7019b63e7dd8424",
+  } as const;
+
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+    const generation = generationOf(templateName, "pre-product-rename-anneal");
+    assert.equal(generation.promptDigest, retiredDigests[templateName]);
+    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    // The retired generation carries the current shape, so only the digest
+    // tells it apart from the graph that replaced it.
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+  }
+});
+
 test("every prompt-only generation can roll straight to the current source", async () => {
   const sources = await loadAllTemplateStepSources();
   const markers = {
@@ -280,10 +300,12 @@ test("every prompt-only generation can roll straight to the current source", asy
       "pre-platform-spec-materialization",
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
+      "pre-product-rename-anneal",
     ],
     "compound-engineer-workflow": [
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
+      "pre-product-rename-anneal",
     ],
   } as const;
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {

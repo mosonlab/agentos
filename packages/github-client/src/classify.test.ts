@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { classifyHttpStatus, isDeterministicRefusal, isLostResponse, NO_RESPONSE } from "./classify.js";
 
-test("the errors that actually ended AgentOS GitHub writes are classified as lost", () => {
+test("the errors that actually ended Anneal GitHub writes are classified as lost", () => {
   // Every string here was produced by a real failed write against
   // github.com from this network, or by our own per-command timeout.
   for (const message of [

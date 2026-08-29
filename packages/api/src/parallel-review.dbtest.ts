@@ -1216,7 +1216,7 @@ test("tampered direct and compound materializations refuse claim with the named 
     await runDbScript("seed.ts");
     await runDbScript("sync-canonical-prompts.ts");
     materializedSpecification = shape === "direct"
-      ? `Feature brief:\n${SPECIFICATION_BRIEF}\nPersist the final implementation output for this step through the AgentOS task output endpoint.`
+      ? `Feature brief:\n${SPECIFICATION_BRIEF}\nPersist the final implementation output for this step through the Anneal task output endpoint.`
       : "tampered specification";
     specificationReads.length = 0;
     const fixture = shape === "direct"
