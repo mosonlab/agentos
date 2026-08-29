@@ -14,7 +14,7 @@ import {
   openRun,
   pinnedImplementationRange,
   runBudgetCeiling,
-} from "./workflow.js";
+} from "./run-open.js";
 
 const now = new Date("2026-08-26T12:00:00.000Z");
 

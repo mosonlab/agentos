@@ -14,7 +14,7 @@ import { isIntegratorStep } from "./merge-integrator.js";
 import { isMergeReadinessStep, REGRESSION_VERIFICATION_OUTPUT_KIND } from "./merge-tail.js";
 import { stepGeneration, stepRole, type StepRole } from "./step-role.js";
 import { loadTemplateStepSources, type CanonicalTemplateName } from "./template-sources.js";
-import { isCompoundImplementationStep, isDirectImplementationStep } from "./workflow.js";
+import { isCompoundImplementationStep, isDirectImplementationStep } from "./run-open.js";
 
 const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
   spec: "spec",

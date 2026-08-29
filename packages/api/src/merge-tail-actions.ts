@@ -3,11 +3,16 @@ import { createHash } from "node:crypto";
 import {
   asJsonObject,
   enqueueTaskRun,
+  isIntegratorStep,
+  isRegressionVerificationOutputKind,
+  latestMarker,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MERGE_TAIL_KIND,
   MERGE_TAIL_SCHEMA_VERSION,
   mergeRecoveryTransitionAllowed,
   MergeRecoveryStatus,
+  type Marker,
+  parseResolverResult,
   parseRegressionVerdict,
   Prisma,
   readMarkerHistory,
@@ -20,7 +25,7 @@ import {
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
-import { settleLease } from "./merge-lease.js";
+import { settleLease, type LeaseSettlementOutcome } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 
 /**
@@ -259,6 +264,9 @@ export type StopMergeTailInput =
 
 export type StopMergeTailResult = { leaseToRelease: MergeLeaseTarget | null };
 
+type ReadinessStopMergeTailInput = Extract<StopMergeTailInput, { phase: "readiness" }>;
+type CompletionOwnedStopMergeTailInput = Exclude<StopMergeTailInput, ReadinessStopMergeTailInput>;
+
 const transitionRecovery = async (
   tx: DbTx,
   aggregateId: string,
@@ -294,11 +302,23 @@ const stopNotice = async (
   }, update: {} });
 };
 
-/** Persist one merge-tail stop and return the Chain Lease its caller may release after commit. */
-export const stopMergeTail = async (
+/**
+ * Persist one merge-tail stop. Readiness is the only phase that returns a
+ * Lease target because its worker must release after commit; Run completion
+ * owns Lease settlement for regression and repair, while recovery owns none.
+ */
+export function stopMergeTail(
+  tx: DbTx,
+  input: ReadinessStopMergeTailInput,
+): Promise<StopMergeTailResult>;
+export function stopMergeTail(
+  tx: DbTx,
+  input: CompletionOwnedStopMergeTailInput,
+): Promise<void>;
+export async function stopMergeTail(
   tx: DbTx,
   input: StopMergeTailInput,
-): Promise<StopMergeTailResult> => {
+): Promise<StopMergeTailResult | void> {
   if (input.phase === "regression" || input.phase === "readiness") {
     const recovery = input.recovery;
     const body = recovery
@@ -367,8 +387,11 @@ export const stopMergeTail = async (
         await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey });
       }
     }
-    const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
-    return { leaseToRelease: lease.leaseToRelease };
+    if (input.phase === "readiness") {
+      const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
+      return { leaseToRelease: lease.leaseToRelease };
+    }
+    return;
   }
 
   if (input.phase === "repair") {
@@ -394,8 +417,7 @@ export const stopMergeTail = async (
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       reason: input.reason,
     });
-    const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
-    return { leaseToRelease: lease.leaseToRelease };
+    return;
   }
 
   await transitionRecovery(tx, input.aggregateId, MergeRecoveryStatus.FAILED, {
@@ -430,7 +452,162 @@ export const stopMergeTail = async (
       ? `Automatic base-drift recovery refused: ${input.reason}`
       : input.reason,
   } });
-  return { leaseToRelease: null };
+}
+
+type MergeTailCompletionTask = {
+  id: string;
+  documentationTaskId?: string | null;
+  templateStep?: {
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate?: { name: string } | null;
+  } | null;
+};
+
+export type MergeTailCompletionResult = {
+  handled: boolean;
+  leaseOutcome: LeaseSettlementOutcome;
+};
+
+/**
+ * Settle the merge-tail state owned by one terminal Run completion. The caller
+ * invokes this only for a successful Run or a failure that did not create a
+ * retry; ordinary task completion and follow-up activation remain its work.
+ */
+export const settleMergeTailCompletion = async (
+  tx: DbTx,
+  input: {
+    task: MergeTailCompletionTask;
+    run: { agentId: string; sessionId: string; completedAt: Date };
+    body: { headSha?: string | null };
+    markers: Marker[];
+    succeeded: boolean;
+  },
+): Promise<MergeTailCompletionResult> => {
+  const repairMarker = latestMarker(input.markers, "repairAttempt");
+  const repairCompletion = Boolean(repairMarker?.regressionTaskId);
+  const terminalFailureStopsLease = isIntegratorStep(input.task.templateStep)
+    || isRegressionVerificationOutputKind(input.task.templateStep?.outputKind)
+    || repairCompletion;
+
+  if (!input.succeeded) {
+    if (repairMarker?.regressionTaskId) {
+      const reason = `${repairMarker.repairKind} repair ${input.task.id} failed without closing the repair at ${repairMarker.headSha}`;
+      await stopMergeTail(tx, {
+        phase: "repair",
+        regressionTaskId: repairMarker.regressionTaskId,
+        repairTaskId: input.task.id,
+        repairKind: repairMarker.repairKind,
+        startHeadSha: repairMarker.headSha,
+        targetHeadSha: repairMarker.baseHeadSha,
+        resolvedHeadSha: input.body.headSha ?? null,
+        reason,
+        at: input.run.completedAt,
+        agentId: input.run.agentId,
+        sessionId: input.run.sessionId,
+      });
+    }
+    return {
+      handled: repairCompletion,
+      leaseOutcome: terminalFailureStopsLease ? "stop" : "continue",
+    };
+  }
+
+  if (!repairMarker?.regressionTaskId) {
+    return {
+      handled: false,
+      leaseOutcome: isIntegratorStep(input.task.templateStep) ? "stop" : "continue",
+    };
+  }
+
+  const repairOutput = await tx.taskStepOutput.findUnique({
+    where: { taskId: input.task.id },
+    select: { body: true },
+  });
+  let repairUnable = false;
+  let reportedUnable = false;
+  let resolvedHeadSha = input.body.headSha ?? null;
+  if (repairMarker.repairKind === "refresh-conflict") {
+    const parsedResolver = parseResolverResult(repairOutput?.body);
+    const expectedStart = repairMarker.headSha;
+    const expectedTarget = repairMarker.baseHeadSha;
+    const bindingError = parsedResolver.status === "invalid"
+      ? parsedResolver.reason
+      : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
+        ? "merge-resolver output is bound to stale start or target heads"
+        : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
+          ? "merge-resolver output resolved head does not match the delivered run head"
+          : null;
+    if (bindingError) {
+      repairUnable = true;
+      const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError}`;
+      await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.DONE, failureReason: reason } });
+      await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+      await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
+        actorType: "control-plane",
+        body: `Automatic refresh-conflict attempt stopped: ${reason}`,
+        metadata: {
+          repairKind: "refresh-conflict",
+          repairTaskId: input.task.id,
+          startHeadSha: expectedStart,
+          targetHeadSha: expectedTarget,
+          resolvedHeadSha: input.body.headSha ?? null,
+          state: "invalid-output",
+          reason: bindingError,
+        },
+      });
+      await openMergeTailStopNotice(tx, {
+        taskId: repairMarker.regressionTaskId,
+        agentId: input.run.agentId,
+        sessionId: input.run.sessionId,
+        reason,
+      });
+    } else if (parsedResolver.status === "ok") {
+      reportedUnable = parsedResolver.result.outcome === "unable";
+      resolvedHeadSha = parsedResolver.result.outcome === "resolved" ? parsedResolver.result.resolvedHeadSha : null;
+    }
+  }
+
+  // gate-fix and review-fix agents have no JSON wire contract; their
+  // successful delivered head is the completion evidence.
+  if (reportedUnable) {
+    repairUnable = true;
+    const reason = `${String(repairMarker.repairKind)} repair ${input.task.id} reported unable at ${String(repairMarker.headSha)}`;
+    await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.DONE, failureReason: reason } });
+    await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+    await openMergeTailStopNotice(tx, {
+      taskId: repairMarker.regressionTaskId,
+      agentId: input.run.agentId,
+      sessionId: input.run.sessionId,
+      reason,
+    });
+  } else if (!repairUnable) {
+    await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
+      actorType: "control-plane",
+      body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${input.body.headSha ?? "missing-head"}`,
+      metadata: {
+        repairKind: repairMarker.repairKind,
+        repairTaskId: input.task.id,
+        startHeadSha: repairMarker.headSha,
+        targetHeadSha: repairMarker.baseHeadSha,
+        resolvedHeadSha,
+      },
+    });
+    if (input.task.documentationTaskId) {
+      await tx.task.update({
+        where: { id: input.task.documentationTaskId },
+        data: {
+          status: TaskStatus.TODO,
+          failureReason: `documentation invalidated by ${String(repairMarker.repairKind)} repair ${input.task.id}`,
+        },
+      });
+    }
+  }
+
+  return {
+    handled: repairUnable,
+    leaseOutcome: repairUnable ? "stop" : "continue",
+  };
 };
 
 export const createMergeTailRepairTask = async (
