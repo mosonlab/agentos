@@ -958,8 +958,10 @@ curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - Deletes every Task in the project-scoped Chain, including its marker-bound
   repair tasks, atomically.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict` when
-  the Task belongs to no Chain or any Chain member has an active Run. An active
-  Run refusal returns code `chain_delete_active_run` and changes nothing.
+  the Task belongs to no Chain, any Chain member has an active Run, or a member
+  has retained Run/Session history. Active Run and retained-history refusals
+  return codes `chain_delete_active_run` and `chain_delete_run_history`,
+  respectively, and change nothing.
 
 ```sh
 curl -X DELETE "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"

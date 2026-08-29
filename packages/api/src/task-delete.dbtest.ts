@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { MERGE_TAIL_KIND, PrismaClient, RunStatus } from "@anneal/db";
+import { CHAIN_STRUCTURE_LOCK_CLASS, MERGE_TAIL_KIND, PrismaClient, RunStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -14,13 +14,20 @@ after(async () => { await db.$disconnect(); });
 
 const OPERATOR = "operator-task-delete-token";
 
-const callDelete = async (path: string): Promise<{ status: number; body: any }> => {
+const callApi = async (
+  path: string,
+  init: { method: "DELETE" | "POST"; body?: Record<string, unknown> },
+): Promise<{ status: number; body: any }> => {
   const prior = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
   try {
     const response = await createApp(db).request(path, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${OPERATOR}` },
+      method: init.method,
+      headers: {
+        Authorization: `Bearer ${OPERATOR}`,
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(init.body ? { body: JSON.stringify(init.body) } : {}),
     });
     return {
       status: response.status,
@@ -29,6 +36,16 @@ const callDelete = async (path: string): Promise<{ status: number; body: any }> 
   } finally {
     if (prior === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = prior;
   }
+};
+
+const callDelete = (path: string) => callApi(path, { method: "DELETE" });
+
+const waitFor = async (predicate: () => Promise<boolean>): Promise<void> => {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("timed out waiting for coordinated database state");
 };
 
 const seedContext = async (label: string) => {
@@ -100,6 +117,17 @@ const seedRepairTask = async (
       kind: MERGE_TAIL_KIND.repairAttempt,
       repairKind: "gate-fix",
       regressionTaskId,
+    },
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: regressionTaskId,
+    actorType: "control-plane",
+    body: `Automatic gate-fix attempt queued as repair task ${task.id}`,
+    metadata: {
+      schemaVersion: 1,
+      kind: MERGE_TAIL_KIND.repairAttempt,
+      repairKind: "gate-fix",
+      repairTaskId: task.id,
     },
   } });
   return task;
@@ -178,6 +206,104 @@ test("Chain delete refuses an active run on any member and deletes nothing", asy
     chainId,
   });
   assert.equal(await db.task.count({ where: { id: { in: [first.id, active.id, repair.id] } } }), 3);
+});
+
+test("Chain delete refuses terminal run history with a machine-readable response", async () => {
+  const context = await seedContext("delete-run-history-chain");
+  const chainId = `delete-run-history-chain-${Date.now()}`;
+  const first = await seedChainTask(context, chainId, 0);
+  const regression = await seedChainTask(context, chainId, 1, "Regression");
+  const repair = await seedRepairTask(context, regression.id);
+  for (const [index, task] of [first, repair].entries()) {
+    await db.run.create({ data: {
+      projectId: context.project.id,
+      taskId: task.id,
+      agentId: context.agent.id,
+      repoId: context.repo.id,
+      runNumber: 1,
+      dedupeKey: `task:${task.id}:run:1`,
+      runner: "CLAUDE",
+      model: "claude",
+      promptHash: `terminal-${index}`,
+      status: RunStatus.SUCCEEDED,
+      endedAt: new Date(),
+    } });
+  }
+
+  const response = await callDelete(`/tasks/${regression.id}/chain`);
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.body, {
+    error: `Cannot delete Chain ${chainId}; a member has run history`,
+    code: "chain_delete_run_history",
+    chainId,
+  });
+  assert.equal(await db.task.count({ where: { id: { in: [first.id, regression.id, repair.id] } } }), 3);
+  assert.equal(await db.run.count({ where: { taskId: { in: [first.id, repair.id] } } }), 2);
+});
+
+test("a chained-task create waiting behind deletion cannot leave a surviving member", async () => {
+  const context = await seedContext("delete-create-race");
+  const chainId = `delete-create-race-${Date.now()}`;
+  const first = await seedChainTask(context, chainId, 0);
+  const second = await seedChainTask(context, chainId, 1);
+  let releaseBlocker!: () => void;
+  let blockerReady!: () => void;
+  const release = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+  const ready = new Promise<void>((resolve) => { blockerReady = resolve; });
+  const blocker = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${first.id} FOR UPDATE`;
+    blockerReady();
+    await release;
+  });
+  await ready;
+
+  const deleting = callDelete(`/tasks/${first.id}/chain`);
+  await waitFor(async () => {
+    const waiting = await db.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND classid::int = ${CHAIN_STRUCTURE_LOCK_CLASS}
+        AND granted
+    `;
+    return waiting[0]?.count === 1;
+  });
+
+  const creating = callApi(`/projects/${context.project.id}/tasks`, {
+    method: "POST",
+    body: {
+      name: "Late disjoint member",
+      description: "must not survive deletion",
+      assigneeType: "HUMAN",
+      status: "BACKLOG",
+      chainId,
+      chainIndex: 9,
+    },
+  });
+  await waitFor(async () => {
+    const waiting = await db.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND classid::int = ${CHAIN_STRUCTURE_LOCK_CLASS}
+        AND NOT granted
+    `;
+    return waiting[0]?.count === 1;
+  });
+  releaseBlocker();
+
+  const [deleted, created] = await Promise.all([deleting, creating]);
+  await blocker;
+  assert.equal(deleted.status, 204);
+  assert.equal(created.status, 409);
+  assert.deepEqual(created.body, {
+    error: `Cannot add Task to Chain ${chainId}; the Chain no longer exists`,
+    code: "chain_create_missing",
+    chainId,
+  });
+  assert.equal(await db.task.count({ where: { id: { in: [first.id, second.id] } } }), 0);
+  assert.equal(await db.task.count({ where: { projectId: context.project.id, chainId } }), 0);
 });
 
 test("single-task delete remains unchanged for a chainless task", async () => {

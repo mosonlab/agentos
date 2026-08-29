@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  asJsonObject,
+  markerFromMetadata,
   MERGE_TAIL_KIND,
   projectMergeOutcome,
   runOwnsMergeOutcome,
@@ -10,6 +10,7 @@ import {
   TaskStatus,
   type Agent,
   type MergeOutcomeProjection,
+  type Marker,
   type Prisma,
   type PrismaClient,
   type Repo,
@@ -271,14 +272,101 @@ export const boardCard = (
  * `regressionTaskId` is not this card's binding rather than a broken one.
  */
 export const repairBinding = (
-  metadata: Record<string, unknown> | null,
+  marker: Marker | null,
   chainOfRegressionTask: (regressionTaskId: string) => { chainId: string; chainName: string | null } | null,
 ): RepairBinding | null => {
-  const regressionTaskId = typeof metadata?.regressionTaskId === "string" ? metadata.regressionTaskId : null;
-  const repairKind = typeof metadata?.repairKind === "string" ? metadata.repairKind : null;
+  const regressionTaskId = marker?.regressionTaskId ?? null;
+  const repairKind = marker?.repairKind ?? null;
   if (regressionTaskId === null || repairKind === null) return null;
   const chain = chainOfRegressionTask(regressionTaskId);
   return chain === null ? null : { chainId: chain.chainId, chainName: chain.chainName, repairKind };
+};
+
+export type RepairChainBinding = {
+  projectId: string;
+  chainId: string;
+  repairKind: string;
+};
+
+/**
+ * Resolves detached repair tasks through their own newest valid marker. Board
+ * projection and delete guards share this query so they cannot disagree about
+ * whether a detached task is Chain-bound.
+ */
+export const readRepairChainByTask = async (
+  db: PrismaClient | Prisma.TransactionClient,
+  tasks: Array<{ id: string; projectId: string }>,
+): Promise<Map<string, RepairChainBinding>> => {
+  if (tasks.length === 0) return new Map();
+  const projectByTask = new Map(tasks.map((task) => [task.id, task.projectId]));
+  const markerRows = await db.taskActivity.findMany({
+    where: {
+      actorType: "control-plane",
+      task: {
+        id: { in: tasks.map((task) => task.id) },
+        chainId: null,
+      },
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
+    },
+    select: { taskId: true, metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const markers = markerRows.flatMap((row) => {
+    const marker = markerFromMetadata(row.metadata);
+    const repairProjectId = projectByTask.get(row.taskId);
+    return marker && repairProjectId ? [{ taskId: row.taskId, projectId: repairProjectId, marker }] : [];
+  });
+  const regressionIds = [...new Set(markers.flatMap(({ marker }) => (
+    marker.regressionTaskId ? [marker.regressionTaskId] : []
+  )))];
+  const regressions = regressionIds.length === 0 ? [] : await db.task.findMany({
+    where: {
+      id: { in: regressionIds },
+      chainId: { not: null },
+    },
+    select: { id: true, projectId: true, chainId: true },
+  });
+  const regressionById = new Map(regressions.map((task) => [task.id, task]));
+  const bindingByRepair = new Map<string, RepairChainBinding>();
+  for (const { taskId, projectId: repairProjectId, marker } of markers) {
+    if (bindingByRepair.has(taskId) || !marker.regressionTaskId || !marker.repairKind) continue;
+    const regression = regressionById.get(marker.regressionTaskId);
+    if (!regression?.chainId || regression.projectId !== repairProjectId) continue;
+    bindingByRepair.set(taskId, {
+      projectId: regression.projectId,
+      chainId: regression.chainId,
+      repairKind: marker.repairKind,
+    });
+  }
+  return bindingByRepair;
+};
+
+/** Follows the Chain-side markers to every detached repair Task they name. */
+export const readChainRepairTaskIds = async (
+  db: PrismaClient | Prisma.TransactionClient,
+  input: { projectId: string; chainTaskIds: string[] },
+): Promise<string[]> => {
+  if (input.chainTaskIds.length === 0) return [];
+  const markerRows = await db.taskActivity.findMany({
+    where: {
+      taskId: { in: input.chainTaskIds },
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
+    },
+    select: { metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const candidateIds = [...new Set(markerRows.flatMap((row) => {
+    const marker = markerFromMetadata(row.metadata);
+    return marker?.repairKind && marker.repairTaskId ? [marker.repairTaskId] : [];
+  }))];
+  if (candidateIds.length === 0) return [];
+  const repairs = await db.task.findMany({
+    where: { id: { in: candidateIds }, projectId: input.projectId, chainId: null },
+    select: { id: true },
+    orderBy: { id: "asc" },
+  });
+  return repairs.map((task) => task.id);
 };
 
 export type TaskReadScope = {
@@ -414,34 +502,12 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
   }
 
-  const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
-  const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
-    where: {
-      taskId: { in: detachedIds },
-      actorType: "control-plane",
-      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
-    },
-    select: { taskId: true, metadata: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  });
+  const detachedTasks = rows
+    .filter((row) => row.chainId === null)
+    .map((row) => ({ id: row.id, projectId: row.projectId }));
+  const repairChainByTask = await readRepairChainByTask(db, detachedTasks);
   const repairByTask = new Map<string, RepairBinding>();
-  if (repairMarkers.length > 0) {
-    const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
-      const value = asJsonObject(marker.metadata)?.regressionTaskId;
-      return typeof value === "string" ? [value] : [];
-    }))];
-    const regressionTasks = await db.task.findMany({
-      where: { id: { in: regressionIds }, ...(scope.projectId ? { projectId: scope.projectId } : {}) },
-      select: { id: true, projectId: true, chainId: true },
-    });
-    const chainOfTask = new Map<string, { key: string; chainId: string }>();
-    for (const task of regressionTasks) {
-      if (task.chainId === null) continue;
-      chainOfTask.set(task.id, {
-        key: chainKey({ projectId: task.projectId, chainId: task.chainId }),
-        chainId: task.chainId,
-      });
-    }
+  if (repairChainByTask.size > 0) {
     const chainNameByKey = new Map<string, string | null>();
     for (const row of rows) {
       if (row.chainId === null) continue;
@@ -449,17 +515,12 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       if (chainNameByKey.has(key)) continue;
       chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
     }
-    const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
-      const chain = chainOfTask.get(taskId);
-      return chain === undefined ? null : {
-        chainId: chain.chainId,
-        chainName: chainNameByKey.get(chain.key) ?? null,
-      };
-    };
-    for (const marker of repairMarkers) {
-      if (repairByTask.has(marker.taskId)) continue;
-      const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
-      if (binding !== null) repairByTask.set(marker.taskId, binding);
+    for (const [taskId, binding] of repairChainByTask) {
+      repairByTask.set(taskId, {
+        chainId: binding.chainId,
+        chainName: chainNameByKey.get(chainKey(binding)) ?? null,
+        repairKind: binding.repairKind,
+      });
     }
   }
 

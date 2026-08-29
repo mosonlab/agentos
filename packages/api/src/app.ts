@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
-  asJsonObject,
   AssigneeType,
   activateChainSuccessor,
   ChainControlState,
@@ -21,8 +20,8 @@ import {
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockChainRows,
+  lockChainStructure,
   lockRunRow,
-  MERGE_TAIL_KIND,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -80,7 +79,16 @@ import {
   principalMayAccess,
   type Principal,
 } from "./auth.js";
-import { etagFor, etagMatches, readBoard, readTaskList, serializeUsageCost, type TaskReadScope } from "./board.js";
+import {
+  etagFor,
+  etagMatches,
+  readBoard,
+  readChainRepairTaskIds,
+  readRepairChainByTask,
+  readTaskList,
+  serializeUsageCost,
+  type TaskReadScope,
+} from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, readProjectCosts } from "./costs.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
@@ -196,49 +204,6 @@ type TaskChainResolution = {
   chain: { projectId: string; chainId: string } | null;
 };
 
-/** Newest valid repair-marker binding for each requested detached task. */
-const repairChainByTask = async (
-  tx: Prisma.TransactionClient,
-  projectId: string,
-  taskIds?: string[],
-): Promise<Map<string, string>> => {
-  if (taskIds?.length === 0) return new Map();
-  const markers = await tx.taskActivity.findMany({
-    where: {
-      actorType: "control-plane",
-      task: {
-        projectId,
-        chainId: null,
-        ...(taskIds === undefined ? {} : { id: { in: taskIds } }),
-      },
-      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
-    },
-    select: { taskId: true, metadata: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  });
-  const regressionIds = [...new Set(markers.flatMap((marker) => {
-    const metadata = asJsonObject(marker.metadata);
-    return typeof metadata?.regressionTaskId === "string" ? [metadata.regressionTaskId] : [];
-  }))];
-  const regressions = regressionIds.length === 0 ? [] : await tx.task.findMany({
-    where: { id: { in: regressionIds }, projectId, chainId: { not: null } },
-    select: { id: true, chainId: true },
-  });
-  const chainByRegression = new Map(regressions.flatMap((task) => (
-    task.chainId ? [[task.id, task.chainId] as const] : []
-  )));
-  const bindingByRepair = new Map<string, string>();
-  for (const marker of markers) {
-    if (bindingByRepair.has(marker.taskId)) continue;
-    const metadata = asJsonObject(marker.metadata);
-    const regressionTaskId = typeof metadata?.regressionTaskId === "string" ? metadata.regressionTaskId : null;
-    const repairKind = typeof metadata?.repairKind === "string" ? metadata.repairKind : null;
-    const chainId = regressionTaskId ? chainByRegression.get(regressionTaskId) : undefined;
-    if (repairKind && chainId) bindingByRepair.set(marker.taskId, chainId);
-  }
-  return bindingByRepair;
-};
-
 /**
  * Resolves both ordinary Chain membership and the detached repair-task binding
  * used by the merge tail. The project predicate is essential: Chain IDs are
@@ -258,25 +223,13 @@ const resolveTaskChain = async (
     return { task, chain: { projectId: task.projectId, chainId: task.chainId } };
   }
 
-  const repairChainId = (await repairChainByTask(tx, task.projectId, [task.id])).get(task.id);
+  const repairChainId = (await readRepairChainByTask(tx, [task])).get(task.id)?.chainId;
   return {
     task,
     chain: repairChainId
       ? { projectId: task.projectId, chainId: repairChainId }
       : null,
   };
-};
-
-/** Detached repair tasks whose newest valid repair marker binds them here. */
-const chainRepairTaskIds = async (
-  tx: Prisma.TransactionClient,
-  chain: { projectId: string; chainId: string },
-): Promise<string[]> => {
-  const bindingByRepair = await repairChainByTask(tx, chain.projectId);
-  return [...bindingByRepair]
-    .filter(([, chainId]) => chainId === chain.chainId)
-    .map(([taskId]) => taskId)
-    .sort();
 };
 
 const lockTaskRowsById = async (
@@ -291,6 +244,18 @@ const lockTaskRowsById = async (
   `;
   return rows.map((row) => row.id);
 };
+
+const chainActiveRunRefusal = (chainId: string): Refusal => refusal(
+  "conflict",
+  `Cannot delete Chain ${chainId}; a member has an active run`,
+  { code: "chain_delete_active_run", chainId },
+);
+
+const chainRunHistoryRefusal = (chainId: string): Refusal => refusal(
+  "conflict",
+  `Cannot delete Chain ${chainId}; a member has run history`,
+  { code: "chain_delete_run_history", chainId },
+);
 
 class TaskCreateOpenRunRefusal extends Error {
   constructor(readonly refusal: Refusal) {
@@ -2429,6 +2394,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     try {
       const task = await db.$transaction(async (tx) => {
+        const chainExistedBeforeLock = body.chainId === undefined ? false : await tx.task.count({
+          where: { projectId, chainId: body.chainId },
+        }) > 0;
+        if (body.chainId !== undefined) {
+          await lockChainStructure(tx, { projectId, chainId: body.chainId });
+          const chainExistsUnderLock = await tx.task.count({
+            where: { projectId, chainId: body.chainId },
+          }) > 0;
+          if (chainExistedBeforeLock && !chainExistsUnderLock) {
+            return refusal(
+              "conflict",
+              `Cannot add Task to Chain ${body.chainId}; the Chain no longer exists`,
+              { code: "chain_create_missing", chainId: body.chainId },
+            );
+          }
+        }
         // The check above answered from an unlocked read. This one holds the
         // Agent-row mutex through the task and `openRun`, so a
         // concurrent archive either loses the race or is refused for this run.
@@ -2932,51 +2913,64 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.delete("/tasks/:taskId/chain", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const result = await readCommitted(db, async (tx) => {
-      // Chain identity is immutable after dispatch. This unlocked read chooses
-      // the full-chain mutex; every deletion fact is re-read under that lock.
-      const resolved = await resolveTaskChain(tx, taskId);
-      if (!resolved) return refusal("not-found", "Task not found");
-      if (!resolved.chain) return refusal("conflict", "Task does not belong to a Chain");
-      const chain = resolved.chain;
+    let deletionChainId: string | null = null;
+    try {
+      const result = await readCommitted(db, async (tx) => {
+        // The first read chooses a structural mutex that exists even after the
+        // final member is gone. Membership and marker bindings are re-read only
+        // after that mutex excludes public chained-task appends.
+        const resolved = await resolveTaskChain(tx, taskId);
+        if (!resolved) return refusal("not-found", "Task not found");
+        if (!resolved.chain) return refusal("conflict", "Task does not belong to a Chain");
+        await lockChainStructure(tx, resolved.chain);
+        const current = await resolveTaskChain(tx, taskId);
+        if (!current) return refusal("not-found", "Task not found");
+        if (!current.chain) return refusal("conflict", "Task does not belong to a Chain");
+        const chain = current.chain;
+        deletionChainId = chain.chainId;
 
-      const chainTaskIds = await lockChainRows(tx, chain);
-      const repairTaskIds = await chainRepairTaskIds(tx, chain);
-      const taskIds = [...new Set([...chainTaskIds, ...repairTaskIds])];
-      // Avoid taking a detached repair lock behind a completion that already
-      // owns that task and is waiting for the Chain lock. Such a completion is
-      // active, so this read can refuse without forming the opposite lock order.
-      const active = await tx.run.count({
-        where: { taskId: { in: taskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+        const chainTaskIds = await lockChainRows(tx, chain);
+        const repairTaskIds = await readChainRepairTaskIds(tx, {
+          projectId: chain.projectId,
+          chainTaskIds,
+        });
+        const taskIds = [...new Set([...chainTaskIds, ...repairTaskIds])];
+        // Avoid taking a detached repair lock behind a completion that already
+        // owns that task and is waiting for the Chain lock. Such a completion is
+        // active, so this read can refuse without forming the opposite lock order.
+        const active = await tx.run.count({
+          where: { taskId: { in: taskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+        });
+        if (active > 0) return chainActiveRunRefusal(chain.chainId);
+
+        const lockedRepairIds = await lockTaskRowsById(tx, repairTaskIds);
+        const survivingTaskIds = [...new Set([...chainTaskIds, ...lockedRepairIds])];
+        // A run can be queued after the first read while this transaction waits
+        // for a repair row. Re-check under every Task mutex before deleting.
+        const activeAfterLock = await tx.run.count({
+          where: { taskId: { in: survivingTaskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+        });
+        if (activeAfterLock > 0) return chainActiveRunRefusal(chain.chainId);
+
+        // Run and Session both restrict Task deletion. History is deliberately
+        // retained, so deleting it would exceed this operation's Task-only scope.
+        const runHistory = await tx.run.count({ where: { taskId: { in: survivingTaskIds } } });
+        if (runHistory > 0) return chainRunHistoryRefusal(chain.chainId);
+
+        await tx.task.deleteMany({ where: { id: { in: survivingTaskIds } } });
+        return { deleted: survivingTaskIds.length };
       });
-      if (active > 0) {
-        return refusal(
-          "conflict",
-          `Cannot delete Chain ${chain.chainId}; a member has an active run`,
-          { code: "chain_delete_active_run", chainId: chain.chainId },
-        );
+      if ("message" in result) return refusalJson(context, result);
+      return context.body(null, 204);
+    } catch (error: unknown) {
+      // Defensive mapping for another restrictive history relation introduced
+      // after the explicit Run check: callers still receive a guided refusal,
+      // never the generic Prisma P2003 response.
+      if (deletionChainId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        return refusalJson(context, chainRunHistoryRefusal(deletionChainId));
       }
-
-      const lockedRepairIds = await lockTaskRowsById(tx, repairTaskIds);
-      const survivingTaskIds = [...new Set([...chainTaskIds, ...lockedRepairIds])];
-      // A run can be queued after the first read while this transaction waits
-      // for a repair row. Re-check under every Task mutex before deleting.
-      const activeAfterLock = await tx.run.count({
-        where: { taskId: { in: survivingTaskIds }, status: { in: ACTIVE_RUN_STATUSES } },
-      });
-      if (activeAfterLock > 0) {
-        return refusal(
-          "conflict",
-          `Cannot delete Chain ${chain.chainId}; a member has an active run`,
-          { code: "chain_delete_active_run", chainId: chain.chainId },
-        );
-      }
-
-      await tx.task.deleteMany({ where: { id: { in: survivingTaskIds } } });
-      return { deleted: survivingTaskIds.length };
-    });
-    if ("message" in result) return refusalJson(context, result);
-    return context.body(null, 204);
+      throw error;
+    }
   });
   app.delete("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));

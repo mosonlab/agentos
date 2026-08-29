@@ -362,12 +362,14 @@ test("public task creation assigns a linear layer and rejects layer/dependency i
     const database = {
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
         task: {
+          count: async () => 0,
           create: async ({ data }: { data: Record<string, unknown> }) => {
             stored = data;
             return { id: "task-1", ...data };
           },
         },
         taskActivity: { create: async () => ({}) },
+        $queryRaw: async () => [{ locked: "" }],
       }),
     } as unknown as PrismaClient;
     const created = await createApp(database).request("/projects/project-1/tasks", {
