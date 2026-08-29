@@ -7,7 +7,6 @@ import {
   type PrismaClient,
 } from "@anneal/db";
 
-import { noteLeaseHandoff } from "./merge-lease.js";
 import { lockTaskMutationRows } from "./task-write.js";
 
 export const READINESS_CLAIM_LEASE_MS = 60_000;
@@ -131,7 +130,7 @@ class ReadinessClaim implements ReadinessClaimHandle {
     await lockTaskMutationRows(tx, this.taskId);
     const held = await tx.task.findUnique({
       where: { id: this.taskId },
-      select: { status: true, readinessClaimToken: true, chainId: true },
+      select: { status: true, readinessClaimToken: true },
     });
     if (held?.status !== TaskStatus.DOING || held.readinessClaimToken !== this.state.token) {
       return { settled: false, ownership: await this.ownershipAfterLoss(tx) };
@@ -142,16 +141,6 @@ class ReadinessClaim implements ReadinessClaimHandle {
     }
 
     const finished = await transition.apply(tx);
-    if (finished.ownership !== "released") {
-      if (!held.chainId) {
-        throw new Error(`Cannot retain the Merge Lease for readiness Step ${this.taskId} without a Chain`);
-      }
-      await noteLeaseHandoff(tx, {
-        chainId: held.chainId,
-        toRunId: finished.ownership.retainFor,
-        at: transition.at,
-      });
-    }
     await tx.task.update({
       where: { id: this.taskId },
       data: { readinessClaimToken: null, readinessClaimExpiresAt: null },

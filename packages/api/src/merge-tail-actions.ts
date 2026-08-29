@@ -24,8 +24,7 @@ import {
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
-import { settleLease, type LeaseSettlementOutcome } from "./merge-lease.js";
-import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import type { LeaseOutcome } from "./merge-lease.js";
 import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state.js";
 
 /**
@@ -262,7 +261,7 @@ export type StopMergeTailInput =
     sessionId?: string;
   };
 
-export type StopMergeTailResult = { leaseToRelease: MergeLeaseTarget | null };
+export type StopMergeTailResult = { leaseOutcome: LeaseOutcome };
 
 type ReadinessStopMergeTailInput = Extract<StopMergeTailInput, { phase: "readiness" }>;
 type CompletionOwnedStopMergeTailInput = Exclude<StopMergeTailInput, ReadinessStopMergeTailInput>;
@@ -344,8 +343,7 @@ export async function stopMergeTail(
       }
     }
     if (input.phase === "readiness") {
-      const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
-      return { leaseToRelease: lease.leaseToRelease };
+      return { leaseOutcome: { kind: "stop", taskId: input.regressionTaskId } };
     }
     return;
   }
@@ -402,7 +400,7 @@ type MergeTailCompletionTask = {
 
 export type MergeTailCompletionResult = {
   handled: boolean;
-  leaseOutcome: LeaseSettlementOutcome;
+  leaseOutcome: "continue" | "stop";
 };
 
 /**

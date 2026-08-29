@@ -8,9 +8,8 @@ import {
   isRegressionVerificationOutputKind,
   latestMarker,
   MERGE_TAIL_KIND,
+  Prisma,
   readMarkers,
-  RunStatus,
-  type Prisma,
   type PrismaClient,
 } from "@anneal/db";
 import {
@@ -89,12 +88,7 @@ const releaseMergeLeaseWith = async (
   target: MergeLeaseTarget | null,
 ): Promise<MergeLeaseRelease | null> => {
   if (!target) return null;
-  let release: MergeLeaseRelease;
-  try {
-    release = await releaser(target.chainId);
-  } catch (error: unknown) {
-    release = { outcome: "unreachable", detail: error instanceof Error ? error.message : String(error) };
-  }
+  const release = await releaser(target.chainId);
   reportMergeLeaseAnomaly(target.chainId, release);
   return release;
 };
@@ -103,6 +97,9 @@ export type ReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClie
 
 export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
   const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, target);
+  if (target && release?.outcome === "unreachable") {
+    throw new Error(`Merge lease release for chain ${target.chainId} was unreachable: ${release.detail}`);
+  }
   if (target && release?.outcome === "released") {
     await recordMergeLeaseHold(db, target, release, new Date());
   }
@@ -196,31 +193,135 @@ export const leaseHolderFor = async (
     : null;
 };
 
-export type LeaseSettlementOutcome = "continue" | "stop";
-export type LeaseSettlement = {
-  disposition: "retain" | "release";
-  leaseToRelease: MergeLeaseTarget | null;
+export type LeaseOutcome =
+  | { kind: "continue" }
+  | {
+    kind: "stop";
+    taskId: string | null;
+    releasedHandoff?: { toRunId: string; at: Date };
+    deferredRelease?: { activityId: string; target: MergeLeaseTarget; at: Date };
+  }
+  | { kind: "hand-off"; taskId: string | null; handoffRunId: string; at: Date };
+
+type LeaseSettlement = {
+  target: MergeLeaseTarget | null;
+  releasedHandoff: { chainId: string; toRunId: string; taskId: string; at: Date } | null;
+  deferredRelease: {
+    activityId: string;
+    target: MergeLeaseTarget;
+    taskId: string;
+    at: Date;
+  } | null;
 };
 
-/** Decide the Lease disposition from one terminal-control outcome. */
-export const settleLease = async (
+const noteLeaseHandoffInvalid = async (
   tx: Prisma.TransactionClient,
-  input: { taskId: string | null; outcome: LeaseSettlementOutcome },
+  input: { taskId: string; toRunId: string; at: Date; reason: string },
+): Promise<void> => {
+  await tx.taskActivity.create({ data: {
+    taskId: input.taskId,
+    actorType: "control-plane",
+    body: `Invalid Chain Lease handoff for queued Run ${input.toRunId}: ${input.reason}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "invalid",
+      toRunId: input.toRunId,
+      invalidAt: input.at.toISOString(),
+      reason: input.reason,
+    },
+  } });
+};
+
+/** Resolve one declared outcome to the module-owned holder and persistence. */
+const settleLease = async (
+  tx: Prisma.TransactionClient,
+  outcome: LeaseOutcome,
 ): Promise<LeaseSettlement> => {
-  if (input.outcome === "continue") return { disposition: "retain", leaseToRelease: null };
-  const holder = await leaseHolderFor(tx, input.taskId);
+  if (outcome.kind === "continue") {
+    return { target: null, releasedHandoff: null, deferredRelease: null };
+  }
+  const holder = await leaseHolderFor(tx, outcome.taskId);
+  if (outcome.kind === "hand-off") {
+    if (!holder) throw new Error(`Cannot hand off a Merge Lease from Task ${outcome.taskId ?? "without a Task"}`);
+    await noteLeaseHandoff(tx, {
+      chainId: holder.chainId,
+      toRunId: outcome.handoffRunId,
+      at: outcome.at,
+    });
+    return { target: null, releasedHandoff: null, deferredRelease: null };
+  }
+  if (outcome.releasedHandoff && outcome.deferredRelease) {
+    throw new Error("A Merge Lease stop cannot settle both a handoff and a deferred release");
+  }
+  if (outcome.releasedHandoff && !holder) {
+    if (!outcome.taskId) throw new Error("Cannot diagnose a Merge Lease handoff without a Task");
+    await noteLeaseHandoffInvalid(tx, {
+      taskId: outcome.taskId,
+      toRunId: outcome.releasedHandoff.toRunId,
+      at: outcome.releasedHandoff.at,
+      reason: "the handoff Task does not resolve to a Merge Lease holder",
+    });
+    return { target: null, releasedHandoff: null, deferredRelease: null };
+  }
+  if (outcome.deferredRelease) {
+    const expected = outcome.deferredRelease.target;
+    if (!holder || holder.chainId !== expected.chainId || holder.projectId !== expected.projectId) {
+      await noteLeaseReleaseTerminal(tx, {
+        activityId: outcome.deferredRelease.activityId,
+        taskId: outcome.taskId,
+        target: expected,
+        state: "invalid",
+        at: outcome.deferredRelease.at,
+        reason: holder
+          ? "the deferred target no longer matches the Task's Merge Lease holder"
+          : "the deferred Task no longer resolves to a Merge Lease holder",
+      });
+      return { target: null, releasedHandoff: null, deferredRelease: null };
+    }
+  }
   return {
-    disposition: "release",
-    leaseToRelease: holder
+    target: holder
       ? { chainId: holder.chainId, projectId: holder.projectId }
+      : null,
+    releasedHandoff: holder && outcome.releasedHandoff
+      ? {
+        chainId: holder.chainId,
+        toRunId: outcome.releasedHandoff.toRunId,
+        taskId: holder.taskId,
+        at: outcome.releasedHandoff.at,
+      }
+      : null,
+    deferredRelease: holder && outcome.deferredRelease
+      ? {
+        activityId: outcome.deferredRelease.activityId,
+        target: { projectId: holder.projectId, chainId: holder.chainId },
+        taskId: holder.taskId,
+        at: outcome.deferredRelease.at,
+      }
       : null,
   };
 };
 
 const LEASE_HANDOFF_GRACE_MS = 60_000;
+const LEASE_HANDOFF_QUERY_LIMIT = 100;
+const LEASE_RELEASE_QUERY_LIMIT = 100;
+
+export class LeaseReleaseDeferralRecordError extends Error {
+  readonly target: MergeLeaseTarget;
+  readonly taskId: string;
+
+  constructor(target: MergeLeaseTarget, taskId: string, cause: unknown) {
+    super(`Failed to record deferred Merge Lease release for chain ${target.chainId}`);
+    this.name = "LeaseReleaseDeferralRecordError";
+    this.target = target;
+    this.taskId = taskId;
+    this.cause = cause;
+  }
+}
 
 /** Persist the queued Run that must consume a retained Chain Lease. */
-export const noteLeaseHandoff = async (
+const noteLeaseHandoff = async (
   tx: Prisma.TransactionClient,
   input: { chainId: string; toRunId: string; at: Date },
 ): Promise<void> => {
@@ -241,54 +342,196 @@ export const noteLeaseHandoff = async (
   } });
 };
 
+const noteLeaseReleaseTerminal = async (
+  tx: Prisma.TransactionClient,
+  input: {
+    activityId: string;
+    taskId: string | null;
+    target: MergeLeaseTarget;
+    state: "released" | "invalid";
+    at: Date;
+    reason?: string;
+  },
+): Promise<void> => {
+  if (!input.taskId) throw new Error("Cannot record a deferred Merge Lease release without a Task");
+  await tx.taskActivity.create({ data: {
+    taskId: input.taskId,
+    actorType: "control-plane",
+    body: input.state === "released"
+      ? `Deferred Merge Lease release completed for chain ${input.target.chainId}`
+      : `Deferred Merge Lease release invalid for chain ${input.target.chainId}: ${input.reason ?? "invalid target"}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseRelease,
+      schemaVersion: 1,
+      state: input.state,
+      deferredActivityId: input.activityId,
+      projectId: input.target.projectId,
+      chainId: input.target.chainId,
+      taskId: input.taskId,
+      ...(input.state === "released"
+        ? { releasedAt: input.at.toISOString() }
+        : { invalidAt: input.at.toISOString(), reason: input.reason ?? "invalid target" }),
+    },
+  } });
+};
+
+const noteLeaseReleaseDeferred = async (
+  db: PrismaClient,
+  input: { target: MergeLeaseTarget; taskId: string; detail: string; at: Date },
+): Promise<void> => {
+  try {
+    await db.$transaction(async (tx) => {
+      const holder = await leaseHolderFor(tx, input.taskId);
+      if (!holder || holder.projectId !== input.target.projectId || holder.chainId !== input.target.chainId) {
+        throw new Error(`Cannot defer Merge Lease release for Task ${input.taskId}: target validation failed`);
+      }
+      await tx.taskActivity.create({ data: {
+        taskId: holder.taskId,
+        actorType: "control-plane",
+        body: `Merge Lease release deferred for chain ${holder.chainId}: ${input.detail}`,
+        metadata: {
+          kind: MERGE_TAIL_KIND.leaseRelease,
+          schemaVersion: 1,
+          state: "release-deferred",
+          projectId: holder.projectId,
+          chainId: holder.chainId,
+          taskId: holder.taskId,
+          failureDetail: input.detail,
+          deferredAt: input.at.toISOString(),
+        },
+      } });
+    });
+  } catch (error: unknown) {
+    throw new LeaseReleaseDeferralRecordError(input.target, input.taskId, error);
+  }
+};
+
+export const deferredLeaseReleasesStatement = Prisma.sql`
+    SELECT
+      deferred.id AS "activityId",
+      deferred."taskId" AS "taskId",
+      deferred.metadata->>'projectId' AS "projectId",
+      deferred.metadata->>'chainId' AS "chainId"
+    FROM "TaskActivity" AS deferred
+    WHERE deferred."actorType" = 'control-plane'
+      AND deferred.metadata->>'kind' = 'mergeTail.leaseRelease'
+      AND deferred.metadata->>'state' = 'release-deferred'
+      AND deferred.metadata->>'projectId' IS NOT NULL
+      AND deferred.metadata->>'chainId' IS NOT NULL
+      AND deferred.metadata->>'taskId' = deferred."taskId"
+      AND NOT EXISTS (
+        SELECT 1
+        FROM "TaskActivity" AS terminal
+        WHERE terminal."taskId" = deferred."taskId"
+          AND terminal."createdAt" >= deferred."createdAt"
+          AND terminal."actorType" = 'control-plane'
+          AND terminal.metadata->>'kind' = 'mergeTail.leaseRelease'
+          AND terminal.metadata->>'deferredActivityId' = deferred.id
+          AND terminal.metadata->>'state' IN ('released', 'invalid')
+      )
+    ORDER BY deferred."createdAt" ASC, deferred.id ASC
+    LIMIT ${LEASE_RELEASE_QUERY_LIMIT}
+  `;
+
+export const deferredLeaseReleases = async (
+  tx: Prisma.TransactionClient,
+): Promise<Array<{ activityId: string; taskId: string; target: MergeLeaseTarget }>> => (
+  tx.$queryRaw<Array<{ activityId: string; taskId: string; projectId: string; chainId: string }>>(
+    deferredLeaseReleasesStatement,
+  )
+).then((rows) => rows.map(({ activityId, taskId, projectId, chainId }) => ({
+  activityId,
+  taskId,
+  target: { projectId, chainId },
+})));
+
 /** Find retained handoffs whose queued Run never became a Lease consumer. */
 export const leaseHandoffsWithoutConsumer = async (
   tx: Prisma.TransactionClient,
   now: Date,
-): Promise<Array<{ chainId: string; projectId: string; toRunId: string; taskId: string }>> => {
-  const rows = await tx.taskActivity.findMany({
-    where: {
-      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
-    },
-    select: { taskId: true, metadata: true, task: { select: { projectId: true } } },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  });
-  const pending = new Map<string, { chainId: string; projectId: string; toRunId: string; taskId: string }>();
-  const settled = new Set<string>();
-  for (const row of rows) {
-    const raw = row.metadata;
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
-    const metadata = raw as Record<string, unknown>;
-    if (typeof metadata.toRunId !== "string") continue;
-    if (metadata.state === "released") {
-      settled.add(metadata.toRunId);
-      continue;
-    }
-    const handedOffAt = typeof metadata.handedOffAt === "string" ? Date.parse(metadata.handedOffAt) : Number.NaN;
-    if (metadata.state === "pending" && typeof metadata.chainId === "string"
-      && Number.isFinite(handedOffAt) && handedOffAt < now.getTime() - LEASE_HANDOFF_GRACE_MS
-      && !settled.has(metadata.toRunId) && !pending.has(metadata.toRunId)) {
-      pending.set(metadata.toRunId, {
-        chainId: metadata.chainId,
-        projectId: row.task.projectId,
-        toRunId: metadata.toRunId,
-        taskId: row.taskId,
-      });
-    }
-  }
-  if (pending.size === 0) return [];
-  const queued = await tx.run.findMany({
-    where: { id: { in: [...pending.keys()] }, status: RunStatus.QUEUED, claimedAt: null, startedAt: null },
-    select: { id: true },
-  });
-  return queued.flatMap((run) => {
-    const handoff = pending.get(run.id);
-    return handoff ? [handoff] : [];
-  });
+): Promise<Array<{ toRunId: string; taskId: string }>> => {
+  const staleBefore = new Date(now.getTime() - LEASE_HANDOFF_GRACE_MS);
+  return tx.$queryRaw<Array<{ toRunId: string; taskId: string }>>`
+    WITH consumers AS (
+      SELECT
+        consumer.id AS "toRunId",
+        consumer."taskId" AS "taskId",
+        consumer."createdAt" AS "createdAt",
+        consumer."readyAt" AS "readyAt"
+      FROM "Run" AS consumer
+      WHERE consumer.status = 'queued'::"RunStatus"
+        AND consumer."claimedAt" IS NULL
+        AND consumer."startedAt" IS NULL
+        AND GREATEST(consumer."createdAt", consumer."readyAt") < ${staleBefore}
+        AND EXISTS (
+          SELECT 1
+          FROM "TaskActivity" AS activity
+          WHERE activity."taskId" = consumer."taskId"
+            AND activity."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
+            AND activity."actorType" = 'control-plane'
+            AND activity.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
+            AND activity.metadata->>'toRunId' = consumer.id
+            AND activity.metadata->>'state' = 'pending'
+            AND activity.metadata->>'chainId' IS NOT NULL
+            AND GREATEST(
+              consumer."createdAt",
+              consumer."readyAt",
+              CASE
+                WHEN activity.metadata->>'handedOffAt' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
+                  THEN (activity.metadata->>'handedOffAt')::timestamptz
+                ELSE activity."createdAt"
+              END
+            ) < ${staleBefore}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM "TaskActivity" AS newer
+              WHERE newer."taskId" = consumer."taskId"
+                AND newer."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
+                AND newer."actorType" = 'control-plane'
+                AND newer.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
+                AND newer.metadata->>'toRunId' = consumer.id
+                AND (newer."createdAt", newer.id) > (activity."createdAt", activity.id)
+            )
+        )
+      ORDER BY GREATEST(consumer."createdAt", consumer."readyAt") ASC, consumer.id ASC
+      LIMIT ${LEASE_HANDOFF_QUERY_LIMIT}
+    ), unresolved AS (
+      SELECT
+        consumer."toRunId" AS "toRunId",
+        consumer."taskId" AS "taskId",
+        GREATEST(
+          consumer."createdAt",
+          consumer."readyAt",
+          CASE
+            WHEN latest.metadata->>'handedOffAt' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
+              THEN (latest.metadata->>'handedOffAt')::timestamptz
+            ELSE latest."createdAt"
+          END
+        ) AS "staleAt"
+      FROM consumers AS consumer
+      JOIN LATERAL (
+        SELECT activity."taskId", activity.metadata, activity."createdAt", activity.id
+        FROM "TaskActivity" AS activity
+        WHERE activity."taskId" = consumer."taskId"
+          AND activity."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
+          AND activity."actorType" = 'control-plane'
+          AND activity.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
+          AND activity.metadata->>'toRunId' = consumer."toRunId"
+        ORDER BY activity."createdAt" DESC, activity.id DESC
+        LIMIT 1
+      ) AS latest ON true
+      WHERE latest.metadata->>'state' = 'pending'
+        AND latest.metadata->>'chainId' IS NOT NULL
+    )
+    SELECT "toRunId", "taskId"
+    FROM unresolved
+    WHERE "staleAt" < ${staleBefore}
+    ORDER BY "staleAt" ASC, "toRunId" ASC
+  `;
 };
 
 /** Record a completed orphan-handoff release after the external release attempt. */
-export const noteLeaseHandoffReleased = async (
+const noteLeaseHandoffReleased = async (
   tx: Prisma.TransactionClient,
   input: { chainId: string; toRunId: string; taskId: string; at: Date },
 ): Promise<void> => {
@@ -307,21 +550,129 @@ export const noteLeaseHandoffReleased = async (
   } });
 };
 
-export type TransactionLeaseDisposition<T> = {
+export type TransactionLeaseOutcome<T> = {
   value: T;
-  lease: LeaseSettlement;
+  leaseOutcome: LeaseOutcome;
 };
 
-/** Commit database state before carrying out its post-commit Lease release. */
-export const commitWithLeaseDisposition = async <T>(
+export type CommitWithLeaseOutcomeOptions = {
+  release?: ReleaseMergeLease | undefined;
+  isolationLevel?: Prisma.TransactionIsolationLevel;
+};
+
+type CommittedLeaseOutcome<T> = {
+  value: T;
+  settlement: LeaseSettlement;
+};
+
+export type LeaseOutcomePostCommitFailure = {
+  target: MergeLeaseTarget;
+  phase: "release" | "record";
+  error: unknown;
+};
+
+export class LeaseOutcomePostCommitError extends AggregateError {
+  readonly failures: LeaseOutcomePostCommitFailure[];
+
+  constructor(failures: LeaseOutcomePostCommitFailure[]) {
+    super(failures.map((failure) => failure.error), "One or more Merge Lease releases or records failed");
+    this.name = "LeaseOutcomePostCommitError";
+    this.failures = failures;
+  }
+}
+
+const releaseCommittedLeaseOutcomes = async (
   db: PrismaClient,
-  fn: (tx: Prisma.TransactionClient) => Promise<TransactionLeaseDisposition<T> | null>,
-  release: ReleaseMergeLease = releaseMergeLease,
-  options?: { isolationLevel: Prisma.TransactionIsolationLevel },
+  committed: Array<CommittedLeaseOutcome<unknown>>,
+  release: ReleaseMergeLease,
+  aggregateFailures: boolean,
+): Promise<void> => {
+  const targets = new Map<string, {
+    target: MergeLeaseTarget;
+    handoffs: Array<NonNullable<LeaseSettlement["releasedHandoff"]>>;
+    deferredReleases: Array<NonNullable<LeaseSettlement["deferredRelease"]>>;
+  }>();
+  for (const entry of committed) {
+    const target = entry.settlement.target;
+    if (!target) continue;
+    const key = JSON.stringify([target.projectId, target.chainId]);
+    const existing = targets.get(key) ?? { target, handoffs: [], deferredReleases: [] };
+    if (entry.settlement.releasedHandoff) existing.handoffs.push(entry.settlement.releasedHandoff);
+    if (entry.settlement.deferredRelease) existing.deferredReleases.push(entry.settlement.deferredRelease);
+    targets.set(key, existing);
+  }
+
+  const failures: LeaseOutcomePostCommitFailure[] = [];
+  for (const entry of targets.values()) {
+    try {
+      await release(entry.target, db);
+    } catch (error: unknown) {
+      failures.push({ target: entry.target, phase: "release", error });
+      continue;
+    }
+    if (entry.handoffs.length > 0 || entry.deferredReleases.length > 0) {
+      try {
+        await db.$transaction(async (tx) => {
+          for (const handoff of entry.handoffs) await noteLeaseHandoffReleased(tx, handoff);
+          for (const deferred of entry.deferredReleases) {
+            await noteLeaseReleaseTerminal(tx, {
+              activityId: deferred.activityId,
+              taskId: deferred.taskId,
+              target: deferred.target,
+              state: "released",
+              at: deferred.at,
+            });
+          }
+        });
+      } catch (error: unknown) {
+        failures.push({ target: entry.target, phase: "record", error });
+      }
+    }
+  }
+  if (failures.length === 1 && !aggregateFailures) throw failures[0]!.error;
+  if (failures.length > 0) throw new LeaseOutcomePostCommitError(failures);
+};
+
+/** Commit database state before carrying out its one post-commit Lease release. */
+export const commitWithLeaseOutcome = async <T>(
+  db: PrismaClient,
+  fn: (tx: Prisma.TransactionClient) => Promise<TransactionLeaseOutcome<T> | null>,
+  options: CommitWithLeaseOutcomeOptions = {},
 ): Promise<T | null> => {
-  const committed = await db.$transaction(fn, options);
+  const committed = await db.$transaction(async (tx) => {
+    const result = await fn(tx);
+    if (result === null) return null;
+    return {
+      value: result.value,
+      settlement: await settleLease(tx, result.leaseOutcome),
+    };
+  }, options.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined);
   if (committed === null) return null;
-  if (committed.lease.disposition === "release") await release(committed.lease.leaseToRelease, db);
+  await releaseCommittedLeaseOutcomes(db, [committed], options.release ?? releaseMergeLease, false);
+  return committed.value;
+};
+
+/** Commit a reconciliation batch, deduplicating its post-commit Lease targets. */
+export const commitWithLeaseOutcomes = async <T>(
+  db: PrismaClient,
+  fn: (tx: Prisma.TransactionClient) => Promise<{ value: T; leaseOutcomes: LeaseOutcome[] }>,
+  options: CommitWithLeaseOutcomeOptions = {},
+): Promise<T> => {
+  const committed = await db.$transaction(async (tx) => {
+    const result = await fn(tx);
+    const settlements: LeaseSettlement[] = [];
+    for (const outcome of result.leaseOutcomes) settlements.push(await settleLease(tx, outcome));
+    return {
+      value: result.value,
+      settlements,
+    };
+  }, options.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined);
+  await releaseCommittedLeaseOutcomes(
+    db,
+    committed.settlements.map((settlement) => ({ value: undefined, settlement })),
+    options.release ?? releaseMergeLease,
+    true,
+  );
   return committed.value;
 };
 
@@ -372,9 +723,9 @@ const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
   }
 };
 
-export type LeaseDisposition =
-  | { kind: "release" }
-  | { kind: "retain"; handoffRunId: string };
+export type HeldLeaseOutcome =
+  | { kind: "continue" }
+  | { kind: "stop"; taskId: string };
 
 export type MergeLeaseDependencies = {
   acquire: MergeLeaseAcquirer;
@@ -384,25 +735,26 @@ export type MergeLeaseDependencies = {
 
 export type WithMergeLease = <T>(
   target: MergeLeaseTarget | null,
-  fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  fn: () => Promise<{ leaseOutcome: HeldLeaseOutcome; value: T }>,
   db: PrismaClient,
   dependencies?: MergeLeaseDependencies,
 ) => Promise<
   | { outcome: "contended" }
-  | { outcome: "unreachable"; detail: string }
+  | { outcome: "unreachable"; detail: string; releaseDeferred?: true }
   | { outcome: "ran"; value: T }
 >;
 
 /**
  * Run one authorization attempt under the Chain's merge Lease. A successful
- * authorization explicitly hands the Lease to mechanical merge with `retain`;
- * every other completed or exceptional callback path gives it back here.
+ * authorization continues the Lease for mechanical merge after its handoff
+ * was persisted by commitWithLeaseOutcome; every stop or exceptional callback
+ * path gives it back here.
  * A Task without a Chain has no Lease to acquire or release, but still runs the
  * callback through the same interface.
  */
 export const withMergeLease = async <T>(
   target: MergeLeaseTarget | null,
-  fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  fn: () => Promise<{ leaseOutcome: HeldLeaseOutcome; value: T }>,
   db: PrismaClient,
   dependencies: MergeLeaseDependencies = {
     acquire: acquireMergeLease,
@@ -410,7 +762,7 @@ export const withMergeLease = async <T>(
   },
 ): Promise<
   | { outcome: "contended" }
-  | { outcome: "unreachable"; detail: string }
+  | { outcome: "unreachable"; detail: string; releaseDeferred?: true }
   | { outcome: "ran"; value: T }
 > => {
   if (target === null) {
@@ -424,31 +776,58 @@ export const withMergeLease = async <T>(
     return { outcome: "unreachable", detail: acquisition.detail };
   }
 
-  let disposition: LeaseDisposition = { kind: "release" };
+  let leaseOutcome: HeldLeaseOutcome | { kind: "stop"; taskId: null } = { kind: "stop", taskId: null };
   let callbackFailed = false;
   let callbackError: unknown;
-  let result: { disposition: LeaseDisposition; value: T } | undefined;
+  let result: { leaseOutcome: HeldLeaseOutcome; value: T } | undefined;
   try {
     result = await fn();
-    disposition = result.disposition;
+    leaseOutcome = result.leaseOutcome;
   } catch (error: unknown) {
     callbackFailed = true;
     callbackError = error;
   }
-  if (disposition.kind === "release") {
+  if (leaseOutcome.kind === "stop") {
+    const deferRelease = async (detail: string): Promise<{
+      outcome: "unreachable";
+      detail: string;
+      releaseDeferred?: true;
+    }> => {
+      if (!leaseOutcome.taskId) return { outcome: "unreachable", detail };
+      await noteLeaseReleaseDeferred(db, {
+        target,
+        taskId: leaseOutcome.taskId,
+        detail,
+        at: dependencies.now?.() ?? new Date(),
+      });
+      return { outcome: "unreachable", detail, releaseDeferred: true };
+    };
+    let release: MergeLeaseRelease | null;
     try {
-      const release = await releaseMergeLeaseWith(dependencies.release, target);
-      if (release?.outcome === "released") {
-        await recordMergeLeaseHold(db, target, release, dependencies.now?.() ?? new Date());
-      }
+      release = await releaseMergeLeaseWith(dependencies.release, target);
     } catch (releaseError: unknown) {
-      if (callbackFailed) {
-        throw new AggregateError(
-          [callbackError, releaseError],
-          "Merge lease callback and confirmed-release recording both failed",
-        );
+      const releaseDetail = `Merge lease release transport failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`;
+      return deferRelease(callbackFailed
+        ? `Merge lease callback failed before release: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}; ${releaseDetail}`
+        : releaseDetail);
+    }
+    if (release?.outcome === "unreachable") {
+      return deferRelease(callbackFailed
+        ? `Merge lease callback failed before release: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}; release transport unreachable: ${release.detail}`
+        : release.detail);
+    }
+    if (release?.outcome === "released") {
+      try {
+        await recordMergeLeaseHold(db, target, release, dependencies.now?.() ?? new Date());
+      } catch (releaseError: unknown) {
+        if (callbackFailed) {
+          throw new AggregateError(
+            [callbackError, releaseError],
+            "Merge lease callback and confirmed-release recording both failed",
+          );
+        }
+        throw releaseError;
       }
-      throw releaseError;
     }
   }
   if (callbackFailed) throw callbackError;

@@ -916,7 +916,15 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
       create: async () => ({}),
     },
     $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
-      $queryRaw: async () => [{ id: "task-2", archivedAt: null }],
+      $queryRaw: async (query: TemplateStringsArray | Prisma.Sql, ...parameters: unknown[]) => {
+        const sql = "sql" in query ? query.sql : query.join("");
+        const values = "values" in query ? query.values : parameters;
+        if (sql.includes('FROM "TaskActivity" AS deferred')) {
+          assert.deepEqual(values, [100]);
+          return [];
+        }
+        return sql.includes('FROM "TaskActivity" AS activity') ? [] : [{ id: "task-2", archivedAt: null }];
+      },
       run: {
         findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
         updateMany: async ({ where }: { where: { id: string } }) => { lost.push(where.id); return { count: 1 }; },
@@ -1731,6 +1739,8 @@ test("claim query filters archived agents before take so active work cannot star
           claimQuery = sql;
           return [{ id: "active" }];
         }
+        if (sql.includes('FROM "TaskActivity" AS activity')) return [];
+        if (sql.includes('FROM "TaskActivity" AS deferred')) return [];
         return [{ granted: true }];
       },
       // The claim loop brackets every candidate in a savepoint.
@@ -1797,7 +1807,10 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
           const sql = Array.isArray(query)
             ? query.join("?")
             : (query as { strings?: string[] }).strings?.join("?") ?? "";
-          return sql.includes('SELECT candidate."id"') ? [] : [{ granted: true }];
+          if (sql.includes('SELECT candidate."id"')) return [];
+          if (sql.includes('FROM "TaskActivity" AS activity')) return [];
+          if (sql.includes('FROM "TaskActivity" AS deferred')) return [];
+          return [{ granted: true }];
         },
         run: { findMany: async () => [] },
         taskActivity: { findMany: async () => [] },

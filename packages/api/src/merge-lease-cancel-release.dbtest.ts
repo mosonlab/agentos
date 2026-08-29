@@ -19,11 +19,19 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DIRECT_TEMPLATE_NAME, MERGE_TAIL_KIND, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import {
+  DIRECT_TEMPLATE_NAME,
+  INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_SENTINEL_MODEL,
+  MERGE_TAIL_KIND,
+  PrismaClient,
+  RunStatus,
+  TaskStatus,
+} from "@anneal/db";
 
 import type { ReleaseMergeLease } from "./merge-lease.js";
 import { recordMergeLeaseHold } from "./merge-lease-hold.js";
-import { reconcileDatabaseRuns } from "./reconcile.js";
+import { ReconciliationMaintenanceError, reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -103,13 +111,26 @@ const seedChain = async (options: { outputKind?: string; chainId?: string; chain
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Cancel release", slug: `cancel-release-${suffix}` } });
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
+  const mechanical = options.outputKind === "merge-result";
   const agent = await db.agent.create({ data: {
-    projectId: project.id, environmentId: environment.id, name: `agent-${suffix}`, title: "Agent",
-    model: "claude-opus-5:high", foundationalPrompt: "foundation", rolePrompt: "role",
+    projectId: project.id,
+    environmentId: environment.id,
+    name: mechanical ? INTEGRATOR_AGENT_NAME : `agent-${suffix}`,
+    title: mechanical ? "Merge Integrator" : "Agent",
+    model: mechanical ? INTEGRATOR_SENTINEL_MODEL : "claude-opus-5:high",
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/widgets.git",
     mountPath: "/repo", defaultBranch: "master",
+  } });
+  await db.agentRepoAccess.create({ data: {
+    projectId: project.id,
+    agentId: agent.id,
+    repoId: repo.id,
+    mountPath: "/repo",
+    permissions: "GIT_WRITE",
   } });
   const template = await db.taskTemplate.create({ data: {
     projectId: project.id, name: DIRECT_TEMPLATE_NAME, description: "cancel fixture", variables: [],
@@ -156,6 +177,8 @@ const seedRun = async (
     leaseExpiresAt?: Date | null;
     heartbeatAt?: Date | null;
     claimed?: boolean;
+    createdAt?: Date;
+    readyAt?: Date;
   } = {},
 ) => {
   const status = options.status ?? RunStatus.RUNNING;
@@ -167,6 +190,8 @@ const seedRun = async (
     runNumber, dedupeKey: `task:${taskId}:run:${runNumber}`, status,
     runner: "CLAUDE", model: chain.agent.model, promptHash: "hash", branch: `claude/${chain.suffix}-${runNumber}`,
     targetBranch: "master", maxRunsPerTask: options.maxRunsPerTask ?? 5,
+    ...(options.createdAt ? { createdAt: options.createdAt } : {}),
+    ...(options.readyAt ? { readyAt: options.readyAt } : {}),
     ...(claimed ? {
       runnerId: RUNNER_ID,
       fencingToken: `fence-${chain.suffix}-${runNumber}`,
@@ -277,9 +302,9 @@ test("reconciliation terminalizing a cancellation after runner loss releases the
   await assertConfirmedHold(chain.task.id);
 });
 
-test("a lost merge-tail run that still has an attempt left keeps the lease for its retry", async () => {
+test("a lost mechanical run that still has an attempt left keeps the lease for its retry", async () => {
   const now = new Date();
-  const chain = await seedChain();
+  const chain = await seedChain({ outputKind: "merge-result", chainIndex: 7 });
   const run = await seedRun(chain, {
     runNumber: 1, maxRunsPerTask: 3, leaseExpiresAt: new Date(now.getTime() - 60_000), heartbeatAt: null,
   });
@@ -288,9 +313,14 @@ test("a lost merge-tail run that still has an attempt left keeps the lease for i
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.LOST);
   const retry = await db.run.findFirst({ where: { taskId: chain.task.id, runNumber: 2 } });
   assert.ok(retry, "the lost run bought a retry");
-  // The retry remains claimable; readiness will reacquire the same
-  // project-scoped lease identity before handing it to the final consumer.
+  // This retry inherits the already-held Lease. Only readiness authorization
+  // creates a recoverable handoff marker; retry scheduling does not shorten
+  // the original mechanical holding window.
   assert.deepEqual(releasedChainLeases, []);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.task.id,
+    metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
+  } }), 0);
 });
 
 test("a lost merge-tail run with no attempts left releases the lease", async () => {
@@ -352,7 +382,8 @@ test("a lost ordinary step with no attempts left never touches the lease", async
 test("a stranded queued handoff releases once and records settlement after release", async () => {
   const now = new Date();
   const chain = await seedChain();
-  const run = await seedRun(chain, { status: RunStatus.QUEUED });
+  const stale = new Date(now.getTime() - 180_000);
+  const run = await seedRun(chain, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
   await db.taskActivity.create({ data: {
     taskId: chain.task.id,
     actorType: "control-plane",
@@ -381,12 +412,383 @@ test("a stranded queued handoff releases once and records settlement after relea
   assert.deepEqual(releasedChainLeases, [chain.chainId]);
 });
 
+test("handoff recovery drains its bounded page oldest-first", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const runIds = Array.from({ length: 101 }, (_, index) => `lease-page-${chain.suffix}-${index}`);
+  await db.run.createMany({ data: runIds.map((id, index) => ({
+    id,
+    projectId: chain.project.id,
+    taskId: chain.task.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: index + 1,
+    dedupeKey: `task:${chain.task.id}:lease-page:${index}`,
+    status: RunStatus.QUEUED,
+    runner: "CLAUDE",
+    model: chain.agent.model,
+    promptHash: "hash",
+    branch: `claude/${chain.suffix}-lease-page-${index}`,
+    targetBranch: "master",
+    createdAt: new Date(now.getTime() - 180_000),
+    readyAt: new Date(now.getTime() - 180_000),
+  })) });
+  const handedOffAt = new Date(now.getTime() - 120_000).toISOString();
+  await db.taskActivity.createMany({ data: runIds.map((toRunId, index) => ({
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Unresolved Chain Lease handoff ${index}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId,
+      handedOffAt,
+    },
+  })) });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 100);
+  assert.equal(releasedChainLeases.length, 1, "one bounded batch deduplicates the shared release target");
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.task.id,
+    metadata: { path: ["state"], equals: "released" },
+  } }), 100);
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.equal(releasedChainLeases.length, 2);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.task.id,
+    metadata: { path: ["state"], equals: "released" },
+  } }), 101);
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 0);
+});
+
+test("duplicate pending handoffs for one Run settle once", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const stale = new Date(now.getTime() - 180_000);
+  const run = await seedRun(chain, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
+  const handedOffAt = new Date(now.getTime() - 120_000).toISOString();
+  await db.taskActivity.createMany({ data: Array.from({ length: 2 }, (_, index) => ({
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Duplicate unresolved Chain Lease handoff ${index}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: run.id,
+      handedOffAt,
+    },
+  })) });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.task.id,
+    AND: [
+      { metadata: { path: ["state"], equals: "released" } },
+      { metadata: { path: ["toRunId"], equals: run.id } },
+    ],
+  } }), 1);
+});
+
+test("an old queued Run with a fresh handoff waits for the handoff grace clock", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const old = new Date(now.getTime() - (9 * 24 * 60 * 60 * 1_000));
+  const freshHandoff = new Date(now.getTime() - 30_000);
+  const run = await seedRun(chain, { status: RunStatus.QUEUED, createdAt: old, readyAt: old });
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Fresh Chain Lease handoff to old Run ${run.id}`,
+    createdAt: freshHandoff,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: run.id,
+      handedOffAt: freshHandoff.toISOString(),
+    },
+  } });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 0);
+  assert.deepEqual(releasedChainLeases, []);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(freshHandoff.getTime() + 61_000), collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+});
+
+test("unrelated stale queued Runs cannot hide a matching handoff from the bounded driver", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const unrelatedAt = new Date(now.getTime() - 300_000);
+  const matchingAt = new Date(now.getTime() - 180_000);
+  const matching = await seedRun(chain, {
+    status: RunStatus.QUEUED,
+    createdAt: matchingAt,
+    readyAt: matchingAt,
+  });
+  const unrelatedIds = Array.from({ length: 101 }, (_, index) => `unrelated-stale-${chain.suffix}-${index}`);
+  await db.run.createMany({ data: unrelatedIds.map((id, index) => ({
+    id,
+    projectId: chain.project.id,
+    taskId: chain.task.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: index + 2,
+    dedupeKey: `task:${chain.task.id}:unrelated-stale:${index}`,
+    status: RunStatus.QUEUED,
+    runner: "CLAUDE" as const,
+    model: chain.agent.model,
+    promptHash: "hash",
+    branch: `claude/${chain.suffix}-unrelated-${index}`,
+    targetBranch: "master",
+    createdAt: unrelatedAt,
+    readyAt: unrelatedAt,
+  })) });
+  await db.taskActivity.createMany({ data: unrelatedIds.map((toRunId, index) => ({
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Malformed unrelated handoff ${index}`,
+    createdAt: new Date(now.getTime() - 240_000),
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      toRunId,
+      handedOffAt: new Date(now.getTime() - 240_000).toISOString(),
+    },
+  })) });
+  const handedOffAt = new Date(now.getTime() - 120_000);
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Only matching Chain Lease handoff ${matching.id}`,
+    createdAt: handedOffAt,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: matching.id,
+      handedOffAt: handedOffAt.toISOString(),
+    },
+  } });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  const released = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: chain.task.id,
+    AND: [
+      { metadata: { path: ["state"], equals: "released" } },
+      { metadata: { path: ["toRunId"], equals: matching.id } },
+    ],
+  } });
+  assert.equal((released.metadata as Record<string, unknown>).toRunId, matching.id);
+});
+
+test("a released marker older than a new pending handoff does not suppress recovery", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const runFloor = new Date(now.getTime() - 240_000);
+  const run = await seedRun(chain, { status: RunStatus.QUEUED, createdAt: runFloor, readyAt: runFloor });
+  await db.taskActivity.createMany({ data: [
+    {
+      taskId: chain.task.id,
+      actorType: "control-plane",
+      body: "Earlier released Chain Lease handoff",
+      createdAt: new Date(now.getTime() - 180_000),
+      metadata: {
+        kind: MERGE_TAIL_KIND.leaseHandoff,
+        schemaVersion: 1,
+        state: "released",
+        chainId: chain.chainId,
+        toRunId: run.id,
+        releasedAt: new Date(now.getTime() - 180_000).toISOString(),
+      },
+    },
+    {
+      taskId: chain.task.id,
+      actorType: "control-plane",
+      body: "New pending Chain Lease handoff",
+      createdAt: new Date(now.getTime() - 120_000),
+      metadata: {
+        kind: MERGE_TAIL_KIND.leaseHandoff,
+        schemaVersion: 1,
+        state: "pending",
+        chainId: chain.chainId,
+        toRunId: run.id,
+        handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+      },
+    },
+  ] });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.task.id,
+    metadata: { path: ["state"], equals: "released" },
+  } }), 2);
+});
+
+test("an old active handoff remains discoverable while released and claimed consumers stay excluded", async () => {
+  const now = new Date();
+  const old = await seedChain();
+  const released = await seedChain();
+  const claimed = await seedChain();
+  const nineDaysAgo = new Date(now.getTime() - (9 * 24 * 60 * 60 * 1_000));
+  const eightDaysAgo = new Date(now.getTime() - (8 * 24 * 60 * 60 * 1_000));
+  const stale = new Date(now.getTime() - 180_000);
+  const oldRun = await seedRun(old, {
+    status: RunStatus.QUEUED, createdAt: nineDaysAgo, readyAt: nineDaysAgo,
+  });
+  const releasedRun = await seedRun(released, {
+    status: RunStatus.QUEUED, createdAt: stale, readyAt: stale,
+  });
+  const claimedRun = await seedRun(claimed, {
+    status: RunStatus.CLAIMED, createdAt: stale, readyAt: stale,
+  });
+  const pending = (chain: typeof old, runId: string, createdAt: Date) => ({
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Chain Lease handed to queued Run ${runId}`,
+    createdAt,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: runId,
+      handedOffAt: createdAt.toISOString(),
+    },
+  });
+  await db.taskActivity.create({ data: pending(old, oldRun.id, eightDaysAgo) });
+  await db.taskActivity.create({ data: pending(released, releasedRun.id, new Date(now.getTime() - 120_000)) });
+  await db.taskActivity.create({ data: {
+    taskId: released.task.id,
+    actorType: "control-plane",
+    body: "Queued handoff already released",
+    createdAt: new Date(now.getTime() - 90_000),
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "released",
+      chainId: released.chainId,
+      toRunId: releasedRun.id,
+      releasedAt: new Date(now.getTime() - 90_000).toISOString(),
+    },
+  } });
+  await db.taskActivity.create({ data: pending(claimed, claimedRun.id, new Date(now.getTime() - 120_000)) });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: old.chainId, projectId: old.project.id }]);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: old.task.id,
+    metadata: { path: ["state"], equals: "released" },
+  } }), 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: claimed.task.id,
+    metadata: { path: ["state"], equals: "released" },
+  } }), 0);
+});
+
+test("a malformed handoff is durably invalidated without blocking a valid batch sibling", async () => {
+  const now = new Date();
+  const valid = await seedChain();
+  const malformed = await seedChain({ outputKind: "implementation" });
+  const stale = new Date(now.getTime() - 180_000);
+  const validRun = await seedRun(valid, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
+  const malformedRun = await seedRun(malformed, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
+  for (const [chain, run] of [[valid, validRun], [malformed, malformedRun]] as const) {
+    await db.taskActivity.create({ data: {
+      taskId: chain.task.id,
+      actorType: "control-plane",
+      body: `Chain Lease handed to queued Run ${run.id}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.leaseHandoff,
+        schemaVersion: 1,
+        state: "pending",
+        chainId: chain.chainId,
+        toRunId: run.id,
+        handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+      },
+    } });
+  }
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 2);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: valid.chainId, projectId: valid.project.id }]);
+  const invalid = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: malformed.task.id,
+    metadata: { path: ["state"], equals: "invalid" },
+  } });
+  assert.match(invalid.body, /does not resolve to a Merge Lease holder/u);
+  assert.equal((invalid.metadata as Record<string, unknown>).toRunId, malformedRun.id);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), collectRelease), 0);
+});
+
+test("runner claim reports post-commit reconciliation maintenance failure and still claims", async (t) => {
+  const now = new Date();
+  const chain = await seedChain();
+  const stale = new Date(now.getTime() - 180_000);
+  const run = await seedRun(chain, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Chain Lease handed to queued Run ${run.id}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: run.id,
+      handedOffAt: new Date(now.getTime() - 120_000).toISOString(),
+    },
+  } });
+  const failure = new Error("release helper unavailable after reconciliation commit");
+  const reports: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { reports.push(args); });
+  const priorRunnerToken = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = RUNNER;
+  try {
+    const response = await createApp(db, {
+      releaseMergeLease: async () => { throw failure; },
+    }).request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: "claim-after-maintenance-failure", leaseSeconds: 60 }),
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    assert.equal((JSON.parse(responseText) as { run: { id: string } }).run.id, run.id);
+  } finally {
+    if (priorRunnerToken === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = priorRunnerToken;
+  }
+  const report = reports.find(([message]) => message === "Runner claim reconciliation maintenance failed after commit");
+  assert.ok(report, "the typed maintenance failure is reported at the claim boundary");
+  const context = report[1] as {
+    reconciledAt: string;
+    failures: Array<{ target: { chainId: string; projectId: string }; phase: string; error: string }>;
+  };
+  assert.match(context.reconciledAt, /^\d{4}-/u);
+  assert.deepEqual(context.failures, [{
+    target: { chainId: chain.chainId, projectId: chain.project.id },
+    phase: "release",
+    error: failure.message,
+  }]);
+});
+
 test("one hold-recording failure does not block other stranded lease releases or settlements", async () => {
   const now = new Date();
   const first = await seedChain();
   const second = await seedChain();
-  const firstRun = await seedRun(first, { status: RunStatus.QUEUED });
-  const secondRun = await seedRun(second, { status: RunStatus.QUEUED });
+  const stale = new Date(now.getTime() - 180_000);
+  const firstRun = await seedRun(first, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
+  const secondRun = await seedRun(second, { status: RunStatus.QUEUED, createdAt: stale, readyAt: stale });
   for (const [chain, run] of [[first, firstRun], [second, secondRun]] as const) {
     await db.taskActivity.create({ data: {
       taskId: chain.task.id,
@@ -413,18 +815,21 @@ test("one hold-recording failure does not block other stranded lease releases or
 
   await assert.rejects(
     reconcileDatabaseRuns(db, now, releaseAll),
-    (error: unknown) => error instanceof AggregateError && error.errors.includes(recordingFailure),
+    (error: unknown) => error instanceof ReconciliationMaintenanceError
+      && error.failures.some((failure) => failure.phase === "release" && failure.error === recordingFailure),
   );
   assert.deepEqual(new Set(attempted), new Set([first.project.id, second.project.id]));
-  for (const chain of [first, second]) {
-    const settlement = await db.taskActivity.findFirstOrThrow({
-      where: {
-        taskId: chain.task.id,
-        metadata: { path: ["state"], equals: "released" },
-      },
-    });
-    assert.equal((settlement.metadata as Record<string, unknown>).kind, MERGE_TAIL_KIND.leaseHandoff);
-  }
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: first.task.id,
+    metadata: { path: ["state"], equals: "released" },
+  } }), 0, "a failed release remains pending for a later reconciliation");
+  const settlement = await db.taskActivity.findFirstOrThrow({
+    where: {
+      taskId: second.task.id,
+      metadata: { path: ["state"], equals: "released" },
+    },
+  });
+  assert.equal((settlement.metadata as Record<string, unknown>).kind, MERGE_TAIL_KIND.leaseHandoff);
   assert.equal(await db.taskActivity.count({
     where: { taskId: first.task.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
   }), 0);

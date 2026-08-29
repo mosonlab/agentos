@@ -144,6 +144,27 @@ const stoppedChain = async (
   return { chain, run };
 };
 
+test("a failed mechanical completion keeps the existing lease across its retry", async () => {
+  const chain = await seedIntegratorChain(db, { label: "completion-retry-hold", shape: "twelve-step" });
+  const run = await liveIntegratorRun(chain, 1, 3);
+  const completed = await completeRun(run, {
+    exitCode: 1,
+    terminalSuccess: false,
+    failureClass: "TRANSIENT_PROVIDER",
+    retryable: true,
+    externalFailure: true,
+    failureReason: "provider disconnected",
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.retryCreated, true);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 2);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.integratorTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
+  } }), 0);
+  assert.deepEqual(releasedChainLeases, []);
+});
+
 test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, question open, no chain advance", async () => {
   const { chain, run } = await stoppedChain("n16");
   // Protocol-level success: the executor executed its contract exactly. The

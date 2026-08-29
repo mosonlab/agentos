@@ -185,7 +185,7 @@ test("claim loss classifies a concrete active successor as retained ownership", 
   assert.equal(await handle.ownershipAfterLoss(fake.db), "released");
 });
 
-test("retained settlement records the Run handoff before clearing the claim", async () => {
+test("retained settlement returns ownership before clearing the claim", async () => {
   const fake = fakeDatabase({ chainId: "chain-1" });
   const handle = await claimReadinessStep(fake.db, fake.task.id, NOW);
   assert.ok(handle);
@@ -209,5 +209,5 @@ test("retained settlement records the Run handoff before clearing the claim", as
     value: "authorized",
     ownership: { retainFor: "run-2" },
   });
-  assert.deepEqual(fake.events, ["transition-applied", "handoff-recorded", "claim-cleared"]);
+  assert.deepEqual(fake.events, ["transition-applied", "claim-cleared"]);
 });

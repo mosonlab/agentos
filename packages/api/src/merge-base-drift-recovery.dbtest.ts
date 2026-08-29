@@ -31,7 +31,7 @@ import {
 } from "./merge-tail-state.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import {
-  settleLease,
+  commitWithLeaseOutcome,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
@@ -190,7 +190,7 @@ const recordRecoveryPass = async (
     runId: run.id, kind: "regression-verification",
     body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: headSha,
   } });
-  const completion = await db.$transaction(async (tx) => {
+  const completion = await commitWithLeaseOutcome(db, async (tx) => {
     const outcome = await handleRegressionCompletion(tx, {
       task: seeded.gateTask,
       run: {
@@ -205,12 +205,14 @@ const recordRecoveryPass = async (
     if (outcome === "advance") {
       await advanceTemplateTask(tx, seeded.gateTask.id, run.id, null);
     }
-    const lease = await settleLease(tx, {
-      taskId: seeded.gateTask.id,
-      outcome: outcome === "advance" ? "continue" : "stop",
-    });
-    return { outcome, lease };
-  });
+    return {
+      value: { outcome },
+      leaseOutcome: outcome === "advance"
+        ? { kind: "continue" }
+        : { kind: "stop", taskId: seeded.gateTask.id },
+    };
+  }, { release: releaseChainLease });
+  if (!completion) throw new Error("Recovery pass completion returned no result");
   return { run, ...completion };
 };
 
@@ -275,7 +277,6 @@ test("a recovery pass delegates activation to the held-Chain seam and retains th
   const completion = await recordRecoveryPass(seeded, BASE_2);
 
   assert.equal(completion.outcome, "advance");
-  assert.deepEqual(completion.lease, { disposition: "retain", leaseToRelease: null });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } })).status, TaskStatus.DONE);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } })).status, TaskStatus.TODO);
   assert.equal(await db.taskActivity.count({ where: {
