@@ -101,6 +101,31 @@ const ZERO = new Prisma.Decimal(0);
 
 const amount = (value: Prisma.Decimal): string => value.toDecimalPlaces(AMOUNT_DECIMALS).toString();
 
+/** Round a partition at wire precision without letting independently rounded
+ *  rows disagree with their rounded total. Largest remainders receive the
+ *  remaining micro-units, with source order as the deterministic tie-breaker. */
+const partitionAmounts = (values: readonly Prisma.Decimal[], total: Prisma.Decimal): string[] => {
+  const scale = new Prisma.Decimal(10).pow(AMOUNT_DECIMALS);
+  const allocations = values.map((value, index) => {
+    const scaled = value.times(scale);
+    const units = scaled.floor();
+    return { index, units, remainder: scaled.minus(units) };
+  });
+  const targetUnits = total.times(scale).toDecimalPlaces(0);
+  let allocatedUnits = allocations.reduce((sum, entry) => sum.plus(entry.units), ZERO);
+  const byRemainder = [...allocations]
+    .sort((left, right) => right.remainder.comparedTo(left.remainder) || left.index - right.index);
+  for (const entry of byRemainder) {
+    if (allocatedUnits.greaterThanOrEqualTo(targetUnits)) break;
+    entry.units = entry.units.plus(1);
+    allocatedUnits = allocatedUnits.plus(1);
+  }
+  if (!allocatedUnits.equals(targetUnits)) {
+    throw new Error("Could not reconcile rounded cost partition");
+  }
+  return allocations.map((entry) => entry.units.dividedBy(scale).toString());
+};
+
 type CalendarParts = { year: number; month: number; day: number; hour: number; minute: number; second: number };
 
 const calendarFormatters = new Map<string, Intl.DateTimeFormat>();
@@ -166,30 +191,43 @@ const shiftCalendarDate = (
   return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() + 1, day: shifted.getUTCDate() };
 };
 
-/** Resolve a local calendar midnight to its UTC instant. Iterating the offset
- *  handles offset changes between the UTC-shaped initial guess and the target
- *  local day, including daylight-saving transitions. */
+/** Resolve the start of a local calendar date to its UTC instant. Usually this
+ *  is midnight; if a DST transition skips midnight, it is the first valid
+ *  instant of the requested date instead. */
 const localMidnight = (
   parts: Pick<CalendarParts, "year" | "month" | "day">,
   timeZone: string,
 ): Date => {
   const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day);
-  let instant = localAsUtc;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  const target = dateKey(parts);
+  const offsets = new Set<number>();
+  // A nonexistent midnight makes offset iteration oscillate across the gap.
+  // Probe both sides of any nearby transition and test each actual offset.
+  for (let hours = -48; hours <= 48; hours += 6) {
+    const instant = localAsUtc + (hours * 60 * 60 * 1_000);
     const observed = calendarParts(new Date(instant), timeZone);
     const observedAsUtc = Date.UTC(
       observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second,
     );
-    const next = localAsUtc - (observedAsUtc - instant);
-    if (next === instant) break;
-    instant = next;
+    offsets.add(observedAsUtc - instant);
   }
-  const resolved = new Date(instant);
-  const observed = calendarParts(resolved, timeZone);
-  if (dateKey(observed) !== dateKey(parts) || observed.hour !== 0 || observed.minute !== 0 || observed.second !== 0) {
-    throw new Error(`Could not resolve local midnight for ${dateKey(parts)} in ${timeZone}`);
+  const candidates = [...offsets]
+    .map((offset) => new Date(localAsUtc - offset))
+    .sort((left, right) => left.getTime() - right.getTime());
+  for (const candidate of candidates) {
+    const observed = calendarParts(candidate, timeZone);
+    if (dateKey(observed) === target
+      && observed.hour === 0 && observed.minute === 0 && observed.second === 0) {
+      return candidate;
+    }
   }
-  return resolved;
+  for (const candidate of candidates) {
+    if (localDay(candidate, timeZone) === target
+      && localDay(new Date(candidate.getTime() - 1), timeZone) < target) {
+      return candidate;
+    }
+  }
+  throw new Error(`Could not resolve local date ${target} in ${timeZone}`);
 };
 
 /** Local midnight `days - 1` calendar days back in the requested timezone. */
@@ -310,6 +348,8 @@ export const aggregateCosts = (
   }
   const runCount = groupedRuns.reduce((sum, group) => sum + group._count._all, 0);
   const pricedRuns = runCount - unavailable;
+  const modelTotals = [...perModel.values()];
+  const modelAmounts = partitionAmounts(modelTotals.map((entry) => entry.usd), total);
   return {
     days,
     since: since.toISOString(),
@@ -336,10 +376,10 @@ export const aggregateCosts = (
         wastedUsd: amount(agentTotal.wastedUsd),
       }))
       .sort((left, right) => Number(right.usd) - Number(left.usd) || left.agent.localeCompare(right.agent)),
-    byModel: [...perModel.values()]
-      .map((modelTotal) => ({
+    byModel: modelTotals
+      .map((modelTotal, index) => ({
         model: modelTotal.model,
-        usd: amount(modelTotal.usd),
+        usd: modelAmounts[index]!,
         runs: modelTotal.runs,
         costUnavailableRuns: modelTotal.costUnavailableRuns,
       }))

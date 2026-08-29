@@ -32,6 +32,12 @@ test("timezone windows use local midnight and retain one local date across DST",
   assert.equal(costsWindowEnd(now, "America/Los_Angeles").toISOString(), "2026-03-09T07:00:00.000Z");
 });
 
+test("timezone windows start at the first valid instant when local midnight is skipped", () => {
+  const now = new Date("2020-09-06T12:00:00.000Z");
+  assert.equal(costsWindowStart(now, 1, "America/Santiago").toISOString(), "2020-09-06T04:00:00.000Z");
+  assert.equal(costsWindowEnd(now, "America/Santiago").toISOString(), "2020-09-07T03:00:00.000Z");
+});
+
 test("aggregateCosts preserves model identity, isolates mixed runs, and reconciles spend", () => {
   const runs = [
     row({
@@ -91,4 +97,41 @@ test("aggregateCosts preserves model identity, isolates mixed runs, and reconcil
   assert.equal(dev?.wastedUsd, "5");
   assert.equal(reviewer?.wastedUsd, "0");
   assert.equal(report.wastedUsd, "5");
+});
+
+test("aggregateCosts reconciles by-model rounding with the serialized total", () => {
+  const runs = [
+    row({
+      id: "model-a", model: "gpt-5.6-sol:high", status: RunStatus.SUCCEEDED,
+      session: {
+        nativeChildUsed: false, costUsd: null,
+        inputTokens: 13, cachedInputTokens: 13, outputTokens: 0,
+      },
+    }),
+    row({
+      id: "model-b", model: "gpt-5.6-sol:max", status: RunStatus.SUCCEEDED,
+      session: {
+        nativeChildUsed: false, costUsd: null,
+        inputTokens: 13, cachedInputTokens: 13, outputTokens: 0,
+      },
+    }),
+  ];
+
+  const report = aggregateCosts(
+    runs,
+    [{ agentId: "dev-id", _count: { _all: 2 } }],
+    new Date("2026-08-28T00:00:00.000Z"),
+    1,
+    "UTC",
+  );
+
+  assert.equal(report.totalUsd, "0.000013");
+  assert.deepEqual(report.byModel.map(({ model, usd }) => ({ model, usd })), [
+    { model: "gpt-5.6-sol:high", usd: "0.000007" },
+    { model: "gpt-5.6-sol:max", usd: "0.000006" },
+  ]);
+  assert.equal(
+    report.byModel.reduce((sum, entry) => sum.plus(entry.usd), new Prisma.Decimal(0)).toString(),
+    report.totalUsd,
+  );
 });
