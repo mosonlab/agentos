@@ -13,6 +13,7 @@ import {
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
+  LeaseReleaseDeferralRecordError,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
@@ -21,6 +22,7 @@ import {
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -62,6 +64,17 @@ const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
   });
 };
 const runWithMergeLease = leaseRunner(acquireChainLease);
+const unreachableReleaseRunner = (attempts: { count: number }): WithMergeLease => (
+  target,
+  fn,
+  database,
+) => withMergeLease(target, fn, database, {
+  acquire: acquireChainLease,
+  release: async () => {
+    attempts.count += 1;
+    return { outcome: "unreachable", detail: "release helper timed out" };
+  },
+});
 const leaseHoldMarkers = (projectId: string) => db.taskActivity.findMany({
   where: {
     task: { projectId },
@@ -214,6 +227,40 @@ const seedReadiness = async () => {
     commitSha: HEAD,
   } });
   return { project, repo, regression, readiness, integrator };
+};
+
+const assertDeferredReleaseAndRetry = async (
+  seeded: Awaited<ReturnType<typeof seedReadiness>>,
+  now: Date,
+): Promise<void> => {
+  const pending = await db.taskActivity.findMany({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseRelease },
+  }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+  assert.equal(pending.length, 1, "the failed release writes exactly one durable record");
+  const metadata = pending[0]!.metadata as Record<string, unknown>;
+  assert.equal(metadata.state, "release-deferred");
+  assert.equal(metadata.projectId, seeded.project.id);
+  assert.equal(metadata.chainId, seeded.regression.chainId);
+  assert.equal(metadata.taskId, seeded.regression.id);
+  assert.equal(metadata.failureDetail, "release helper timed out");
+
+  const retried: MergeLeaseTarget[] = [];
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), async (target) => {
+    if (target) retried.push(target);
+  }), 1);
+  assert.deepEqual(retried, [{ projectId: seeded.project.id, chainId: seeded.regression.chainId }]);
+  const terminal = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    AND: [
+      { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseRelease } },
+      { metadata: { path: ["state"], equals: "released" } },
+    ],
+  } });
+  assert.equal((terminal.metadata as Record<string, unknown>).deferredActivityId, pending[0]!.id);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 2_000), async () => {
+    throw new Error("a terminal deferred release must not retry");
+  }), 0);
 };
 
 test("clean exact-head readiness authorizes and queues mechanical merge", async () => {
@@ -598,6 +645,123 @@ test("an unreachable merge lease acquire defers mechanically without spending re
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("authorize without a handoff durably defers an unreachable finished-claim release for reconciliation", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.integrator.id }, data: { status: TaskStatus.DONE } });
+  const now = new Date();
+  const attempts = { count: 0 };
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), now, 5, releaseChainLease, unreachableReleaseRunner(attempts)),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal(attempts.count, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  await assertDeferredReleaseAndRetry(seeded, now);
+  assert.equal(attempts.count, 1, "readiness does not immediately retry the unreachable release");
+});
+
+test("a semantic stop durably defers an unreachable finished-claim release for reconciliation", async () => {
+  const seeded = await seedReadiness();
+  const now = new Date();
+  const attempts = { count: 0 };
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : null });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, movingReader, now, 5, releaseChainLease, unreachableReleaseRunner(attempts)),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+  );
+  assert.equal(attempts.count, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.REVIEW);
+  await assertDeferredReleaseAndRetry(seeded, now);
+  assert.equal(attempts.count, 1);
+});
+
+test("a base requeue durably defers an unreachable finished-claim release for reconciliation", async () => {
+  const seeded = await seedReadiness();
+  const now = new Date();
+  const attempts = { count: 0 };
+  const movedBase = "d".repeat(40);
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : movedBase });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, movingReader, now, 5, releaseChainLease, unreachableReleaseRunner(attempts)),
+    { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+  );
+  assert.equal(attempts.count, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
+  await assertDeferredReleaseAndRetry(seeded, now);
+  assert.equal(attempts.count, 1);
+});
+
+test("a deferred-release record failure surfaces without a readiness REVIEW or second release", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.integrator.id }, data: { status: TaskStatus.DONE } });
+  const target = { projectId: seeded.project.id, chainId: seeded.regression.chainId! };
+  const recordFailure = new Error("release-deferred activity write failed");
+  let callbackRan = false;
+  const failedWriter: WithMergeLease = async (_target, fn) => {
+    await fn();
+    callbackRan = true;
+    throw new LeaseReleaseDeferralRecordError(target, seeded.regression.id, recordFailure);
+  };
+
+  await assert.rejects(
+    readinessTick(db, reader(), new Date(), 5, releaseChainLease, failedWriter),
+    (error: unknown) => error instanceof LeaseReleaseDeferralRecordError && error.cause === recordFailure,
+  );
+  assert.equal(callbackRan, true);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  assert.deepEqual(releasedLeaseTargets, []);
+});
+
+test("reconciliation invalidates a deferred release whose validated holder later changes", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.integrator.id }, data: { status: TaskStatus.DONE } });
+  const now = new Date();
+  const attempts = { count: 0 };
+  await readinessTick(db, reader(), now, 5, releaseChainLease, unreachableReleaseRunner(attempts));
+  const deferred = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "release-deferred" },
+  } });
+  await db.task.update({
+    where: { id: seeded.regression.id },
+    data: { chainId: `${seeded.regression.chainId}-changed` },
+  });
+
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), async () => {
+    throw new Error("an invalid deferred target must not be released");
+  }), 1);
+  const invalid = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "invalid" },
+  } });
+  const metadata = invalid.metadata as Record<string, unknown>;
+  assert.equal(metadata.deferredActivityId, deferred.id);
+  assert.match(String(metadata.reason), /no longer matches/u);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 2_000), async () => {
+    throw new Error("an invalid deferred target must remain terminal");
+  }), 0);
 });
 
 test("an unreachable post-acquire release durably defers without review or a second release", async () => {

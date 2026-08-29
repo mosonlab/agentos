@@ -495,6 +495,102 @@ test("duplicate pending handoffs for one Run settle once", async () => {
   } }), 1);
 });
 
+test("an old queued Run with a fresh handoff waits for the handoff grace clock", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const old = new Date(now.getTime() - (9 * 24 * 60 * 60 * 1_000));
+  const freshHandoff = new Date(now.getTime() - 30_000);
+  const run = await seedRun(chain, { status: RunStatus.QUEUED, createdAt: old, readyAt: old });
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Fresh Chain Lease handoff to old Run ${run.id}`,
+    createdAt: freshHandoff,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: run.id,
+      handedOffAt: freshHandoff.toISOString(),
+    },
+  } });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 0);
+  assert.deepEqual(releasedChainLeases, []);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(freshHandoff.getTime() + 61_000), collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+});
+
+test("unrelated stale queued Runs cannot hide a matching handoff from the bounded driver", async () => {
+  const now = new Date();
+  const chain = await seedChain();
+  const unrelatedAt = new Date(now.getTime() - 300_000);
+  const matchingAt = new Date(now.getTime() - 180_000);
+  const matching = await seedRun(chain, {
+    status: RunStatus.QUEUED,
+    createdAt: matchingAt,
+    readyAt: matchingAt,
+  });
+  const unrelatedIds = Array.from({ length: 101 }, (_, index) => `unrelated-stale-${chain.suffix}-${index}`);
+  await db.run.createMany({ data: unrelatedIds.map((id, index) => ({
+    id,
+    projectId: chain.project.id,
+    taskId: chain.task.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: index + 2,
+    dedupeKey: `task:${chain.task.id}:unrelated-stale:${index}`,
+    status: RunStatus.QUEUED,
+    runner: "CLAUDE" as const,
+    model: chain.agent.model,
+    promptHash: "hash",
+    branch: `claude/${chain.suffix}-unrelated-${index}`,
+    targetBranch: "master",
+    createdAt: unrelatedAt,
+    readyAt: unrelatedAt,
+  })) });
+  await db.taskActivity.createMany({ data: unrelatedIds.map((toRunId, index) => ({
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Malformed unrelated handoff ${index}`,
+    createdAt: new Date(now.getTime() - 240_000),
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      toRunId,
+      handedOffAt: new Date(now.getTime() - 240_000).toISOString(),
+    },
+  })) });
+  const handedOffAt = new Date(now.getTime() - 120_000);
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "control-plane",
+    body: `Only matching Chain Lease handoff ${matching.id}`,
+    createdAt: handedOffAt,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "pending",
+      chainId: chain.chainId,
+      toRunId: matching.id,
+      handedOffAt: handedOffAt.toISOString(),
+    },
+  } });
+
+  assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  const released = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: chain.task.id,
+    AND: [
+      { metadata: { path: ["state"], equals: "released" } },
+      { metadata: { path: ["toRunId"], equals: matching.id } },
+    ],
+  } });
+  assert.equal((released.metadata as Record<string, unknown>).toRunId, matching.id);
+});
+
 test("a released marker older than a new pending handoff does not suppress recovery", async () => {
   const now = new Date();
   const chain = await seedChain();

@@ -10,6 +10,7 @@ import {
 
 import {
   commitWithLeaseOutcomes,
+  deferredLeaseReleases,
   LeaseOutcomePostCommitError,
   leaseHandoffsWithoutConsumer,
   releaseMergeLease,
@@ -174,7 +175,9 @@ export const reconcileDatabaseRuns = async (
   ));
   const reconciliation = await commitWithLeaseOutcomes(db, async (tx) => {
     const strandedHandoffs = await leaseHandoffsWithoutConsumer(tx, now);
-    if (orphans.length === 0 && expiredInboxRuns.length === 0 && strandedHandoffs.length === 0) {
+    const deferredReleases = await deferredLeaseReleases(tx);
+    if (orphans.length === 0 && expiredInboxRuns.length === 0
+      && strandedHandoffs.length === 0 && deferredReleases.length === 0) {
       return { value: { count: 0 }, leaseOutcomes: [] };
     }
     const leaseOutcomes: LeaseOutcome[] = [];
@@ -353,8 +356,17 @@ export const reconcileDatabaseRuns = async (
         releasedHandoff: { toRunId: handoff.toRunId, at: now },
       });
     }
+    for (const deferred of deferredReleases) {
+      leaseOutcomes.push({
+        kind: "stop",
+        taskId: deferred.taskId,
+        deferredRelease: { activityId: deferred.activityId, target: deferred.target, at: now },
+      });
+    }
     return {
-      value: { count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length },
+      value: {
+        count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length + deferredReleases.length,
+      },
       leaseOutcomes,
     };
   }, { release: releaseChainLease }).catch((error: unknown) => {

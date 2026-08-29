@@ -39,6 +39,7 @@ import {
 } from "./readiness-decision.js";
 import {
   commitWithLeaseOutcome,
+  LeaseReleaseDeferralRecordError,
   releaseMergeLease,
   withMergeLease,
   type HeldLeaseOutcome,
@@ -479,8 +480,8 @@ const recordLeaseDeferral = async (
   return settlement.settled;
 });
 
-const heldLeaseOutcome = (ownership: ReadinessLeaseOwnership): HeldLeaseOutcome => ownership === "released"
-  ? { kind: "stop" }
+const heldLeaseOutcome = (ownership: ReadinessLeaseOwnership, taskId: string): HeldLeaseOutcome => ownership === "released"
+  ? { kind: "stop", taskId }
   : { kind: "continue" };
 
 const applyReadinessDecision = async (
@@ -546,7 +547,7 @@ const applyReadinessDecision = async (
   const leased = await runWithMergeLease(target, async () => {
     if (!await claim.renew()) {
       const ownership = await claim.ownershipAfterLoss(db);
-      return { leaseOutcome: heldLeaseOutcome(ownership), value: "claim-lost" as const };
+      return { leaseOutcome: heldLeaseOutcome(ownership, regression.id), value: "claim-lost" as const };
     }
 
     // Regression evidence is durable before this short Lease window. Repeat
@@ -555,11 +556,14 @@ const applyReadinessDecision = async (
     const leasedDecision = await evaluateReadiness(reader, read.input);
     switch (leasedDecision.kind) {
       case "skip":
-        return { leaseOutcome: { kind: "stop" as const }, value: "lease-recheck-skipped" as const };
+        return {
+          leaseOutcome: { kind: "stop" as const, taskId: regression.id },
+          value: "lease-recheck-skipped" as const,
+        };
       case "defer": {
         const deferred = await deferReadiness(db, readiness.id, claim);
         return {
-          leaseOutcome: heldLeaseOutcome(deferred.ownership),
+          leaseOutcome: heldLeaseOutcome(deferred.ownership, regression.id),
           value: "lease-recheck-deferred" as const,
         };
       }
@@ -573,7 +577,9 @@ const applyReadinessDecision = async (
         const stopped = stoppedResult.value;
         if (stopped.applied) result.stopped += 1;
         return {
-          leaseOutcome: stopped.applied ? { kind: "stop" as const } : heldLeaseOutcome(stopped.ownership),
+          leaseOutcome: stopped.applied
+            ? { kind: "stop" as const, taskId: regression.id }
+            : heldLeaseOutcome(stopped.ownership, regression.id),
           value: "lease-recheck-stopped" as const,
         };
       }
@@ -588,7 +594,9 @@ const applyReadinessDecision = async (
         const requeued = requeuedResult.value;
         if (requeued.applied) result.requeued += 1;
         return {
-          leaseOutcome: requeued.applied ? { kind: "stop" as const } : heldLeaseOutcome(requeued.ownership),
+          leaseOutcome: requeued.applied
+            ? { kind: "stop" as const, taskId: regression.id }
+            : heldLeaseOutcome(requeued.ownership, regression.id),
           value: "lease-recheck-requeued" as const,
         };
       }
@@ -714,7 +722,7 @@ const applyReadinessDecision = async (
     if (!authorization) throw new Error("Readiness authorization transaction returned no settlement");
     if (!authorization.settled) {
       return {
-        leaseOutcome: heldLeaseOutcome(authorization.ownership),
+        leaseOutcome: heldLeaseOutcome(authorization.ownership, regression.id),
         value: "claim-lost" as const,
       };
     }
@@ -723,18 +731,20 @@ const applyReadinessDecision = async (
       // A retained ownership was recorded atomically with authorization by
       // commitWithLeaseOutcome. Continue leaves that Lease for its consumer;
       // a missing successor still releases through this outer owner.
-      leaseOutcome: heldLeaseOutcome(authorization.ownership),
+      leaseOutcome: heldLeaseOutcome(authorization.ownership, regression.id),
       value: authorization.value,
     };
   }, db);
   if (leased.outcome === "contended") return;
   if (leased.outcome === "unreachable") {
-    await recordLeaseDeferral(db, {
-      readinessTaskId: readiness.id,
-      chainId: readiness.chainId,
-      detail: leased.detail,
-      at: read.input.now,
-    }, claim);
+    if (!leased.releaseDeferred) {
+      await recordLeaseDeferral(db, {
+        readinessTaskId: readiness.id,
+        chainId: readiness.chainId,
+        detail: leased.detail,
+        at: read.input.now,
+      }, claim);
+    }
     return;
   }
   if (leased.value === "authorized") result.authorized += 1;
@@ -769,6 +779,7 @@ export const readinessTick = async (
         reader,
       );
     } catch (error: unknown) {
+      if (error instanceof LeaseReleaseDeferralRecordError) throw error;
       const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
       const stopped = await stopReadiness(db, {
         readinessTaskId: readiness.id,

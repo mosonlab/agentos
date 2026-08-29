@@ -6,6 +6,8 @@ import type { Prisma, PrismaClient } from "@anneal/db";
 import {
   commitWithLeaseOutcome,
   commitWithLeaseOutcomes,
+  deferredLeaseReleases,
+  LeaseReleaseDeferralRecordError,
   leaseHandoffsWithoutConsumer,
   leaseHolderFor,
   mergeLeaseScriptPath,
@@ -36,6 +38,31 @@ const holdDb = {
     taskActivity: { create: async () => ({}) },
   } as unknown as Prisma.TransactionClient),
 } as unknown as PrismaClient;
+
+const releaseDeferralDb = (
+  chainId: string,
+  writes: Array<Record<string, unknown>> = [],
+  recordFailure?: Error,
+): PrismaClient => ({
+  $transaction: async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn({
+    task: { findUnique: async () => ({
+      chainId,
+      projectId: "project-1",
+      templateStep: {
+        stepIndex: 7,
+        outputKind: "merge-result",
+        taskTemplate: { name: "direct-engineer-workflow" },
+      },
+    }) },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        if (recordFailure) throw recordFailure;
+        writes.push(data);
+        return data;
+      },
+    },
+  } as unknown as Prisma.TransactionClient),
+} as unknown as PrismaClient);
 
 const holderTx = (input: {
   task: { chainId: string | null; projectId: string; templateStep: { stepIndex: number; outputKind: string; taskTemplate: { name: string } } };
@@ -149,13 +176,37 @@ test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", 
     { toRunId: "run-stale", taskId: "task-stale" },
   ]);
   assert.match(sql, /FROM "Run" AS consumer/u);
+  assert.match(sql, /WITH consumers AS/u);
+  assert.match(sql, /AND EXISTS \(/u);
   assert.match(sql, /JOIN LATERAL/u);
+  assert.match(sql, /activity\."taskId" = consumer\."taskId"/u);
   assert.match(sql, /activity\."createdAt" >= LEAST\(consumer\."createdAt", consumer\."readyAt"\)/u);
   assert.match(sql, /GREATEST\(consumer\."createdAt", consumer\."readyAt"\)/u);
   assert.match(sql, /ORDER BY "staleAt" ASC, "toRunId" ASC/u);
   assert.match(sql, /LIMIT/u);
   assert.ok(parameters.some((value) => value instanceof Date), "the query has a time floor");
   assert.ok(parameters.includes(100), "the query has an explicit row limit");
+});
+
+test("deferredLeaseReleases returns one bounded unresolved page", async () => {
+  let sql = "";
+  let parameters: unknown[] = [];
+  const tx = {
+    $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      sql = strings.join("?");
+      parameters = values;
+      return [{ activityId: "deferred-1", taskId: "task-1", projectId: "project-1", chainId: "chain-1" }];
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  assert.deepEqual(await deferredLeaseReleases(tx), [{
+    activityId: "deferred-1",
+    taskId: "task-1",
+    target: { projectId: "project-1", chainId: "chain-1" },
+  }]);
+  assert.match(sql, /state' = 'release-deferred'/u);
+  assert.match(sql, /deferredActivityId/u);
+  assert.ok(parameters.includes(100));
 });
 
 const transactionDb = (tx: Prisma.TransactionClient, events: string[] = []) => ({
@@ -315,7 +366,7 @@ test("a completed callback releases the merge Lease", async () => {
   const acquiredFor: string[] = [];
   const releasedFor: string[] = [];
   const result = await withMergeLease(leaseTarget("chain-1"), async () => ({
-    leaseOutcome: { kind: "stop" },
+    leaseOutcome: { kind: "stop", taskId: "task-1" },
     value: 42,
   }), holdDb, {
     acquire: async (chainId) => {
@@ -393,7 +444,7 @@ test("a contended merge Lease does not run the callback", async () => {
   let releaseCalled = false;
   const result = await withMergeLease(leaseTarget("chain-4"), async () => {
     callbackCalled = true;
-    return { leaseOutcome: { kind: "stop" }, value: null };
+    return { leaseOutcome: { kind: "stop", taskId: "task-1" }, value: null };
   }, holdDb, {
     acquire: async () => ({ outcome: "contended" }),
     release: async () => {
@@ -412,7 +463,7 @@ test("an unreachable merge Lease is a retryable result and does not run the call
   let releaseCalled = false;
   const result = await withMergeLease(leaseTarget("chain-unreachable"), async () => {
     callbackCalled = true;
-    return { leaseOutcome: { kind: "stop" }, value: null };
+    return { leaseOutcome: { kind: "stop", taskId: "task-1" }, value: null };
   }, holdDb, {
     acquire: async () => ({ outcome: "unreachable", detail: "TLS transport failed" }),
     release: async () => {
@@ -430,11 +481,11 @@ test("skipped and refused releases are reported decided outcomes", async (t) => 
   const said: string[] = [];
   t.mock.method(console, "error", (...args: unknown[]) => { said.push(args.map(String).join(" ")); });
 
-  assert.deepEqual(await withMergeLease(leaseTarget("chain-5"), async () => ({ leaseOutcome: { kind: "stop" }, value: "skipped" }), holdDb, {
+  assert.deepEqual(await withMergeLease(leaseTarget("chain-5"), async () => ({ leaseOutcome: { kind: "stop", taskId: "task-1" }, value: "skipped" }), holdDb, {
     acquire: acquired,
     release: async () => ({ outcome: "skipped", heldFor: "chain-42" }),
   }), { outcome: "ran", value: "skipped" });
-  assert.deepEqual(await withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop" }, value: "refused" }), holdDb, {
+  assert.deepEqual(await withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop", taskId: "task-1" }, value: "refused" }), holdDb, {
     acquire: acquired,
     release: async () => ({ outcome: "refused", heldBy: "another-host" }),
   }), { outcome: "ran", value: "refused" });
@@ -447,28 +498,63 @@ test("skipped and refused releases are reported decided outcomes", async (t) => 
 });
 
 test("an unreachable release outcome is retryable", async () => {
+  const deferred: Array<Record<string, unknown>> = [];
   assert.deepEqual(await withMergeLease(
     leaseTarget("chain-unreachable-release"),
-    async () => ({ leaseOutcome: { kind: "stop" }, value: null }),
-    holdDb,
+    async () => ({ leaseOutcome: { kind: "stop", taskId: "task-1" }, value: null }),
+    releaseDeferralDb("chain-unreachable-release", deferred),
     {
       acquire: acquired,
       release: async () => ({ outcome: "unreachable", detail: "release helper timed out" }),
     },
-  ), { outcome: "unreachable", detail: "release helper timed out" });
+  ), { outcome: "unreachable", detail: "release helper timed out", releaseDeferred: true });
+  assert.equal(deferred.length, 1);
+  assert.deepEqual((deferred[0]!.metadata as Record<string, unknown>), {
+    kind: "mergeTail.leaseRelease",
+    schemaVersion: 1,
+    state: "release-deferred",
+    projectId: "project-1",
+    chainId: "chain-unreachable-release",
+    taskId: "task-1",
+    failureDetail: "release helper timed out",
+    deferredAt: (deferred[0]!.metadata as Record<string, unknown>).deferredAt,
+  });
 });
 
 test("a rejected release adapter is an unreachable transport", async () => {
   const releaser: MergeLeaseReleaser = async () => { throw new Error("spawn bash ENOENT"); };
 
-  assert.deepEqual(await withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop" }, value: null }), holdDb, {
+  assert.deepEqual(await withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop", taskId: "task-1" }, value: null }), releaseDeferralDb("chain-6"), {
     acquire: acquired,
     release: releaser,
-  }), { outcome: "unreachable", detail: "Merge lease release transport failed: spawn bash ENOENT" });
+  }), {
+    outcome: "unreachable",
+    detail: "Merge lease release transport failed: spawn bash ENOENT",
+    releaseDeferred: true,
+  });
+});
+
+test("a deferred-release record failure is typed and does not retry the release", async () => {
+  let releases = 0;
+  const recordFailure = new Error("activity writer unavailable");
+  await assert.rejects(withMergeLease(
+    leaseTarget("chain-record-failure"),
+    async () => ({ leaseOutcome: { kind: "stop", taskId: "task-1" }, value: null }),
+    releaseDeferralDb("chain-record-failure", [], recordFailure),
+    {
+      acquire: acquired,
+      release: async () => {
+        releases += 1;
+        return { outcome: "unreachable", detail: "release helper timed out" };
+      },
+    },
+  ), (error: unknown) => error instanceof LeaseReleaseDeferralRecordError
+    && error.cause === recordFailure);
+  assert.equal(releases, 1);
 });
 
 test("a Task without a Chain runs without either Lease adapter", async () => {
-  const result = await withMergeLease(null, async () => ({ leaseOutcome: { kind: "stop" }, value: "unleased" }), holdDb, {
+  const result = await withMergeLease(null, async () => ({ leaseOutcome: { kind: "stop", taskId: "task-1" }, value: "unleased" }), holdDb, {
     acquire: async () => { throw new Error("the acquirer must not be called"); },
     release: async () => { throw new Error("the releaser must not be called"); },
   });

@@ -24,6 +24,7 @@ export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
   leaseHandoff: "mergeTail.leaseHandoff",
   leaseHold: "mergeTail.leaseHold",
+  leaseRelease: "mergeTail.leaseRelease",
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
