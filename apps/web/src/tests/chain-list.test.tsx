@@ -35,12 +35,12 @@ const heldControl = (overrides: Partial<NonNullable<Chain["control"]>> = {}): No
 });
 
 const render = (value: Chain, taskId: string, repairActivities: readonly TaskActivity[] | null = null): string => renderToStaticMarkup(
-  <ChainList chain={value} taskId={taskId} pending={false} repairActivities={repairActivities} onStart={() => undefined} />,
+  <ChainList chain={value} taskId={taskId} pending={false} regressionTaskId="regression" repairActivities={repairActivities} onStart={() => undefined} />,
 );
 
-const renderLocale = (value: Chain, taskId: string, locale: "en" | "zh"): string => renderToStaticMarkup(
+const renderLocale = (value: Chain, taskId: string, locale: "en" | "zh", repairActivities: readonly TaskActivity[] | null = null): string => renderToStaticMarkup(
   <LocaleProvider initialLocale={locale}>
-    <ChainList chain={value} taskId={taskId} pending={false} onStart={() => undefined} />
+    <ChainList chain={value} taskId={taskId} pending={false} regressionTaskId="regression" repairActivities={repairActivities} onStart={() => undefined} />
   </LocaleProvider>,
 );
 
@@ -95,6 +95,42 @@ test("the Regression row renders ordered repair cycles with short heads and task
 test("a chain with no repair markers renders no repair timeline", () => {
   const markup = render(chain([step(1, { stepName: "Regression verification" })]), "t1", []);
   assert.doesNotMatch(markup, /data-repair-timeline=/);
+});
+
+test("pending and failed repairs show no delivered end head, and pending is localized in zh", () => {
+  const activities = [
+    repairActivity("q1", "mergeTail.repairAttempt", "repair-pending", "gate-fix", "a".repeat(40), "b".repeat(40)),
+    repairActivity("q2", "mergeTail.repairAttempt", "repair-failed", "review-fix", "c".repeat(40), "d".repeat(40)),
+    repairActivity("r2", "mergeTail.repairResult", "repair-failed", "review-fix", "c".repeat(40), "d".repeat(40), {
+      resolvedHeadSha: null,
+      state: "failed",
+    }),
+  ];
+  const markup = renderLocale(chain([
+    step(1, { taskId: "regression", stepName: "Regression verification" }),
+  ]), "regression", "zh", activities);
+
+  assert.match(markup, /aaaaaaa → —/);
+  assert.match(markup, /ccccccc → —/);
+  assert.doesNotMatch(markup, /→ bbbbbbb|→ ddddddd/);
+  assert.match(markup, new RegExp(translate("zh", "chain.repair.outcome.pending")));
+  assert.doesNotMatch(markup, />Pending</);
+});
+
+test("the Regression row surfaces repair loading and failure states", () => {
+  const value = chain([step(1, { taskId: "regression", stepName: "Regression verification" })]);
+  const loading = renderToStaticMarkup(
+    <ChainList chain={value} taskId="regression" pending={false} regressionTaskId="regression"
+      repairActivities={null} repairActivitiesLoading onStart={() => undefined} />,
+  );
+  const failed = renderToStaticMarkup(
+    <ChainList chain={value} taskId="regression" pending={false} regressionTaskId="regression"
+      repairActivities={null} repairActivitiesError="network" onReloadRepairActivities={() => undefined} onStart={() => undefined} />,
+  );
+
+  assert.match(loading, new RegExp(en("chain.repair.loading")));
+  assert.match(failed, new RegExp(en("chain.repair.error")));
+  assert.match(failed, new RegExp(en("common.retry")));
 });
 
 test("the gate's meaning is spelled out verbatim, once per gated step", () => {
@@ -308,4 +344,10 @@ test("the task page routes its error branch through fatal (E14 wiring)", () => {
 
 test("the chain card is rendered only for a task that is in a chain (wiring)", () => {
   assert.match(detailSource, /task\.chainId === null/);
+});
+
+test("the Regression page reuses the activity poll instead of opening a duplicate", () => {
+  assert.match(detailSource, /regressionTaskId === null \|\| regressionTaskId === taskId \? null/);
+  assert.match(detailSource, /regressionTaskId === taskId \? activity : auxiliaryRepairActivities/);
+  assert.match(detailSource, /<Activity taskId=\{taskId\} poll=\{activity\}/);
 });

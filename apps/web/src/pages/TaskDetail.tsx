@@ -2,15 +2,16 @@ import { type ReactNode, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import { compactTokens, durationWithInboxWait, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
-import { useAction, usePoll } from "../lib/hooks";
+import { useAction, usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
+import { isRegressionStep } from "../lib/repair-subtimeline";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
-import { ChainList, isRegressionStep } from "../components/chain-list";
+import { ChainList } from "../components/chain-list";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
@@ -145,8 +146,7 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
   );
 };
 
-export const Activity = ({ taskId }: { taskId: string }): ReactNode => {
-  const poll = usePoll<TaskActivity[]>(`/tasks/${taskId}/activity`);
+export const Activity = ({ taskId, poll }: { taskId: string; poll: Poll<TaskActivity[]> }): ReactNode => {
   const { data, error: pollError, loading, reload } = poll;
   const [comment, setComment] = useState("");
   const { pending, error, run } = useAction();
@@ -257,15 +257,17 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<Task>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
   const startability = usePoll<TaskStartability>(`/tasks/${taskId}/startability`);
+  const activity = usePoll<TaskActivity[]>(`/tasks/${taskId}/activity`);
   // No new cadence: the chain rides the page's default poll.
   const chain = usePoll<Chain>(`/tasks/${taskId}/chain`);
   // Repair markers are already exposed by the existing activity read. Poll the
   // Regression task only after the chain identifies it; a chain without a
   // Regression node remains completely idle on this auxiliary path.
   const regressionTaskId = chain.data?.steps.find(isRegressionStep)?.taskId ?? null;
-  const repairActivities = usePoll<TaskActivity[]>(
-    regressionTaskId === null ? null : `/tasks/${regressionTaskId}/activity`,
+  const auxiliaryRepairActivities = usePoll<TaskActivity[]>(
+    regressionTaskId === null || regressionTaskId === taskId ? null : `/tasks/${regressionTaskId}/activity`,
   );
+  const repairActivities = regressionTaskId === taskId ? activity : auxiliaryRepairActivities;
   const [expanded, setExpanded] = useState<string | null>(null);
   const chainControlInFlight = useRef(false);
   const { pending, error: actionError, run } = useAction();
@@ -455,7 +457,10 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         {task.chainId === null ? null
           : chain.data && chain.data.chainId !== null
-            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} repairActivities={repairActivities.data} onStart={startStep} onControl={controlChain} />
+            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} regressionTaskId={regressionTaskId}
+                repairActivities={repairActivities.data} repairActivitiesLoading={repairActivities.loading}
+                repairActivitiesError={repairActivities.error?.message ?? null} onReloadRepairActivities={repairActivities.reload}
+                onStart={startStep} onControl={controlChain} />
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
@@ -463,7 +468,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         <TaskOutput poll={output} />
 
-        <Activity taskId={taskId} />
+        <Activity taskId={taskId} poll={activity} />
       </div>
     </Page>
   );

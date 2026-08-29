@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseRepairCycles, repairTaskHref, shortRepairSha } from "../lib/repair-subtimeline";
+import { isRegressionStep, parseRepairCycles, type RepairActivity } from "../lib/repair-subtimeline";
 
 const activity = (
   id: string,
@@ -10,14 +10,8 @@ const activity = (
   startHeadSha: string,
   targetHeadSha: string,
   extra: Record<string, unknown> = {},
-) => ({
+): RepairActivity => ({
   id,
-  taskId: "regression-task",
-  actorType: "control-plane",
-  actorId: null,
-  body: "",
-  commitSha: null,
-  createdAt: `2026-08-28T00:0${id.slice(-1)}:00.000Z`,
   metadata: {
     schemaVersion: 1,
     kind,
@@ -31,19 +25,19 @@ const activity = (
 
 test("pairs four queued/result markers by task and keeps queue order", () => {
   const activities = [
-    activity("q1", "mergeTail.repairQueued", "repair-1", "a".repeat(40), "b".repeat(40), { repairKind: "gate-fix" }),
+    activity("q1", "mergeTail.repairAttempt", "repair-1", "a".repeat(40), "b".repeat(40), { repairKind: "gate-fix" }),
     activity("r1", "mergeTail.repairResult", "repair-1", "a".repeat(40), "b".repeat(40), {
       repairKind: "gate-fix", resolvedHeadSha: "c".repeat(40), state: "succeeded",
     }),
-    activity("q2", "repairQueued", "repair-2", "c".repeat(40), "b".repeat(40), { repairKind: "review-fix" }),
-    activity("r2", "repairResult", "repair-2", "c".repeat(40), "b".repeat(40), {
+    activity("q2", "mergeTail.repairAttempt", "repair-2", "c".repeat(40), "b".repeat(40), { repairKind: "review-fix" }),
+    activity("r2", "mergeTail.repairResult", "repair-2", "c".repeat(40), "b".repeat(40), {
       repairKind: "review-fix", resolvedHeadSha: "d".repeat(40), state: "succeeded",
     }),
     activity("q3", "mergeTail.repairAttempt", "repair-3", "d".repeat(40), "b".repeat(40), { repairKind: "gate-fix" }),
     activity("r3", "mergeTail.repairResult", "repair-3", "d".repeat(40), "b".repeat(40), {
       repairKind: "gate-fix", resolvedHeadSha: "e".repeat(40), state: "succeeded",
     }),
-    activity("q4", "mergeTail.repairQueued", "repair-4", "e".repeat(40), "b".repeat(40), { repairKind: "refresh-conflict" }),
+    activity("q4", "mergeTail.repairAttempt", "repair-4", "e".repeat(40), "b".repeat(40), { repairKind: "refresh-conflict" }),
     activity("r4", "mergeTail.repairResult", "repair-4", "e".repeat(40), "b".repeat(40), {
       repairKind: "refresh-conflict", resolvedHeadSha: "f".repeat(40), state: "succeeded",
     }),
@@ -58,25 +52,45 @@ test("pairs four queued/result markers by task and keeps queue order", () => {
     { ordinal: 4, repairKind: "refresh-conflict", repairTaskId: "repair-4", outcome: "succeeded" },
   ]);
   assert.equal(cycles[0]?.startHeadSha, "a".repeat(40));
-  assert.equal(cycles[0]?.targetHeadSha, "b".repeat(40));
-  assert.equal(cycles[0]?.resolvedHeadSha, "c".repeat(40));
   assert.equal(cycles[0]?.endHeadSha, "c".repeat(40));
   assert.equal(cycles[0]?.taskHref, "/tasks/repair-1");
 });
 
-test("keeps queued repairs pending and retains failed result state", () => {
+test("keeps queued repairs pending and retains failed outcomes", () => {
   const cycles = parseRepairCycles([
-    activity("q1", "repairQueued", "repair-pending", "a".repeat(40), "b".repeat(40), { repairKind: "gate-fix" }),
-    activity("q2", "repairQueued", "repair-failed", "c".repeat(40), "b".repeat(40), { repairKind: "review-fix" }),
-    activity("r2", "repairResult", "repair-failed", "c".repeat(40), "b".repeat(40), {
+    activity("q1", "mergeTail.repairAttempt", "repair-pending", "a".repeat(40), "b".repeat(40), { repairKind: "gate-fix" }),
+    activity("q2", "mergeTail.repairAttempt", "repair-failed", "c".repeat(40), "b".repeat(40), { repairKind: "review-fix" }),
+    activity("r2", "mergeTail.repairResult", "repair-failed", "c".repeat(40), "b".repeat(40), {
       repairKind: "review-fix", resolvedHeadSha: null, state: "failed",
     }),
   ]);
 
-  assert.deepEqual(cycles.map(({ repairTaskId, outcome, state, endHeadSha }) => ({ repairTaskId, outcome, state, endHeadSha })), [
-    { repairTaskId: "repair-pending", outcome: "pending", state: "queued", endHeadSha: null },
-    { repairTaskId: "repair-failed", outcome: "failed", state: "failed", endHeadSha: null },
+  assert.deepEqual(cycles.map(({ repairTaskId, outcome, endHeadSha }) => ({ repairTaskId, outcome, endHeadSha })), [
+    { repairTaskId: "repair-pending", outcome: "pending", endHeadSha: null },
+    { repairTaskId: "repair-failed", outcome: "failed", endHeadSha: null },
   ]);
+});
+
+test("pairs the current repairAttempt writer fields with repairResult fields", () => {
+  const queued = activity("q1", "mergeTail.repairAttempt", "repair-1", "ignored", "ignored");
+  queued.metadata = {
+    schemaVersion: 1,
+    kind: "mergeTail.repairAttempt",
+    repairKind: "gate-fix",
+    repairTaskId: "repair-1",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+  };
+  const cycles = parseRepairCycles([
+    queued,
+    activity("r1", "mergeTail.repairResult", "repair-1", "a".repeat(40), "b".repeat(40), {
+      resolvedHeadSha: "c".repeat(40),
+    }),
+  ]);
+
+  assert.equal(cycles.length, 1);
+  assert.equal(cycles[0]?.startHeadSha, "a".repeat(40));
+  assert.equal(cycles[0]?.endHeadSha, "c".repeat(40));
 });
 
 test("returns no cycles for empty or malformed and unknown metadata", () => {
@@ -91,10 +105,7 @@ test("returns no cycles for empty or malformed and unknown metadata", () => {
   ]), []);
 });
 
-test("short SHA and task-card link helpers stay safe for absent values", () => {
-  assert.equal(shortRepairSha("abcdef1234567890"), "abcdef1");
-  assert.equal(shortRepairSha(null), "—");
-  assert.equal(shortRepairSha(""), "—");
-  assert.equal(repairTaskHref("repair-1"), "/tasks/repair-1");
-  assert.equal(repairTaskHref(null), null);
+test("identifies the canonical Regression node from chain step copy", () => {
+  assert.equal(isRegressionStep({ name: "Release: Regression verification", stepName: "Regression verification" }), true);
+  assert.equal(isRegressionStep({ name: "Release: Merge authorization", stepName: "Merge authorization" }), false);
 });

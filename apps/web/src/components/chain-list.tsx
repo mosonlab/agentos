@@ -6,7 +6,7 @@ import { parseRepairCycles, type RepairCycleViewModel } from "../lib/repair-subt
 import { Link } from "../lib/router";
 import type { Chain, ChainStep, TaskActivity } from "../lib/types";
 import { IconLock, IconUser } from "./icons";
-import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, Pill, TaskPill } from "./ui";
+import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, ErrorNotice, Pill, TaskPill } from "./ui";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
@@ -27,13 +27,7 @@ const OWNER_CHIP = "inline-flex items-center gap-[6px] rounded-full border borde
 
 const REPAIR_TIMELINE = "mt-[10px] grid gap-[7px] border-l-2 border-[color:var(--border-soft)] pl-[12px]";
 const REPAIR_CYCLE = "grid gap-[3px] text-[11.5px] leading-[1.45] text-[color:var(--faint)]";
-const KNOWN_REPAIR_OUTCOMES = new Set(["failed", "invalid-output", "queued", "resolved", "succeeded", "unknown"]);
-
-/** The canonical templates call this node "Regression verification". Matching
- * the visible step name keeps the read path compatible with both direct and
- * full-assurance chains without adding a new API-only field. */
-export const isRegressionStep = (step: Pick<ChainStep, "name" | "stepName">): boolean =>
-  /\bregression\b/iu.test(`${step.stepName} ${step.name}`);
+const KNOWN_REPAIR_OUTCOMES = new Set(["failed", "invalid-output", "pending", "succeeded", "unknown"]);
 
 const repairOutcome = (cycle: RepairCycleViewModel, t: ReturnType<typeof useT>): string => {
   return KNOWN_REPAIR_OUTCOMES.has(cycle.outcome)
@@ -44,18 +38,27 @@ const repairOutcome = (cycle: RepairCycleViewModel, t: ReturnType<typeof useT>):
 /** Presentation-only history for the repair tasks a Regression step spawned.
  * The parser pairs markers by repairTaskId; this component only renders the
  * resulting ordered view models and never mutates chain state. */
-export const RepairTimeline = ({ cycles }: { cycles: readonly RepairCycleViewModel[] }): ReactNode => {
+export const RepairTimeline = ({ cycles, loading = false, error = null, onRetry }: {
+  cycles: readonly RepairCycleViewModel[];
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+}): ReactNode => {
   const t = useT();
-  if (cycles.length === 0) return null;
+  if (cycles.length === 0 && !loading && error === null) return null;
   return (
     <div data-repair-timeline="" aria-label={t("chain.repair.title")} className={REPAIR_TIMELINE}>
       <div className="text-[11.5px] font-bold text-secondary-foreground">{t("chain.repair.title")}</div>
+      {loading ? <div data-repair-loading="" className={HINT}>{t("chain.repair.loading")}</div> : null}
+      {error === null ? null : (
+        <div data-repair-error=""><ErrorNotice message={t("chain.repair.error")} {...(onRetry ? { onRetry } : {})} /></div>
+      )}
       {cycles.map((cycle) => (
         <div key={cycle.repairTaskId} data-repair-cycle={cycle.ordinal} className={REPAIR_CYCLE}>
           <div className="flex flex-wrap items-center gap-[7px]">
             <span data-repair-ordinal="" className="font-bold text-secondary-foreground">{t("chain.repair.ordinal", { n: cycle.ordinal })}</span>
             <span data-repair-kind="" className="text-secondary-foreground">{t("chain.repair.kind")}: {cycle.repairKind}</span>
-            <span data-repair-heads="" className="font-mono">{t("chain.repair.heads")}: {sha(cycle.startHeadSha)} → {sha(cycle.endHeadSha ?? cycle.targetHeadSha)}</span>
+            <span data-repair-heads="" className="font-mono">{t("chain.repair.heads")}: {sha(cycle.startHeadSha)} → {sha(cycle.endHeadSha)}</span>
             <span data-repair-outcome="">{t("chain.repair.outcome")}: {repairOutcome(cycle, t)}</span>
           </div>
           <Link to={cycle.taskHref} className="w-fit text-[11.5px] text-secondary-foreground hover:text-foreground">
@@ -143,13 +146,19 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
 };
 
-export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, repairCycles = [], onStart }: {
+export const ChainRow = ({
+  step, here, pending, blockedBy, heldLayer, repairCycles = [], repairLoading = false,
+  repairError = null, onReloadRepairActivities, onStart,
+}: {
   step: ChainStep;
   here: boolean;
   pending: boolean;
   blockedBy: readonly ChainStep[];
   heldLayer: number | null;
   repairCycles?: readonly RepairCycleViewModel[];
+  repairLoading?: boolean;
+  repairError?: string | null;
+  onReloadRepairActivities?: () => void;
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
@@ -175,7 +184,8 @@ export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, repairCycl
             {t("chain.blockedOnPredecessor", { name: blockedOn.name })}
           </span>
         ) : null}
-        {repairCycles.length > 0 ? <RepairTimeline cycles={repairCycles} /> : null}
+        <RepairTimeline cycles={repairCycles} loading={repairLoading} error={repairError}
+          {...(onReloadRepairActivities ? { onRetry: onReloadRepairActivities } : {})} />
         {blockedBy.length > 0 && step.status !== "DONE" ? (
           <span data-chain-join-blocked="" className={cn(HINT, "mt-[3px] block")}>
             {t("chain.blockedBy", { names: blockedBy.map((blocker) => blocker.stepName).join(", ") })}
@@ -209,11 +219,18 @@ export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, repairCycl
  * able to disagree with the board about how far along a chain is, nor with the
  * route about whether a step may be started.
  */
-export const ChainList = ({ chain, taskId, pending, repairActivities, onStart, onControl }: {
+export const ChainList = ({
+  chain, taskId, pending, regressionTaskId, repairActivities, repairActivitiesLoading = false,
+  repairActivitiesError = null, onReloadRepairActivities, onStart, onControl,
+}: {
   chain: Chain;
   taskId: string;
   pending: boolean;
+  regressionTaskId: string | null;
   repairActivities?: readonly TaskActivity[] | null;
+  repairActivitiesLoading?: boolean;
+  repairActivitiesError?: string | null;
+  onReloadRepairActivities?: () => void;
   onStart: (step: ChainStep) => void;
   onControl?: () => void;
 }): ReactNode => {
@@ -223,7 +240,6 @@ export const ChainList = ({ chain, taskId, pending, repairActivities, onStart, o
   const heldLayer = chainHeldLayer(chain);
   const waitingOnOperator = heldChainWaitingOnOperator(chain);
   const repairCycles = parseRepairCycles(repairActivities ?? []);
-  const regressionTaskId = chain.steps.find(isRegressionStep)?.taskId ?? null;
   const headerControl = (
     <div className={ROW_WRAP}>
       {held && heldLayer !== null ? (
@@ -271,6 +287,9 @@ export const ChainList = ({ chain, taskId, pending, repairActivities, onStart, o
               blockedBy={group.blockers}
               heldLayer={heldLayer}
               repairCycles={step.taskId === regressionTaskId ? repairCycles : []}
+              repairLoading={step.taskId === regressionTaskId && repairActivities === null && repairActivitiesLoading}
+              repairError={step.taskId === regressionTaskId ? repairActivitiesError : null}
+              {...(onReloadRepairActivities ? { onReloadRepairActivities } : {})}
               onStart={onStart}
             />
           ))}
