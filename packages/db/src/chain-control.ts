@@ -6,13 +6,12 @@ import {
   TaskStatus,
 } from "@prisma/client";
 
-import { markerFromMetadata } from "./merge-tail-markers.js";
 import {
   ACTIVE_RUN_STATUSES,
   activateChainSuccessor,
-  lockChainRows,
-  lockChainStructure,
-} from "./workflow.js";
+} from "./chain-activation.js";
+import { lockChainRows, lockChainStructure } from "./locks.js";
+import { markerFromMetadata } from "./merge-tail-markers.js";
 
 type ChainControlDb = Pick<Prisma.TransactionClient, "chainControl">;
 
