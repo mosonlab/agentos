@@ -13,6 +13,7 @@ import {
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
+  deferredLeaseReleases,
   LeaseReleaseDeferralRecordError,
   withMergeLease,
   type MergeLeaseAcquirer,
@@ -262,6 +263,67 @@ const assertDeferredReleaseAndRetry = async (
     throw new Error("a terminal deferred release must not retry");
   }), 0);
 };
+
+test("the no-deferral sweep uses its partial index without a TaskActivity scan or sort", async () => {
+  const seeded = await seedReadiness();
+  const noise = Array.from({ length: 5_000 }, (_, index) => ({
+    taskId: seeded.regression.id,
+    actorType: "control-plane",
+    body: `Unrelated activity ${index}`,
+    metadata: { kind: "test.noise", schemaVersion: 1, index },
+  }));
+  await db.taskActivity.createMany({ data: noise });
+  await db.$executeRawUnsafe('ANALYZE "TaskActivity"');
+
+  type PlanNode = {
+    "Node Type"?: string;
+    "Relation Name"?: string;
+    "Index Name"?: string;
+    Plans?: PlanNode[];
+  };
+  const rows = await db.$transaction(async (tx) => {
+    assert.deepEqual(await deferredLeaseReleases(tx), []);
+    return tx.$queryRaw<Array<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>>`
+      EXPLAIN (FORMAT JSON, COSTS OFF)
+      SELECT
+        deferred.id AS "activityId",
+        deferred."taskId" AS "taskId",
+        deferred.metadata->>'projectId' AS "projectId",
+        deferred.metadata->>'chainId' AS "chainId"
+      FROM "TaskActivity" AS deferred
+      WHERE deferred."actorType" = 'control-plane'
+        AND deferred.metadata->>'kind' = 'mergeTail.leaseRelease'
+        AND deferred.metadata->>'state' = 'release-deferred'
+        AND deferred.metadata->>'projectId' IS NOT NULL
+        AND deferred.metadata->>'chainId' IS NOT NULL
+        AND deferred.metadata->>'taskId' = deferred."taskId"
+        AND NOT EXISTS (
+          SELECT 1
+          FROM "TaskActivity" AS terminal
+          WHERE terminal."taskId" = deferred."taskId"
+            AND terminal."createdAt" >= deferred."createdAt"
+            AND terminal."actorType" = 'control-plane'
+            AND terminal.metadata->>'kind' = 'mergeTail.leaseRelease'
+            AND terminal.metadata->>'deferredActivityId' = deferred.id
+            AND terminal.metadata->>'state' IN ('released', 'invalid')
+        )
+      ORDER BY deferred."createdAt" ASC, deferred.id ASC
+      LIMIT ${100}
+    `;
+  });
+
+  const root = rows[0]?.["QUERY PLAN"]?.[0]?.Plan;
+  assert.ok(root, "PostgreSQL returned an EXPLAIN plan");
+  const nodes: PlanNode[] = [];
+  const collect = (node: PlanNode): void => {
+    nodes.push(node);
+    node.Plans?.forEach(collect);
+  };
+  collect(root);
+  assert.ok(nodes.some((node) => node["Index Name"] === "TaskActivity_release_deferred_createdAt_id_idx"));
+  assert.equal(nodes.some((node) => node["Node Type"] === "Seq Scan" && node["Relation Name"] === "TaskActivity"), false);
+  assert.equal(nodes.some((node) => node["Node Type"] === "Sort"), false);
+});
 
 test("clean exact-head readiness authorizes and queues mechanical merge", async () => {
   const seeded = await seedReadiness();

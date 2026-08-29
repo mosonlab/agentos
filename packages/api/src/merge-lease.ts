@@ -417,7 +417,7 @@ export const deferredLeaseReleases = async (
       deferred.metadata->>'chainId' AS "chainId"
     FROM "TaskActivity" AS deferred
     WHERE deferred."actorType" = 'control-plane'
-      AND deferred.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseRelease}
+      AND deferred.metadata->>'kind' = 'mergeTail.leaseRelease'
       AND deferred.metadata->>'state' = 'release-deferred'
       AND deferred.metadata->>'projectId' IS NOT NULL
       AND deferred.metadata->>'chainId' IS NOT NULL
@@ -428,7 +428,7 @@ export const deferredLeaseReleases = async (
         WHERE terminal."taskId" = deferred."taskId"
           AND terminal."createdAt" >= deferred."createdAt"
           AND terminal."actorType" = 'control-plane'
-          AND terminal.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseRelease}
+          AND terminal.metadata->>'kind' = 'mergeTail.leaseRelease'
           AND terminal.metadata->>'deferredActivityId' = deferred.id
           AND terminal.metadata->>'state' IN ('released', 'invalid')
       )

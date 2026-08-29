@@ -204,8 +204,10 @@ test("deferredLeaseReleases returns one bounded unresolved page", async () => {
     taskId: "task-1",
     target: { projectId: "project-1", chainId: "chain-1" },
   }]);
+  assert.match(sql, /kind' = 'mergeTail\.leaseRelease'/u);
   assert.match(sql, /state' = 'release-deferred'/u);
   assert.match(sql, /deferredActivityId/u);
+  assert.doesNotMatch(sql, /kind' = \?/u, "the partial-index predicate stays a SQL literal");
   assert.ok(parameters.includes(100));
 });
 
