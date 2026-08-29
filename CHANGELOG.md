@@ -9,6 +9,15 @@ written.
 
 ## Unreleased
 
+- **The public `verify:oss-b0` and `test:oss-b0-harness` commands are removed as
+  a breaking change in the next pre-1.0 minor.** No compatibility alias or
+  replacement harness is provided. Current verification remains with
+  `scripts/merge-gate.sh` and its `scripts/gate-worker/` dispatch path, `npm run
+  test:release-docs`, `npm run test:dependency-gate`, `npm run
+  verify:secret-hygiene`, and the public-snapshot scans. The merge-integrator
+  real/system checks and documented templates release demo remain unchanged;
+  the frozen OSS-B0 smoke fixture remains for release, UI and API parity.
+
 ## v0.4.0 — Developer Preview 4
 
 The fourth preview, and the first under the name Anneal. The headline is

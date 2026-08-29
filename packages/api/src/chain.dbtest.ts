@@ -387,7 +387,7 @@ test("session-less Inbox approval finds no decision-bound question and writes no
   assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
 });
 
-test("repaired compound approval is atomic and exactly once across PATCH, Inbox, replay, and concurrency", async () => {
+test("repaired compound Inbox approval is atomic and exactly once across replay and concurrency", async () => {
   const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
   await db.$transaction([
     db.agent.update({
@@ -401,20 +401,30 @@ test("repaired compound approval is atomic and exactly once across PATCH, Inbox,
     db.task.update({ where: { id: successor.id }, data: { assigneeAgentId: executioner.id } }),
   ]);
 
-  const [patch, inbox] = await withOperatorToken(() => Promise.all([
-    createApp(db).request(`/tasks/${predecessor.id}`, {
-      method: "PATCH",
+  const patchBeforeApproval = await requestCompoundApproval(
+    "patch",
+    predecessor.id,
+    gate.id,
+    "unused-patch-request-id",
+  );
+  assert.equal(patchBeforeApproval.status, 409);
+  assert.deepEqual(await patchBeforeApproval.json(), {
+    error: "Chain task statuses are controlled by chain execution",
+  });
+
+  const [firstInbox, secondInbox] = await withOperatorToken(() => Promise.all([
+    createApp(db).request(`/inbox/messages/${gate.id}/decision`, {
+      method: "POST",
       headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "DONE" }),
+      body: JSON.stringify({ decision: "approve", requestId: "compound-race-first" }),
     }),
     createApp(db).request(`/inbox/messages/${gate.id}/decision`, {
       method: "POST",
       headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ decision: "approve", requestId: "compound-race" }),
+      body: JSON.stringify({ decision: "approve", requestId: "compound-race-second" }),
     }),
   ]));
-  assert.equal(patch.status, 200);
-  assert.ok([200, 201].includes(inbox.status));
+  assert.deepEqual([firstInbox.status, secondInbox.status].sort(), [200, 201]);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
   assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
   assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
