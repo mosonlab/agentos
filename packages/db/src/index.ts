@@ -20,7 +20,79 @@ export * from "./merge-integrator.js";
 export * from "./merge-integrator-db.js";
 export * from "./merge-tail.js";
 export * from "./merge-tail-markers.js";
-export * from "./workflow.js";
+export {
+  CHAIN_STRUCTURE_LOCK_CLASS,
+  lockAgentRepoGrant,
+  lockAgentRepoGrantForRevocation,
+  lockAgentRow,
+  lockAgentRows,
+  lockChainRows,
+  lockChainStructure,
+  lockRunRow,
+  lockTaskRow,
+} from "./locks.js";
+export {
+  ArchivedAssigneeError,
+  ArchivedTaskError,
+  COMPOUND_IMPLEMENTATION_AGENT_NAME,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  ChainHeldError,
+  CompoundImplementationAssigneeError,
+  type CompoundImplementationStepShape,
+  type EnqueueTaskRunOptions,
+  IntegratorStoppedError,
+  NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
+  NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
+  type OpenRunIntent,
+  type OpenRunRefusal,
+  type OpenRunResult,
+  PinnedBaseCommitError,
+  type RunBranchTask,
+  WorkflowRefusalError,
+  type WorkflowRefusalReason,
+  compoundImplementationAssigneeValid,
+  deriveRunConfig,
+  enqueueTaskRun,
+  gateQuestion,
+  isArchivedAssigneeError,
+  isArchivedTaskError,
+  isChainHeldError,
+  isCompoundImplementationAssigneeError,
+  isCompoundImplementationStep,
+  isDirectImplementationStep,
+  isIntegratorStoppedError,
+  isPinnedBaseCommitError,
+  isWorkflowRefusalError,
+  nativeImplementationSubagentRunConfig,
+  openRun,
+  pinnedImplementationRange,
+  resolveRequeueBase,
+  resolveRunBranches,
+  runBudgetCeiling,
+  runnerFor,
+} from "./run-open.js";
+export {
+  ACTIVE_RUN_STATUSES,
+  CHAIN_AUTO_RESUME_KIND,
+  LIVE_TASK_STATUSES,
+  MAX_AUTOMATIC_SUCCESSOR_RESUMES,
+  activateChainSuccessor,
+  activateRecoveryIntegratorSuccessor,
+  advanceTemplateTask,
+  agentArchiveBlocker,
+} from "./chain-activation.js";
+export {
+  type MergeAuthorizationResult,
+  MergeEvidenceError,
+  isMergeEvidenceError,
+  produceMergeAuthorization,
+} from "./merge-authorization.js";
+export {
+  type InboxDecisionInput,
+  type InboxDecisionResult,
+  applyInboxDecision,
+  applyInboxDecisionTx,
+} from "./inbox-decision.js";
 export * from "./usage.js";
 export * from "./cost.js";
 export * from "./task-source.js";
