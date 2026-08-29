@@ -38,6 +38,7 @@ const fixture = () => {
   mkdirSync(join(stageRoot, "packages/db/prisma/migrations/001_init"), { recursive: true });
   mkdirSync(join(stageRoot, "node_modules/.prisma/client"), { recursive: true });
   mkdirSync(join(stageRoot, "node_modules/@anneal"), { recursive: true });
+  mkdirSync(join(stageRoot, "node_modules/vendor/data"), { recursive: true });
   mkdirSync(join(stageRoot, "apps/web/dist"), { recursive: true });
   writeFileSync(join(stageRoot, "packages/api/dist/index.js"), "api\n");
   writeFileSync(join(stageRoot, "packages/api/dist/build-info.json"), JSON.stringify({
@@ -53,6 +54,7 @@ const fixture = () => {
   writeFileSync(join(stageRoot, "packages/db/prisma/schema.prisma"), "datasource db { provider = \"postgresql\" url = env(\"DATABASE_URL\") }\n");
   writeFileSync(join(stageRoot, "packages/db/prisma/migrations/001_init/migration.sql"), "-- migration\n");
   writeFileSync(join(stageRoot, "node_modules/.prisma/client/index.js"), "generated\n");
+  writeFileSync(join(stageRoot, "node_modules/vendor/data/runtime.bin"), "dependency-data\n");
   symlinkSync("../../packages/api", join(stageRoot, "node_modules/@anneal/api"));
   writeFileSync(join(stageRoot, "apps/web/dist/index.html"), "<html />\n");
   writeFileSync(join(stageRoot, ".env"), "DATABASE_URL=secret\n");
@@ -97,6 +99,7 @@ test("assembles a deterministic versioned release and excludes shared/secrets", 
     assert.equal(existsSync(join(result.releaseDirectory, "shared")), false);
     assert.equal(existsSync(join(result.releaseDirectory, "packages/db/prisma/schema.prisma")), true);
     assert.equal(readFileSync(join(result.releaseDirectory, "packages/api/dist/index.js"), "utf8"), "api\n");
+    assert.equal(readFileSync(join(result.releaseDirectory, "node_modules/vendor/data/runtime.bin"), "utf8"), "dependency-data\n");
     assert.equal(computeReleaseDigest(result.releaseDirectory), result.digest);
     assert.equal(lstatSync(result.releaseDirectory).mode & 0o222, 0);
     assert.equal(lstatSync(join(result.releaseDirectory, "packages/api/dist/index.js")).mode & 0o222, 0);

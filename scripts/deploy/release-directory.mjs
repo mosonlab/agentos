@@ -118,9 +118,18 @@ const MUTABLE_COMPONENTS = new Set([
   ".agentos-deploy",
 ]);
 
-const forbiddenComponent = (component) => SECRET_COMPONENT.test(component) || MUTABLE_COMPONENTS.has(component);
+const forbiddenComponent = (component) => SECRET_COMPONENT.test(component);
 
-const forbiddenPath = (relativePath) => relativePath.split("/").some(forbiddenComponent);
+/* Mutable operator state is excluded only when it is rooted at the artifact
+ * boundary. Dependencies are allowed to have ordinary `data`, `runtime`, or
+ * `tmp` directories of their own; filtering those names at every depth would
+ * silently ship an incomplete npm tree. Secret-shaped components remain
+ * excluded at any depth. */
+const forbiddenPath = (relativePath) => {
+  const components = relativePath.split("/");
+  return components.some(forbiddenComponent)
+    || MUTABLE_COMPONENTS.has(components[0]);
+};
 
 const readJsonObject = (path, label) => {
   assertRegularFile(path, label);
@@ -192,7 +201,7 @@ const sourceEntry = (source, destination, stageRoot, relativePath) => {
     ensureDestinationDirectory(destination, "release-directory");
     for (const entry of readdirSync(source, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
       const childRelative = `${relativePath}/${entry.name}`;
-      if (forbiddenComponent(entry.name)) continue;
+      if (forbiddenPath(childRelative)) continue;
       sourceEntry(join(source, entry.name), join(destination, entry.name), stageRoot, childRelative);
     }
     return;
