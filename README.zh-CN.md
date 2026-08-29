@@ -4,9 +4,9 @@
 
 **你只写 spec，它清空看板。**
 
-Anneal 是运行在你本机的 coding agent 控制平面。晚上把任务挂进看板，
-任务链会无人值守地完成计划、评审、实现、验证与合并——全程跑在你已经
-登录的 Codex 与 Claude 订阅上。
+Anneal 在你自己的 Mac 上驱动一条条 coding agent 任务链。把任务挂进
+看板，每个任务都会被无人值守地计划、评审、实现、验证、合并，全程跑在
+你已经登录的 Codex 与 Claude 订阅上。
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#当前状态)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -21,27 +21,27 @@ Anneal 是运行在你本机的 coding agent 控制平面。晚上把任务挂�
 
 ## 它服务的工作流
 
-白天你只做一件事：写 spec。晚上把它们作为任务挂进看板。夜里，任务链
-接过每个任务并走完全程——计划、计划评审、实现、两次相互独立的代码评审、
-修复落地、回归验证，直至合并。第二天早上，你只读真正重要的 pull
-request，对在意的那几个开一个 agent 窗口，和 AI 迭代到满意为止。
+你只做一件事：写 spec。把它们挂进看板，然后走开。任务链接过每个任务
+并走完全程：计划、计划评审、实现、两次相互独立的代码评审、修复落地、
+回归验证，直至合并。等你回来，只读真正重要的 pull request，对在意的
+那几个开一个 agent 窗口，和 AI 迭代到满意为止。
 
-在这些节点之间它不需要你。链只在三种情况下停下来等你：agent 通过
-Inbox 向你提问、你标记为 gated 的步骤需要人来决策、或某次运行升级
-（escalate）。你不必守在它前面；看板是你回来时要看的东西。
+中间它不需要你。链只在三种情况下停下来等你：agent 通过 Inbox 向你
+提问、你标记为 gated 的步骤需要人来决策、或某次运行升级（escalate）。
 
 ## 你得到什么
 
 - **Spec 进，merge 出。** 一张任务卡最终成为一个分支、一个 pull
-  request 和一次通过 merge gate 的合并；中间的每个产物——计划、评审
-  发现、修复裁决、回归结果——都被记录、可回看。
+  request 和一次通过 merge gate 的合并。中间的每个产物（计划、评审
+  发现、修复裁决、回归结果）都记录在你的机器上，事后可以逐步回溯
+  整条链。
+- **不靠信任合并。** 两次盲评、一次独立回归验证和一道 merge gate，
+  隔在 agent 的 diff 和你的主分支之间。
 - **默认并行。** 不同任务、不同仓库的链同时在飞；吞吐量取决于你注册了
   多少 runner，而不是你的工时。
 - **用你的订阅，不用 API key。** Anneal 启动的是你已经安装并登录的官方
   Codex CLI、Claude Code 和 Pi。它自己不持有任何凭据，不做代理，也没有
   任何要粘贴的 key。
-- **评审就是产品。** 每一步的输出都是下一步的输入，每次运行的记录都留
-  在你的机器上供你审计。
 
 ## Anneal 由 Anneal 构建
 
@@ -52,12 +52,17 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 
 ## 工作原理
 
-链由模板实例化而来。每一步绑定一个 agent 角色——提示词、模型、推理档位
-以及执行它的 runner CLI；旗舰的 Full Assurance 模板用十二步覆盖整条交付
-路径。下表中的 `Sol` 和 `Luna` 是 Codex CLI 暴露的 GPT-5.6 变体。
+链由模板实例化而来。每一步绑定一个 agent 角色：提示词、模型、推理档位
+以及执行它的 runner CLI。旗舰的 Full Assurance 模板用十二步覆盖整条
+交付路径。
+
+模板是数据，不是代码。角色、提示词、模型和 gate 都可以编辑，你可以把
+这条链改造成自己的流程。
 
 <details>
 <summary><b>完整十二步</b>——每一步的角色、runner、模型与档位</summary>
+
+表中的 `Sol` 和 `Luna` 是 Codex CLI 暴露的 GPT-5.6 变体。
 
 | # | 步骤 | Agent 角色 | 做什么 | Runner | 模型 · 档位 |
 | --- | --- | --- | --- | --- | --- |
@@ -84,10 +89,12 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 
 </div>
 
-第 6、7 步是并行兄弟：盲评看不到另一路的输出，第 8 步同时裁决两者。
-角色绑定在
-[`agents/templates/compound-engineer-workflow/`](agents/templates/compound-engineer-workflow)，
-模型定义在 [`agents/roles/`](agents/roles)。看板各列的语义见
+这些步骤背后的设计规则是：写代码的一方永远不裁决自己的代码。创作、
+评审与验证在相互独立的会话里进行，两路代码评审看不到彼此的发现，由
+第 8 步统一裁决。每个会话都是干净起步：提示词为该角色专门构造，运行
+环境由 runner 自行构造，你的全局 agent 配置和技能不会作为噪音漏入。角色绑定在
+[`agents/templates/compound-engineer-workflow/`](agents/templates/compound-engineer-workflow)；
+看板各列的语义见
 [task-routing 契约](docs/governance/task-routing-v1.md)。
 
 ## 快速开始
@@ -124,8 +131,8 @@ Developer Preview 4（v0.4.0）：接口与存储数据形态在 preview 之间�
 丢弃的仓库和一台你愿意让 agent 修改的机器。详见
 [`docs/release/security.md`](docs/release/security.md)。
 
-Provider CLI、它们的认证与套餐条款始终在你和 provider 之间：Anneal 不
-读取、不转发它们的凭据，也不授予任何使用权。权威支持声明见
+Provider CLI、它们的认证与套餐条款始终在你和 provider 之间；权威支持
+声明见
 [`docs/release/support-matrix.md`](docs/release/support-matrix.md)。
 
 ## 文档
