@@ -63,9 +63,20 @@ export const ChainFilterControl = ({ name, onClear }: { name: string; onClear: (
 
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
-export const moveAction = (origin: "drop" | "menu", status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
-  (origin === "drop" || origin === "menu") && status === "DOING" && startable ? "confirm-start" : "patch"
+export const moveAction = (status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
+  status === "DOING" && startable ? "confirm-start" : "patch"
 );
+
+export const startabilityRefusal = (verdict: TaskStartability): string => {
+  const reasons = Object.entries(verdict.checklist)
+    .filter(([, satisfied]) => !satisfied)
+    .map(([key]) => formatT(`taskDetail.startability.${key}`))
+    .join(", ");
+  return formatT("tasks.startRefused", { reasons });
+};
+
+export const moveNotAllowedNotice = (task: Pick<BoardTask, "name">, status: TaskStatus): string =>
+  formatT("tasks.notice.moveNotAllowed", { name: task.name, status: statusLabel(status) });
 
 /** Keeps the previous object for every row whose serialization is unchanged.
  *
@@ -129,9 +140,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
   request: TaskStartability | null;
   pending: boolean;
   error: string | null;
-  requestForMove: (origin: "drop" | "menu", taskId: string, requireStart?: boolean) => Promise<boolean>;
-  requestForDrop: (taskId: string) => Promise<boolean>;
-  requestForStart: (taskId: string) => Promise<boolean>;
+  requestForMove: (taskId: string) => Promise<boolean>;
   confirm: () => Promise<void>;
   cancel: () => void;
 } => {
@@ -139,20 +148,13 @@ export const useTaskStartConfirmation = (reload: () => void): {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const requestForMove = useCallback(async (origin: "drop" | "menu", taskId: string, requireStart = false): Promise<boolean> => {
+  const requestForMove = useCallback(async (taskId: string): Promise<boolean> => {
     const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
-    if (moveAction(origin, "DOING", verdict.startable) === "patch") {
-      if (requireStart) throw new Error("Task is not currently startable");
-      return false;
-    }
+    if (moveAction("DOING", verdict.startable) === "patch") throw new Error(startabilityRefusal(verdict));
     setError(null);
     setRequest(verdict);
     return true;
   }, []);
-
-  const requestForStart = useCallback((taskId: string): Promise<boolean> => requestForMove("menu", taskId, true), [requestForMove]);
-
-  const requestForDrop = useCallback((taskId: string): Promise<boolean> => requestForMove("drop", taskId), [requestForMove]);
 
   const confirm = useCallback(async (): Promise<void> => {
     if (!request) return;
@@ -175,7 +177,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
     setError(null);
   }, [pending]);
 
-  return { request, pending, error, requestForMove, requestForDrop, requestForStart, confirm, cancel };
+  return { request, pending, error, requestForMove, confirm, cancel };
 };
 
 export const TasksPage = (): ReactNode => {
@@ -277,11 +279,11 @@ export const TasksPage = (): ReactNode => {
     setAnnouncement(t("tasks.announcement.moved", { name: task.name, status: statusLabel(status) }));
   }, [t]);
 
-  const move = useCallback((taskId: string, status: TaskStatus, origin: "drop" | "menu" = "menu"): void => {
+  const move = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
     void run(async () => {
-      if (status === "DOING" && await start.requestForMove(origin, taskId, task.assigneeType === "AGENT")) return;
+      if (status === "DOING" && await start.requestForMove(taskId)) return;
       recordMove(task, status);
       await api.patch(`/tasks/${taskId}`, { status });
       reload();
@@ -290,8 +292,14 @@ export const TasksPage = (): ReactNode => {
 
   const drop = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
-    if (!task || task.status === status || !operatorMoveTargets(task).includes(status)) return;
-    move(taskId, status, "drop");
+    if (!task || task.status === status) return;
+    if (!operatorMoveTargets(task).includes(status)) {
+      const message = moveNotAllowedNotice(task, status);
+      setNotice(message);
+      setAnnouncement(message);
+      return;
+    }
+    move(taskId, status);
   }, [move]);
 
   // Focus follows the card. It runs when a payload lands, which is when the move
@@ -331,7 +339,7 @@ export const TasksPage = (): ReactNode => {
   }, [t]);
 
   const actions: CardActions = useMemo(() => ({
-    onMove: (task, status, origin = "menu") => move(task.id, status, origin),
+    onMove: (task, status) => move(task.id, status),
     onRetry: retry,
     onArchive: archive,
     onDelete: remove,
@@ -347,7 +355,7 @@ export const TasksPage = (): ReactNode => {
    * stale-view 4xx responses remain visible in StartTaskDialog. */
   const aggregateActions: ChainAggregateActions = useMemo(() => ({
     onActivate: (taskId) => {
-      void run(async () => { await start.requestForStart(taskId); });
+      void run(async () => { await start.requestForMove(taskId); });
     },
     onFilter: (aggregate) => setChainFilter({ id: aggregate.chainId, name: aggregate.chainName ?? aggregate.chainId.slice(0, 8) }),
     // The aggregate owns the visible members returned by this board read.

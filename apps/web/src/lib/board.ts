@@ -96,71 +96,6 @@ export const taskBoardEntry = (task: BoardTask): TaskBoardEntry => ({
 export const isBoardEntry = (value: BoardEntry | BoardTask): value is BoardEntry =>
   "kind" in value && (value.kind === "task" || value.kind === "chain");
 
-const ACTIVE_RUN_STATUSES: RunStatus[] = ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING"];
-
-const chainMemberOrder = (left: BoardTask, right: BoardTask): number => {
-  const leftPosition = left.chainProgress?.position ?? (left.chainIndex === null ? Number.MAX_SAFE_INTEGER : left.chainIndex + 1);
-  const rightPosition = right.chainProgress?.position ?? (right.chainIndex === null ? Number.MAX_SAFE_INTEGER : right.chainIndex + 1);
-  return leftPosition - rightPosition || left.id.localeCompare(right.id);
-};
-
-/** Derive a best-effort aggregate only for older control planes that do not
- * yet send `chainAggregate`. It reads facts already present on the raw rows;
- * the API projection remains authoritative whenever it exists. */
-const fallbackChainAggregate = (binding: ChainBinding, members: BoardTask[]): ChainAggregate => {
-  const steps = members.filter((member) => member.chainId === binding.id).sort(chainMemberOrder);
-  const first = steps[0] ?? members[0];
-  const primaryFrontier = steps.find((member) => member.status !== "DONE");
-  // A detached merge-tail repair is a chain member for board placement. It
-  // becomes the frontier only after every primary step has settled; before
-  // then the primary step remains the honest frontier.
-  const frontier = primaryFrontier
-    ?? members.find((member) => member.status !== "DONE")
-    ?? steps.at(-1)
-    ?? first;
-  const statusCounts: Partial<Record<TaskStatus, number>> = {};
-  for (const member of steps) statusCounts[member.status] = (statusCounts[member.status] ?? 0) + 1;
-  const active = members.some((member) => member.status === "DOING" || ACTIVE_RUN_STATUSES.includes(member.latestRun?.status ?? "CANCELLED"));
-  const allDone = members.length > 0 && members.every((member) => member.status === "DONE");
-  const status: TaskStatus = allDone
-    ? "DONE"
-    : active
-      ? "DOING"
-      : frontier?.status === "REVIEW"
-        ? "REVIEW"
-        : frontier?.status === "BACKLOG" ? "BACKLOG" : "TODO";
-  const hasBlockedOnField = first !== undefined && Object.hasOwn(first, "blockedOn");
-  const predecessor = !hasBlockedOnField
-    ? null
-    : first?.blockedOn ?? members.find((member) => member.blockedOn !== null)?.blockedOn ?? null;
-  const activation = predecessor !== null
-    ? { state: "waiting-on-predecessor" as const, predecessor }
-    : hasBlockedOnField && first?.status === "TODO" && first.latestRun === null
-      ? { state: "parked-unactivated" as const, predecessor: null }
-      : status === "DONE"
-        ? { state: "settled" as const, predecessor: null }
-        : { state: "running" as const, predecessor: null };
-  return {
-    chainId: binding.id,
-    chainName: binding.name,
-    stepCount: steps.length,
-    statusCounts,
-    status,
-    frontier: frontier === undefined ? null : {
-      taskId: frontier.id,
-      title: frontier.displayName,
-      status: frontier.status,
-      latestRun: frontier.latestRun,
-      failureReason: frontier.failureReason,
-      position: frontier.chainProgress?.position ?? (frontier.chainIndex === null ? null : frontier.chainIndex + 1),
-    },
-    activation,
-    totalCost: null,
-    createdAt: (members[0]?.createdAt ?? new Date(0).toISOString()),
-    updatedAt: (members.reduce((latest, member) => member.updatedAt > latest ? member.updatedAt : latest, new Date(0).toISOString())),
-  };
-};
-
 /** Collapse raw board rows into the entries both board shells render. Grouping
  * uses `chainBinding`, so chain-detached merge-tail repairs stay with their
  * chain even though they have no chain columns of their own. */
@@ -184,9 +119,11 @@ export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
     if (item.kind !== "chain-group") return item;
     const group = groups.get(item.id)!;
     const { binding, members } = group;
-    const aggregate = members.find((member) => member.chainAggregate !== null && member.chainAggregate !== undefined)?.chainAggregate
-      ?? fallbackChainAggregate(binding, members);
-    const representativeTaskId = aggregate.frontier?.taskId ?? members.find((member) => member.chainId === binding.id)?.id ?? members[0]!.id;
+    const aggregate = members.find((member) => member.chainAggregate !== null && member.chainAggregate !== undefined)?.chainAggregate;
+    if (aggregate === null || aggregate === undefined) {
+      throw new Error(`Board response omitted the aggregate for chain ${binding.id}`);
+    }
+    const representativeTaskId = aggregate.detailTaskId;
     return {
       kind: "chain",
       id: `chain:${aggregate.chainId}`,
@@ -312,12 +249,6 @@ export const retryable = (
   return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
 };
 
-/** Status-only destination helper retained for generic status navigation.
- * Board task cards use `operatorMoveTargets`, which also applies ownership and
- * predecessor/chain binding rules before exposing a destination. */
-export const moveTargets = (status: TaskStatus): TaskStatus[] =>
-  STATUSES.filter((candidate) => candidate !== status);
-
 /**
  * The status destinations an operator may ask the board to perform.
  *
@@ -336,7 +267,7 @@ export const moveTargets = (status: TaskStatus): TaskStatus[] =>
 export const operatorMoveTargets = (task: Pick<BoardTask, "status" | "assigneeType" | "chainId" | "chainName" | "repairOf"> & {
   blockedOn?: BoardTask["blockedOn"];
   chainProgress?: BoardTask["chainProgress"];
-}): TaskStatus[] => {
+}, startable = true): TaskStatus[] => {
   if (chainBinding(task) !== null
     || task.chainProgress !== null && task.chainProgress !== undefined
     || task.blockedOn !== null && task.blockedOn !== undefined) return [];
@@ -351,7 +282,7 @@ export const operatorMoveTargets = (task: Pick<BoardTask, "status" | "assigneeTy
   }
   // Doing is a start action for an unstarted agent task. Its callback must use
   // `moveAction`, which turns it into the same confirmation flow as a drop.
-  return task.status === "TODO" || task.status === "BACKLOG" ? [...queueTargets, "DOING"] : [];
+  return startable && (task.status === "TODO" || task.status === "BACKLOG") ? [...queueTargets, "DOING"] : queueTargets;
 };
 
 /* -------------------------------------------------------------- persistence */

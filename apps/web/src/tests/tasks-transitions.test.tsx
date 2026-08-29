@@ -50,9 +50,9 @@ type UseTaskStartConfirmation = typeof import("../pages/Tasks").useTaskStartConf
 const StartMenuHarness = ({ Card, useStart, row, onMutation }: { Card: TaskCardComponent; useStart: UseTaskStartConfirmation; row: BoardTask; onMutation: (status: TaskStatus) => void }): ReactNode => {
   const start = useStart(() => undefined);
   const [error, setError] = useState<string | null>(null);
-  const onMove = useCallback((selected: BoardTask, status: TaskStatus, origin: "menu" | "drop" = "menu"): void => {
+  const onMove = useCallback((selected: BoardTask, status: TaskStatus): void => {
     void (async () => {
-      if (status === "DOING" && await start.requestForMove(origin, selected.id, selected.assigneeType === "AGENT")) return;
+      if (status === "DOING" && await start.requestForMove(selected.id)) return;
       onMutation(status);
     })().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
   }, [onMutation, start.requestForMove]);
@@ -99,6 +99,7 @@ const openDoing = async (dom: ReturnType<typeof installDom>["dom"]): Promise<HTM
   const trigger = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label^='Actions for']");
   assert.ok(trigger, dom.window.document.body.innerHTML);
   await act(async () => trigger.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, button: 0 })));
+  await settle();
   const doing = [...dom.window.document.querySelectorAll<HTMLElement>("[role='menuitem']")]
     .find((item) => item.textContent?.trim() === "Doing");
   assert.ok(doing, dom.window.document.body.innerHTML);
@@ -128,7 +129,7 @@ test("the agent menu Doing action opens confirmation and never PATCHes", async (
     await act(async () => doing.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
     await settle();
     assert.ok(container.querySelector("[data-confirmation]"), container.innerHTML);
-    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 1);
+    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 2);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
     assert.deepEqual(mutations, []);
 
@@ -148,7 +149,7 @@ test("the agent menu Doing action opens confirmation and never PATCHes", async (
   }
 });
 
-test("a non-startable agent Doing action surfaces refusal without a status PATCH", async () => {
+test("a non-startable agent menu does not advertise Doing", async () => {
   const { dom, container } = installDom();
   installComputedStyle(dom);
   const { useTaskStartConfirmation } = await import("../pages/Tasks");
@@ -166,10 +167,13 @@ test("a non-startable agent Doing action surfaces refusal without a status PATCH
   try {
     await act(async () => root.render(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" } })} onMutation={(status) => mutations.push(status)} />));
     await settle();
-    const doing = await openDoing(dom);
-    await act(async () => doing.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label^='Actions for']");
+    assert.ok(trigger);
+    await act(async () => trigger.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, button: 0 })));
     await settle();
-    assert.match(container.textContent ?? "", /not currently startable/);
+    assert.equal([...dom.window.document.querySelectorAll<HTMLElement>("[role='menuitem']")]
+      .some((item) => item.textContent?.trim() === "Doing"), false);
+    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 1);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
     assert.deepEqual(mutations, []);
   } finally {

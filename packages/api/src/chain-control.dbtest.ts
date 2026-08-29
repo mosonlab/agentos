@@ -381,15 +381,16 @@ test("Hold records the next non-DONE layer even when no Run is active", async ()
   assert.equal(control.state, ChainControlState.HELD);
 });
 
-test("moving one Step to Backlog never creates or changes ChainControl", async () => {
+test("operator cannot move AGENT chain steps to Backlog or change ChainControl", async () => {
   const unheld = await seedChain();
   const beforeUnheld = await getTasks(unheld.project.id);
   const unheldProgress = beforeUnheld.body.find((task: any) => task.id === unheld.first.id).chainProgress;
   const parked = await patchTask(`/tasks/${unheld.second.id}`, { status: TaskStatus.BACKLOG });
-  assert.equal(parked.status, 200, JSON.stringify(parked.body));
+  assert.equal(parked.status, 409, JSON.stringify(parked.body));
   assert.equal(await db.chainControl.count({ where: { projectId: unheld.project.id, chainId: unheld.chainId } }), 0);
   const afterUnheld = await getTasks(unheld.project.id);
   assert.deepEqual(afterUnheld.body.find((task: any) => task.id === unheld.first.id).chainProgress, unheldProgress);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: unheld.second.id } })).status, TaskStatus.TODO);
 
   const held = await seedChain();
   assert.equal((await call(`/tasks/${held.first.id}/chain/hold`, { requestId: "hold-before-move" })).status, 200);
@@ -400,7 +401,7 @@ test("moving one Step to Backlog never creates or changes ChainControl", async (
   const beforeHeld = await getTasks(held.project.id);
   const heldProgress = beforeHeld.body.find((task: any) => task.id === held.first.id).chainProgress;
   const heldParked = await patchTask(`/tasks/${held.third.id}`, { status: TaskStatus.BACKLOG });
-  assert.equal(heldParked.status, 200, JSON.stringify(heldParked.body));
+  assert.equal(heldParked.status, 409, JSON.stringify(heldParked.body));
   const afterControl = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
     projectId: held.project.id,
     chainId: held.chainId,
@@ -408,5 +409,5 @@ test("moving one Step to Backlog never creates or changes ChainControl", async (
   assert.deepEqual(afterControl, beforeControl);
   const afterHeld = await getTasks(held.project.id);
   assert.deepEqual(afterHeld.body.find((task: any) => task.id === held.first.id).chainProgress, heldProgress);
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: held.third.id } })).status, TaskStatus.BACKLOG);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: held.third.id } })).status, TaskStatus.TODO);
 });

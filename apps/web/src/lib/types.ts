@@ -401,7 +401,7 @@ export type UsageCost = {
   outputTokens: number | null;
 };
 
-export type ChainAggregateState = "parked-unactivated" | "waiting-on-predecessor" | "running" | "settled";
+export type ChainAggregateState = "parked-unactivated" | "waiting-on-predecessor" | "running" | "idle" | "settled";
 
 /** One chain as it appears on the board. This is a projection, not a Task row:
  * the server owns the frontier and status derivation so the board never
@@ -411,6 +411,7 @@ export type ChainAggregate = {
   chainName: string | null;
   stepCount: number;
   statusCounts: Partial<Record<TaskStatus, number>>;
+  detailTaskId: string;
   status: TaskStatus;
   frontier: {
     taskId: string;
@@ -425,11 +426,10 @@ export type ChainAggregate = {
   activation: {
     state: ChainAggregateState;
     predecessor?: { taskId: string; taskName: string } | null;
+    taskId: string | null;
   };
-  /** Aggregate usage keeps the same shape as a task's usage projection. A
-   * legacy control plane may expose only the decimal amount, which the card
-   * also accepts and formats honestly. */
-  totalCost: UsageCost | string | number | null;
+  /** Aggregate usage keeps the same shape as a task's usage projection. */
+  totalCost: UsageCost | null;
   createdAt: string;
   updatedAt: string;
 };

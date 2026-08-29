@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
-  focusAfterMove, moveTargets, orderColumn, parseStatus, retryable, sameEdges, scheduleLabel, statusLabel, storedScroll,
+  focusAfterMove, orderColumn, parseStatus, retryable, sameEdges, scheduleLabel, storedScroll,
 } from "../lib/board";
 import type { BoardTask, ChainProgress } from "../lib/types";
 
@@ -161,12 +161,6 @@ test("Backlog preserves the API's id-ascending tiebreak within one creation time
 });
 
 /* ------------------------------------------------------------ the actions */
-
-test("a card may be moved everywhere it is not", () => {
-  assert.deepEqual(moveTargets("TODO"), ["BACKLOG", "DOING", "REVIEW", "DONE"]);
-  assert.equal(moveTargets("DONE").includes("DONE"), false);
-  assert.equal(statusLabel("BACKLOG"), "Backlog");
-});
 
 test("a retry waits for the last run to be terminal", () => {
   const failed = { status: "FAILED" as const };

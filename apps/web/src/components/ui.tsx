@@ -451,10 +451,10 @@ export type RowMenuEntry =
   | { kind?: "item"; label: string; danger?: boolean; onSelect: () => void }
   | { kind: "heading"; label: string };
 
-export const RowMenu = ({ items, label }: { items: RowMenuEntry[]; label?: string }): ReactNode => {
+export const RowMenu = ({ items, label, onOpenChange }: { items: RowMenuEntry[]; label?: string; onOpenChange?: (open: boolean) => void }): ReactNode => {
   const t = useT();
   return (
-    <DropdownMenu>
+    <DropdownMenu {...(onOpenChange === undefined ? {} : { onOpenChange })}>
       <span className="relative" onClick={(event) => event.stopPropagation()}>
         <DropdownMenuTrigger asChild>
           <Button type="button" variant="icon" size="legacyIcon" aria-label={label ?? t("ui.rowMenu.more")}><IconDots /></Button>

@@ -185,7 +185,7 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.deepEqual(allTodo.frontier, {
     taskId: "step-1", title: "Build", status: "TODO", latestRun: null, failureReason: null, position: 1,
   });
-  assert.deepEqual(allTodo.activation, { state: "parked-unactivated", predecessor: null });
+  assert.deepEqual(allTodo.activation, { state: "parked-unactivated", predecessor: null, taskId: "step-1" });
 
   const doing = chainAggregate("c1", "Release", [
     member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
@@ -201,6 +201,7 @@ test("chainAggregate derives primary progress and every board column from the fr
     member({ id: "step-2", status: "REVIEW", failureReason: "needs approval", chainIndex: 1, chainLayer: 1 }),
   ], []);
   assert.equal(review.status, "REVIEW");
+  assert.equal(review.activation.state, "idle");
   assert.deepEqual(review.frontier, {
     taskId: "step-2", title: "Step 1", status: "REVIEW", latestRun: null, failureReason: "needs approval", position: 2,
   });
@@ -224,6 +225,21 @@ test("chainAggregate reports a predecessor-bound chain and never offers parked a
   assert.deepEqual(aggregate.activation, {
     state: "waiting-on-predecessor",
     predecessor: { taskId: predecessor.id, taskName: predecessor.name },
+    taskId: "step-1",
+  });
+});
+
+test("chainAggregate offers activation after a bound predecessor has settled", () => {
+  const predecessor = { id: "previous-task", name: "Finish source", status: "DONE" as BoardRow["status"] };
+  const aggregate = chainAggregate("c1", "Release", [
+    member({ dispatchAfterTaskId: predecessor.id }),
+    member({ id: "step-2", chainIndex: 1, chainLayer: 1 }),
+  ], [], new Map([[predecessor.id, predecessor]]));
+
+  assert.deepEqual(aggregate.activation, {
+    state: "parked-unactivated",
+    predecessor: null,
+    taskId: "step-1",
   });
 });
 
@@ -244,14 +260,13 @@ test("chainAggregate sums member usage and groups a detached repair without infl
 
   assert.equal(aggregate.stepCount, 2);
   assert.deepEqual(aggregate.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
-  assert.deepEqual(aggregate.memberStatusCounts, { BACKLOG: 0, TODO: 1, DOING: 0, REVIEW: 0, DONE: 2 });
   assert.equal(aggregate.status, "TODO");
   assert.deepEqual(aggregate.frontier, {
     taskId: "repair", title: "Merge-tail repair", status: "TODO", latestRun: {
       id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", costUsd: "0.50", startedAt: null, endedAt: null,
     }, failureReason: null,
   });
-  assert.equal(aggregate.activation.state, "running");
+  assert.equal(aggregate.activation.state, "idle");
   assert.equal(aggregate.totalCost?.costUsd, "1.75");
 });
 
@@ -459,7 +474,7 @@ test("readBoard computes chainProgress from the complete chain lookup", async ()
   });
 });
 
-test("readBoard puts the same aggregate on every visible chain member and repair", async () => {
+test("readBoard carries one aggregate for visible chain members and repair", async () => {
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 0, chainLayer: 0,
     name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
@@ -476,14 +491,55 @@ test("readBoard puts the same aggregate on every visible chain member and repair
   const cards = await readBoard(db, { projectId: "p1", archived: "false" });
   const primary = cards.find((card) => card.id === regression.id)!;
   const detachedRepair = cards.find((card) => card.id === repair.id)!;
-  assert.ok(primary.chainAggregate);
-  assert.deepEqual(detachedRepair.chainAggregate, primary.chainAggregate);
-  assert.equal(primary.chainAggregate?.stepCount, 1);
-  assert.deepEqual(primary.chainAggregate?.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 });
-  assert.equal(primary.chainAggregate?.memberStatusCounts.TODO, 1);
-  assert.equal(primary.chainAggregate?.status, "TODO");
+  const projection = primary.chainAggregate ?? detachedRepair.chainAggregate;
+  assert.ok(projection);
+  assert.equal([primary, detachedRepair].filter((card) => card.chainAggregate !== null).length, 1);
+  assert.equal(projection.stepCount, 1);
+  assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 });
+  assert.equal(projection.status, "TODO");
   assert.equal(detachedRepair.repairOf?.chainId, "c1");
-  assert.equal(detachedRepair.chainAggregate?.frontier.taskId, repair.id);
+  assert.equal(projection.frontier.taskId, repair.id);
+  assert.equal(projection.detailTaskId, regression.id);
+});
+
+test("readBoard restores archived primary facts when only a detached repair is visible", async () => {
+  const regression = row({
+    id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
+    name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
+    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", session: session({ costUsd: "1.25" }) }],
+  });
+  const implementation = row({
+    id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE",
+  });
+  const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
+  const { db } = boardReadDatabase({
+    rows: [repair],
+    chainRows: [implementation, regression],
+    related: [{ id: regression.id, projectId: "p1", chainId: "c1" }],
+    activities: [{ taskId: repair.id, metadata: {
+      schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: regression.id,
+    } }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  const projection = cards[0]?.chainAggregate;
+  assert.ok(projection);
+  assert.equal(projection.stepCount, 2);
+  assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
+  assert.equal(projection.totalCost?.costUsd, "1.25");
+  assert.equal(projection.frontier.taskId, repair.id);
+  assert.equal(projection.detailTaskId, implementation.id);
+});
+
+test("readBoard does not invent a direct-chain name from a duplicated single row", async () => {
+  const direct = row({ id: "solo", chainId: "direct", chainIndex: 0, name: "Release: Build" });
+  const { db } = boardReadDatabase({ rows: [direct], chainRows: [direct] });
+
+  const [card] = await readBoard(db, { projectId: "p1", archived: "false" });
+  assert.equal(card?.chainName, null);
+  assert.equal(card?.displayName, "Release: Build");
+  assert.equal(card?.chainAggregate?.chainName, null);
 });
 
 test("the failure reason is carried in full, because Copy error hands it over", () => {

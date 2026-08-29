@@ -98,9 +98,8 @@ export type BoardCard = {
    */
   repairOf: RepairBinding | null;
   /**
-   * One shared projection for every visible member of a chain. Standalone
-   * tasks (including ordinary chain-detached tasks) carry null here; a repair
-   * task gets the same object as the primary chain rows it repairs.
+   * The chain projection, carried once by one visible member. Standalone tasks
+   * and the remaining members carry null; the web groups all rows by binding.
    */
   chainAggregate: BoardChainAggregate | null;
 };
@@ -121,6 +120,7 @@ export type BoardChainActivationState =
   | "parked-unactivated"
   | "waiting-on-predecessor"
   | "running"
+  | "idle"
   | "settled";
 
 export type BoardChainFrontier = {
@@ -140,14 +140,16 @@ export type BoardChainAggregate = {
   stepCount: number;
   /** Status counts for primary steps only, used for progress. */
   statusCounts: Record<TaskStatusType, number>;
-  /** Status counts for all members, including detached repair tasks. */
-  memberStatusCounts: Record<TaskStatusType, number>;
+  /** A persisted primary member whose task page renders the chain detail. */
+  detailTaskId: string;
   /** Derived board column; this is not a persisted Task status. */
   status: TaskStatusType;
   frontier: BoardChainFrontier;
   activation: {
     state: BoardChainActivationState;
     predecessor: { taskId: string; taskName: string } | null;
+    /** Step zero is the only board activation target. */
+    taskId: string | null;
   };
   totalCost: SerializedUsageCost | null;
   /** Earliest member creation and latest member update, for aggregate age. */
@@ -231,6 +233,7 @@ export type BoardChainMember = {
   status: TaskStatusType;
   failureReason: string | null;
   dispatchAfterTaskId: string | null;
+  archivedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
   templateStep: { name: string } | null;
@@ -304,8 +307,6 @@ export const chainAggregate = (
 
   const stepStatusCounts = chainStatuses();
   for (const member of primary) stepStatusCounts[member.status] += 1;
-  const memberStatusCounts = chainStatuses();
-  for (const member of members) memberStatusCounts[member.status] += 1;
 
   const unfinishedPrimary = primary.filter((member) => member.status !== TaskStatus.DONE);
   const unfinishedRepairs = repairs.filter((member) => member.status !== TaskStatus.DONE);
@@ -342,9 +343,10 @@ export const chainAggregate = (
         : firstPrimary !== undefined
           && firstPrimary.status === TaskStatus.TODO
           && (firstPrimary.runs ?? []).length === 0
-          && firstPrimary.dispatchAfterTaskId === null
+          && (firstPrimary.dispatchAfterTaskId === null
+            || predecessorById.get(firstPrimary.dispatchAfterTaskId)?.status === TaskStatus.DONE)
           ? "parked-unactivated"
-          : "running";
+          : "idle";
 
   const totalCost = sumUsageCosts(members.flatMap((member) => {
     const cost = memberUsageCost(member);
@@ -363,7 +365,7 @@ export const chainAggregate = (
     chainName,
     stepCount: primary.length,
     statusCounts: stepStatusCounts,
-    memberStatusCounts,
+    detailTaskId: firstPrimary?.id ?? frontierMember.id,
     status: columnStatus,
     frontier: {
       taskId: frontierMember.id,
@@ -378,6 +380,7 @@ export const chainAggregate = (
       predecessor: predecessor === null || predecessor.status === TaskStatus.DONE
         ? null
         : { taskId: predecessor.id, taskName: predecessor.name },
+      taskId: firstPrimary?.id ?? null,
     },
     totalCost: serializeUsageCost(totalCost),
     createdAt,
@@ -538,35 +541,18 @@ const taskOrderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
  * not globally unique. An unenriched full list and a page with no indexed chain
  * rows both skip the lookup entirely.
  */
-const chainProgressLookup = async (
-  db: PrismaClient,
-  rows: readonly ChainSubject[],
-  scope: TaskReadScope,
+const chainProgressFromRows = (
+  chainRows: readonly (ChainSubject & { archivedAt?: Date | null })[],
   enrich: boolean,
-): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
-  const chainIds = !enrich ? [] : [...new Set(rows
-    .filter((task) => task.chainIndex !== null)
-    .map((task) => task.chainId)
-    .filter((value): value is string => value !== null))];
-  const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
-    where: {
-      chainId: { in: chainIds },
-      chainIndex: { not: null },
-      ...(scope.projectId ? { projectId: scope.projectId } : {}),
-    },
-    select: {
-      id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-      chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
-    },
-    orderBy: { chainIndex: "asc" },
-  });
-  const progressByChain = chainProgressByChain(chainRows);
+): ((task: ChainSubject) => ChainProgressWire | null) => {
+  const normalizedRows = chainRows.map((row) => ({ ...row, archivedAt: row.archivedAt ?? null }));
+  const progressByChain = chainProgressByChain(normalizedRows);
   const positionsByChain = new Map<string, Map<string, number>>();
-  for (const row of chainRows) {
+  for (const row of normalizedRows) {
     if (row.chainId === null) continue;
     const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
     if (positionsByChain.has(key)) continue;
-    positionsByChain.set(key, positions(chainRows.filter((candidate) => (
+    positionsByChain.set(key, positions(normalizedRows.filter((candidate) => (
       candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
     ))));
   }
@@ -590,6 +576,31 @@ const chainProgressLookup = async (
     const progress = progressByChain.get(key) ?? null;
     return progress ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null } : null;
   };
+};
+
+const chainProgressLookup = async (
+  db: PrismaClient,
+  rows: readonly ChainSubject[],
+  scope: TaskReadScope,
+  enrich: boolean,
+): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
+  const chainIds = !enrich ? [] : [...new Set(rows
+    .filter((task) => task.chainIndex !== null)
+    .map((task) => task.chainId)
+    .filter((value): value is string => value !== null))];
+  const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
+    where: {
+      chainId: { in: chainIds },
+      chainIndex: { not: null },
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+    },
+    select: {
+      id: true, projectId: true, chainId: true, chainIndex: true, status: true,
+      chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
+    },
+    orderBy: { chainIndex: "asc" },
+  });
+  return chainProgressFromRows(chainRows, enrich);
 };
 
 /**
@@ -623,6 +634,7 @@ const boardChainRows = async (
       status: true,
       failureReason: true,
       dispatchAfterTaskId: true,
+      archivedAt: true,
       createdAt: true,
       updatedAt: true,
       templateStep: { select: { name: true } },
@@ -681,12 +693,57 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       stepOutput: { select: { kind: true, body: true, runId: true } },
     },
   });
-  const progressFor = await chainProgressLookup(db, rows, scope, true);
-  const primaryRows = await boardChainRows(db, rows, scope);
-  // The page's visible rows carry the display-only title for cards; archived
-  // siblings are added so a chain's name/frontier can still be derived when a
-  // visible step is not the one that proves the shared prefix.
-  const displayByTask = chainDisplayByTask([...rows, ...primaryRows]);
+  let primaryRows = await boardChainRows(db, rows, scope);
+  const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
+  const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
+    where: {
+      taskId: { in: detachedIds },
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
+    },
+    select: { taskId: true, metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const repairByTask = new Map<string, RepairBinding>();
+  const repairChainKeyByTask = new Map<string, string>();
+  const chainOfTask = new Map<string, { key: string; chainId: string }>();
+  if (repairMarkers.length > 0) {
+    const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
+      const value = asJsonObject(marker.metadata)?.regressionTaskId;
+      return typeof value === "string" ? [value] : [];
+    }))];
+    const regressionTasks = await db.task.findMany({
+      where: { id: { in: regressionIds }, ...(scope.projectId ? { projectId: scope.projectId } : {}) },
+      select: { id: true, projectId: true, chainId: true },
+    });
+    for (const task of regressionTasks) {
+      if (task.chainId === null) continue;
+      chainOfTask.set(task.id, {
+        key: chainKey({ projectId: task.projectId, chainId: task.chainId }),
+        chainId: task.chainId,
+      });
+    }
+    // A detached repair can be the only visible member. Resolve its regression
+    // binding before finalizing the primary lookup so archived siblings still
+    // contribute the real step count, progress, spend and chain-detail target.
+    const loadedKeys = new Set(primaryRows.flatMap((row) => row.chainId === null ? [] : [
+      chainKey({ projectId: row.projectId, chainId: row.chainId }),
+    ]));
+    const missingChains = regressionTasks.filter((task) => task.chainId !== null
+      && !loadedKeys.has(chainKey({ projectId: task.projectId, chainId: task.chainId })));
+    if (missingChains.length > 0) {
+      const supplemental = await boardChainRows(db, missingChains, scope);
+      const byId = new Map([...primaryRows, ...supplemental].map((row) => [row.id, row]));
+      primaryRows = [...byId.values()];
+    }
+  }
+
+  // Visible primary rows also occur in the complete lookup. Deduplicate before
+  // deriving direct-chain names so one punctuation-bearing row never looks like
+  // corroborating evidence for itself.
+  const displayInputs = [...new Map([...rows, ...primaryRows].map((row) => [row.id, row])).values()];
+  const displayByTask = chainDisplayByTask(displayInputs);
+  const progressFor = chainProgressFromRows(primaryRows, true);
 
   const predecessorIds = [...new Set([...rows, ...primaryRows]
     .map((row) => row.dispatchAfterTaskId)
@@ -700,35 +757,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
   }
 
-  const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
-  const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
-    where: {
-      taskId: { in: detachedIds },
-      actorType: "control-plane",
-      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
-    },
-    select: { taskId: true, metadata: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  });
-  const repairByTask = new Map<string, RepairBinding>();
-  const repairChainKeyByTask = new Map<string, string>();
   if (repairMarkers.length > 0) {
-    const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
-      const value = asJsonObject(marker.metadata)?.regressionTaskId;
-      return typeof value === "string" ? [value] : [];
-    }))];
-    const regressionTasks = await db.task.findMany({
-      where: { id: { in: regressionIds }, ...(scope.projectId ? { projectId: scope.projectId } : {}) },
-      select: { id: true, projectId: true, chainId: true },
-    });
-    const chainOfTask = new Map<string, { key: string; chainId: string }>();
-    for (const task of regressionTasks) {
-      if (task.chainId === null) continue;
-      chainOfTask.set(task.id, {
-        key: chainKey({ projectId: task.projectId, chainId: task.chainId }),
-        chainId: task.chainId,
-      });
-    }
     const chainNameByKey = new Map<string, string | null>();
     for (const row of [...rows, ...primaryRows]) {
       if (row.chainId === null) continue;
@@ -810,6 +839,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     ));
   }
 
+  const emittedAggregates = new Set<string>();
   return rows.map((row) => {
     const repairKey = row.chainId === null ? repairChainKeyByTask.get(row.id) : undefined;
     const key = row.chainId === null
@@ -822,7 +852,11 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
       repairByTask.get(row.id) ?? null,
     );
-    return { ...card, chainAggregate: key === undefined ? null : aggregateByChain.get(key) ?? null };
+    const aggregate = key === undefined || emittedAggregates.has(key)
+      ? null
+      : aggregateByChain.get(key) ?? null;
+    if (aggregate !== null && key !== undefined) emittedAggregates.add(key);
+    return { ...card, chainAggregate: aggregate };
   });
 };
 

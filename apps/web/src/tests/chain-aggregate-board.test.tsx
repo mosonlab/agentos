@@ -22,9 +22,10 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
 
 const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => ({
   chainId: "chain-1", chainName: "Release", stepCount: 12,
+  detailTaskId: "step-1",
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, failureReason: null, position: 3 },
-  activation: { state: "running", predecessor: null }, totalCost: null,
+  activation: { state: "running", predecessor: null, taskId: "step-1" }, totalCost: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z", ...overrides,
 });
 
@@ -55,6 +56,7 @@ test("one aggregate entry owns chain steps and a detached repair, while standalo
   const entries = boardEntries(rows);
   assert.deepEqual(entries.map((entry) => entry.kind), ["chain", "task"]);
   assert.equal(entries[0]?.kind === "chain" ? entries[0].members.length : 0, 3);
+  assert.equal(entries[0]?.kind === "chain" ? entries[0].representativeTaskId : "", "step-1");
   assert.equal(entries[1]?.kind === "task" ? entries[1].task.id : "", "standalone");
 });
 
@@ -75,7 +77,7 @@ test("aggregate placement follows API-derived frontier status and counts entries
 });
 
 test("aggregate card exposes progress, frontier, activation/lock state, and no drag or Move To", () => {
-  const parked = aggregate({ activation: { state: "parked-unactivated", predecessor: null } });
+  const parked = aggregate({ activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1" } });
   const parkedMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={parked} />);
   assert.match(parkedMarkup, /Step 3\/12/);
   assert.match(parkedMarkup, /Implement release/);
@@ -83,7 +85,7 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.doesNotMatch(parkedMarkup, /draggable/);
   assert.doesNotMatch(parkedMarkup, /Move to/);
 
-  const waitingMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({ activation: { state: "waiting-on-predecessor", predecessor: { taskId: "previous", taskName: "Prepare release" } } })} />);
+  const waitingMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({ activation: { state: "waiting-on-predecessor", predecessor: { taskId: "previous", taskName: "Prepare release" }, taskId: "step-1" } })} />);
   assert.match(waitingMarkup, /Prepare release/);
   assert.match(waitingMarkup, /Locked by/);
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
@@ -109,12 +111,13 @@ test("aggregate translations keep the state and action copy localized", () => {
 
 const AggregateActivationHarness = (): ReactNode => {
   const start = useTaskStartConfirmation(noop);
-  const projection = aggregate({ activation: { state: "parked-unactivated", predecessor: null } });
+  const projection = aggregate({ activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1" } });
   return <>
     <ChainAggregateCard
       aggregate={projection}
+      representativeTaskId="step-1"
       actions={{
-        onActivate: (taskId) => { void start.requestForStart(taskId); },
+        onActivate: (taskId) => { void start.requestForMove(taskId); },
         onFilter: noop,
         onArchive: noop,
       }}
@@ -128,7 +131,7 @@ const AggregateActivationHarness = (): ReactNode => {
   </>;
 };
 
-test("aggregate Activate starts the frontier and keeps a stale-view 4xx visible", async () => {
+test("aggregate Activate starts step zero and keeps a stale-view 4xx visible", async () => {
   const { dom, container } = installDom();
   const originalFetch = globalThis.fetch;
   const requests: Array<{ method: string; path: string }> = [];
@@ -136,18 +139,18 @@ test("aggregate Activate starts the frontier and keeps a stale-view 4xx visible"
     const path = String(input);
     const method = init?.method ?? "GET";
     requests.push({ method, path });
-    if (path === "/api/tasks/step-3/startability") return Response.json({
+    if (path === "/api/tasks/step-1/startability") return Response.json({
       startable: true,
       checklist: {
         repoBound: true, agentAssignee: true, repoAccessGrant: true,
         budgetRemaining: true, noActiveRun: true, predecessorsDone: true,
       },
       task: {
-        id: "step-3", name: "Release: Implement", agent: { id: "a1", title: "Senior dev" },
+        id: "step-1", name: "Release: Build", agent: { id: "a1", title: "Senior dev" },
         repo: { id: "r1", name: "product" }, targetBranch: "main",
       },
     });
-    if (path === "/api/tasks/step-3/start" && method === "POST") {
+    if (path === "/api/tasks/step-1/start" && method === "POST") {
       return Response.json({ error: "This chain was already activated." }, { status: 409 });
     }
     return Response.json([], { status: 404 });
@@ -170,7 +173,7 @@ test("aggregate Activate starts the frontier and keeps a stale-view 4xx visible"
     await press("Activate");
     assert.ok(container.querySelector("[data-aggregate-confirmation]"));
     await press("Confirm activation");
-    assert.equal(requests.filter(({ method, path }) => method === "POST" && path === "/api/tasks/step-3/start").length, 1);
+    assert.equal(requests.filter(({ method, path }) => method === "POST" && path === "/api/tasks/step-1/start").length, 1);
     assert.match(container.textContent ?? "", /already activated/u);
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });

@@ -1,6 +1,6 @@
 import { type MouseEvent, type ReactNode } from "react";
 
-import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
+import { duration, timeAgo, usageCostLabel } from "../lib/format";
 import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
 import { cn } from "../lib/utils";
 import { navigate } from "../lib/router";
@@ -26,6 +26,7 @@ const STATE_TONE: Record<ChainAggregateState, "green" | "amber" | "grey"> = {
   "parked-unactivated": "grey",
   "waiting-on-predecessor": "amber",
   running: "amber",
+  idle: "grey",
   settled: "green",
 };
 
@@ -44,7 +45,7 @@ const memberPosition = (aggregate: ChainAggregate, members: readonly BoardTask[]
 };
 
 const aggregateCost = (value: ChainAggregate["totalCost"]): string =>
-  value !== null && typeof value === "object" ? usageCostLabel(value) : value === null ? "—" : money(value);
+  value === null ? "—" : usageCostLabel(value);
 
 const runLine = (aggregate: ChainAggregate, t: Translate): ReactNode => {
   const run = aggregate.frontier?.latestRun;
@@ -69,8 +70,8 @@ const menu = (
   t: Translate,
 ): RowMenuEntry[] => [
   { label: t("tasks.aggregate.menu.open"), onSelect: () => navigate(routeFor(representativeTaskId)) },
-  ...(aggregate.activation.state === "parked-unactivated"
-    ? [{ label: t("tasks.aggregate.menu.activate"), onSelect: () => actions.onActivate(representativeTaskId) }]
+  ...(aggregate.activation.state === "parked-unactivated" && aggregate.activation.taskId !== null
+    ? [{ label: t("tasks.aggregate.menu.activate"), onSelect: () => actions.onActivate(aggregate.activation.taskId!) }]
     : []),
   { label: t("tasks.aggregate.menu.filter"), onSelect: () => actions.onFilter(aggregate) },
   ...(aggregate.activation.state === "settled"
@@ -91,7 +92,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor ?? null;
   const memberTaskIds = members.map((member) => member.id);
-  const noOp: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
+  const handlers: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
   const frontierRun = runLine(aggregate, t);
   const onBodyClick = (event: MouseEvent<HTMLElement>): void => {
     const target = event.target;
@@ -109,7 +110,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
         <a data-card-title="" href={`#${routeFor(representative)}`} className={TITLE}>{title}</a>
       </h3>
-      <RowMenu items={menu(aggregate, representative, memberTaskIds, noOp, t)} label={t("tasks.aggregate.actionsFor", { name: title })} />
+      <RowMenu items={menu(aggregate, representative, memberTaskIds, handlers, t)} label={t("tasks.aggregate.actionsFor", { name: title })} />
     </div>
     <div className={META}>
       <div data-chain-progress="" className={META_ROW}>
@@ -124,7 +125,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
             className="ml-auto flex-none rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
             title={t("tasks.aggregate.filter")}
             aria-label={t("tasks.card.filterChain", { name: title })}
-            onClick={(event) => { event.stopPropagation(); noOp.onFilter(aggregate); }}
+            onClick={(event) => { event.stopPropagation(); handlers.onFilter(aggregate); }}
           >
             {t("tasks.aggregate.filter")}
           </button>
@@ -134,9 +135,9 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
       {aggregate.frontier?.failureReason === null || aggregate.frontier?.failureReason === undefined ? null : (
         <div data-chain-failure="" className={cn(META_ROW, FAILURE)}>{aggregate.frontier.failureReason}</div>
       )}
-      {state === "parked-unactivated" ? (
+      {state === "parked-unactivated" && aggregate.activation.taskId !== null ? (
         <div className={META_ROW}>
-          <Button type="button" variant="legacyPrimary" size="legacySmall" onClick={(event) => { event.stopPropagation(); noOp.onActivate(representative); }}>
+          <Button type="button" variant="legacyPrimary" size="legacySmall" onClick={(event) => { event.stopPropagation(); handlers.onActivate(aggregate.activation.taskId!); }}>
             {t("tasks.aggregate.activate")}
           </Button>
         </div>
