@@ -14,6 +14,7 @@ import {
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
   MERGE_TAIL_KIND,
+  transitionMergeRecovery,
 } from "./merge-tail.js";
 import {
   ArchivedAssigneeError,
@@ -974,12 +975,11 @@ export const activateRecoveryIntegratorSuccessor = async (
   if (activated.nextTaskId !== input.integratorTaskId) {
     throw new Error("Recovery activation did not resolve the expected merge-integrator successor");
   }
-  await tx.mergeRecoveryAttempt.update({ where: { id: recovery.id }, data: {
-    status: MergeRecoveryStatus.SUCCEEDED,
+  await transitionMergeRecovery(tx, recovery.id, MergeRecoveryStatus.SUCCEEDED, {
     authorizationActivityId: authorization.id,
     failureReason: null,
     endedAt: now,
-  } });
+  });
   return activated;
 };
 

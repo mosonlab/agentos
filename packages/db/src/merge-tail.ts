@@ -1,4 +1,4 @@
-import { MergeRecoveryStatus, type Prisma } from "@prisma/client";
+import { MergeRecoveryStatus, type MergeRecoveryAttempt, type Prisma } from "@prisma/client";
 
 import { stepRole } from "./step-role.js";
 
@@ -50,7 +50,7 @@ export type MergeRecoveryPhase =
   | "succeeded"
   | "actual-failure";
 
-const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecoveryStatus>> = {
+export const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecoveryStatus>> = {
   [MergeRecoveryStatus.VALIDATING]: new Set([MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.FAILED]),
   [MergeRecoveryStatus.REPAIRING]: new Set([
     MergeRecoveryStatus.AWAITING_AUTHORIZATION,
@@ -61,15 +61,76 @@ const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecover
     MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
     MergeRecoveryStatus.SUCCEEDED,
   ]),
-  [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set(),
+  [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set([MergeRecoveryStatus.REPAIRING]),
   [MergeRecoveryStatus.SUCCEEDED]: new Set(),
-  [MergeRecoveryStatus.FAILED]: new Set(),
+  [MergeRecoveryStatus.FAILED]: new Set([MergeRecoveryStatus.VALIDATING]),
 };
 
 export const mergeRecoveryTransitionAllowed = (
   from: MergeRecoveryStatus,
   to: MergeRecoveryStatus,
 ): boolean => from === to || RECOVERY_TRANSITIONS[from].has(to);
+
+export type MergeRecoveryTransitionData = Omit<Prisma.MergeRecoveryAttemptUpdateManyMutationInput, "status">;
+
+export type MergeRecoveryTransitionGuard = Prisma.MergeRecoveryAttemptWhereInput;
+
+/**
+ * The fail-loud persistence primitive for every recovery status change. Named
+ * merge-tail operations own the surrounding Task and marker writes; the
+ * activation module also uses this primitive for its authorization-bound
+ * terminal success.
+ */
+export function transitionMergeRecovery(
+  tx: Prisma.TransactionClient,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data?: MergeRecoveryTransitionData,
+): Promise<MergeRecoveryAttempt>;
+export function transitionMergeRecovery(
+  tx: Prisma.TransactionClient,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data: MergeRecoveryTransitionData,
+  expected: MergeRecoveryTransitionGuard,
+): Promise<MergeRecoveryAttempt | null>;
+export async function transitionMergeRecovery(
+  tx: Prisma.TransactionClient,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data: MergeRecoveryTransitionData = {},
+  expected?: MergeRecoveryTransitionGuard,
+): Promise<MergeRecoveryAttempt | null> {
+  const aggregate = await tx.mergeRecoveryAttempt.findUnique({
+    where: { id: aggregateId },
+    select: { status: true },
+  });
+  if (!aggregate) {
+    if (expected) return null;
+    throw new Error(`Merge recovery aggregate ${aggregateId} is absent`);
+  }
+  if (expected) {
+    const guardedFrom = typeof expected.status === "string" ? expected.status : aggregate.status;
+    if (!mergeRecoveryTransitionAllowed(guardedFrom, target)) {
+      throw new Error(`Illegal merge recovery transition ${guardedFrom} -> ${target} for ${aggregateId}`);
+    }
+    if (aggregate.status !== guardedFrom) return null;
+    const updated = await tx.mergeRecoveryAttempt.updateMany({
+      where: { AND: [{ id: aggregateId, status: aggregate.status }, expected] },
+      data: { ...data, status: target },
+    });
+    return updated.count === 1
+      ? tx.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregateId } })
+      : null;
+  }
+  if (!mergeRecoveryTransitionAllowed(aggregate.status, target)) {
+    throw new Error(`Illegal merge recovery transition ${aggregate.status} -> ${target} for ${aggregateId}`);
+  }
+  return tx.mergeRecoveryAttempt.update({
+    where: { id: aggregateId },
+    data: { ...data, status: target },
+  });
+}
 
 export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPhase => (
   status === MergeRecoveryStatus.VALIDATING ? "validation"

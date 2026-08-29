@@ -11,6 +11,7 @@ import {
   isMergeReadinessStep,
   mergeRecoveryPhase,
   mergeRecoveryTransitionAllowed,
+  RECOVERY_TRANSITIONS,
   parseResolverResult,
   parseRegressionVerdict,
 } from "./merge-tail.js";
@@ -19,13 +20,30 @@ const A = "a".repeat(40);
 const B = "b".repeat(40);
 
 test("merge recovery state transitions and operator phases are explicit", () => {
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.VALIDATING, MergeRecoveryStatus.REPAIRING), true);
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.VALIDATING, MergeRecoveryStatus.FAILED), true);
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION), true);
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.AWAITING_AUTHORIZATION, MergeRecoveryStatus.REPAIRING), true);
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.AWAITING_AUTHORIZATION, MergeRecoveryStatus.SUCCEEDED), true);
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.SUCCEEDED, MergeRecoveryStatus.REPAIRING), false);
-  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.FAILED, MergeRecoveryStatus.VALIDATING), false);
+  const statuses = Object.values(MergeRecoveryStatus);
+  const declaredEdges = statuses.flatMap((from) => (
+    [...RECOVERY_TRANSITIONS[from]].map((to) => `${from}->${to}`)
+  ));
+  assert.deepEqual(declaredEdges, [
+    "VALIDATING->REPAIRING",
+    "VALIDATING->FAILED",
+    "REPAIRING->AWAITING_AUTHORIZATION",
+    "REPAIRING->BLOCKED_DOWNSTREAM",
+    "AWAITING_AUTHORIZATION->REPAIRING",
+    "AWAITING_AUTHORIZATION->BLOCKED_DOWNSTREAM",
+    "AWAITING_AUTHORIZATION->SUCCEEDED",
+    "BLOCKED_DOWNSTREAM->REPAIRING",
+    "FAILED->VALIDATING",
+  ]);
+  for (const from of statuses) {
+    for (const to of statuses) {
+      assert.equal(
+        mergeRecoveryTransitionAllowed(from, to),
+        from === to || RECOVERY_TRANSITIONS[from].has(to),
+        `${from} -> ${to}`,
+      );
+    }
+  }
   assert.deepEqual(Object.values(MergeRecoveryStatus).map((status) => mergeRecoveryPhase(status)), [
     "validation",
     "repair",
