@@ -57,6 +57,36 @@ Long-horizon autonomy is not wired yet. A Goal is stored and edited but nothing
 schedules work from it, so a chain is still started by you or by a webhook
 trigger, not by a standing objective. See [Status](#status).
 
+## Board columns
+
+The board shows where work sits in the intent-to-delivery flow. The [Backlog
+card lifecycle](docs/governance/task-routing-v1.md#backlog-card-lifecycle) in
+the task-routing contract defines card creation, dispatch, and archival; the
+definitions here cover the column semantics.
+
+- **Backlog — intent.** An un-instantiated brief that is still being refined,
+  awaits a decision, or is deliberately parked; it is not connected to
+  execution. Prefix an indefinitely parked card's title with `Parked:`.
+- **Todo — runnable execution.** An instantiated chain or step whose
+  specification of record is final, runnable now or waiting for activation or
+  a dependency unlock. The boundary is explicit: un-instantiated intent
+  belongs in Backlog; instantiated chains and their steps belong in Todo and
+  the later columns.
+- **Doing — active execution.** The runner has activated an AGENT task and work
+  is in progress.
+- **Review — awaiting a lifecycle decision.** An AGENT task is paused for an
+  approval or review gate, or has surfaced a run issue that needs attention
+  before the chain can continue.
+- **Done — complete.** The task or chain step is finished. The runner and chain
+  scheduler record completion for AGENT tasks; the operator marks HUMAN tasks
+  Done.
+
+The operator owns Backlog and Todo transitions and marking HUMAN tasks Done.
+The runner and chain scheduler own DOING, REVIEW, and DONE transitions for
+AGENT tasks. In the usual flow, the operator moves finalized intent from
+Backlog to Todo, then the runner advances each instantiated step through Doing,
+Review, and Done.
+
 <div align="center">
 
 <img src="docs/media/agents.png" alt="Agents view: each agent's role, model, reasoning effort and runner" width="880">
