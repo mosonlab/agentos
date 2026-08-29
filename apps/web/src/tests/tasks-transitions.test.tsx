@@ -3,12 +3,11 @@ import test from "node:test";
 import { act, type ReactNode, useCallback, useState } from "react";
 
 import type { CardActions } from "../components/task-card";
-import { operatorMoveTargets } from "../lib/board";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { installDom, reactDom } from "./dom-harness";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
-  id: "t1", name: "Ship the thing", displayName: overrides.displayName ?? overrides.name ?? "Ship the thing", status: "TODO",
+  id: "t1", name: "Ship the thing", displayName: overrides.displayName ?? overrides.name ?? "Ship the thing", status: "TODO", moveTargets: [],
   assigneeType: "HUMAN", failureReason: null, createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
@@ -21,29 +20,6 @@ const actions = (onMove: CardActions["onMove"] = noop): CardActions => ({
   onMove, onRetry: noop, onArchive: noop, onDelete: noop, onCopyError: noop, onFilterChain: noop,
 });
 
-test("operator move targets keep machine statuses out of ordinary menus", () => {
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "HUMAN", status: "TODO" })), ["BACKLOG", "DONE"]);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "HUMAN", status: "DOING" })), ["DONE"]);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "HUMAN", status: "REVIEW" })), ["DONE"]);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "HUMAN", status: "DONE" })), []);
-
-  // Doing is present only as the agent's start action. The menu never offers a
-  // Review or Done PATCH for an agent, and a callback below proves Doing cannot
-  // silently become one either.
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "AGENT", status: "TODO" })), ["BACKLOG", "DOING"]);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "AGENT", status: "BACKLOG" })), ["TODO", "DOING"]);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "AGENT", status: "DOING" })), []);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "AGENT", status: "REVIEW" })), []);
-  assert.deepEqual(operatorMoveTargets(task({ assigneeType: "AGENT", status: "DONE" })), []);
-});
-
-test("predecessor-bound and chain-derived cards have no operator status targets", () => {
-  assert.deepEqual(operatorMoveTargets(task({ blockedOn: { taskId: "p1", taskName: "Build first" } })), []);
-  assert.deepEqual(operatorMoveTargets(task({ chainId: "c1", chainName: "Release", chainIndex: 0 })), []);
-  assert.deepEqual(operatorMoveTargets(task({ chainProgress: { chainId: "c1", done: 0, total: 1, activeStepName: "Build", activeStatus: "todo", currentLayer: 1, layerCount: 1, position: 1 } })), []);
-  assert.deepEqual(operatorMoveTargets(task({ repairOf: { chainId: "c1", chainName: "Release", repairKind: "gate-fix" } })), []);
-});
-
 type TaskCardComponent = typeof import("../components/task-card").TaskCard;
 type UseTaskStartConfirmation = typeof import("../pages/Tasks").useTaskStartConfirmation;
 
@@ -52,7 +28,8 @@ const StartMenuHarness = ({ Card, useStart, row, onMutation }: { Card: TaskCardC
   const [error, setError] = useState<string | null>(null);
   const onMove = useCallback((selected: BoardTask, status: TaskStatus): void => {
     void (async () => {
-      if (status === "DOING" && await start.requestForMove(selected.id)) return;
+      const target = selected.moveTargets.find((candidate) => candidate.status === status);
+      if (target?.via === "start" && await start.requestForMove(selected.id)) return;
       onMutation(status);
     })().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
   }, [onMutation, start.requestForMove]);
@@ -123,13 +100,17 @@ test("the agent menu Doing action opens confirmation and never PATCHes", async (
   } });
   const root = (await reactDom()).createRoot(container);
   try {
-    await act(async () => root.render(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" } })} onMutation={(status) => mutations.push(status)} />));
+    await act(async () => root.render(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({
+      assigneeType: "AGENT",
+      assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" },
+      moveTargets: [{ status: "BACKLOG", via: "patch" }, { status: "DOING", via: "start" }],
+    })} onMutation={(status) => mutations.push(status)} />));
     await settle();
     const doing = await openDoing(dom);
     await act(async () => doing.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
     await settle();
     assert.ok(container.querySelector("[data-confirmation]"), container.innerHTML);
-    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 2);
+    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 1);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
     assert.deepEqual(mutations, []);
 
@@ -173,7 +154,7 @@ test("a non-startable agent menu does not advertise Doing", async () => {
     await settle();
     assert.equal([...dom.window.document.querySelectorAll<HTMLElement>("[role='menuitem']")]
       .some((item) => item.textContent?.trim() === "Doing"), false);
-    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 1);
+    assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 0);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
     assert.deepEqual(mutations, []);
   } finally {

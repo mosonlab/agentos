@@ -1,13 +1,12 @@
 import { type DragEvent, type MouseEvent, type ReactNode, memo, useEffect, useState } from "react";
 
 import { chainPositionMarker } from "../lib/chain";
-import { api } from "../lib/api";
 import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
-import { chainBinding, chainBindingLabel, operatorMoveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
+import { chainBinding, chainBindingLabel, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
 import { navigate } from "../lib/router";
-import type { BoardTask, TaskStartability, TaskStatus } from "../lib/types";
+import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { IconRobot, IconUser } from "./icons";
 import { DOT, DOT_TONE, Pill, ROW, RowMenu, type RowMenuEntry } from "./ui";
@@ -159,8 +158,8 @@ export const RunningCardTime = ({ task, t }: { task: BoardTask; t: Translate }):
   return <>{cardTime(task, t, now)}</>;
 };
 
-const menu = (task: BoardTask, actions: CardActions, t: Translate, startable: boolean): RowMenuEntry[] => {
-  const targets = operatorMoveTargets(task, startable);
+const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => {
+  const targets = task.moveTargets;
   return [
   ...(retryable(task, task.latestRun) ? [{ label: t("common.retry"), onSelect: () => actions.onRetry(task) }] : []),
   // Only where there is an error to copy, and it copies the whole of it — the
@@ -170,24 +169,15 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate, startable: bo
   { label: t("common.delete"), danger: true, onSelect: () => actions.onDelete(task) },
   // The keyboard's and touch's replacement for the drag (K15/K16).
   ...(targets.length === 0 ? [] : [{ kind: "heading" as const, label: t("tasks.menu.moveTo") }]),
-  ...targets.map((status) => ({
-    label: statusLabel(status),
-    onSelect: () => actions.onMove(task, status),
+  ...targets.map((target) => ({
+    label: statusLabel(target.status),
+    onSelect: () => actions.onMove(task, target.status),
   })),
   ];
 };
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
-  const [startable, setStartable] = useState(false);
-  useEffect(() => setStartable(false), [task.id, task.status]);
-  const readStartability = (open: boolean): void => {
-    if (!open || task.assigneeType !== "AGENT" || !["BACKLOG", "TODO"].includes(task.status)) return;
-    void api.get<TaskStartability>(`/tasks/${task.id}/startability`).then(
-      (verdict) => setStartable(verdict.startable),
-      () => setStartable(false),
-    );
-  };
   const assignee = task.assigneeAgent?.title ?? null;
   const schedule = scheduleLabel(task);
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
@@ -213,7 +203,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
         <a data-card-title="" href={`#/tasks/${task.id}`} className={TASK_TITLE}>{title}</a>
       </h3>
-      <RowMenu items={menu(task, actions, t, startable)} label={t("tasks.card.actionsFor", { name: task.name })} onOpenChange={readStartability} />
+      <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
     <div className={TASK_META}>
       {hasScheduleRow ? <div data-card-schedule="" className={TASK_META_ROW}>

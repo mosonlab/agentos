@@ -29,11 +29,16 @@ import {
 
 import { createGitHubReader, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 import {
-  recoveryDecision,
+  classifyCandidate,
+  classifyDurable,
+  classifyFresh,
+  classifyRetryBudget,
   type CandidateLoad,
   type CandidateRefusalCode,
+  type Ineligible,
   type RecoveryCandidate,
   type RecoveryIdentity,
+  type Retry,
 } from "./base-drift-recovery-decision.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
 
@@ -395,23 +400,22 @@ const recordClassificationRetry = async (
   if (currentStop?.stopId !== stopId) return "skipped";
   const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
   if (attempt.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
-  const decision = recoveryDecision({
-    stage: "classification-retry",
+  const decision = classifyRetryBudget({
     reason,
     validationAttempts: attempt.validationAttempts,
     maxAttempts: MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
   });
-  if (decision.kind === "ineligible") {
-    await settleIneligibleLocked(
-      tx,
-      integratorTaskId,
-      stopId,
-      decision.reason,
-    );
-    return "ineligible";
-  }
-  if (decision.kind !== "retry" || decision.classificationAttempt === undefined) {
-    throw new Error(`Unexpected classification retry decision ${decision.kind}`);
+  switch (decision.kind) {
+    case "ineligible":
+      await settleIneligibleLocked(
+        tx,
+        integratorTaskId,
+        stopId,
+        decision.reason,
+      );
+      return "ineligible";
+    case "retry":
+      break;
   }
   const classificationAttempt = decision.classificationAttempt;
   await tx.mergeRecoveryAttempt.update({
@@ -461,8 +465,7 @@ const queueRecovery = async (
     targetBranch: expected.targetBranch,
     recoveryRunId: { not: null },
   } });
-  const decision = recoveryDecision({
-    stage: "durable",
+  const decision = classifyDurable({
     expected,
     load: loaded,
     aggregateValidating: aggregate.status === MergeRecoveryStatus.VALIDATING,
@@ -470,10 +473,18 @@ const queueRecovery = async (
     maxRecoveries: MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
     currentBaseSha,
   });
-  if (decision.kind === "skip") return { kind: "skip" };
-  if (decision.kind === "retry") return { kind: "retry", reason: decision.reason };
-  if (decision.kind === "ineligible") return { kind: "ineligible", reason: decision.reason };
-  if (decision.kind === "inspect") throw new Error("Durable recovery decision cannot request another remote inspection");
+  switch (decision.kind) {
+    case "skip":
+      return { kind: "skip" };
+    case "retry":
+      return { kind: "retry", reason: decision.reason };
+    case "ineligible":
+      return { kind: "ineligible", reason: decision.reason };
+    case "exhausted":
+      break;
+    case "queue":
+      break;
+  }
   const attempt = aggregate.attempt;
   const common = {
     sourceStopId: expected.stopId,
@@ -491,32 +502,35 @@ const queueRecovery = async (
     readinessTaskId: expected.readinessTaskId,
     regressionTaskId: expected.regressionTaskId,
   };
-  if (decision.kind === "exhausted") {
-    await stopMergeTail(tx, {
-      phase: "recovery-exhausted",
-      aggregateId: aggregate.id,
-      integratorTaskId: expected.integratorTaskId,
-      sourceStopId: expected.stopId,
-      reason: decision.reason,
-      at: now,
-      attempt,
-      recoveryData: {
-        boundSourceRunId: expected.sourceRunId,
-        authorizationActivityId: expected.authorizationActivityId,
-        readinessTaskId: expected.readinessTaskId,
-        regressionTaskId: expected.regressionTaskId,
-        repository: expected.repository,
-        prNumber: expected.prNumber,
-        targetBranch: expected.targetBranch,
-        authorizedHeadSha: expected.authorizedHeadSha,
-        authorizedBaseSha: expected.authorizedBaseSha,
-        observedBaseSha: expected.observedBaseSha,
-        currentBaseSha,
-      },
-      markerMetadata: common,
-    });
-    await openAbandonQuestion(tx, expected.integratorTaskId, expected.stopId);
-    return { kind: "exhausted" };
+  switch (decision.kind) {
+    case "exhausted":
+      await stopMergeTail(tx, {
+        phase: "recovery-exhausted",
+        aggregateId: aggregate.id,
+        integratorTaskId: expected.integratorTaskId,
+        sourceStopId: expected.stopId,
+        reason: decision.reason,
+        at: now,
+        attempt,
+        recoveryData: {
+          boundSourceRunId: expected.sourceRunId,
+          authorizationActivityId: expected.authorizationActivityId,
+          readinessTaskId: expected.readinessTaskId,
+          regressionTaskId: expected.regressionTaskId,
+          repository: expected.repository,
+          prNumber: expected.prNumber,
+          targetBranch: expected.targetBranch,
+          authorizedHeadSha: expected.authorizedHeadSha,
+          authorizedBaseSha: expected.authorizedBaseSha,
+          observedBaseSha: expected.observedBaseSha,
+          currentBaseSha,
+        },
+        markerMetadata: common,
+      });
+      await openAbandonQuestion(tx, expected.integratorTaskId, expected.stopId);
+      return { kind: "exhausted" };
+    case "queue":
+      break;
   }
 
   await closeIntegratorQuestions(tx, expected.integratorTaskId);
@@ -558,7 +572,58 @@ const queueRecovery = async (
   return { kind: "recovered" };
 });
 
+export type RecoveryTickDelta = { recovered: number; exhausted: number; ineligible: number };
+
+type RecoverySettlementTask = {
+  id: string;
+  identity?: Partial<RecoveryIdentity>;
+};
+
+type RecoverySettlementDecision = Retry | Ineligible | QueueRecoveryResult;
+
+type RecoverySettlementOperations = {
+  recordRetry: typeof recordClassificationRetry;
+  settleIneligible: typeof settleIneligible;
+};
+
+const recoverySettlementOperations: RecoverySettlementOperations = {
+  recordRetry: recordClassificationRetry,
+  settleIneligible,
+};
+
+export const settleRecovery = async (
+  db: PrismaClient,
+  task: RecoverySettlementTask,
+  stopId: string,
+  decision: RecoverySettlementDecision,
+  operations: RecoverySettlementOperations = recoverySettlementOperations,
+): Promise<RecoveryTickDelta> => {
+  const tickDelta: RecoveryTickDelta = { recovered: 0, exhausted: 0, ineligible: 0 };
+  switch (decision.kind) {
+    case "skip":
+      return tickDelta;
+    case "recovered":
+      return { ...tickDelta, recovered: 1 };
+    case "exhausted":
+      return { ...tickDelta, exhausted: 1 };
+    case "retry": {
+      const outcome = await operations.recordRetry(db, task.id, stopId, decision.reason);
+      return outcome === "ineligible" ? { ...tickDelta, ineligible: 1 } : tickDelta;
+    }
+    case "ineligible": {
+      const settled = await operations.settleIneligible(db, task.id, stopId, decision.reason, task.identity);
+      return settled ? { ...tickDelta, ineligible: 1 } : tickDelta;
+    }
+  }
+};
+
 export type BaseDriftRecoveryTickResult = { examined: number; recovered: number; exhausted: number; ineligible: number };
+
+const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDelta): void => {
+  result.recovered += delta.recovered;
+  result.exhausted += delta.exhausted;
+  result.ineligible += delta.ineligible;
+};
 
 export const baseDriftRecoveryTick = async (
   db: PrismaClient,
@@ -586,23 +651,21 @@ export const baseDriftRecoveryTick = async (
       cursor = task.id;
       if (result.examined >= limit) break;
       const loaded = await loadCandidate(db, task.id);
-      const candidateDecision = recoveryDecision({ stage: "candidate", load: loaded });
-      if (candidateDecision.kind === "skip") continue;
-      result.examined += 1;
-      if (candidateDecision.kind === "retry" || candidateDecision.kind === "ineligible") {
-        if (loaded.kind !== "refused") throw new Error(`Candidate ${task.id} has no refusal binding`);
-        if (candidateDecision.kind === "retry") {
-          const outcome = await recordClassificationRetry(db, task.id, loaded.stopId, candidateDecision.reason);
-          if (outcome === "ineligible") result.ineligible += 1;
-        } else if (await settleIneligible(db, task.id, loaded.stopId, candidateDecision.reason)) {
-          result.ineligible += 1;
-        }
-        continue;
-      }
-      if (candidateDecision.kind !== "inspect") {
-        throw new Error(`Unexpected candidate recovery decision ${candidateDecision.kind}`);
+      const candidateDecision = classifyCandidate(loaded);
+      switch (candidateDecision.kind) {
+        case "skip":
+          continue;
+        case "retry":
+        case "ineligible":
+          result.examined += 1;
+          addTickDelta(result, await settleRecovery(db, task, candidateDecision.stopId, candidateDecision));
+          continue;
+        case "inspect":
+          result.examined += 1;
+          break;
       }
       const candidate = candidateDecision.candidate;
+      const settlementTask = { id: task.id, identity: candidate };
       const validation = await db.$transaction(async (tx) => {
         if (!await lockRecoveryChain(tx, candidate.integratorTaskId)) return false;
         const attempt = await ensureValidationAttemptLocked(tx, candidate.integratorTaskId, candidate.stopId, candidate);
@@ -610,12 +673,8 @@ export const baseDriftRecoveryTick = async (
       });
       if (!validation) continue;
       if (!reader) {
-        const decision = recoveryDecision({ stage: "reader-unavailable" });
-        if (decision.kind !== "retry") throw new Error(`Unexpected reader decision ${decision.kind}`);
-        const outcome = await recordClassificationRetry(
-          db, task.id, candidate.stopId, decision.reason,
-        );
-        if (outcome === "ineligible") result.ineligible += 1;
+        const decision = classifyFresh({ kind: "reader-unavailable" });
+        addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, decision));
         continue;
       }
       let snapshot: PullRequestSnapshot;
@@ -641,42 +700,31 @@ export const baseDriftRecoveryTick = async (
           clearTimeout(timer);
         }
       } catch (error: unknown) {
-        const decision = recoveryDecision({
-          stage: "reader-failure",
+        const decision = classifyFresh({
+          kind: "reader-failure",
           reason: `fresh server-side repository read failed (${error instanceof Error ? error.name : "unknown error"})`,
         });
-        if (decision.kind !== "retry") throw new Error(`Unexpected reader failure decision ${decision.kind}`);
-        const outcome = await recordClassificationRetry(db, task.id, candidate.stopId, decision.reason);
-        if (outcome === "ineligible") result.ineligible += 1;
+        addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, decision));
         continue;
       }
-      const fresh = recoveryDecision({
-        stage: "fresh",
+      const fresh = classifyFresh({
+        kind: "snapshot",
         candidate,
         snapshot,
         comparisonAvailable: reader.compareCommits !== undefined,
         authorizedAdvance,
         observedAdvance,
       });
-      if (fresh.kind === "ineligible") {
-        if (await settleIneligible(db, task.id, candidate.stopId, fresh.reason, candidate)) result.ineligible += 1;
-        continue;
+      switch (fresh.kind) {
+        case "retry":
+        case "ineligible":
+          addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, fresh));
+          continue;
+        case "queue":
+          break;
       }
-      if (fresh.kind === "retry") {
-        const outcome = await recordClassificationRetry(db, task.id, candidate.stopId, fresh.reason);
-        if (outcome === "ineligible") result.ineligible += 1;
-        continue;
-      }
-      if (fresh.kind !== "queue") throw new Error(`Unexpected fresh recovery decision ${fresh.kind}`);
       const outcome = await queueRecovery(db, candidate, fresh.currentBaseSha, now);
-      if (outcome.kind === "recovered") result.recovered += 1;
-      else if (outcome.kind === "exhausted") result.exhausted += 1;
-      else if (outcome.kind === "ineligible") {
-        if (await settleIneligible(db, task.id, candidate.stopId, outcome.reason, candidate)) result.ineligible += 1;
-      } else if (outcome.kind === "retry") {
-        const retry = await recordClassificationRetry(db, task.id, candidate.stopId, outcome.reason);
-        if (retry === "ineligible") result.ineligible += 1;
-      }
+      addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, outcome));
     }
     if (tasks.length < pageSize) break;
   }

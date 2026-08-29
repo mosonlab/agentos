@@ -58,41 +58,29 @@ export type RecoveryPullRequestFacts = {
   mergeQueueEntry: unknown | null;
 };
 
-export type RecoveryFacts =
-  | { stage: "candidate"; load: CandidateLoad }
-  | { stage: "reader-unavailable" }
-  | { stage: "reader-failure"; reason: string }
+export type FreshRecoveryFacts =
+  | { kind: "reader-unavailable" }
+  | { kind: "reader-failure"; reason: string }
   | {
-      stage: "fresh";
+      kind: "snapshot";
       candidate: RecoveryCandidate;
       snapshot: RecoveryPullRequestFacts;
       comparisonAvailable: boolean;
       authorizedAdvance: Comparison | null;
       observedAdvance: Comparison | null;
-    }
-  | {
-      stage: "classification-retry";
-      reason: string;
-      validationAttempts: number;
-      maxAttempts: number;
-    }
-  | {
-      stage: "durable";
-      expected: RecoveryCandidate;
-      load: CandidateLoad;
-      aggregateValidating: boolean;
-      recoveryCount: number;
-      maxRecoveries: number;
-      currentBaseSha: string;
     };
 
-export type RecoveryDecision =
-  | { kind: "inspect"; candidate: RecoveryCandidate }
-  | { kind: "queue"; candidate: RecoveryCandidate; currentBaseSha: string }
-  | { kind: "retry"; reason: string; classificationAttempt?: number }
-  | { kind: "ineligible"; reason: string }
-  | { kind: "exhausted"; reason: string }
-  | { kind: "skip" };
+export type Skip = { kind: "skip" };
+export type Retry = { kind: "retry"; reason: string };
+export type Ineligible = { kind: "ineligible"; reason: string };
+export type Inspect = { kind: "inspect"; candidate: RecoveryCandidate };
+export type Queue = { kind: "queue"; candidate: RecoveryCandidate; currentBaseSha: string };
+export type Exhausted = { kind: "exhausted"; reason: string };
+
+export type CandidateDecision = Skip | (Retry & { stopId: string }) | (Ineligible & { stopId: string }) | Inspect;
+export type FreshDecision = Retry | Ineligible | Queue;
+export type DurableDecision = Skip | Retry | Ineligible | Exhausted | Queue;
+export type RetryBudgetDecision = (Retry & { classificationAttempt: number }) | Ineligible;
 
 const refusalReason = (refusal: Extract<CandidateLoad, { kind: "refused" }>): string => {
   switch (refusal.code) {
@@ -115,11 +103,19 @@ const refusalReason = (refusal: Extract<CandidateLoad, { kind: "refused" }>): st
   }
 };
 
-const candidateDecision = (load: CandidateLoad): RecoveryDecision => {
-  if (load.kind === "skip") return { kind: "skip" };
-  if (load.kind === "candidate") return { kind: "inspect", candidate: load.candidate };
-  const reason = refusalReason(load);
-  return load.code === "chain-active" ? { kind: "retry", reason } : { kind: "ineligible", reason };
+export const classifyCandidate = (load: CandidateLoad): CandidateDecision => {
+  switch (load.kind) {
+    case "skip":
+      return { kind: "skip" };
+    case "candidate":
+      return { kind: "inspect", candidate: load.candidate };
+    case "refused": {
+      const reason = refusalReason(load);
+      return load.code === "chain-active"
+        ? { kind: "retry", reason, stopId: load.stopId }
+        : { kind: "ineligible", reason, stopId: load.stopId };
+    }
+  }
 };
 
 const candidatesMatch = (left: RecoveryCandidate, right: RecoveryCandidate): boolean => {
@@ -133,45 +129,19 @@ const candidatesMatch = (left: RecoveryCandidate, right: RecoveryCandidate): boo
 
 /**
  * Owns every base-drift recovery classification rule. The worker reads durable
- * and remote facts, then applies this result; this module performs no I/O.
+ * and remote facts, then applies these stage-specific results without widening
+ * their decision unions; this module performs no I/O.
  */
-export const recoveryDecision = (facts: RecoveryFacts): RecoveryDecision => {
-  switch (facts.stage) {
-    case "candidate":
-      return candidateDecision(facts.load);
+export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "reader-unavailable" }>): Retry;
+export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "reader-failure" }>): Retry;
+export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "snapshot" }>): FreshDecision;
+export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
+  switch (facts.kind) {
     case "reader-unavailable":
       return { kind: "retry", reason: "server-side GitHub reader is unavailable" };
     case "reader-failure":
       return { kind: "retry", reason: facts.reason };
-    case "classification-retry": {
-      const classificationAttempt = facts.validationAttempts + 1;
-      if (classificationAttempt > facts.maxAttempts) {
-        return {
-          kind: "ineligible",
-          reason: `classification retry limit ${facts.maxAttempts} reached after transient failure: ${facts.reason}`,
-        };
-      }
-      return { kind: "retry", reason: facts.reason, classificationAttempt };
-    }
-    case "durable": {
-      if (!facts.aggregateValidating) return { kind: "skip" };
-      const loaded = candidateDecision(facts.load);
-      if (loaded.kind === "skip") {
-        return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
-      }
-      if (loaded.kind !== "inspect") return loaded;
-      if (!candidatesMatch(loaded.candidate, facts.expected)) {
-        return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
-      }
-      if (facts.recoveryCount >= facts.maxRecoveries) {
-        return {
-          kind: "exhausted",
-          reason: `automatic recovery limit ${facts.maxRecoveries} reached for ${facts.expected.repository}#${facts.expected.prNumber} targeting ${facts.expected.targetBranch}`,
-        };
-      }
-      return { kind: "queue", candidate: facts.expected, currentBaseSha: facts.currentBaseSha };
-    }
-    case "fresh":
+    case "snapshot":
       break;
   }
 
@@ -222,4 +192,50 @@ export const recoveryDecision = (facts: RecoveryFacts): RecoveryDecision => {
     }
   }
   return { kind: "queue", candidate, currentBaseSha: snapshot.baseSha };
+}
+
+export const classifyDurable = (facts: {
+  expected: RecoveryCandidate;
+  load: CandidateLoad;
+  aggregateValidating: boolean;
+  recoveryCount: number;
+  maxRecoveries: number;
+  currentBaseSha: string;
+}): DurableDecision => {
+  if (!facts.aggregateValidating) return { kind: "skip" };
+  switch (facts.load.kind) {
+    case "skip":
+      return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
+    case "refused": {
+      const reason = refusalReason(facts.load);
+      return facts.load.code === "chain-active" ? { kind: "retry", reason } : { kind: "ineligible", reason };
+    }
+    case "candidate":
+      break;
+  }
+  if (!candidatesMatch(facts.load.candidate, facts.expected)) {
+    return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
+  }
+  if (facts.recoveryCount >= facts.maxRecoveries) {
+    return {
+      kind: "exhausted",
+      reason: `automatic recovery limit ${facts.maxRecoveries} reached for ${facts.expected.repository}#${facts.expected.prNumber} targeting ${facts.expected.targetBranch}`,
+    };
+  }
+  return { kind: "queue", candidate: facts.expected, currentBaseSha: facts.currentBaseSha };
+};
+
+export const classifyRetryBudget = (facts: {
+  reason: string;
+  validationAttempts: number;
+  maxAttempts: number;
+}): RetryBudgetDecision => {
+  const classificationAttempt = facts.validationAttempts + 1;
+  if (classificationAttempt > facts.maxAttempts) {
+    return {
+      kind: "ineligible",
+      reason: `classification retry limit ${facts.maxAttempts} reached after transient failure: ${facts.reason}`,
+    };
+  }
+  return { kind: "retry", reason: facts.reason, classificationAttempt };
 };

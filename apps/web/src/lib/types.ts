@@ -2,6 +2,7 @@
  *  Decimal columns arrive as strings, DateTime as ISO strings. */
 
 export type TaskStatus = "BACKLOG" | "TODO" | "DOING" | "REVIEW" | "DONE";
+export type TaskMoveTarget = { status: TaskStatus; via: "patch" | "start" };
 /** How a task came to exist. A recurring definition stays MANUAL; only its
  *  fired copies are CRON. */
 export type TaskSource = "MANUAL" | "CRON" | "WEBHOOK";
@@ -289,6 +290,7 @@ export type Task = {
   targetBranch: string | null;
   failureReason: string | null;
   status: TaskStatus;
+  moveTargets: TaskMoveTarget[];
   assigneeType: AssigneeType;
   executionOwner: ExecutionOwner;
   approvalGate: boolean;
@@ -349,6 +351,7 @@ export type BoardTask = {
   name: string;
   displayName: string;
   status: TaskStatus;
+  moveTargets: TaskMoveTarget[];
   assigneeType: AssigneeType;
   failureReason: string | null;
   scheduleKind: "NOW" | "AT" | "CRON";

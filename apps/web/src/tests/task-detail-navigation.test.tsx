@@ -17,6 +17,9 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   templateId: null, templateStepId: null, name,
   description: prompts[promptIndex]!.prompt,
   workingDirectory: null, targetBranch: "main", failureReason: null, status: "TODO",
+  moveTargets: chainId === null
+    ? [{ status: "BACKLOG", via: "patch" }, { status: "DOING", via: "start" }]
+    : [],
   assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW", runAt: null,
   cron: null, timezone: null, maxDurationMin: 120, stallTimeoutMin: 10,
   maxSessionsPerTask: 3, createdAt: now, updatedAt: now, assigneeAgent: null,
@@ -201,7 +204,7 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     await act(async () => { start.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
     await settle();
 
-    assert.ok(mutations.some((item) => item.url === "/tasks/b" && item.method === "PATCH"));
+    assert.ok(mutations.some((item) => item.url === "/tasks/b/start" && item.method === "POST"));
     assert.ok(mutations.some((item) => item.url === "/tasks/b/archive" && item.method === "POST"));
     assert.ok(mutations.some((item) => item.url === "/tasks/b/activity" && item.body.includes("destination comment")), JSON.stringify(mutations));
     assert.ok(mutations.some((item) => item.url === "/tasks/c/start" && item.method === "POST"));

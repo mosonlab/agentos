@@ -18,7 +18,7 @@ import { installDom, reactDom } from "./dom-harness";
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
-  id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
+  id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", moveTargets: [], failureReason: null,
   assigneeType: "HUMAN", createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
@@ -101,11 +101,9 @@ test("the board has five columns, in order, with Backlog first", () => {
   }
 });
 
-test("only a startable desktop drop onto Doing asks for start confirmation", () => {
-  for (const { status } of COLUMNS) {
-    assert.equal(moveAction(status, true), status === "DOING" ? "confirm-start" : "patch");
-    assert.equal(moveAction(status, false), "patch");
-  }
+test("the projected transport selects the move execution flow", () => {
+  assert.equal(moveAction("start"), "confirm-start");
+  assert.equal(moveAction("patch"), "patch");
 });
 
 test("start and drop refusals explain the observed server verdict", () => {
