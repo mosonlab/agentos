@@ -125,6 +125,16 @@ something outside the checkout.
   and give each worktree its own `?schema=` so parallel runs stay apart. Never
   point them at a database whose contents you would miss: `npm run test:db` drops
   and recreates what it is given.
+- A hand-built scratch server has three requirements the harness enforces but
+  does not advertise, each of which otherwise costs a full run to discover.
+  Export `AGENTOS_ALLOW_SCRATCH_DATABASES=1`; the `@anneal/db` suite refuses
+  without it. Give the server a password of at least 24 characters, because the
+  tests that spawn the real API entrypoint inherit it as `POSTGRES_PASSWORD` and
+  the startup check refuses a shorter one. Name a schema other than `public` in
+  `TEST_DATABASE_URL`, because the harness resets the schema it is given.
+- Do not commit while a database suite is running. `build-provenance.dbtest.ts`
+  asserts that the build stamp names the commit the worktree is at, so a commit
+  mid-run fails the suite on the first file and aborts everything after it.
 - Chain template structure has no authoring API. Templates are edited in
   `agents/templates/` and reach production through an ordinary pull request;
   the operator procedure is maintained outside this repository, while the

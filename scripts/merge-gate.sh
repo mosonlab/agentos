@@ -883,7 +883,7 @@ verify_tree_did_not_drift() {
 
 say "Preflight"
 [ -f "${REPO_ROOT}/package.json" ] || die "no package.json at ${REPO_ROOT}"
-grep -q '"name": "agentos"' "${REPO_ROOT}/package.json" || die "${REPO_ROOT} is not the agentos repository root"
+grep -q '"name": "anneal"' "${REPO_ROOT}/package.json" || die "${REPO_ROOT} is not the Anneal repository root"
 
 # Taken here, ahead of every other precondition: the gate installs into this
 # worktree's node_modules and builds into its dist/, so concurrency is the first
