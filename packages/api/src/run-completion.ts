@@ -25,7 +25,6 @@ import {
   mechanicalPrincipalRefusal,
   openRun,
   parseMergeResult,
-  parseResolverResult,
   Prisma,
   type PrismaClient,
   readMarkers,
@@ -34,7 +33,6 @@ import {
   RunStatus,
   stepRole,
   TaskStatus,
-  writeMarker,
 } from "@anneal/db";
 import { z } from "zod";
 
@@ -56,10 +54,9 @@ import {
 import {
   handleRegressionCompletion,
   mergeTailRequeueForRun,
-  openMergeTailStopNotice,
   recordMergeTailRequeue,
   regressionVerdictForRun,
-  stopMergeTail,
+  settleMergeTailCompletion,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
 import { terminalizeRun } from "./run-terminal.js";
@@ -557,41 +554,15 @@ export const completeRun = async (
       if (opened.ok) retryCreated = true;
       else retryRefusal = opened.refusal;
     }
-    if (!succeeded && !retryCreated && (mechanical
-      || isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
-      || mergeTailAuxiliary)) {
-      leaseOutcome = "stop";
-    }
     if (run.taskId) {
       const budgetExhausted = !succeeded && retryable && !durableNegativeRegressionVerdict
         && !retryCreated && !retryRefusal;
       let canonicalOutputFailure: string | null = null;
-      if (!succeeded && !retryCreated && run.task) {
-        // The same markers the success path above read, from the same scan.
-        const failedRepair = latestMarker(tailMarkers, "repairAttempt");
-        if (failedRepair?.regressionTaskId) {
-          const reason = `${failedRepair.repairKind} repair ${run.taskId} failed without closing the repair at ${failedRepair.headSha}`;
-          await stopMergeTail(tx, {
-            phase: "repair",
-            regressionTaskId: failedRepair.regressionTaskId,
-            repairTaskId: run.taskId,
-            repairKind: failedRepair.repairKind,
-            startHeadSha: failedRepair.headSha,
-            targetHeadSha: failedRepair.baseHeadSha,
-            resolvedHeadSha: body.headSha ?? null,
-            reason,
-            at: now,
-            agentId: run.agentId,
-            sessionId: run.session.id,
-          });
-        }
-      }
       // §4.0 outcome branching. The executor's own fenced write is the only
       // writer of a step-12 output: neither synthesis nor the metadata update
       // may touch it, because a synthesized body would read as a merge that
       // never happened.
       if (succeeded && mechanical && run.task) {
-        leaseOutcome = "stop";
         const persisted = await tx.taskStepOutput.findUnique({
           where: { taskId: run.taskId }, select: { kind: true, body: true },
         });
@@ -664,12 +635,26 @@ export const completeRun = async (
               reason: outputRefusal,
             },
           } });
-          if (isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)) {
-            leaseOutcome = "stop";
-          }
         }
         canonicalOutputFailure = outputRefusal;
       }
+      const mergeTailCompletion = run.task && (succeeded || !retryCreated)
+        ? await settleMergeTailCompletion(tx, {
+            task: {
+              id: run.task.id,
+              templateStep: run.task.templateStep,
+              documentationTaskId: repairDocumentationTask?.id ?? null,
+            },
+            run: { agentId: run.agentId, sessionId: run.session.id, completedAt: now },
+            body: { headSha: body.headSha ?? null },
+            markers: tailMarkers,
+            succeeded,
+          })
+        : { handled: false, leaseOutcome: "continue" as const };
+      leaseOutcome = canonicalOutputFailure
+        && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
+        ? "stop"
+        : mergeTailCompletion.leaseOutcome;
       if (durableNegativeRegressionVerdict && run.task?.templateId) {
         await handleRegressionCompletion(tx, {
           task: run.task,
@@ -722,87 +707,13 @@ export const completeRun = async (
           );
         }
       } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
-        let repairUnable = false;
-        if (repairMarker?.regressionTaskId) {
-          const repairOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
-          let reportedUnable = false;
-          let resolvedHeadSha = body.headSha ?? null;
-          if (repairMarker.repairKind === "refresh-conflict") {
-            const parsedResolver = parseResolverResult(repairOutput?.body);
-            const expectedStart = repairMarker.headSha;
-            const expectedTarget = repairMarker.baseHeadSha;
-            const bindingError = parsedResolver.status === "invalid"
-              ? parsedResolver.reason
-              : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
-                ? "merge-resolver output is bound to stale start or target heads"
-                : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== body.headSha
-                  ? "merge-resolver output resolved head does not match the delivered run head"
-                  : null;
-            if (bindingError) {
-              repairUnable = true;
-              const reason = `refresh-conflict repair ${run.taskId} returned invalid output: ${bindingError}`;
-              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
-              await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-              await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
-                actorType: "control-plane",
-                body: `Automatic refresh-conflict attempt stopped: ${reason}`,
-                metadata: {
-                  repairKind: "refresh-conflict",
-                  repairTaskId: run.taskId,
-                  startHeadSha: expectedStart,
-                  targetHeadSha: expectedTarget,
-                  resolvedHeadSha: body.headSha ?? null,
-                  state: "invalid-output",
-                  reason: bindingError,
-                },
-              });
-              await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-            } else if (parsedResolver.status === "ok") {
-              reportedUnable = parsedResolver.result.outcome === "unable";
-              resolvedHeadSha = parsedResolver.result.outcome === "resolved" ? parsedResolver.result.resolvedHeadSha : null;
-            }
-          }
-          // gate-fix and review-fix agents have no JSON wire contract; their
-          // successful delivered head is the completion evidence.
-          if (reportedUnable) {
-            repairUnable = true;
-            const reason = `${String(repairMarker.repairKind)} repair ${run.taskId} reported unable at ${String(repairMarker.headSha)}`;
-            await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
-            await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-          } else if (!repairUnable) {
-            await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
-              actorType: "control-plane",
-              body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${body.headSha ?? "missing-head"}`,
-              metadata: {
-                repairKind: repairMarker.repairKind,
-                repairTaskId: run.taskId,
-                startHeadSha: repairMarker.headSha,
-                targetHeadSha: repairMarker.baseHeadSha,
-                resolvedHeadSha,
-              },
-            });
-            if (repairDocumentationTask) {
-              await tx.task.update({
-                where: { id: repairDocumentationTask.id },
-                data: {
-                  status: TaskStatus.TODO,
-                  failureReason: `documentation invalidated by ${String(repairMarker.repairKind)} repair ${run.taskId}`,
-                },
-              });
-            }
-          }
-        }
-        if (repairUnable) {
-          // The failed repair owns the stop; never activate its follow-up.
-          leaseOutcome = "stop";
-        } else if (run.task.approvalGate) {
+        if (!mergeTailCompletion.handled && run.task.approvalGate) {
           const claimed = await tx.task.updateMany({
             where: { id: run.taskId, status: completionTaskStatus! },
             data: { status: TaskStatus.REVIEW, failureReason: null },
           });
           if (claimed.count === 1) await gateQuestion(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null);
-        } else {
+        } else if (!mergeTailCompletion.handled) {
           const completed = await tx.task.updateMany({
             where: { id: run.taskId, status: completionTaskStatus! }, data: { status: TaskStatus.DONE, failureReason: null },
           });
