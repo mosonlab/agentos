@@ -13,7 +13,7 @@ import { useTaskStartConfirmation } from "../pages/Tasks";
 import { installDom, reactDom } from "./dom-harness";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
-  id: "task-1", name: "Release: Build", displayName: "Build", status: "TODO", failureReason: null,
+  id: "task-1", name: "Release: Build", displayName: "Build", status: "TODO", moveTargets: [], failureReason: null,
   assigneeType: "AGENT", createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false, templateId: null,
   source: "MANUAL", chainId: null, chainIndex: null, chainName: null, assigneeAgent: null,
