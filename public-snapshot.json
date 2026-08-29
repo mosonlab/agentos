@@ -165,9 +165,6 @@
     { "glob": "scripts/templates-release-demo.test.mjs", "purpose": "templates release-demo regression tests" },
     { "glob": "scripts/verify-secret-hygiene.mjs", "purpose": "bundle and tracked-file secret hygiene scan" },
     { "glob": "scripts/verify-secret-hygiene.test.mjs", "purpose": "secret hygiene scan regression tests" },
-    { "glob": "scripts/verify-oss-b0.mjs", "purpose": "redacted OSS-B0 acceptance harness" },
-    { "glob": "scripts/verify-oss-b0-review.mjs", "purpose": "OSS-B0 independent-review structure checker" },
-    { "glob": "scripts/verify-oss-b0.test.mjs", "purpose": "OSS-B0 acceptance-harness regression tests" },
     { "glob": "tsconfig.base.json", "purpose": "shared TypeScript configuration" }
   ],
   "deny": [
