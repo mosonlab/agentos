@@ -538,7 +538,7 @@ export const completeRun = async (
       },
     });
     if (terminal === null || "message" in terminal) return null;
-    let retryRunId: string | null = null;
+    let retryCreated = false;
     let retryRefusal: Refusal | null = null;
     if (!succeeded && retryable && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
@@ -549,10 +549,9 @@ export const completeRun = async (
         budgetGrant: refunded,
         readyAt: retryAt ?? now,
       });
-      if (opened.ok) retryRunId = opened.run.id;
+      if (opened.ok) retryCreated = true;
       else retryRefusal = opened.refusal;
     }
-    const retryCreated = retryRunId !== null;
     if (run.taskId) {
       const budgetExhausted = !succeeded && retryable && !durableNegativeRegressionVerdict
         && !retryCreated && !retryRefusal;
@@ -811,11 +810,9 @@ export const completeRun = async (
     }
     return {
       value: { taskId: run.taskId, succeeded, retryCreated, failureClass },
-      leaseOutcome: retryRunId && mechanical
-        ? { kind: "hand-off", taskId: run.taskId, handoffRunId: retryRunId, at: now }
-        : leaseOutcome === "stop"
-          ? { kind: "stop", taskId: run.taskId }
-          : { kind: "continue" },
+      leaseOutcome: leaseOutcome === "stop"
+        ? { kind: "stop", taskId: run.taskId }
+        : { kind: "continue" },
     };
   // ReadCommitted lets successor CAS losers observe count=0 instead of
   // surfacing a serialization failure to runners. Every task status write

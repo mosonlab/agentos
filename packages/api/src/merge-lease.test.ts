@@ -148,10 +148,11 @@ test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", 
   assert.deepEqual(await leaseHandoffsWithoutConsumer(tx, now), [
     { toRunId: "run-stale", taskId: "task-stale" },
   ]);
-  assert.match(sql, /NOT EXISTS/u);
-  assert.match(sql, /GREATEST/u);
-  assert.match(sql, /\(released\."createdAt", released\.id\) > \(pending\."createdAt", pending\.id\)/u);
-  assert.match(sql, /ORDER BY "createdAt" ASC, id ASC/u);
+  assert.match(sql, /FROM "Run" AS consumer/u);
+  assert.match(sql, /JOIN LATERAL/u);
+  assert.match(sql, /activity\."createdAt" >= LEAST\(consumer\."createdAt", consumer\."readyAt"\)/u);
+  assert.match(sql, /GREATEST\(consumer\."createdAt", consumer\."readyAt"\)/u);
+  assert.match(sql, /ORDER BY "staleAt" ASC, "toRunId" ASC/u);
   assert.match(sql, /LIMIT/u);
   assert.ok(parameters.some((value) => value instanceof Date), "the query has a time floor");
   assert.ok(parameters.includes(100), "the query has an explicit row limit");
@@ -239,7 +240,7 @@ test("commitWithLeaseOutcome records handoff without release and surfaces record
   const activities: unknown[] = [];
   const tx = {
     ...holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }),
-    run: { findUnique: async () => ({ taskId: "task-2", readyAt: new Date("2026-08-27T12:05:00.000Z") }) },
+    run: { findUnique: async () => ({ taskId: "task-2" }) },
     taskActivity: { create: async (input: unknown) => { activities.push(input); } },
   } as unknown as Prisma.TransactionClient;
   let releases = 0;
@@ -255,10 +256,6 @@ test("commitWithLeaseOutcome records handoff without release and surfaces record
   }), { release: async () => { releases += 1; } });
   assert.equal(releases, 0);
   assert.equal(activities.length, 1);
-  assert.equal(
-    ((activities[0] as { data: { metadata: Record<string, unknown> } }).data.metadata).consumerReadyAt,
-    "2026-08-27T12:05:00.000Z",
-  );
 
   const recordFailure = new Error("handoff record failed");
   const failingTx = {
@@ -276,9 +273,10 @@ test("commitWithLeaseOutcome records handoff without release and surfaces record
   })), (error: unknown) => error === recordFailure);
 });
 
-test("commitWithLeaseOutcome refuses to settle a handoff without a holder", async () => {
+test("commitWithLeaseOutcome durably invalidates a handoff without a holder", async () => {
   let releases = 0;
-  const tx = holderTx({
+  const invalidActivities: Array<{ data: { metadata: Record<string, unknown> } }> = [];
+  const base = holderTx({
     task: {
       chainId: "ordinary-chain",
       projectId: "project-1",
@@ -289,15 +287,28 @@ test("commitWithLeaseOutcome refuses to settle a handoff without a holder", asyn
       },
     },
   });
-  await assert.rejects(commitWithLeaseOutcome(transactionDb(tx), async () => ({
+  const tx = {
+    ...base,
+    taskActivity: {
+      findMany: async () => [],
+      create: async (input: { data: { metadata: Record<string, unknown> } }) => {
+        invalidActivities.push(input);
+        return {};
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+  await commitWithLeaseOutcome(transactionDb(tx), async () => ({
     value: null,
     leaseOutcome: {
       kind: "stop",
       taskId: "task-1",
       releasedHandoff: { toRunId: "run-orphan", at: new Date("2026-08-27T12:00:00.000Z") },
     },
-  }), { release: async () => { releases += 1; } }), /Cannot settle a Merge Lease handoff/u);
+  }), { release: async () => { releases += 1; } });
   assert.equal(releases, 0);
+  assert.equal(invalidActivities.length, 1);
+  assert.equal(invalidActivities[0]!.data.metadata.state, "invalid");
+  assert.equal(invalidActivities[0]!.data.metadata.toRunId, "run-orphan");
 });
 
 test("a completed callback releases the merge Lease", async () => {
@@ -435,8 +446,8 @@ test("skipped and refused releases are reported decided outcomes", async (t) => 
   assert.match(said[1]!, /another-host/u);
 });
 
-test("an unreachable release outcome fails loudly", async () => {
-  await assert.rejects(withMergeLease(
+test("an unreachable release outcome is retryable", async () => {
+  assert.deepEqual(await withMergeLease(
     leaseTarget("chain-unreachable-release"),
     async () => ({ leaseOutcome: { kind: "stop" }, value: null }),
     holdDb,
@@ -444,16 +455,16 @@ test("an unreachable release outcome fails loudly", async () => {
       acquire: acquired,
       release: async () => ({ outcome: "unreachable", detail: "release helper timed out" }),
     },
-  ), /failed with outcome unreachable/u);
+  ), { outcome: "unreachable", detail: "release helper timed out" });
 });
 
-test("a rejected release adapter fails loudly", async () => {
+test("a rejected release adapter is an unreachable transport", async () => {
   const releaser: MergeLeaseReleaser = async () => { throw new Error("spawn bash ENOENT"); };
 
-  await assert.rejects(withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop" }, value: null }), holdDb, {
+  assert.deepEqual(await withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop" }, value: null }), holdDb, {
     acquire: acquired,
     release: releaser,
-  }), /spawn bash ENOENT/u);
+  }), { outcome: "unreachable", detail: "Merge lease release transport failed: spawn bash ENOENT" });
 });
 
 test("a Task without a Chain runs without either Lease adapter", async () => {

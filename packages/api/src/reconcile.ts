@@ -1,6 +1,5 @@
 import {
   isRegressionVerificationOutputKind,
-  isIntegratorStep,
   lockTaskRow,
   openRun,
   runBudgetCeiling,
@@ -11,9 +10,11 @@ import {
 
 import {
   commitWithLeaseOutcomes,
+  LeaseOutcomePostCommitError,
   leaseHandoffsWithoutConsumer,
   releaseMergeLease,
   type LeaseOutcome,
+  type LeaseOutcomePostCommitFailure,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
 import { handleRegressionCompletion, regressionVerdictForRun } from "./merge-tail-actions.js";
@@ -23,6 +24,19 @@ import { terminalizeRun } from "./run-terminal.js";
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
 const archivedNoticePageSize = 100;
 export const archivedNoticeSweepIntervalMs = 60_000;
+
+export class ReconciliationMaintenanceError extends Error {
+  readonly reconciledAt: Date;
+  readonly failures: LeaseOutcomePostCommitFailure[];
+
+  constructor(reconciledAt: Date, cause: LeaseOutcomePostCommitError) {
+    super("Run reconciliation committed, but Merge Lease maintenance failed");
+    this.name = "ReconciliationMaintenanceError";
+    this.reconciledAt = reconciledAt;
+    this.failures = cause.failures;
+    this.cause = cause;
+  }
+}
 
 export const noteArchivedQueuedRuns = async (
   db: PrismaClient,
@@ -278,14 +292,6 @@ export const reconcileDatabaseRuns = async (
           readyAt: now,
         });
         if (opened.ok) {
-          if (isIntegratorStep(run.task?.templateStep ?? null)) {
-            leaseOutcomes.push({
-              kind: "hand-off",
-              taskId: run.taskId,
-              handoffRunId: opened.run.id,
-              at: now,
-            });
-          }
           await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
           await tx.taskActivity.create({
             data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
@@ -351,7 +357,12 @@ export const reconcileDatabaseRuns = async (
       value: { count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length },
       leaseOutcomes,
     };
-  }, { release: releaseChainLease });
+  }, { release: releaseChainLease }).catch((error: unknown) => {
+    if (error instanceof LeaseOutcomePostCommitError) {
+      throw new ReconciliationMaintenanceError(now, error);
+    }
+    throw error;
+  });
   return reconciliation.count;
 };
 

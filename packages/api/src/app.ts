@@ -130,7 +130,12 @@ import {
   jsonValue,
   normalizeSessionEventValue,
 } from "./execution.js";
-import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
+import {
+  createArchivedRunNoticeScheduler,
+  noteArchivedQueuedRuns,
+  reconcileDatabaseRuns,
+  ReconciliationMaintenanceError,
+} from "./reconcile.js";
 import {
   type Refusal,
   type RefusalDetail,
@@ -3173,7 +3178,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const now = new Date();
     runners.note(body.runnerId, body, now);
     await options.ownership.assertHeld();
-    await reconcileDatabaseRuns(db, now, releaseChainLease);
+    try {
+      await reconcileDatabaseRuns(db, now, releaseChainLease);
+    } catch (error: unknown) {
+      if (!(error instanceof ReconciliationMaintenanceError)) throw error;
+      console.error("Runner claim reconciliation maintenance failed after commit", {
+        reconciledAt: error.reconciledAt.toISOString(),
+        failures: error.failures.map((failure) => ({
+          target: failure.target,
+          phase: failure.phase,
+          error: failure.error instanceof Error ? failure.error.message : String(failure.error),
+        })),
+      });
+    }
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await claimRun(db, {
       body,

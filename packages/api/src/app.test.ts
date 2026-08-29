@@ -916,7 +916,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
       create: async () => ({}),
     },
     $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
-      $queryRaw: async (query: TemplateStringsArray) => query.join("").includes('FROM "TaskActivity" AS pending')
+      $queryRaw: async (query: TemplateStringsArray) => query.join("").includes('FROM "TaskActivity" AS activity')
         ? []
         : [{ id: "task-2", archivedAt: null }],
       run: {
@@ -1733,7 +1733,7 @@ test("claim query filters archived agents before take so active work cannot star
           claimQuery = sql;
           return [{ id: "active" }];
         }
-        if (sql.includes('FROM "TaskActivity" AS pending')) return [];
+        if (sql.includes('FROM "TaskActivity" AS activity')) return [];
         return [{ granted: true }];
       },
       // The claim loop brackets every candidate in a savepoint.
@@ -1801,7 +1801,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
             ? query.join("?")
             : (query as { strings?: string[] }).strings?.join("?") ?? "";
           if (sql.includes('SELECT candidate."id"')) return [];
-          if (sql.includes('FROM "TaskActivity" AS pending')) return [];
+          if (sql.includes('FROM "TaskActivity" AS activity')) return [];
           return [{ granted: true }];
         },
         run: { findMany: async () => [] },

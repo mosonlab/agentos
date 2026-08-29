@@ -581,7 +581,7 @@ test("an unreachable merge lease acquire defers mechanically without spending re
   assert.notEqual(readiness.readinessClaimExpiresAt, null);
   assert.equal(readiness.failureReason, null);
   const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.readiness.id } });
-  assert.match(activity.body, /lease acquisition deferred.*ENOENT/ui);
+  assert.match(activity.body, /lease transport deferred.*ENOENT/ui);
   assert.deepEqual(releasedChainLeases, []);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
 
@@ -598,6 +598,36 @@ test("an unreachable merge lease acquire defers mechanically without spending re
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("an unreachable post-acquire release durably defers without review or a second release", async () => {
+  const seeded = await seedReadiness();
+  let releaseAttempts = 0;
+  const unreachableRelease: WithMergeLease = (target, _fn, database) => withMergeLease(target, async () => {
+    throw new Error("authorization transaction failed before settlement");
+  }, database, {
+    acquire: acquireChainLease,
+    release: async () => {
+      releaseAttempts += 1;
+      return { outcome: "unreachable", detail: "release helper timed out" };
+    },
+  });
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, unreachableRelease),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal(releaseAttempts, 1);
+  assert.deepEqual(releasedLeaseTargets, []);
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  assert.equal(readiness.status, TaskStatus.DOING);
+  assert.equal(readiness.failureReason, null);
+  assert.notEqual(readiness.readinessClaimToken, null);
+  const activity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: seeded.readiness.id, metadata: { path: ["state"], equals: "lease-transport-deferred" } },
+  });
+  assert.match(activity.body, /authorization transaction failed before settlement/u);
+  assert.match(activity.body, /release helper timed out/u);
 });
 
 test("a worker that acquired then lost its claim releases without a concrete successor Run", async () => {

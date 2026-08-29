@@ -466,10 +466,10 @@ const recordLeaseDeferral = async (
     apply: async (client) => client.taskActivity.create({ data: {
       taskId: input.readinessTaskId,
       actorType: "control-plane",
-      body: `Merge lease acquisition deferred: ${input.detail}`,
+      body: `Merge lease transport deferred: ${input.detail}`,
       metadata: {
         kind: MERGE_TAIL_KIND.readiness,
-        state: "lease-acquire-deferred",
+        state: "lease-transport-deferred",
         chainId: input.chainId,
         detail: input.detail,
         retryAfter: new Date(input.at.getTime() + READINESS_CLAIM_LEASE_MS).toISOString(),

@@ -17,7 +17,6 @@ import {
   type MergeLeaseRelease,
   type MergeLeaseTarget,
 } from "./merge-lease-hold.js";
-import { DONE_TASK_ARCHIVE_AGE_MS } from "./scheduler.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -91,9 +90,6 @@ const releaseMergeLeaseWith = async (
   if (!target) return null;
   const release = await releaser(target.chainId);
   reportMergeLeaseAnomaly(target.chainId, release);
-  if (release.outcome === "unreachable") {
-    throw new Error(`Merge lease release for chain ${target.chainId} failed with outcome ${release.outcome}`);
-  }
   return release;
 };
 
@@ -101,6 +97,9 @@ export type ReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClie
 
 export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
   const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, target);
+  if (target && release?.outcome === "unreachable") {
+    throw new Error(`Merge lease release for chain ${target.chainId} was unreachable: ${release.detail}`);
+  }
   if (target && release?.outcome === "released") {
     await recordMergeLeaseHold(db, target, release, new Date());
   }
@@ -208,6 +207,25 @@ type LeaseSettlement = {
   releasedHandoff: { chainId: string; toRunId: string; taskId: string; at: Date } | null;
 };
 
+const noteLeaseHandoffInvalid = async (
+  tx: Prisma.TransactionClient,
+  input: { taskId: string; toRunId: string; at: Date; reason: string },
+): Promise<void> => {
+  await tx.taskActivity.create({ data: {
+    taskId: input.taskId,
+    actorType: "control-plane",
+    body: `Invalid Chain Lease handoff for queued Run ${input.toRunId}: ${input.reason}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.leaseHandoff,
+      schemaVersion: 1,
+      state: "invalid",
+      toRunId: input.toRunId,
+      invalidAt: input.at.toISOString(),
+      reason: input.reason,
+    },
+  } });
+};
+
 /** Resolve one declared outcome to the module-owned holder and persistence. */
 const settleLease = async (
   tx: Prisma.TransactionClient,
@@ -225,7 +243,14 @@ const settleLease = async (
     return { target: null, releasedHandoff: null };
   }
   if (outcome.releasedHandoff && !holder) {
-    throw new Error(`Cannot settle a Merge Lease handoff from Task ${outcome.taskId ?? "without a Task"}`);
+    if (!outcome.taskId) throw new Error("Cannot diagnose a Merge Lease handoff without a Task");
+    await noteLeaseHandoffInvalid(tx, {
+      taskId: outcome.taskId,
+      toRunId: outcome.releasedHandoff.toRunId,
+      at: outcome.releasedHandoff.at,
+      reason: "the handoff Task does not resolve to a Merge Lease holder",
+    });
+    return { target: null, releasedHandoff: null };
   }
   return {
     target: holder
@@ -250,7 +275,7 @@ const noteLeaseHandoff = async (
   tx: Prisma.TransactionClient,
   input: { chainId: string; toRunId: string; at: Date },
 ): Promise<void> => {
-  const run = await tx.run.findUnique({ where: { id: input.toRunId }, select: { taskId: true, readyAt: true } });
+  const run = await tx.run.findUnique({ where: { id: input.toRunId }, select: { taskId: true } });
   if (!run?.taskId) throw new Error(`Lease handoff target Run ${input.toRunId} has no Task`);
   await tx.taskActivity.create({ data: {
     taskId: run.taskId,
@@ -263,7 +288,6 @@ const noteLeaseHandoff = async (
       chainId: input.chainId,
       toRunId: input.toRunId,
       handedOffAt: input.at.toISOString(),
-      consumerReadyAt: run.readyAt.toISOString(),
     },
   } });
 };
@@ -273,46 +297,36 @@ export const leaseHandoffsWithoutConsumer = async (
   tx: Prisma.TransactionClient,
   now: Date,
 ): Promise<Array<{ toRunId: string; taskId: string }>> => {
-  const activityFloor = new Date(now.getTime() - DONE_TASK_ARCHIVE_AGE_MS);
-  const staleBefore = new Date(now.getTime() - LEASE_HANDOFF_GRACE_MS).toISOString();
+  const staleBefore = new Date(now.getTime() - LEASE_HANDOFF_GRACE_MS);
   return tx.$queryRaw<Array<{ toRunId: string; taskId: string }>>`
     WITH unresolved AS (
-      SELECT DISTINCT ON (pending.metadata->>'toRunId')
-        pending.metadata->>'toRunId' AS "toRunId",
-        pending."taskId" AS "taskId",
-        pending."createdAt" AS "createdAt",
-        pending.id
-      FROM "TaskActivity" AS pending
-      JOIN "Run" AS consumer ON consumer.id = pending.metadata->>'toRunId'
-      WHERE pending."createdAt" >= ${activityFloor}
-        AND pending."actorType" = 'control-plane'
-        AND pending.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
-        AND pending.metadata->>'state' = 'pending'
-        AND pending.metadata->>'chainId' IS NOT NULL
-        AND pending.metadata->>'toRunId' IS NOT NULL
-        AND GREATEST(
-          pending.metadata->>'handedOffAt',
-          COALESCE(pending.metadata->>'consumerReadyAt', pending.metadata->>'handedOffAt')
-        ) < ${staleBefore}
-        AND consumer.status = 'queued'::"RunStatus"
+      SELECT
+        consumer.id AS "toRunId",
+        latest."taskId" AS "taskId",
+        GREATEST(consumer."createdAt", consumer."readyAt") AS "staleAt"
+      FROM "Run" AS consumer
+      JOIN LATERAL (
+        SELECT activity."taskId", activity.metadata, activity."createdAt", activity.id
+        FROM "TaskActivity" AS activity
+        WHERE activity."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
+          AND activity."actorType" = 'control-plane'
+          AND activity.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
+          AND activity.metadata->>'toRunId' = consumer.id
+        ORDER BY activity."createdAt" DESC, activity.id DESC
+        LIMIT 1
+      ) AS latest ON true
+      WHERE consumer.status = 'queued'::"RunStatus"
         AND consumer."claimedAt" IS NULL
         AND consumer."startedAt" IS NULL
-        AND NOT EXISTS (
-          SELECT 1
-          FROM "TaskActivity" AS released
-          WHERE released."createdAt" >= ${activityFloor}
-            AND released."actorType" = 'control-plane'
-            AND released.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
-            AND released.metadata->>'state' = 'released'
-            AND released.metadata->>'toRunId' = pending.metadata->>'toRunId'
-            AND (released."createdAt", released.id) > (pending."createdAt", pending.id)
-        )
-      ORDER BY pending.metadata->>'toRunId', pending."createdAt" DESC, pending.id DESC
+        AND GREATEST(consumer."createdAt", consumer."readyAt") < ${staleBefore}
+        AND latest.metadata->>'state' = 'pending'
+        AND latest.metadata->>'chainId' IS NOT NULL
+      ORDER BY GREATEST(consumer."createdAt", consumer."readyAt") ASC, consumer.id ASC
+      LIMIT ${LEASE_HANDOFF_QUERY_LIMIT}
     )
     SELECT "toRunId", "taskId"
     FROM unresolved
-    ORDER BY "createdAt" ASC, id ASC
-    LIMIT ${LEASE_HANDOFF_QUERY_LIMIT}
+    ORDER BY "staleAt" ASC, "toRunId" ASC
   `;
 };
 
@@ -351,6 +365,22 @@ type CommittedLeaseOutcome<T> = {
   settlement: LeaseSettlement;
 };
 
+export type LeaseOutcomePostCommitFailure = {
+  target: MergeLeaseTarget;
+  phase: "release" | "record";
+  error: unknown;
+};
+
+export class LeaseOutcomePostCommitError extends AggregateError {
+  readonly failures: LeaseOutcomePostCommitFailure[];
+
+  constructor(failures: LeaseOutcomePostCommitFailure[]) {
+    super(failures.map((failure) => failure.error), "One or more Merge Lease releases or records failed");
+    this.name = "LeaseOutcomePostCommitError";
+    this.failures = failures;
+  }
+}
+
 const releaseCommittedLeaseOutcomes = async (
   db: PrismaClient,
   committed: Array<CommittedLeaseOutcome<unknown>>,
@@ -370,21 +400,26 @@ const releaseCommittedLeaseOutcomes = async (
     targets.set(key, existing);
   }
 
-  const failures: unknown[] = [];
+  const failures: LeaseOutcomePostCommitFailure[] = [];
   for (const entry of targets.values()) {
     try {
       await release(entry.target, db);
-      if (entry.handoffs.length > 0) {
+    } catch (error: unknown) {
+      failures.push({ target: entry.target, phase: "release", error });
+      continue;
+    }
+    if (entry.handoffs.length > 0) {
+      try {
         await db.$transaction(async (tx) => {
           for (const handoff of entry.handoffs) await noteLeaseHandoffReleased(tx, handoff);
         });
+      } catch (error: unknown) {
+        failures.push({ target: entry.target, phase: "record", error });
       }
-    } catch (error: unknown) {
-      failures.push(error);
     }
   }
-  if (failures.length === 1 && !aggregateFailures) throw failures[0];
-  if (failures.length > 0) throw new AggregateError(failures, "One or more Merge Lease releases or records failed");
+  if (failures.length === 1 && !aggregateFailures) throw failures[0]!.error;
+  if (failures.length > 0) throw new LeaseOutcomePostCommitError(failures);
 };
 
 /** Commit database state before carrying out its one post-commit Lease release. */
@@ -542,19 +577,38 @@ export const withMergeLease = async <T>(
     callbackError = error;
   }
   if (leaseOutcome.kind === "stop") {
+    let release: MergeLeaseRelease | null;
     try {
-      const release = await releaseMergeLeaseWith(dependencies.release, target);
-      if (release?.outcome === "released") {
-        await recordMergeLeaseHold(db, target, release, dependencies.now?.() ?? new Date());
-      }
+      release = await releaseMergeLeaseWith(dependencies.release, target);
     } catch (releaseError: unknown) {
-      if (callbackFailed) {
-        throw new AggregateError(
-          [callbackError, releaseError],
-          "Merge lease callback and confirmed-release recording both failed",
-        );
+      const releaseDetail = `Merge lease release transport failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`;
+      return {
+        outcome: "unreachable",
+        detail: callbackFailed
+          ? `Merge lease callback failed before release: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}; ${releaseDetail}`
+          : releaseDetail,
+      };
+    }
+    if (release?.outcome === "unreachable") {
+      return {
+        outcome: "unreachable",
+        detail: callbackFailed
+          ? `Merge lease callback failed before release: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}; release transport unreachable: ${release.detail}`
+          : release.detail,
+      };
+    }
+    if (release?.outcome === "released") {
+      try {
+        await recordMergeLeaseHold(db, target, release, dependencies.now?.() ?? new Date());
+      } catch (releaseError: unknown) {
+        if (callbackFailed) {
+          throw new AggregateError(
+            [callbackError, releaseError],
+            "Merge lease callback and confirmed-release recording both failed",
+          );
+        }
+        throw releaseError;
       }
-      throw releaseError;
     }
   }
   if (callbackFailed) throw callbackError;
