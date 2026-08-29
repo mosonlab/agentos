@@ -4,10 +4,10 @@
 
 **You write the specs. It clears the board.**
 
-Anneal is a local control plane for coding agents. Queue tasks in the
-evening, and chains plan, review, implement, verify and merge them
-unattended — on the Codex and Claude subscriptions you are already
-signed in to.
+Anneal runs chains of coding agents on your own Mac. Queue tasks on
+the board, and each one is planned, reviewed, implemented, verified and
+merged unattended, on the Codex and Claude subscriptions you are
+already signed in to.
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -22,25 +22,26 @@ signed in to.
 
 ## The workflow it is built for
 
-During the day you do one thing: write specs. In the evening you queue
-them as tasks on the board. Overnight, a chain picks up each task and
-takes it the whole way — plan, plan review, implementation, two
-independent code reviews, fix application, regression verification, and
-the merge itself. In the morning you read the pull requests that matter,
-open an agent window on the ones you care about, and iterate until you
-are satisfied.
+You do one thing: write specs. Queue them on the board and walk away. A
+chain picks up each task and takes it the whole way through plan, plan
+review, implementation, two independent code reviews, fix application,
+regression verification, and the merge itself. When you come back, you
+read the pull requests that matter, open an agent window on the ones
+you care about, and iterate until you are satisfied.
 
-Between those points nothing needs you. A chain only stops for you when
-an agent asks a question through the Inbox, when a step you marked as
-gated needs a human decision, or when a run escalates. You are not
-sitting in front of it; the board is what you come back to.
+In between, nothing needs you. A chain only stops for you when an agent
+asks a question through the Inbox, when a step you marked as gated
+needs a human decision, or when a run escalates.
 
 ## What you get
 
 - **Spec in, merge out.** A task card becomes a branch, a pull request
-  and a merge behind the merge gate, with every intermediate artifact —
-  plan, review findings, fix dispositions, regression results — recorded
-  and reviewable.
+  and a merge behind the merge gate. Every intermediate artifact (plan,
+  review findings, fix dispositions, regression results) is recorded on
+  your machine, so you can trace any chain step by step afterwards.
+- **Nothing merges on faith.** Two blind code reviews, an independent
+  regression run, and a merge gate stand between an agent's diff and
+  your main branch.
 - **Parallel by default.** Chains for different tasks and different
   repositories run at the same time; throughput comes from how many
   runners you register, not from your hours.
@@ -48,8 +49,6 @@ sitting in front of it; the board is what you come back to.
   CLI, Claude Code and Pi you have already installed and signed in to.
   It holds no credential of its own, runs no proxy, and there is no key
   to paste in.
-- **Review is the product.** Every step's output is the next step's
-  input, and every run record stays on your machine for you to audit.
 
 ## Anneal is built with Anneal
 
@@ -61,14 +60,18 @@ log which commits the chains produced.
 
 ## How it works
 
-A chain instantiates a template of steps. Each step binds an agent role
-— a prompt, a model, a reasoning effort and the runner CLI it executes
-on — and the flagship Full Assurance template covers delivery in twelve
-steps. `Sol` and `Luna` below are the GPT-5.6 variants the Codex CLI
-exposes.
+A chain instantiates a template of steps. Each step binds an agent
+role: a prompt, a model, a reasoning effort and the runner CLI it
+executes on. The flagship Full Assurance template covers delivery in
+twelve steps.
+
+The template is data, not code. Roles, prompts, models and gates are
+all editable, so you can reshape the chain into your own process.
 
 <details>
 <summary><b>The twelve steps in full</b> — role, runner, model and effort for each</summary>
+
+`Sol` and `Luna` below are the GPT-5.6 variants the Codex CLI exposes.
 
 | # | Step | Agent role | What it does | Runner | Model · effort |
 | --- | --- | --- | --- | --- | --- |
@@ -95,11 +98,14 @@ exposes.
 
 </div>
 
-Steps 6 and 7 are parallel siblings: the blind review never sees the
-other's output, and step 8 adjudicates both. Role bindings live in
-[`agents/templates/compound-engineer-workflow/`](agents/templates/compound-engineer-workflow)
-and the models in [`agents/roles/`](agents/roles). Board column
-semantics are defined in the
+The design rule behind the steps: whoever wrote the code never judges
+it. Authorship, review and verification run in separate sessions, the
+two code reviews cannot see each other's findings, and step 8
+adjudicates both. Each session starts clean, with a purpose-built
+prompt and an environment the runner constructs itself: your global
+agent config and skills never leak in as noise. Role bindings live in
+[`agents/templates/compound-engineer-workflow/`](agents/templates/compound-engineer-workflow);
+board column semantics in the
 [task-routing contract](docs/governance/task-routing-v1.md).
 
 ## Quick start
@@ -136,14 +142,12 @@ macOS on Apple Silicon only.
 
 **Read before pointing this at anything you care about:** Anneal
 launches coding CLIs with non-interactive permission bypass, as your
-macOS user, outside a sandbox. Use a disposable repository and a machine
-you are willing to let an agent modify. Details in
+macOS user, outside a sandbox. Use a disposable repository and a
+machine you are willing to let an agent modify. Details in
 [`docs/release/security.md`](docs/release/security.md).
 
-The provider CLIs, their authentication and their plan terms stay
-between you and the provider: Anneal neither reads nor forwards their
-credentials and grants no entitlement. The authoritative support
-statement is
+Provider CLIs, their authentication and their plan terms stay between
+you and the provider; the authoritative support statement is
 [`docs/release/support-matrix.md`](docs/release/support-matrix.md).
 
 ## Documentation
@@ -162,5 +166,5 @@ Five skills from
 [mattpocock/skills](https://github.com/mattpocock/skills) (MIT,
 Copyright (c) 2026 Matt Pocock) supply working text for the chain's
 prompts; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). This
-snapshot is licensed under the [MIT License](LICENSE), with its boundary
-defined by [`public-snapshot.json`](public-snapshot.json).
+snapshot is licensed under the [MIT License](LICENSE), with its
+boundary defined by [`public-snapshot.json`](public-snapshot.json).
