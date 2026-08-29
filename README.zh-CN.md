@@ -59,6 +59,14 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 模板是数据，不是代码。角色、提示词、模型和 gate 都可以编辑，你可以把
 这条链改造成自己的流程。
 
+<div align="center">
+
+<img src="docs/media/agents.png" alt="Agents 视图：每个 agent 的角色、模型、推理档位与 runner" width="880">
+
+<sub>Agents：一个角色、一段提示词、一个模型与档位，以及它去往的 runner。</sub>
+
+</div>
+
 <details>
 <summary><b>完整十二步</b>——每一步的角色、runner、模型与档位</summary>
 
