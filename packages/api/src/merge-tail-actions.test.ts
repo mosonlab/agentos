@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MergeRecoveryStatus, type Prisma, type RecoveryContext } from "@anneal/db";
+import {
+  type Marker,
+  MergeRecoveryStatus,
+  type Prisma,
+  type RecoveryContext,
+  TaskStatus,
+} from "@anneal/db";
 
 import {
   openDefenseAuditNotice,
   openMergeTailStopNotice,
+  settleMergeTailCompletion,
   stopMergeTail,
   type StopMergeTailInput,
 } from "./merge-tail-actions.js";
@@ -69,6 +76,68 @@ const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
   } as unknown as Prisma.TransactionClient;
   return { tx, activities, notices, recoveryUpdates };
 };
+
+const repairAttempt = (repairKind: "refresh-conflict" | "gate-fix" | "review-fix"): Marker => ({
+  kind: "repairAttempt",
+  state: null,
+  regressionTaskId: "regression-1",
+  repairTaskId: "repair-1",
+  readinessTaskId: null,
+  repairKind,
+  headSha: "a".repeat(40),
+  baseHeadSha: "b".repeat(40),
+  baseSha: null,
+  startHeadSha: null,
+  resolvedHeadSha: null,
+  recoverySourceStopId: null,
+  raw: {},
+});
+
+const completionTx = (outputBody = "repair completed") => {
+  const activities: Array<Record<string, any>> = [];
+  const notices: Array<Record<string, any>> = [];
+  const taskUpdates: Array<Record<string, any>> = [];
+  const tx = {
+    taskStepOutput: {
+      findUnique: async () => ({ body: outputBody }),
+    },
+    task: {
+      update: async (args: Record<string, any>) => {
+        taskUpdates.push(args);
+        return {};
+      },
+    },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, any> }) => {
+        activities.push(data);
+        return {};
+      },
+    },
+    inboxMessage: {
+      upsert: async (args: Record<string, any>) => {
+        notices.push(args);
+        return {};
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+  return { tx, activities, notices, taskUpdates };
+};
+
+const completionInput = (
+  repairKind: "refresh-conflict" | "gate-fix" | "review-fix",
+  succeeded: boolean,
+  documentationTaskId?: string,
+) => ({
+  task: { id: "repair-1", documentationTaskId: documentationTaskId ?? null },
+  run: {
+    agentId: "agent-1",
+    sessionId: "session-1",
+    completedAt: new Date("2026-08-27T12:00:00.000Z"),
+  },
+  body: { headSha: "c".repeat(40) },
+  markers: [repairAttempt(repairKind)],
+  succeeded,
+});
 
 test("openMergeTailStopNotice derives its dedupe key from the task and reason", async () => {
   let upsert: Record<string, unknown> | undefined;
@@ -143,6 +212,80 @@ test("openDefenseAuditNotice records the triggered paths against the readiness t
   });
 });
 
+test("settleMergeTailCompletion records a successful repair", async () => {
+  const observed = completionTx();
+
+  const result = await settleMergeTailCompletion(observed.tx, completionInput("gate-fix", true));
+
+  assert.deepEqual(result, { handled: false, leaseOutcome: "continue" });
+  assert.equal(observed.notices.length, 0);
+  assert.deepEqual(observed.taskUpdates, []);
+  assert.equal(observed.activities.length, 1);
+  assert.deepEqual(observed.activities[0]?.metadata, {
+    schemaVersion: 1,
+    repairKind: "gate-fix",
+    repairTaskId: "repair-1",
+    startHeadSha: "a".repeat(40),
+    targetHeadSha: "b".repeat(40),
+    resolvedHeadSha: "c".repeat(40),
+    kind: "mergeTail.repairResult",
+  });
+});
+
+test("settleMergeTailCompletion stops a failed repair", async () => {
+  const observed = completionTx();
+
+  const result = await settleMergeTailCompletion(observed.tx, completionInput("review-fix", false));
+
+  assert.deepEqual(result, { handled: true, leaseOutcome: "stop" });
+  assert.deepEqual(observed.taskUpdates, [{
+    where: { id: "regression-1" },
+    data: {
+      status: TaskStatus.REVIEW,
+      failureReason: `review-fix repair repair-1 failed without closing the repair at ${"a".repeat(40)}`,
+    },
+  }]);
+  assert.equal(observed.activities[0]?.metadata?.state, "failed");
+  assert.equal(observed.notices.length, 1);
+});
+
+test("settleMergeTailCompletion stops when the resolver reports unable", async () => {
+  const observed = completionTx(JSON.stringify({
+    schemaVersion: 1,
+    outcome: "unable",
+    startHeadSha: "a".repeat(40),
+    targetHeadSha: "b".repeat(40),
+    blockingContradiction: "the two required histories conflict",
+  }));
+
+  const result = await settleMergeTailCompletion(observed.tx, completionInput("refresh-conflict", true));
+
+  assert.deepEqual(result, { handled: true, leaseOutcome: "stop" });
+  assert.equal(observed.activities.length, 0);
+  assert.equal(observed.notices.length, 1);
+  assert.deepEqual(observed.taskUpdates.map((update) => update.where.id), ["repair-1", "regression-1"]);
+  assert.equal(observed.taskUpdates[0]?.data?.status, TaskStatus.DONE);
+  assert.equal(observed.taskUpdates[1]?.data?.status, TaskStatus.REVIEW);
+});
+
+test("settleMergeTailCompletion moves Documentation back before Regression", async () => {
+  const observed = completionTx();
+
+  const result = await settleMergeTailCompletion(
+    observed.tx,
+    completionInput("review-fix", true, "documentation-1"),
+  );
+
+  assert.deepEqual(result, { handled: false, leaseOutcome: "continue" });
+  assert.deepEqual(observed.taskUpdates, [{
+    where: { id: "documentation-1" },
+    data: {
+      status: TaskStatus.TODO,
+      failureReason: "documentation invalidated by review-fix repair repair-1",
+    },
+  }]);
+});
+
 test("stopMergeTail owns the phase by recovery matrix", async () => {
   const at = new Date("2026-08-27T12:00:00.000Z");
   const cases: Array<{
@@ -152,7 +295,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
     markerStates: string[];
     noticeKey: RegExp;
     recoveryTarget: MergeRecoveryStatus | null;
-    leaseToRelease: { chainId: string; projectId: string } | null;
+    result: { leaseToRelease: { chainId: string; projectId: string } | null } | undefined;
   }> = [
     {
       name: "regression without recovery",
@@ -161,7 +304,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["stopped"],
       noticeKey: /^merge-tail-stop:regression-1:/u,
       recoveryTarget: null,
-      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
+      result: undefined,
     },
     {
       name: "regression during recovery",
@@ -170,7 +313,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["tail-stopped", "tail-stopped"],
       noticeKey: /:stop-1:regression$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
+      result: undefined,
     },
     {
       name: "readiness without recovery",
@@ -179,7 +322,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["stopped"],
       noticeKey: /^merge-readiness-stop:readiness-1:/u,
       recoveryTarget: null,
-      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
+      result: { leaseToRelease: { chainId: "chain-1", projectId: "project-1" } },
     },
     {
       name: "readiness during recovery",
@@ -188,7 +331,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["tail-stopped", "tail-stopped", "stopped"],
       noticeKey: /:stop-1:readiness$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
+      result: { leaseToRelease: { chainId: "chain-1", projectId: "project-1" } },
     },
     {
       name: "recovery validation",
@@ -201,7 +344,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["ineligible"],
       noticeKey: /:ineligible:stop-1$/u,
       recoveryTarget: MergeRecoveryStatus.FAILED,
-      leaseToRelease: null,
+      result: undefined,
     },
     {
       name: "recovery exhausted",
@@ -214,7 +357,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["exhausted"],
       noticeKey: /:exhausted:stop-1$/u,
       recoveryTarget: MergeRecoveryStatus.FAILED,
-      leaseToRelease: null,
+      result: undefined,
     },
     {
       name: "repair",
@@ -227,13 +370,16 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["failed"],
       noticeKey: /^merge-tail-stop:regression-1:/u,
       recoveryTarget: null,
-      leaseToRelease: { chainId: "chain-1", projectId: "project-1" },
+      result: undefined,
     },
   ];
 
   for (const entry of cases) {
     const observed = stopTx(entry.status);
-    assert.deepEqual(await stopMergeTail(observed.tx, entry.input), { leaseToRelease: entry.leaseToRelease }, entry.name);
+    const result = entry.input.phase === "readiness"
+      ? await stopMergeTail(observed.tx, entry.input)
+      : await stopMergeTail(observed.tx, entry.input);
+    assert.deepEqual(result, entry.result, entry.name);
     assert.deepEqual(
       observed.activities.map((activity) => (activity.metadata as Record<string, unknown>).state),
       entry.markerStates,
