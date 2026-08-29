@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   asJsonObject,
+  ACTIVE_RUN_STATUSES,
   MERGE_TAIL_KIND,
   projectMergeOutcome,
   runOwnsMergeOutcome,
@@ -96,6 +97,62 @@ export type BoardCard = {
    * chain is what this reports. Null for every card that is not a repair task.
    */
   repairOf: RepairBinding | null;
+  /**
+   * One shared projection for every visible member of a chain. Standalone
+   * tasks (including ordinary chain-detached tasks) carry null here; a repair
+   * task gets the same object as the primary chain rows it repairs.
+   */
+  chainAggregate: BoardChainAggregate | null;
+};
+
+export type BoardLatestRun = {
+  id: string;
+  runNumber: number;
+  status: string;
+  /** The model snapshot taken when the run was claimed, not the assignee's
+   * current configuration: a re-tiered agent must not relabel a past run. */
+  model: string;
+  costUsd: string | null;
+  startedAt: Date | null;
+  endedAt: Date | null;
+};
+
+export type BoardChainActivationState =
+  | "parked-unactivated"
+  | "waiting-on-predecessor"
+  | "running"
+  | "settled";
+
+export type BoardChainFrontier = {
+  taskId: string;
+  title: string;
+  status: TaskStatusType;
+  latestRun: BoardLatestRun | null;
+  failureReason: string | null;
+  /** Dense one-based position among primary steps; null for a repair frontier. */
+  position?: number | null;
+};
+
+export type BoardChainAggregate = {
+  chainId: string;
+  chainName: string | null;
+  /** Number of primary chain steps. Detached repairs never inflate this. */
+  stepCount: number;
+  /** Status counts for primary steps only, used for progress. */
+  statusCounts: Record<TaskStatusType, number>;
+  /** Status counts for all members, including detached repair tasks. */
+  memberStatusCounts: Record<TaskStatusType, number>;
+  /** Derived board column; this is not a persisted Task status. */
+  status: TaskStatusType;
+  frontier: BoardChainFrontier;
+  activation: {
+    state: BoardChainActivationState;
+    predecessor: { taskId: string; taskName: string } | null;
+  };
+  totalCost: SerializedUsageCost | null;
+  /** Earliest member creation and latest member update, for aggregate age. */
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 /** What a repair card needs to sit with its chain: the chain it belongs to and
@@ -161,6 +218,172 @@ export type SerializedUsageCost = Omit<UsageCost, "costUsd"> & { costUsd: string
 
 export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
   cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
+
+/** The fields of a primary step or detached repair needed by the aggregate. */
+export type BoardChainMember = {
+  id: string;
+  projectId: string;
+  name: string;
+  displayName?: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  chainLayer: number | null;
+  status: TaskStatusType;
+  failureReason: string | null;
+  dispatchAfterTaskId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  templateStep: { name: string } | null;
+  runs: BoardRow["runs"];
+};
+
+const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | undefined): BoardLatestRun | null => {
+  const run = runs?.[0];
+  return run === undefined
+    ? null
+    : {
+        id: run.id,
+        runNumber: run.runNumber,
+        status: run.status,
+        model: run.model,
+        costUsd: decimal(run.session?.costUsd),
+        startedAt: run.session?.startedAt ?? null,
+        endedAt: run.session?.endedAt ?? null,
+      };
+};
+
+const memberUsageCost = (member: Pick<BoardChainMember, "runs">): UsageCost | null =>
+  sumUsageCosts((member.runs ?? []).flatMap((run) => run.session === null ? [] : [runSessionUsageCost(run)!]));
+
+const chainStatuses = (): Record<TaskStatusType, number> => ({
+  [TaskStatus.BACKLOG]: 0,
+  [TaskStatus.TODO]: 0,
+  [TaskStatus.DOING]: 0,
+  [TaskStatus.REVIEW]: 0,
+  [TaskStatus.DONE]: 0,
+});
+
+const chainMemberLayer = (member: Pick<BoardChainMember, "chainLayer" | "chainIndex">): number =>
+  member.chainLayer ?? member.chainIndex ?? Number.MAX_SAFE_INTEGER;
+
+const chainMemberOrder = (left: BoardChainMember, right: BoardChainMember): number => (
+  chainMemberLayer(left) - chainMemberLayer(right)
+    || (left.chainIndex ?? Number.MAX_SAFE_INTEGER) - (right.chainIndex ?? Number.MAX_SAFE_INTEGER)
+    || left.id.localeCompare(right.id)
+);
+
+const memberTitle = (member: BoardChainMember): string => member.displayName
+  ?? member.templateStep?.name
+  ?? member.name;
+
+const isActiveLatestRun = (member: Pick<BoardChainMember, "runs">): boolean => {
+  const status = (member.runs ?? [])[0]?.status;
+  return status !== undefined && ACTIVE_RUN_STATUSES.includes(status as (typeof ACTIVE_RUN_STATUSES)[number]);
+};
+
+/**
+ * Derive the single board card projection for one chain. `primaryMembers` are
+ * the persisted chain rows and define step progress/frontier. `repairMembers`
+ * are chain-detached merge-tail repairs: they affect placement and spend, but
+ * never make a chain appear to have more primary steps than it does.
+ */
+export const chainAggregate = (
+  chainId: string,
+  chainName: string | null,
+  primaryMembers: readonly BoardChainMember[],
+  repairMembers: readonly BoardChainMember[],
+  predecessorById: ReadonlyMap<string, BoardBlockedOnTask> = new Map(),
+): BoardChainAggregate => {
+  const primary = [...primaryMembers].sort(chainMemberOrder);
+  const repairs = [...repairMembers].sort(chainMemberOrder);
+  const members = [...primary, ...repairs];
+  // A malformed response should never manufacture a member. A chain aggregate
+  // is only built for a real primary or repair row, but keep this guard so the
+  // pure helper remains honest when called directly.
+  if (members.length === 0) throw new Error(`Cannot aggregate empty chain ${chainId}`);
+
+  const stepStatusCounts = chainStatuses();
+  for (const member of primary) stepStatusCounts[member.status] += 1;
+  const memberStatusCounts = chainStatuses();
+  for (const member of members) memberStatusCounts[member.status] += 1;
+
+  const unfinishedPrimary = primary.filter((member) => member.status !== TaskStatus.DONE);
+  const unfinishedRepairs = repairs.filter((member) => member.status !== TaskStatus.DONE);
+  // A repair is the frontier only after all primary steps have settled. Before
+  // then the chain's own lowest unfinished layer is the operator's useful
+  // frontier; repair state still participates in active/terminal placement.
+  const frontierMember = unfinishedPrimary[0]
+    ?? unfinishedRepairs[0]
+    ?? primary[primary.length - 1]
+    ?? repairs[repairs.length - 1]!;
+  const active = members.some((member) => member.status === TaskStatus.DOING || isActiveLatestRun(member));
+  const allDone = members.every((member) => member.status === TaskStatus.DONE);
+  const columnStatus = active
+    ? TaskStatus.DOING
+    : allDone
+      ? TaskStatus.DONE
+      : frontierMember.status;
+
+  const firstPrimary = primary[0];
+  const waitingMember = primary.find((member) => {
+    if (member.dispatchAfterTaskId === null) return false;
+    const predecessor = predecessorById.get(member.dispatchAfterTaskId);
+    return predecessor !== undefined && predecessor.status !== TaskStatus.DONE;
+  });
+  const predecessor = waitingMember?.dispatchAfterTaskId === null || waitingMember?.dispatchAfterTaskId === undefined
+    ? null
+    : predecessorById.get(waitingMember.dispatchAfterTaskId) ?? null;
+  const activationState: BoardChainActivationState = active
+    ? "running"
+    : waitingMember !== undefined
+      ? "waiting-on-predecessor"
+      : allDone
+        ? "settled"
+        : firstPrimary !== undefined
+          && firstPrimary.status === TaskStatus.TODO
+          && (firstPrimary.runs ?? []).length === 0
+          && firstPrimary.dispatchAfterTaskId === null
+          ? "parked-unactivated"
+          : "running";
+
+  const totalCost = sumUsageCosts(members.flatMap((member) => {
+    const cost = memberUsageCost(member);
+    return cost === null ? [] : [cost];
+  }));
+  const createdAt = members.reduce((earliest, member) => (
+    member.createdAt < earliest ? member.createdAt : earliest
+  ), members[0]!.createdAt);
+  const updatedAt = members.reduce((latest, member) => (
+    member.updatedAt > latest ? member.updatedAt : latest
+  ), members[0]!.updatedAt);
+
+  const frontierPosition = primary.indexOf(frontierMember);
+  return {
+    chainId,
+    chainName,
+    stepCount: primary.length,
+    statusCounts: stepStatusCounts,
+    memberStatusCounts,
+    status: columnStatus,
+    frontier: {
+      taskId: frontierMember.id,
+      title: memberTitle(frontierMember),
+      status: frontierMember.status,
+      latestRun: latestRunProjection(frontierMember.runs),
+      failureReason: frontierMember.failureReason,
+      ...(frontierPosition >= 0 ? { position: frontierPosition + 1 } : {}),
+    },
+    activation: {
+      state: activationState,
+      predecessor: predecessor === null || predecessor.status === TaskStatus.DONE
+        ? null
+        : { taskId: predecessor.id, taskName: predecessor.name },
+    },
+    totalCost: serializeUsageCost(totalCost),
+    createdAt,
+    updatedAt,
+  };
+};
 
 /** The instantiated chain name is persisted as the prefix of every task name.
  * The template step is the lossless delimiter: only remove a suffix we can
@@ -248,17 +471,7 @@ export const boardCard = (
       ? null
       : { id: row.assigneeAgent.id, title: row.assigneeAgent.title, model: row.assigneeAgent.model },
     chainProgress,
-    latestRun: run === undefined
-      ? null
-      : {
-          id: run.id,
-          runNumber: run.runNumber,
-          status: run.status,
-          model: run.model,
-          costUsd: decimal(run.session?.costUsd),
-          startedAt: run.session?.startedAt ?? null,
-          endedAt: run.session?.endedAt ?? null,
-        },
+    latestRun: latestRunProjection(row.runs),
     taskCost: serializeUsageCost(taskCost),
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
     // run 2's outcome, and the card's only run line is the newest run's.
@@ -266,6 +479,7 @@ export const boardCard = (
       ? projectMergeOutcome(row.stepOutput)
       : null,
     repairOf,
+    chainAggregate: null,
   };
 };
 
@@ -378,6 +592,66 @@ const chainProgressLookup = async (
   };
 };
 
+/**
+ * Fetch the complete primary-step facts needed by the aggregate. The progress
+ * lookup intentionally stays small for full task-list callers; board reads
+ * additionally need frontier/run/cost and age facts, including archived chain
+ * siblings that are not themselves visible cards.
+ */
+const boardChainRows = async (
+  db: PrismaClient,
+  rows: readonly Pick<BoardRow, "chainId">[],
+  scope: TaskReadScope,
+): Promise<BoardChainMember[]> => {
+  const chainIds = [...new Set(rows
+    .map((row) => row.chainId)
+    .filter((value): value is string => value !== null))];
+  if (chainIds.length === 0) return [];
+  const chainRows = await db.task.findMany({
+    where: {
+      chainId: { in: chainIds },
+      chainIndex: { not: null },
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+    },
+    select: {
+      id: true,
+      name: true,
+      projectId: true,
+      chainId: true,
+      chainIndex: true,
+      chainLayer: true,
+      status: true,
+      failureReason: true,
+      dispatchAfterTaskId: true,
+      createdAt: true,
+      updatedAt: true,
+      templateStep: { select: { name: true } },
+      runs: {
+        orderBy: { runNumber: "desc" },
+        select: {
+          id: true,
+          runNumber: true,
+          status: true,
+          model: true,
+          subagentModel: true,
+          session: {
+            select: {
+              nativeChildUsed: true,
+              costUsd: true,
+              inputTokens: true,
+              cachedInputTokens: true,
+              outputTokens: true,
+              startedAt: true,
+              endedAt: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  return chainRows as unknown as BoardChainMember[];
+};
+
 /** Read the complete board card model, including every lookup needed to project it. */
 export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise<BoardCard[]> => {
   const rows: BoardRow[] = await db.task.findMany({
@@ -408,9 +682,13 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     },
   });
   const progressFor = await chainProgressLookup(db, rows, scope, true);
-  const displayByTask = chainDisplayByTask(rows);
+  const primaryRows = await boardChainRows(db, rows, scope);
+  // The page's visible rows carry the display-only title for cards; archived
+  // siblings are added so a chain's name/frontier can still be derived when a
+  // visible step is not the one that proves the shared prefix.
+  const displayByTask = chainDisplayByTask([...rows, ...primaryRows]);
 
-  const predecessorIds = [...new Set(rows
+  const predecessorIds = [...new Set([...rows, ...primaryRows]
     .map((row) => row.dispatchAfterTaskId)
     .filter((value): value is string => typeof value === "string" && value.length > 0))];
   const predecessorById = new Map<string, BoardBlockedOnTask>();
@@ -433,6 +711,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
   const repairByTask = new Map<string, RepairBinding>();
+  const repairChainKeyByTask = new Map<string, string>();
   if (repairMarkers.length > 0) {
     const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
       const value = asJsonObject(marker.metadata)?.regressionTaskId;
@@ -451,7 +730,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       });
     }
     const chainNameByKey = new Map<string, string | null>();
-    for (const row of rows) {
+    for (const row of [...rows, ...primaryRows]) {
       if (row.chainId === null) continue;
       const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
       if (chainNameByKey.has(key)) continue;
@@ -467,17 +746,84 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     for (const marker of repairMarkers) {
       if (repairByTask.has(marker.taskId)) continue;
       const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
-      if (binding !== null) repairByTask.set(marker.taskId, binding);
+      if (binding !== null) {
+        repairByTask.set(marker.taskId, binding);
+        const regressionTaskId = asJsonObject(marker.metadata)?.regressionTaskId;
+        if (typeof regressionTaskId === "string") {
+          const chain = chainOfTask.get(regressionTaskId);
+          if (chain !== undefined) repairChainKeyByTask.set(marker.taskId, chain.key);
+        }
+      }
     }
   }
 
-  return rows.map((row) => boardCard(
-    row,
-    progressFor(row),
-    displayByTask.get(row.id),
-    row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
-    repairByTask.get(row.id) ?? null,
-  ));
+  const membersByChain = new Map<string, { primary: BoardChainMember[]; repairs: BoardChainMember[]; chainName: string | null }>();
+  const addChain = (key: string, chainName: string | null): { primary: BoardChainMember[]; repairs: BoardChainMember[]; chainName: string | null } => {
+    const existing = membersByChain.get(key);
+    if (existing !== undefined) {
+      if (existing.chainName === null && chainName !== null) existing.chainName = chainName;
+      return existing;
+    }
+    const created = { primary: [], repairs: [], chainName };
+    membersByChain.set(key, created);
+    return created;
+  };
+  const memberWithDisplay = (member: BoardChainMember): BoardChainMember => ({
+    ...member,
+    displayName: displayByTask.get(member.id)?.displayName,
+  });
+  // Include the complete chain lookup first so archived siblings contribute to
+  // progress, costs and terminal placement. Visible rows then fill malformed
+  // one-row chains and retain the exact card-side run projection.
+  for (const member of primaryRows) {
+    if (member.chainId === null) continue;
+    const key = chainKey({ projectId: member.projectId, chainId: member.chainId });
+    const group = addChain(key, displayByTask.get(member.id)?.chainName ?? null);
+    if (!group.primary.some((candidate) => candidate.id === member.id)) group.primary.push(memberWithDisplay(member));
+  }
+  for (const row of rows) {
+    if (row.chainId !== null) {
+      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+      const group = addChain(key, displayByTask.get(row.id)?.chainName ?? null);
+      const existingIndex = group.primary.findIndex((candidate) => candidate.id === row.id);
+      if (existingIndex === -1) group.primary.push(memberWithDisplay(row));
+      else group.primary[existingIndex] = memberWithDisplay(row);
+      continue;
+    }
+    const key = repairChainKeyByTask.get(row.id);
+    if (key === undefined) continue;
+    const group = addChain(key, repairByTask.get(row.id)?.chainName ?? null);
+    group.repairs.push(memberWithDisplay(row));
+  }
+  const aggregateByChain = new Map<string, BoardChainAggregate>();
+  for (const [key, group] of membersByChain) {
+    const chainId = group.primary[0]?.chainId
+      ?? (group.repairs[0] === undefined
+        ? key.split("\u0000")[1]!
+        : repairByTask.get(group.repairs[0].id)?.chainId ?? key.split("\u0000")[1]!);
+    aggregateByChain.set(key, chainAggregate(
+      chainId,
+      group.chainName,
+      group.primary,
+      group.repairs,
+      predecessorById,
+    ));
+  }
+
+  return rows.map((row) => {
+    const repairKey = row.chainId === null ? repairChainKeyByTask.get(row.id) : undefined;
+    const key = row.chainId === null
+      ? repairKey
+      : chainKey({ projectId: row.projectId, chainId: row.chainId });
+    const card = boardCard(
+      row,
+      progressFor(row),
+      displayByTask.get(row.id),
+      row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+      repairByTask.get(row.id) ?? null,
+    );
+    return { ...card, chainAggregate: key === undefined ? null : aggregateByChain.get(key) ?? null };
+  });
 };
 
 const taskListInclude = {
