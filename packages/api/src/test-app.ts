@@ -98,4 +98,4 @@ export const createApp = (db: PrismaClient, options: {
   });
 };
 
-export { partitionArchivable } from "./app.js";
+export { partitionArchivable } from "./task-archive.js";

@@ -90,6 +90,7 @@ import {
   type TaskReadScope,
 } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
+import { lockDoneTasks, partitionArchivable } from "./task-archive.js";
 import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts } from "./costs.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
@@ -1090,43 +1091,6 @@ const sessionWriteInput = z.object({
 const isPublic = (path: string, method: string): boolean =>
   path === "/" || path === "/health" || path === "/version" || method === "OPTIONS"
   || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
-
-/** Locks a whole candidate set in one statement. `ORDER BY "id"` is not
- *  decoration: it is what stops two concurrent Archive All presses from
- *  deadlocking against each other.
- *
- *  The scope predicates are re-stated here rather than trusted from the
- *  unlocked selection above: `FOR UPDATE` re-evaluates its own `WHERE` against
- *  the row version it waited for, so a task dragged back out of `Done` between
- *  selection and lock drops out of the result instead of being archived out
- *  from under the operator who moved it. */
-const lockDoneTasks = async (
-  tx: Prisma.TransactionClient,
-  projectId: string,
-  taskIds: string[],
-): Promise<string[]> => {
-  if (taskIds.length === 0) return [];
-  const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT "id" FROM "Task"
-    WHERE "id" = ANY(${taskIds})
-      AND "archivedAt" IS NULL
-      AND "projectId" = ${projectId}
-      AND "status" = 'done'::"TaskStatus"
-    ORDER BY "id" FOR UPDATE
-  `;
-  return rows.map((row) => row.id);
-};
-
-/** `{archived, skipped}` from a candidate set and the ids that turned out busy.
- *  Extracted so the partitioning is unit-testable without a database. */
-export const partitionArchivable = (
-  candidateIds: string[],
-  busyIds: string[],
-): { archive: string[]; skipped: number } => {
-  const busy = new Set(busyIds);
-  const archive = candidateIds.filter((taskId) => !busy.has(taskId));
-  return { archive, skipped: candidateIds.length - archive.length };
-};
 
 const secretPublicSelect = {
   id: true,

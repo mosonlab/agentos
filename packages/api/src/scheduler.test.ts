@@ -36,6 +36,7 @@ test("stored garbage cron is quarantined with the full observed tuple and one ac
   let activities = 0;
   const database = {
     task: { findMany: async ({ where: query }: { where: { scheduleKind: string } }) => query.scheduleKind === "CRON" ? [task] : [] },
+    $queryRaw: async () => [],
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       task: { updateMany: async ({ where: value }: { where: Record<string, unknown> }) => { where = value; return { count: 1 }; } },
       taskActivity: { create: async () => { activities += 1; return {}; } },
@@ -51,6 +52,7 @@ test("transient fire failures remain due and are not quarantined", async () => {
   let transactions = 0;
   const database = {
     task: { findMany: async ({ where }: { where: { scheduleKind: string } }) => where.scheduleKind === "CRON" ? [task] : [] },
+    $queryRaw: async () => [],
     $transaction: async () => { transactions += 1; throw new Error("temporary database failure"); },
   } as any;
   const originalError = console.error;
