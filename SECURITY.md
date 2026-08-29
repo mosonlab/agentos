@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.3.0 (Developer Preview) | Yes, on the target platform only — see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) |
+| 0.4.0 (Developer Preview) | Yes, on the target platform only — see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) |
 | 0.2.0 and 0.1.0 | No. A developer preview is superseded by the next one; there is no backport path. |
 
 There is no patch stream and no backport path. A fix ships as the next release; published
@@ -17,9 +17,9 @@ the current boundaries are and — more usefully — where they stop. Several
 properties people reasonably expect are **not** claimed by this release, and are
 documented as absent rather than treated as defects:
 
-- AgentOS is not a sandbox. The provider adapters launch the coding CLI with
+- Anneal is not a sandbox. The provider adapters launch the coding CLI with
   non-interactive permission-bypass flags, and with the shipped same-user default
-  the agent runs with your own user's authority. AgentOS grants are a
+  the agent runs with your own user's authority. Anneal grants are a
   control-plane authorization and audit boundary, not operating-system
   containment.
 - There is no enforced network isolation. A fresh installation labels its

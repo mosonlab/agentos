@@ -57,7 +57,7 @@ and severity: P0 for correctness or security failure, P1 for a required
 functional defect, and P2 for a non-blocking improvement. State explicitly when
 there are no findings.
 
-Persist the complete report only as the AgentOS task output; do not write or
+Persist the complete report only as the Anneal task output; do not write or
 commit a report or session record to the chain branch. Record the exact base,
 head, commands run, and finding counts in the activity log. Finish only after
 the platform output is durable.
@@ -70,6 +70,6 @@ the reports raised, rerun the
 relevant regressions, and run the repository's required exact-head gate. Verify
 that each defect is closed, the fix preserves the specification, and the
 combined fixes introduce no regression. Persist the required structured
-verdict as the AgentOS task output and bind it to the exact fixed head. Any
+verdict as the Anneal task output and bind it to the exact fixed head. Any
 unresolved item or newly discovered defect returns the chain to the fix phase;
 do not start another full review round.

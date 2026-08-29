@@ -1,10 +1,10 @@
-# AgentOS — security boundaries, and where they stop
+# Anneal — security boundaries, and where they stop
 
 This page is written to be believed, which means it has to be usable as a list
-of what AgentOS does *not* protect you from. Read the limits section before you
+of what Anneal does *not* protect you from. Read the limits section before you
 decide what to point this at.
 
-The short version: AgentOS is a **local, single-operator** control plane. Its
+The short version: Anneal is a **local, single-operator** control plane. Its
 boundaries are authorization and audit boundaries inside its own APIs. It is not
 a sandbox, it does not contain the coding CLI it launches, and it is not built
 to face a network.
@@ -96,8 +96,8 @@ are ordinary clients; any number of them may poll that one API.
 
 The provider adapters launch the coding CLI with non-interactive
 permission-bypass flags. With the shipped same-user default, the agent runs
-**with your own user's authority** on your own machine. AgentOS grants constrain
-AgentOS's own APIs — which is a real thing, and an audit trail — but they are not
+**with your own user's authority** on your own machine. Anneal grants constrain
+Anneal's own APIs — which is a real thing, and an audit trail — but they are not
 an operating-system containment boundary. Application metadata describing an
 environment as restricted is metadata, not enforcement, and nothing in this
 release should be read as sandboxing.

@@ -14,7 +14,7 @@ mechanical run; there is no token, identity, or service fallback.
 
 ## Security model
 
-Create a private GitHub App owned by the account or organization where AgentOS
+Create a private GitHub App owned by the account or organization where Anneal
 runs. A public operator cannot install another organization's private App and
 must not try to reuse one. The App acts as itself through short-lived
 installation access tokens; it never acts for a GitHub user.
@@ -78,7 +78,7 @@ following evidence; a process merely staying alive proves none of these writes.
 
 | Mutating operation | Required permission | Verification evidence |
 | --- | --- | --- |
-| `createSanitizedTree` — `POST /git/trees` | Contents write; Workflows write too when the retained tree changes workflow files | The first controlled AgentOS chain PR contains `.chain/` on its head. After the App-bot merge, inspect the landed tree and record that `.chain/` is absent. |
+| `createSanitizedTree` — `POST /git/trees` | Contents write; Workflows write too when the retained tree changes workflow files | The first controlled Anneal chain PR contains `.chain/` on its head. After the App-bot merge, inspect the landed tree and record that `.chain/` is absent. |
 | `createMergeCommit` — `POST /git/commits` | Contents write; Workflows write for a workflow-changing result | The mechanical `merge-result` names the new commit SHA; GitHub shows a two-parent merge commit whose parents are the authorized base and exact reviewed head. |
 | `updateBaseRef` — GraphQL `updateRefs` | Contents write; Workflows write for a workflow-changing result | The selected base ref equals the recorded merge commit and the old base was its first parent. A concurrent base change must instead record `ref-update-refused`. |
 | `disablePullRequestAutoMerge` — GraphQL mutation | Pull requests write | In a controlled, merge-blocked test PR with auto-merge armed, exercise a stop/disarm path; record the run activity and verify GitHub reports auto-merge disabled. |
@@ -288,7 +288,7 @@ as root after substituting the user, group, and Node path:
 
 ```ini
 [Unit]
-Description=AgentOS merge executor
+Description=Anneal merge executor
 After=network-online.target
 Wants=network-online.target
 
@@ -378,7 +378,7 @@ daemon row.
 ### First positive App-bot merge
 
 Use a controlled repository selected in the App installation and a disposable
-PR that travels through the normal AgentOS authorization, regression, and merge
+PR that travels through the normal Anneal authorization, regression, and merge
 chain. Do not bypass a gate to create evidence. Record together:
 
 1. the authorization activity and exact reviewed head/base SHAs;

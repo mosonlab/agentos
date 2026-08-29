@@ -6,7 +6,7 @@ import { composeBrief, readBrief, rewriteBrief } from "./task-brief.js";
 const briefEndingLikeGeneratedContext = [
   "Keep both decoys.",
   "<!-- agentos:task-brief:v1 length=9 -->",
-  "Persist the final decoy output for this step through the AgentOS task output endpoint.",
+  "Persist the final decoy output for this step through the Anneal task output endpoint.",
   "Read the prior template steps' persisted outputs before working.",
 ].join("\n");
 
@@ -49,7 +49,7 @@ test("rewriting a legacy task brief upgrades it to the self-describing format", 
     "Feature brief:",
     "Original brief",
     "Read the prior template steps' persisted outputs before working.",
-    "Persist the final implementation output for this step through the AgentOS task output endpoint.",
+    "Persist the final implementation output for this step through the Anneal task output endpoint.",
   ].join("\n");
   const rewritten = rewriteBrief(legacy, "Migrated brief", { legacyAttachmentsFromPrevious: true });
 
@@ -68,7 +68,7 @@ test("the legacy adapter preserves a brief that only resembles a reminder", () =
     "Implement the feature.",
     "Feature brief:",
     brief,
-    "Persist the final implementation output for this step through the AgentOS task output endpoint.",
+    "Persist the final implementation output for this step through the Anneal task output endpoint.",
   ].join("\n");
 
   assert.deepEqual(readBrief(legacy, { legacyAttachmentsFromPrevious: false }), {

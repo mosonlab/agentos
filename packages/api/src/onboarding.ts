@@ -1,7 +1,7 @@
 /**
  * OSS-B0 Step 4: the one transactional first-run installation.
  *
- * A fresh AgentOS has to reach a usable state without the operator calling five
+ * A fresh Anneal has to reach a usable state without the operator calling five
  * REST routes in the right order. Chaining those creates from the browser was
  * rejected in the plan (Fixed Decision 1) for one reason: a failure halfway
  * through leaves a half-seeded control plane and hands recovery judgement to

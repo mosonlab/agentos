@@ -1,5 +1,5 @@
 /**
- * The runner half of the same claim the API's dbtest makes: a *running* AgentOS
+ * The runner half of the same claim the API's dbtest makes: a *running* Anneal
  * runner is visible to the exclusive maintenance lock.
  *
  * This starts `packages/runner/dist/index.js` — the shipped entrypoint, not a
@@ -187,7 +187,7 @@ describe("the shipped runner and the shared lock", () => {
 
     const runner = await spawnRunner(target.url);
     await waitForOutput(runner.child, /runner step=maintenance-lock role=shared result=acquired/u, runner.output);
-    await waitForOutput(runner.child, /AgentOS local runner .* polling/u, runner.output);
+    await waitForOutput(runner.child, /Anneal local runner .* polling/u, runner.output);
     assert.ok(
       runner.output.value.indexOf("step=maintenance-lock role=shared result=acquired")
         < runner.output.value.indexOf("polling"),
@@ -223,7 +223,7 @@ describe("the shipped runner and the shared lock", () => {
       assert.equal(await exited(runner.child), SERVICE_LOCK_CONTENTION_EXIT_CODE);
       assert.match(
         runner.output.value,
-        /AgentOS runner startup refused: exclusive-maintenance-lock-held-by-another-session/u,
+        /Anneal runner startup refused: exclusive-maintenance-lock-held-by-another-session/u,
       );
       assert.ok(!/polling/u.test(runner.output.value), runner.output.value);
     } finally {
@@ -236,13 +236,13 @@ describe("the shipped runner and the shared lock", () => {
     unnamed.searchParams.delete("schema");
     const runner = await spawnRunner(unnamed.href);
     assert.equal(await exited(runner.child), SERVICE_LOCK_CONFIGURATION_EXIT_CODE);
-    assert.match(runner.output.value, /AgentOS runner startup refused: database-url-schema-unnamed/u);
+    assert.match(runner.output.value, /Anneal runner startup refused: database-url-schema-unnamed/u);
   });
 
   it("reacquires shared when its lock backend is terminated without maintenance", async () => {
     const target = targetFor("terminated-recover");
     const runner = await spawnRunner(target.url);
-    await waitForOutput(runner.child, /AgentOS local runner .* polling/u, runner.output);
+    await waitForOutput(runner.child, /Anneal local runner .* polling/u, runner.output);
 
     const oldPid = await terminateSharedBackend(target);
     await waitForOutput(runner.child, /result=reacquired/u, runner.output);
@@ -262,7 +262,7 @@ describe("the shipped runner and the shared lock", () => {
   it("stops when maintenance acquires exclusively after the shared backend is lost", async () => {
     const target = targetFor("terminated-maintenance");
     const runner = await spawnRunner(target.url);
-    await waitForOutput(runner.child, /AgentOS local runner .* polling/u, runner.output);
+    await waitForOutput(runner.child, /Anneal local runner .* polling/u, runner.output);
 
     await terminateSharedBackend(target);
     const maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);

@@ -80,7 +80,7 @@ const cleanup = (exitCode: number): Promise<void> => {
     if (ownership) await ownership.release().catch((error: unknown) => failures.push(error));
     if (failures.length > 0) {
       finalExitCode = 1;
-      throw new AggregateError(failures, "AgentOS API cleanup failed");
+      throw new AggregateError(failures, "Anneal API cleanup failed");
     }
   })();
   return cleanupPromise.finally(() => { process.exitCode = finalExitCode; });
@@ -99,9 +99,9 @@ const ensureStartupActive = async (): Promise<void> => {
 const onSignal = (signal: NodeJS.Signals): void => {
   if (requestedSignal) return;
   requestedSignal = signal;
-  console.log(`Received ${signal}; shutting down AgentOS API`);
+  console.log(`Received ${signal}; shutting down Anneal API`);
   if (!startupBusy) void cleanup(0).catch((error: unknown) => {
-    console.error("AgentOS API shutdown failed", error);
+    console.error("Anneal API shutdown failed", error);
     process.exitCode = 1;
   });
 };
@@ -120,10 +120,10 @@ process.once("SIGTERM", () => onSignal("SIGTERM"));
 const onSharedLockLost = (reason: string): void => {
   if (lockLost) return;
   lockLost = true;
-  console.error(`AgentOS API stopping: ${reason}`);
+  console.error(`Anneal API stopping: ${reason}`);
   finalExitCode = Math.max(finalExitCode, SERVICE_LOCK_CONTENTION_EXIT_CODE);
   if (!startupBusy) void cleanup(SERVICE_LOCK_CONTENTION_EXIT_CODE).catch((error: unknown) => {
-    console.error("AgentOS API shutdown failed", error);
+    console.error("Anneal API shutdown failed", error);
     process.exitCode = 1;
   });
 };
@@ -218,7 +218,7 @@ const main = async (): Promise<void> => {
   await ensureStartupActive();
   const address = activeServer.address();
   const listeningPort = typeof address === "object" && address ? address.port : port;
-  console.log(`AgentOS API listening on http://${hostname}:${listeningPort}`);
+  console.log(`Anneal API listening on http://${hostname}:${listeningPort}`);
   schedulerTimer = startScheduler(prisma);
   // §D-P3 Phase B. Attaches to the process that already owns the single-instance
   // control plane and already holds the read credential, rather than inventing
@@ -236,7 +236,7 @@ try {
   if (error instanceof StartupConfigError) {
     // No stack: the stack says where the check lives, and the reasons say what
     // to fix. Exit 78 (EX_CONFIG) tells a supervisor a restart will not help.
-    console.error(`AgentOS API startup configuration refused: ${error.reasons.join(", ")}`);
+    console.error(`Anneal API startup configuration refused: ${error.reasons.join(", ")}`);
     console.error("Run `npm run setup:local` to generate a complete local configuration, or fix the variables named above.");
     process.exitCode = error.exitCode;
   } else if (error instanceof ControlPlaneOwnershipStartupError) {
@@ -244,13 +244,13 @@ try {
   } else if (error instanceof ServiceMaintenanceLockError) {
     // No stack, and no value: the reason names the kind of holder or the
     // variable at fault, which is the whole of what an operator can act on.
-    console.error(`AgentOS API startup refused: ${error.reason}`);
+    console.error(`Anneal API startup refused: ${error.reason}`);
     process.exitCode = error.exitCode;
-    await cleanup(error.exitCode).catch((cleanupError: unknown) => console.error("AgentOS API cleanup failed", cleanupError));
+    await cleanup(error.exitCode).catch((cleanupError: unknown) => console.error("Anneal API cleanup failed", cleanupError));
   } else if (error instanceof StartupCancelledBySignalError) {
-    await cleanup(0).catch((cleanupError: unknown) => console.error("AgentOS API cleanup failed", cleanupError));
+    await cleanup(0).catch((cleanupError: unknown) => console.error("Anneal API cleanup failed", cleanupError));
   } else {
-    console.error("AgentOS API startup failed", error);
-    await cleanup(1).catch((cleanupError: unknown) => console.error("AgentOS API cleanup failed", cleanupError));
+    console.error("Anneal API startup failed", error);
+    await cleanup(1).catch((cleanupError: unknown) => console.error("Anneal API cleanup failed", cleanupError));
   }
 }

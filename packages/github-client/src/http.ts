@@ -1,5 +1,5 @@
 /**
- * The transport seam every AgentOS process shares when it talks to GitHub over
+ * The transport seam every Anneal process shares when it talks to GitHub over
  * HTTP.
  *
  * It is an injected function, not a fetch call, for two reasons that are both

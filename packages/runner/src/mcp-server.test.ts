@@ -38,7 +38,7 @@ const withApi = async (
   }
 };
 
-test("the MCP handshake advertises all ten AgentOS tools", async () => {
+test("the MCP handshake advertises all ten Anneal tools", async () => {
   const credentials = { apiUrl: "http://unused", runId: "run-1", sessionToken: "t", fencingToken: "f", workspacePath: process.cwd() };
   const initialize = await handleRequest(credentials, {
     jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" },

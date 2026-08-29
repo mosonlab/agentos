@@ -15,7 +15,7 @@ also need
 - Docker with Docker Compose, for the PostgreSQL service defined here;
 - Git;
 - the official **Codex CLI, already installed and already signed in**, under the
-  same macOS account that will run the AgentOS runner;
+  same macOS account that will run the Anneal runner;
 - the GitHub CLI (`gh`), installed and authenticated under that account, for
   every GitHub-backed run configured to open a pull request. If `gh` cannot
   record an open pull request, the run fails while preserving its already-pushed
@@ -23,13 +23,13 @@ also need
 
 Codex is the only provider CLI this preview requires. The starter agent it
 installs runs on Codex; Claude Code and Pi are optional,
-and a machine without them is a complete installation. AgentOS never logs you
+and a machine without them is a complete installation. Anneal never logs you
 into a provider and never reads a credential store.
 
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.3.0
+git checkout v0.4.0
 npm ci
 npm run setup:local
 npm run build

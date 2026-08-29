@@ -320,7 +320,7 @@ test("the disclosure states host authority, open networking and no filesystem gr
 
 test("an empty control plane opens the wizard instead of an application with nothing in it", async () => {
   const { markup, paths } = await withWizard(() => <App />, { projects: [{ status: 200, body: "[]" }] }, async () => undefined);
-  assert.match(markup, /Set up AgentOS/u);
+  assert.match(markup, /Set up Anneal/u);
   // No Shell, no routed page, no runner row behind the wizard. The wizard does
   // read `/runners` itself from Step 6 on — that is the Codex readiness gate,
   // not a provider mounted behind the page — so what is asserted is the absence
@@ -396,7 +396,7 @@ test("a successful install selects the created project and lands on the board", 
   assert.equal(storage.get("agentos.projectId"), "p9");
   assert.equal(hash, "#/tasks");
   assert.match(markup, /Vibeville/u);
-  assert.doesNotMatch(markup, /Set up AgentOS/u);
+  assert.doesNotMatch(markup, /Set up Anneal/u);
 });
 
 test("an installation that already exists recovers into the application without a second write", async () => {
@@ -420,7 +420,7 @@ test("an installation that already exists recovers into the application without 
   assert.equal(storage.get("agentos.projectId"), "other");
   assert.equal(hash, "#/tasks");
   assert.match(markup, /Existing/u);
-  assert.doesNotMatch(markup, /Set up AgentOS/u);
+  assert.doesNotMatch(markup, /Set up Anneal/u);
 });
 
 test("a refused installation keeps the operator on the wizard with their answers intact", async () => {
@@ -458,7 +458,7 @@ test("a control plane that already reports an installation ends the wizard witho
   assert.equal(storage.get("agentos.projectId"), "p-existing");
   assert.equal(hash, "#/tasks");
   assert.match(markup, /Existing/u);
-  assert.doesNotMatch(markup, /Set up AgentOS/u);
+  assert.doesNotMatch(markup, /Set up Anneal/u);
 });
 
 test("a control plane that disagrees with itself is recovered from once, not forever", async () => {
@@ -476,7 +476,7 @@ test("a control plane that disagrees with itself is recovered from once, not for
   // property, which is about how many times the bootstrap is re-run.
   assert.deepEqual(paths.filter((path) => path !== "/api/runners"), ["/api/projects", "/api/onboarding", "/api/projects", "/api/onboarding"]);
   assert.deepEqual(posts, []);
-  assert.match(markup, /Set up AgentOS/u);
+  assert.match(markup, /Set up Anneal/u);
 });
 
 /* ------------------------------------------ an installation with no answer */
@@ -520,7 +520,7 @@ test("retrying an unanswered installation recovers through 409 rather than writi
   assert.deepEqual(posts[0], posts[1]);
   assert.equal(hash, "#/tasks");
   assert.match(markup, /Existing/u);
-  assert.doesNotMatch(markup, /Set up AgentOS/u);
+  assert.doesNotMatch(markup, /Set up Anneal/u);
 });
 
 /* ----------------------------------------------------------- no way around it */
@@ -534,7 +534,7 @@ test("a deep link into a protected route on a fresh installation still lands on 
     { projects: [{ status: 200, body: "[]" }], url: "http://127.0.0.1:5173/#/settings" },
     async () => undefined,
   );
-  assert.match(markup, /Set up AgentOS/u);
+  assert.match(markup, /Set up Anneal/u);
   assert.doesNotMatch(markup, /data-runner-state=/u);
   assert.deepEqual(paths.filter((path) => !["/api/projects", "/api/onboarding", "/api/runners"].includes(path)), []);
 });

@@ -406,7 +406,7 @@ export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): 
 };
 
 /**
- * Session credentials for the AgentOS MCP server, written per claim because the
+ * Session credentials for the Anneal MCP server, written per claim because the
  * session token and fencing token are reissued on every claim.
  *
  * They live in a 0600 file rather than only in the child environment because

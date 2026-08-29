@@ -100,7 +100,7 @@ const validateRemote = (raw) => {
 
 export const validateAuthority = (artifact, expectedCommit, scope) => {
   if (artifact.status !== "approved") throw new Error(`${scope} artifact is not approved`);
-  if (artifact.agentosCommit !== expectedCommit) throw new Error(`${scope} artifact names another AgentOS commit`);
+  if (artifact.agentosCommit !== expectedCommit) throw new Error(`${scope} artifact names another Anneal commit`);
   if (typeof artifact.approver !== "string" || artifact.approver.trim() === "") throw new Error(`${scope} artifact has no approver`);
   if (!Number.isFinite(Date.parse(artifact.approvedAt))) throw new Error(`${scope} artifact has no approval timestamp`);
   if (artifact.scopes?.[scope] !== true) throw new Error(`${scope} artifact does not approve its required scope`);
@@ -127,7 +127,7 @@ export function validatePreflightOptions(options, repositoryRoot = root) {
   const sourcePath = realpathSync(repositoryRoot);
   if (!isAbsolute(required(options, "evidence-dir"))) throw new Error("evidence directory must be absolute");
   if (within(sourcePath, evidenceDir) || within(targetPath, evidenceDir)) throw new Error("evidence directory must be outside both repositories");
-  if (within(sourcePath, targetPath) || within(targetPath, sourcePath)) throw new Error("target and AgentOS repositories must be separate");
+  if (within(sourcePath, targetPath) || within(targetPath, sourcePath)) throw new Error("target and Anneal repositories must be separate");
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL is required");
   const schema = new URL(databaseUrl).searchParams.get("schema");
@@ -166,8 +166,8 @@ const commandSummary = (cwd, command, args) => {
 
 export function runPreflight(options, repositoryRoot = root) {
   const config = validatePreflightOptions(options, repositoryRoot);
-  if (git(config.sourcePath, ["rev-parse", "HEAD^{commit}"]) !== config.agentosCommit) throw new Error("AgentOS checkout is not at the declared commit");
-  if (git(config.sourcePath, ["status", "--porcelain"]) !== "") throw new Error("AgentOS checkout must be clean");
+  if (git(config.sourcePath, ["rev-parse", "HEAD^{commit}"]) !== config.agentosCommit) throw new Error("Anneal checkout is not at the declared commit");
+  if (git(config.sourcePath, ["status", "--porcelain"]) !== "") throw new Error("Anneal checkout must be clean");
   if (git(config.targetPath, ["rev-parse", "HEAD^{commit}"]) !== config.targetBaseline) throw new Error("target checkout is not at the declared baseline");
   if (git(config.targetPath, ["status", "--porcelain"]) !== "") throw new Error("target checkout must be clean");
   const remoteHead = git(config.targetPath, ["ls-remote", config.targetRemote, `refs/heads/${config.targetDefaultBranch}`]).split(/\s/u)[0];

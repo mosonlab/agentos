@@ -320,7 +320,7 @@ test("buildPrompt gives a retry the immediate prior output without reusing provi
   assert.match(prompt, /Use inbox_ask to obtain the required change/u);
 });
 
-test("the prompt manifest names the AgentOS tools the session actually got", () => {
+test("the prompt manifest names the Anneal tools the session actually got", () => {
   const prompt = buildPrompt(claim);
   // All eight, not the original four: tools/list advertises eight, and a session that is
   // told about four cannot know what it was actually granted.
@@ -334,7 +334,7 @@ test("the prompt manifest names the AgentOS tools the session actually got", () 
   assert.match(buildPrompt({ ...claim, runner: "PI" }), /pi extension tools/);
 });
 
-test("every CLI is launched with the AgentOS tool surface attached", () => {
+test("every CLI is launched with the Anneal tool surface attached", () => {
   const spec = runSpec();
   const claude = argsForRunner("CLAUDE", spec);
   const config = JSON.parse(claude[claude.indexOf("--mcp-config") + 1]!) as ReturnType<typeof mcpConfig>;
@@ -665,12 +665,12 @@ test("PI runtime preflight rejects an openai-codex Run whose explicit service ti
     env: { AGENTOS_RUN_ID: "run-1" },
   });
   assert.equal(result.ok, false);
-  assert.equal(result.error, "PI openai-codex runs require an explicit AgentOS Codex service tier");
+  assert.equal(result.error, "PI openai-codex runs require an explicit Anneal Codex service tier");
 });
 
-test("Pi relies on its isolated config root while retaining the explicit AgentOS extension", () => {
+test("Pi relies on its isolated config root while retaining the explicit Anneal extension", () => {
   const args = argsForRunner("PI", runSpec());
-  assert.equal(args.includes("--no-extensions"), false, "the global extension kill switch would cancel the AgentOS extension");
+  assert.equal(args.includes("--no-extensions"), false, "the global extension kill switch would cancel the Anneal extension");
   for (const flag of ["--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve"]) {
     assert.equal(args.filter((arg) => arg === flag).length, 1, `${flag} must be unconditional`);
   }
@@ -751,7 +751,7 @@ const priorOutput = (index: number): ClaimedTask["priorOutputs"][number] => {
 };
 
 // The child these tests spawn is this stub, not the vendor CLI: `runAsPrefix`
-// replaces the binary. So everything below is evidence about *AgentOS's* side of
+// replaces the binary. So everything below is evidence about *Anneal's* side of
 // the process boundary — the bytes it writes to the child's stdin and the argv it
 // builds — and deliberately claims nothing about what a real `claude`, `codex` or
 // `pi` process does with what it reads. The vendor CLIs are free to normalise the
@@ -820,15 +820,15 @@ test("every runner launches with the largest legal chain prompt and receives all
 });
 
 test("every runner is handed the prompt and the resume input byte-exact at the process boundary", { timeout: 30_000 }, async () => {
-  // Scope, stated once: the child is the stub above, so this proves what AgentOS
+  // Scope, stated once: the child is the stub above, so this proves what Anneal
   // writes and spawns — the full prompt on stdin, digest-identical, and an argv
   // that never carries it. Whether the vendor CLI then trims a trailing newline
-  // of its own is outside this boundary and outside what AgentOS controls.
+  // of its own is outside this boundary and outside what Anneal controls.
   const prompt = buildPrompt(claim);
   const resumeInput = "operator answered: approve";
   // What makes the tolerance above safe, kept checkable instead of asserted in a
   // comment: if a prompt ever grows outer whitespace, a CLI trimming it would be
-  // dropping something AgentOS meant to send.
+  // dropping something Anneal meant to send.
   assert.equal(prompt, prompt.trim(), "buildPrompt must keep no significant outer whitespace");
   assert.equal(resumeInput, resumeInput.trim());
   for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
@@ -1050,7 +1050,7 @@ test("Codex and PI child environments preserve the configured runner Git identit
   await mkdir(runnerHome, { recursive: true });
   await writeFile(join(runnerHome, ".gitconfig"), [
     "[user]",
-    "\tname = AgentOS Runner",
+    "\tname = Anneal Runner",
     "\temail = runner@agentos.invalid",
     "",
   ].join("\n"));
@@ -1075,7 +1075,7 @@ test("Codex and PI child environments preserve the configured runner Git identit
         encoding: "utf8",
         env,
       }).trim();
-      assert.equal(author, "AgentOS Runner <runner@agentos.invalid>", `${runner} lost the configured runner Git identity`);
+      assert.equal(author, "Anneal Runner <runner@agentos.invalid>", `${runner} lost the configured runner Git identity`);
     }
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -1273,7 +1273,7 @@ test("PI preflight fails closed when the CLI omits an isolation capability", { t
     } as unknown as RunnerConfig;
     const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
     assert.equal(result.ok, false);
-    assert.equal(result.error, "cli-incompatible: the CLI does not expose the required AgentOS exec protocol");
+    assert.equal(result.error, "cli-incompatible: the CLI does not expose the required Anneal exec protocol");
     assert.equal(result.authMode, null);
   } finally {
     await rm(fixture, { recursive: true, force: true });

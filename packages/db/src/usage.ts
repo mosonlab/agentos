@@ -141,7 +141,7 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
  * PI's totals, aggregated by the runner's PI parser and attached to the
  * FINAL_OUTPUT payload as `agentosPiUsage`. The name is deliberate: unlike
  * `usage` and `modelUsage`, which are the providers' own vocabularies, this
- * object is AgentOS-computed, and reading it as a provider payload would hide
+ * object is Anneal-computed, and reading it as a provider payload would hide
  * that.
  *
  * Canonicalization at this boundary makes PI's columns match the other

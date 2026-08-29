@@ -4,7 +4,7 @@ Thank you for reading this before opening something.
 
 ## The current state of contributions
 
-AgentOS v0.3.0 is a Developer Preview published so that people can evaluate it,
+Anneal v0.4.0 is a Developer Preview published so that people can evaluate it,
 read it, and tell us where it is wrong. **We are not yet accepting outside pull
 requests.** The review and merge process this repository uses is built around a
 single gate run by maintainers, and we would rather say that plainly than leave
@@ -125,11 +125,21 @@ something outside the checkout.
   and give each worktree its own `?schema=` so parallel runs stay apart. Never
   point them at a database whose contents you would miss: `npm run test:db` drops
   and recreates what it is given.
+- A hand-built scratch server has three requirements the harness enforces but
+  does not advertise, each of which otherwise costs a full run to discover.
+  Export `AGENTOS_ALLOW_SCRATCH_DATABASES=1`; the `@anneal/db` suite refuses
+  without it. Give the server a password of at least 24 characters, because the
+  tests that spawn the real API entrypoint inherit it as `POSTGRES_PASSWORD` and
+  the startup check refuses a shorter one. Name a schema other than `public` in
+  `TEST_DATABASE_URL`, because the harness resets the schema it is given.
+- Do not commit while a database suite is running. `build-provenance.dbtest.ts`
+  asserts that the build stamp names the commit the worktree is at, so a commit
+  mid-run fails the suite on the first file and aborts everything after it.
 - Chain template structure has no authoring API. Templates are edited in
   `agents/templates/` and reach production through an ordinary pull request;
   the operator procedure is maintained outside this repository, while the
   closed sync contract remains enforced here.
-- A checkout named by a loaded AgentOS service is an appliance checkout. Follow
+- A checkout named by a loaded Anneal service is an appliance checkout. Follow
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
   use a separate worktree for development. A fresh worktree needs

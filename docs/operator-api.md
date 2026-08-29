@@ -1,6 +1,6 @@
 # Operator API handbook
 
-The operator drives AgentOS through this HTTP API. Unless a route is marked
+The operator drives Anneal through this HTTP API. Unless a route is marked
 **Public** or **Webhook**, send `Authorization: Bearer $OPERATOR_TOKEN`.
 Examples use `$BASE_URL` (for example, `http://127.0.0.1:3000`) and placeholder
 IDs such as `$PROJECT_ID`; replace them with values from your installation.
@@ -858,14 +858,14 @@ curl -X POST "$BASE_URL/task-templates/$TEMPLATE_ID/fire" \
 ### POST `/hooks/templates/:templateId` — Webhook
 
 - Required path parameter: `templateId`.
-- Required header: `X-AgentOS-Webhook-Secret`.
-- Required body: a JSON object. `X-AgentOS-Delivery-Id` is optional and is used
+- Required header: `X-Anneal-Webhook-Secret`.
+- Required body: a JSON object. `X-Anneal-Delivery-Id` is optional and is used
   for replay deduplication when the trigger has a replay window.
 - This public delivery route does not use the operator bearer token.
 
 ```sh
 curl -X POST "$BASE_URL/hooks/templates/$TEMPLATE_ID" \
-  -H "X-AgentOS-Webhook-Secret: $WEBHOOK_SECRET" -H "Content-Type: application/json" \
+  -H "X-Anneal-Webhook-Secret: $WEBHOOK_SECRET" -H "Content-Type: application/json" \
   -d '{"branchName":"feature/webhook"}'
 ```
 
