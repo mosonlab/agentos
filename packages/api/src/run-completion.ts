@@ -55,6 +55,7 @@ import {
 import {
   handleRegressionCompletion,
   openMergeTailStopNotice,
+  recordMergeTailRequeue,
   regressionVerdictForRun,
   stopMergeTail,
 } from "./merge-tail-actions.js";
@@ -146,7 +147,8 @@ const activateMergeTailTarget = async (
   const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
   if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
   try {
-    await enqueueTaskRun(tx, taskId, now);
+    const queued = await enqueueTaskRun(tx, taskId, now, { budgetGrant: 1 });
+    await recordMergeTailRequeue(tx, { taskId, runId: queued.id });
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
   } catch (error: unknown) {
     if (hasSavepoint) {
@@ -372,10 +374,19 @@ export const completeRun = async (
     // above the read.
     const failureIsFinal = !succeeded
       && (durableNegativeRegressionVerdict || !(retryable && run.runNumber < budgetCeiling));
-    const tailMarkers = run.task && (failureIsFinal || (succeeded && !run.task.templateId && !run.task.chainId))
+    const mergeTailDocumentationTarget = succeeded
+      && run.task?.templateStep?.outputKind === "documentation";
+    const tailMarkers = run.task && (failureIsFinal
+      || (succeeded && (!run.task.templateId && !run.task.chainId || mergeTailDocumentationTarget)))
       ? await readMarkers(tx, run.task.id)
       : [];
     const succeededMarkers = succeeded ? tailMarkers : [];
+    const mergeTailRequeueMarker = latestMarker(succeededMarkers, "requeue", "queued");
+    const mergeTailSuccessorRequeue = Boolean(
+      mergeTailDocumentationTarget
+      && mergeTailRequeueMarker
+      && mergeTailRequeueMarker.raw.runId === run.id,
+    );
     const repairMarker = latestMarker(succeededMarkers, "repairAttempt");
     const repairRegression = repairMarker?.regressionTaskId
       ? await tx.task.findUnique({
@@ -690,7 +701,15 @@ export const completeRun = async (
             leaseOutcome = "stop";
           }
         } else {
-          await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
+          await advanceTemplateTask(
+            tx,
+            run.taskId,
+            run.id,
+            process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
+            now,
+            completionTaskStatus,
+            { mergeTailRequeue: mergeTailSuccessorRequeue },
+          );
         }
       } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
         let repairUnable = false;

@@ -31,6 +31,26 @@ import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 
 type DbTx = Prisma.TransactionClient;
 
+/**
+ * Records the platform-owned requeue that earns one additional attempt for a
+ * merge-tail target. The marker is bound to the Run created by that requeue so
+ * a later operator retry cannot accidentally propagate the grant downstream.
+ */
+export const recordMergeTailRequeue = async (
+  tx: DbTx,
+  input: { taskId: string; runId: string },
+): Promise<void> => {
+  await writeMarker(tx, input.taskId, "requeue", {
+    actorType: "control-plane",
+    body: `Merge-tail target requeued with one budget grant (Run ${input.runId})`,
+    metadata: {
+      state: "queued",
+      runId: input.runId,
+      budgetGrant: 1,
+    },
+  });
+};
+
 type RegressionTaskIdentity = {
   id: string;
   templateStep?: {

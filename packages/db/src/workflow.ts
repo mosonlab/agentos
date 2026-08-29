@@ -45,7 +45,11 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import {
+  isMergeReadinessStep,
+  isRegressionVerificationOutputKind,
+  MERGE_TAIL_KIND,
+} from "./merge-tail.js";
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
@@ -865,7 +869,6 @@ export const openRun = async (
   }
   if ((intent.kind === "retry"
     || intent.kind === "integrator-authorized"
-    || intent.kind === "merge-tail-requeue"
     || sourceRetryIntent(intent)) && !prior) {
     return openRunRefusal("conflict", `Task ${task.name} has no Run to continue`);
   }
@@ -1640,6 +1643,8 @@ type ChainSuccessorOptions = {
   sourceRunId?: string | null;
   chatId?: string | null;
   archivedAssignee?: "park" | "throw";
+  /** The Documentation -> Regression hop after a merge-tail repair. */
+  mergeTailRequeue?: boolean;
 };
 
 const parkStoppedIntegratorSuccessor = async (
@@ -1925,7 +1930,15 @@ const activateChainSuccessorInternal = async (
     const savepoint = "chain_layer_enqueue";
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
     try {
-      await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
+      await enqueueTaskRunInternal(
+        tx,
+        successor.id,
+        now,
+        stopBypass,
+        options.mergeTailRequeue && isRegressionVerificationOutputKind(successorStep?.outputKind)
+          ? { budgetGrant: 1 }
+          : {},
+      );
       if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
     } catch (error: unknown) {
       if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
@@ -2096,6 +2109,7 @@ export const advanceTemplateTask = async (
   chatId: string | null,
   now = new Date(),
   expectedStatus?: TaskStatus,
+  options: Pick<ChainSuccessorOptions, "mergeTailRequeue"> = {},
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
@@ -2139,7 +2153,7 @@ export const advanceTemplateTask = async (
   } else {
     await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
   }
-  return activateChainSuccessor(tx, task, { sourceRunId, chatId }, now);
+  return activateChainSuccessor(tx, task, { sourceRunId, chatId, ...options }, now);
 };
 
 /**

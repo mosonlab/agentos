@@ -384,6 +384,58 @@ test("a semantic FAIL skips the gate path and is repaired twice before it escala
   assert.match(notice.body, /after 2 automatic repair attempts/u);
 });
 
+test("all five merge-tail repairs grant the sixth Regression run without changing the configured budget", async () => {
+  const seeded = await exercise("review-fail");
+  const heads = [RESOLVED, REPAIRED, "e".repeat(40), "f".repeat(40), "1".repeat(40), "2".repeat(40)];
+  const repairOutput = "Repair completed and the focused verification passed.";
+
+  const completeLatest = async (
+    kind: "refresh-conflict" | "review-fix" | "gate-fix",
+    output: string,
+    headSha: string,
+  ) => {
+    const repair = await db.task.findFirstOrThrow({
+      where: { projectId: seeded.project.id, name: `Autonomous merge tail: ${kind}` },
+      orderBy: { createdAt: "desc" },
+    });
+    await completeRepair(seeded, repair.id, output, headSha);
+  };
+
+  // The repair cap is one refresh conflict plus two attempts for each review
+  // and gate failure. Every successful repair queues a fresh Regression Run;
+  // only those platform requeues should accumulate grants.
+  await completeLatest("review-fix", repairOutput, heads[1]!);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 2, heads[1]!), "handled");
+  await completeLatest("gate-fix", repairOutput, heads[2]!);
+  assert.equal(await failRegressionAgain(seeded, "review-fail", 3, heads[2]!), "handled");
+  await completeLatest("review-fix", repairOutput, heads[3]!);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 4, heads[3]!), "handled");
+  await completeLatest("gate-fix", repairOutput, heads[4]!);
+  assert.equal(await failRegressionAgain(seeded, "refresh-conflict", 5, heads[4]!), "handled");
+  await completeLatest("refresh-conflict", JSON.stringify({
+    schemaVersion: 1,
+    outcome: "resolved",
+    startHeadSha: heads[4],
+    targetHeadSha: BASE,
+    resolvedHeadSha: heads[5],
+    tradeOffs: [],
+    changedTestExpectations: [],
+  }), heads[5]!);
+
+  const runs = await db.run.findMany({
+    where: { taskId: seeded.regression.id },
+    orderBy: { runNumber: "asc" },
+    select: { runNumber: true, status: true, maxRunsPerTask: true, budgetGrants: true },
+  });
+  assert.equal(runs.length, 6);
+  assert.deepEqual(runs.at(-1), {
+    runNumber: 6,
+    status: "QUEUED",
+    maxRunsPerTask: 10,
+    budgetGrants: 5,
+  });
+});
+
 test("a repair task carries only the chain outputs its repair kind reads", async () => {
   for (const outcome of ["review-fail", "gate-fail", "refresh-conflict"] as const) {
     await resetTestDb(db);
@@ -432,6 +484,78 @@ test("a Full Assurance repair revalidates documentation before Regression", asyn
   assert.equal(await db.run.count({ where: { taskId: seeded.librarian.id } }), 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.REVIEW);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("a Full Assurance documentation requeue grants the following Regression hop exactly once", async () => {
+  const seeded = await exercise("review-fail", { withLibrarian: true });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.", RESOLVED);
+  assert.ok(seeded.librarian);
+
+  const librarianRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.librarian.id } });
+  const runnerId = `librarian-runner-${librarianRun.id}`;
+  const fencingToken = `librarian:${librarianRun.id}:1`;
+  await db.run.update({ where: { id: librarianRun.id }, data: {
+    status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
+  } });
+  await db.session.create({
+    data: {
+      runId: librarianRun.id,
+      projectId: seeded.project.id,
+      agentId: seeded.librarian.assigneeAgentId!,
+      taskId: seeded.librarian.id,
+      runner: "CODEX",
+      executionStatus: "RUNNING",
+    },
+  });
+  await db.task.update({ where: { id: seeded.librarian.id }, data: { status: TaskStatus.DOING } });
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.librarian.id,
+    runId: librarianRun.id,
+    kind: "documentation",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: RESOLVED,
+      summary: "Documentation refreshed for the repaired head.",
+      changes: [],
+    }),
+    commitSha: RESOLVED,
+  } });
+
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "merge-tail-librarian-token";
+  try {
+    const response = await createApp(db).request(`/runner/runs/${librarianRun.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-librarian-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId,
+        fencingToken,
+        exitCode: 0,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        cleanupStatus: "SUCCEEDED",
+        branch: BRANCH,
+        pushedBranch: BRANCH,
+        pushStatus: "SUCCEEDED",
+        headSha: RESOLVED,
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+
+  const completedDocumentation = await db.run.findUniqueOrThrow({ where: { id: librarianRun.id } });
+  assert.equal(completedDocumentation.maxRunsPerTask, 6);
+  assert.equal(completedDocumentation.budgetGrants, 1);
+  const regressionRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id, runNumber: 2 },
+  });
+  assert.equal(regressionRun.status, "QUEUED");
+  assert.equal(regressionRun.maxRunsPerTask, 6);
+  assert.equal(regressionRun.budgetGrants, 1);
 });
 
 test("repairs on every previously omitted legacy generation reopen the Librarian Step", async () => {
