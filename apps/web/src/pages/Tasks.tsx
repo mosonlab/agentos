@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
+import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, operatorMoveTargets, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -150,7 +150,7 @@ export const useTaskStartConfirmation = (reload: () => void): {
     return true;
   }, []);
 
-  const requestForStart = useCallback((taskId: string): Promise<boolean> => requestForMove("drop", taskId), [requestForMove]);
+  const requestForStart = useCallback((taskId: string): Promise<boolean> => requestForMove("menu", taskId, true), [requestForMove]);
 
   const requestForDrop = useCallback((taskId: string): Promise<boolean> => requestForMove("drop", taskId), [requestForMove]);
 
@@ -290,7 +290,7 @@ export const TasksPage = (): ReactNode => {
 
   const drop = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
-    if (!task || task.status === status) return;
+    if (!task || task.status === status || !operatorMoveTargets(task).includes(status)) return;
     move(taskId, status, "drop");
   }, [move]);
 
@@ -346,13 +346,21 @@ export const TasksPage = (): ReactNode => {
    * task dropped onto Doing. Keeping this callback at the page boundary means
    * stale-view 4xx responses remain visible in StartTaskDialog. */
   const aggregateActions: ChainAggregateActions = useMemo(() => ({
-    onActivate: (taskId) => { void start.requestForStart(taskId); },
+    onActivate: (taskId) => {
+      void run(async () => { await start.requestForStart(taskId); });
+    },
     onFilter: (aggregate) => setChainFilter({ id: aggregate.chainId, name: aggregate.chainName ?? aggregate.chainId.slice(0, 8) }),
-    // The API has no chain-wide archive operation in this slice. Leave the
-    // terminal menu callback as a seam for the owning archive policy rather
-    // than silently archiving one representative member as the whole chain.
-    onArchive: () => undefined,
-  }), [start]);
+    // The aggregate owns the visible members returned by this board read.
+    // Archived siblings are already absent; settling the rest through the
+    // existing idempotent task route removes the aggregate without inventing a
+    // second chain-execution mutation.
+    onArchive: (_aggregate, taskIds) => {
+      void run(async () => {
+        for (const taskId of taskIds) await api.post(`/tasks/${taskId}/archive`, {});
+        reload();
+      });
+    },
+  }), [run, reload, start]);
 
   /** `api.post` is called for its payload, which `useAction.run` discards — but
    *  the call still runs *inside* `run`, so failures land in the same

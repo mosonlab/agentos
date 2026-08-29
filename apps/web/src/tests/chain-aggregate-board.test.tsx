@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ChainAggregateCard } from "../components/chain-aggregate-card";
@@ -8,6 +9,8 @@ import { MobileTaskList } from "../components/mobile-task-list";
 import { COLUMNS, type BoardEntry, boardEntries, boardEntriesByStatus, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import type { BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
+import { useTaskStartConfirmation } from "../pages/Tasks";
+import { installDom, reactDom } from "./dom-harness";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "task-1", name: "Release: Build", displayName: "Build", status: "TODO", failureReason: null,
@@ -102,4 +105,76 @@ test("mobile and desktop receive the same aggregate entry list", () => {
 test("aggregate translations keep the state and action copy localized", () => {
   assert.equal(translate("en", "tasks.aggregate.activate"), "Activate");
   assert.notEqual(translate("zh", "tasks.aggregate.activate"), "Activate");
+});
+
+const AggregateActivationHarness = (): ReactNode => {
+  const start = useTaskStartConfirmation(noop);
+  const projection = aggregate({ activation: { state: "parked-unactivated", predecessor: null } });
+  return <>
+    <ChainAggregateCard
+      aggregate={projection}
+      actions={{
+        onActivate: (taskId) => { void start.requestForStart(taskId); },
+        onFilter: noop,
+        onArchive: noop,
+      }}
+    />
+    {start.request === null ? null : (
+      <section data-aggregate-confirmation="">
+        {start.error === null ? null : <div role="alert">{start.error}</div>}
+        <button type="button" onClick={() => void start.confirm()}>Confirm activation</button>
+      </section>
+    )}
+  </>;
+};
+
+test("aggregate Activate starts the frontier and keeps a stale-view 4xx visible", async () => {
+  const { dom, container } = installDom();
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ method: string; path: string }> = [];
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
+    const path = String(input);
+    const method = init?.method ?? "GET";
+    requests.push({ method, path });
+    if (path === "/api/tasks/step-3/startability") return Response.json({
+      startable: true,
+      checklist: {
+        repoBound: true, agentAssignee: true, repoAccessGrant: true,
+        budgetRemaining: true, noActiveRun: true, predecessorsDone: true,
+      },
+      task: {
+        id: "step-3", name: "Release: Implement", agent: { id: "a1", title: "Senior dev" },
+        repo: { id: "r1", name: "product" }, targetBranch: "main",
+      },
+    });
+    if (path === "/api/tasks/step-3/start" && method === "POST") {
+      return Response.json({ error: "This chain was already activated." }, { status: 409 });
+    }
+    return Response.json([], { status: 404 });
+  } });
+  const root = (await reactDom()).createRoot(container);
+  const settle = async (): Promise<void> => {
+    for (let round = 0; round < 3; round += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    }
+  };
+  const press = async (label: string): Promise<void> => {
+    const button = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) => candidate.textContent?.trim() === label);
+    assert.ok(button, `no ${label} button`);
+    await act(async () => button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    await settle();
+  };
+  try {
+    await act(async () => root.render(<AggregateActivationHarness />));
+    await press("Activate");
+    assert.ok(container.querySelector("[data-aggregate-confirmation]"));
+    await press("Confirm activation");
+    assert.equal(requests.filter(({ method, path }) => method === "POST" && path === "/api/tasks/step-3/start").length, 1);
+    assert.match(container.textContent ?? "", /already activated/u);
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
 });

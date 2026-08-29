@@ -768,10 +768,10 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     membersByChain.set(key, created);
     return created;
   };
-  const memberWithDisplay = (member: BoardChainMember): BoardChainMember => ({
-    ...member,
-    displayName: displayByTask.get(member.id)?.displayName,
-  });
+  const memberWithDisplay = (member: BoardChainMember): BoardChainMember => {
+    const displayName = displayByTask.get(member.id)?.displayName;
+    return displayName === undefined ? { ...member } : { ...member, displayName };
+  };
   // Include the complete chain lookup first so archived siblings contribute to
   // progress, costs and terminal placement. Visible rows then fill malformed
   // one-row chains and retain the exact card-side run projection.

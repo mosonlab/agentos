@@ -19,7 +19,7 @@ const FAILURE = "line-clamp-3 text-[var(--destructive-fg)] [overflow-wrap:anywhe
 export type ChainAggregateActions = {
   onActivate: (taskId: string) => void;
   onFilter: (aggregate: ChainAggregate) => void;
-  onArchive: (aggregate: ChainAggregate, representativeTaskId: string) => void;
+  onArchive: (aggregate: ChainAggregate, memberTaskIds: readonly string[]) => void;
 };
 
 const STATE_TONE: Record<ChainAggregateState, "green" | "amber" | "grey"> = {
@@ -61,14 +61,20 @@ const runLine = (aggregate: ChainAggregate, t: Translate): ReactNode => {
 
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
 
-const menu = (aggregate: ChainAggregate, representativeTaskId: string, actions: ChainAggregateActions, t: Translate): RowMenuEntry[] => [
+const menu = (
+  aggregate: ChainAggregate,
+  representativeTaskId: string,
+  memberTaskIds: readonly string[],
+  actions: ChainAggregateActions,
+  t: Translate,
+): RowMenuEntry[] => [
   { label: t("tasks.aggregate.menu.open"), onSelect: () => navigate(routeFor(representativeTaskId)) },
   ...(aggregate.activation.state === "parked-unactivated"
     ? [{ label: t("tasks.aggregate.menu.activate"), onSelect: () => actions.onActivate(representativeTaskId) }]
     : []),
   { label: t("tasks.aggregate.menu.filter"), onSelect: () => actions.onFilter(aggregate) },
   ...(aggregate.activation.state === "settled"
-    ? [{ label: t("tasks.aggregate.menu.archive"), onSelect: () => actions.onArchive(aggregate, representativeTaskId) }]
+    ? [{ label: t("tasks.aggregate.menu.archive"), onSelect: () => actions.onArchive(aggregate, memberTaskIds) }]
     : []),
 ];
 
@@ -84,6 +90,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const position = memberPosition(aggregate, members);
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor ?? null;
+  const memberTaskIds = members.map((member) => member.id);
   const noOp: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
   const frontierRun = runLine(aggregate, t);
   const onBodyClick = (event: MouseEvent<HTMLElement>): void => {
@@ -102,7 +109,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
         <a data-card-title="" href={`#${routeFor(representative)}`} className={TITLE}>{title}</a>
       </h3>
-      <RowMenu items={menu(aggregate, representative, noOp, t)} label={t("tasks.aggregate.actionsFor", { name: title })} />
+      <RowMenu items={menu(aggregate, representative, memberTaskIds, noOp, t)} label={t("tasks.aggregate.actionsFor", { name: title })} />
     </div>
     <div className={META}>
       <div data-chain-progress="" className={META_ROW}>
@@ -142,7 +149,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     <div className={FOOT}>
       <span>{t("tasks.aggregate.cost", { amount: aggregateCost(aggregate.totalCost) })}</span>
       <span className="flex-1" />
-      <span>{timeAgo(aggregate.updatedAt)}</span>
+      <span>{timeAgo(aggregate.createdAt)}</span>
     </div>
   </article>;
 };

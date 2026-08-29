@@ -1,6 +1,6 @@
 import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, clampScroll, columnStep, edgeState, normalizeBoardEntries, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, clampScroll, columnStep, edgeState, normalizeBoardEntries, operatorMoveTargets, sameEdges, scrollKey, storedScroll } from "../lib/board";
 import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
@@ -115,7 +115,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
     >
       {visibleTasks.map((entry) => entry.kind === "chain"
         ? <ChainAggregateCard key={entry.id} aggregate={entry.aggregate} members={entry.members} representativeTaskId={entry.representativeTaskId} actions={aggregateActions} />
-        : <TaskCard key={entry.id} task={entry.task} actions={actions} draggable />)}
+        : <TaskCard key={entry.id} task={entry.task} actions={actions} draggable={operatorMoveTargets(entry.task).length > 0} />)}
       {previousCount > 0 || nextCount > 0 ? (
         <div className={COLUMN_PAGER}>
           {previousCount > 0 ? (
