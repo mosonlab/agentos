@@ -562,6 +562,9 @@ model Task {
   goalPredecessorTaskId   String?              @unique
   dispatchAfterTaskId     String?              @unique
   createdAt               DateTime             @default(now())
+  /// Stable completion clock for age-based retention. A database trigger sets
+  /// it on every transition into DONE and clears it on every transition out.
+  doneAt                  DateTime?
   updatedAt               DateTime             @updatedAt
   project                 Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   assigneeAgent           Agent?               @relation(fields: [assigneeAgentId, projectId], references: [id, projectId], onDelete: Restrict)
@@ -609,6 +612,7 @@ model Task {
   @@index([repoId])
   @@index([scheduleKind, status, runAt])
   @@index([projectId, archivedAt, status])
+  @@index([status, archivedAt, doneAt, id])
   @@index([recurringSourceTaskId])
   @@index([goalId, goalDispatchState])
   @@index([goalPredecessorTaskId])
