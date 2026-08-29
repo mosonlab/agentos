@@ -1,9 +1,9 @@
 const METHODS = Object.freeze([
-  "fastForward", "createStage", "installDependencies", "build", "backup",
+  "verifyArtifact", "waitForQuiet", "prepareWorkspace", "backup",
   "guardedMigration", "generatePrismaClient", "syncCanonicalPrompts", "verifyRuntimePrismaClient",
-  "materializeRelease", "verifyStableServicePaths",
+  "verifyStableServicePaths",
   "assertQuietBeforeRestart", "publishBuild", "restartServices", "verifyServices",
-  "restorePreviousServices", "escalate", "notify", "cleanupStage",
+  "restorePreviousServices", "escalate", "notify", "cleanupWorkspace",
 ]);
 
 /** Import-safe production-host composition boundary used by the real job and harness. */

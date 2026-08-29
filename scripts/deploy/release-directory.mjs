@@ -24,9 +24,8 @@ import {
 } from "./quiet-window-adapters.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 
-/** The release tree is bounded using the same small rollback window as the
- * existing previous-build retention. A caller may retain more, but never less
- * than the targets currently named by the pointers. */
+/** The release tree is bounded to a small rollback window. A caller may retain
+ * more, but never less than the targets currently named by the pointers. */
 export const RELEASE_DIRECTORY_RETENTION_COUNT = 3;
 export const RELEASE_MANIFEST_FILE = "release-manifest.json";
 export const RELEASE_API_STAMP_PATH = "packages/api/dist/build-info.json";

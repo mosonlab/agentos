@@ -195,6 +195,7 @@ export const renderLaunchdPlist = (template, values) => {
     __PATH__: values.path,
     __GIT_BINARY__: values.gitBinary,
     __NPM_BINARY__: values.npmBinary,
+    __SOURCE_REMOTE__: values.sourceRemote,
   };
   let rendered = template;
   for (const [placeholder, value] of Object.entries(replacements)) {
@@ -666,8 +667,12 @@ export const installLaunchd = (args) => {
   const npmBinary = requiredBinary("npm");
   const values = {
     nodeBinary,
-    deployScript: realpathSync(join(SCRIPT_DIR, "quiet-window-deploy.mjs")),
+    deployScript: join(realpathSync(REPOSITORY_ROOT), "current/scripts/deploy/quiet-window-deploy.mjs"),
     repositoryRoot: realpathSync(REPOSITORY_ROOT),
+    sourceRemote: execFileSync(gitBinary, ["-C", REPOSITORY_ROOT, "remote", "get-url", "origin"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim(),
     stdoutPath: join(logs, "auto-deploy.log"),
     stderrPath: join(logs, "auto-deploy.error.log"),
     path: controlledLaunchdPath({ nodeBinary, gitBinary }),

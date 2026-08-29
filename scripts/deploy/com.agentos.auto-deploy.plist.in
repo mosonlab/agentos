@@ -13,6 +13,8 @@
   <string>__REPOSITORY_ROOT__</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>AGENTOS_REPOSITORY_ROOT</key>
+    <string>__REPOSITORY_ROOT__</string>
     <key>PATH</key>
     <string>__PATH__</string>
     <key>QUIET_WINDOW_POLL_SECONDS</key>
@@ -23,6 +25,8 @@
     <string>__GIT_BINARY__</string>
     <key>DEPLOY_NPM_BINARY</key>
     <string>__NPM_BINARY__</string>
+    <key>DEPLOY_SOURCE_REMOTE</key>
+    <string>__SOURCE_REMOTE__</string>
 __BACKUP_ENVIRONMENT__
   </dict>
   <key>RunAtLoad</key>

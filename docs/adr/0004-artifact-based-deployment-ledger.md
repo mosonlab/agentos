@@ -1,12 +1,13 @@
-# 0004 - Narrow artifact deployment to host-built releases with a durable ledger
+# 0004 - Separate release artifact construction from activation
 
 Status: accepted (2026-08-29)
 
 ## Context
 
-The quiet-window deploy currently performs an ordered in-memory procedure. An
-interruption can therefore leave an operator reconstructing the committed
-phases from the production checkout, `/version`, and Prisma migration history.
+The original quiet-window deploy installed dependencies, built source, migrated
+the database, and published files from a mutable production checkout. An
+interruption could therefore leave an operator reconstructing committed phases
+from checkout state, `/version`, and Prisma migration history.
 The gate workers are Ubuntu VMs; their build bytes are gate evidence and never
 deploy to the Apple Silicon appliance. The appliance itself is the builder and
 the deployment host.
@@ -14,8 +15,9 @@ the deployment host.
 ## Decision
 
 The deployment unit is an immutable release directory,
-`releases/<commit>-<digest>/`. A build step on the appliance host creates that
-directory before activation; activation is a separate operation that switches
+`releases/<commit>-<digest>/`. An explicitly invocable builder on the appliance
+host creates that directory before activation; activation is a separate
+operation that verifies the exact artifact before taking the quiet window and switches
 the `current` symlink atomically. A release is never modified after it has
 been activated.
 
@@ -58,8 +60,8 @@ multi-state orchestrator in this decision.
 ## Consequences
 
 The immutable directory and atomic pointer make activation identity explicit,
-while the ledger preserves the phase evidence needed for interruption
-recovery. The host remains responsible for building, migration remains
-operator-reviewed at the destructive boundary, and recovery still follows the
-existing rollback and escalation behavior. Later work may implement the
-release directory and launchd pointer switch; this ADR does not do so.
+while `ARTIFACT_VERIFIED` and the later ledger phases preserve interruption
+evidence. The activation path never installs dependencies, builds source,
+mutates a checkout, or copies environment files. The host remains responsible
+for the separate build step, migration remains operator-reviewed at the
+destructive boundary, and recovery follows pointer rollback and escalation.

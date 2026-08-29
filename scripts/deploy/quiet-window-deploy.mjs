@@ -4,10 +4,11 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   chmodSync,
-  copyFileSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -32,36 +33,27 @@ import {
 import {
   acquireProcessLock,
   blockingRunsStatement,
-  deployReleaseArtifactPaths,
-  DEPLOY_OPTIONAL_ARTIFACT_PATHS,
-  DEPLOY_REQUIRED_ARTIFACT_PATHS,
-  inspectGitPreflight,
-  inspectProductionCheckout,
   pruneDeployHistory,
-  workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
-import { materializeReleaseSnapshot } from "./release-snapshot.mjs";
 import { runCommandWithRetry } from "./quiet-window-retry.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
 import {
-  assembleReleaseDirectory,
   pruneReleaseDirectories,
-  verifyReleaseDirectory,
 } from "./release-directory.mjs";
+import { findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 import { activateReleasePointer, rollbackReleasePointer } from "./release-pointer.mjs";
 import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
 import { serviceWrapperPath } from "./install-launchd.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
+const REPOSITORY_ROOT = resolve(process.env.AGENTOS_REPOSITORY_ROOT ?? resolve(SCRIPT_DIR, "../.."));
 const STATE_DIR = join(REPOSITORY_ROOT, ".agentos-deploy");
 const LOCK_PATH = join(STATE_DIR, "lock");
 const ESCALATION_PATH = join(STATE_DIR, "escalated.json");
-const LEGACY_API_BUILD_STAMP = join(REPOSITORY_ROOT, "packages/api/dist/build-info.json");
 const CURRENT_PATH = join(REPOSITORY_ROOT, "current");
 const CURRENT_API_BUILD_STAMP = join(CURRENT_PATH, "packages/api/dist/build-info.json");
 const RELEASES_PATH = join(REPOSITORY_ROOT, "releases");
@@ -170,16 +162,6 @@ const retryingGitCommand = (operation, args, options) => runCommandWithRetry(
   },
 );
 
-const checkedGitNetwork = (reason, operation, args, options) => checkedResult(
-  reason,
-  () => retryingGitCommand(operation, args, options),
-);
-
-const gitText = (...args) => execFileSync(loadBinaries().git, ["-C", REPOSITORY_ROOT, ...args], {
-  encoding: "utf8",
-  stdio: ["ignore", "pipe", "pipe"],
-}).trim();
-
 const readJson = (path, reason) => {
   try {
     const value = JSON.parse(readFileSync(path, "utf8"));
@@ -191,14 +173,13 @@ const readJson = (path, reason) => {
 };
 
 const readDeployedRevision = () => {
-  let stampPath = LEGACY_API_BUILD_STAMP;
+  let stampPath = CURRENT_API_BUILD_STAMP;
   try {
     const current = lstatSync(CURRENT_PATH);
     if (!current.isSymbolicLink()) fail("deployed-revision-unreadable", "current-is-not-a-symlink");
-    stampPath = CURRENT_API_BUILD_STAMP;
   } catch (error) {
     if (error instanceof DeployFailure) throw error;
-    if (error?.code !== "ENOENT") fail("deployed-revision-unreadable", "current-pointer-unreadable");
+    fail("deployed-revision-unreadable", `current-pointer-${error?.code ?? "unreadable"}`);
   }
   const stamp = readJson(stampPath, "deployed-revision-unreadable");
   const refusal = deployedBuildStampRefusal(stamp);
@@ -208,15 +189,14 @@ const readDeployedRevision = () => {
   return stamp.commit;
 };
 
-const environmentFilePath = () => {
-  const sharedEnvironment = join(SHARED_PATH, ".env");
-  return existsSync(sharedEnvironment) ? sharedEnvironment : join(REPOSITORY_ROOT, ".env");
-};
+const environmentFilePath = () => join(SHARED_PATH, ".env");
 
 const remoteMainRevision = async () => {
+  const sourceRemote = process.env.DEPLOY_SOURCE_REMOTE;
+  if (!sourceRemote) fail("environment-unreadable", "DEPLOY_SOURCE_REMOTE-missing");
   const result = await retryingGitCommand(
     "ls-remote-main",
-    ["ls-remote", "--exit-code", "origin", "refs/heads/main"],
+    ["ls-remote", "--exit-code", sourceRemote, "refs/heads/main"],
     { capture: true },
   );
   const revision = result.stdout.trim().split(/\s+/u)[0] ?? "";
@@ -492,7 +472,7 @@ const pruneHistory = () => {
   const releases = existsSync(RELEASES_PATH)
     ? pruneReleaseDirectories({ deployRoot: REPOSITORY_ROOT })
     : { kept: 0, removed: 0, protected: [] };
-  log(`PRUNE deploy-history previous-kept=${result.keptPrevious} previous-removed=${result.removedPrevious} releases-kept=${releases.kept} releases-removed=${releases.removed} backups-kept=${result.keptBackups} backups-removed=${result.removedBackups}`);
+  log(`PRUNE deploy-history releases-kept=${releases.kept} releases-removed=${releases.removed} backups-kept=${result.keptBackups} backups-removed=${result.removedBackups}`);
   return { ...result, releases };
 };
 
@@ -537,46 +517,23 @@ const verifyStableServicePaths = async () => {
   }
 };
 
-const repositoryState = async (target) => {
-  const source = gitText("rev-parse", "HEAD");
-  let branch = null;
-  try { branch = gitText("symbolic-ref", "--short", "HEAD"); } catch { /* detached HEAD is reported by the dry-run */ }
-  const dirty = gitText("status", "--porcelain").length > 0;
-  let fastForward = "verify-after-fetch";
-  try {
-    execFileSync(loadBinaries().git, ["-C", REPOSITORY_ROOT, "cat-file", "-e", `${target}^{commit}`], { stdio: "ignore" });
-    fastForward = commandSyncOk(loadBinaries().git, ["-C", REPOSITORY_ROOT, "merge-base", "--is-ancestor", source, target]) ? "yes" : "no";
-  } catch { /* ls-remote can name an object this checkout has not fetched */ }
-  return { branch, source, dirty, fastForward };
-};
-
-const commandSyncOk = (program, args) => {
-  try { execFileSync(program, args, { stdio: "ignore" }); return true; } catch { return false; }
-};
-
-const assertProductionCheckout = () => {
-  const state = inspectProductionCheckout({ git: loadBinaries().git, root: REPOSITORY_ROOT });
-  if (state.refusal) {
-    fail(
-      state.refusal,
-      state.refusal === "production-checkout-not-main"
-        ? `branch-${state.branch ?? "detached"}`
-        : "checkout-has-uncommitted-content",
-    );
-  }
-  return state;
-};
-
 const dryRun = async () => {
   await loadEnvironment();
   loadBinaries();
   const from = readDeployedRevision();
   const to = await remoteMainRevision();
-  const source = gitText("rev-parse", "HEAD");
   const result = await dryRunDecision({
-    revisions: async () => ({ from, source, to }),
+    revisions: async () => ({ from, to }),
     blockingRuns,
-    repositoryState: () => repositoryState(to),
+    artifactState: async () => {
+      try {
+        const artifact = findReleaseArtifact({ deployRoot: REPOSITORY_ROOT, revision: to });
+        return { ok: true, releaseName: artifact.releaseName };
+      } catch (error) {
+        const failure = failureOf(error);
+        return { ok: false, reason: failure.reason };
+      }
+    },
     serviceState,
     backupState: async () => {
       const requested = loadBinaries().backup;
@@ -593,7 +550,17 @@ const dryRun = async () => {
     },
   });
   for (const line of result.lines) log(line);
-  return result.repository.branch !== "main" || result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.backup.ok ? 1 : 0;
+  return !result.artifact.ok || !result.services.ok || !result.backup.ok ? 1 : 0;
+};
+
+const makeWritable = (root) => {
+  const visit = (path) => {
+    const status = lstatSync(path);
+    if (status.isSymbolicLink()) return;
+    chmodSync(path, status.mode & 0o777 | (status.isDirectory() ? 0o700 : 0o600));
+    if (status.isDirectory()) for (const entry of readdirSync(path)) visit(join(path, entry));
+  };
+  visit(root);
 };
 
 const main = async () => {
@@ -608,7 +575,6 @@ const main = async () => {
   if (options.pruneHistory) {
     loadBinaries();
     const result = await runLocked({ acquireLock, log }, async () => {
-      assertProductionCheckout();
       pruneHistory();
       return { ok: true };
     });
@@ -629,7 +595,6 @@ const main = async () => {
     try {
       from = readDeployedRevision();
       to = await remoteMainRevision();
-      assertProductionCheckout();
     } catch (error) {
       const failure = failureOf(error);
       await persistAndNotifyFailure(failure, from, to);
@@ -641,9 +606,7 @@ const main = async () => {
       return { ok: true, skipped: "already-deployed" };
     }
 
-    let stage = null;
-    let artifactPaths = null;
-    let optionalArtifacts = null;
+    let operationWorkspace = null;
     let preparedRelease = null;
     let barrier = null;
     let ledger = null;
@@ -652,7 +615,27 @@ const main = async () => {
     try {
       ledger = createDeploymentLedger({ stateDir: STATE_DIR, deploymentId: transactionId, targetCommit: to });
       ledger.start({ targetCommit: to });
-      barrier = await waitForQuiet();
+      const built = await checked(
+        "release-artifact-build-failed",
+        loadBinaries().node,
+        [join(SCRIPT_DIR, "build-release-artifact.mjs"), to],
+        { capture: true },
+      );
+      const receiptLine = built.stdout.trim().split("\n").findLast((line) => line.startsWith("RELEASE-ARTIFACT "));
+      if (!receiptLine) fail("release-artifact-build-failed", "builder-receipt-missing");
+      let receipt;
+      try { receipt = JSON.parse(receiptLine.slice("RELEASE-ARTIFACT ".length)); }
+      catch { fail("release-artifact-build-failed", "builder-receipt-invalid"); }
+      preparedRelease = verifyReleaseArtifact({
+        deployRoot: REPOSITORY_ROOT,
+        revision: to,
+        releaseName: receipt.releaseName,
+      });
+      ledger.record("ARTIFACT_PREPARED", {
+        targetCommit: to,
+        releaseDirectoryIdentity: preparedRelease.releaseName,
+        activatedBuildStamp: preparedRelease.buildStamp,
+      });
     } catch (error) {
       const failure = failureOf(error);
       if (ledger && failure.reason !== "deployment-ledger-write-failed") {
@@ -667,45 +650,26 @@ const main = async () => {
       return { ok: false, reason: failure.reason };
     }
     const host = createProductionHost({
-      fastForward: async () => {
-        assertProductionCheckout();
-        await checkedGitNetwork("fetch-main-failed", "fetch-main", ["fetch", "origin", "main"]);
-        to = gitText("rev-parse", "origin/main");
-        const state = inspectGitPreflight({ git: loadBinaries().git, root: REPOSITORY_ROOT, target: to });
-        const { head } = state;
-        if (state.refusal) fail(state.refusal, `${head}-to-${to}`);
-        if (head !== to) await checked("fast-forward-failed", loadBinaries().git, ["merge", "--ff-only", "origin/main"]);
-        return to;
+      verifyArtifact: async (target) => {
+        if (!preparedRelease) fail("release-artifact-missing", target);
+        preparedRelease = verifyReleaseArtifact({
+          deployRoot: REPOSITORY_ROOT,
+          revision: target,
+          releaseName: preparedRelease.releaseName,
+        });
+        return preparedRelease;
       },
-      createStage: async () => {
-        stage = join(STATE_DIR, `stage-${transactionId}`);
-        await checked("staging-worktree-failed", loadBinaries().git, ["worktree", "add", "--detach", stage, "HEAD"]);
+      waitForQuiet: async () => {
+        barrier = await waitForQuiet();
       },
-      installDependencies: async () => {
-        await checked("staging-dependencies-failed", loadBinaries().node, [loadBinaries().npm, "ci"], { cwd: stage });
-        if (!generatedPrismaClientIsComplete(stage)) {
-          fail("staging-dependencies-failed", "npm-ci-did-not-produce-generated-prisma-client");
+      prepareWorkspace: async () => {
+        operationWorkspace = join(STATE_DIR, `operation-${transactionId}`);
+        try {
+          cpSync(preparedRelease.releaseDirectory, operationWorkspace, { recursive: true, errorOnExist: true });
+          makeWritable(operationWorkspace);
+        } catch (error) {
+          fail("operation-workspace-preparation-failed", error?.code ?? "copy-failed");
         }
-      },
-      build: async () => {
-        const snapshot = materializeReleaseSnapshot({ stageRoot: stage, revision: to });
-        if (snapshot.hit) log(`PASS release-snapshot-hit build-key=${snapshot.buildKey}`);
-        else {
-          log(`MISS release-snapshot reason=${snapshot.reason}; building-from-source`);
-          await checked("build-failed", loadBinaries().node, [loadBinaries().npm, "run", "build"], { cwd: stage });
-        }
-        const stamp = readJson(join(stage, "packages/api/dist/build-info.json"), "build-stamp-invalid");
-        if (stamp.commit !== to || stamp.dirty !== false) fail("build-stamp-invalid", "staged-api-dist-does-not-match-target");
-        optionalArtifacts = [...DEPLOY_OPTIONAL_ARTIFACT_PATHS, ...workspaceDependencyPaths(stage)];
-        artifactPaths = deployReleaseArtifactPaths(stage);
-        for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
-        return {
-          buildStamp: {
-            packageName: stamp.packageName,
-            commit: stamp.commit,
-            dirty: stamp.dirty,
-          },
-        };
       },
       backup: async () => {
         mkdirSync(backupDirectory, { recursive: true, mode: 0o700 });
@@ -724,34 +688,36 @@ const main = async () => {
         return { backupIdentity: basename(output) };
       },
       guardedMigration: async () => {
-        copyFileSync(environmentFilePath(), join(stage, ".env"));
-        chmodSync(join(stage, ".env"), 0o600);
         const migrationTailBefore = await migrationTail();
-        await checked("guarded-migration-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:migrate-goal-execution"], {
-          cwd: stage,
+        await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
+          cwd: operationWorkspace,
+        });
+        await checked("guarded-migration-refused", loadBinaries().node, [
+          "node_modules/prisma/build/index.js",
+          "migrate",
+          "deploy",
+          "--schema",
+          "packages/db/prisma/schema.prisma",
+        ], {
+          cwd: operationWorkspace,
         });
         const migrationTailAfter = await migrationTail();
         return { migrationTailBefore, migrationTailAfter };
       },
-      generatePrismaClient: () => checked("prisma-client-generation-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:generate"], { cwd: stage }),
-      syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:sync-canonical-prompts"], { cwd: stage }),
+      generatePrismaClient: () => checked("prisma-client-generation-refused", loadBinaries().node, [
+        "node_modules/prisma/build/index.js",
+        "generate",
+        "--schema",
+        "packages/db/prisma/schema.prisma",
+      ], { cwd: operationWorkspace }),
+      syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [
+        "node_modules/tsx/dist/cli.mjs",
+        "packages/db/prisma/sync-canonical-prompts.ts",
+      ], { cwd: operationWorkspace }),
       verifyRuntimePrismaClient: async () => {
-        if (!generatedPrismaClientIsComplete(stage)) {
-          fail("runtime-prisma-client-missing", "staged-generated-client-is-absent");
+        if (!generatedPrismaClientIsComplete(operationWorkspace)) {
+          fail("runtime-prisma-client-missing", "operation-generated-client-is-absent");
         }
-      },
-      materializeRelease: async () => {
-        if (!artifactPaths || !optionalArtifacts) fail("build-output-missing", "artifact-inventory-not-prepared");
-        preparedRelease = assembleReleaseDirectory({
-          stageRoot: stage,
-          deployRoot: REPOSITORY_ROOT,
-          revision: to,
-          artifactPaths,
-          optionalArtifactPaths: optionalArtifacts,
-          retention: false,
-          probeImmutability: true,
-        });
-        for (const path of preparedRelease.excludedPaths) log(`EXCLUDED release-path path=${path}`);
       },
       verifyStableServicePaths: async () => {
         await verifyStableServicePaths();
@@ -762,11 +728,11 @@ const main = async () => {
         if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
       },
       publishBuild: async () => {
-        if (!preparedRelease) fail("release-directory-missing", "verified-release-not-prepared");
-        verifyReleaseDirectory({
-          releaseDirectory: preparedRelease.releaseDirectory,
+        if (!preparedRelease) fail("release-artifact-missing", "verified-release-not-prepared");
+        preparedRelease = verifyReleaseArtifact({
+          deployRoot: REPOSITORY_ROOT,
           revision: to,
-          digest: preparedRelease.digest,
+          releaseName: preparedRelease.releaseName,
         });
         const activated = activateReleasePointer({ root: REPOSITORY_ROOT, release: preparedRelease.releaseName });
         const relativeTarget = (target) => target === null ? null : `releases/${target}`;
@@ -833,20 +799,15 @@ const main = async () => {
       markEscalationNotified,
       notify,
       log,
-      cleanupStage: async () => {
-        let cleanupFailure = null;
+      cleanupWorkspace: async () => {
         try {
-          if (stage && existsSync(join(stage, ".env"))) rmSync(join(stage, ".env"), { force: true });
-          if (stage && existsSync(stage)) {
-            await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "remove", "--force", stage], { capture: true, allowAfterInterrupt: true });
+          if (operationWorkspace && existsSync(operationWorkspace)) {
+            makeWritable(operationWorkspace);
+            rmSync(operationWorkspace, { recursive: true, force: true });
           }
-          await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "prune"], { capture: true, allowAfterInterrupt: true });
-        } catch (error) {
-          cleanupFailure = error;
         } finally {
           if (barrier) await barrier.release();
         }
-        if (cleanupFailure) throw cleanupFailure;
       },
     });
     const result = await executeUpgrade(host, { from, to }, { ledger, ledgerStarted: true });

@@ -1,16 +1,15 @@
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
 export const DEPLOY_STEPS = Object.freeze([
-  "fast-forward",
-  "install-dependencies",
-  "build",
+  "verify-release-artifact",
+  "acquire-quiet-window",
+  "prepare-operation-workspace",
+  "verify-stable-service-paths",
   "backup",
   "guarded-migration",
   "generate-prisma-client",
   "canonical-prompt-sync",
   "verify-runtime-prisma-client",
-  "materialize-release",
-  "verify-stable-service-paths",
   "publish-build",
   "restart-services",
   "verify-services",
@@ -69,13 +68,6 @@ export const deployedBuildStampRefusal = (stamp) => {
   return null;
 };
 
-export const gitPreflightFailure = ({ branch, dirty, head, target, fastForward }) => {
-  if (branch !== "main") return "production-checkout-not-main";
-  if (dirty) return "dirty-working-tree";
-  if (head !== target && !fastForward) return "non-fast-forward-main";
-  return null;
-};
-
 export const shouldPersistFailure = ({ dryRun, reason, upgradeStarted = true }) =>
   !dryRun && reason !== "usage" && (reason !== "deploy-interrupted" || upgradeStarted);
 
@@ -124,12 +116,17 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       }
       else await recordLedger("STARTED");
     }
-    const to = await host.fastForward();
-    revisions = Object.freeze({ from: initialRevisions.from, to });
-    await host.createStage();
-    await host.installDependencies();
-    const build = await host.build();
-    candidateBuildStamp = build?.buildStamp ?? null;
+    const artifact = await host.verifyArtifact(revisions.to);
+    candidateBuildStamp = artifact?.buildStamp ?? null;
+    context = {
+      ...context,
+      activatedBuildStamp: candidateBuildStamp,
+      releaseDirectoryIdentity: artifact?.releaseDirectoryIdentity ?? null,
+    };
+    await recordLedger("ARTIFACT_VERIFIED");
+    await host.waitForQuiet();
+    await host.prepareWorkspace(artifact);
+    await host.verifyStableServicePaths();
     const backup = await host.backup();
     context = { ...context, backupIdentity: backup?.backupIdentity ?? null };
     await recordLedger("BACKED_UP");
@@ -144,8 +141,6 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
     await host.generatePrismaClient();
     await host.syncCanonicalPrompts();
     await host.verifyRuntimePrismaClient();
-    await host.materializeRelease();
-    await host.verifyStableServicePaths();
     await host.assertQuietBeforeRestart();
     activationAttempted = true;
     try {
@@ -232,7 +227,7 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       ...(terminalLedgerFailure ? { ledgerFailure: terminalLedgerFailure } : {}),
     };
   } finally {
-    await host.cleanupStage();
+    await host.cleanupWorkspace();
   }
 };
 
@@ -260,21 +255,21 @@ export const runLocked = async (host, work) => {
 
 /** Dry-run deliberately has no mutating host methods in its interface. */
 export const dryRunDecision = async (host) => {
-  const [revisions, runs, repository, services, backup] = await Promise.all([
+  const [revisions, runs, artifact, services, backup] = await Promise.all([
     host.revisions(),
     host.blockingRuns(),
-    host.repositoryState(),
+    host.artifactState(),
     host.serviceState(),
     host.backupState(),
   ]);
   const quiet = quietWindowIsOpen(runs);
   const lines = [
-    `DRY-RUN revisions from=${revisions.from} source=${revisions.source} target=${revisions.to}`,
+    `DRY-RUN revisions from=${revisions.from} target=${revisions.to}`,
     `DRY-RUN quiet-window=${quiet ? "open" : "holding"} blockers=${runs.length}`,
-    `DRY-RUN repository branch=${repository.branch} dirty=${repository.dirty} fast-forward=${repository.fastForward}`,
+    `DRY-RUN artifact=${artifact.ok ? "ready" : "not-ready"}${artifact.releaseName ? ` release=${artifact.releaseName}` : ""}${artifact.reason ? ` reason=${artifact.reason}` : ""}`,
     `DRY-RUN services=${services.ok ? "ready" : "not-ready"}`,
     `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
   for (const step of DEPLOY_STEPS) lines.push(`DRY-RUN plan step=${step} mutation=skipped`);
-  return { quiet, revisions, runs, repository, services, backup, lines };
+  return { quiet, revisions, runs, artifact, services, backup, lines };
 };
