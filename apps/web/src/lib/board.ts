@@ -103,16 +103,22 @@ export const chainParked = (task: ScheduleSubject): boolean =>
   && task.chainProgress?.position !== 1;
 
 /**
- * The one-line answer to "what starts this task", for the board card.
+ * The one-line answer to "what starts this task", for the board card, or null
+ * where there is no answer worth a row.
  *
  * Never the raw enum: `AT` lower-cased to a lone "at" is what 42 of the live
  * board's 112 cards showed, which reads as a rendering accident rather than a
  * schedule. And never the parking date either — 2099-01-01 is an implementation
  * detail of how chains are held back, not something an operator should have to
  * decode.
+ *
+ * `NOW` is null for the same reason `MANUAL` renders no provenance pill: it is
+ * the default, true of nearly every card, so a row saying "Once" on all of them
+ * is filler taking a line from the title. Every value that distinguishes one
+ * card from the next — cron prose, a time, a chain's wait — still renders.
  */
-export const scheduleLabel = (task: ScheduleSubject): string => {
-  if (task.scheduleKind === "NOW") return formatT("tasks.schedule.NOW");
+export const scheduleLabel = (task: ScheduleSubject): string | null => {
+  if (task.scheduleKind === "NOW") return null;
   if (task.scheduleKind === "CRON") return cronProse(task.cron, task.timezone);
   if (chainParked(task)) {
     // The same fact from two sides: a step that has not started is waiting, and
@@ -125,6 +131,25 @@ export const scheduleLabel = (task: ScheduleSubject): string => {
     ? formatT("tasks.schedule.notScheduled")
     : formatT("tasks.schedule.atTime", { time: formatDateTime(task.runAt) });
 };
+
+/**
+ * The order one column's cards are read in.
+ *
+ * `GET /tasks` returns the whole board newest-first (`createdAt desc`), which is
+ * right for every column that reports what just happened. Backlog is the one
+ * column that is a queue rather than a report: it is dispatched from the top, so
+ * newest-first prints the queue backwards. The explicit creation-time sort
+ * preserves the API's id-ascending tiebreak when timestamps are equal; a plain
+ * reverse would silently invert that stable order.
+ */
+export const orderColumn = (status: TaskStatus, tasks: readonly BoardTask[]): BoardTask[] =>
+  status === "BACKLOG"
+    ? [...tasks].sort((left, right) => (
+        left.createdAt < right.createdAt ? -1
+          : left.createdAt > right.createdAt ? 1
+            : left.id.localeCompare(right.id)
+      ))
+    : [...tasks];
 
 /* -------------------------------------------------------------- the actions */
 
