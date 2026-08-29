@@ -343,10 +343,63 @@ export const verifyServicePlistDefinitions = (definitions, labels = SERVICE_LABE
 };
 
 const PLUTIL = "/usr/bin/plutil";
+const PYTHON3 = "/usr/bin/python3";
+
+// launchd installation is a macOS operation, but the merge gate exercises the
+// migration on Linux. Python's standard plistlib keeps that test on the real
+// plist mutation path without adding a production runtime dependency.
+const PYTHON_PLISTLIB = String.raw`
+import json
+import plistlib
+import sys
+
+args = sys.argv[1:]
+path = args[-1]
+with open(path, "rb") as source:
+    root = plistlib.load(source)
+
+def parent_for(key_path):
+    parts = key_path.split(".")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[part]
+    return parent, parts[-1]
+
+if args[0] == "-convert" and args[1] == "json":
+    print(json.dumps(root))
+    sys.exit(0)
+
+if args[0] == "-remove":
+    parent, key = parent_for(args[1])
+    del parent[key]
+elif args[0] in ("-replace", "-insert"):
+    parent, key = parent_for(args[1])
+    value_type = args[2]
+    if value_type == "-dictionary":
+        value = {}
+    elif value_type == "-json":
+        value = json.loads(args[3])
+    elif value_type == "-string":
+        value = args[3]
+    else:
+        raise ValueError(f"unsupported plist value type: {value_type}")
+    parent[key] = value
+elif not (args[0] == "-convert" and args[1] == "xml1"):
+    raise ValueError(f"unsupported plist operation: {args}")
+
+with open(path, "wb") as destination:
+    plistlib.dump(root, destination, fmt=plistlib.FMT_XML, sort_keys=False)
+`;
+
+const execPlist = (args, options) => {
+  if (existsSync(PLUTIL)) return execFileSync(PLUTIL, args, options);
+  if (!existsSync(PYTHON3)) throw new Error(`plist-tool-unavailable:${PLUTIL}:${PYTHON3}`);
+  return execFileSync(PYTHON3, ["-c", PYTHON_PLISTLIB, ...args], options);
+};
 
 const plistObject = (path) => {
   try {
-    return JSON.parse(execFileSync(PLUTIL, ["-convert", "json", "-o", "-", path], {
+    return JSON.parse(execPlist(["-convert", "json", "-o", "-", path], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }));
@@ -360,7 +413,7 @@ const setPlistValue = (path, existing, keyPath, type, value) => {
   const args = [action, keyPath, type];
   if (value !== undefined) args.push(value);
   args.push(path);
-  execFileSync(PLUTIL, args, { stdio: ["ignore", "ignore", "pipe"] });
+  execPlist(args, { stdio: ["ignore", "ignore", "pipe"] });
 };
 
 /** Patch only the stable wrapper boundary into an existing definition. plutil
@@ -406,9 +459,9 @@ const renderMigratedServicePlist = ({ sourcePath, values }) => {
       setPlistValue(temporary, Object.hasOwn(environment, key), `EnvironmentVariables.${key}`, "-string", value);
     }
     for (const key of values.runnerId ? [] : ["RUNNER_ID", "RUNNER_PATH"]) {
-      if (environment[key] === "") execFileSync(PLUTIL, ["-remove", `EnvironmentVariables.${key}`, temporary], { stdio: "ignore" });
+      if (environment[key] === "") execPlist(["-remove", `EnvironmentVariables.${key}`, temporary], { stdio: "ignore" });
     }
-    execFileSync(PLUTIL, ["-convert", "xml1", temporary], { stdio: ["ignore", "ignore", "pipe"] });
+    execPlist(["-convert", "xml1", temporary], { stdio: ["ignore", "ignore", "pipe"] });
     return readFileSync(temporary, "utf8");
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
