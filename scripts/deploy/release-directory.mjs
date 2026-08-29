@@ -17,11 +17,6 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import {
-  DEPLOY_OPTIONAL_ARTIFACT_PATHS,
-  DEPLOY_REQUIRED_ARTIFACT_PATHS,
-  deployArtifactPaths,
-} from "./quiet-window-adapters.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 
 /** The release tree is bounded to a small rollback window. A caller may retain
@@ -34,14 +29,6 @@ const REVISION = /^[0-9a-f]{40}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const RELEASE_NAME = /^[0-9a-f]{40}-[0-9a-f]{64}$/u;
 const API_PACKAGE_NAMES = new Set(["@anneal/api", "@agentos/api"]);
-
-const RELEASE_RUNTIME_PATHS = Object.freeze([
-  ...DEPLOY_REQUIRED_ARTIFACT_PATHS,
-  "packages/db/prisma",
-  "packages/build-info/index.mjs",
-  "packages/build-info/index.d.ts",
-  "packages/build-info/package.json",
-]);
 
 const invalid = (detail) => {
   throw new DeployFailure("release-directory-invalid", detail);
@@ -259,30 +246,13 @@ const runtimeManifestPaths = (stageRoot, paths) => {
 
 const resolveInputs = ({ stageRoot, artifactPaths, optionalArtifactPaths }) => {
   const supplied = artifactPaths;
-  if (supplied !== undefined && !Array.isArray(supplied)) invalid("artifact-paths-must-be-an-array");
-  const explicitlySupplied = supplied !== undefined;
-  let selected;
-  let optional;
-  if (explicitlySupplied) {
-    // An explicit list is the caller's artifact inventory. Keeping that list
-    // exact makes an omitted runtime component a loud missing-artifact failure
-    // instead of silently changing the deploy contract under the caller.
-    selected = [...supplied];
-    optional = optionalArtifactPaths ?? [];
-  } else {
-    let discovered;
-    try { discovered = deployArtifactPaths(stageRoot); } catch {
-      discovered = [...RELEASE_RUNTIME_PATHS, ...DEPLOY_OPTIONAL_ARTIFACT_PATHS];
-    }
-    selected = [...discovered];
-    optional = [
-      ...DEPLOY_OPTIONAL_ARTIFACT_PATHS,
-      ...discovered.filter((path) => !DEPLOY_REQUIRED_ARTIFACT_PATHS.includes(path)
-        && !path.startsWith("packages/db/prisma")
-        && !path.startsWith("packages/build-info/")),
-    ];
-    selected.push("packages/db/prisma", "packages/build-info/index.mjs", "packages/build-info/index.d.ts", "packages/build-info/package.json");
-  }
+  if (supplied === undefined) failure("workspace-layout-invalid", "artifact-paths-missing");
+  if (!Array.isArray(supplied)) invalid("artifact-paths-must-be-an-array");
+  // An explicit list is the caller's artifact inventory. Keeping that list
+  // exact makes an omitted runtime component a loud missing-artifact failure
+  // instead of silently changing the deploy contract under the caller.
+  const selected = [...supplied];
+  const optional = optionalArtifactPaths ?? [];
   if (!Array.isArray(optional)) invalid("optional-artifact-paths-must-be-an-array");
   const normalizedSelected = [...new Set(selected.map((path) => normalizeRelativePath(path, "artifact-path")))];
   const normalizedOptional = new Set(optional.map((path) => normalizeRelativePath(path, "optional-artifact-path")));
@@ -290,7 +260,6 @@ const resolveInputs = ({ stageRoot, artifactPaths, optionalArtifactPaths }) => {
   return {
     paths: [...new Set(normalizedSelected)],
     optional: [...normalizedOptional],
-    explicitlySupplied,
   };
 };
 

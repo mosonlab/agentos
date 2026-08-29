@@ -7,7 +7,7 @@ import {
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   deployReleaseArtifactPaths,
   workspaceDependencyPaths,
-} from "./quiet-window-adapters.mjs";
+} from "./release-artifacts.mjs";
 import { assembleReleaseDirectory, verifyReleaseDirectory } from "./release-directory.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 

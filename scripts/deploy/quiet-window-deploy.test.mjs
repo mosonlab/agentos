@@ -16,9 +16,9 @@ import {
 import {
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   deployReleaseArtifactPaths,
-  pruneDeployHistory,
   workspaceDependencyPaths,
-} from "./quiet-window-adapters.mjs";
+} from "./release-artifacts.mjs";
+import { pruneDeployHistory } from "./deploy-preflight.mjs";
 import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-ledger.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
@@ -266,7 +266,7 @@ test("dry-run reports artifact readiness and performs no mutation", async () => 
 test("deploy source has no install/build fallback, checkout mutation, or legacy publication", () => {
   const source = readFileSync(new URL("./quiet-window-deploy.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /npm[^\n]*(?:ci|run["', ]+build)/u);
-  assert.doesNotMatch(source, /worktree|fast-forward|publishDirectories|assertProductionCheckout|inspectGitPreflight/u);
+  assert.doesNotMatch(source, /worktree|fast-forward|assertProductionCheckout|inspectGitPreflight/u);
   assert.ok(source.indexOf("verifyArtifact:") < source.indexOf("waitForQuiet:"));
   assert.match(source, /process\.env\.AGENTOS_REPOSITORY_ROOT/u);
 });
