@@ -104,7 +104,12 @@ if [ "$COMMAND" = "release" ] && [ -z "$TASK" ] && [ "$FORCE" -ne 1 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+if [ -n "${AGENTOS_REPOSITORY_ROOT:-}" ]; then
+  REPO_ROOT="$(cd "${AGENTOS_REPOSITORY_ROOT}" && pwd -P)" \
+    || die "${AGENTOS_REPOSITORY_ROOT} is not an accessible repository root"
+else
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
 git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
   || die "${REPO_ROOT} is not a git repository"
 git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 \

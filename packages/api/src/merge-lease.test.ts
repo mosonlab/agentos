@@ -7,6 +7,7 @@ import {
   commitWithLeaseDisposition,
   leaseHandoffsWithoutConsumer,
   leaseHolderFor,
+  mergeLeaseScriptPath,
   readMergeLeaseRelease,
   settleLease,
   withMergeLease,
@@ -46,6 +47,20 @@ const holderTx = (input: {
     findMany: async () => input.markers ?? [],
   },
 } as unknown as Prisma.TransactionClient);
+
+test("release runtime executes the current release's helper while keeping the Git checkout separate", () => {
+  assert.equal(
+    mergeLeaseScriptPath({
+      AGENTOS_RELEASE_ROOT: "/srv/agentos/current",
+      AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source",
+    }),
+    "/srv/agentos/current/scripts/merge-lease.sh",
+  );
+  assert.match(
+    mergeLeaseScriptPath({ AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source" }),
+    /\/scripts\/merge-lease\.sh$/u,
+  );
+});
 
 test("leaseHolderFor owns every merge-tail Task shape, including a failed auxiliary", async () => {
   const cases = [

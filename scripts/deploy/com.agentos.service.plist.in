@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BINARY__</string>
+    <string>__WRAPPER_PATH__</string>
+    <string>__LABEL__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPOSITORY_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>DEPLOY_NODE_BINARY</key>
+    <string>__NODE_BINARY__</string>
+    <key>AGENTOS_REPOSITORY_ROOT</key>
+    <string>__REPOSITORY_ROOT__</string>
+    <key>AGENTOS_SHARED_ROOT</key>
+    <string>__SHARED_ROOT__</string>
+    <key>AGENTOS_SHARED_ENV_FILE</key>
+    <string>__SHARED_ENV_FILE__</string>
+    <key>AGENTOS_CURRENT_POINTER</key>
+    <string>current</string>
+    <key>AGENTOS_RELEASES_DIRECTORY</key>
+    <string>releases</string>
+    <key>AGENTOS_SERVICE_LABEL</key>
+    <string>__LABEL__</string>
+__RUNNER_ENVIRONMENT__
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__STDOUT_PATH__</string>
+  <key>StandardErrorPath</key>
+  <string>__STDERR_PATH__</string>
+</dict>
+</plist>

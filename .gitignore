@@ -2,6 +2,10 @@ node_modules/
 dist/
 .merge-gate.lock/
 .agentos-deploy/
+/releases/
+/shared/
+/current
+/previous
 .agentos-pi/
 .env
 # Human-captured merge-executor service input. It contains the executor API
