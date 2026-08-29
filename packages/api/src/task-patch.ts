@@ -44,6 +44,33 @@ type GateWinner = {
   runId: string;
 } | null;
 
+/**
+ * The status transitions owned by the board operator.
+ *
+ * Execution code does not call this action: runners and the chain control
+ * plane write their machine-owned states through their own fenced paths.  A
+ * board PATCH may therefore only move standalone work between its two queue
+ * states, or record the one terminal decision a Human owns.  Chain state is a
+ * projection of chain execution, with that Human completion as its sole
+ * operator-owned exception.
+ */
+export const operatorStatusTransitionRefusal = (
+  task: Pick<Task, "assigneeType" | "chainId" | "status">,
+  next: TaskStatus,
+): string | null => {
+  if (next === task.status) return null;
+  if (task.assigneeType === "HUMAN" && next === TaskStatus.DONE) return null;
+  if (task.chainId !== null) return "Chain task statuses are controlled by chain execution";
+  const queueTransition = (
+    (task.status === TaskStatus.BACKLOG && next === TaskStatus.TODO)
+    || (task.status === TaskStatus.TODO && next === TaskStatus.BACKLOG)
+  );
+  if (queueTransition) return null;
+  return task.assigneeType === "AGENT"
+    ? "Doing, Review, and Done for agent tasks are controlled by execution"
+    : "Human tasks may move between Backlog and Todo or be marked Done";
+};
+
 /** A refusal from `writeTask` in this action's terms: the task is gone, or the
  *  assignee the request named may not be written onto it. */
 const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => (
@@ -213,11 +240,12 @@ export const patchTask = async (
         }
         if (typeof locked.dispatchAfterTaskId === "string"
           && locked.dispatchAfter?.status !== TaskStatus.DONE
-          && body.status !== locked.status
-          && body.status !== TaskStatus.TODO) {
+          && body.status !== locked.status) {
           const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
           return refuse(`Cannot change bound task status before predecessor ${predecessorName} is done`);
         }
+        const operatorRefusal = operatorStatusTransitionRefusal(locked, body.status!);
+        if (operatorRefusal !== null) return refuse(operatorRefusal);
         // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
         // task back to whoever it is *already* assigned to, and that assignee is
         // in no request field for the module's assignment guard to have checked.
