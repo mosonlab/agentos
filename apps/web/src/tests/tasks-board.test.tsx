@@ -19,6 +19,7 @@ const en = (key: string, vars?: Record<string, string | number>): string => tran
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
+  assigneeType: "HUMAN", createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
@@ -386,9 +387,9 @@ test("the board renders Backlog oldest first and leaves every other column in th
   storage.set("agentos.projectId", "p1");
   // As `GET /tasks` answers: newest first, for every column.
   const rows = [
-    task({ id: "backlog-new", status: "BACKLOG" }),
-    task({ id: "backlog-mid", status: "BACKLOG" }),
-    task({ id: "backlog-old", status: "BACKLOG" }),
+    task({ id: "backlog-new", status: "BACKLOG", createdAt: "2026-08-18T00:00:00.000Z" }),
+    task({ id: "backlog-mid", status: "BACKLOG", createdAt: "2026-08-17T00:00:00.000Z" }),
+    task({ id: "backlog-old", status: "BACKLOG", createdAt: "2026-08-16T00:00:00.000Z" }),
     task({ id: "done-new", status: "DONE" }),
     task({ id: "done-old", status: "DONE" }),
   ];
@@ -534,7 +535,7 @@ test("Copy error is offered only when there is an error to copy", () => {
 test("the assignee is one line with a keyboard-reachable way to see the rest", () => {
   // 59 of 112 cards truncated this name with no reveal at all: `title` is a
   // hover affordance, which is none on touch and none from the keyboard.
-  const markup = card({ assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" } });
+  const markup = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" } });
   assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>Implementation Plan Executioner<\/button>/);
   assert.match(markup, /title="Implementation Plan Executioner"/);
   assert.match(markup, /gpt-5\.6-sol:medium/);
@@ -573,15 +574,17 @@ test("a card with neither a run nor an assignee has no model line", () => {
   assert.equal(cardModel(task()), null);
 });
 
-test("a card with no agent shows a person, not the word Unassigned", () => {
+test("a HUMAN card shows a person, an unassigned AGENT warns, and an assigned AGENT is unchanged", () => {
   // "Unassigned" beside a robot was on every card a human owns, which is most of
   // them, and it named a state that is not a problem.
-  const markup = card();
+  const markup = card({ assigneeType: "HUMAN", assigneeAgent: null });
   assert.doesNotMatch(markup, /Unassigned/);
-  // The person icon, which is IconUser's own circle-over-shoulders path.
-  assert.match(markup, /M2.9 13.6a5.1 5.1 0 0 1 10.2 0/);
+  assert.match(markup, /data-card-assignee="human"/);
+  const unassignedAgent = card({ assigneeType: "AGENT", assigneeAgent: null });
+  assert.match(unassignedAgent, /data-card-assignee="unassigned-agent"/);
+  assert.match(unassignedAgent, /Unassigned/);
   // An agent, named, is unchanged.
-  const assigned = card({ assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" } });
+  const assigned = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" } });
   assert.match(assigned, new RegExp(`aria-label="${en("tasks.card.assignee", { name: "merge-resolver" })}"`));
   assert.match(assigned, />merge-resolver</);
 });
@@ -591,8 +594,12 @@ test("a card with no agent shows a person, not the word Unassigned", () => {
 test("a NOW card carries no schedule row, and every informative schedule still does", () => {
   // "Once" is the default and was on nearly every card: three of a Backlog
   // card's five rows were constants while its title clamped.
-  assert.doesNotMatch(card(), /Once/);
-  assert.match(card({ scheduleKind: "CRON", cron: "0 9 * * 1" }), /At 09:00 AM, only on Monday/);
+  const now = card();
+  assert.doesNotMatch(now, /Once/);
+  assert.doesNotMatch(now, /data-card-schedule=/);
+  const cron = card({ scheduleKind: "CRON", cron: "0 9 * * 1" });
+  assert.match(cron, /data-card-schedule=""/);
+  assert.match(cron, /At 09:00 AM, only on Monday/);
   assert.match(
     card({ status: "BACKLOG", scheduleKind: "AT", runAt: "2099-01-01T00:00:00.000Z", chainId: "c1", chainIndex: 4, chainProgress: progress({ position: 4 }) }),
     new RegExp(en("tasks.schedule.waitingForPrevious")),

@@ -177,6 +177,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const t = useT();
   const assignee = task.assigneeAgent?.title ?? null;
   const schedule = scheduleLabel(task);
+  const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
   const run = runLabel(task, t);
   const model = cardModel(task);
   const taskCostLabel = usageCostLabel(task.taskCost);
@@ -202,21 +203,20 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
     <div className={TASK_META}>
-      <div className={TASK_META_ROW}>
+      {hasScheduleRow ? <div data-card-schedule="" className={TASK_META_ROW}>
         {/* Two lines, not one ellipsized one. Measured in a 170px content box:
             "Waiting for previous step" came out as "Waiting for previous st…"
             and a cron's prose as "At 09:00 AM, only on M…". This line is the
             answer to "what starts this task" — an answer cut off two characters
             from the end is not a shorter answer, it is no answer.
-            Null on a `NOW` task, which is nearly every task: the row is shared
-            with the pills, so it survives an absent schedule and disappears
-            with them. */}
+            A plain `NOW` task has no row at all; approval and source pills keep
+            this shared row when they carry the card's only information. */}
         {schedule === null ? null : <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{schedule}</span>}
         {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.approval")}</Pill> : null}
         {/* MANUAL renders nothing: most tasks are manual, and a pill on every
             card would be noise rather than provenance ([A8]). */}
         {task.source === "CRON" ? <Pill tone="grey" className={TASK_PILL}>{t("tasks.pill.cron")}</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent" className={TASK_PILL}>{t("tasks.pill.webhook")}</Pill> : null}
-      </div>
+      </div> : null}
       {task.blockedOn ? (
         <div data-card-blocked-on="" className={TASK_META_ROW}>
           <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">
@@ -246,8 +246,8 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           {repair === null
             ? null
             : <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.repair", { kind: repair.repairKind })}</Pill>}
-          {/* The marker keeps the card's node ordinal and the API-derived dense
-              execution-layer progress together, without recomputing either. */}
+          {/* The board needs only the task's ordinal. Execution layers are a
+              scheduling concept rendered by the chain detail page. */}
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </div>
       )}
@@ -262,16 +262,17 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, TASK_FAILURE)}>{task.failureReason}</div>}
     </div>
     <div className={TASK_FOOT}>
-      {/* An agent by name, or a person icon and no word. "Unassigned" beside a
-          robot was on every card a human owns — which is most of them — and it
-          named a state that is not a problem in the vocabulary of the one thing
-          the card cannot see: the board projection carries no assignee *type*,
-          so an agent task missing its agent is indistinguishable here from a
-          task no agent was ever meant to run. */}
-      <span className={cn(ROW, "min-w-0 gap-[6px]")}>
-        {assignee === null
+      {/* Human ownership is complete without an agent name. A missing agent on
+          an AGENT task is different: it is a misconfiguration worth naming. */}
+      <span
+        data-card-assignee={task.assigneeType === "HUMAN" ? "human" : assignee === null ? "unassigned-agent" : "agent"}
+        className={cn(ROW, "min-w-0 gap-[6px]")}
+      >
+        {task.assigneeType === "HUMAN"
           ? <IconUser />
-          : <><IconRobot /><Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} /></>}
+          : assignee === null
+            ? <><IconRobot /><span>{t("ui.chip.unassigned")}</span></>
+            : <><IconRobot /><Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} /></>}
       </span>
       <span className="flex-1" />
       {task.taskCost !== null && !hasTokenFallback

@@ -41,6 +41,7 @@ const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, 
 
 const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Merge execution", displayName: overrides.name ?? "Merge execution", status: "DONE", failureReason: null,
+  assigneeType: "AGENT", createdAt: "2026-08-17T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
   chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,

@@ -138,13 +138,18 @@ export const scheduleLabel = (task: ScheduleSubject): string | null => {
  * `GET /tasks` returns the whole board newest-first (`createdAt desc`), which is
  * right for every column that reports what just happened. Backlog is the one
  * column that is a queue rather than a report: it is dispatched from the top, so
- * newest-first prints the queue backwards. Reversing the response restores
- * creation order without a second sort key — the board card carries no
- * `createdAt`, and inventing one client-side would be a second, disagreeing
- * answer to an ordering the API already states.
+ * newest-first prints the queue backwards. The explicit creation-time sort
+ * preserves the API's id-ascending tiebreak when timestamps are equal; a plain
+ * reverse would silently invert that stable order.
  */
 export const orderColumn = (status: TaskStatus, tasks: readonly BoardTask[]): BoardTask[] =>
-  (status === "BACKLOG" ? [...tasks].reverse() : [...tasks]);
+  status === "BACKLOG"
+    ? [...tasks].sort((left, right) => (
+        left.createdAt < right.createdAt ? -1
+          : left.createdAt > right.createdAt ? 1
+            : left.id.localeCompare(right.id)
+      ))
+    : [...tasks];
 
 /* -------------------------------------------------------------- the actions */
 
