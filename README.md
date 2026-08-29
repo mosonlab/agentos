@@ -2,122 +2,70 @@
 
 # Anneal
 
-**AI can write code now. Nobody has the capacity to review all of it.**
+**You write the specs. It clears the board.**
 
-Anneal is the part that reviews it: a local control plane for coding agents.
-You write the spec. A chain takes it from there — plan, review, implement,
-verify, merge — and every run stays observable and reviewable.
-
-*Annealing is the heat treatment that relieves the internal stresses left in
-worked metal. The defects come out in the process.*
+Anneal is a local control plane for coding agents. Queue tasks in the
+evening, and chains plan, review, implement, verify and merge them
+unattended — on the Codex and Claude subscriptions you are already
+signed in to.
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](#status)
 [![node](https://img.shields.io/badge/node-22.17.0-brightgreen)](.nvmrc)
 
-[Install](#quick-start) · [Docs](#documentation) · [Status](#status) · [简体中文](README.zh-CN.md)
+[Install](#quick-start) · [How it works](#how-it-works) · [Status](#status) · [简体中文](README.zh-CN.md)
 
 <img src="docs/media/parallel-tasks.gif" alt="Multiple tasks running in parallel across the board" width="880">
 
 </div>
 
-## What it is
+## The workflow it is built for
 
-Anneal connects tasks, agents, repository and file grants, isolated run
-records, provider event streams, human questions, review gates and git delivery
-into one workflow that runs entirely on your own machine.
+During the day you do one thing: write specs. In the evening you queue
+them as tasks on the board. Overnight, a chain picks up each task and
+takes it the whole way — plan, plan review, implementation, two
+independent code reviews, fix application, regression verification, and
+the merge itself. In the morning you read the pull requests that matter,
+open an agent window on the ones you care about, and iterate until you
+are satisfied.
 
-It orchestrates the official Codex CLI, Claude Code and Pi that you have
-already installed and signed in to, so the subscription logins those CLIs
-already hold are what it runs on. Anneal supplies no credential of its own and
-resells no subscription. See
-[Authentication and subscriptions](#authentication-and-subscriptions).
+Between those points nothing needs you. A chain only stops for you when
+an agent asks a question through the Inbox, when a step you marked as
+gated needs a human decision, or when a run escalates. You are not
+sitting in front of it; the board is what you come back to.
 
-## What it changes
+## What you get
 
-A Full Assurance task chain covers the whole delivery path: specification,
-plan, plan review, implementation, two independent code reviews, fix
-application, regression verification, merge readiness and the merge itself. A
-Direct chain omits the specification and planning stages. Agent steps carry
-their own role, prompt, model and reasoning effort; mechanical readiness and
-merge steps do not. Outputs flow only to the downstream consumers declared by
-the template, including both parallel review findings flowing to the fix step.
+- **Spec in, merge out.** A task card becomes a branch, a pull request
+  and a merge behind the merge gate, with every intermediate artifact —
+  plan, review findings, fix dispositions, regression results — recorded
+  and reviewable.
+- **Parallel by default.** Chains for different tasks and different
+  repositories run at the same time; throughput comes from how many
+  runners you register, not from your hours.
+- **Your subscriptions, no keys.** Anneal launches the official Codex
+  CLI, Claude Code and Pi you have already installed and signed in to.
+  It holds no credential of its own, runs no proxy, and there is no key
+  to paste in.
+- **Review is the product.** Every step's output is the next step's
+  input, and every run record stays on your machine for you to audit.
 
-Once a chain starts it advances on its own. You step in when an agent asks you
-something through the Inbox, when a step you marked as gated needs a human
-decision, or when a run escalates. Everything between those points
-runs unattended, including delivery: a branch, an optional pull request, and a
-merge behind the merge gate.
-
-That changes what limits you. Throughput comes from how many runners you have
-registered rather than from your hours: chains for different tasks and different
-repositories are in flight at the same time, and you read review output instead
-of typing the implementation.
-
-Long-horizon autonomy is not wired yet. A Goal is stored and edited but nothing
-schedules work from it, so a chain is still started by you or by a webhook
-trigger, not by a standing objective. See [Status](#status).
-
-<div align="center">
-
-<img src="docs/media/agents.png" alt="Agents view: each agent's role, model, reasoning effort and runner" width="880">
-
-<sub>Agents: a role, a prompt, a model and effort, and the runner it goes to.</sub>
-
-</div>
-
-## Board columns
-
-The board shows where work sits in the intent-to-delivery flow. The [Backlog
-card lifecycle](docs/governance/task-routing-v1.md#backlog-card-lifecycle) in
-the task-routing contract defines card creation, dispatch, and archival; the
-definitions here cover the column semantics.
-
-- **Backlog — intent.** An un-instantiated brief that is still being refined,
-  awaits a decision, or is deliberately parked; it is not connected to
-  execution. For an indefinitely parked HUMAN card, prefix its title with
-  `Parked:`.
-- **Todo — runnable execution.** An instantiated chain or step whose
-  specification of record is final, runnable now or waiting for activation or
-  a dependency unlock. The entry boundary is explicit: un-instantiated intent
-  enters the board in Backlog; instantiated chains and their steps enter in
-  Todo and then move through the later columns.
-- **Doing — active execution.** The runner has activated an AGENT task and work
-  is in progress.
-- **Review — awaiting a lifecycle decision.** An AGENT task is paused for an
-  approval or review gate, or has surfaced a run issue that needs attention
-  before the chain can continue.
-- **Done — complete.** The task or chain step is finished.
-
-An operator can stop and park a running chain step, which returns it to Backlog
-as a parked step. Resume it with **Start now** or **Recover parked step**, not
-ordinary card dispatch.
-
-The operator owns Backlog and Todo transitions and marking HUMAN tasks Done.
-The runner and chain scheduler own Doing, Review, and Done transitions for
-AGENT tasks. In the usual flow, the operator moves finalized intent from
-Backlog to Todo, then the runner advances each instantiated step through Doing,
-Review, and Done.
-
-## It is built by its own chains
+## Anneal is built with Anneal
 
 The pull requests in this repository are specified, planned, reviewed,
-implemented and merged by the chain below, running on one Mac. That is what the
-eight days between the first preview release and the third look like from the
-inside.
+implemented and merged by Anneal's own chains, running on one Mac.
+Chain-delivered commits carry `Co-Authored-By: Anneal Chain` and
+`X-Anneal-Run` / `X-Anneal-Step` trailers, so you can check in the git
+log which commits the chains produced.
 
-Attribution for chain-delivered commits is not yet explicit in git history, so
-treat this as a statement about how the work is done rather than a number you
-can check. Making it checkable is the next preview's job.
+## How it works
 
-## The twelve-step chain
-
-The Full Assurance template that ships with Anneal. Every step binds a role,
-and every role carries its own runner, model and reasoning effort.
-
-`Sol` and `Luna` in the table below are not Anneal names: they are the GPT-5.6
-variants the Codex CLI exposes, bound as `gpt-5.6-sol` and `gpt-5.6-luna`.
+A chain instantiates a template of steps. Each step binds an agent role
+— a prompt, a model, a reasoning effort and the runner CLI it executes
+on — and the flagship Full Assurance template covers delivery in twelve
+steps. `Sol` and `Luna` below are the GPT-5.6 variants the Codex CLI
+exposes.
 
 <details>
 <summary><b>The twelve steps in full</b> — role, runner, model and effort for each</summary>
@@ -147,32 +95,22 @@ variants the Codex CLI exposes, bound as `gpt-5.6-sol` and `gpt-5.6-luna`.
 
 </div>
 
-Steps 6 and 7 are parallel siblings: the blind review never sees the other's
-output, and step 8 adjudicates both. Step 5's root session dispatches native
-subagents pinned to Luna at maximum effort, at most eight concurrent.
-
-Role bindings live in
+Steps 6 and 7 are parallel siblings: the blind review never sees the
+other's output, and step 8 adjudicates both. Role bindings live in
 [`agents/templates/compound-engineer-workflow/`](agents/templates/compound-engineer-workflow)
-and the models in [`agents/roles/`](agents/roles). A model or effort changed in
-the console is a persisted runtime override and is not replaced by a later
-seed.
-
-> **Developer Preview 4 (v0.4.0).** Interfaces, configuration and stored data
-> shapes may change between preview releases, and the only upgrade path is a
-> fresh install.
->
-> **Host execution.** Anneal launches coding CLIs with non-interactive
-> permission bypass. By default they run as your macOS user, outside a sandbox,
-> with that user's filesystem and network authority. Anneal grants constrain
-> Anneal APIs; they are not host containment. Use a disposable repository and a
-> machine you are willing to let an agent modify.
+and the models in [`agents/roles/`](agents/roles). Board column
+semantics are defined in the
+[task-routing contract](docs/governance/task-routing-v1.md).
 
 ## Quick start
 
-You need an Apple Silicon Mac with Node.js `22.17.0` from `.nvmrc` (installation requires
-Node.js satisfying `^20.19.0 || ^22.13.0 || >=24` and refuses anything else), npm 10.9.2+,
-Docker Compose, Git, and the official Codex CLI already signed in under the same
-macOS account. Claude Code and Pi are optional.
+You need:
+
+- an Apple Silicon Mac
+- Node.js `22.17.0` (from `.nvmrc`) and npm 10.9.2+
+- Docker Compose and Git
+- the official Codex CLI signed in under the same macOS account
+  (Claude Code and Pi optional)
 
 ```sh
 git clone https://github.com/mosonlab/anneal.git
@@ -185,83 +123,44 @@ docker compose up -d --wait --wait-timeout 60 postgres
 npm run db:migrate:release -- --fresh
 ```
 
-Then start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`, in
-that order, in three terminals, and open `http://127.0.0.1:5173`.
-
-This is the short form. The literal sequence, including its filesystem, port,
-runner identity and repository preflights, is in
-[`docs/release/developer-preview.md`](docs/release/developer-preview.md),
-with the remaining installation detail in [`docs/install.md`](docs/install.md).
+Then start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`
+in three terminals, in that order, and open `http://127.0.0.1:5173`.
+The full sequence with its preflights is in
+[`docs/release/developer-preview.md`](docs/release/developer-preview.md).
 
 ## Status
 
-Developer Preview. What is supported, and the evidence behind every claim, is
-recorded in [`docs/release/support-matrix.md`](docs/release/support-matrix.md),
-the authoritative support statement. It describes evidence held in this
-repository, not compatibility promises by the CLI providers.
+Developer Preview 4 (v0.4.0): interfaces and stored data shapes may
+change between previews, and the only upgrade path is a fresh install.
+macOS on Apple Silicon only.
 
-Anneal targets macOS on Apple Silicon. Linux is unverified, and Windows is
-unsupported by design: the runner relies on POSIX process-group, path and
-command behavior.
+**Read before pointing this at anything you care about:** Anneal
+launches coding CLIs with non-interactive permission bypass, as your
+macOS user, outside a sandbox. Use a disposable repository and a machine
+you are willing to let an agent modify. Details in
+[`docs/release/security.md`](docs/release/security.md).
 
-Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
-limits, models, and provider-side availability remain yours. Anneal supplies no
-provider credential and no entitlement.
-
-## Authentication and subscriptions
-
-Anneal holds no provider credential. It launches the official CLIs you have
-already installed and signed in to (Codex CLI, Claude Code and Pi), and their
-authentication stays where each CLI keeps it, in that CLI's own configuration.
-Anneal neither reads it nor forwards it, and there is no Anneal account, no
-API proxy and no key to paste in.
-
-Whatever authentication those CLIs support is therefore what Anneal runs on: a
-ChatGPT subscription login, a Claude Pro/Max login, or each CLI's own API-key
-mode, exactly as you already configured it. Pi carries no account of its own
-either: it authenticates through the Codex login.
-
-You can check this. The runner constructs the
-child environment for the provider process rather than copying the host
-environment wholesale
-([`docs/architecture.md`](docs/architecture.md), `packages/runner/src/adapters/`),
-and the release check scans this checkout for token variables, bearer headers
-and `Authorization` ([`docs/release/security.md`](docs/release/security.md)).
-
-None of that settles a provider's terms for you. Plan limits,
-rate limits, usage allowances, and whether your plan permits this kind of
-orchestration are between you and the provider. Anneal grants no entitlement
-and makes no compatibility promise for a CLI provider.
+The provider CLIs, their authentication and their plan terms stay
+between you and the provider: Anneal neither reads nor forwards their
+credentials and grants no entitlement. The authoritative support
+statement is
+[`docs/release/support-matrix.md`](docs/release/support-matrix.md).
 
 ## Documentation
 
-- [Architecture and security model](docs/architecture.md): how the console,
-  API, runner and provider CLIs fit together, and what the grants do and do not
-  contain.
-- [Installation notes and verification](docs/install.md): environment file,
-  migrations, merge executor, and the check sequence.
-- [Security](docs/release/security.md): read before pointing this at
-  anything you care about.
-- [Migration and recovery](docs/release/migration-and-recovery.md): read
-  before putting data in it.
-- [Release notes](docs/release/v0.4.0-release-notes.md) ·
-  [Contributing](CONTRIBUTING.md)
-
-## Support
-
-Anneal is a personal project with no support or response-time commitments. Send
-security reports through the private channel in [`SECURITY.md`](SECURITY.md),
-and see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) for
-the authoritative support statement.
+[Architecture](docs/architecture.md) ·
+[Install](docs/install.md) ·
+[Security](docs/release/security.md) ·
+[Migration and recovery](docs/release/migration-and-recovery.md) ·
+[Release notes](docs/release/v0.4.0-release-notes.md) ·
+[Contributing](CONTRIBUTING.md) ·
+[Support](SECURITY.md)
 
 ## Credits and license
 
-The chain's role and step prompts owe more than inspiration: five skills from
-[mattpocock/skills](https://github.com/mattpocock/skills) supply their working
-text, carried verbatim and wrapped in paragraphs written here for this
-platform's contracts. That work is MIT-licensed, `Copyright (c) 2026 Matt
-Pocock`, and the notice is in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
-This snapshot is licensed under the [MIT License](LICENSE); the snapshot
-boundary is defined by [`public-snapshot.json`](public-snapshot.json).
+Five skills from
+[mattpocock/skills](https://github.com/mattpocock/skills) (MIT,
+Copyright (c) 2026 Matt Pocock) supply working text for the chain's
+prompts; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). This
+snapshot is licensed under the [MIT License](LICENSE), with its boundary
+defined by [`public-snapshot.json`](public-snapshot.json).
