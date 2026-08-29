@@ -544,10 +544,11 @@ test("eligible direct and compound stops recover once under duplicate ticks and 
       assert.equal(parsed.payload.baseSha, BASE_2);
     }
     assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 2);
-    assert.equal(
+    assert.deepEqual(
       (await readMarkerHistory(db, seeded.integratorTask!.id))
-        .filter((entry) => entry.kind === "baseDriftRecovery").length,
-      1,
+        .filter((entry) => entry.kind === "baseDriftRecovery")
+        .map((entry) => entry.state),
+      ["awaiting-authorization", "queued"],
     );
   }
 });

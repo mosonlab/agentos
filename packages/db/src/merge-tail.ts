@@ -50,7 +50,7 @@ export type MergeRecoveryPhase =
   | "succeeded"
   | "actual-failure";
 
-const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecoveryStatus>> = {
+export const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecoveryStatus>> = {
   [MergeRecoveryStatus.VALIDATING]: new Set([MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.FAILED]),
   [MergeRecoveryStatus.REPAIRING]: new Set([
     MergeRecoveryStatus.AWAITING_AUTHORIZATION,
@@ -61,15 +61,43 @@ const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecover
     MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
     MergeRecoveryStatus.SUCCEEDED,
   ]),
-  [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set(),
+  [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set([MergeRecoveryStatus.REPAIRING]),
   [MergeRecoveryStatus.SUCCEEDED]: new Set(),
-  [MergeRecoveryStatus.FAILED]: new Set(),
+  [MergeRecoveryStatus.FAILED]: new Set([MergeRecoveryStatus.VALIDATING]),
 };
 
 export const mergeRecoveryTransitionAllowed = (
   from: MergeRecoveryStatus,
   to: MergeRecoveryStatus,
 ): boolean => from === to || RECOVERY_TRANSITIONS[from].has(to);
+
+export type MergeRecoveryTransitionData = Omit<Prisma.MergeRecoveryAttemptUpdateInput, "status">;
+
+/**
+ * The fail-loud persistence primitive for every recovery status change. Named
+ * merge-tail operations own the surrounding Task and marker writes; the
+ * activation module also uses this primitive for its authorization-bound
+ * terminal success.
+ */
+export const transitionMergeRecovery = async (
+  tx: Prisma.TransactionClient,
+  aggregateId: string,
+  target: MergeRecoveryStatus,
+  data: MergeRecoveryTransitionData = {},
+) => {
+  const aggregate = await tx.mergeRecoveryAttempt.findUnique({
+    where: { id: aggregateId },
+    select: { status: true },
+  });
+  if (!aggregate) throw new Error(`Merge recovery aggregate ${aggregateId} is absent`);
+  if (!mergeRecoveryTransitionAllowed(aggregate.status, target)) {
+    throw new Error(`Illegal merge recovery transition ${aggregate.status} -> ${target} for ${aggregateId}`);
+  }
+  return tx.mergeRecoveryAttempt.update({
+    where: { id: aggregateId },
+    data: { ...data, status: target },
+  });
+};
 
 export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPhase => (
   status === MergeRecoveryStatus.VALIDATING ? "validation"

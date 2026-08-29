@@ -24,6 +24,12 @@ import {
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { openDefenseAuditNotice, stopMergeTail } from "./merge-tail-actions.js";
+import {
+  adoptRecoveryHead,
+  awaitAuthorization,
+  enterRepair,
+  reopenAfterHeadAdoption,
+} from "./merge-tail-state.js";
 import { createGitHubReader, type PullRequestReader } from "./github-read.js";
 import {
   evaluateReadiness,
@@ -123,45 +129,9 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         || stop?.stopId !== attempt.sourceStopId
         || stop.sourceRunId !== context.sourceRunId) return false;
 
-      const updated = await tx.mergeRecoveryAttempt.updateMany({
-        where: {
-          id: attempt.id,
-          status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-          failureReason: attempt.failureReason,
-          boundSourceRunId: context.sourceRunId,
-          authorizationActivityId: context.authorizationActivityId,
-          recoveryRunId: context.recoveryRunId,
-          readinessTaskId: context.readinessTaskId,
-          regressionTaskId: context.regressionTaskId,
-          repository: context.repository,
-          prNumber: context.prNumber,
-          targetBranch: context.targetBranch,
-          authorizedHeadSha: context.authorizedHeadSha,
-          authorizedBaseSha: context.authorizedBaseSha,
-          observedBaseSha: context.observedBaseSha,
-          currentBaseSha: context.currentBaseSha,
-        },
-        data: { status: MergeRecoveryStatus.REPAIRING, failureReason: null, endedAt: null },
-      });
-      if (updated.count !== 1) return false;
-      await tx.task.update({ where: { id: candidate.regressionTaskId! }, data: { status: TaskStatus.DONE, failureReason: null } });
-      await tx.task.update({ where: { id: candidate.readinessTaskId! }, data: { status: TaskStatus.TODO, failureReason: null } });
-      await tx.task.update({ where: { id: candidate.integratorTaskId }, data: {
-        status: TaskStatus.REVIEW,
-        failureReason: `Automatic base-drift recovery ${candidate.attempt} resumed after verified regression head adoption`,
-      } });
-      const body = `Automatic base-drift recovery ${candidate.attempt} reopened the verified Regression result for fresh readiness authorization`;
-      const metadata = {
-        aggregateId: candidate.id,
-        sourceStopId: candidate.sourceStopId,
-        recoveryRunId: candidate.recoveryRunId,
-        state: "reopened-head-adoption",
-      };
-      await writeMarker(tx, candidate.integratorTaskId, "baseDriftRecovery", {
-        actorType: "control-plane", body, metadata,
-      });
-      await writeMarker(tx, candidate.regressionTaskId!, "baseDriftRecovery", {
-        actorType: "control-plane", body, metadata,
+      await reopenAfterHeadAdoption(tx, {
+        recovery: context,
+        expectedFailureReason: attempt.failureReason,
       });
       return true;
     });
@@ -198,7 +168,7 @@ const recoveryContextFor = async (
   regressionTaskId: string,
   readinessTaskId: string,
   recoveryRunId: string | null,
-): Promise<RecoveryContext | null> => {
+): Promise<{ context: RecoveryContext; status: MergeRecoveryStatus } | null> => {
   if (!recoveryRunId) return null;
   const row = await db.mergeRecoveryAttempt.findFirst({ where: {
     regressionTaskId,
@@ -206,7 +176,8 @@ const recoveryContextFor = async (
     recoveryRunId,
     status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
   }, orderBy: [{ attempt: "desc" }, { id: "desc" }] });
-  return recoveryContext(row);
+  const context = recoveryContext(row);
+  return row && context ? { context, status: row.status } : null;
 };
 
 const stopReadiness = async (
@@ -268,60 +239,40 @@ const requeueRegression = async (
     kind: "finish",
     at: input.now,
     apply: async (client) => {
-      await client.task.update({
-        where: { id: input.readinessTaskId },
-        data: { status: TaskStatus.TODO, failureReason: null },
-      });
-      await client.task.update({
-        where: { id: input.regressionTaskId },
-        data: { status: TaskStatus.TODO, failureReason: null },
-      });
       // The prior Regression run succeeded; the control plane invalidated its
       // exact-base evidence after a remote read. This retry is therefore external
       // compensation, not another attempt charged to the agent. Without the
       // grant, a requeue at the configured ceiling creates run N+1 with ceiling N
       // and the runner rejects it before launch -- exactly the stuck state the
       // readiness transition was supposed to recover.
-      const run = await enqueueTaskRun(client, input.regressionTaskId, input.now, { budgetGrant: 1 });
       if (input.recovery) {
-        await client.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
-          status: MergeRecoveryStatus.REPAIRING,
-          recoveryRunId: run.id,
+        await enterRepair(client, {
+          aggregateId: input.recovery.aggregateId,
           currentBaseSha: input.currentBaseSha,
-          failureReason: null,
-          endedAt: null,
-        } });
-        const body = `Automatic base-drift recovery ${String(input.recovery.attempt)} context carried through readiness requeue`;
-        const metadata = {
-          ...input.recovery,
-          currentBaseSha: input.currentBaseSha,
-          recoveryRunId: run.id,
-        } as Prisma.InputJsonObject;
-        await client.taskActivity.createMany({ data: [
-          {
-            taskId: input.recovery.integratorTaskId,
-            actorType: "control-plane",
-            body,
-            metadata,
+          now: input.now,
+          readinessRequeue: { staleBaseSha: input.staleBaseSha, reason: input.reason },
+        });
+      } else {
+        await client.task.update({
+          where: { id: input.readinessTaskId },
+          data: { status: TaskStatus.TODO, failureReason: null },
+        });
+        await client.task.update({
+          where: { id: input.regressionTaskId },
+          data: { status: TaskStatus.TODO, failureReason: null },
+        });
+        await enqueueTaskRun(client, input.regressionTaskId, input.now, { budgetGrant: 1 });
+        await writeMarker(client, input.regressionTaskId, "readiness", {
+          actorType: "control-plane",
+          body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
+          metadata: {
+            state: "requeued-regression",
+            reason: input.reason,
+            staleBaseSha: input.staleBaseSha,
+            currentBaseSha: input.currentBaseSha,
           },
-          {
-            taskId: input.regressionTaskId,
-            actorType: "control-plane",
-            body,
-            metadata,
-          },
-        ] });
+        });
       }
-      await writeMarker(client, input.regressionTaskId, "readiness", {
-        actorType: "control-plane",
-        body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
-        metadata: {
-          state: "requeued-regression",
-          reason: input.reason,
-          staleBaseSha: input.staleBaseSha,
-          currentBaseSha: input.currentBaseSha,
-        },
-      });
       return { value: undefined, ownership: "released" as const };
     },
   });
@@ -370,18 +321,25 @@ const readReadiness = async (
     return { claimed: false, input: { ...context, stage: "regression-pending" } };
   }
 
+  let recovery: RecoveryContext | null = null;
+  try {
+    const recoveryRead = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
+    recovery = recoveryRead?.context ?? null;
+    if (recovery && recoveryRead?.status === MergeRecoveryStatus.REPAIRING) {
+      await db.$transaction((tx) => awaitAuthorization(tx, recovery!));
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      claimed: false,
+      input: { ...context, stage: "read-failed", failure: { kind: "unexpected", message } },
+    };
+  }
+
   const claim = await claimReadinessStep(db, readiness.id, now);
   if (!claim) return { claimed: false, input: { ...context, stage: "claim-lost" } };
 
-  let recovery: RecoveryContext | null = null;
   try {
-    recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
-    if (recovery) {
-      await db.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
-        status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
-        failureReason: null,
-      } });
-    }
     const claimedRead = (input: ReadinessInput): ClaimedReadiness => ({
       claimed: true,
       readiness,
@@ -603,22 +561,11 @@ const applyReadinessDecision = async (
           // candidate, so its gated head may legitimately replace the head that
           // first stopped on base drift. Adopt only the head re-read under the
           // merge Lease and bind the CAS to the pre-Lease recovery snapshot.
-          const adopted = await client.mergeRecoveryAttempt.updateMany({
-            where: {
-              id: recovery.aggregateId,
-              status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
-              recoveryRunId: recovery.recoveryRunId,
-              currentBaseSha: recovery.currentBaseSha,
-              authorizedHeadSha: recovery.authorizedHeadSha,
-            },
-            data: {
-              currentBaseSha: leasedDecision.evidence.baseSha,
-              authorizedHeadSha: leasedDecision.evidence.headSha,
-            },
+          await adoptRecoveryHead(client, {
+            recovery,
+            currentBaseSha: leasedDecision.evidence.baseSha,
+            authorizedHeadSha: leasedDecision.evidence.headSha,
           });
-          if (adopted.count !== 1) {
-            throw new Error("Recovery authorization could not adopt the verified regression head");
-          }
         }
         const activity = await client.taskActivity.create({ data: {
           taskId: readiness.id,

@@ -8,8 +8,6 @@ import {
   Prisma,
   TaskStatus,
   asJsonObject,
-  closeIntegratorQuestions,
-  enqueueTaskRun,
   isMergeReadinessStep,
   latestRecordedStop,
   lockChainRows,
@@ -19,7 +17,6 @@ import {
   resolveChainTarget,
   selectAuthorization,
   taskIsIntegratorStep,
-  writeMarker,
   type CardRow,
   type CandidateActivity,
   type DecisionRow,
@@ -41,46 +38,17 @@ import {
   type Retry,
 } from "./base-drift-recovery-decision.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
+import {
+  ensureRecoveryValidation,
+  enterRepair,
+  recordValidationRetry,
+  recoveryIsReopenableLegacyRefusal,
+  retireLegacyRefusal,
+} from "./merge-tail-state.js";
 
 type DbReader = PrismaClient | Prisma.TransactionClient;
 
 const SHA = /^[0-9a-f]{40}$/u;
-const LEGACY_PRE_INTENT_REFUSAL = "source executor run does not have exactly one server-bound merge intent";
-const LEGACY_TARGET_BRANCH_REFUSAL = "authorized target ref differs from the chain target branch";
-
-const isLegacyPreIntentRefusal = (attempt: MergeRecoveryAttempt): boolean => (
-  attempt.status === MergeRecoveryStatus.FAILED
-  && attempt.failureReason === LEGACY_PRE_INTENT_REFUSAL
-  && attempt.boundSourceRunId === null
-  && attempt.authorizationActivityId === null
-  && attempt.recoveryRunId === null
-);
-
-const isLegacyTargetBranchRefusal = (attempt: MergeRecoveryAttempt): boolean => (
-  attempt.status === MergeRecoveryStatus.FAILED
-  && attempt.failureReason === LEGACY_TARGET_BRANCH_REFUSAL
-  && attempt.boundSourceRunId === null
-  && attempt.authorizationActivityId === null
-  && attempt.recoveryRunId === null
-  && attempt.readinessTaskId === null
-  && attempt.regressionTaskId === null
-  && attempt.repository === null
-  && attempt.prNumber === null
-  && attempt.targetBranch === null
-  && attempt.authorizedHeadSha === null
-  && attempt.authorizedBaseSha === null
-  && attempt.observedBaseSha === null
-  && attempt.currentBaseSha === null
-);
-
-const isReopenableLegacyRefusal = (attempt: MergeRecoveryAttempt): boolean => (
-  isLegacyPreIntentRefusal(attempt) || isLegacyTargetBranchRefusal(attempt)
-);
-
-const retiredLegacyRefusalReason = (reason: string): string => (
-  `Historical base-drift recovery refusal retired after current validation: ${reason}`
-);
-
 export const baseDriftRecoveryPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
@@ -94,47 +62,6 @@ const recoveryAttemptFor = async (
   where: { integratorTaskId, sourceStopId },
   orderBy: [{ attempt: "desc" }, { id: "desc" }],
 });
-
-const ensureValidationAttemptLocked = async (
-  tx: Prisma.TransactionClient,
-  integratorTaskId: string,
-  sourceStopId: string,
-  candidate?: RecoveryCandidate,
-): Promise<MergeRecoveryAttempt> => {
-  const existing = await recoveryAttemptFor(tx, integratorTaskId, sourceStopId);
-  const candidateData = candidate ? {
-    boundSourceRunId: candidate.sourceRunId,
-    authorizationActivityId: candidate.authorizationActivityId,
-    readinessTaskId: candidate.readinessTaskId,
-    regressionTaskId: candidate.regressionTaskId,
-    repository: candidate.repository,
-    prNumber: candidate.prNumber,
-    targetBranch: candidate.targetBranch,
-    authorizedHeadSha: candidate.authorizedHeadSha,
-    authorizedBaseSha: candidate.authorizedBaseSha,
-    observedBaseSha: candidate.observedBaseSha,
-  } : {};
-  if (existing) {
-    if (!candidate || !isReopenableLegacyRefusal(existing)) return existing;
-    return tx.mergeRecoveryAttempt.update({ where: { id: existing.id }, data: {
-      status: MergeRecoveryStatus.VALIDATING,
-      failureReason: null,
-      endedAt: null,
-      ...candidateData,
-    } });
-  }
-  const latest = await tx.mergeRecoveryAttempt.aggregate({
-    where: { integratorTaskId },
-    _max: { attempt: true },
-  });
-  return tx.mergeRecoveryAttempt.create({ data: {
-    integratorTaskId,
-    sourceStopId,
-    attempt: (latest._max.attempt ?? 0) + 1,
-    status: MergeRecoveryStatus.VALIDATING,
-    ...candidateData,
-  } });
-};
 
 const parseBaseDriftEvidence = (evidence: string): { observed: string; authorized: string } | null => {
   let value: unknown;
@@ -179,7 +106,7 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
   const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
   if (existingAttempt
     && existingAttempt.status !== MergeRecoveryStatus.VALIDATING
-    && !isReopenableLegacyRefusal(existingAttempt)) return { kind: "skip" };
+    && !recoveryIsReopenableLegacyRefusal(existingAttempt)) return { kind: "skip" };
   const refuse = (code: CandidateRefusalCode, detail?: string): CandidateLoad => ({
     kind: "refused", code, stopId: stop.stopId, ...(detail ? { detail } : {}),
   });
@@ -327,7 +254,7 @@ const settleIneligibleLocked = async (
   reason: string,
   identity?: Partial<RecoveryIdentity>,
 ): Promise<void> => {
-  const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
+  const attempt = await ensureRecoveryValidation(tx, { integratorTaskId, sourceStopId: stopId });
   await stopMergeTail(tx, {
     phase: "recovery-validation",
     aggregateId: attempt.id,
@@ -361,26 +288,14 @@ const settleIneligible = async (
   if (currentStop?.stopId !== stopId) return false;
   const existing = await recoveryAttemptFor(tx, integratorTaskId, stopId);
   if (existing && existing.status !== MergeRecoveryStatus.VALIDATING) {
-    if (!isReopenableLegacyRefusal(existing)) return false;
-    const retiredReason = retiredLegacyRefusalReason(reason);
-    await tx.mergeRecoveryAttempt.update({ where: { id: existing.id }, data: {
-      failureReason: retiredReason,
-      endedAt: new Date(),
-    } });
-    await tx.task.update({ where: { id: integratorTaskId }, data: {
-      status: TaskStatus.REVIEW,
-      failureReason: `Automatic base-drift recovery refused: ${reason}`,
-    } });
-    await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
-      actorType: "control-plane",
-      body: retiredReason,
-      metadata: {
-        state: "legacy-refusal-retired",
-        integratorTaskId,
-        sourceStopId: stopId,
-        priorReason: existing.failureReason,
-        reason,
-      },
+    if (!recoveryIsReopenableLegacyRefusal(existing)) return false;
+    await retireLegacyRefusal(tx, {
+      aggregateId: existing.id,
+      integratorTaskId,
+      sourceStopId: stopId,
+      priorReason: existing.failureReason,
+      reason,
+      at: new Date(),
     });
     await openAbandonQuestion(tx, integratorTaskId, stopId);
     return true;
@@ -398,7 +313,7 @@ const recordClassificationRetry = async (
   if (!await lockRecoveryChain(tx, integratorTaskId)) return "skipped";
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
   if (currentStop?.stopId !== stopId) return "skipped";
-  const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
+  const attempt = await ensureRecoveryValidation(tx, { integratorTaskId, sourceStopId: stopId });
   if (attempt.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
   const decision = classifyRetryBudget({
     reason,
@@ -418,20 +333,13 @@ const recordClassificationRetry = async (
       break;
   }
   const classificationAttempt = decision.classificationAttempt;
-  await tx.mergeRecoveryAttempt.update({
-    where: { id: attempt.id },
-    data: { validationAttempts: classificationAttempt, failureReason: reason },
-  });
-  await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body: `Automatic pre-merge base-drift classification deferred (${classificationAttempt}/${MAX_BASE_DRIFT_CLASSIFICATION_RETRIES}): ${reason}`,
-    metadata: {
-      state: "classification-retry",
-      integratorTaskId,
-      sourceStopId: stopId,
-      classificationAttempt,
-      reason,
-    },
+  await recordValidationRetry(tx, {
+    aggregateId: attempt.id,
+    integratorTaskId,
+    sourceStopId: stopId,
+    classificationAttempt,
+    maxAttempts: MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
+    reason,
   });
   return "retryable";
 });
@@ -450,7 +358,11 @@ const queueRecovery = async (
   now: Date,
 ): Promise<QueueRecoveryResult> => db.$transaction(async (tx) => {
   if (!await lockRecoveryChain(tx, expected.integratorTaskId)) return { kind: "skip" };
-  const aggregate = await ensureValidationAttemptLocked(tx, expected.integratorTaskId, expected.stopId, expected);
+  const aggregate = await ensureRecoveryValidation(tx, {
+    integratorTaskId: expected.integratorTaskId,
+    sourceStopId: expected.stopId,
+    identity: expected,
+  });
   const loaded = await loadCandidate(tx, expected.integratorTaskId);
 
   // A recovery spends an attempt only once it owns a fresh regression Run.
@@ -533,42 +445,7 @@ const queueRecovery = async (
       break;
   }
 
-  await closeIntegratorQuestions(tx, expected.integratorTaskId);
-  await tx.task.update({ where: { id: expected.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
-  await tx.task.update({ where: { id: expected.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
-  await tx.task.update({ where: { id: expected.integratorTaskId }, data: {
-    status: TaskStatus.REVIEW,
-    failureReason: `Automatic base-drift recovery ${attempt} queued from stop ${expected.stopId}`,
-  } });
-  const run = await enqueueTaskRun(tx, expected.regressionTaskId, now);
-  await tx.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
-    status: MergeRecoveryStatus.REPAIRING,
-    failureReason: null,
-    endedAt: null,
-    boundSourceRunId: expected.sourceRunId,
-    authorizationActivityId: expected.authorizationActivityId,
-    recoveryRunId: run.id,
-    readinessTaskId: expected.readinessTaskId,
-    regressionTaskId: expected.regressionTaskId,
-    repository: expected.repository,
-    prNumber: expected.prNumber,
-    targetBranch: expected.targetBranch,
-    authorizedHeadSha: expected.authorizedHeadSha,
-    authorizedBaseSha: expected.authorizedBaseSha,
-    observedBaseSha: expected.observedBaseSha,
-    currentBaseSha,
-  } });
-  const metadata = { ...common, state: "queued", recoveryRunId: run.id };
-  await writeMarker(tx, expected.integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body: `Automatic base-drift recovery ${attempt} parked stop ${expected.stopId} and queued fresh regression`,
-    metadata,
-  });
-  await writeMarker(tx, expected.regressionTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body: `Automatic base-drift recovery ${attempt} verifies ${expected.authorizedHeadSha} against current base ${currentBaseSha}`,
-    metadata,
-  });
+  await enterRepair(tx, { aggregateId: aggregate.id, currentBaseSha, now });
   return { kind: "recovered" };
 });
 
@@ -668,7 +545,11 @@ export const baseDriftRecoveryTick = async (
       const settlementTask = { id: task.id, identity: candidate };
       const validation = await db.$transaction(async (tx) => {
         if (!await lockRecoveryChain(tx, candidate.integratorTaskId)) return false;
-        const attempt = await ensureValidationAttemptLocked(tx, candidate.integratorTaskId, candidate.stopId, candidate);
+        const attempt = await ensureRecoveryValidation(tx, {
+          integratorTaskId: candidate.integratorTaskId,
+          sourceStopId: candidate.stopId,
+          identity: candidate,
+        });
         return attempt.status === MergeRecoveryStatus.VALIDATING;
       });
       if (!validation) continue;
