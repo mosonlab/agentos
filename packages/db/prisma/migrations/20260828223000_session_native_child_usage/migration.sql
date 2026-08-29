@@ -1,0 +1,2 @@
+ALTER TABLE "Session"
+ADD COLUMN "nativeChildUsed" BOOLEAN NOT NULL DEFAULT false;

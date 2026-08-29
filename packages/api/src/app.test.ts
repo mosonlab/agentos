@@ -2219,6 +2219,17 @@ test("a batch with no FINAL_OUTPUT does not touch the usage columns", async () =
   });
 });
 
+test("an observed native child is persisted independently of the launch grant", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const response = await postEvents(ingestDatabase(updates, []), ["NATIVE_CHILD_STARTED"]);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 1 });
+    assert.deepEqual(updates, [{ where: { id: "ses-1" }, data: { nativeChildUsed: true } }]);
+  });
+});
+
 test("a failing usage recompute does not fail the ingest", async () => {
   await withTokens(async () => {
     // The derived cache must never be fatal to the write path it decorates:
@@ -2376,6 +2387,11 @@ const getTasks = async (database: PrismaClient, query: string, headers: Record<s
     headers: { Authorization: "Bearer operator-unit-token", ...headers },
   });
 
+const taskDetailDatabase = (task: Record<string, unknown>): PrismaClient => ({
+  task: { findUnique: async () => task },
+  mergeRecoveryAttempt: { findFirst: async () => null },
+} as unknown as PrismaClient);
+
 test("GET /tasks?view=board answers with the card projection, not the whole row", async () => {
   await withTokens(async () => {
     const response = await getTasks(boardDatabase([taskRow()]), "?view=board");
@@ -2393,6 +2409,50 @@ test("GET /tasks?view=board answers with the card projection, not the whole row"
     for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
       assert.equal(dropped in body[0]!, false, `${dropped} must not ride along`);
     }
+  });
+});
+
+test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
+  await withTokens(async () => {
+    const task = taskRow({
+      assigneeType: "AGENT",
+      description: "detail",
+      runs: [
+        {
+          id: "prefixed-run", runNumber: 2, status: "SUCCEEDED", model: "openai-codex/gpt-5.6-sol:high",
+          subagentModel: "gpt-5.6-luna:max",
+          session: {
+            nativeChildUsed: false, costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+            startedAt: null, endedAt: null,
+          },
+        },
+        {
+          id: "reported-run", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium",
+          subagentModel: null,
+          session: {
+            costUsd: "0.42", inputTokens: null, cachedInputTokens: null, outputTokens: null,
+            startedAt: null, endedAt: null,
+          },
+        },
+        { id: "unreported-run", runNumber: 0, status: "SUCCEEDED", model: "gpt-5.6-luna:max", subagentModel: null, session: null },
+      ],
+    });
+    const response = await createApp(taskDetailDatabase(task)).request("/tasks/t1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      taskCost: { costUsd: string; estimated: boolean; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null };
+      runs: Array<{ id: string; session: { usageCost: { costUsd: string; estimated: boolean } } | null }>;
+    };
+    assert.deepEqual(body.taskCost, {
+      costUsd: "6.62", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+    });
+    assert.deepEqual(body.runs.map((run) => ({ id: run.id, usageCost: run.session?.usageCost ?? null })), [
+      { id: "prefixed-run", usageCost: { costUsd: "6.2", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000 } },
+      { id: "reported-run", usageCost: { costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, outputTokens: null } },
+      { id: "unreported-run", usageCost: null },
+    ]);
   });
 });
 
