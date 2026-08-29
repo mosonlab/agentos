@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  holdChain,
   MERGE_TAIL_KIND,
   PrismaClient,
   readChainControls,
@@ -152,6 +153,23 @@ const seedChain = async (options: { allDone?: boolean; chainId?: string; chainIn
   return { project, agent, repo, ...chain };
 };
 
+const holdDirect = async (
+  chain: Awaited<ReturnType<typeof seedChain>>,
+  taskId: string,
+  requestId: string,
+  reason?: string,
+) => {
+  const body = await db.$transaction((tx) => holdChain(tx, {
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+    taskId,
+    requestId,
+    reason,
+  }));
+  if ("message" in body) assert.fail(body.message);
+  return { status: 200, body };
+};
+
 test("the shared reader treats absent and released controls as not held", async () => {
   const chain = await seedChain();
   const released = await db.chainControl.create({
@@ -224,7 +242,7 @@ test("Hold creates one authority and one audit event without touching Runs or Ta
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
   const statusesBefore = await db.task.findMany({ where: { projectId: chain.project.id, chainId: chain.chainId }, select: { id: true, status: true } });
-  const held = await call(`/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-1", reason: "review the current output" });
+  const held = await holdDirect(chain, chain.second.id, "hold-1", "review the current output");
   assert.equal(held.status, 200);
   assert.equal(held.body.control.state, "held");
   assert.equal(held.body.control.heldLayer, 1);
@@ -270,13 +288,13 @@ test("Hold creates one authority and one audit event without touching Runs or Ta
 
 test("repeated Hold is an idempotent success and does not append history", async () => {
   const chain = await seedChain();
-  const first = await call(`/tasks/${chain.first.id}/chain/hold`, { requestId: "hold-original", reason: "first reason" });
+  const first = await holdDirect(chain, chain.first.id, "hold-original", "first reason");
   assert.equal(first.status, 200);
-  const repeatedSame = await call(`/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-original", reason: "ignored same-request reason" });
+  const repeatedSame = await holdDirect(chain, chain.second.id, "hold-original", "ignored same-request reason");
   assert.equal(repeatedSame.status, 200);
   assert.equal(repeatedSame.body.duplicate, true);
   assert.equal(repeatedSame.body.control.holdRequestId, "hold-original");
-  const repeated = await call(`/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-retry", reason: "ignored reason" });
+  const repeated = await holdDirect(chain, chain.second.id, "hold-retry", "ignored reason");
   assert.equal(repeated.status, 200);
   assert.equal(repeated.body.duplicate, true);
   assert.equal(repeated.body.control.holdRequestId, "hold-original");
@@ -370,7 +388,7 @@ test("Hold records the next non-DONE layer even when no Run is active", async ()
   await db.task.update({ where: { id: chain.first.id }, data: { status: TaskStatus.DONE } });
   assert.equal(await db.run.count(), 0);
 
-  const held = await call(`/tasks/${chain.first.id}/chain/hold`, { requestId: "hold-without-run" });
+  const held = await holdDirect(chain, chain.first.id, "hold-without-run");
   assert.equal(held.status, 200);
   assert.equal(held.body.control.heldLayer, 2);
   const control = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
