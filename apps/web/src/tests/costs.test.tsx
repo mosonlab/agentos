@@ -7,7 +7,7 @@ import { installDom, reactDom } from "./dom-harness";
 
 import {
   COSTS_COLUMNS, COSTS_RANGES, ChartLegend, DailySpendChart, ModelBar, SERIES_SLOTS, axisDates,
-  chartSegments, chartSeries, modelShare, percent, seriesColor, wasteShare,
+  chartSegments, chartSeries, percent, seriesColor, sharePct, wasteShare,
 } from "../pages/Costs";
 import type { CostsReport } from "../lib/types";
 
@@ -301,9 +301,9 @@ test("a percentage is one decimal, and a missing figure is an em dash", () => {
 });
 
 test("a share is taken from the wire amounts, and is null when there is no total", () => {
-  assert.equal(modelShare("25", "200"), 12.5);
-  assert.equal(modelShare("1", "0"), null);
-  assert.equal(modelShare("0", "3"), 0);
+  assert.equal(sharePct("25", "200"), 12.5);
+  assert.equal(sharePct("1", "0"), null);
+  assert.equal(sharePct("0", "3"), 0);
 });
 
 test("waste is a share of the agent's own spend, and null when it has none", () => {

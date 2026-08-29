@@ -184,6 +184,7 @@ export const en = {
   "costs.byModel.spend": "Spend",
   "costs.byModel.title": "By model",
   "costs.byModel.tooltip": "{model} · {amount} · {share}",
+  "costs.byModel.unavailable": "{n} costs unavailable",
   "costs.chart.aria": "Daily spend by agent over {n} days, peaking at {amount} in a day.",
   "costs.chart.empty": "Nothing was spent in this window.",
   "costs.chart.title": "Daily spend",

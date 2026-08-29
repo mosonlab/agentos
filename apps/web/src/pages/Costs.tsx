@@ -9,7 +9,7 @@ import { IconRefresh } from "../components/icons";
 import {
   HINT, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP,
   STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, GapNotice, Page, Segmented,
+  Card, EmptyState, ErrorNotice, GapNotice, MetricFigure, Page, Segmented,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
@@ -224,16 +224,16 @@ export const percent = (value: number | null): string => (value === null ? "—"
 /** Share of the window's total spend, computed from the wire amounts rather than
  *  from the rounded strings the table shows. `null` when there is no total to
  *  take a share of. */
-export const modelShare = (usd: string, totalUsd: string): number | null => {
-  const total = Number(totalUsd);
+export const sharePct = (part: string, whole: string): number | null => {
+  const total = Number(whole);
   if (!Number.isFinite(total) || total <= 0) return null;
-  return (Number(usd) / total) * 100;
+  return (Number(part) / total) * 100;
 };
 
 /** Spend a run did not buy, as a share of that agent's spend. `null` when the
  *  agent has no priced spend at all: a rate over nothing is not zero waste. */
 export const wasteShare = (entry: CostsReport["byAgent"][number]): number | null =>
-  modelShare(entry.wastedUsd, entry.usd);
+  sharePct(entry.wastedUsd, entry.usd);
 
 /** One horizontal bar over the model keys. It answers "what is this window
  *  mostly?" before the reader parses a single number, which is the one question
@@ -245,7 +245,7 @@ export const ModelBar = ({ byModel, totalUsd, colors }: {
 }): ReactNode => {
   const t = useT();
   const segments = byModel
-    .map((entry) => ({ model: entry.model, usd: entry.usd, share: modelShare(entry.usd, totalUsd) }))
+    .map((entry) => ({ model: entry.model, usd: entry.usd, share: sharePct(entry.usd, totalUsd) }))
     .filter((entry): entry is { model: string; usd: string; share: number } =>
       entry.share !== null && entry.share > 0);
   if (segments.length === 0) return null;
@@ -283,13 +283,6 @@ export const COSTS_COLUMNS = "grid grid-cols-[minmax(0,1fr)] items-start gap-[16
 /** One row rather than a wall of tiles: four figures that are read together and
  *  compared against each other, not four independent headlines. */
 export const COSTS_SUMMARY = "grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-[18px] rounded-xl border border-border bg-card px-[20px] py-[14px]";
-
-const SummaryFigure = ({ label, value }: { label: string; value: ReactNode }): ReactNode => (
-  <div>
-    <div className="text-[12px] text-muted-foreground">{label}</div>
-    <div className="mt-[5px] text-[15px] font-bold">{value}</div>
-  </div>
-);
 
 export const CostsPage = (): ReactNode => {
   const { projectId, project } = useProjectScope();
@@ -364,13 +357,13 @@ export const CostsPage = (): ReactNode => {
                 page's headline, and a total nobody can compare against the part
                 of it that bought nothing is a number without a verdict. */}
             <div className={COSTS_SUMMARY}>
-              <SummaryFigure label={t("costs.metric.total")} value={usageMoney(report.totalUsd)} />
-              <SummaryFigure label={t("costs.metric.runs")} value={report.runCount} />
-              <SummaryFigure
+              <MetricFigure label={t("costs.metric.total")} value={usageMoney(report.totalUsd)} />
+              <MetricFigure label={t("costs.metric.runs")} value={report.runCount} />
+              <MetricFigure
                 label={t("costs.metric.avg")}
                 value={report.runCount === report.costUnavailableRuns ? "—" : usageMoney(report.avgUsd)}
               />
-              <SummaryFigure label={t("costs.metric.wasted")} value={usageMoney(report.wastedUsd)} />
+              <MetricFigure label={t("costs.metric.wasted")} value={usageMoney(report.wastedUsd)} />
             </div>
             {/* Neither number is decoration. An estimated share says part of the
                 total is the control plane's own pricing, and an unavailable
@@ -514,14 +507,14 @@ export const CostsPage = (): ReactNode => {
                                         {entry.model}
                                       </span>
                                       {entry.costUnavailableRuns > 0
-                                        ? <span className={TABLE_SUB}>{t("costs.byAgent.unavailable", { n: entry.costUnavailableRuns })}</span>
+                                        ? <span className={TABLE_SUB}>{t("costs.byModel.unavailable", { n: entry.costUnavailableRuns })}</span>
                                         : null}
                                     </div>
                                   </TableCell>
                                   <TableCell className={TABLE_TIGHT}>
                                     {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.usd)}
                                   </TableCell>
-                                  <TableCell className={TABLE_TIGHT}>{percent(modelShare(entry.usd, report.totalUsd))}</TableCell>
+                                  <TableCell className={TABLE_TIGHT}>{percent(sharePct(entry.usd, report.totalUsd))}</TableCell>
                                 </TableRow>
                               ))}
                             </TableBody>

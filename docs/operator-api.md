@@ -185,6 +185,17 @@ curl -X PATCH "$BASE_URL/projects/$PROJECT_ID" \
 curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
+### GET `/projects/:projectId/costs`
+
+- Required path parameter: `projectId`.
+- Required query parameter: `tz` (recognized IANA timezone).
+- Optional query parameter: `days` (`1`, `7`, `30`, or `90`; default `30`).
+
+```sh
+curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
 ### GET `/projects/:projectId/environments`
 
 - Required path parameter: `projectId`.

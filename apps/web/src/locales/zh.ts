@@ -183,6 +183,7 @@ export const zh = {
   "costs.byModel.spend": "花费",
   "costs.byModel.title": "按模型",
   "costs.byModel.tooltip": "{model} · {amount} · {share}",
+  "costs.byModel.unavailable": "{n} 笔成本不可用",
   "costs.chart.aria": "{n} 天内按 Agent 分组的每日花费，单日峰值 {amount}。",
   "costs.chart.empty": "该区间内没有任何花费。",
   "costs.chart.title": "每日花费",
