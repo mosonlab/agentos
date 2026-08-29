@@ -65,6 +65,22 @@ const safeBackupIdentity = (value) => {
   return name === "." || name === ".." || name.includes("/") ? null : name;
 };
 
+/** Store the immutable release's directory identity, never a caller-owned
+ * path. Release trees are named by their commit and content digest; retaining
+ * that final component is enough to identify the tree while avoiding host
+ * layout details in the durable ledger. */
+const safeReleaseDirectoryIdentity = (value) => {
+  if (value === null || value === undefined) return null;
+  const text = safeText(value);
+  if (!text) return null;
+  const name = basename(text);
+  return name === "." || name === ".." || name.includes("/") || name.includes("\\") ? null : name;
+};
+
+const safePointerTarget = (value) => safeText(value);
+
+const safeRollbackPointerOutcome = (value) => safeText(value);
+
 const safeMigrationTail = (value) => {
   if (value === null || value === undefined) return null;
   return safeText(value);
@@ -255,6 +271,10 @@ export const createDeploymentLedger = ({
     migrationTailBefore: null,
     migrationTailAfter: null,
     activatedBuildStamp: null,
+    releaseDirectoryIdentity: null,
+    pointerOldTarget: null,
+    pointerNewTarget: null,
+    rollbackPointerOutcome: null,
     reasonCode: null,
   };
 
@@ -277,6 +297,10 @@ export const createDeploymentLedger = ({
       migrationTailBefore: safeMigrationTail(metadata.migrationTailBefore) ?? context.migrationTailBefore,
       migrationTailAfter: safeMigrationTail(metadata.migrationTailAfter) ?? context.migrationTailAfter,
       activatedBuildStamp: safeBuildStamp(metadata.activatedBuildStamp) ?? context.activatedBuildStamp,
+      releaseDirectoryIdentity: safeReleaseDirectoryIdentity(metadata.releaseDirectoryIdentity) ?? context.releaseDirectoryIdentity,
+      pointerOldTarget: safePointerTarget(metadata.pointerOldTarget) ?? context.pointerOldTarget,
+      pointerNewTarget: safePointerTarget(metadata.pointerNewTarget) ?? context.pointerNewTarget,
+      rollbackPointerOutcome: safeRollbackPointerOutcome(metadata.rollbackPointerOutcome) ?? context.rollbackPointerOutcome,
       reasonCode: state === "FAILED" || state === "MANUAL_RECOVERY"
         ? safeReasonCode(metadata.reasonCode)
         : null,
@@ -289,6 +313,10 @@ export const createDeploymentLedger = ({
       migration_tail_before: nextContext.migrationTailBefore,
       migration_tail_after: nextContext.migrationTailAfter,
       activated_build_stamp: nextContext.activatedBuildStamp,
+      release_directory_identity: nextContext.releaseDirectoryIdentity,
+      pointer_old_target: nextContext.pointerOldTarget,
+      pointer_new_target: nextContext.pointerNewTarget,
+      rollback_pointer_outcome: nextContext.rollbackPointerOutcome,
       reason_code: nextContext.reasonCode,
     };
     const event = { ...payload, phase: state, timestamp: recordedAt };

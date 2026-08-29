@@ -443,6 +443,46 @@ test("a successful upgrade records every ledger boundary and a terminal state", 
   rmSync(root, { recursive: true, force: true });
 });
 
+test("ledger records release identity, pointer transitions, and rollback outcomes without adding resume state", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-pointer-evidence-"));
+  const ledger = createDeploymentLedger({ stateDir: root, targetCommit: revisions.to });
+  const releaseDirectoryIdentity = `${revisions.to}-${"d".repeat(64)}`;
+  const previousTarget = `${"a".repeat(40)}-${"e".repeat(64)}`;
+
+  ledger.start();
+  const activation = ledger.record("ACTIVATED", {
+    releaseDirectoryIdentity,
+    pointerOldTarget: previousTarget,
+    pointerNewTarget: releaseDirectoryIdentity,
+  });
+  const rollback = ledger.record("FAILED", {
+    reasonCode: "service-verification-failed",
+    rollbackPointerOutcome: "restored-previous",
+  });
+  const state = JSON.parse(readFileSync(ledger.statePath, "utf8"));
+  const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+
+  assert.equal(activation.release_directory_identity, releaseDirectoryIdentity);
+  assert.equal(activation.pointer_old_target, previousTarget);
+  assert.equal(activation.pointer_new_target, releaseDirectoryIdentity);
+  assert.equal(activation.rollback_pointer_outcome, null);
+  assert.equal(rollback.release_directory_identity, releaseDirectoryIdentity);
+  assert.equal(rollback.pointer_old_target, previousTarget);
+  assert.equal(rollback.pointer_new_target, releaseDirectoryIdentity);
+  assert.equal(rollback.rollback_pointer_outcome, "restored-previous");
+  assert.equal(state.release_directory_identity, releaseDirectoryIdentity);
+  assert.equal(state.pointer_old_target, previousTarget);
+  assert.equal(state.pointer_new_target, releaseDirectoryIdentity);
+  assert.equal(state.rollback_pointer_outcome, "restored-previous");
+  for (const persisted of [state, ...events]) {
+    for (const alias of [
+      "releaseDirectoryIdentity", "pointerOldTarget", "pointerNewTarget", "rollbackPointerOutcome",
+      "resume", "resumeAuthority", "resume_authority",
+    ]) assert.equal(alias in persisted, false, alias);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("failed and unproven post-schema upgrades receive distinct ledger terminals", async () => {
   const failedRoot = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-failed-"));
   const failedLedger = createDeploymentLedger({ stateDir: failedRoot, targetCommit: revisions.to });
