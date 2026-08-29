@@ -343,6 +343,7 @@ test("only an unclaimed QUEUED cancellation settles without runner acknowledgeme
   });
   assert.ok(!("message" in queuedResponse));
   assert.equal(queuedResponse.cancellationState, "acknowledged");
+  assert.equal("reason" in queuedResponse, false);
   assert.ok((await db.run.findUniqueOrThrow({ where: { id: queued.run.id } })).cancelAcknowledgedAt);
 
   const waiting = await seed(RunStatus.WAITING_INBOX);

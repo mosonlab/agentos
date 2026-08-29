@@ -37,7 +37,7 @@ export type RunCancellation = {
   status: RunStatus;
   cancellationState: CancellationState;
   requestId: string;
-  reason: string | null;
+  reason?: string | null;
   releaseMergeLeaseTask: MergeLeaseTarget | null;
 };
 
@@ -178,7 +178,6 @@ export const cancelRun = async (
         status: terminal.status,
         cancellationState: "acknowledged" as const,
         requestId: body.requestId,
-        reason: body.reason,
         releaseMergeLeaseTask: terminal.leaseToRelease,
       };
     }
