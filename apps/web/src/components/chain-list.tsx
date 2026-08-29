@@ -1,8 +1,10 @@
 import { type ReactNode, useState } from "react";
 
+import { sha, titleCase } from "../lib/format";
 import { useT } from "../lib/i18n";
+import { parseRepairCycles, type RepairCycleViewModel } from "../lib/repair-subtimeline";
 import { Link } from "../lib/router";
-import type { Chain, ChainStep } from "../lib/types";
+import type { Chain, ChainStep, TaskActivity } from "../lib/types";
 import { IconLock, IconUser } from "./icons";
 import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, Pill, TaskPill } from "./ui";
 import { Button } from "./ui/button";
@@ -22,6 +24,48 @@ const STEP_POSITION = "w-[18px] shrink-0 text-[11.5px] text-[color:var(--faint)]
 export const GATE_TITLE_KEY = "chain.gate";
 
 const OWNER_CHIP = "inline-flex items-center gap-[6px] rounded-full border border-border bg-secondary px-[9px] py-[2px] text-[11.5px] leading-[19px] text-secondary-foreground";
+
+const REPAIR_TIMELINE = "mt-[10px] grid gap-[7px] border-l-2 border-[color:var(--border-soft)] pl-[12px]";
+const REPAIR_CYCLE = "grid gap-[3px] text-[11.5px] leading-[1.45] text-[color:var(--faint)]";
+const KNOWN_REPAIR_OUTCOMES = new Set(["failed", "invalid-output", "queued", "resolved", "succeeded", "unknown"]);
+
+/** The canonical templates call this node "Regression verification". Matching
+ * the visible step name keeps the read path compatible with both direct and
+ * full-assurance chains without adding a new API-only field. */
+export const isRegressionStep = (step: Pick<ChainStep, "name" | "stepName">): boolean =>
+  /\bregression\b/iu.test(`${step.stepName} ${step.name}`);
+
+const repairOutcome = (cycle: RepairCycleViewModel, t: ReturnType<typeof useT>): string => {
+  return KNOWN_REPAIR_OUTCOMES.has(cycle.outcome)
+    ? t(`chain.repair.outcome.${cycle.outcome}`)
+    : titleCase(cycle.outcome);
+};
+
+/** Presentation-only history for the repair tasks a Regression step spawned.
+ * The parser pairs markers by repairTaskId; this component only renders the
+ * resulting ordered view models and never mutates chain state. */
+export const RepairTimeline = ({ cycles }: { cycles: readonly RepairCycleViewModel[] }): ReactNode => {
+  const t = useT();
+  if (cycles.length === 0) return null;
+  return (
+    <div data-repair-timeline="" aria-label={t("chain.repair.title")} className={REPAIR_TIMELINE}>
+      <div className="text-[11.5px] font-bold text-secondary-foreground">{t("chain.repair.title")}</div>
+      {cycles.map((cycle) => (
+        <div key={cycle.repairTaskId} data-repair-cycle={cycle.ordinal} className={REPAIR_CYCLE}>
+          <div className="flex flex-wrap items-center gap-[7px]">
+            <span data-repair-ordinal="" className="font-bold text-secondary-foreground">{t("chain.repair.ordinal", { n: cycle.ordinal })}</span>
+            <span data-repair-kind="" className="text-secondary-foreground">{t("chain.repair.kind")}: {cycle.repairKind}</span>
+            <span data-repair-heads="" className="font-mono">{t("chain.repair.heads")}: {sha(cycle.startHeadSha)} → {sha(cycle.endHeadSha ?? cycle.targetHeadSha)}</span>
+            <span data-repair-outcome="">{t("chain.repair.outcome")}: {repairOutcome(cycle, t)}</span>
+          </div>
+          <Link to={cycle.taskHref} className="w-fit text-[11.5px] text-secondary-foreground hover:text-foreground">
+            {t("chain.repair.task", { kind: cycle.repairKind })}
+          </Link>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 export type ChainLayerGroup = {
   storedLayer: number;
@@ -99,12 +143,13 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
 };
 
-export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, onStart }: {
+export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, repairCycles = [], onStart }: {
   step: ChainStep;
   here: boolean;
   pending: boolean;
   blockedBy: readonly ChainStep[];
   heldLayer: number | null;
+  repairCycles?: readonly RepairCycleViewModel[];
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
@@ -130,6 +175,7 @@ export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, onStart }:
             {t("chain.blockedOnPredecessor", { name: blockedOn.name })}
           </span>
         ) : null}
+        {repairCycles.length > 0 ? <RepairTimeline cycles={repairCycles} /> : null}
         {blockedBy.length > 0 && step.status !== "DONE" ? (
           <span data-chain-join-blocked="" className={cn(HINT, "mt-[3px] block")}>
             {t("chain.blockedBy", { names: blockedBy.map((blocker) => blocker.stepName).join(", ") })}
@@ -163,10 +209,11 @@ export const ChainRow = ({ step, here, pending, blockedBy, heldLayer, onStart }:
  * able to disagree with the board about how far along a chain is, nor with the
  * route about whether a step may be started.
  */
-export const ChainList = ({ chain, taskId, pending, onStart, onControl }: {
+export const ChainList = ({ chain, taskId, pending, repairActivities, onStart, onControl }: {
   chain: Chain;
   taskId: string;
   pending: boolean;
+  repairActivities?: readonly TaskActivity[] | null;
   onStart: (step: ChainStep) => void;
   onControl?: () => void;
 }): ReactNode => {
@@ -175,6 +222,8 @@ export const ChainList = ({ chain, taskId, pending, onStart, onControl }: {
   const held = chain.control?.state === "held";
   const heldLayer = chainHeldLayer(chain);
   const waitingOnOperator = heldChainWaitingOnOperator(chain);
+  const repairCycles = parseRepairCycles(repairActivities ?? []);
+  const regressionTaskId = chain.steps.find(isRegressionStep)?.taskId ?? null;
   const headerControl = (
     <div className={ROW_WRAP}>
       {held && heldLayer !== null ? (
@@ -221,6 +270,7 @@ export const ChainList = ({ chain, taskId, pending, onStart, onControl }: {
               pending={pending}
               blockedBy={group.blockers}
               heldLayer={heldLayer}
+              repairCycles={step.taskId === regressionTaskId ? repairCycles : []}
               onStart={onStart}
             />
           ))}

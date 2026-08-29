@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CHAIN_PAGE, ChainList, GATE_TITLE_KEY } from "../components/chain-list";
 import { translate } from "../lib/i18n-core";
 import { LocaleProvider } from "../lib/i18n";
-import type { Chain, ChainStep } from "../lib/types";
+import type { Chain, ChainStep, TaskActivity } from "../lib/types";
 
 /* The expected values are unchanged; since batch 1 they come from the `en`
  * dictionary rather than from a literal in the component (spec §7.20). */
@@ -34,8 +34,8 @@ const heldControl = (overrides: Partial<NonNullable<Chain["control"]>> = {}): No
   releasedAt: null, ...overrides,
 });
 
-const render = (value: Chain, taskId: string): string => renderToStaticMarkup(
-  <ChainList chain={value} taskId={taskId} pending={false} onStart={() => undefined} />,
+const render = (value: Chain, taskId: string, repairActivities: readonly TaskActivity[] | null = null): string => renderToStaticMarkup(
+  <ChainList chain={value} taskId={taskId} pending={false} repairActivities={repairActivities} onStart={() => undefined} />,
 );
 
 const renderLocale = (value: Chain, taskId: string, locale: "en" | "zh"): string => renderToStaticMarkup(
@@ -51,6 +51,50 @@ test("a nine-step chain renders nine rows and exactly one Viewed here", () => {
   assert.equal([...markup.matchAll(new RegExp(en("chain.viewedHere"), "g"))].length, 1);
   // The marker sits on the open task's row, not the first row.
   assert.match(markup, new RegExp(`Step 4</a><span[^>]*>${en("chain.viewedHere")}`));
+});
+
+const repairActivity = (
+  id: string,
+  kind: string,
+  repairTaskId: string,
+  repairKind: string,
+  startHeadSha: string,
+  targetHeadSha: string,
+  extra: Record<string, unknown> = {},
+): TaskActivity => ({
+  id,
+  taskId: "regression",
+  actorType: "control-plane",
+  actorId: null,
+  body: "",
+  commitSha: null,
+  metadata: { schemaVersion: 1, kind, repairTaskId, repairKind, startHeadSha, targetHeadSha, ...extra },
+  createdAt: `2026-08-28T00:0${id.slice(-1)}:00.000Z`,
+});
+
+test("the Regression row renders ordered repair cycles with short heads and task links", () => {
+  const activities = [
+    repairActivity("q1", "mergeTail.repairAttempt", "repair-1", "gate-fix", "a".repeat(40), "b".repeat(40)),
+    repairActivity("r1", "mergeTail.repairResult", "repair-1", "gate-fix", "a".repeat(40), "b".repeat(40), { resolvedHeadSha: "c".repeat(40) }),
+    repairActivity("q2", "mergeTail.repairAttempt", "repair-2", "review-fix", "c".repeat(40), "b".repeat(40)),
+    repairActivity("r2", "mergeTail.repairResult", "repair-2", "review-fix", "c".repeat(40), "b".repeat(40), { resolvedHeadSha: "d".repeat(40), state: "failed" }),
+  ];
+  const markup = render(chain([
+    step(1, { taskId: "regression", name: "Release: Regression verification", stepName: "Regression verification" }),
+    step(2, { name: "Release: Merge authorization", stepName: "Merge authorization" }),
+  ]), "regression", activities);
+  assert.equal([...markup.matchAll(/data-repair-timeline=""/g)].length, 1);
+  assert.equal([...markup.matchAll(/data-repair-cycle=/g)].length, 2);
+  assert.ok(markup.indexOf("gate-fix") < markup.indexOf("review-fix"));
+  assert.match(markup, /aaaaaaa → ccccccc/);
+  assert.match(markup, /Autonomous merge tail: gate-fix/);
+  assert.match(markup, /href="#\/tasks\/repair-1"/);
+  assert.match(markup, /Invalid|Failed/);
+});
+
+test("a chain with no repair markers renders no repair timeline", () => {
+  const markup = render(chain([step(1, { stepName: "Regression verification" })]), "t1", []);
+  assert.doesNotMatch(markup, /data-repair-timeline=/);
 });
 
 test("the gate's meaning is spelled out verbatim, once per gated step", () => {

@@ -10,7 +10,7 @@ import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
-import { ChainList } from "../components/chain-list";
+import { ChainList, isRegressionStep } from "../components/chain-list";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
@@ -259,6 +259,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const startability = usePoll<TaskStartability>(`/tasks/${taskId}/startability`);
   // No new cadence: the chain rides the page's default poll.
   const chain = usePoll<Chain>(`/tasks/${taskId}/chain`);
+  // Repair markers are already exposed by the existing activity read. Poll the
+  // Regression task only after the chain identifies it; a chain without a
+  // Regression node remains completely idle on this auxiliary path.
+  const regressionTaskId = chain.data?.steps.find(isRegressionStep)?.taskId ?? null;
+  const repairActivities = usePoll<TaskActivity[]>(
+    regressionTaskId === null ? null : `/tasks/${regressionTaskId}/activity`,
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
   const chainControlInFlight = useRef(false);
   const { pending, error: actionError, run } = useAction();
@@ -448,7 +455,14 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         {task.chainId === null ? null
           : chain.data && chain.data.chainId !== null
-            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} onControl={controlChain} />
+            ? <ChainList
+              chain={chain.data}
+              taskId={taskId}
+              pending={pending}
+              repairActivities={repairActivities.data}
+              onStart={startStep}
+              onControl={controlChain}
+            />
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
