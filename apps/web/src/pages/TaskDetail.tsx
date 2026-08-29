@@ -455,14 +455,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         {task.chainId === null ? null
           : chain.data && chain.data.chainId !== null
-            ? <ChainList
-              chain={chain.data}
-              taskId={taskId}
-              pending={pending}
-              repairActivities={repairActivities.data}
-              onStart={startStep}
-              onControl={controlChain}
-            />
+            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} repairActivities={repairActivities.data} onStart={startStep} onControl={controlChain} />
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
