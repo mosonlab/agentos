@@ -244,8 +244,6 @@ export const patchTask = async (
           const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
           return refuse(`Cannot change bound task status before predecessor ${predecessorName} is done`);
         }
-        const operatorRefusal = operatorStatusTransitionRefusal(locked, body.status!);
-        if (operatorRefusal !== null) return refuse(operatorRefusal);
         // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
         // task back to whoever it is *already* assigned to, and that assignee is
         // in no request field for the module's assignment guard to have checked.
@@ -280,6 +278,12 @@ export const patchTask = async (
         if (stopped && body.status !== undefined && body.status !== locked.status) {
           return refuse(stopStateRefusal(stopped));
         }
+        // Ownership is the generic boundary. A forbidden board move must not
+        // hide the more actionable reason that this same write is impossible
+        // anyway. The shared guards are above; DONE's active-run and chain-
+        // predecessor guards run below before its ownership refusal.
+        const operatorRefusal = operatorStatusTransitionRefusal(locked, body.status!);
+        if (body.status !== TaskStatus.DONE && operatorRefusal !== null) return refuse(operatorRefusal);
         let gate: GateWinner = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
@@ -299,6 +303,7 @@ export const patchTask = async (
               return refuse(`Cannot complete ${before.name}; predecessor ${blocker.name} is not done`);
             }
           }
+          if (operatorRefusal !== null) return refuse(operatorRefusal);
           // A Human approval has one durable decision identity on both API
           // channels. The earliest OPEN card is the deterministic winner; the
           // gate Task lock the module took makes this selection and the Inbox

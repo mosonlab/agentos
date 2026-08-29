@@ -918,15 +918,16 @@ test("archive-done does not archive a task dragged out of Done between selection
   );
 });
 
-test("an archived task's status cannot be changed until it is unarchived", async () => {
+test("an archived task rejects status writes before applying ordinary ownership rules", async () => {
   const context = await seedTask("archived-status-write", { status: "DONE" });
   assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
   const { status, body } = await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" });
   assert.equal(status, 409);
   assert.match(body.error, /unarchive it first/);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).status, "DONE");
-  // Unarchive, and the same write is accepted.
+  // Once unarchived, an operator-owned queue transition is accepted.
   assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
+  await db.task.update({ where: { id: context.task.id }, data: { status: "BACKLOG" } });
   assert.equal((await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" })).status, 200);
 });
 
@@ -1518,14 +1519,14 @@ test("unarchiving the agent or reassigning the task lets the same promotion thro
   assert.equal(await statusOf(reassigned.task.id), "TODO");
 });
 
-test("human and unassigned steps promote out of Backlog exactly as before", async () => {
+test("Human queue movement remains operator-owned while unassigned AGENT state does not", async () => {
   const context = await seedTask("reactivate-human", { status: "BACKLOG", assigneeType: "HUMAN", assigneeAgentId: null });
   assert.equal((await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" })).status, 200);
   assert.equal(await statusOf(context.task.id), "TODO");
 
   const unassigned = await seedTask("reactivate-unassigned", { status: "DONE", assigneeAgentId: null });
-  assert.equal((await call("PATCH", `/tasks/${unassigned.task.id}`, { status: "REVIEW" })).status, 200);
-  assert.equal(await statusOf(unassigned.task.id), "REVIEW");
+  assert.equal((await call("PATCH", `/tasks/${unassigned.task.id}`, { status: "REVIEW" })).status, 409);
+  assert.equal(await statusOf(unassigned.task.id), "DONE");
 });
 
 test("naming an archived agent in the promotion itself is still the 400 it always was", async () => {

@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import { activateChainSuccessor, PrismaClient, TaskStatus } from "@anneal/db";
 import { buildChildEnvironment } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
 import type { RunnerConfig } from "@anneal/runner/config";
@@ -74,6 +74,11 @@ const operatorRequest = async (path: string, init: RequestInit = {}): Promise<Re
 
 const postTask = async (projectId: string, body: Record<string, unknown>): Promise<Response> =>
   operatorRequest(`/projects/${projectId}/tasks`, { method: "POST", body: JSON.stringify(body) });
+
+const settleChainStep = async (taskId: string, advance: boolean): Promise<void> => {
+  const task = await db.task.update({ where: { id: taskId }, data: { status: TaskStatus.DONE } });
+  if (advance) await db.$transaction((tx) => activateChainSuccessor(tx, task, {}, new Date()));
+};
 
 /** Claims whatever run the control plane hands out, asserting it is the one the
  *  test expects. Going through the real route matters: the claim payload is
@@ -275,12 +280,9 @@ test("T3: a failed run's WIP salvage push is the successor's durable clone base"
   assert.equal(closed.branch, shared, "the misleading column is still written; the test is about not trusting it");
   assert.equal(closed.pushStatus, "SUCCEEDED");
 
-  // A failed predecessor can no longer be bypassed. Record the authorized
-  // operator completion and let normal advancement queue step ②.
-  const completed = await operatorRequest(`/tasks/${first.body.id}`, {
-    method: "PATCH", body: JSON.stringify({ status: "DONE" }),
-  });
-  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  // This test owns branch selection, not the operator status boundary. Model
+  // the machine-owned terminal state and run normal chain advancement.
+  await settleChainStep(first.body.id, true);
   const secondRun = await db.run.findFirstOrThrow({ where: { taskId: second.id, status: "QUEUED" } });
   assert.equal(secondRun.targetBranch, `agentos/${first.body.id}/run-1`);
   assert.notEqual(secondRun.targetBranch, shared);
@@ -513,10 +515,9 @@ test("T16: a pull-request failure after a successful push still counts as public
   });
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: firstRun.id } })).status, "FAILED");
 
-  const completed = await operatorRequest(`/tasks/${first.body.id}`, {
-    method: "PATCH", body: JSON.stringify({ status: "DONE" }),
-  });
-  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  // The successor is created below, so only the machine-owned terminal state
+  // is needed here; its manual start still proves the durable branch base.
+  await settleChainStep(first.body.id, false);
 
   const second = await seedChainStep(seed, chainId, 1);
   assert.equal((await startStep(second.id)).targetBranch, shared, "the branch is on the remote whatever gh did");

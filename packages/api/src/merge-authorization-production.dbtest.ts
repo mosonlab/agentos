@@ -116,38 +116,19 @@ test("N13 rejection produces no authorization at all", async () => {
   assert.equal((await authorizationsFor(chain.gateTask.id)).length, 0);
 });
 
-test("N13 PATCH channel: the operator route produces a real decision row and the same record", async () => {
+test("N13 PATCH cannot substitute for the Inbox authorization channel", async () => {
   const { chain, card } = await filledGate("n13-patch");
   const response = await call("PATCH", `/tasks/${chain.gateTask.id}`, { status: "DONE" });
-  assert.equal(response.status, 200);
-
-  const records = await authorizationsFor(chain.gateTask.id);
-  assert.equal(records.length, 1);
-  const parsed = parseAuthorizationMetadata(records[0]!.metadata);
-  assert.equal(parsed.status, "ok");
-  if (parsed.status !== "ok") return;
-  assert.equal(parsed.payload.decision.channel, "patch");
-
-  // Y4: the binding is a durable InboxDecision row, not "the closed card set
-  // plus a status activity id".
-  const decision = await db.inboxDecision.findFirstOrThrow({ where: { inboxMessageId: card.id } });
-  assert.equal(decision.decision, "approve");
-  assert.equal(parsed.payload.decision.inboxDecisionId, decision.id);
-  assert.match(decision.externalEventId, /^patch:/u);
-  const answered = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
-  assert.equal(answered.status, "ANSWERED");
-  assert.equal(answered.selectedChoiceId, "approve");
-
-  const block = parseEvidence(card.body);
-  if (block.status !== "ok") return assert.fail("card body must carry an evidence block");
-  assert.equal(parsed.payload.headSha, block.evidence.headSha);
-  assert.equal(parsed.payload.nonce, block.evidence.nonce);
+  assert.equal(response.status, 409);
+  assert.equal((await authorizationsFor(chain.gateTask.id)).length, 0);
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: card.id } }), 0);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
 });
 
 test("N5 the PATCH no-gate-rows edge stays fail-closed: no decision, no authorization", async () => {
   const chain = await seedIntegratorChain(db, { label: "n5-nogate" });
   const response = await call("PATCH", `/tasks/${chain.gateTask.id}`, { status: "DONE" });
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 409);
   assert.equal(await db.inboxDecision.count(), 0);
   assert.equal((await authorizationsFor(chain.gateTask.id)).length, 0);
 });
