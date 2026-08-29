@@ -8,6 +8,7 @@ import {
   Prisma,
   TaskStatus,
   asJsonObject,
+  closeIntegratorQuestions,
   enqueueTaskRun,
   isMergeReadinessStep,
   latestRecordedStop,
@@ -69,6 +70,10 @@ const isLegacyTargetBranchRefusal = (attempt: MergeRecoveryAttempt): boolean => 
 
 const isReopenableLegacyRefusal = (attempt: MergeRecoveryAttempt): boolean => (
   isLegacyPreIntentRefusal(attempt) || isLegacyTargetBranchRefusal(attempt)
+);
+
+const retiredLegacyRefusalReason = (reason: string): string => (
+  `Historical base-drift recovery refusal retired after current validation: ${reason}`
 );
 
 export const baseDriftRecoveryPollIntervalMs = (): number => {
@@ -350,7 +355,31 @@ const settleIneligible = async (
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
   if (currentStop?.stopId !== stopId) return false;
   const existing = await recoveryAttemptFor(tx, integratorTaskId, stopId);
-  if (existing && existing.status !== MergeRecoveryStatus.VALIDATING) return false;
+  if (existing && existing.status !== MergeRecoveryStatus.VALIDATING) {
+    if (!isReopenableLegacyRefusal(existing)) return false;
+    const retiredReason = retiredLegacyRefusalReason(reason);
+    await tx.mergeRecoveryAttempt.update({ where: { id: existing.id }, data: {
+      failureReason: retiredReason,
+      endedAt: new Date(),
+    } });
+    await tx.task.update({ where: { id: integratorTaskId }, data: {
+      status: TaskStatus.REVIEW,
+      failureReason: `Automatic base-drift recovery refused: ${reason}`,
+    } });
+    await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
+      body: retiredReason,
+      metadata: {
+        state: "legacy-refusal-retired",
+        integratorTaskId,
+        sourceStopId: stopId,
+        priorReason: existing.failureReason,
+        reason,
+      },
+    });
+    await openAbandonQuestion(tx, integratorTaskId, stopId);
+    return true;
+  }
   await settleIneligibleLocked(tx, integratorTaskId, stopId, reason, identity);
   return true;
 });
@@ -490,6 +519,7 @@ const queueRecovery = async (
     return { kind: "exhausted" };
   }
 
+  await closeIntegratorQuestions(tx, expected.integratorTaskId);
   await tx.task.update({ where: { id: expected.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
   await tx.task.update({ where: { id: expected.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
   await tx.task.update({ where: { id: expected.integratorTaskId }, data: {
