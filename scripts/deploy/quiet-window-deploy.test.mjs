@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,6 +15,7 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +23,7 @@ import test from "node:test";
 
 import {
   DeployFailure,
+  DeploymentLedgerError,
   SERVICE_LABELS,
   deployedBuildStampRefusal,
   dryRunDecision,
@@ -360,22 +363,31 @@ test("a successful upgrade records every ledger boundary and a terminal state", 
   const { host } = fixture();
   host.backup = async () => ({ backupIdentity: "/safe/backups/deploy.dump" });
   host.guardedMigration = async () => ({ migrationTailBefore: "20260828010000_before", migrationTailAfter: "20260829010000_after" });
-  host.build = async () => ({ activatedBuildStamp: { packageName: "@anneal/api", commit: revisions.to, dirty: false } });
+  host.build = async () => ({ buildStamp: { packageName: "@anneal/api", commit: revisions.to, dirty: false } });
   const result = await executeUpgrade(host, revisions, { ledger });
   assert.deepEqual(result, { ok: true });
   const state = JSON.parse(readFileSync(ledger.statePath, "utf8"));
   const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(state.state, "SUCCEEDED");
-  assert.equal(state.status, "SUCCEEDED");
   assert.deepEqual(events.map((event) => event.phase), [
     "STARTED", "BACKED_UP", "SCHEMA_ADVANCED", "ACTIVATED", "VERIFIED", "SUCCEEDED",
   ]);
   assert.equal(events[1].backup_identity, "deploy.dump");
   assert.equal(events[2].migration_tail_before, "20260828010000_before");
   assert.equal(events[2].migration_tail_after, "20260829010000_after");
+  assert.equal(events[2].activated_build_stamp, null);
+  assert.deepEqual(events[3].activated_build_stamp, {
+    packageName: "@anneal/api", commit: revisions.to, dirty: false,
+  });
   assert.deepEqual(events.at(-1).activated_build_stamp, {
     packageName: "@anneal/api", commit: revisions.to, dirty: false,
   });
+  for (const persisted of [state, ...events]) {
+    for (const alias of [
+      "deploymentId", "targetCommit", "backupIdentity", "migrationTailBefore",
+      "migrationTailAfter", "activatedBuildStamp", "reasonCode",
+    ]) assert.equal(alias in persisted, false, alias);
+  }
   assert.equal(events.some((event) => JSON.stringify(event).includes("DATABASE_URL")), false);
   rmSync(root, { recursive: true, force: true });
 });
@@ -392,18 +404,42 @@ test("failed and unproven post-schema upgrades receive distinct ledger terminals
 
   const manualRoot = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-manual-"));
   const manualLedger = createDeploymentLedger({ stateDir: manualRoot, targetCommit: revisions.to });
-  const manualFixture = fixture();
-  manualFixture.host.publishBuild = async () => {
-    throw new DeployFailure("build-swap-failed", "fixture-partial-activation");
+  const restoredRoot = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-restored-"));
+  const restoredLedger = createDeploymentLedger({ stateDir: restoredRoot, targetCommit: revisions.to });
+  const restoredFixture = fixture();
+  restoredFixture.host.publishBuild = async () => {
+    throw new DeployFailure("build-swap-failed", "fixture-restored-live-tree");
   };
+  const restored = await executeUpgrade(restoredFixture.host, revisions, { ledger: restoredLedger });
+  assert.equal(restored.ok, false);
+  assert.equal(JSON.parse(readFileSync(restoredLedger.statePath, "utf8")).state, "FAILED");
+
+  const manualFixture = fixture("restart-services");
+  manualFixture.host.publishBuild = async () => ({
+    rollback: async () => { throw new DeployFailure("build-rollback-failed", "fixture"); },
+    commit: async () => undefined,
+  });
   const manual = await executeUpgrade(manualFixture.host, revisions, { ledger: manualLedger });
   assert.equal(manual.ok, false);
   assert.equal(JSON.parse(readFileSync(manualLedger.statePath, "utf8")).state, "MANUAL_RECOVERY");
   const manualEvents = readFileSync(manualLedger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(manualEvents.at(-1).phase, "MANUAL_RECOVERY");
-  assert.equal(manualEvents.at(-1).reason_code, "build-swap-failed");
+  assert.equal(manualEvents.at(-1).reason_code, "build-rollback-failed");
   rmSync(failedRoot, { recursive: true, force: true });
+  rmSync(restoredRoot, { recursive: true, force: true });
   rmSync(manualRoot, { recursive: true, force: true });
+});
+
+test("a pre-activation failure never records the staged build stamp as activated", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-pre-activation-"));
+  const ledger = createDeploymentLedger({ stateDir: root, targetCommit: revisions.to });
+  const { host } = fixture("generate-prisma-client");
+  host.build = async () => ({ buildStamp: { packageName: "@anneal/api", commit: revisions.to, dirty: false } });
+  const result = await executeUpgrade(host, revisions, { ledger });
+  assert.equal(result.ok, false);
+  const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(events.every((event) => event.activated_build_stamp === null), true);
+  rmSync(root, { recursive: true, force: true });
 });
 
 test("a ledger write failure is surfaced as the deploy failure", async () => {
@@ -424,6 +460,76 @@ test("a ledger write failure is surfaced as the deploy failure", async () => {
   assert.ok(calls.includes("escalate"));
 });
 
+test("a terminal ledger failure preserves the original deploy failure", async () => {
+  const { host, state } = fixture("build");
+  const logs = [];
+  host.log = (line) => logs.push(line);
+  const ledger = {
+    record: (phase) => {
+      if (phase === "FAILED") throw new DeploymentLedgerError("record", Object.assign(new Error("disk full"), { code: "ENOSPC" }));
+    },
+  };
+  const result = await executeUpgrade(host, revisions, { ledger });
+  assert.equal(result.failure.reason, "build-failed");
+  assert.equal(result.ledgerFailure.reason, "deployment-ledger-write-failed");
+  assert.equal(state.escalated.reason, "build-failed");
+  assert.match(logs.join("\n"), /deployment-ledger-write-failed/u);
+});
+
+test("a SUCCEEDED ledger failure rolls back before success notification or commit", async () => {
+  const { host, calls, state } = fixture();
+  const ledger = {
+    record: (phase) => {
+      if (phase === "SUCCEEDED") throw new DeploymentLedgerError("record", Object.assign(new Error("disk full"), { code: "ENOSPC" }));
+    },
+  };
+  const result = await executeUpgrade(host, revisions, { ledger });
+  assert.equal(result.failure.reason, "deployment-ledger-write-failed");
+  assert.equal(state.serving, "previous");
+  assert.equal(calls.includes("notify-success"), false);
+  assert.equal(calls.includes("commit-build"), false);
+  assert.equal(calls.includes("rollback-build"), true);
+  assert.equal(calls.includes("notify-failure"), true);
+});
+
+test("unrelated errors with a reason property remain unexpected errors", async () => {
+  const { host } = fixture();
+  host.build = async () => { throw { reason: "unrelated-host-reason", detail: "fixture" }; };
+  const result = await executeUpgrade(host, revisions);
+  assert.equal(result.failure.reason, "unexpected-error");
+});
+
+test("short ledger writes and sync failures fail loudly without advancing state", async () => {
+  for (const failure of ["short-write", "sync"]) {
+    const root = mkdtempSync(join(tmpdir(), `agentos-deploy-ledger-${failure}-`));
+    let armed = false;
+    let partialWritten = false;
+    const filesystem = {
+      writeSync: (...args) => {
+        if (!armed || failure !== "short-write") return writeSync(...args);
+        if (!partialWritten) {
+          partialWritten = true;
+          const [descriptor, buffer, offset, length, position] = args;
+          return writeSync(descriptor, buffer, offset, Math.min(5, length), position);
+        }
+        return 0;
+      },
+      fsyncSync: (descriptor) => {
+        if (armed && failure === "sync") throw Object.assign(new Error("fixture sync failure"), { code: "EIO" });
+        return fsyncSync(descriptor);
+      },
+    };
+    const ledger = createDeploymentLedger({ stateDir: root, targetCommit: revisions.to, filesystem });
+    ledger.start();
+    armed = true;
+    const { host } = fixture();
+    const result = await executeUpgrade(host, revisions, { ledger, ledgerStarted: true });
+    assert.equal(result.failure.reason, "deployment-ledger-write-failed", failure);
+    assert.equal(JSON.parse(readFileSync(ledger.statePath, "utf8")).state, "STARTED", failure);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("ledger retention removes only old UUID deployment directories", () => {
   const root = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-retention-"));
   const ids = [randomUUID(), randomUUID(), randomUUID()];
@@ -439,6 +545,15 @@ test("ledger retention removes only old UUID deployment directories", () => {
   assert.deepEqual(DEPLOYMENT_LEDGER_STATES, [
     "STARTED", "BACKED_UP", "SCHEMA_ADVANCED", "ACTIVATED", "VERIFIED", "SUCCEEDED", "FAILED", "MANUAL_RECOVERY",
   ]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("ledger allocation bounds retention even when deploy attempts fail", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-ledger-allocation-retention-"));
+  for (let index = 0; index < 16; index += 1) {
+    createDeploymentLedger({ stateDir: root, targetCommit: revisions.to });
+  }
+  assert.equal(readdirSync(join(root, "deployments")).length, 14);
   rmSync(root, { recursive: true, force: true });
 });
 

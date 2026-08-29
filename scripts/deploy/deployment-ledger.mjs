@@ -3,6 +3,7 @@ import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -11,12 +12,11 @@ import {
   renameSync,
   rmSync,
   statSync,
-  writeFileSync,
   writeSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { DeployFailure } from "./quiet-window-lib.mjs";
+import { DeploymentLedgerError, DeployFailure } from "./quiet-window-lib.mjs";
 
 export const DEPLOYMENT_LEDGER_SCHEMA_VERSION = 1;
 export const DEPLOYMENT_LEDGER_RETENTION_COUNT = 14;
@@ -59,10 +59,7 @@ const safeTargetCommit = (value, fallback = "unknown") => safeText(value, fallba
 
 const safeBackupIdentity = (value) => {
   if (value === null || value === undefined) return null;
-  const candidate = typeof value === "object" && value !== null
-    ? value.identity ?? value.backupIdentity ?? value.backup_id
-    : value;
-  const text = safeText(candidate);
+  const text = safeText(value);
   if (!text) return null;
   const name = basename(text);
   return name === "." || name === ".." || name.includes("/") ? null : name;
@@ -70,22 +67,12 @@ const safeBackupIdentity = (value) => {
 
 const safeMigrationTail = (value) => {
   if (value === null || value === undefined) return null;
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => safeText(entry))
-      .filter((entry) => entry !== null)
-      .slice(-100);
-  }
-  if (typeof value === "object") {
-    const name = safeText(value.name ?? value.migrationName ?? value.migration_name);
-    return name ?? null;
-  }
   return safeText(value);
 };
 
 const safeBuildStamp = (value) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const packageName = safeText(value.packageName ?? value.package_name);
+  const packageName = safeText(value.packageName);
   const commit = safeText(value.commit);
   const dirty = value.dirty === true ? true : value.dirty === false ? false : null;
   if (packageName === null && commit === null && dirty === null) return null;
@@ -94,27 +81,19 @@ const safeBuildStamp = (value) => {
 
 const safeReasonCode = (value) => safeText(value, "unknown-failure");
 
-const getMetadata = (metadata, camel, snake) => metadata?.[camel] ?? metadata?.[snake] ?? null;
+const DEFAULT_FILESYSTEM = Object.freeze({
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeSync,
+});
 
-const ledgerWriteDetail = (error) => {
-  const code = safeText(error?.code, null);
-  if (code) return code;
-  const name = safeText(error?.name, null);
-  return name ?? "filesystem-write-failed";
-};
-
-/** Raised when a record-only write cannot be persisted. The deploy pipeline
- * treats this as a deploy failure instead of silently dropping evidence. */
-export class DeploymentLedgerError extends Error {
-  constructor(operation, cause) {
-    const detail = `${operation}-${ledgerWriteDetail(cause)}`;
-    super(`deployment-ledger-write-failed: ${detail}`);
-    this.name = "DeploymentLedgerError";
-    this.reason = "deployment-ledger-write-failed";
-    this.detail = detail;
-    this.cause = cause;
-  }
-}
+const filesystemFrom = (overrides) => ({ ...DEFAULT_FILESYSTEM, ...(overrides ?? {}) });
 
 const assertDirectory = (path, label) => {
   if (!existsSync(path)) return;
@@ -128,32 +107,62 @@ const assertSafeLedgerId = (deploymentId) => {
   return deploymentId;
 };
 
-const atomicWriteJson = (path, value) => {
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    renameSync(temporary, path);
-  } finally {
-    rmSync(temporary, { force: true });
+const writeAll = (filesystem, descriptor, bytes) => {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = filesystem.writeSync(descriptor, bytes, offset, bytes.byteLength - offset, null);
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      throw Object.assign(new Error("write made no progress"), { code: "EIO" });
+    }
+    offset += written;
   }
 };
 
-const appendJsonLine = (path, value) => {
-  const descriptor = openSync(
+const closeAfter = (filesystem, descriptor, work) => {
+  let failure = null;
+  try { work(); } catch (error) { failure = error; }
+  try { filesystem.closeSync(descriptor); } catch (error) { failure ??= error; }
+  if (failure) throw failure;
+};
+
+const syncDirectory = (filesystem, path) => {
+  const descriptor = filesystem.openSync(path, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
+  closeAfter(filesystem, descriptor, () => filesystem.fsyncSync(descriptor));
+};
+
+const atomicWriteJson = (filesystem, path, value) => {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const descriptor = filesystem.openSync(
+      temporary,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    closeAfter(filesystem, descriptor, () => {
+      writeAll(filesystem, descriptor, bytes);
+      filesystem.fsyncSync(descriptor);
+    });
+    filesystem.renameSync(temporary, path);
+    syncDirectory(filesystem, dirname(path));
+  } finally {
+    filesystem.rmSync(temporary, { force: true });
+  }
+};
+
+const appendJsonLine = (filesystem, path, value) => {
+  const existed = filesystem.existsSync(path);
+  const descriptor = filesystem.openSync(
     path,
     fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
     0o600,
   );
-  try {
+  closeAfter(filesystem, descriptor, () => {
     const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
-    writeSync(descriptor, bytes, 0, bytes.byteLength);
-  } finally {
-    closeSync(descriptor);
-  }
+    writeAll(filesystem, descriptor, bytes);
+    filesystem.fsyncSync(descriptor);
+  });
+  if (!existed) syncDirectory(filesystem, dirname(path));
 };
 
 const assertLedgerDirectory = (path, root) => {
@@ -207,6 +216,7 @@ export const createDeploymentLedger = ({
   deploymentId = randomUUID(),
   targetCommit = "unknown",
   now = () => new Date(),
+  filesystem: filesystemOverrides,
 } = {}) => {
   if (typeof stateDir !== "string" || stateDir.length === 0) invalid("state-directory-missing");
   if (typeof now !== "function") invalid("clock-invalid");
@@ -214,13 +224,20 @@ export const createDeploymentLedger = ({
   const root = resolve(stateDir);
   const deploymentsRoot = join(root, "deployments");
   const directory = join(deploymentsRoot, id);
+  const filesystem = filesystemFrom(filesystemOverrides);
   try {
-    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const rootExisted = filesystem.existsSync(root);
+    filesystem.mkdirSync(root, { recursive: true, mode: 0o700 });
     assertDirectory(root, "state-directory");
-    mkdirSync(deploymentsRoot, { recursive: true, mode: 0o700 });
+    if (!rootExisted) syncDirectory(filesystem, dirname(root));
+    const deploymentsExisted = filesystem.existsSync(deploymentsRoot);
+    filesystem.mkdirSync(deploymentsRoot, { recursive: true, mode: 0o700 });
     assertDirectory(deploymentsRoot, "deployment-directory");
-    mkdirSync(directory, { recursive: false, mode: 0o700 });
+    if (!deploymentsExisted) syncDirectory(filesystem, root);
+    pruneDeploymentLedgers({ stateDir: root, limit: DEPLOYMENT_LEDGER_RETENTION_COUNT - 1 });
+    filesystem.mkdirSync(directory, { recursive: false, mode: 0o700 });
     assertDirectory(directory, "ledger-directory");
+    syncDirectory(filesystem, deploymentsRoot);
   } catch (error) {
     if (error instanceof DeployFailure || error instanceof DeploymentLedgerError) throw error;
     throw new DeploymentLedgerError("allocate", error);
@@ -251,79 +268,49 @@ export const createDeploymentLedger = ({
   const record = (state, metadata = {}) => {
     if (!LEDGER_STATE_SET.has(state)) invalid(`state-invalid-${String(state)}`);
     const recordedAt = timestamp();
-    const target = getMetadata(metadata, "targetCommit", "target_commit");
-    if (target !== null && target !== undefined) currentTargetCommit = safeTargetCommit(target, currentTargetCommit);
+    const nextStartedAt = startedAt ?? recordedAt;
+    const nextTargetCommit = metadata.targetCommit === null || metadata.targetCommit === undefined
+      ? currentTargetCommit
+      : safeTargetCommit(metadata.targetCommit, currentTargetCommit);
     const nextContext = {
-      backupIdentity: safeBackupIdentity(getMetadata(metadata, "backupIdentity", "backup_identity")) ?? context.backupIdentity,
-      migrationTailBefore: safeMigrationTail(getMetadata(metadata, "migrationTailBefore", "migration_tail_before")) ?? context.migrationTailBefore,
-      migrationTailAfter: safeMigrationTail(getMetadata(metadata, "migrationTailAfter", "migration_tail_after")) ?? context.migrationTailAfter,
-      activatedBuildStamp: safeBuildStamp(getMetadata(metadata, "activatedBuildStamp", "activated_build_stamp")) ?? context.activatedBuildStamp,
+      backupIdentity: safeBackupIdentity(metadata.backupIdentity) ?? context.backupIdentity,
+      migrationTailBefore: safeMigrationTail(metadata.migrationTailBefore) ?? context.migrationTailBefore,
+      migrationTailAfter: safeMigrationTail(metadata.migrationTailAfter) ?? context.migrationTailAfter,
+      activatedBuildStamp: safeBuildStamp(metadata.activatedBuildStamp) ?? context.activatedBuildStamp,
       reasonCode: state === "FAILED" || state === "MANUAL_RECOVERY"
-        ? safeReasonCode(getMetadata(metadata, "reasonCode", "reason_code"))
+        ? safeReasonCode(metadata.reasonCode)
         : null,
     };
-    if (startedAt === null) startedAt = recordedAt;
-    const event = {
+    const payload = {
       schemaVersion: DEPLOYMENT_LEDGER_SCHEMA_VERSION,
       deployment_id: id,
-      deploymentId: id,
-      phase: state,
-      state,
-      timestamp: recordedAt,
-      recorded_at: recordedAt,
-      recordedAt,
-      started_at: startedAt,
-      startedAt,
-      ended_at: recordedAt,
-      endedAt: recordedAt,
-      target_commit: currentTargetCommit,
-      targetCommit: currentTargetCommit,
+      target_commit: nextTargetCommit,
       backup_identity: nextContext.backupIdentity,
-      backupIdentity: nextContext.backupIdentity,
       migration_tail_before: nextContext.migrationTailBefore,
-      migrationTailBefore: nextContext.migrationTailBefore,
       migration_tail_after: nextContext.migrationTailAfter,
-      migrationTailAfter: nextContext.migrationTailAfter,
       activated_build_stamp: nextContext.activatedBuildStamp,
-      activatedBuildStamp: nextContext.activatedBuildStamp,
       reason_code: nextContext.reasonCode,
-      reasonCode: nextContext.reasonCode,
     };
+    const event = { ...payload, phase: state, timestamp: recordedAt };
     const nextEventCount = eventCount + 1;
     const snapshot = {
-      schemaVersion: DEPLOYMENT_LEDGER_SCHEMA_VERSION,
-      deployment_id: id,
-      deploymentId: id,
+      ...payload,
       state,
-      status: state,
       terminal: TERMINAL_STATES.has(state),
-      started_at: startedAt,
-      startedAt,
+      started_at: nextStartedAt,
       updated_at: recordedAt,
-      updatedAt: recordedAt,
-      target_commit: currentTargetCommit,
-      targetCommit: currentTargetCommit,
-      backup_identity: nextContext.backupIdentity,
-      backupIdentity: nextContext.backupIdentity,
-      migration_tail_before: nextContext.migrationTailBefore,
-      migrationTailBefore: nextContext.migrationTailBefore,
-      migration_tail_after: nextContext.migrationTailAfter,
-      migrationTailAfter: nextContext.migrationTailAfter,
-      activated_build_stamp: nextContext.activatedBuildStamp,
-      activatedBuildStamp: nextContext.activatedBuildStamp,
-      reason_code: nextContext.reasonCode,
-      reasonCode: nextContext.reasonCode,
       event_count: nextEventCount,
-      eventCount: nextEventCount,
     };
     try {
-      appendJsonLine(eventsPath, event);
-      atomicWriteJson(statePath, snapshot);
+      appendJsonLine(filesystem, eventsPath, event);
+      atomicWriteJson(filesystem, statePath, snapshot);
     } catch (error) {
       throw error instanceof DeploymentLedgerError ? error : new DeploymentLedgerError("record", error);
     }
     context = nextContext;
+    currentTargetCommit = nextTargetCommit;
     currentState = state;
+    startedAt = nextStartedAt;
     updatedAt = recordedAt;
     eventCount = nextEventCount;
     return Object.freeze(event);
@@ -336,14 +323,12 @@ export const createDeploymentLedger = ({
 
   const ledger = {
     deploymentId: id,
-    deployment_id: id,
     directory,
     statePath,
     eventsPath,
     record,
     start,
     get state() { return currentState; },
-    get currentState() { return currentState; },
     get started() { return currentState !== null; },
     get startedAt() { return startedAt; },
     get updatedAt() { return updatedAt; },

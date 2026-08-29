@@ -39,6 +39,21 @@ export class DeployFailure extends Error {
   }
 }
 
+/** A record-only ledger write failed. Keep this as a concrete DeployFailure so
+ * unrelated errors with a coincidental `reason` property are not reclassified. */
+export class DeploymentLedgerError extends DeployFailure {
+  constructor(operation, cause) {
+    const causeCode = typeof cause?.code === "string"
+      ? cause.code
+      : typeof cause?.name === "string"
+        ? cause.name
+        : "filesystem-write-failed";
+    super("deployment-ledger-write-failed", `${operation}-${causeCode}`);
+    this.name = "DeploymentLedgerError";
+    this.cause = cause;
+  }
+}
+
 export const quietWindowIsOpen = (runs) =>
   runs.every((run) => !BLOCKING_RUN_STATUSES.includes(String(run.status).toLowerCase()));
 
@@ -62,38 +77,9 @@ export const gitPreflightFailure = ({ branch, dirty, head, target, fastForward }
 export const shouldPersistFailure = ({ dryRun, reason, upgradeStarted = true }) =>
   !dryRun && reason !== "usage" && (reason !== "deploy-interrupted" || upgradeStarted);
 
-const failureOf = (error) => error instanceof DeployFailure
+export const failureOf = (error) => error instanceof DeployFailure
   ? error
-  : typeof error?.reason === "string"
-    ? new DeployFailure(error.reason, typeof error.detail === "string" ? error.detail : "")
-    : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
-
-const ledgerMetadataFrom = (value) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const metadata = {};
-  if (value.backupIdentity !== undefined || value.backup_identity !== undefined) {
-    metadata.backupIdentity = value.backupIdentity ?? value.backup_identity;
-  }
-  if (value.migrationTailBefore !== undefined || value.migration_tail_before !== undefined) {
-    metadata.migrationTailBefore = value.migrationTailBefore ?? value.migration_tail_before;
-  }
-  if (value.migrationTailAfter !== undefined || value.migration_tail_after !== undefined) {
-    metadata.migrationTailAfter = value.migrationTailAfter ?? value.migration_tail_after;
-  }
-  if (value.migrationTail !== undefined) {
-    metadata.migrationTailAfter = value.migrationTail;
-  }
-  if (value.activatedBuildStamp !== undefined || value.activated_build_stamp !== undefined) {
-    metadata.activatedBuildStamp = value.activatedBuildStamp ?? value.activated_build_stamp;
-  } else if (value.buildStamp !== undefined || value.build_stamp !== undefined) {
-    metadata.activatedBuildStamp = value.buildStamp ?? value.build_stamp;
-  } else if ((value.packageName !== undefined || value.package_name !== undefined
-    || value.commit !== undefined || value.dirty !== undefined)
-    && typeof value.commit !== "function") {
-    metadata.activatedBuildStamp = value;
-  }
-  return metadata;
-};
+  : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
 
 /**
  * The mutating upgrade pipeline. The host is deliberately narrow so the test
@@ -108,12 +94,11 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
   let schemaAdvanced = false;
   let activationAttempted = false;
   let activationOutcomeProven = false;
+  let candidateBuildStamp = null;
   let context = {};
-  const applyLedgerMetadata = (value) => {
-    const metadata = ledgerMetadataFrom(value);
-    context = { ...context, ...metadata };
-    return metadata;
-  };
+  const ledgerError = (operation, error) => error instanceof DeploymentLedgerError
+    ? error
+    : new DeploymentLedgerError(operation, error);
   const recordLedger = async (state, metadata = {}) => {
     if (typeof ledger?.record !== "function") return;
     try {
@@ -123,11 +108,7 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
         ...metadata,
       });
     } catch (error) {
-      if (error?.reason === "deployment-ledger-write-failed") throw error;
-      const wrapped = new Error("deployment-ledger-write-failed");
-      wrapped.reason = "deployment-ledger-write-failed";
-      wrapped.detail = error?.code ?? error?.name ?? "record-failed";
-      throw wrapped;
+      throw ledgerError("record", error);
     }
   };
   try {
@@ -136,11 +117,7 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
         try {
           await ledger.start({ targetCommit: revisions.to });
         } catch (error) {
-          if (error?.reason === "deployment-ledger-write-failed") throw error;
-          const wrapped = new Error("deployment-ledger-write-failed");
-          wrapped.reason = "deployment-ledger-write-failed";
-          wrapped.detail = error?.code ?? error?.name ?? "start-failed";
-          throw wrapped;
+          throw ledgerError("start", error);
         }
       }
       else await recordLedger("STARTED");
@@ -149,12 +126,17 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
     revisions = Object.freeze({ from: initialRevisions.from, to });
     await host.createStage();
     await host.installDependencies();
-    applyLedgerMetadata(await host.build());
+    const build = await host.build();
+    candidateBuildStamp = build?.buildStamp ?? null;
     const backup = await host.backup();
-    applyLedgerMetadata(backup);
+    context = { ...context, backupIdentity: backup?.backupIdentity ?? null };
     await recordLedger("BACKED_UP");
     const migration = await host.guardedMigration();
-    applyLedgerMetadata(migration);
+    context = {
+      ...context,
+      migrationTailBefore: migration?.migrationTailBefore ?? null,
+      migrationTailAfter: migration?.migrationTailAfter ?? null,
+    };
     schemaAdvanced = true;
     await recordLedger("SCHEMA_ADVANCED");
     await host.generatePrismaClient();
@@ -162,15 +144,26 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
     await host.verifyRuntimePrismaClient();
     await host.assertQuietBeforeRestart();
     activationAttempted = true;
-    publication = await host.publishBuild();
-    activationOutcomeProven = publication !== null && publication !== undefined;
     try {
-      applyLedgerMetadata(publication);
+      publication = await host.publishBuild();
+      activationOutcomeProven = publication !== null && publication !== undefined;
+    } catch (error) {
+      if (error instanceof DeployFailure && error.reason === "build-swap-failed") {
+        activationOutcomeProven = true;
+      }
+      throw error;
+    }
+    try {
+      context = { ...context, activatedBuildStamp: candidateBuildStamp };
       await recordLedger("ACTIVATED");
       await host.restartServices();
       const verification = await host.verifyServices(revisions);
-      applyLedgerMetadata(verification);
+      context = {
+        ...context,
+        activatedBuildStamp: verification?.activatedBuildStamp ?? context.activatedBuildStamp,
+      };
       await recordLedger("VERIFIED");
+      await recordLedger("SUCCEEDED");
       await host.notify({ outcome: "success", reason: "deployed", ...revisions });
     } catch (error) {
       try {
@@ -184,11 +177,10 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       throw error;
     }
     await publication.commit();
-    await recordLedger("SUCCEEDED");
     return { ok: true };
   } catch (error) {
     const failure = failureOf(error);
-    let effectiveFailure = failure;
+    let terminalLedgerFailure = null;
     if (ledger && failure.reason !== "deployment-ledger-write-failed") {
       const terminalState = schemaAdvanced && activationAttempted && !activationOutcomeProven
         ? "MANUAL_RECOVERY"
@@ -196,21 +188,25 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       try {
         await recordLedger(terminalState, { reasonCode: failure.reason });
       } catch (ledgerError) {
-        effectiveFailure = failureOf(ledgerError);
-        host.log?.(`STOP ${effectiveFailure.reason}${effectiveFailure.detail ? ` detail=${effectiveFailure.detail}` : ""}`);
+        terminalLedgerFailure = failureOf(ledgerError);
+        host.log?.(`STOP ${terminalLedgerFailure.reason}${terminalLedgerFailure.detail ? ` detail=${terminalLedgerFailure.detail}` : ""}; original=${failure.reason}`);
       }
     } else if (failure.reason === "deployment-ledger-write-failed") {
       host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
     }
-    const record = { outcome: "failure", reason: effectiveFailure.reason, detail: effectiveFailure.detail, ...revisions };
+    const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
     await host.escalate(record);
     try {
       await host.notify(record);
       await host.markEscalationNotified?.();
     } catch (notificationError) {
-      host.log?.(`STOP inbox-notification-pending reason=${effectiveFailure.reason}`);
+      host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
     }
-    return { ok: false, failure: effectiveFailure };
+    return {
+      ok: false,
+      failure,
+      ...(terminalLedgerFailure ? { ledgerFailure: terminalLedgerFailure } : {}),
+    };
   } finally {
     await host.cleanupStage();
   }

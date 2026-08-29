@@ -24,6 +24,7 @@ import {
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
+  failureOf,
   runLocked,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
@@ -569,9 +570,7 @@ const main = async () => {
       to = await remoteMainRevision();
       assertProductionCheckout();
     } catch (error) {
-      const failure = error instanceof DeployFailure
-        ? error
-        : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
+      const failure = failureOf(error);
       await persistAndNotifyFailure(failure, from, to);
       return { ok: false, reason: failure.reason };
     }
@@ -594,16 +593,7 @@ const main = async () => {
       ledger.start({ targetCommit: to });
       barrier = await waitForQuiet();
     } catch (error) {
-      const failure = error instanceof DeployFailure
-        ? error
-        : typeof error?.reason === "string"
-          ? new DeployFailure(error.reason, typeof error.detail === "string" ? error.detail : "")
-          : new DeployFailure(
-            error instanceof Error && error.message === "deployment-ledger-write-failed"
-              ? "deployment-ledger-write-failed"
-              : "unexpected-error",
-            error instanceof Error ? error.message : String(error),
-          );
+      const failure = failureOf(error);
       if (ledger && failure.reason !== "deployment-ledger-write-failed") {
         try { ledger.record("FAILED", { targetCommit: to, reasonCode: failure.reason }); }
         catch (ledgerError) { log(`STOP deployment-ledger-write-failed detail=${ledgerError instanceof Error ? ledgerError.name : "unknown"}`); }
@@ -649,7 +639,7 @@ const main = async () => {
         artifactPaths = deployArtifactPaths(stage);
         for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
         return {
-          activatedBuildStamp: {
+          buildStamp: {
             packageName: stamp.packageName,
             commit: stamp.commit,
             dirty: stamp.dirty,
@@ -781,7 +771,7 @@ let exitCode = 1;
 try {
   exitCode = await main();
 } catch (error) {
-  const failure = error instanceof DeployFailure ? error : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
+  const failure = failureOf(error);
   log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
   const dryRunMode = process.argv.includes("--dry-run");
   if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && !existsSync(ESCALATION_PATH)) {
