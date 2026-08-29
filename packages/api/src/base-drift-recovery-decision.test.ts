@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { PrismaClient } from "@anneal/db";
+
 import {
   candidateRefusalCodes,
-  recoveryDecision,
+  classifyCandidate,
+  classifyDurable,
+  classifyFresh,
+  classifyRetryBudget,
   type CandidateLoad,
+  type FreshRecoveryFacts,
   type RecoveryCandidate,
   type RecoveryPullRequestFacts,
 } from "./base-drift-recovery-decision.js";
+import { settleRecovery } from "./merge-base-drift-worker.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -43,8 +50,10 @@ const snapshot = (overrides: Partial<RecoveryPullRequestFacts> = {}): RecoveryPu
   ...overrides,
 });
 
-const freshDecision = (overrides: Partial<Parameters<typeof recoveryDecision>[0] & { stage: "fresh" }> = {}) => recoveryDecision({
-  stage: "fresh",
+type SnapshotFacts = Extract<FreshRecoveryFacts, { kind: "snapshot" }>;
+
+const freshDecision = (overrides: Partial<SnapshotFacts> = {}) => classifyFresh({
+  kind: "snapshot",
   candidate,
   snapshot: snapshot(),
   comparisonAvailable: true,
@@ -63,17 +72,22 @@ test("all durable candidate refusal paths decide without a database", () => {
       ...(code === "authorization-invalid" ? { detail: "ambiguous" } : {}),
       ...(code === "target-unresolved" ? { detail: "repository" } : {}),
     };
-    const decision = recoveryDecision({ stage: "candidate", load });
+    const decision = classifyCandidate(load);
     assert.equal(decision.kind, code === "chain-active" ? "retry" : "ineligible", code);
     assert.notEqual("reason" in decision ? decision.reason : "", "", code);
   }
-  assert.deepEqual(recoveryDecision({
-    stage: "candidate",
-    load: { kind: "refused", code: "target-branch-mismatch", stopId: "stop-1" },
+  assert.deepEqual(classifyCandidate({
+    kind: "refused", code: "target-branch-mismatch", stopId: "stop-1",
   }), {
     kind: "ineligible",
     reason: "chain first-run target ref differs from the authorized base ref",
+    stopId: "stop-1",
   });
+});
+
+test("candidate classification narrows skip and inspect outcomes", () => {
+  assert.deepEqual(classifyCandidate({ kind: "skip" }), { kind: "skip" });
+  assert.deepEqual(classifyCandidate({ kind: "candidate", candidate }), { kind: "inspect", candidate });
 });
 
 test("all fresh pull-request refusal paths decide without a database", () => {
@@ -93,7 +107,15 @@ test("all fresh pull-request refusal paths decide without a database", () => {
   }
 });
 
-test("ancestry refusal, retry, queue, exhaustion, and skip are explicit decisions", () => {
+test("fresh classification narrows reader facts and snapshot outcomes", () => {
+  assert.deepEqual(classifyFresh({ kind: "reader-unavailable" }), {
+    kind: "retry",
+    reason: "server-side GitHub reader is unavailable",
+  });
+  assert.deepEqual(classifyFresh({ kind: "reader-failure", reason: "reader timeout" }), {
+    kind: "retry",
+    reason: "reader timeout",
+  });
   assert.equal(freshDecision({ comparisonAvailable: false }).kind, "ineligible");
   assert.equal(freshDecision({ authorizedAdvance: { status: "diverged", behindBy: 1 } }).kind, "ineligible");
   assert.equal(freshDecision({
@@ -101,22 +123,23 @@ test("ancestry refusal, retry, queue, exhaustion, and skip are explicit decision
     observedAdvance: { status: "behind", behindBy: 1 },
   }).kind, "ineligible");
   assert.deepEqual(freshDecision(), { kind: "queue", candidate, currentBaseSha: CURRENT });
+});
 
-  assert.deepEqual(recoveryDecision({
-    stage: "classification-retry",
+test("retry-budget classification narrows retry and ineligible outcomes", () => {
+  assert.deepEqual(classifyRetryBudget({
     reason: "reader timeout",
     validationAttempts: 0,
     maxAttempts: 2,
   }), { kind: "retry", reason: "reader timeout", classificationAttempt: 1 });
-  assert.equal(recoveryDecision({
-    stage: "classification-retry",
+  assert.equal(classifyRetryBudget({
     reason: "reader timeout",
     validationAttempts: 2,
     maxAttempts: 2,
   }).kind, "ineligible");
+});
 
-  assert.equal(recoveryDecision({
-    stage: "durable",
+test("durable classification narrows skip, retry, ineligible, exhausted, and queue outcomes", () => {
+  assert.equal(classifyDurable({
     expected: candidate,
     load: { kind: "candidate", candidate },
     aggregateValidating: true,
@@ -124,8 +147,7 @@ test("ancestry refusal, retry, queue, exhaustion, and skip are explicit decision
     maxRecoveries: 2,
     currentBaseSha: CURRENT,
   }).kind, "exhausted");
-  assert.deepEqual(recoveryDecision({
-    stage: "durable",
+  assert.deepEqual(classifyDurable({
     expected: candidate,
     load: { kind: "candidate", candidate },
     aggregateValidating: false,
@@ -133,4 +155,87 @@ test("ancestry refusal, retry, queue, exhaustion, and skip are explicit decision
     maxRecoveries: 2,
     currentBaseSha: CURRENT,
   }), { kind: "skip" });
+  assert.equal(classifyDurable({
+    expected: candidate,
+    load: { kind: "refused", code: "chain-active", stopId: candidate.stopId },
+    aggregateValidating: true,
+    recoveryCount: 0,
+    maxRecoveries: 2,
+    currentBaseSha: CURRENT,
+  }).kind, "retry");
+  assert.equal(classifyDurable({
+    expected: candidate,
+    load: { kind: "candidate", candidate: { ...candidate, sourceRunId: "run-2" } },
+    aggregateValidating: true,
+    recoveryCount: 0,
+    maxRecoveries: 2,
+    currentBaseSha: CURRENT,
+  }).kind, "ineligible");
+  assert.deepEqual(classifyDurable({
+    expected: candidate,
+    load: { kind: "candidate", candidate },
+    aggregateValidating: true,
+    recoveryCount: 0,
+    maxRecoveries: 2,
+    currentBaseSha: CURRENT,
+  }), { kind: "queue", candidate, currentBaseSha: CURRENT });
+});
+
+test("settleRecovery maps persistence outcomes to tick deltas without a database", async () => {
+  const calls: string[] = [];
+  let retryOutcome: "retryable" | "ineligible" | "skipped" = "retryable";
+  let ineligibleSettled = false;
+  const operations = {
+    recordRetry: async (
+      _db: PrismaClient,
+      taskId: string,
+      stopId: string,
+      reason: string,
+    ): Promise<"retryable" | "ineligible" | "skipped"> => {
+      calls.push(`retry:${taskId}:${stopId}:${reason}`);
+      return retryOutcome;
+    },
+    settleIneligible: async (
+      _db: PrismaClient,
+      taskId: string,
+      stopId: string,
+      reason: string,
+      identity?: Partial<RecoveryCandidate>,
+    ): Promise<boolean> => {
+      calls.push(`ineligible:${taskId}:${stopId}:${reason}:${identity?.repository ?? "none"}`);
+      return ineligibleSettled;
+    },
+  };
+  const db = {} as PrismaClient;
+  const task = { id: "integrator-1", identity: candidate };
+
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "retry", reason: "reader timeout" }, operations,
+  ), { recovered: 0, exhausted: 0, ineligible: 0 });
+  retryOutcome = "ineligible";
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "retry", reason: "reader unavailable" }, operations,
+  ), { recovered: 0, exhausted: 0, ineligible: 1 });
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "ineligible", reason: "head changed" }, operations,
+  ), { recovered: 0, exhausted: 0, ineligible: 0 });
+  ineligibleSettled = true;
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "ineligible", reason: "base changed" }, operations,
+  ), { recovered: 0, exhausted: 0, ineligible: 1 });
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "recovered" }, operations,
+  ), { recovered: 1, exhausted: 0, ineligible: 0 });
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "exhausted" }, operations,
+  ), { recovered: 0, exhausted: 1, ineligible: 0 });
+  assert.deepEqual(await settleRecovery(
+    db, task, candidate.stopId, { kind: "skip" }, operations,
+  ), { recovered: 0, exhausted: 0, ineligible: 0 });
+  assert.deepEqual(calls, [
+    "retry:integrator-1:stop-1:reader timeout",
+    "retry:integrator-1:stop-1:reader unavailable",
+    "ineligible:integrator-1:stop-1:head changed:acme/widgets",
+    "ineligible:integrator-1:stop-1:base changed:acme/widgets",
+  ]);
 });

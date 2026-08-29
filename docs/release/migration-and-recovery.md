@@ -96,8 +96,10 @@ STOP preflight <condition>: <detail>
 | Condition | What it means |
 | --- | --- |
 | `arguments` | The flags do not name exactly one mode, or `--backup-bundle` is missing/relative/paired with `--fresh`. `--force`, `--skip-preflight` and `--no-preflight` are refused by name. |
-| `env-file`, `compose-file`, `compose-service`, `compose-port` | The checkout's `.env` or `docker-compose.yml` does not describe one PostgreSQL service published on one loopback port. |
-| `target-url`, `env-conflict` | `DATABASE_URL` is absent, unparsable, not PostgreSQL, or an inherited value disagrees with the one in `.env`. The command will not migrate a target it cannot prove is the one in this checkout. |
+| `env-file`, `compose-file`, `compose-service`, `compose-port` | The checkout's `.env` or `docker-compose.yml` does not describe one PostgreSQL service with one resolved published port. An explicit non-loopback bind is refused; Compose shorthand with no bind emits `compose-publishes-on-every-interface`, while the target URL must still prove a literal loopback host. |
+| `target-url` | `DATABASE_URL` is absent, unparsable, or not PostgreSQL. |
+| `env-conflict` | An inherited `DATABASE_URL` disagrees with the one in `.env`. |
+| `target-schema`, `target-host`, `target-port`, `target-database`, `target-user`, `target-credential` | The URL does not prove the schema, literal loopback host, published port, database, user, and non-placeholder credential declared by this checkout. |
 | `compose-identity`, `server-identity` | The database answering is not the Compose database this checkout defines. |
 | `backup-bundle`, `backup-target`, `backup-wal` | Existing mode, and the bundle is unreadable/invalid, names another target, or no longer matches the target's WAL fingerprint. These are real consumer checks; this release does not ship the producer needed to create a supported bundle. |
 | `target-not-empty` | Fresh mode, and the schema already holds migration history or user objects. The line above it reports the census. |

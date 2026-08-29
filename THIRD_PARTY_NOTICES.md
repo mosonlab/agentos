@@ -5,10 +5,10 @@ third-party material the release carries and the licenses that apply to it.
 
 ## What this release actually distributes
 
-The v0.1.0 Developer Preview is a **source-only** release. It contains no
-compiled artifact, no bundled JavaScript, no vendored dependency tree, and no
-binary of any kind — the published file set has zero binary files in it, which
-`npm run snapshot:scan` re-checks on every run.
+The Developer Preview is a **source release**. It contains no compiled artifact,
+no bundled JavaScript, and no vendored dependency tree. The published file set
+does include three reviewed documentation media files; `npm run snapshot:scan`
+classifies and verifies those approved binary assets on every run.
 
 That matters for licensing, because it means this repository does not
 redistribute the packages it depends on. `npm ci` fetches them from the registry
@@ -20,7 +20,7 @@ authoritative ones; the table below is an index, not a substitute.
 
 Two bodies of third-party material are checked in rather than installed.
 
-**shadcn/ui** — `apps/web/src/components/ui/*.tsx` (14 files).
+**shadcn/ui** — `apps/web/src/components/ui/*.tsx` (13 files).
 
 These components were generated into this repository by the shadcn/ui CLI, whose
 configuration is `apps/web/components.json`, and have been edited here since.

@@ -249,42 +249,6 @@ export const retryable = (
   return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
 };
 
-/**
- * The status destinations an operator may ask the board to perform.
- *
- * Backlog and Todo are operator-owned queue states. A human may also settle a
- * task by marking it Done; agent execution states are owned by the runner and
- * are therefore never exposed as ordinary status PATCH destinations. Doing for
- * an unstarted agent task is the one exception in the returned list: the card
- * routes that destination through the startability/confirmation flow, so it is
- * not a bare machine-status write.
- *
- * A chain (including a merge-tail repair task) derives its status from the
- * chain projection. A task bound to a predecessor is similarly not an
- * operator-owned status surface, even when an older board response has no
- * chain binding on the row.
- */
-export const operatorMoveTargets = (task: Pick<BoardTask, "status" | "assigneeType" | "chainId" | "chainName" | "repairOf"> & {
-  blockedOn?: BoardTask["blockedOn"];
-  chainProgress?: BoardTask["chainProgress"];
-}, startable = true): TaskStatus[] => {
-  if (chainBinding(task) !== null
-    || task.chainProgress !== null && task.chainProgress !== undefined
-    || task.blockedOn !== null && task.blockedOn !== undefined) return [];
-
-  const queueTargets = task.status === "BACKLOG"
-    ? ["TODO" as const]
-    : task.status === "TODO"
-      ? ["BACKLOG" as const]
-      : [];
-  if (task.assigneeType === "HUMAN") {
-    return task.status === "DONE" ? queueTargets : [...queueTargets, "DONE"];
-  }
-  // Doing is a start action for an unstarted agent task. Its callback must use
-  // `moveAction`, which turns it into the same confirmation flow as a drop.
-  return startable && (task.status === "TODO" || task.status === "BACKLOG") ? [...queueTargets, "DOING"] : queueTargets;
-};
-
 /* -------------------------------------------------------------- persistence */
 
 /** Per project, so switching projects never inherits another board's tab or

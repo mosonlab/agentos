@@ -30,7 +30,7 @@ import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   deployReleaseArtifactPaths,
   workspaceDependencyPaths,
-} from "./quiet-window-adapters.mjs";
+} from "./release-artifacts.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { activateReleasePointer } from "./release-pointer.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";

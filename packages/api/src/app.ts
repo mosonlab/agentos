@@ -85,6 +85,7 @@ import {
 import {
   etagFor,
   etagMatches,
+  operatorMoveTargets,
   readBoard,
   readRepairChainByTask,
   readTaskList,
@@ -2334,6 +2335,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       },
     });
     if (!task) return context.json({ error: "Task not found" }, 404);
+    const admission = await readStepAdmission(db, task.id, { locked: false });
+    if (!admission.task || !admission.verdict) {
+      throw new Error(`Task ${task.id} disappeared while projecting operator move targets`);
+    }
     const recoveryRow = await db.mergeRecoveryAttempt.findFirst({
       where: task.chainId
         ? { integratorTask: { projectId: task.projectId, chainId: task.chainId } }
@@ -2351,6 +2356,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json({
       ...task,
       executionOwner: chainExecutionOwner(task),
+      moveTargets: operatorMoveTargets(task, admission.verdict),
       taskCost: serializeUsageCost(sumUsageCosts(usageCosts.filter((cost) => cost !== null))),
       mergeOutcome,
       mergeRecovery,

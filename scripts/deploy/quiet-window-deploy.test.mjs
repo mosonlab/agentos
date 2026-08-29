@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { PREFIX_DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
 import {
   DeployFailure,
-  DEPLOY_STEPS,
   SERVICE_LABELS,
   deployedBuildStampRefusal,
   dryRunDecision,
@@ -16,9 +16,9 @@ import {
 import {
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   deployReleaseArtifactPaths,
-  pruneDeployHistory,
   workspaceDependencyPaths,
-} from "./quiet-window-adapters.mjs";
+} from "./release-artifacts.mjs";
+import { pruneDeployHistory } from "./deploy-preflight.mjs";
 import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-ledger.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
@@ -29,29 +29,28 @@ const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 
 const fixture = (failure = null) => {
   const calls = [];
+  const phaseCalls = [];
   const records = [];
   const state = { serving: "previous", escalated: null };
   const step = (name, work = async () => undefined) => async (...args) => {
     calls.push(name);
+    phaseCalls.push(name);
     if (failure === name) throw new DeployFailure(`${name}-failed`, "fixture");
     return work(...args);
   };
+  const support = (name, work = async () => undefined) => async (...args) => {
+    calls.push(name);
+    return work(...args);
+  };
   const releaseName = `${revisions.to}-${"c".repeat(64)}`;
-  const host = {
-    verifyArtifact: step("verify-artifact", async () => ({
+  const phaseWork = {
+    verifyArtifact: async () => ({
       releaseDirectoryIdentity: releaseName,
       buildStamp: { packageName: "@anneal/api", commit: revisions.to, dirty: false },
-    })),
-    waitForQuiet: step("wait-for-quiet"),
-    prepareWorkspace: step("prepare-workspace"),
-    verifyStableServicePaths: step("verify-stable-service-paths"),
-    backup: step("backup", async () => ({ backupIdentity: "fixture.dump" })),
-    guardedMigration: step("guarded-migration", async () => ({ migrationTailBefore: "before", migrationTailAfter: "after" })),
-    generatePrismaClient: step("generate-prisma-client"),
-    syncCanonicalPrompts: step("canonical-prompt-sync"),
-    verifyRuntimePrismaClient: step("verify-runtime-prisma-client"),
-    assertQuietBeforeRestart: step("quiet-recheck"),
-    publishBuild: step("publish-build", async () => {
+    }),
+    backup: async () => ({ backupIdentity: "fixture.dump" }),
+    guardedMigration: async () => ({ migrationTailBefore: "before", migrationTailAfter: "after" }),
+    publishBuild: async () => {
       state.serving = "candidate";
       return {
         releaseDirectoryIdentity: releaseName,
@@ -59,10 +58,14 @@ const fixture = (failure = null) => {
         rollback: async () => { calls.push("rollback-build"); state.serving = "previous"; },
         commit: async () => { calls.push("commit-build"); },
       };
-    }),
-    restartServices: step("restart-services"),
-    verifyServices: step("verify-services"),
-    restorePreviousServices: step("restore-services"),
+    },
+  };
+  const host = {
+    ...Object.fromEntries(UPGRADE_DEPLOY_PHASES.map(({ name, hostMethod }) => [
+      hostMethod,
+      step(name, phaseWork[hostMethod]),
+    ])),
+    restorePreviousServices: support("restore-services"),
     escalate: async (record) => { calls.push("escalate"); state.escalated = record; },
     notify: async (record) => { calls.push(`notify-${record.outcome}`); },
     cleanupWorkspace: async () => { calls.push("cleanup-workspace"); },
@@ -71,7 +74,7 @@ const fixture = (failure = null) => {
     start: (metadata) => { records.push({ state: "STARTED", metadata }); },
     record: (name, metadata) => { records.push({ state: name, metadata }); },
   };
-  return { host, calls, records, state, ledger };
+  return { host, calls, phaseCalls, records, state, ledger };
 };
 
 const minimalBuildTree = (root, revision) => {
@@ -121,6 +124,26 @@ test("deployed build stamps require an exact clean commit", () => {
 
 test("production host requires the artifact-only mechanisms", () => {
   assert.throws(() => createProductionHost({}), /production-host-adapter-missing:verifyArtifact/u);
+  for (const { hostMethod } of UPGRADE_DEPLOY_PHASES) {
+    const { host } = fixture();
+    delete host[hostMethod];
+    assert.throws(
+      () => createProductionHost(host),
+      new RegExp(`production-host-adapter-missing:${hostMethod}`, "u"),
+    );
+  }
+});
+
+test("main prefix phase order declares the current artifact deployment boundaries", () => {
+  assert.deepEqual(PREFIX_DEPLOY_PHASES.map(({ name }) => name), [
+    "parse-arguments",
+    "check-escalation",
+    "acquire-deploy-lock",
+    "read-revisions",
+    "check-already-deployed",
+    "start-deployment-ledger",
+    "prepare-release-artifact",
+  ]);
 });
 
 test("release artifact inventory includes deploy runtime and workspace dependencies", () => {
@@ -142,30 +165,39 @@ test("successful activation verifies artifact before acquiring the quiet window"
   const { host, calls, records, ledger } = fixture();
   assert.deepEqual(await executeUpgrade(host, revisions, { ledger }), { ok: true });
   assert.deepEqual(calls, [
-    "verify-artifact", "wait-for-quiet", "prepare-workspace", "verify-stable-service-paths", "backup",
+    "verify-release-artifact", "acquire-quiet-window", "prepare-operation-workspace", "verify-stable-service-paths", "backup",
     "guarded-migration", "generate-prisma-client", "canonical-prompt-sync", "verify-runtime-prisma-client",
-    "quiet-recheck", "publish-build", "restart-services", "verify-services", "notify-success", "commit-build",
+    "assert-quiet-before-restart", "publish-build", "restart-services", "verify-services", "notify-success", "commit-build",
     "cleanup-workspace",
   ]);
   assert.deepEqual(records.map(({ state }) => state), [
     "STARTED", "ARTIFACT_VERIFIED", "BACKED_UP", "SCHEMA_ADVANCED", "ACTIVATED", "VERIFIED", "SUCCEEDED",
   ]);
-  assert.ok(calls.indexOf("verify-artifact") < calls.indexOf("wait-for-quiet"));
 });
 
 test("missing artifact records FAILED without quiet-window, build, or activation", async () => {
   const { host, calls, records, ledger } = fixture();
   host.verifyArtifact = async () => {
-    calls.push("verify-artifact");
+    calls.push("verify-release-artifact");
     throw new DeployFailure("release-artifact-missing", revisions.to);
   };
   const result = await executeUpgrade(host, revisions, { ledger });
   assert.equal(result.ok, false);
   assert.equal(result.failure.reason, "release-artifact-missing");
-  assert.equal(calls.includes("wait-for-quiet"), false);
+  assert.equal(calls.includes("acquire-quiet-window"), false);
   assert.equal(calls.includes("publish-build"), false);
   assert.equal(calls.some((call) => /dependencies|install/u.test(call)), false);
   assert.equal(records.at(-1).state, "FAILED");
+});
+
+test("each declared upgrade phase stops execution at its first failure", async () => {
+  const phaseNames = UPGRADE_DEPLOY_PHASES.map(({ name }) => name);
+  for (const [index, name] of phaseNames.entries()) {
+    const { host, phaseCalls } = fixture(name);
+    const result = await executeUpgrade(host, revisions);
+    assert.equal(result.ok, false, name);
+    assert.deepEqual(phaseCalls, phaseNames.slice(0, index + 1), name);
+  }
 });
 
 test("service verification failure rolls back before restoring services", async () => {
@@ -251,6 +283,8 @@ test("artifact verification reports content digest mismatch distinctly", () => {
 
 test("dry-run reports artifact readiness and performs no mutation", async () => {
   const calls = [];
+  const execution = fixture();
+  assert.deepEqual(await executeUpgrade(execution.host, revisions, { ledger: execution.ledger }), { ok: true });
   const result = await dryRunDecision({
     revisions: async () => ({ from: revisions.from, to: revisions.to }),
     blockingRuns: async () => [],
@@ -260,14 +294,16 @@ test("dry-run reports artifact readiness and performs no mutation", async () => 
   });
   assert.equal(result.artifact.ok, true);
   assert.deepEqual(calls, ["artifact"]);
-  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, DEPLOY_STEPS.length);
+  const plannedPhases = result.lines
+    .filter((line) => line.startsWith("DRY-RUN plan step="))
+    .map((line) => line.match(/^DRY-RUN plan step=([^ ]+) mutation=skipped$/u)?.[1]);
+  assert.deepEqual(plannedPhases, execution.phaseCalls);
 });
 
 test("deploy source has no install/build fallback, checkout mutation, or legacy publication", () => {
   const source = readFileSync(new URL("./quiet-window-deploy.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /npm[^\n]*(?:ci|run["', ]+build)/u);
-  assert.doesNotMatch(source, /worktree|fast-forward|publishDirectories|assertProductionCheckout|inspectGitPreflight/u);
-  assert.ok(source.indexOf("verifyArtifact:") < source.indexOf("waitForQuiet:"));
+  assert.doesNotMatch(source, /worktree|fast-forward|assertProductionCheckout|inspectGitPreflight/u);
   assert.match(source, /process\.env\.AGENTOS_REPOSITORY_ROOT/u);
 });
 
