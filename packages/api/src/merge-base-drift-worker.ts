@@ -40,6 +40,7 @@ type DbReader = PrismaClient | Prisma.TransactionClient;
 
 const SHA = /^[0-9a-f]{40}$/u;
 const LEGACY_PRE_INTENT_REFUSAL = "source executor run does not have exactly one server-bound merge intent";
+const LEGACY_TARGET_BRANCH_REFUSAL = "authorized target ref differs from the chain target branch";
 
 const isLegacyPreIntentRefusal = (attempt: MergeRecoveryAttempt): boolean => (
   attempt.status === MergeRecoveryStatus.FAILED
@@ -47,6 +48,27 @@ const isLegacyPreIntentRefusal = (attempt: MergeRecoveryAttempt): boolean => (
   && attempt.boundSourceRunId === null
   && attempt.authorizationActivityId === null
   && attempt.recoveryRunId === null
+);
+
+const isLegacyTargetBranchRefusal = (attempt: MergeRecoveryAttempt): boolean => (
+  attempt.status === MergeRecoveryStatus.FAILED
+  && attempt.failureReason === LEGACY_TARGET_BRANCH_REFUSAL
+  && attempt.boundSourceRunId === null
+  && attempt.authorizationActivityId === null
+  && attempt.recoveryRunId === null
+  && attempt.readinessTaskId === null
+  && attempt.regressionTaskId === null
+  && attempt.repository === null
+  && attempt.prNumber === null
+  && attempt.targetBranch === null
+  && attempt.authorizedHeadSha === null
+  && attempt.authorizedBaseSha === null
+  && attempt.observedBaseSha === null
+  && attempt.currentBaseSha === null
+);
+
+const isReopenableLegacyRefusal = (attempt: MergeRecoveryAttempt): boolean => (
+  isLegacyPreIntentRefusal(attempt) || isLegacyTargetBranchRefusal(attempt)
 );
 
 export const baseDriftRecoveryPollIntervalMs = (): number => {
@@ -83,7 +105,7 @@ const ensureValidationAttemptLocked = async (
     observedBaseSha: candidate.observedBaseSha,
   } : {};
   if (existing) {
-    if (!candidate || !isLegacyPreIntentRefusal(existing)) return existing;
+    if (!candidate || !isReopenableLegacyRefusal(existing)) return existing;
     return tx.mergeRecoveryAttempt.update({ where: { id: existing.id }, data: {
       status: MergeRecoveryStatus.VALIDATING,
       failureReason: null,
@@ -147,7 +169,7 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
   const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
   if (existingAttempt
     && existingAttempt.status !== MergeRecoveryStatus.VALIDATING
-    && !isLegacyPreIntentRefusal(existingAttempt)) return { kind: "skip" };
+    && !isReopenableLegacyRefusal(existingAttempt)) return { kind: "skip" };
   const refuse = (code: CandidateRefusalCode, detail?: string): CandidateLoad => ({
     kind: "refused", code, stopId: stop.stopId, ...(detail ? { detail } : {}),
   });
@@ -242,7 +264,9 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
     where: { task: { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } } },
     orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }], select: { targetBranch: true },
   });
-  if (firstRun?.targetBranch !== authorization.baseRef || task.targetBranch !== authorization.baseRef) {
+  // The chain's first Run pins the authorized base. The integrator Task may
+  // instead carry the delivered feature branch propagated through the chain.
+  if (firstRun?.targetBranch !== authorization.baseRef) {
     return refuse("target-branch-mismatch");
   }
   return { kind: "candidate", candidate: {
