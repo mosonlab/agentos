@@ -387,6 +387,10 @@ export type BoardTask = {
    *  the chain it belongs to. Null on every other card, absent for older board
    *  responses. */
   repairOf?: { chainId: string; chainName: string | null; repairKind: string } | null;
+  /** API-computed board projection for the chain this task belongs to. Every
+   * member carries the same aggregate so the web can collapse a chain without
+   * fetching a second resource. Null on standalone tasks. */
+  chainAggregate?: ChainAggregate | null;
 };
 
 export type UsageCost = {
@@ -395,6 +399,39 @@ export type UsageCost = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   outputTokens: number | null;
+};
+
+export type ChainAggregateState = "parked-unactivated" | "waiting-on-predecessor" | "running" | "settled";
+
+/** One chain as it appears on the board. This is a projection, not a Task row:
+ * the server owns the frontier and status derivation so the board never
+ * invents a state between polls. */
+export type ChainAggregate = {
+  chainId: string;
+  chainName: string | null;
+  stepCount: number;
+  statusCounts: Partial<Record<TaskStatus, number>>;
+  status: TaskStatus;
+  frontier: {
+    taskId: string;
+    title: string;
+    status: TaskStatus;
+    latestRun: BoardTask["latestRun"];
+    failureReason: string | null;
+    /** The API may include the dense one-based step ordinal. Older projections
+     * can leave it out; the renderer falls back to the member's chain columns. */
+    position?: number | null;
+  } | null;
+  activation: {
+    state: ChainAggregateState;
+    predecessor?: { taskId: string; taskName: string } | null;
+  };
+  /** Aggregate usage keeps the same shape as a task's usage projection. A
+   * legacy control plane may expose only the decimal amount, which the card
+   * also accepts and formats honestly. */
+  totalCost: UsageCost | string | number | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 /** `GET /projects/:projectId/costs`. Every amount is a decimal string, as every

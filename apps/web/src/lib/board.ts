@@ -1,6 +1,6 @@
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
-import type { BoardTask, RunStatus, TaskStatus } from "./types";
+import type { BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
 
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
@@ -74,6 +74,142 @@ export const chainBinding = (task: Pick<BoardTask, "chainId" | "chainName" | "re
  *  and a short form of its id where it could not. */
 export const chainBindingLabel = (binding: ChainBinding): string => binding.name ?? binding.id.slice(0, 8);
 
+/* --------------------------------------------------------------- projection */
+
+export type TaskBoardEntry = { kind: "task"; id: string; status: TaskStatus; task: BoardTask };
+export type ChainBoardEntry = {
+  kind: "chain";
+  id: string;
+  status: TaskStatus;
+  aggregate: ChainAggregate;
+  /** Raw members are retained only for the chain filter and for resolving a
+   * representative step when an older projection omitted its ordinal. */
+  members: BoardTask[];
+  representativeTaskId: string;
+};
+export type BoardEntry = TaskBoardEntry | ChainBoardEntry;
+
+export const taskBoardEntry = (task: BoardTask): TaskBoardEntry => ({
+  kind: "task", id: task.id, status: task.status, task,
+});
+
+export const isBoardEntry = (value: BoardEntry | BoardTask): value is BoardEntry =>
+  "kind" in value && (value.kind === "task" || value.kind === "chain");
+
+const ACTIVE_RUN_STATUSES: RunStatus[] = ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING"];
+
+const chainMemberOrder = (left: BoardTask, right: BoardTask): number => {
+  const leftPosition = left.chainProgress?.position ?? (left.chainIndex === null ? Number.MAX_SAFE_INTEGER : left.chainIndex + 1);
+  const rightPosition = right.chainProgress?.position ?? (right.chainIndex === null ? Number.MAX_SAFE_INTEGER : right.chainIndex + 1);
+  return leftPosition - rightPosition || left.id.localeCompare(right.id);
+};
+
+/** Derive a best-effort aggregate only for older control planes that do not
+ * yet send `chainAggregate`. It reads facts already present on the raw rows;
+ * the API projection remains authoritative whenever it exists. */
+const fallbackChainAggregate = (binding: ChainBinding, members: BoardTask[]): ChainAggregate => {
+  const steps = members.filter((member) => member.chainId === binding.id).sort(chainMemberOrder);
+  const first = steps[0] ?? members[0];
+  const primaryFrontier = steps.find((member) => member.status !== "DONE");
+  // A detached merge-tail repair is a chain member for board placement. It
+  // becomes the frontier only after every primary step has settled; before
+  // then the primary step remains the honest frontier.
+  const frontier = primaryFrontier
+    ?? members.find((member) => member.status !== "DONE")
+    ?? steps.at(-1)
+    ?? first;
+  const statusCounts: Partial<Record<TaskStatus, number>> = {};
+  for (const member of steps) statusCounts[member.status] = (statusCounts[member.status] ?? 0) + 1;
+  const active = members.some((member) => member.status === "DOING" || ACTIVE_RUN_STATUSES.includes(member.latestRun?.status ?? "CANCELLED"));
+  const allDone = members.length > 0 && members.every((member) => member.status === "DONE");
+  const status: TaskStatus = allDone
+    ? "DONE"
+    : active
+      ? "DOING"
+      : frontier?.status === "REVIEW"
+        ? "REVIEW"
+        : frontier?.status === "BACKLOG" ? "BACKLOG" : "TODO";
+  const hasBlockedOnField = first !== undefined && Object.hasOwn(first, "blockedOn");
+  const predecessor = !hasBlockedOnField
+    ? null
+    : first?.blockedOn ?? members.find((member) => member.blockedOn !== null)?.blockedOn ?? null;
+  const activation = predecessor !== null
+    ? { state: "waiting-on-predecessor" as const, predecessor }
+    : hasBlockedOnField && first?.status === "TODO" && first.latestRun === null
+      ? { state: "parked-unactivated" as const, predecessor: null }
+      : status === "DONE"
+        ? { state: "settled" as const, predecessor: null }
+        : { state: "running" as const, predecessor: null };
+  return {
+    chainId: binding.id,
+    chainName: binding.name,
+    stepCount: steps.length,
+    statusCounts,
+    status,
+    frontier: frontier === undefined ? null : {
+      taskId: frontier.id,
+      title: frontier.displayName,
+      status: frontier.status,
+      latestRun: frontier.latestRun,
+      failureReason: frontier.failureReason,
+      position: frontier.chainProgress?.position ?? (frontier.chainIndex === null ? null : frontier.chainIndex + 1),
+    },
+    activation,
+    totalCost: null,
+    createdAt: (members[0]?.createdAt ?? new Date(0).toISOString()),
+    updatedAt: (members.reduce((latest, member) => member.updatedAt > latest ? member.updatedAt : latest, new Date(0).toISOString())),
+  };
+};
+
+/** Collapse raw board rows into the entries both board shells render. Grouping
+ * uses `chainBinding`, so chain-detached merge-tail repairs stay with their
+ * chain even though they have no chain columns of their own. */
+export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
+  const order: Array<TaskBoardEntry | { kind: "chain-group"; id: string }> = [];
+  const groups = new Map<string, { binding: ChainBinding; members: BoardTask[] }>();
+  for (const task of tasks) {
+    const binding = chainBinding(task);
+    if (binding === null) {
+      order.push(taskBoardEntry(task));
+      continue;
+    }
+    const group = groups.get(binding.id);
+    if (group) group.members.push(task);
+    else {
+      groups.set(binding.id, { binding, members: [task] });
+      order.push({ kind: "chain-group", id: binding.id });
+    }
+  }
+  return order.map((item): BoardEntry => {
+    if (item.kind !== "chain-group") return item;
+    const group = groups.get(item.id)!;
+    const { binding, members } = group;
+    const aggregate = members.find((member) => member.chainAggregate !== null && member.chainAggregate !== undefined)?.chainAggregate
+      ?? fallbackChainAggregate(binding, members);
+    const representativeTaskId = aggregate.frontier?.taskId ?? members.find((member) => member.chainId === binding.id)?.id ?? members[0]!.id;
+    return {
+      kind: "chain",
+      id: `chain:${aggregate.chainId}`,
+      status: aggregate.status,
+      aggregate,
+      members,
+      representativeTaskId,
+    };
+  });
+};
+
+/** Normalize a board column input. Keeping raw-task compatibility here makes
+ * the extracted column easy to use from existing callers and focused tests. */
+export const normalizeBoardEntries = (entries: readonly (BoardEntry | BoardTask)[]): BoardEntry[] =>
+  entries.map((entry) => isBoardEntry(entry) ? entry : taskBoardEntry(entry));
+
+export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskStatus, BoardEntry[]> => {
+  const groups = new Map<TaskStatus, BoardEntry[]>(COLUMNS.map((column) => [column.status, []]));
+  for (const entry of entries) groups.get(entry.status)?.push(entry);
+  for (const [status, rows] of groups) groups.set(status, orderColumn(status, rows));
+  return groups;
+};
+
 /* ------------------------------------------------------------- the schedule */
 
 export type ScheduleSubject = Pick<
@@ -142,14 +278,18 @@ export const scheduleLabel = (task: ScheduleSubject): string | null => {
  * preserves the API's id-ascending tiebreak when timestamps are equal; a plain
  * reverse would silently invert that stable order.
  */
-export const orderColumn = (status: TaskStatus, tasks: readonly BoardTask[]): BoardTask[] =>
-  status === "BACKLOG"
+export const orderColumn = <T extends BoardTask | BoardEntry>(status: TaskStatus, tasks: readonly T[]): T[] => {
+  const createdAt = (entry: T): string => isBoardEntry(entry)
+    ? entry.kind === "task" ? entry.task.createdAt : entry.aggregate.createdAt
+    : entry.createdAt;
+  return status === "BACKLOG"
     ? [...tasks].sort((left, right) => (
-        left.createdAt < right.createdAt ? -1
-          : left.createdAt > right.createdAt ? 1
+        createdAt(left) < createdAt(right) ? -1
+          : createdAt(left) > createdAt(right) ? 1
             : left.id.localeCompare(right.id)
       ))
     : [...tasks];
+};
 
 /* -------------------------------------------------------------- the actions */
 
