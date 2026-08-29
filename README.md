@@ -68,6 +68,14 @@ twelve steps.
 The template is data, not code. Roles, prompts, models and gates are
 all editable, so you can reshape the chain into your own process.
 
+<div align="center">
+
+<img src="docs/media/agents.png" alt="Agents view: each agent's role, model, reasoning effort and runner" width="880">
+
+<sub>Agents: a role, a prompt, a model and effort, and the runner it goes to.</sub>
+
+</div>
+
 <details>
 <summary><b>The twelve steps in full</b> — role, runner, model and effort for each</summary>
 
