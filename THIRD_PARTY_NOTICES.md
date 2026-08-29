@@ -1,6 +1,6 @@
 # Third-party notices
 
-AgentOS is released under the MIT License (`LICENSE`). This file records the
+Anneal is released under the MIT License (`LICENSE`). This file records the
 third-party material the release carries and the licenses that apply to it.
 
 ## What this release actually distributes
@@ -154,9 +154,9 @@ checkout. This file does not enumerate that tree, because a static copy of it in
 Markdown would be stale the first time the lockfile moved and would then be worse
 than no copy at all.
 
-## What AgentOS does not bundle
+## What Anneal does not bundle
 
-AgentOS launches coding CLIs that are already installed on your machine. It does
+Anneal launches coding CLIs that are already installed on your machine. It does
 not contain, redistribute, or relicense the Codex CLI, Claude Code, Pi, or any
 provider's model, subscription, or capacity. Those remain governed by their own
 terms and your own account with their vendor.

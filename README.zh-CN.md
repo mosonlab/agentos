@@ -131,7 +131,7 @@ Anneal 自带的 Full Assurance 模板。每一步绑定一个角色，每个角
 模型在 [`agents/roles/`](agents/roles)。在控制台改过的模型或档位是持久化的运行时
 覆盖，后续 seed 不会替换它。
 
-> **Developer Preview 3（v0.3.0）。** 接口、配置与已存数据的形状都可能在预览版
+> **Developer Preview 4（v0.4.0）。** 接口、配置与已存数据的形状都可能在预览版
 > 之间变动，预览版之间除全新安装外没有升级路径。
 >
 > **裸机执行警告。** Anneal 会用非交互式 permission bypass 启动 coding CLI。
@@ -149,7 +149,7 @@ Pi 都是可选的。
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.3.0
+git checkout v0.4.0
 npm ci
 npm run setup:local
 npm run build
@@ -206,7 +206,7 @@ provider 作出兼容性承诺。
 - [安装细节与验证](docs/install.md)：环境文件、迁移、merge executor 与检查序列。
 - [安全](docs/release/security.md)：在把它指向任何你在乎的东西之前先读。
 - [迁移与恢复](docs/release/migration-and-recovery.md)：在往里放数据之前先读。
-- [发布说明](docs/release/v0.3.0-release-notes.md) · [贡献](CONTRIBUTING.md)
+- [发布说明](docs/release/v0.4.0-release-notes.md) · [贡献](CONTRIBUTING.md)
 
 ## 支持
 

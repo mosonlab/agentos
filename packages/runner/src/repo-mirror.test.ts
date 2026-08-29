@@ -26,7 +26,7 @@ const fixture = async (label: string): Promise<Fixture> => {
   const seed = join(root, "seed");
   git(root, "init", "--bare", "--initial-branch=main", remote);
   git(root, "init", "--initial-branch=main", seed);
-  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.name", "Anneal Test");
   git(seed, "config", "user.email", "runner@example.invalid");
   await writeFile(join(seed, "tree.txt"), "base\n");
   git(seed, "add", "tree.txt");

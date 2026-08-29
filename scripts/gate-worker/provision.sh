@@ -7,7 +7,7 @@
 #   ssh <server> 'bash /tmp/provision.sh --apply'    # do it
 #
 # What this machine is: a compute worker that checks a commit out of a bare
-# mirror and runs scripts/merge-gate.sh against it. It never runs an AgentOS
+# mirror and runs scripts/merge-gate.sh against it. It never runs an Anneal
 # runner or an agent session — the execution plane stays on the local machine.
 # This script installs a toolchain and a directory layout and nothing else: no
 # service, no queue, no daemon and no clone of a GitHub remote.
@@ -201,7 +201,7 @@ if command -v git >/dev/null 2>&1 \
   && [ -n "$(git config --global user.email 2>/dev/null)" ]; then
   ok "$(git config --global user.name) <$(git config --global user.email)>"
 else
-  run git config --global user.name "AgentOS Gate Worker"
+  run git config --global user.name "Anneal Gate Worker"
   run git config --global user.email "gate-worker@example.invalid"
   did "configured the synthetic Git fixture identity"
 fi

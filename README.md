@@ -155,7 +155,7 @@ and the models in [`agents/roles/`](agents/roles). A model or effort changed in
 the console is a persisted runtime override and is not replaced by a later
 seed.
 
-> **Developer Preview 3 (v0.3.0).** Interfaces, configuration and stored data
+> **Developer Preview 4 (v0.4.0).** Interfaces, configuration and stored data
 > shapes may change between preview releases, and the only upgrade path is a
 > fresh install.
 >
@@ -175,7 +175,7 @@ macOS account. Claude Code and Pi are optional.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.3.0
+git checkout v0.4.0
 npm ci
 npm run setup:local
 npm run build
@@ -242,7 +242,7 @@ and makes no compatibility promise for a CLI provider.
   anything you care about.
 - [Migration and recovery](docs/release/migration-and-recovery.md): read
   before putting data in it.
-- [Release notes](docs/release/v0.3.0-release-notes.md) ·
+- [Release notes](docs/release/v0.4.0-release-notes.md) ·
   [Contributing](CONTRIBUTING.md)
 
 ## Support

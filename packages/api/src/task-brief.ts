@@ -3,7 +3,7 @@ import { stepRole } from "@anneal/db";
 const FEATURE_BRIEF_PREFIX = "\nFeature brief:\n";
 const PRIOR_OUTPUTS_REMINDER = "\nRead the prior template steps' persisted outputs before working.";
 const PERSIST_OUTPUT_PREFIX = "\nPersist the final ";
-const PERSIST_OUTPUT_SUFFIX = " output for this step through the AgentOS task output endpoint.";
+const PERSIST_OUTPUT_SUFFIX = " output for this step through the Anneal task output endpoint.";
 
 const BRIEF_HEADER_PREFIX = "\n<!-- agentos:task-brief:v1 length=";
 const BRIEF_HEADER_SUFFIX = " -->\n";

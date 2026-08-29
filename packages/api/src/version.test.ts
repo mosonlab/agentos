@@ -67,7 +67,7 @@ test("the version document carries provenance and nothing else", () => {
 test("the startup line names the service and the build in one greppable line", () => {
   assert.equal(
     apiBuildLine(built()),
-    `AgentOS API build: sha=${OID} package=@anneal/api@0.0.0 builtAt=2026-08-18T00:00:00.000Z`,
+    `Anneal API build: sha=${OID} package=@anneal/api@0.0.0 builtAt=2026-08-18T00:00:00.000Z`,
   );
-  assert.match(apiBuildLine(), /^AgentOS API build: sha=unbuilt /);
+  assert.match(apiBuildLine(), /^Anneal API build: sha=unbuilt /);
 });

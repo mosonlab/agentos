@@ -821,7 +821,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
     await mkdir(seed);
     await git(root, "init", "--bare", "--initial-branch=main", remote);
     await git(seed, "init", "--initial-branch=main");
-    await git(seed, "config", "user.name", "AgentOS Test");
+    await git(seed, "config", "user.name", "Anneal Test");
     await git(seed, "config", "user.email", "runner@example.invalid");
     await createFixture(seed, false);
     await runCommand([], "npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], seed, process.env);

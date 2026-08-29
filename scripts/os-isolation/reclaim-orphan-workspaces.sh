@@ -66,7 +66,7 @@ failed=0
 skipped_over_limit=0
 report() { printf '  %-8s %-28s %s\n' "$1" "$2" "$3"; }
 
-printf 'AgentOS orphan workspace reclamation — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (nothing is deleted)')"
+printf 'Anneal orphan workspace reclamation — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (nothing is deleted)')"
 printf '  root        : %s\n' "$WORKSPACE_ROOT"
 printf '  age cutoff  : ended more than %s hour(s) ago\n' "$OLDER_THAN_HOURS"
 printf '  limit       : %s director(ies) per run\n\n' "$LIMIT"

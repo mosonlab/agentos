@@ -1,4 +1,4 @@
-/** AgentOS MCP server (stdio).
+/** Anneal MCP server (stdio).
  *
  *  Spawned by the CLI the runner starts, not by the runner itself, so it never
  *  sees a token the agent does not already hold: credentials arrive through the
@@ -26,7 +26,7 @@ type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: bo
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SUPPORTED_PROTOCOLS = new Set([PROTOCOL_VERSION, "2025-03-26", "2024-11-05"]);
-const SERVER_INFO = { name: "agentos", title: "AgentOS", version: "1.0.0" };
+const SERVER_INFO = { name: "agentos", title: "Anneal", version: "1.0.0" };
 
 export type SessionCredentials = {
   apiUrl: string;
@@ -63,7 +63,7 @@ export const readCredentials = (environment: NodeJS.ProcessEnv, argv: string[] =
     ...(fencingToken ? [] : ["AGENTOS_FENCING_TOKEN"]),
     ...(workspacePath ? [] : ["AGENTOS_WORKSPACE_PATH"]),
   ];
-  if (missing.length > 0) throw new Error(`AgentOS MCP server is missing ${missing.join(", ")}`);
+  if (missing.length > 0) throw new Error(`Anneal MCP server is missing ${missing.join(", ")}`);
   return {
     apiUrl: apiUrl!.replace(/\/$/, ""),
     runId: runId!,
@@ -105,7 +105,7 @@ const call = async (
     ...(request.body ? { body: JSON.stringify(request.body) } : {}),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(`AgentOS API ${response.status}: ${text.slice(0, 500)}`);
+  if (!response.ok) throw new Error(`Anneal API ${response.status}: ${text.slice(0, 500)}`);
   return text.length > 0 ? JSON.parse(text) as unknown : null;
 };
 
@@ -177,7 +177,7 @@ export const handleRequest = async (
       protocolVersion: requested && SUPPORTED_PROTOCOLS.has(requested) ? requested : PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: SERVER_INFO,
-      instructions: "AgentOS control plane for the current task: log progress, persist the deliverable, read status, ask the human.",
+      instructions: "Anneal control plane for the current task: log progress, persist the deliverable, read status, ask the human.",
     });
   }
   if (request.method === "notifications/initialized" || request.method === "notifications/cancelled") return null;

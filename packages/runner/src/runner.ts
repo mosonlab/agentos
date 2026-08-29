@@ -90,7 +90,7 @@ const appendRetainedSessionConfig = (reason: string, path: string | null): strin
   `${reason}${path ? `; session CLI config retained at ${path}` : ""}`;
 
 const missingOutputRemediationInput = (outputKind: string): string => [
-  `AgentOS detected that this Run finished its work but did not persist its required '${outputKind}' task output.`,
+  `Anneal detected that this Run finished its work but did not persist its required '${outputKind}' task output.`,
   "Do not redo the task, edit files, commit, push, open a PR, or run delivery steps.",
   `Using the work and evidence already produced in this conversation, call task_output with kind '${outputKind}' and a body that satisfies the task's exact output contract and current HEAD binding.`,
   "If the write is rejected, correct the body and retry. Then call task_status and finish only after it reports outputPersisted: true for this Run.",
@@ -1027,7 +1027,7 @@ const reportStartupStateWithRetry = async (
   if (!Number.isSafeInteger(attempts) || attempts < 1) throw new Error("startup report attempts must be a positive integer");
   const wait = options.wait ?? waitBeforeStartupReportRetry;
   const onRetry = options.onRetry ?? ((kind, attempt, total) => {
-    console.error(`AgentOS API unavailable during ${kind.toLowerCase()} startup preflight; retrying ${attempt + 1}/${total}`);
+    console.error(`Anneal API unavailable during ${kind.toLowerCase()} startup preflight; retrying ${attempt + 1}/${total}`);
   });
 
   for (let attempt = 1; ; attempt += 1) {

@@ -54,7 +54,7 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
       signal: AbortSignal.timeout(config.apiTimeoutMs),
     });
     if (!response.ok && response.status !== 204) {
-      throw new Error(`AgentOS API ${response.status}: ${await response.text()}`);
+      throw new Error(`Anneal API ${response.status}: ${await response.text()}`);
     }
     return response;
   };

@@ -36,7 +36,7 @@ test("provisioning trusts an already-published intended head after its database 
     const seed = join(root, "seed");
     git(root, "init", "--bare", remote);
     git(root, "init", "--initial-branch=main", seed);
-    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.name", "Anneal Test");
     git(seed, "config", "user.email", "runner@agentos.local");
     await writeFile(join(seed, "tree.txt"), "base\n");
     git(seed, "add", "tree.txt");
@@ -86,7 +86,7 @@ test("provisioning commits the server-prepared direct specification before the a
     const seed = join(root, "seed");
     git(root, "init", "--bare", "--initial-branch=main", remote);
     git(root, "init", "--initial-branch=main", seed);
-    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.name", "Anneal Test");
     git(seed, "config", "user.email", "runner@agentos.local");
     await writeFile(join(seed, "tree.txt"), "base\n");
     git(seed, "add", "tree.txt");
@@ -140,7 +140,7 @@ test("prepared specification refuses a repository symlink that would escape the 
     await mkdir(escaped);
     git(root, "init", "--bare", "--initial-branch=main", remote);
     git(root, "init", "--initial-branch=main", seed);
-    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.name", "Anneal Test");
     git(seed, "config", "user.email", "runner@agentos.local");
     await symlink(escaped, join(seed, ".chain"));
     git(seed, "add", ".chain");
@@ -179,7 +179,7 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
     const seed = join(root, "seed");
     git(root, "init", "--bare", "--initial-branch=main", remote);
     git(root, "init", "--initial-branch=main", seed);
-    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.name", "Anneal Test");
     git(seed, "config", "user.email", "runner@agentos.local");
     await writeFile(join(seed, "tree.txt"), "base\n");
     git(seed, "add", "tree.txt");
@@ -225,7 +225,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
     const seed = join(root, "seed");
     git(root, "init", "--bare", remote);
     git(root, "init", "--initial-branch=main", seed);
-    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.name", "Anneal Test");
     git(seed, "config", "user.email", "runner@agentos.local");
     await writeFile(join(seed, "base.txt"), "review base\n");
     git(seed, "add", "base.txt");
@@ -513,7 +513,7 @@ test("a run-as workspace is provisioned by the launched account and cannot be en
     const seed = join(root, "seed");
     git(root, "init", "--bare", remote);
     git(root, "init", "--initial-branch=main", seed);
-    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.name", "Anneal Test");
     git(seed, "config", "user.email", "runner@agentos.local");
     await writeFile(join(seed, "tree.txt"), "base\n");
     git(seed, "add", "tree.txt");

@@ -1,7 +1,7 @@
-/** AgentOS tools for pi.
+/** Anneal tools for pi.
  *
  *  pi deliberately ships no MCP client ("It intentionally does not include
- *  built-in MCP..."), so the same ten AgentOS tools are registered as pi
+ *  built-in MCP..."), so the same ten Anneal tools are registered as pi
  *  extension tools instead. The runner injects this file with `--extension`;
  *  credentials come from the inherited environment, exactly as the MCP server
  *  reads them, so the tool surface matches across all three CLIs.
@@ -32,7 +32,7 @@ const SESSION_TOOLS: ReadonlyArray<{
   {
     name: "task_activity_log",
     label: "Append to the task activity log",
-    description: "Record notable progress on the current AgentOS task. This is the routine progress channel; it never interrupts a human.",
+    description: "Record notable progress on the current Anneal task. This is the routine progress channel; it never interrupts a human.",
     parameters: {
       type: "object",
       properties: {
@@ -46,7 +46,7 @@ const SESSION_TOOLS: ReadonlyArray<{
   {
     name: "task_output",
     label: "Persist the task output",
-    description: "Persist this Step's deliverable as the AgentOS task output. Later Steps in the Chain read it, and the Approval gate shows it to the human. Canonical Steps may require a phase-specific write sequence from the task contract. A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
+    description: "Persist this Step's deliverable as the Anneal task output. Later Steps in the Chain read it, and the Approval gate shows it to the human. Canonical Steps may require a phase-specific write sequence from the task contract. A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
     parameters: {
       type: "object",
       properties: {
@@ -61,7 +61,7 @@ const SESSION_TOOLS: ReadonlyArray<{
   {
     name: "task_status",
     label: "Read the task and Run status",
-    description: "Read the current AgentOS task and Run: name, status, Approval gate, Run number and budget, branch, and whether an output has already been persisted.",
+    description: "Read the current Anneal task and Run: name, status, Approval gate, Run number and budget, branch, and whether an output has already been persisted.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -80,7 +80,7 @@ const SESSION_TOOLS: ReadonlyArray<{
   {
     name: "inbox_ask",
     label: "Ask the human a question",
-    description: "Ask the human a question through the AgentOS Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
+    description: "Ask the human a question through the Anneal Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
     parameters: {
       type: "object",
       properties: {
@@ -163,7 +163,7 @@ const credentials = () => {
   const fencingToken = process.env.AGENTOS_FENCING_TOKEN;
   const workspacePath = process.env.AGENTOS_WORKSPACE_PATH;
   if (!apiUrl || !runId || !sessionToken || !fencingToken || !workspacePath) {
-    throw new Error("AgentOS session credentials are missing from this environment");
+    throw new Error("Anneal session credentials are missing from this environment");
   }
   return { apiUrl: apiUrl.replace(/\/$/, ""), runId, sessionToken, fencingToken, workspacePath };
 };
@@ -287,7 +287,7 @@ const call = async (request: ToolRequest): Promise<unknown> => {
     ...(request.body ? { body: JSON.stringify(request.body) } : {}),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(`AgentOS API ${response.status}: ${text.slice(0, 500)}`);
+  if (!response.ok) throw new Error(`Anneal API ${response.status}: ${text.slice(0, 500)}`);
   return text.length > 0 ? JSON.parse(text) : null;
 };
 
@@ -345,7 +345,7 @@ export default function (pi: {
     }
     return {
       ...event.payload,
-      // The Responses API reports Fast as `priority`; the AgentOS setting stays
+      // The Responses API reports Fast as `priority`; the Anneal setting stays
       // `fast` because that is the operator-facing Codex config vocabulary.
       service_tier: configured === "fast" ? "priority" : "default",
     };

@@ -181,7 +181,7 @@ export const installLaunchd = (args) => {
   if (process.getuid() === 0) throw new Error("launchd-installer-refuses-root");
   const userHome = homedir();
   const launchAgents = join(userHome, "Library/LaunchAgents");
-  const logs = join(userHome, "Library/Logs/AgentOS");
+  const logs = join(userHome, "Library/Logs/Anneal");
   const destination = join(launchAgents, `${LABEL}.plist`);
   const nodeBinary = realpathSync(process.execPath);
   const gitBinary = requiredBinary("git");

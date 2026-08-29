@@ -4,7 +4,7 @@ This job advances one macOS launchd deployment from its currently stamped
 build to `origin/main`. It is for the checkout whose services are
 `com.agentos.api`, `com.agentos.inbox`, `com.agentos.runner`,
 `com.agentos.runner-2` through `com.agentos.runner-10`, and `com.agentos.web`.
-It does not deploy an AgentOS run workspace.
+It does not deploy an Anneal run workspace.
 
 ## Preconditions
 
@@ -29,7 +29,7 @@ the preview process remains bound to the last verified build.
 
 ## Appliance checkout
 
-The production checkout is a dedicated clone owned by the loaded AgentOS
+The production checkout is a dedicated clone owned by the loaded Anneal
 services and auto-deploy. Keep it on `main` with a clean tracked and untracked
 tree. Development happens in a different clone or worktree; no interactive
 agent task uses the production checkout as its working directory. A worktree of
@@ -124,7 +124,7 @@ The installed plist lives at
 `~/Library/LaunchAgents/com.agentos.auto-deploy.plist`. It runs at load and
 every five minutes. One invocation stays alive while a main revision is
 waiting for a quiet window and records `HOLD quiet-window` once per minute.
-Logs are `~/Library/Logs/AgentOS/auto-deploy.log` and
+Logs are `~/Library/Logs/Anneal/auto-deploy.log` and
 `auto-deploy.error.log`.
 
 The installer refuses to replace a different existing plist. Inspect and
@@ -251,7 +251,7 @@ The command refuses a non-main or dirty appliance checkout and shares the same
 exclusive deploy process lock. It does not fetch, migrate, restart services,
 touch the live build, clear escalation state, or delete an active run workspace.
 
-Success and failure create an AgentOS Inbox message containing both revisions
+Success and failure create an Anneal Inbox message containing both revisions
 and the named outcome. A failure also writes
 `.agentos-deploy/escalated.json`. While that file exists, scheduled invocations
 never retry the upgrade. If the Inbox write was interrupted, they retry only

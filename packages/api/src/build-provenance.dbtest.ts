@@ -186,7 +186,7 @@ test("build provenance survives the whole path from the build script to /version
     },
   });
   children.add(child);
-  const ready = await waitFor(child, /AgentOS API listening/u, output);
+  const ready = await waitFor(child, /Anneal API listening/u, output);
 
   const expectedSha = apiStamp.commit === null
     ? "unknown"
@@ -194,10 +194,10 @@ test("build provenance survives the whole path from the build script to /version
   // Printed before ownership, the database or the port could have failed.
   assert.match(
     ready,
-    new RegExp(`^AgentOS API build: sha=${expectedSha} package=@anneal/api@${apiStamp.version} builtAt=${apiStamp.builtAt}`, "u"),
+    new RegExp(`^Anneal API build: sha=${expectedSha} package=@anneal/api@${apiStamp.version} builtAt=${apiStamp.builtAt}`, "u"),
   );
 
-  const port = Number(ready.match(/AgentOS API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
+  const port = Number(ready.match(/Anneal API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
   assert.ok(port > 0);
   const base = `http://127.0.0.1:${port}`;
 
