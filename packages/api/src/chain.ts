@@ -2,13 +2,20 @@ import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
   chainControlKey,
+  executionLayer,
+  readChainControlRecord,
   readChainControls,
+  resumeActivationAnchor,
+  resumeActivationNeedsSourceRun,
   type ChainControlSnapshot,
   isMergeReadinessStep,
   lockAgentRepoGrant,
   Prisma,
+  type PrismaClient,
   TaskStatus,
 } from "@anneal/db";
+
+export { executionLayer, resumeActivationAnchor, resumeActivationNeedsSourceRun };
 
 import { runBudgetCeiling } from "./execution.js";
 import type { Refusal } from "./refusal.js";
@@ -62,13 +69,6 @@ export type ChainProgress = {
 export const stepName = (row: Pick<ChainRow, "name" | "templateStep">): string => row.templateStep?.name ?? row.name;
 
 const byChainIndex = (left: ChainRow, right: ChainRow): number => (left.chainIndex ?? 0) - (right.chainIndex ?? 0);
-
-/** A missing layer can only occur during the nullable expand migration (or in
- * old API fixtures). Treating the node ordinal as its layer preserves the
- * legacy linear contract without reintroducing a linked-list successor. */
-const executionLayer = (row: { chainLayer?: number | null; chainIndex: number | null }): number | null => (
-  row.chainLayer ?? row.chainIndex
-);
 
 const byExecutionPosition = <T extends { chainLayer?: number | null; chainIndex: number | null; id: string }>(
   left: T,
@@ -506,4 +506,93 @@ export const readStepAdmission = async (
   verdict: null,
   blocker: null,
   refusal: { reason: "not-found", message: "Task not found" },
+};
+
+const chainDetailInclude = {
+  assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
+  templateStep: {
+    select: {
+      name: true,
+      stepIndex: true,
+      outputKind: true,
+      taskTemplate: { select: { name: true } },
+    },
+  },
+  runs: { orderBy: { runNumber: "desc" as const }, take: 1 },
+} as const satisfies Prisma.TaskInclude;
+
+export type ChainDetailRead =
+  | { kind: "not-found" }
+  | { kind: "chainless" }
+  | {
+    kind: "chain";
+    chainId: string;
+    rows: Array<Prisma.TaskGetPayload<{ include: typeof chainDetailInclude }> & {
+      dispatchAfter: DispatchPredecessor | null;
+    }>;
+    firstTaskId: string | null;
+    dispatchAfter: DispatchPredecessor | null;
+    admissions: Map<string, FoundStepAdmission>;
+    control: Awaited<ReturnType<typeof readChainControlRecord>>;
+    recoveryRow: Awaited<ReturnType<PrismaClient["mergeRecoveryAttempt"]["findFirst"]>>;
+  };
+
+/** All database reads behind GET Chain, leaving only HTTP projection in app. */
+export const readChainDetail = async (
+  db: PrismaClient,
+  taskId: string,
+): Promise<ChainDetailRead> => {
+  const subject = await db.task.findUnique({
+    where: { id: taskId },
+    select: { id: true, projectId: true, chainId: true, chainIndex: true },
+  });
+  if (!subject) return { kind: "not-found" };
+  if (!subject.chainId) return { kind: "chainless" };
+
+  // A malformed null-index row remains its own one-row Chain instead of
+  // shifting the positions of valid rows that happen to share its chainId.
+  const storedRows = subject.chainIndex === null
+    ? [await db.task.findUniqueOrThrow({ where: { id: taskId }, include: chainDetailInclude })]
+    : await db.task.findMany({
+      where: { projectId: subject.projectId, chainId: subject.chainId, chainIndex: { not: null } },
+      orderBy: { chainIndex: "asc" },
+      include: chainDetailInclude,
+    });
+  const firstTask = [...storedRows].sort(byExecutionPosition)[0] ?? null;
+  const dispatchAfterTaskId = firstTask?.dispatchAfterTaskId ?? null;
+  const dispatchAfter = dispatchAfterTaskId === null
+    ? null
+    : await db.task.findFirst({
+      where: { id: dispatchAfterTaskId, projectId: subject.projectId },
+      select: { id: true, name: true, status: true },
+    });
+  const rows = storedRows.map((row) => ({
+    ...row,
+    dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
+  }));
+  const chainId = subject.chainId;
+  const [chainRead, recoveryRow] = await Promise.all([
+    db.$transaction(async (tx) => {
+      const control = await readChainControlRecord(tx, { projectId: subject.projectId, chainId });
+      const controls: ReadonlyMap<string, ChainControlSnapshot> = control === null
+        ? new Map()
+        : new Map([[chainKey(control), { ...control, held: control.state === "HELD" }]]);
+      const admissions = await readStepAdmissions(tx, rows.map((row) => row.id), { locked: false, controls });
+      return { admissions, control };
+    }),
+    db.mergeRecoveryAttempt.findFirst({
+      where: { integratorTask: { projectId: subject.projectId, chainId } },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+    }),
+  ]);
+  return {
+    kind: "chain",
+    chainId,
+    rows,
+    firstTaskId: firstTask?.id ?? null,
+    dispatchAfter,
+    admissions: chainRead.admissions,
+    control: chainRead.control,
+    recoveryRow,
+  };
 };

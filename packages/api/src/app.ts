@@ -3,8 +3,6 @@ import { createHash } from "node:crypto";
 import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
-  activateChainSuccessor,
-  ChainControlState,
   agentArchiveBlocker,
   applyInboxDecision,
   catalogRunnerForModel,
@@ -61,11 +59,16 @@ import {
   isRegressionVerificationOutputKind,
   type CandidateActivity,
   type CardRow,
-  type ChainControlSnapshot,
+  type ChainControlAddress,
   type DecisionRow,
   mergeRecoveryPhase,
   type MergeRecoveryAttempt,
   loadAgentSources,
+  chainControlReadProjection,
+  chainRunHistoryRefusal,
+  deleteChain,
+  holdChain,
+  resumeChain,
 } from "@anneal/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -84,7 +87,6 @@ import {
   etagMatches,
   operatorMoveTargets,
   readBoard,
-  readChainRepairTaskIds,
   readRepairChainByTask,
   readTaskList,
   serializeUsageCost,
@@ -116,11 +118,11 @@ import {
 } from "./runner-cli-availability.js";
 import {
   chainKey,
+  readChainDetail,
   chainProgress,
   chainProgressByChain,
   positions,
   readStepAdmission,
-  readStepAdmissions,
   stepName,
 } from "./chain.js";
 import {
@@ -213,7 +215,7 @@ type TaskChainResolution = {
  * boundary.
  */
 const resolveTaskChain = async (
-  tx: Prisma.TransactionClient,
+  tx: PrismaClient | Prisma.TransactionClient,
   taskId: string,
 ): Promise<TaskChainResolution | null> => {
   const task = await tx.task.findUnique({
@@ -234,30 +236,18 @@ const resolveTaskChain = async (
   };
 };
 
-const lockTaskRowsById = async (
-  tx: Prisma.TransactionClient,
-  taskIds: string[],
-): Promise<string[]> => {
-  if (taskIds.length === 0) return [];
-  const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT "id" FROM "Task"
-    WHERE "id" = ANY(${taskIds})
-    ORDER BY "id" FOR UPDATE
-  `;
-  return rows.map((row) => row.id);
+const resolveDirectChainAddress = async (
+  db: PrismaClient | Prisma.TransactionClient,
+  taskId: string,
+): Promise<ChainControlAddress | Refusal> => {
+  const task = await db.task.findUnique({
+    where: { id: taskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!task) return refusal("not-found", "Task not found");
+  if (!task.chainId) return refusal("conflict", "Task does not belong to a Chain");
+  return { projectId: task.projectId, chainId: task.chainId, taskId };
 };
-
-const chainActiveRunRefusal = (chainId: string): Refusal => refusal(
-  "conflict",
-  `Cannot delete Chain ${chainId}; a member has an active run`,
-  { code: "chain_delete_active_run", chainId },
-);
-
-const chainRunHistoryRefusal = (chainId: string): Refusal => refusal(
-  "conflict",
-  `Cannot delete Chain ${chainId}; a member has run history`,
-  { code: "chain_delete_run_history", chainId },
-);
 
 class TaskCreateOpenRunRefusal extends Error {
   constructor(readonly refusal: Refusal) {
@@ -899,109 +889,6 @@ const chainHoldInput = z.object({
 const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 }).strict();
-
-type ChainControlProjectionInput = {
-  projectId: string;
-  chainId: string;
-  state: ChainControlState;
-  heldLayer: number | null;
-  heldAt: Date | null;
-  holdRequestId: string | null;
-  holdReason: string | null;
-  releasedAt: Date | null;
-  releaseRequestId: string | null;
-  holdGeneration: number;
-};
-
-/** The Chain read contract exposes operator facts, not internal CAS metadata. */
-export const chainControlReadProjection = (control: ChainControlProjectionInput) => ({
-  state: control.state === ChainControlState.HELD ? "held" as const : "released" as const,
-  heldLayer: control.heldLayer,
-  heldAt: control.heldAt,
-  holdRequestId: control.holdRequestId,
-  holdReason: control.holdReason,
-  releasedAt: control.releasedAt,
-});
-
-/** Mutation responses retain transition metadata needed by idempotent clients. */
-export const chainControlMutationProjection = (control: ChainControlProjectionInput) => ({
-  projectId: control.projectId,
-  chainId: control.chainId,
-  state: control.state === ChainControlState.HELD ? "held" as const : "released" as const,
-  heldLayer: control.heldLayer,
-  heldAt: control.heldAt,
-  holdRequestId: control.holdRequestId,
-  holdReason: control.holdReason,
-  releasedAt: control.releasedAt,
-  releaseRequestId: control.releaseRequestId,
-  holdGeneration: control.holdGeneration,
-});
-
-type ChainResumeRow = {
-  id: string;
-  projectId: string;
-  name: string;
-  chainId: string | null;
-  chainIndex: number | null;
-  chainLayer: number | null;
-  status: TaskStatus;
-  assigneeType: AssigneeType;
-  assigneeAgentId: string | null;
-  repoId: string | null;
-};
-
-const executionLayer = (task: Pick<ChainResumeRow, "chainLayer" | "chainIndex">): number | null => (
-  task.chainLayer ?? task.chainIndex
-);
-
-/**
- * Resume may reuse the normal successor activation routine, but it needs a
- * completed predecessor to anchor that routine. The hold layer is the first
- * non-DONE layer at the time of the hold, so it must be complete before a
- * release can activate anything. Once that is true, choose the highest fully
- * complete layer deterministically; the routine then selects the first higher
- * layer that still has work and applies all of its ordinary guards.
- */
-const resumeActivationAnchor = (
-  rows: readonly ChainResumeRow[],
-  heldLayer: number | null,
-): ChainResumeRow | null => {
-  if (heldLayer === null) return null;
-  const layers = [...new Set(rows.map(executionLayer).filter((layer): layer is number => layer !== null))];
-  const heldRows = rows.filter((row) => executionLayer(row) === heldLayer);
-  if (heldRows.length === 0 || !heldRows.every((row) => row.status === TaskStatus.DONE)) return null;
-  const completeLayer = layers
-    .filter((layer) => rows.some((row) => executionLayer(row) === layer)
-      && rows.filter((row) => executionLayer(row) === layer).every((row) => row.status === TaskStatus.DONE))
-    .sort((left, right) => right - left)[0];
-  if (completeLayer === undefined) return null;
-  return rows
-    .filter((row) => executionLayer(row) === completeLayer)
-    .sort((left, right) => (
-      (left.chainIndex ?? Number.MAX_SAFE_INTEGER) - (right.chainIndex ?? Number.MAX_SAFE_INTEGER)
-        || left.id.localeCompare(right.id)
-    ))[0] ?? null;
-};
-
-const resumeActivationNeedsSourceRun = (
-  rows: readonly ChainResumeRow[],
-  anchor: ChainResumeRow,
-): boolean => {
-  const anchorLayer = executionLayer(anchor);
-  if (anchorLayer === null) return false;
-  const nextLayer = [...new Set(rows.map(executionLayer).filter((layer): layer is number => layer !== null))]
-    .filter((layer) => layer > anchorLayer && rows.some((row) => executionLayer(row) === layer && row.status !== TaskStatus.DONE))
-    .sort((left, right) => left - right)[0];
-  if (nextLayer === undefined) return false;
-  return rows
-    // Activation handles an operator-parked successor before it considers
-    // assignee shape. Resume must preserve that ordering instead of demanding
-    // a source session for work that will remain parked.
-    .filter((row) => executionLayer(row) === nextLayer
-      && row.status !== TaskStatus.DONE
-      && row.status !== TaskStatus.BACKLOG)
-    .some((row) => row.assigneeType !== AssigneeType.AGENT || row.assigneeAgentId === null || row.repoId === null);
-};
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
@@ -2505,100 +2392,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.get("/tasks/:taskId/chain", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const subject = await db.task.findUnique({
-      where: { id: taskId },
-      select: { id: true, projectId: true, chainId: true, chainIndex: true, status: true },
-    });
-    if (!subject) return context.json({ error: "Task not found" }, 404);
-    if (!subject.chainId) return context.json({ chainId: null, total: 0, done: 0, steps: [] });
-    const chainId = subject.chainId;
-
-    const chainInclude = {
-      assigneeAgent: { select: {
-        id: true,
-        title: true,
-        archivedAt: true,
-      } },
-      templateStep: {
-        select: {
-          name: true,
-          stepIndex: true,
-          outputKind: true,
-          taskTemplate: { select: { name: true } },
-        },
-      },
-      runs: { orderBy: { runNumber: "desc" as const }, take: 1 },
-    };
-    // A chainId with a null chainIndex is a broken row the advancer already
-    // refuses to follow. PostgreSQL sorts NULL last, so leaving it in the query
-    // would render it at the bottom of somebody else's chain instead of as its
-    // own one-row chain — and would shift every real row's position by one.
-    const rows = subject.chainIndex === null
-      ? [await db.task.findUniqueOrThrow({ where: { id: taskId }, include: chainInclude })]
-      : await db.task.findMany({
-        where: { projectId: subject.projectId, chainId: subject.chainId, chainIndex: { not: null } },
-        orderBy: { chainIndex: "asc" },
-        include: chainInclude,
-      });
-
-    // Bindings are stored only on the first task. Keep the common unbound path
-    // at zero predecessor lookups, and resolve the one pointer only when the
-    // chain's first execution row carries it. This is deliberately separate
-    // from the row include above: including the self-relation would make every
-    // historical chain pay for a relation query it cannot use.
-    const firstTask = [...rows].sort((left, right) => (
-      (left.chainLayer ?? left.chainIndex ?? 0) - (right.chainLayer ?? right.chainIndex ?? 0)
-        || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
-        || left.id.localeCompare(right.id)
-    ))[0];
-    const dispatchAfterTaskId = firstTask?.dispatchAfterTaskId ?? null;
-    const dispatchAfter = dispatchAfterTaskId === null
-      ? null
-      : await db.task.findFirst({
-        where: { id: dispatchAfterTaskId, projectId: subject.projectId },
-        select: { id: true, name: true, status: true },
-      });
-    const chainRows = rows.map((row) => ({
-      ...row,
-      dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
-    }));
-
-    const [chainRead, recoveryRow] = await Promise.all([
-      db.$transaction(async (tx) => {
-        // Read the control authority once in the same transaction used for
-        // admission. The route projects this exact row, while the shared
-        // admission seam consumes the same snapshot for held-layer startability.
-        const control = await tx.chainControl.findUnique({
-          where: { projectId_chainId: { projectId: subject.projectId, chainId } },
-          select: {
-            projectId: true,
-            chainId: true,
-            state: true,
-            heldLayer: true,
-            heldAt: true,
-            holdRequestId: true,
-            holdReason: true,
-            releasedAt: true,
-            releaseRequestId: true,
-            holdGeneration: true,
-          },
-        });
-        const controls: ReadonlyMap<string, ChainControlSnapshot> = control === null
-          ? new Map()
-          : new Map([[chainKey({ projectId: control.projectId, chainId: control.chainId }), {
-            ...control,
-            held: control.state === ChainControlState.HELD,
-          }]]);
-        const admissions = await readStepAdmissions(tx, chainRows.map((row) => row.id), { locked: false, controls });
-        return { admissions, control };
-      }),
-      db.mergeRecoveryAttempt.findFirst({
-        where: { integratorTask: { projectId: subject.projectId, chainId } },
-        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
-      }),
-    ]);
-    const { admissions, control } = chainRead;
-    const mergeRecovery = mergeRecoveryProjection(recoveryRow);
+    const detail = await readChainDetail(db, taskId);
+    if (detail.kind === "not-found") return context.json({ error: "Task not found" }, 404);
+    if (detail.kind === "chainless") return context.json({ chainId: null, total: 0, done: 0, steps: [] });
+    const { admissions, chainId, control, dispatchAfter, firstTaskId, rows: chainRows } = detail;
+    const mergeRecovery = mergeRecoveryProjection(detail.recoveryRow);
     const ordinals = positions(chainRows);
     const progress = chainProgress(chainRows);
 
@@ -2630,7 +2428,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           : null,
         holdRefusal: admissions.get(row.id)?.holdRefusal?.message ?? null,
         currentExecution: admissions.get(row.id)?.facts.active ?? false,
-        blockedOn: row.id === firstTask?.id
+        blockedOn: row.id === firstTaskId
           && row.dispatchAfterTaskId !== null
           && dispatchAfter !== null
           && dispatchAfter.status !== TaskStatus.DONE
@@ -2643,239 +2441,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/chain/hold", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, chainHoldInput);
-    const result = await readCommitted(db, async (tx) => {
-      // Chain identity is immutable after dispatch, so this unlocked read only
-      // chooses the mutex. Every fact used for the write is re-read after the
-      // full-chain lock, just as completion and task mutation do.
-      const identity = await tx.task.findUnique({
-        where: { id: taskId },
-        select: { projectId: true, chainId: true },
-      });
-      if (!identity) return refusal("not-found", "Task not found");
-      if (!identity.chainId) return refusal("conflict", "Task does not belong to a Chain");
-
-      await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-      const chainRows = await tx.task.findMany({
-        where: { projectId: identity.projectId, chainId: identity.chainId },
-        select: { id: true, status: true, chainIndex: true, chainLayer: true },
-      });
-      // Keep the route's task addressing scoped to the same project/Chain pair
-      // selected above. This is defensive against malformed legacy rows and
-      // makes a missing row a normal 404 instead of creating an orphan control.
-      if (!chainRows.some((row) => row.id === taskId)) return refusal("not-found", "Task not found");
-
-      const existing = await tx.chainControl.findUnique({
-        where: { projectId_chainId: { projectId: identity.projectId, chainId: identity.chainId } },
-      });
-      // Event history is the durable idempotency ledger. A delayed retry of an
-      // accepted Hold must remain a no-op even after Resume has replaced the
-      // mutable state with RELEASED.
-      const priorRequest = existing === null ? null : await tx.chainControlEvent.findUnique({
-        where: {
-          chainControlId_kind_requestId: {
-            chainControlId: existing.id,
-            kind: ChainControlState.HELD,
-            requestId: body.requestId,
-          },
-        },
-      });
-      if (priorRequest || existing?.state === ChainControlState.HELD) {
-        if (!existing) throw new Error("Chain control event exists without its authority");
-        return {
-          control: chainControlMutationProjection(existing),
-          duplicate: true,
-        };
-      }
-
-      const heldLayer = chainRows
-        .filter((row) => row.status !== TaskStatus.DONE)
-        .map((row) => row.chainLayer ?? row.chainIndex)
-        .filter((layer): layer is number => layer !== null)
-        .sort((left, right) => left - right)[0];
-      if (heldLayer === undefined) {
-        return refusal("conflict", "Cannot hold a completed Chain; there is nothing left to hold");
-      }
-
-      const now = new Date();
-      const holdGeneration = (existing?.holdGeneration ?? 0) + 1;
-      const held = existing
-        ? await tx.chainControl.update({
-          where: { id: existing.id },
-          data: {
-            state: ChainControlState.HELD,
-            heldLayer,
-            heldAt: now,
-            holdRequestId: body.requestId,
-            holdReason: body.reason ?? null,
-            releasedAt: null,
-            releaseRequestId: null,
-            holdGeneration,
-          },
-        })
-        : await tx.chainControl.create({
-          data: {
-            projectId: identity.projectId,
-            chainId: identity.chainId,
-            state: ChainControlState.HELD,
-            heldLayer,
-            heldAt: now,
-            holdRequestId: body.requestId,
-            holdReason: body.reason ?? null,
-            holdGeneration,
-          },
-        });
-      await tx.chainControlEvent.create({
-        data: {
-          chainControlId: held.id,
-          kind: ChainControlState.HELD,
-          layer: heldLayer,
-          actorType: "operator",
-          actorId: null,
-          requestId: body.requestId,
-          reason: body.reason ?? null,
-          createdAt: now,
-          holdGeneration,
-        },
-      });
-      return {
-        control: chainControlMutationProjection(held),
-        duplicate: false,
-      };
-    });
+    const address = await resolveDirectChainAddress(db, taskId);
+    if ("message" in address) return refusalJson(context, address);
+    const result = await readCommitted(db, (tx) => holdChain(tx, { ...address, ...body }));
     if ("message" in result) return refusalJson(context, result);
     return context.json(result);
   });
   app.post("/tasks/:taskId/chain/resume", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, chainResumeInput);
-    const result = await readCommitted(db, async (tx) => {
-      // Identity chooses the mutex only. The chain rows and control authority
-      // are re-read after the full-chain lock, so Resume serializes with both
-      // completion and Hold before deciding whether it may activate work.
-      const identity = await tx.task.findUnique({
-        where: { id: taskId },
-        select: { projectId: true, chainId: true },
-      });
-      if (!identity) return refusal("not-found", "Task not found");
-      if (!identity.chainId) return refusal("conflict", "Task does not belong to a Chain");
-
-      await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-      const chainRows = await tx.task.findMany({
-        where: { projectId: identity.projectId, chainId: identity.chainId },
-        select: {
-          id: true,
-          projectId: true,
-          name: true,
-          chainId: true,
-          chainIndex: true,
-          chainLayer: true,
-          status: true,
-          assigneeType: true,
-          assigneeAgentId: true,
-          repoId: true,
-        },
-      });
-      if (!chainRows.some((row) => row.id === taskId)) return refusal("not-found", "Task not found");
-
-      const existing = await tx.chainControl.findUnique({
-        where: { projectId_chainId: { projectId: identity.projectId, chainId: identity.chainId } },
-      });
-      if (!existing) {
-        return { control: null, duplicate: true, nextTaskId: null, gated: false };
-      }
-      // The append-only event ledger is the durable idempotency key. Looking
-      // only at the mutable RELEASED row would let a delayed Resume replay
-      // release a later Hold, which is precisely the transition this route
-      // must never resurrect.
-      const priorRequest = await tx.chainControlEvent.findUnique({
-        where: {
-          chainControlId_kind_requestId: {
-            chainControlId: existing.id,
-            kind: ChainControlState.RELEASED,
-            requestId: body.requestId,
-          },
-        },
-      });
-      if (priorRequest || existing.state !== ChainControlState.HELD) {
-        return {
-          control: chainControlMutationProjection(existing),
-          duplicate: true,
-          nextTaskId: null,
-          gated: false,
-        };
-      }
-      if (existing.heldLayer === null) {
-        throw new Error("Held Chain control is missing its held layer");
-      }
-
-      const anchor = resumeActivationAnchor(chainRows, existing.heldLayer);
-      const anchorLayer = anchor === null ? null : executionLayer(anchor);
-      const sourceRun = anchorLayer === null
-        ? null
-        : await tx.run.findFirst({
-          where: {
-            taskId: { in: chainRows.filter((row) => executionLayer(row) === anchorLayer).map((row) => row.id) },
-            status: RunStatus.SUCCEEDED,
-            session: { isNot: null },
-          },
-          orderBy: [{ endedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
-          select: { id: true },
-        });
-      if (anchor !== null && sourceRun === null && resumeActivationNeedsSourceRun(chainRows, anchor)) {
-        return refusal("conflict", "Cannot resume an approval layer without a succeeded source Run session");
-      }
-
-      const now = new Date();
-      // Keep the generation in the release row and event. The state and
-      // generation predicate are a compare-and-set even though the Chain
-      // mutex is the normal serializer; this closes a direct writer race and
-      // makes a losing release side-effect free.
-      const releasedCount = await tx.chainControl.updateMany({
-        where: {
-          id: existing.id,
-          state: ChainControlState.HELD,
-          holdGeneration: existing.holdGeneration,
-        },
-        data: {
-          state: ChainControlState.RELEASED,
-          releasedAt: now,
-          releaseRequestId: body.requestId,
-        },
-      });
-      if (releasedCount.count !== 1) {
-        const current = await tx.chainControl.findUniqueOrThrow({ where: { id: existing.id } });
-        return {
-          control: chainControlMutationProjection(current),
-          duplicate: true,
-          nextTaskId: null,
-          gated: false,
-        };
-      }
-      const released = await tx.chainControl.findUniqueOrThrow({ where: { id: existing.id } });
-      await tx.chainControlEvent.create({
-        data: {
-          chainControlId: released.id,
-          kind: ChainControlState.RELEASED,
-          layer: existing.heldLayer,
-          actorType: "operator",
-          actorId: null,
-          requestId: body.requestId,
-          reason: null,
-          createdAt: now,
-          holdGeneration: existing.holdGeneration,
-        },
-      });
-
-      const activated = anchor
-        ? await activateChainSuccessor(tx, anchor, { sourceRunId: sourceRun?.id ?? null }, now)
-        : { nextTaskId: null, gated: false };
-      return {
-        control: chainControlMutationProjection(released),
-        duplicate: false,
-        nextTaskId: activated.nextTaskId,
-        gated: activated.gated,
-      };
-    });
+    const address = await resolveDirectChainAddress(db, taskId);
+    if ("message" in address) return refusalJson(context, address);
+    const result = await readCommitted(db, (tx) => resumeChain(tx, { ...address, ...body }, new Date()));
     if ("message" in result) return refusalJson(context, result);
     return context.json(result);
   });
@@ -2887,61 +2464,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.delete("/tasks/:taskId/chain", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    let deletionChainId: string | null = null;
+    const resolved = await resolveTaskChain(db, taskId);
+    if (!resolved) return refusalJson(context, refusal("not-found", "Task not found"));
+    if (!resolved.chain) return refusalJson(context, refusal("conflict", "Task does not belong to a Chain"));
+    const address = { ...resolved.chain, taskId };
     try {
-      const result = await readCommitted(db, async (tx) => {
-        // The first read chooses a structural mutex that exists even after the
-        // final member is gone. Membership and marker bindings are re-read only
-        // after that mutex excludes public chained-task appends.
-        const resolved = await resolveTaskChain(tx, taskId);
-        if (!resolved) return refusal("not-found", "Task not found");
-        if (!resolved.chain) return refusal("conflict", "Task does not belong to a Chain");
-        await lockChainStructure(tx, resolved.chain);
-        const current = await resolveTaskChain(tx, taskId);
-        if (!current) return refusal("not-found", "Task not found");
-        if (!current.chain) return refusal("conflict", "Task does not belong to a Chain");
-        const chain = current.chain;
-        deletionChainId = chain.chainId;
-
-        const chainTaskIds = await lockChainRows(tx, chain);
-        const repairTaskIds = await readChainRepairTaskIds(tx, {
-          projectId: chain.projectId,
-          chainTaskIds,
-        });
-        const taskIds = [...new Set([...chainTaskIds, ...repairTaskIds])];
-        // Avoid taking a detached repair lock behind a completion that already
-        // owns that task and is waiting for the Chain lock. Such a completion is
-        // active, so this read can refuse without forming the opposite lock order.
-        const active = await tx.run.count({
-          where: { taskId: { in: taskIds }, status: { in: ACTIVE_RUN_STATUSES } },
-        });
-        if (active > 0) return chainActiveRunRefusal(chain.chainId);
-
-        const lockedRepairIds = await lockTaskRowsById(tx, repairTaskIds);
-        const survivingTaskIds = [...new Set([...chainTaskIds, ...lockedRepairIds])];
-        // A run can be queued after the first read while this transaction waits
-        // for a repair row. Re-check under every Task mutex before deleting.
-        const activeAfterLock = await tx.run.count({
-          where: { taskId: { in: survivingTaskIds }, status: { in: ACTIVE_RUN_STATUSES } },
-        });
-        if (activeAfterLock > 0) return chainActiveRunRefusal(chain.chainId);
-
-        // Run and Session both restrict Task deletion. History is deliberately
-        // retained, so deleting it would exceed this operation's Task-only scope.
-        const runHistory = await tx.run.count({ where: { taskId: { in: survivingTaskIds } } });
-        if (runHistory > 0) return chainRunHistoryRefusal(chain.chainId);
-
-        await tx.task.deleteMany({ where: { id: { in: survivingTaskIds } } });
-        return { deleted: survivingTaskIds.length };
-      });
+      const result = await readCommitted(db, (tx) => deleteChain(tx, address));
       if ("message" in result) return refusalJson(context, result);
       return context.body(null, 204);
     } catch (error: unknown) {
       // Defensive mapping for another restrictive history relation introduced
       // after the explicit Run check: callers still receive a guided refusal,
       // never the generic Prisma P2003 response.
-      if (deletionChainId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
-        return refusalJson(context, chainRunHistoryRefusal(deletionChainId));
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        return refusalJson(context, chainRunHistoryRefusal(address.chainId));
       }
       throw error;
     }
