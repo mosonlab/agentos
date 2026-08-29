@@ -421,14 +421,21 @@ export const createMergeTailRepairTask = async (
   // it. Without this the repair agent sees only the verdict summary and no
   // Feature brief, acceptance criteria, or review reports, and the narrowest
   // reading of that summary is the whole job it can do. Same query, ordering,
-  // and rendering as a chain step's: what the chain steps could see, the repair
-  // for those steps sees too.
+  // and rendering as a chain step's, filtered to the kinds each repair reads:
+  // intent and handoffs for every kind, the review reports only for the
+  // review-fix that must trace their finding ids. Planning-stage and
+  // documentation outputs repair nothing and stay out.
+  const repairPriorOutputKinds = input.repairKind === "review-fix"
+    ? ["spec", "implementation", "sol-findings", "blind-findings", "fixed-implementation"]
+    : input.repairKind === "gate-fix"
+      ? ["spec", "implementation", "fixed-implementation"]
+      : ["spec", "implementation"];
   const priorOutputs = await tx.taskStepOutput.findMany({
     where: { task: {
       projectId: regressionTask.projectId,
       chainId: regressionTask.chainId,
       chainIndex: { lt: regressionTask.chainIndex },
-    } },
+    }, kind: { in: repairPriorOutputKinds } },
     select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
     orderBy: { task: { chainIndex: "asc" } },
   });

@@ -198,6 +198,24 @@ const finishRecoveryPass = async (
   });
 };
 
+const parkCurrentHeadAdoptionFailure = async (label: string) => {
+  const seeded = await seedStopped("canonical-compound-readiness", label);
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await recordRecoveryPass(seeded, BASE_3, HEAD_2);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const failure = "readiness evaluation failed: Recovery authorization could not adopt the verified regression head";
+  await db.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
+    status: "BLOCKED_DOWNSTREAM", failureReason: failure, endedAt: new Date(),
+  } });
+  await db.task.updateMany({
+    where: { id: { in: [seeded.gateTask.id, seeded.readinessTask!.id, seeded.integratorTask!.id] } },
+    data: { status: TaskStatus.REVIEW, failureReason: failure },
+  });
+  return { seeded, aggregate, failure };
+};
+
 test("queued recovery keeps generic PATCH, retry, and enqueue blocked until readiness completes", async () => {
   const seeded = await seedStopped("canonical-compound-readiness", "queued-recovery-guard");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
@@ -245,10 +263,10 @@ test("recovery adopts the verified head produced by merging the current base bef
   const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-adopts-regression-head");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
 
-  await recordRecoveryPass(seeded, BASE_2, HEAD_2);
+  await recordRecoveryPass(seeded, BASE_3, HEAD_2);
   const tick = await readinessTick(
     db,
-    reader(snapshot(BASE_2, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    reader(snapshot(BASE_3, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
     new Date(),
     5,
     releaseChainLease,
@@ -260,6 +278,7 @@ test("recovery adopts the verified head produced by merging the current base bef
     where: { integratorTaskId: seeded.integratorTask!.id },
   });
   assert.equal(aggregate.status, "SUCCEEDED");
+  assert.equal(aggregate.currentBaseSha, BASE_3);
   assert.equal(aggregate.authorizedHeadSha, HEAD_2);
   const authorization = await db.taskActivity.findFirstOrThrow({
     where: { taskId: seeded.readinessTask!.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } },
@@ -267,8 +286,95 @@ test("recovery adopts the verified head produced by merging the current base bef
   });
   const parsed = parseAuthorizationMetadata(authorization.metadata);
   assert.equal(parsed.status, "ok");
-  if (parsed.status === "ok") assert.equal(parsed.payload.headSha, HEAD_2);
+  if (parsed.status === "ok") {
+    assert.equal(parsed.payload.baseSha, BASE_3);
+    assert.equal(parsed.payload.headSha, HEAD_2);
+  }
   assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
+});
+
+test("recovery authorization fails closed when its aggregate changes after the leased read", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-adoption-cas");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await recordRecoveryPass(seeded, BASE_3, HEAD_2);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const mutateBeforeLeaseCallback: WithMergeLease = async (target, fn, leaseDb) => {
+    await leaseDb.mergeRecoveryAttempt.update({
+      where: { id: aggregate.id },
+      data: { recoveryRunId: seeded.gateRun.id },
+    });
+    return withMergeLease(target, fn, leaseDb, {
+      acquire: acquireChainLease,
+      release: releaseLeaseAdapter,
+    });
+  };
+
+  const tick = await readinessTick(
+    db,
+    reader(snapshot(BASE_3, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    new Date(),
+    5,
+    releaseChainLease,
+    mutateBeforeLeaseCallback,
+  );
+  assert.deepEqual(tick, { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
+  const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");
+  assert.equal(
+    stopped.failureReason,
+    "readiness evaluation failed: Recovery authorization could not adopt the verified regression head",
+  );
+  assert.equal(stopped.recoveryRunId, seeded.gateRun.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 0);
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0, "the concurrent run-binding mutation stays closed");
+});
+
+test("the current head-adoption failure reopens once and adopts leased base and head evidence", async () => {
+  const { seeded, aggregate } = await parkCurrentHeadAdoptionFailure("readiness-recovery-reopens-current-adoption-stop");
+  assert.equal(aggregate.currentBaseSha, BASE_2);
+
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 1);
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0);
+  const reopened = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(reopened.status, "REPAIRING");
+  assert.equal(reopened.currentBaseSha, BASE_2, "reopen preserves the pre-lease aggregate base");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readinessTask!.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.REVIEW);
+
+  const tick = await readinessTick(
+    db,
+    reader(snapshot(BASE_3, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    new Date(),
+    5,
+    releaseChainLease,
+    runWithMergeLease,
+  );
+  assert.equal(tick.authorized, 1);
+  const completed = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(completed.status, "SUCCEEDED");
+  assert.equal(completed.currentBaseSha, BASE_3);
+  assert.equal(completed.authorizedHeadSha, HEAD_2);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
+});
+
+test("current head-adoption reopen refuses different failures and run bindings", async () => {
+  let parked = await parkCurrentHeadAdoptionFailure("readiness-recovery-current-adoption-wrong-reason");
+  await db.mergeRecoveryAttempt.update({
+    where: { id: parked.aggregate.id },
+    data: { failureReason: `${parked.failure}: different` },
+  });
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0);
+
+  await resetTestDb(db);
+  parked = await parkCurrentHeadAdoptionFailure("readiness-recovery-current-adoption-wrong-run");
+  await db.mergeRecoveryAttempt.update({
+    where: { id: parked.aggregate.id },
+    data: { recoveryRunId: parked.seeded.gateRun.id },
+  });
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0);
 });
 
 test("the deployed head-adoption fix reopens its exact legacy downstream stop once", async () => {
