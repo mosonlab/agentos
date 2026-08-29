@@ -104,3 +104,35 @@ A backlog card is a dispatch-ready brief waiting for a decision, not a work item
   3. Independent — dispatch in parallel, no justification needed; the merge tail and the deploy quiet window already serialize delivery.
   Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — schema migrations touching the same tables, changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list).
 - Archive the card at the moment of instantiation. The archived card remains recoverable in the Archived view; re-dispatching its work is a new decision, not a revival of the card.
+
+## Board column semantics
+
+The board shows where work sits in the intent-to-delivery flow. The
+[Backlog card lifecycle](#backlog-card-lifecycle) defines card creation,
+dispatch, and archival; the definitions here cover the column semantics.
+
+- **Backlog — intent.** An un-instantiated brief that is still being refined,
+  awaits a decision, or is deliberately parked; it is not connected to
+  execution. For an indefinitely parked HUMAN card, prefix its title with
+  `Parked:`.
+- **Todo — runnable execution.** An instantiated chain or step whose
+  specification of record is final, runnable now or waiting for activation or
+  a dependency unlock. The entry boundary is explicit: un-instantiated intent
+  enters the board in Backlog; instantiated chains and their steps enter in
+  Todo and then move through the later columns.
+- **Doing — active execution.** The runner has activated an AGENT task and work
+  is in progress.
+- **Review — awaiting a lifecycle decision.** An AGENT task is paused for an
+  approval or review gate, or has surfaced a run issue that needs attention
+  before the chain can continue.
+- **Done — complete.** The task or chain step is finished.
+
+An operator can stop and park a running chain step, which returns it to Backlog
+as a parked step. Resume it with **Start now** or **Recover parked step**, not
+ordinary card dispatch.
+
+The operator owns Backlog and Todo transitions and marking HUMAN tasks Done.
+The runner and chain scheduler own Doing, Review, and Done transitions for
+AGENT tasks. In the usual flow, the operator moves finalized intent from
+Backlog to Todo, then the runner advances each instantiated step through Doing,
+Review, and Done.
