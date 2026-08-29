@@ -148,6 +148,7 @@ export const DEPLOY_RELEASE_EXTRA_ARTIFACT_PATHS = Object.freeze([
   "package.json",
   "package-lock.json",
   "packages/db/prisma",
+  "packages/db/src",
   "packages/build-info/index.mjs",
   "packages/build-info/index.d.ts",
   "packages/build-info/package.json",

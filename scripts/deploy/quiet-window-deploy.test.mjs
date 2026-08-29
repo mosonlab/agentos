@@ -83,6 +83,12 @@ const minimalBuildTree = (root, revision) => {
     commit: revision,
     dirty: false,
   })}\n`);
+  const prisma = join(root, "packages/db/prisma");
+  const source = join(root, "packages/db/src");
+  mkdirSync(prisma, { recursive: true });
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(prisma, "preflight.ts"), 'import { census } from "../src/schema-census.js";\nvoid census;\n');
+  writeFileSync(join(source, "schema-census.ts"), "export const census = true;\n");
 };
 
 const removeTree = (root) => {
@@ -127,6 +133,7 @@ test("release artifact inventory includes deploy runtime and workspace dependenc
   assert.deepEqual(workspaceDependencyPaths(root), ["apps/web/node_modules", "packages/api/node_modules"]);
   const paths = deployReleaseArtifactPaths(root);
   assert.ok(paths.includes("scripts/deploy"));
+  assert.ok(paths.includes("packages/db/src"));
   for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) assert.ok(paths.includes(path), path);
   rmSync(root, { recursive: true, force: true });
 });
@@ -180,7 +187,7 @@ test("standalone builder creates a verified exact-commit release", () => {
     nodeBinary: "/node",
     npmBinary: "/npm",
     requiredPaths: ["packages/api/dist"],
-    artifactPaths: () => ["packages/api/dist"],
+    artifactPaths: () => ["packages/api/dist", "packages/db/prisma", "packages/db/src"],
     optionalArtifactPaths: () => [],
     execute: (program, args, options = {}) => {
       commands.push({ program, args });
@@ -188,12 +195,34 @@ test("standalone builder creates a verified exact-commit release", () => {
     },
   });
   assert.equal(artifact.revision, revisions.to);
+  assert.deepEqual(artifact.dbMaintenanceSourceImports, ["schema-census"]);
   assert.match(artifact.releaseName, new RegExp(`^${revisions.to}-[0-9a-f]{64}$`, "u"));
   assert.equal(findReleaseArtifact({ deployRoot, revision: revisions.to }).releaseName, artifact.releaseName);
   assert.equal(commands.length, 4);
   assert.deepEqual(commands.slice(1).map(({ args }) => args.slice(-2)), [
     ["--detach", revisions.to], ["/npm", "ci"], ["run", "build"],
   ]);
+  removeTree(deployRoot);
+});
+
+test("artifact verification rejects an incomplete DB maintenance runtime before activation", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-runtime-closure-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  const assembled = assembleReleaseDirectory({
+    stageRoot: source,
+    deployRoot,
+    revision: revisions.to,
+    artifactPaths: ["packages/api/dist", "packages/db/prisma"],
+    optionalArtifactPaths: [],
+  });
+  assert.throws(
+    () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+    (error) => error instanceof DeployFailure
+      && error.reason === "release-artifact-runtime-incomplete"
+      && error.detail === "packages/db/src-missing",
+  );
   removeTree(deployRoot);
 });
 

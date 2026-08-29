@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -18,6 +18,41 @@ const fail = (reason, detail) => {
   throw new DeployFailure(reason, detail);
 };
 
+const maintenanceSourceImports = (releaseDirectory) => {
+  const prismaRoot = join(releaseDirectory, "packages/db/prisma");
+  const sourceRoot = join(releaseDirectory, "packages/db/src");
+  if (!existsSync(prismaRoot) || lstatSync(prismaRoot).isSymbolicLink() || !lstatSync(prismaRoot).isDirectory()) {
+    fail("release-artifact-runtime-incomplete", "packages/db/prisma-missing");
+  }
+  if (!existsSync(sourceRoot) || lstatSync(sourceRoot).isSymbolicLink() || !lstatSync(sourceRoot).isDirectory()) {
+    fail("release-artifact-runtime-incomplete", "packages/db/src-missing");
+  }
+  const imports = new Set();
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name.endsWith(".ts")) {
+        const source = readFileSync(path, "utf8");
+        for (const match of source.matchAll(/\bfrom\s+["']\.\.\/src\/(?<module>[^"']+)\.js["']/gu)) {
+          imports.add(match.groups.module);
+        }
+      }
+    }
+  };
+  visit(prismaRoot);
+  for (const imported of imports) {
+    if (imported.split("/").some((component) => component === ".." || component === "")) {
+      fail("release-artifact-runtime-incomplete", "packages/db/src-import-invalid");
+    }
+    const sourcePath = join(sourceRoot, `${imported}.ts`);
+    if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) {
+      fail("release-artifact-runtime-incomplete", `packages/db/src/${imported}.ts-missing`);
+    }
+  }
+  return Object.freeze([...imports].sort());
+};
+
 export const verifyReleaseArtifact = ({ deployRoot, revision, releaseName }) => {
   if (!SHA.test(revision ?? "")) fail("release-artifact-invalid", "target-commit-invalid");
   const identity = RELEASE.exec(releaseName ?? "")?.groups;
@@ -28,10 +63,12 @@ export const verifyReleaseArtifact = ({ deployRoot, revision, releaseName }) => 
   if (status.isSymbolicLink() || !status.isDirectory()) fail("release-artifact-invalid", "release-path-not-directory");
   try {
     const verified = verifyReleaseDirectory({ releaseDirectory, revision, digest: identity.digest });
+    const dbMaintenanceSourceImports = maintenanceSourceImports(verified.releaseDirectory);
     return Object.freeze({
       ...verified,
       releaseDirectoryIdentity: verified.releaseName,
       buildStamp: verified.apiBuildStamp,
+      dbMaintenanceSourceImports,
     });
   } catch (error) {
     if (error instanceof DeployFailure && error.reason === "release-digest-mismatch") {

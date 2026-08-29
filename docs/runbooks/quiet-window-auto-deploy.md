@@ -17,8 +17,10 @@ previous -> releases/...      pointer rollback target
 ```
 
 Release artifacts contain the compiled applications, runtime dependency graph,
-Prisma schema and generated client, native assets, deployment scripts, build
-stamps, and canonical agent sources. They contain no `.env`, credentials, or
+Prisma schema, DB maintenance source modules, generated client, native assets,
+deployment scripts, build stamps, and canonical agent sources. The verifier
+checks every Prisma maintenance import rooted at `packages/db/src` before the
+quiet window. Release artifacts contain no `.env`, credentials, or
 mutable operator state. Every excluded secret-shaped path is written to the
 builder log and the release manifest.
 
