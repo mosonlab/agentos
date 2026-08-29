@@ -110,7 +110,7 @@ was released only by the other chain's failure, not by its success.
 
 Acquire happens in exactly one place, and it is a prompt, not code:
 
-- `agents/templates/direct-engineer-workflow/05-regression-verification.md:16`
+- `agents/templates/direct-engineer-workflow/06-regression-verification.md:16`
 - `agents/templates/compound-engineer-workflow/10-regression-verification.md:16`
 
 Both say: "before the first fetch, acquire the chain merge lease with

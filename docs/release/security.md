@@ -15,9 +15,11 @@ to face a network.
 
 - The API refuses to start on anything but `127.0.0.1`. A non-loopback
   `API_HOST` is a startup refusal (`api-host-not-loopback`), not a warning.
-- The PostgreSQL service defined by `docker-compose.yml` publishes on
-  `127.0.0.1:5432` only, and the release migration path refuses a Compose file
-  whose published bind is not loopback.
+- The repository's `docker-compose.yml` publishes PostgreSQL on
+  `127.0.0.1:5432`. The release migration path refuses an explicit non-loopback
+  bind. Compose shorthand with no bind emits a notice because it publishes on
+  every interface, while the migration target URL must still name literal
+  loopback.
 - The web console is served at `http://127.0.0.1:5173` and its dev/preview
   server decides per request that the caller is its own loopback origin before
   it will attach the operator's authority.
