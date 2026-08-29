@@ -154,7 +154,12 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       throw error;
     }
     try {
-      context = { ...context, activatedBuildStamp: candidateBuildStamp };
+      context = {
+        ...context,
+        activatedBuildStamp: candidateBuildStamp,
+        ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
+        ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
+      };
       await recordLedger("ACTIVATED");
       await host.restartServices();
       const verification = await host.verifyServices(revisions);
@@ -167,7 +172,10 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       await host.notify({ outcome: "success", reason: "deployed", ...revisions });
     } catch (error) {
       try {
-        await publication.rollback();
+        const rollbackPointerOutcome = await publication.rollback();
+        if (rollbackPointerOutcome !== null && rollbackPointerOutcome !== undefined) {
+          context = { ...context, rollbackPointerOutcome };
+        }
         await host.restorePreviousServices();
         activationOutcomeProven = true;
       } catch (recoveryError) {

@@ -321,6 +321,57 @@ test("SIGTERM after publication enters the failure path and restores the previou
   assert.ok(calls.includes("notify-failure"));
 });
 
+test("pointer activation is durably recorded before restart and rollback outcome reaches the terminal ledger event", async () => {
+  const { host, calls, state } = fixture();
+  const records = [];
+  const releaseIdentity = {
+    name: `${revisions.to}-${"c".repeat(64)}`,
+    commit: revisions.to,
+    digest: "c".repeat(64),
+  };
+  const pointerTransition = {
+    oldTarget: `releases/${revisions.from}-${"d".repeat(64)}`,
+    newTarget: `releases/${releaseIdentity.name}`,
+  };
+  host.publishBuild = async () => {
+    calls.push("publish-build");
+    state.serving = "candidate";
+    return {
+      releaseIdentity,
+      pointerTransition,
+      rollback: async () => {
+        calls.push("rollback-build");
+        state.serving = "previous";
+        return { outcome: "rolled-back", ...pointerTransition };
+      },
+      commit: async () => { calls.push("commit-build"); },
+    };
+  };
+  host.restartServices = async () => {
+    calls.push("restart-services");
+    assert.equal(records.at(-1)?.state, "ACTIVATED");
+    assert.deepEqual(records.at(-1)?.metadata.pointerTransition, pointerTransition);
+    throw new DeployFailure("service-restart-failed", "fixture");
+  };
+  const ledger = {
+    record: (stateName, metadata) => { records.push({ state: stateName, metadata }); },
+  };
+
+  const result = await executeUpgrade(host, revisions, { ledger });
+
+  assert.equal(result.ok, false);
+  assert.equal(state.serving, "previous");
+  assert.deepEqual(records.find(({ state: phase }) => phase === "ACTIVATED")?.metadata.releaseIdentity, releaseIdentity);
+  assert.equal(records.at(-1)?.state, "FAILED");
+  assert.deepEqual(records.at(-1)?.metadata.releaseIdentity, releaseIdentity);
+  assert.deepEqual(records.at(-1)?.metadata.pointerTransition, pointerTransition);
+  assert.deepEqual(records.at(-1)?.metadata.rollbackPointerOutcome, {
+    outcome: "rolled-back",
+    ...pointerTransition,
+  });
+  assert.equal(records.at(-1)?.metadata.reasonCode, "service-restart-failed");
+});
+
 test("a service that exits after kickstart rolls back before success", async () => {
   const { host, calls, state } = fixture("verify-services");
   const result = await executeUpgrade(host, revisions);
