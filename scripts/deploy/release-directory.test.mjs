@@ -23,6 +23,7 @@ import {
   probeReleaseImmutability,
   pruneReleaseDirectories,
   RELEASE_DIRECTORY_RETENTION_COUNT,
+  RELEASE_MANIFEST_FILE,
   verifyReleaseDirectory,
 } from "./release-directory.mjs";
 
@@ -113,6 +114,69 @@ test("assembles a deterministic versioned release and excludes shared/secrets", 
     });
     assert.equal(second.releaseName, result.releaseName);
     assert.equal(second.reused, true);
+  } finally {
+    cleanup(context);
+  }
+});
+
+test("preserves ordinary source modules named secrets", () => {
+  const context = fixture();
+  try {
+    writeFileSync(join(context.stageRoot, "packages/api/dist/secrets.js"), "export const encryptSecret = () => undefined;\n");
+    writeFileSync(join(context.stageRoot, "packages/api/dist/secrets.d.ts"), "export declare const encryptSecret: () => void;\n");
+    writeFileSync(join(context.stageRoot, "packages/api/dist/secrets.js.map"), "{}\n");
+    const result = assembleReleaseDirectory({
+      stageRoot: context.stageRoot,
+      deployRoot: context.deployRoot,
+      revision,
+      artifactPaths,
+    });
+    for (const name of ["secrets.js", "secrets.d.ts", "secrets.js.map"]) {
+      assert.equal(existsSync(join(result.releaseDirectory, "packages/api/dist", name)), true);
+    }
+  } finally {
+    cleanup(context);
+  }
+});
+
+test("excludes secret-shaped files from selected release artifacts", () => {
+  const context = fixture();
+  try {
+    const paths = [".secret", ".secrets.json", "credentials.json", "server.key"];
+    for (const path of paths) writeFileSync(join(context.stageRoot, "packages/api/dist", path), "sensitive\n");
+    const result = assembleReleaseDirectory({
+      stageRoot: context.stageRoot,
+      deployRoot: context.deployRoot,
+      revision,
+      artifactPaths,
+    });
+    for (const path of paths) {
+      assert.equal(existsSync(join(result.releaseDirectory, "packages/api/dist", path)), false);
+    }
+  } finally {
+    cleanup(context);
+  }
+});
+
+test("reports every secret-shaped path excluded during materialization", () => {
+  const context = fixture();
+  try {
+    mkdirSync(join(context.stageRoot, "node_modules/vendor/.secrets"), { recursive: true });
+    writeFileSync(join(context.stageRoot, "node_modules/vendor/.secrets/token"), "sensitive\n");
+    writeFileSync(join(context.stageRoot, "packages/api/dist/.env.production"), "sensitive\n");
+    const result = assembleReleaseDirectory({
+      stageRoot: context.stageRoot,
+      deployRoot: context.deployRoot,
+      revision,
+      artifactPaths,
+    });
+    assert.deepEqual(result.excludedPaths, [
+      "node_modules/vendor/.secrets",
+      "packages/api/dist/.env.production",
+    ]);
+    const manifest = JSON.parse(readFileSync(join(result.releaseDirectory, RELEASE_MANIFEST_FILE), "utf8"));
+    assert.deepEqual(manifest.excludedPaths, result.excludedPaths);
+    assert.deepEqual(verifyReleaseDirectory({ releaseDirectory: result.releaseDirectory }).excludedPaths, result.excludedPaths);
   } finally {
     cleanup(context);
   }

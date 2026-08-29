@@ -114,7 +114,7 @@ const assertRegularFile = (path, label) => {
  * intentionally based on path components: it does not try to infer secrets
  * from arbitrary application bytes, and it keeps credentials out even when a
  * build happened to leave them underneath a selected staging directory. */
-const SECRET_COMPONENT = /^(?:\.env(?:\..*)?|\.secrets?|secrets?(?:\..*)?|credentials?(?:\..*)?|.*\.(?:pem|key|p12|pfx))$/iu;
+const SECRET_COMPONENT = /^(?:\.env(?:\..*)?|\.secrets?(?:\..*)?|credentials?(?:\..*)?|.*\.(?:pem|key|p12|pfx))$/iu;
 const MUTABLE_COMPONENTS = new Set([
   "shared",
   "data",
@@ -189,7 +189,7 @@ const ensureDestinationDirectory = (path, label) => {
   else mkdirSync(path, { recursive: true, mode: 0o700 });
 };
 
-const sourceEntry = (source, destination, stageRoot, relativePath) => {
+const sourceEntry = (source, destination, stageRoot, relativePath, excludedPaths) => {
   let status;
   try { status = lstatSync(source); } catch (error) {
     failure("release-directory-missing", `${relativePath}-missing-${error?.code ?? "unreadable"}`);
@@ -209,8 +209,11 @@ const sourceEntry = (source, destination, stageRoot, relativePath) => {
     ensureDestinationDirectory(destination, "release-directory");
     for (const entry of readdirSync(source, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
       const childRelative = `${relativePath}/${entry.name}`;
-      if (forbiddenPath(childRelative)) continue;
-      sourceEntry(join(source, entry.name), join(destination, entry.name), stageRoot, childRelative);
+      if (forbiddenPath(childRelative)) {
+        excludedPaths.add(childRelative);
+        continue;
+      }
+      sourceEntry(join(source, entry.name), join(destination, entry.name), stageRoot, childRelative, excludedPaths);
     }
     return;
   }
@@ -227,7 +230,7 @@ const sourceEntry = (source, destination, stageRoot, relativePath) => {
 };
 
 const copySelectedPaths = ({ stageRoot, releaseDirectory, requiredPaths, optionalPaths }) => {
-  const copied = [];
+  const excludedPaths = new Set();
   const optional = new Set(optionalPaths);
   for (const path of requiredPaths) {
     const normalized = normalizeRelativePath(path, "stage-path");
@@ -239,10 +242,9 @@ const copySelectedPaths = ({ stageRoot, releaseDirectory, requiredPaths, optiona
       if (optional.has(relativePath)) continue;
       failure("release-directory-missing", `${relativePath}-missing`);
     }
-    sourceEntry(child, join(releaseDirectory, relativePath), stageRoot, relativePath);
-    copied.push(relativePath);
+    sourceEntry(child, join(releaseDirectory, relativePath), stageRoot, relativePath, excludedPaths);
   }
-  return copied;
+  return Object.freeze([...excludedPaths].sort((left, right) => left.localeCompare(right)));
 };
 
 const runtimeManifestPaths = (stageRoot, paths) => {
@@ -378,6 +380,19 @@ const readReleaseManifest = (releaseDirectory) => {
   return manifest;
 };
 
+const releaseManifestExcludedPaths = (manifest) => {
+  if (manifest.excludedPaths === undefined) return Object.freeze([]);
+  if (!Array.isArray(manifest.excludedPaths)
+    || manifest.excludedPaths.some((path) => typeof path !== "string" || !forbiddenPath(path))) {
+    failure("release-manifest-invalid", "excluded-paths");
+  }
+  const normalized = [...new Set(manifest.excludedPaths)].sort((left, right) => left.localeCompare(right));
+  if (JSON.stringify(normalized) !== JSON.stringify(manifest.excludedPaths)) {
+    failure("release-manifest-invalid", "excluded-paths-order");
+  }
+  return Object.freeze(normalized);
+};
+
 /** Verify a finalized tree before activation or reuse. A changed byte, changed
  * symlink target, wrong API stamp, or restored write permission is a deployment
  * failure, even if the directory name still looks like a valid release. */
@@ -396,6 +411,7 @@ export const verifyReleaseDirectory = (options = {}) => {
   if (manifest.releaseName !== `${expectedRevision}-${observedDigest}`) failure("release-manifest-invalid", "release-name-mismatch");
   const stamp = readApiBuildStamp(join(releaseDirectory, RELEASE_API_STAMP_PATH), expectedRevision);
   if (JSON.stringify(manifest.apiBuildStamp ?? null) !== JSON.stringify(stamp)) failure("release-manifest-invalid", "api-stamp-mismatch");
+  const excludedPaths = releaseManifestExcludedPaths(manifest);
   assertImmutablePermissions(releaseDirectory);
   return Object.freeze({
     releaseDirectory,
@@ -403,6 +419,7 @@ export const verifyReleaseDirectory = (options = {}) => {
     revision: expectedRevision,
     digest: observedDigest,
     files: manifest.files,
+    excludedPaths,
     apiBuildStamp: stamp,
   });
 };
@@ -472,7 +489,7 @@ export const assembleReleaseDirectory = (options = {}) => {
   let finalized = false;
   try {
     mkdirSync(temporary, { recursive: false, mode: 0o700 });
-    copySelectedPaths({
+    const excludedPaths = copySelectedPaths({
       stageRoot,
       releaseDirectory: temporary,
       requiredPaths: inputs.paths,
@@ -493,6 +510,7 @@ export const assembleReleaseDirectory = (options = {}) => {
       commit: revision,
       digest,
       files,
+      excludedPaths,
       apiBuildStamp: copiedApiBuildStamp,
       sharedPath: relative(temporary, sharedRoot).split(sep).join("/"),
     };
@@ -505,6 +523,7 @@ export const assembleReleaseDirectory = (options = {}) => {
       revision,
       digest,
       files,
+      excludedPaths,
       apiBuildStamp: copiedApiBuildStamp,
     });
     const postVerificationWriteProbe = options.postVerificationWriteProbe;

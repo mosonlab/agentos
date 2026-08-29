@@ -751,6 +751,7 @@ const main = async () => {
           retention: false,
           probeImmutability: true,
         });
+        for (const path of preparedRelease.excludedPaths) log(`EXCLUDED release-path path=${path}`);
       },
       verifyStableServicePaths: async () => {
         await verifyStableServicePaths();
