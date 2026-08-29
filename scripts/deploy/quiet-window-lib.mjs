@@ -1,19 +1,6 @@
-export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
+import { UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
 
-export const DEPLOY_STEPS = Object.freeze([
-  "verify-release-artifact",
-  "acquire-quiet-window",
-  "prepare-operation-workspace",
-  "verify-stable-service-paths",
-  "backup",
-  "guarded-migration",
-  "generate-prisma-client",
-  "canonical-prompt-sync",
-  "verify-runtime-prisma-client",
-  "publish-build",
-  "restart-services",
-  "verify-services",
-]);
+export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
 export const SERVICE_LABELS = Object.freeze([
   "com.agentos.api",
@@ -116,82 +103,101 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       }
       else await recordLedger("STARTED");
     }
-    const artifact = await host.verifyArtifact(revisions.to);
-    candidateBuildStamp = artifact?.buildStamp ?? null;
-    context = {
-      ...context,
-      activatedBuildStamp: candidateBuildStamp,
-      releaseDirectoryIdentity: artifact?.releaseDirectoryIdentity ?? null,
-    };
-    await recordLedger("ARTIFACT_VERIFIED");
-    await host.waitForQuiet();
-    await host.prepareWorkspace(artifact);
-    await host.verifyStableServicePaths();
-    const backup = await host.backup();
-    context = { ...context, backupIdentity: backup?.backupIdentity ?? null };
-    await recordLedger("BACKED_UP");
-    const migration = await host.guardedMigration();
-    context = {
-      ...context,
-      migrationTailBefore: migration?.migrationTailBefore ?? null,
-      migrationTailAfter: migration?.migrationTailAfter ?? null,
-    };
-    schemaAdvanced = true;
-    await recordLedger("SCHEMA_ADVANCED");
-    await host.generatePrismaClient();
-    await host.syncCanonicalPrompts();
-    await host.verifyRuntimePrismaClient();
-    await host.assertQuietBeforeRestart();
-    activationAttempted = true;
-    try {
-      publication = await host.publishBuild();
-      activationOutcomeProven = publication !== null && publication !== undefined;
-    } catch (error) {
-      if (error instanceof DeployFailure && ["build-swap-failed", "release-pointer-activation-failed"].includes(error.reason)) {
-        activationOutcomeProven = true;
+    let artifact = null;
+    let publicationReady = false;
+    const executePhase = async ({ hostMethod }) => {
+      switch (hostMethod) {
+        case "verifyArtifact": {
+          artifact = await host[hostMethod](revisions.to);
+          candidateBuildStamp = artifact?.buildStamp ?? null;
+          context = {
+            ...context,
+            activatedBuildStamp: candidateBuildStamp,
+            releaseDirectoryIdentity: artifact?.releaseDirectoryIdentity ?? null,
+          };
+          break;
+        }
+        case "prepareWorkspace":
+          await host[hostMethod](artifact);
+          break;
+        case "backup": {
+          const backup = await host[hostMethod]();
+          context = { ...context, backupIdentity: backup?.backupIdentity ?? null };
+          break;
+        }
+        case "guardedMigration": {
+          const migration = await host[hostMethod]();
+          context = {
+            ...context,
+            migrationTailBefore: migration?.migrationTailBefore ?? null,
+            migrationTailAfter: migration?.migrationTailAfter ?? null,
+          };
+          schemaAdvanced = true;
+          break;
+        }
+        case "publishBuild":
+          activationAttempted = true;
+          try {
+            publication = await host[hostMethod]();
+            publicationReady = true;
+            activationOutcomeProven = publication !== null && publication !== undefined;
+          } catch (error) {
+            if (error instanceof DeployFailure && ["build-swap-failed", "release-pointer-activation-failed"].includes(error.reason)) {
+              activationOutcomeProven = true;
+            }
+            throw error;
+          }
+          context = {
+            ...context,
+            activatedBuildStamp: candidateBuildStamp,
+            ...(publication?.releaseDirectoryIdentity
+              ? { releaseDirectoryIdentity: publication.releaseDirectoryIdentity }
+              : publication?.releaseIdentity?.name
+                ? { releaseDirectoryIdentity: publication.releaseIdentity.name }
+                : {}),
+            ...(publication?.pointerOldTarget !== undefined ? { pointerOldTarget: publication.pointerOldTarget } : {}),
+            ...(publication?.pointerNewTarget !== undefined ? { pointerNewTarget: publication.pointerNewTarget } : {}),
+            ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
+            ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
+          };
+          break;
+        case "verifyServices": {
+          const verification = await host[hostMethod](revisions);
+          context = {
+            ...context,
+            activatedBuildStamp: verification?.activatedBuildStamp ?? context.activatedBuildStamp,
+          };
+          break;
+        }
+        default:
+          await host[hostMethod]();
       }
-      throw error;
-    }
+    };
     try {
-      context = {
-        ...context,
-        activatedBuildStamp: candidateBuildStamp,
-        ...(publication?.releaseDirectoryIdentity
-          ? { releaseDirectoryIdentity: publication.releaseDirectoryIdentity }
-          : publication?.releaseIdentity?.name
-            ? { releaseDirectoryIdentity: publication.releaseIdentity.name }
-            : {}),
-        ...(publication?.pointerOldTarget !== undefined ? { pointerOldTarget: publication.pointerOldTarget } : {}),
-        ...(publication?.pointerNewTarget !== undefined ? { pointerNewTarget: publication.pointerNewTarget } : {}),
-        ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
-        ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
-      };
-      await recordLedger("ACTIVATED");
-      await host.restartServices();
-      const verification = await host.verifyServices(revisions);
-      context = {
-        ...context,
-        activatedBuildStamp: verification?.activatedBuildStamp ?? context.activatedBuildStamp,
-      };
-      await recordLedger("VERIFIED");
+      for (const phase of UPGRADE_DEPLOY_PHASES) {
+        await executePhase(phase);
+        if (phase.ledgerState !== null) await recordLedger(phase.ledgerState);
+      }
       await recordLedger("SUCCEEDED");
       await host.notify({ outcome: "success", reason: "deployed", ...revisions });
     } catch (error) {
-      try {
-        const rollbackPointerOutcome = await publication.rollback();
-        if (rollbackPointerOutcome !== null && rollbackPointerOutcome !== undefined) {
-          const durableOutcome = typeof rollbackPointerOutcome === "string"
-            ? rollbackPointerOutcome
-            : rollbackPointerOutcome.operation && rollbackPointerOutcome.oldTarget && rollbackPointerOutcome.newTarget
-              ? `${rollbackPointerOutcome.operation}:${rollbackPointerOutcome.oldTarget}->${rollbackPointerOutcome.newTarget}`
-              : String(rollbackPointerOutcome.outcome ?? rollbackPointerOutcome);
-          context = { ...context, rollbackPointerOutcome: durableOutcome };
+      if (publicationReady) {
+        try {
+          const rollbackPointerOutcome = await publication.rollback();
+          if (rollbackPointerOutcome !== null && rollbackPointerOutcome !== undefined) {
+            const durableOutcome = typeof rollbackPointerOutcome === "string"
+              ? rollbackPointerOutcome
+              : rollbackPointerOutcome.operation && rollbackPointerOutcome.oldTarget && rollbackPointerOutcome.newTarget
+                ? `${rollbackPointerOutcome.operation}:${rollbackPointerOutcome.oldTarget}->${rollbackPointerOutcome.newTarget}`
+                : String(rollbackPointerOutcome.outcome ?? rollbackPointerOutcome);
+            context = { ...context, rollbackPointerOutcome: durableOutcome };
+          }
+          await host.restorePreviousServices();
+          activationOutcomeProven = true;
+        } catch (recoveryError) {
+          activationOutcomeProven = false;
+          throw recoveryError;
         }
-        await host.restorePreviousServices();
-        activationOutcomeProven = true;
-      } catch (recoveryError) {
-        activationOutcomeProven = false;
-        throw recoveryError;
       }
       throw error;
     }
@@ -270,6 +276,6 @@ export const dryRunDecision = async (host) => {
     `DRY-RUN services=${services.ok ? "ready" : "not-ready"}`,
     `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
-  for (const step of DEPLOY_STEPS) lines.push(`DRY-RUN plan step=${step} mutation=skipped`);
+  for (const phase of UPGRADE_DEPLOY_PHASES) lines.push(`DRY-RUN plan step=${phase.name} mutation=skipped`);
   return { quiet, revisions, runs, artifact, services, backup, lines };
 };
