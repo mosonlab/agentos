@@ -11,6 +11,14 @@ import {
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+const waitUntil = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);
+    await wait(25);
+  }
+};
+
 test("the renewed readiness claim covers both the read budget and a lease acquire timeout", () => {
   assert.equal(READINESS_READ_BUDGET_MS, 20_000);
   assert.equal(READINESS_CLAIM_LEASE_MS, 60_000);
@@ -38,13 +46,12 @@ test("the readiness worker never overlaps ticks in one process", async () => {
   } as unknown as PrismaClient;
   const timer = startReadinessWorker(db, null);
   try {
-    await wait(800);
+    await waitUntil(() => calls >= 2);
   } finally {
     clearInterval(timer);
     if (previousInterval === undefined) delete process.env.MERGE_READINESS_POLL_INTERVAL_MS;
     else process.env.MERGE_READINESS_POLL_INTERVAL_MS = previousInterval;
   }
-  await wait(400);
-  assert.ok(calls >= 2);
+  await waitUntil(() => active === 0);
   assert.equal(maximumActive, 1);
 });
