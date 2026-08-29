@@ -10,8 +10,7 @@ import {
 } from "@anneal/db";
 
 import { jsonValue } from "./execution.js";
-import { settleLease } from "./merge-lease.js";
-import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import type { LeaseOutcome } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { lockTaskMutationRows } from "./task-write.js";
@@ -72,13 +71,7 @@ export type TerminalResult = {
   runId: string;
   taskId: string | null;
   status: RunStatus;
-  /**
-   * The final consumer's project-scoped Chain Lease identity. The release
-   * happens after this transaction commits, so carrying the project along with
-   * the chain is necessary both for attribution and for two projects that use
-   * the same chain id not to collapse into one evidence record.
-   */
-  leaseToRelease: MergeLeaseTarget | null;
+  leaseOutcome: LeaseOutcome;
   cancellationState?: "acknowledged";
   requestId?: string;
 };
@@ -271,7 +264,7 @@ export const terminalizeRun = async (
         status: run.status,
         cancellationState: "acknowledged",
         requestId: input.outcome.requestId,
-        leaseToRelease: null,
+        leaseOutcome: { kind: "continue" },
       };
     }
     if (run.taskId) await lockTaskMutationRows(tx, run.taskId);
@@ -319,14 +312,13 @@ export const terminalizeRun = async (
           : { runId: run.id, requestId: input.outcome.requestId, status: RunStatus.CANCELLED },
       } });
     }
-    const disposition = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
     return {
       runId: run.id,
       taskId: run.taskId,
       status: RunStatus.CANCELLED,
       cancellationState: "acknowledged",
       requestId: input.outcome.requestId,
-      leaseToRelease: disposition.leaseToRelease,
+      leaseOutcome: { kind: "stop", taskId: run.taskId },
     };
   }
 
@@ -350,7 +342,7 @@ export const terminalizeRun = async (
   }
 
   if (input.outcome.kind !== "timed-out") {
-    return { runId: input.runId, taskId: null, status: fields.run.status as RunStatus, leaseToRelease: null };
+    return { runId: input.runId, taskId: null, status: fields.run.status as RunStatus, leaseOutcome: { kind: "continue" } };
   }
   if (input.outcome.waitingOnMessageId) {
     await tx.inboxMessage.updateMany({
@@ -373,6 +365,6 @@ export const terminalizeRun = async (
     runId: input.runId,
     taskId: input.outcome.taskId,
     status: RunStatus.TIMED_OUT,
-    leaseToRelease: null,
+    leaseOutcome: { kind: "continue" },
   };
 };

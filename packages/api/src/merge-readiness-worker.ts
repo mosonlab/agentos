@@ -38,8 +38,11 @@ import {
   type ReadinessInput,
 } from "./readiness-decision.js";
 import {
+  commitWithLeaseOutcome,
   releaseMergeLease,
   withMergeLease,
+  type HeldLeaseOutcome,
+  type LeaseOutcome,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
@@ -188,11 +191,30 @@ const stopReadiness = async (
     recovery: RecoveryContext | null;
   },
   claim: ReadinessClaimHandle,
+  releaseChainLease: ReleaseMergeLease,
 ): Promise<{
   applied: boolean;
-  leaseToRelease: MergeLeaseTarget | null;
   ownership: ReadinessLeaseOwnership;
-}> => db.$transaction(async (tx) => {
+}> => commitWithLeaseOutcome(db, (tx) => settleReadinessStop(tx, input, claim), {
+  release: releaseChainLease,
+}).then((settlement) => {
+  if (!settlement) throw new Error("Readiness stop transaction returned no settlement");
+  return settlement;
+});
+
+const settleReadinessStop = async (
+  tx: Prisma.TransactionClient,
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    reason: string;
+    recovery: RecoveryContext | null;
+  },
+  claim: ReadinessClaimHandle,
+): Promise<{
+  value: { applied: boolean; ownership: ReadinessLeaseOwnership };
+  leaseOutcome: LeaseOutcome;
+}> => {
   const settlement = await claim.settle(tx, {
     kind: "finish",
     at: new Date(),
@@ -209,15 +231,17 @@ const stopReadiness = async (
     },
   });
   if (!settlement.settled) {
-    return { applied: false, leaseToRelease: null, ownership: settlement.ownership };
+    return {
+      value: { applied: false, ownership: settlement.ownership },
+      leaseOutcome: { kind: "continue" },
+    };
   }
   if (settlement.claim !== "released") throw new Error("Readiness stop retained a finished claim");
   return {
-    applied: true,
-    leaseToRelease: settlement.value.leaseToRelease,
-    ownership: settlement.ownership,
+    value: { applied: true, ownership: settlement.ownership },
+    leaseOutcome: settlement.value.leaseOutcome,
   };
-});
+};
 
 export type ReadinessTickResult = { claimed: number; authorized: number; requeued: number; stopped: number };
 
@@ -233,7 +257,32 @@ const requeueRegression = async (
     recovery: RecoveryContext | null;
   },
   claim: ReadinessClaimHandle,
-): Promise<{ applied: boolean; ownership: ReadinessLeaseOwnership }> => db.$transaction(async (tx) => {
+  releaseChainLease: ReleaseMergeLease,
+): Promise<{ applied: boolean; ownership: ReadinessLeaseOwnership }> => commitWithLeaseOutcome(
+  db,
+  (tx) => settleRegressionRequeue(tx, input, claim),
+  { release: releaseChainLease },
+).then((settlement) => {
+  if (!settlement) throw new Error("Regression requeue transaction returned no settlement");
+  return settlement;
+});
+
+const settleRegressionRequeue = async (
+  tx: Prisma.TransactionClient,
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    staleBaseSha: string;
+    currentBaseSha: string;
+    reason: string;
+    now: Date;
+    recovery: RecoveryContext | null;
+  },
+  claim: ReadinessClaimHandle,
+): Promise<{
+  value: { applied: boolean; ownership: ReadinessLeaseOwnership };
+  leaseOutcome: LeaseOutcome;
+}> => {
   const settlement = await claim.settle(tx, {
     kind: "finish",
     at: input.now,
@@ -275,10 +324,15 @@ const requeueRegression = async (
       return { value: undefined, ownership: "released" as const };
     },
   });
-  if (!settlement.settled) return { applied: false, ownership: settlement.ownership };
+  if (!settlement.settled) {
+    return { value: { applied: false, ownership: settlement.ownership }, leaseOutcome: { kind: "continue" } };
+  }
   if (settlement.claim !== "released") throw new Error("Regression requeue retained a finished claim");
-  return { applied: true, ownership: settlement.ownership };
-});
+  return {
+    value: { applied: true, ownership: settlement.ownership },
+    leaseOutcome: { kind: "stop", taskId: input.regressionTaskId },
+  };
+};
 
 type ClaimedReadiness = {
   claimed: true;
@@ -425,9 +479,9 @@ const recordLeaseDeferral = async (
   return settlement.settled;
 });
 
-const leaseDisposition = (ownership: ReadinessLeaseOwnership) => ownership === "released"
-  ? { kind: "release" as const }
-  : { kind: "retain" as const, handoffRunId: ownership.retainFor };
+const heldLeaseOutcome = (ownership: ReadinessLeaseOwnership): HeldLeaseOutcome => ownership === "released"
+  ? { kind: "stop" }
+  : { kind: "continue" };
 
 const applyReadinessDecision = async (
   db: PrismaClient,
@@ -448,10 +502,9 @@ const applyReadinessDecision = async (
       regressionTaskId: regression.id,
       reason,
       recovery,
-    }, claim);
+    }, claim, releaseChainLease);
     if (!stopped.applied) return false;
     result.stopped += 1;
-    await releaseChainLease(stopped.leaseToRelease, db);
     return true;
   };
   const requeue = async (input: {
@@ -465,10 +518,9 @@ const applyReadinessDecision = async (
       ...input,
       now: read.input.now,
       recovery,
-    }, claim);
+    }, claim, releaseChainLease);
     if (!requeued.applied) return false;
     result.requeued += 1;
-    await releaseChainLease(target, db);
     return true;
   };
 
@@ -494,7 +546,7 @@ const applyReadinessDecision = async (
   const leased = await runWithMergeLease(target, async () => {
     if (!await claim.renew()) {
       const ownership = await claim.ownershipAfterLoss(db);
-      return { disposition: leaseDisposition(ownership), value: "claim-lost" as const };
+      return { leaseOutcome: heldLeaseOutcome(ownership), value: "claim-lost" as const };
     }
 
     // Regression evidence is durable before this short Lease window. Repeat
@@ -503,40 +555,52 @@ const applyReadinessDecision = async (
     const leasedDecision = await evaluateReadiness(reader, read.input);
     switch (leasedDecision.kind) {
       case "skip":
-        return { disposition: { kind: "release" as const }, value: "lease-recheck-skipped" as const };
+        return { leaseOutcome: { kind: "stop" as const }, value: "lease-recheck-skipped" as const };
       case "defer": {
         const deferred = await deferReadiness(db, readiness.id, claim);
-        return { disposition: leaseDisposition(deferred.ownership), value: "lease-recheck-deferred" as const };
+        return {
+          leaseOutcome: heldLeaseOutcome(deferred.ownership),
+          value: "lease-recheck-deferred" as const,
+        };
       }
       case "stop": {
-        const stopped = await stopReadiness(db, {
+        const stoppedResult = await db.$transaction((tx) => settleReadinessStop(tx, {
           readinessTaskId: readiness.id,
           regressionTaskId: regression.id,
           reason: leasedDecision.evidence,
           recovery,
-        }, claim);
+        }, claim));
+        const stopped = stoppedResult.value;
         if (stopped.applied) result.stopped += 1;
-        return { disposition: leaseDisposition(stopped.ownership), value: "lease-recheck-stopped" as const };
+        return {
+          leaseOutcome: stopped.applied ? { kind: "stop" as const } : heldLeaseOutcome(stopped.ownership),
+          value: "lease-recheck-stopped" as const,
+        };
       }
       case "requeue-regression": {
-        const requeued = await requeueRegression(db, {
+        const requeuedResult = await db.$transaction((tx) => settleRegressionRequeue(tx, {
           readinessTaskId: readiness.id,
           regressionTaskId: regression.id,
           ...leasedDecision,
           now: read.input.now,
           recovery,
-        }, claim);
+        }, claim));
+        const requeued = requeuedResult.value;
         if (requeued.applied) result.requeued += 1;
-        return { disposition: leaseDisposition(requeued.ownership), value: "lease-recheck-requeued" as const };
+        return {
+          leaseOutcome: requeued.applied ? { kind: "stop" as const } : heldLeaseOutcome(requeued.ownership),
+          value: "lease-recheck-requeued" as const,
+        };
       }
       case "authorize":
         break;
     }
 
-    const authorization = await db.$transaction((tx) => claim.settle(tx, {
-      kind: "finish",
-      at: read.input.now,
-      apply: async (client) => {
+    const authorization = await commitWithLeaseOutcome(db, async (tx) => {
+      const settlement = await claim.settle(tx, {
+        kind: "finish",
+        at: read.input.now,
+        apply: async (client) => {
         await client.task.update({
           where: { id: readiness.id },
           data: { status: TaskStatus.DONE, failureReason: null },
@@ -631,13 +695,37 @@ const applyReadinessDecision = async (
           value: "authorized" as const,
           ownership: handoff ? { retainFor: handoff.id } : "released" as const,
         };
-      },
-    }));
+        },
+      });
+      return {
+        value: settlement,
+        leaseOutcome: settlement.settled
+          && settlement.claim === "released"
+          && settlement.ownership !== "released"
+          ? {
+            kind: "hand-off",
+            taskId: regression.id,
+            handoffRunId: settlement.ownership.retainFor,
+            at: read.input.now,
+          }
+          : { kind: "continue" },
+      };
+    }, { release: releaseChainLease });
+    if (!authorization) throw new Error("Readiness authorization transaction returned no settlement");
     if (!authorization.settled) {
-      return { disposition: leaseDisposition(authorization.ownership), value: "claim-lost" as const };
+      return {
+        leaseOutcome: heldLeaseOutcome(authorization.ownership),
+        value: "claim-lost" as const,
+      };
     }
     if (authorization.claim !== "released") throw new Error("Authorization retained a finished claim");
-    return { disposition: leaseDisposition(authorization.ownership), value: authorization.value };
+    return {
+      // A retained ownership was recorded atomically with authorization by
+      // commitWithLeaseOutcome. Continue leaves that Lease for its consumer;
+      // a missing successor still releases through this outer owner.
+      leaseOutcome: heldLeaseOutcome(authorization.ownership),
+      value: authorization.value,
+    };
   }, db);
   if (leased.outcome === "contended") return;
   if (leased.outcome === "unreachable") {
@@ -687,10 +775,9 @@ export const readinessTick = async (
         regressionTaskId: read.regression.id,
         reason,
         recovery: read.recovery,
-      }, read.claim);
+      }, read.claim, releaseChainLease);
       if (stopped.applied) {
         result.stopped += 1;
-        await releaseChainLease(stopped.leaseToRelease, db);
       }
       // A failed release/hold recording can happen after stopMergeTail has
       // already committed its state transition. A second stop then returns

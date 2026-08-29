@@ -4,8 +4,12 @@ import { after, before, beforeEach, test } from "node:test";
 import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
 
 import { suspendForInbox } from "./inbox.js";
+import type { ReleaseMergeLease } from "./merge-lease.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
-import { acknowledgeCancellation, cancelRun } from "./run-cancel.js";
+import {
+  acknowledgeCancellation as acknowledgeCancellationWithLease,
+  cancelRun as cancelRunWithLease,
+} from "./run-cancel.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -17,6 +21,17 @@ after(async () => { await db.$disconnect(); });
 const OPERATOR = "active-cancel-operator";
 const RUNNER = "active-cancel-runner-token";
 const RUNNER_ID = "active-cancel-runner";
+const noOpReleaseMergeLease: ReleaseMergeLease = async () => {};
+const cancelRun = (
+  client: PrismaClient,
+  runId: string,
+  body: Parameters<typeof cancelRunWithLease>[2],
+) => cancelRunWithLease(client, runId, body, noOpReleaseMergeLease);
+const acknowledgeCancellation = (
+  client: PrismaClient,
+  runId: string,
+  body: Parameters<typeof acknowledgeCancellationWithLease>[2],
+) => acknowledgeCancellationWithLease(client, runId, body, noOpReleaseMergeLease);
 
 const call = async (method: string, path: string, token: string, body?: unknown, client: PrismaClient = db) => {
   const priorOperator = process.env.OPERATOR_TOKEN;

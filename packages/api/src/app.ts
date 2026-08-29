@@ -3306,14 +3306,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, cancelAcknowledgeInput);
-    const result = await acknowledgeCancellation(db, runId, body);
+    const result = await acknowledgeCancellation(db, runId, body, releaseChainLease);
     if ("message" in result) return refusalJson(context, result);
-    const { releaseMergeLeaseTask, ...settlement } = result;
-    // Cancellation is a terminal write. The lease target is deliberately
-    // released only after that transaction commits, when the release adapter
-    // can also record the confirmed deletion and its hold window.
-    await releaseChainLease(releaseMergeLeaseTask, db);
-    return context.json(settlement);
+    return context.json(result);
   });
 
   // Publication is a separate durable fact from terminal completion. Persist
@@ -3954,14 +3949,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runs/:runId/cancel", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, cancelRunInput);
-    const result = await cancelRun(db, runId, body);
+    const result = await cancelRun(db, runId, body, releaseChainLease);
     if ("message" in result) return refusalJson(context, result);
-    const { releaseMergeLeaseTask, ...cancellation } = result;
-    // A queued cancellation is the final consumer when no runner ever claims
-    // the Run. Keep the release post-commit so a rollback cannot free a lease
-    // whose cancellation state was not durably written.
-    await releaseChainLease(releaseMergeLeaseTask, db);
-    return context.json(cancellation);
+    return context.json(result);
   });
 
   app.get("/runs/:runId/events", async (context) => {

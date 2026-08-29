@@ -4,12 +4,12 @@ import test from "node:test";
 import type { Prisma, PrismaClient } from "@anneal/db";
 
 import {
-  commitWithLeaseDisposition,
+  commitWithLeaseOutcome,
+  commitWithLeaseOutcomes,
   leaseHandoffsWithoutConsumer,
   leaseHolderFor,
   mergeLeaseScriptPath,
   readMergeLeaseRelease,
-  settleLease,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
@@ -31,6 +31,10 @@ const leaseTarget = (chainId: string) => ({ projectId: "project-1", chainId });
 const holdDb = {
   task: { findFirst: async () => ({ id: "tail-task" }) },
   taskActivity: { createMany: async () => ({ count: 1 }) },
+  $transaction: async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn({
+    run: { findUnique: async () => ({ taskId: "tail-task" }) },
+    taskActivity: { create: async () => ({}) },
+  } as unknown as Prisma.TransactionClient),
 } as unknown as PrismaClient;
 
 const holderTx = (input: {
@@ -95,18 +99,6 @@ test("leaseHolderFor owns every merge-tail Task shape, including a failed auxili
   }
 });
 
-test("settleLease maps continuation and stop outcomes through the holder record", async () => {
-  const tx = holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } });
-  assert.deepEqual(await settleLease(tx, { taskId: "task-1", outcome: "continue" }), {
-    disposition: "retain",
-    leaseToRelease: null,
-  });
-  assert.deepEqual(await settleLease(tx, { taskId: "task-1", outcome: "stop" }), {
-    disposition: "release",
-    leaseToRelease: leaseTarget("chain-1"),
-  });
-});
-
 test("release parsing requires the timestamp while leaving duration validation to the calculator", () => {
   assert.deepEqual(
     readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha 2026-08-27T12:00:00.000Z"),
@@ -143,50 +135,176 @@ test("mergeLeaseHold calculates whole elapsed seconds and clamps invalid or skew
 
 test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", async () => {
   const now = new Date("2026-08-27T12:02:00.000Z");
+  let sql = "";
+  let parameters: unknown[] = [];
   const tx = {
-    taskActivity: { findMany: async () => [
-      { taskId: "task-stale", task: { projectId: "project-1" }, metadata: { state: "pending", chainId: "chain-stale", toRunId: "run-stale", handedOffAt: "2026-08-27T12:00:00.000Z" } },
-      { taskId: "task-active", task: { projectId: "project-1" }, metadata: { state: "pending", chainId: "chain-active", toRunId: "run-active", handedOffAt: "2026-08-27T12:01:30.000Z" } },
-      { taskId: "task-done", task: { projectId: "project-1" }, metadata: { state: "released", chainId: "chain-done", toRunId: "run-done" } },
-      { taskId: "task-done", task: { projectId: "project-1" }, metadata: { state: "pending", chainId: "chain-done", toRunId: "run-done" } },
-    ] },
-    run: { findMany: async () => [{ id: "run-stale" }] },
+    $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      sql = strings.join("?");
+      parameters = values;
+      return [{ toRunId: "run-stale", taskId: "task-stale" }];
+    },
   } as unknown as Prisma.TransactionClient;
 
   assert.deepEqual(await leaseHandoffsWithoutConsumer(tx, now), [
-    { chainId: "chain-stale", projectId: "project-1", toRunId: "run-stale", taskId: "task-stale" },
+    { toRunId: "run-stale", taskId: "task-stale" },
   ]);
+  assert.match(sql, /NOT EXISTS/u);
+  assert.match(sql, /GREATEST/u);
+  assert.match(sql, /\(released\."createdAt", released\.id\) > \(pending\."createdAt", pending\.id\)/u);
+  assert.match(sql, /ORDER BY "createdAt" ASC, id ASC/u);
+  assert.match(sql, /LIMIT/u);
+  assert.ok(parameters.some((value) => value instanceof Date), "the query has a time floor");
+  assert.ok(parameters.includes(100), "the query has an explicit row limit");
 });
 
-test("commitWithLeaseDisposition releases only after the transaction commits", async () => {
-  const events: string[] = [];
-  const db = {
-    $transaction: async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => {
-      const result = await fn({} as Prisma.TransactionClient);
-      events.push("commit");
-      return result;
-    },
-  } as unknown as Parameters<typeof commitWithLeaseDisposition>[0];
+const transactionDb = (tx: Prisma.TransactionClient, events: string[] = []) => ({
+  $transaction: async (fn: (client: Prisma.TransactionClient) => Promise<unknown>) => {
+    const result = await fn(tx);
+    events.push("commit");
+    return result;
+  },
+} as unknown as PrismaClient);
 
-  const value = await commitWithLeaseDisposition(db, async () => {
+test("commitWithLeaseOutcome releases only after the transaction commits", async () => {
+  const events: string[] = [];
+  const tx = holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } });
+  const db = transactionDb(tx, events);
+
+  const value = await commitWithLeaseOutcome(db, async () => {
     events.push("transaction");
     return {
       value: 42,
-      lease: { disposition: "release", leaseToRelease: leaseTarget("chain-1") },
+      leaseOutcome: { kind: "stop", taskId: "task-1" },
     };
-  }, async (target) => {
+  }, { release: async (target) => {
     events.push(`release:${target?.chainId ?? "none"}`);
-  });
+  } });
 
   assert.equal(value, 42);
   assert.deepEqual(events, ["transaction", "commit", "release:chain-1"]);
+});
+
+test("commitWithLeaseOutcome rolls back without release when the callback fails", async () => {
+  let releases = 0;
+  const failure = new Error("transaction failed");
+  const db = transactionDb(holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }));
+  await assert.rejects(commitWithLeaseOutcome(db, async () => {
+    throw failure;
+  }, { release: async () => { releases += 1; } }), (error: unknown) => error === failure);
+  assert.equal(releases, 0);
+});
+
+test("commitWithLeaseOutcome surfaces release failure", async () => {
+  const failure = new Error("release failed");
+  const db = transactionDb(holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }));
+  await assert.rejects(commitWithLeaseOutcome(db, async () => ({
+    value: null,
+    leaseOutcome: { kind: "stop", taskId: "task-1" },
+  }), { release: async () => { throw failure; } }), (error: unknown) => error === failure);
+});
+
+test("commitWithLeaseOutcomes deduplicates release targets and rolls back without release", async () => {
+  const tx = holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } });
+  const db = transactionDb(tx);
+  const releasedTargets: unknown[] = [];
+  const value = await commitWithLeaseOutcomes(db, async () => ({
+    value: 7,
+    leaseOutcomes: [
+      { kind: "stop", taskId: "task-1" },
+      { kind: "stop", taskId: "task-1" },
+    ],
+  }), { release: async (target) => { releasedTargets.push(target); } });
+  assert.equal(value, 7);
+  assert.deepEqual(releasedTargets, [leaseTarget("chain-1")]);
+
+  const failure = new Error("batch transaction failed");
+  await assert.rejects(commitWithLeaseOutcomes(db, async () => {
+    throw failure;
+  }, { release: async (target) => { if (target) releasedTargets.push(target); } }), (error: unknown) => error === failure);
+  assert.equal(releasedTargets.length, 1);
+});
+
+test("commitWithLeaseOutcomes surfaces release failure", async () => {
+  const failure = new Error("batch release failed");
+  const db = transactionDb(holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }));
+  await assert.rejects(commitWithLeaseOutcomes(db, async () => ({
+    value: null,
+    leaseOutcomes: [{ kind: "stop", taskId: "task-1" }],
+  }), { release: async () => { throw failure; } }), (error: unknown) => (
+    error instanceof AggregateError && error.errors.includes(failure)
+  ));
+});
+
+test("commitWithLeaseOutcome records handoff without release and surfaces record failure", async () => {
+  const activities: unknown[] = [];
+  const tx = {
+    ...holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }),
+    run: { findUnique: async () => ({ taskId: "task-2", readyAt: new Date("2026-08-27T12:05:00.000Z") }) },
+    taskActivity: { create: async (input: unknown) => { activities.push(input); } },
+  } as unknown as Prisma.TransactionClient;
+  let releases = 0;
+  const db = transactionDb(tx);
+  await commitWithLeaseOutcome(db, async () => ({
+    value: null,
+    leaseOutcome: {
+      kind: "hand-off",
+      taskId: "task-1",
+      handoffRunId: "run-2",
+      at: new Date("2026-08-27T12:00:00.000Z"),
+    },
+  }), { release: async () => { releases += 1; } });
+  assert.equal(releases, 0);
+  assert.equal(activities.length, 1);
+  assert.equal(
+    ((activities[0] as { data: { metadata: Record<string, unknown> } }).data.metadata).consumerReadyAt,
+    "2026-08-27T12:05:00.000Z",
+  );
+
+  const recordFailure = new Error("handoff record failed");
+  const failingTx = {
+    ...tx,
+    taskActivity: { create: async () => { throw recordFailure; } },
+  } as unknown as Prisma.TransactionClient;
+  await assert.rejects(commitWithLeaseOutcome(transactionDb(failingTx), async () => ({
+    value: null,
+    leaseOutcome: {
+      kind: "hand-off",
+      taskId: "task-1",
+      handoffRunId: "run-2",
+      at: new Date("2026-08-27T12:00:00.000Z"),
+    },
+  })), (error: unknown) => error === recordFailure);
+});
+
+test("commitWithLeaseOutcome refuses to settle a handoff without a holder", async () => {
+  let releases = 0;
+  const tx = holderTx({
+    task: {
+      chainId: "ordinary-chain",
+      projectId: "project-1",
+      templateStep: {
+        stepIndex: 2,
+        outputKind: "implementation",
+        taskTemplate: { name: "direct-engineer-workflow" },
+      },
+    },
+  });
+  await assert.rejects(commitWithLeaseOutcome(transactionDb(tx), async () => ({
+    value: null,
+    leaseOutcome: {
+      kind: "stop",
+      taskId: "task-1",
+      releasedHandoff: { toRunId: "run-orphan", at: new Date("2026-08-27T12:00:00.000Z") },
+    },
+  }), { release: async () => { releases += 1; } }), /Cannot settle a Merge Lease handoff/u);
+  assert.equal(releases, 0);
 });
 
 test("a completed callback releases the merge Lease", async () => {
   const acquiredFor: string[] = [];
   const releasedFor: string[] = [];
   const result = await withMergeLease(leaseTarget("chain-1"), async () => ({
-    disposition: { kind: "release" },
+    leaseOutcome: { kind: "stop" },
     value: 42,
   }), holdDb, {
     acquire: async (chainId) => {
@@ -204,10 +322,10 @@ test("a completed callback releases the merge Lease", async () => {
   assert.deepEqual(releasedFor, ["chain-1"]);
 });
 
-test("retain hands the merge Lease to the downstream consumer", async () => {
+test("continue leaves the merge Lease with its recorded downstream consumer", async () => {
   let releaseCalled = false;
   const result = await withMergeLease(leaseTarget("chain-2"), async () => ({
-    disposition: { kind: "retain", handoffRunId: "run-2" },
+    leaseOutcome: { kind: "continue" },
     value: "authorized",
   }), holdDb, {
     acquire: acquired,
@@ -264,7 +382,7 @@ test("a contended merge Lease does not run the callback", async () => {
   let releaseCalled = false;
   const result = await withMergeLease(leaseTarget("chain-4"), async () => {
     callbackCalled = true;
-    return { disposition: { kind: "release" }, value: null };
+    return { leaseOutcome: { kind: "stop" }, value: null };
   }, holdDb, {
     acquire: async () => ({ outcome: "contended" }),
     release: async () => {
@@ -283,7 +401,7 @@ test("an unreachable merge Lease is a retryable result and does not run the call
   let releaseCalled = false;
   const result = await withMergeLease(leaseTarget("chain-unreachable"), async () => {
     callbackCalled = true;
-    return { disposition: { kind: "release" }, value: null };
+    return { leaseOutcome: { kind: "stop" }, value: null };
   }, holdDb, {
     acquire: async () => ({ outcome: "unreachable", detail: "TLS transport failed" }),
     release: async () => {
@@ -297,37 +415,49 @@ test("an unreachable merge Lease is a retryable result and does not run the call
   assert.equal(releaseCalled, false);
 });
 
-test("the module reports a release anomaly itself", async (t) => {
+test("skipped and refused releases are reported decided outcomes", async (t) => {
   const said: string[] = [];
   t.mock.method(console, "error", (...args: unknown[]) => { said.push(args.map(String).join(" ")); });
 
-  await withMergeLease(leaseTarget("chain-5"), async () => ({ disposition: { kind: "release" }, value: null }), holdDb, {
+  assert.deepEqual(await withMergeLease(leaseTarget("chain-5"), async () => ({ leaseOutcome: { kind: "stop" }, value: "skipped" }), holdDb, {
     acquire: acquired,
     release: async () => ({ outcome: "skipped", heldFor: "chain-42" }),
-  });
+  }), { outcome: "ran", value: "skipped" });
+  assert.deepEqual(await withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop" }, value: "refused" }), holdDb, {
+    acquire: acquired,
+    release: async () => ({ outcome: "refused", heldBy: "another-host" }),
+  }), { outcome: "ran", value: "refused" });
 
-  assert.equal(said.length, 1);
+  assert.equal(said.length, 2);
   assert.match(said[0]!, /chain-5/u);
   assert.match(said[0]!, /chain-42/u);
+  assert.match(said[1]!, /chain-6/u);
+  assert.match(said[1]!, /another-host/u);
 });
 
-test("a rejected release adapter is reported as unreachable", async (t) => {
-  const said: string[] = [];
-  t.mock.method(console, "error", (...args: unknown[]) => { said.push(args.map(String).join(" ")); });
+test("an unreachable release outcome fails loudly", async () => {
+  await assert.rejects(withMergeLease(
+    leaseTarget("chain-unreachable-release"),
+    async () => ({ leaseOutcome: { kind: "stop" }, value: null }),
+    holdDb,
+    {
+      acquire: acquired,
+      release: async () => ({ outcome: "unreachable", detail: "release helper timed out" }),
+    },
+  ), /failed with outcome unreachable/u);
+});
+
+test("a rejected release adapter fails loudly", async () => {
   const releaser: MergeLeaseReleaser = async () => { throw new Error("spawn bash ENOENT"); };
 
-  await withMergeLease(leaseTarget("chain-6"), async () => ({ disposition: { kind: "release" }, value: null }), holdDb, {
+  await assert.rejects(withMergeLease(leaseTarget("chain-6"), async () => ({ leaseOutcome: { kind: "stop" }, value: null }), holdDb, {
     acquire: acquired,
     release: releaser,
-  });
-
-  assert.equal(said.length, 1);
-  assert.match(said[0]!, /chain-6/u);
-  assert.match(said[0]!, /spawn bash ENOENT/u);
+  }), /spawn bash ENOENT/u);
 });
 
 test("a Task without a Chain runs without either Lease adapter", async () => {
-  const result = await withMergeLease(null, async () => ({ disposition: { kind: "release" }, value: "unleased" }), holdDb, {
+  const result = await withMergeLease(null, async () => ({ leaseOutcome: { kind: "stop" }, value: "unleased" }), holdDb, {
     acquire: async () => { throw new Error("the acquirer must not be called"); },
     release: async () => { throw new Error("the releaser must not be called"); },
   });

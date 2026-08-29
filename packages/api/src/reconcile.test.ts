@@ -18,7 +18,7 @@ test("database reconciliation active status query remains limited to three execu
       return [];
     } },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
-      taskActivity: { findMany: async () => [] },
+      $queryRaw: async () => [],
     }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database), 0);
@@ -130,6 +130,7 @@ test("database reconciliation times out expired Inbox waits and makes retained w
       },
     },
     $transaction: async (operation: (tx: any) => Promise<unknown>) => operation({
+      $queryRaw: async () => [],
       run: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "run", data }); return { count: 1 }; } },
       session: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "session", data }); return { count: 1 }; } },
       inboxMessage: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "message", data }); return { count: 1 }; } },
@@ -160,7 +161,7 @@ test("startup reconciliation does not fail when archived notice persistence fail
     taskActivity: { findMany: async () => [] },
     taskTemplate: { findMany: async () => [] },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
-      taskActivity: { findMany: async () => [] },
+      $queryRaw: async () => [],
     }),
   } as unknown as PrismaClient;
   const originalError = console.error;
@@ -200,7 +201,9 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
         : queued ? [{ id: "retry-2", taskId: "task-1", runNumber: 2, agent: { name: "Archived", archivedAt: now } }] : [],
     },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
-      $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
+      $queryRaw: async (strings: TemplateStringsArray) => strings.join("").includes("TaskActivity")
+        ? []
+        : [{ id: "task-1", archivedAt: null }],
       agent: { findUnique: async () => ({ id: "agent-1", name: "Archived", archivedAt: now }) },
       run: {
         findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),

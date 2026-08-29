@@ -347,7 +347,7 @@ test("a post-acquire release or hold-recording failure remains observable", asyn
   const failingFinalRelease: WithMergeLease = async (target, fn) => {
     if (target) leasedTargets.push(target);
     const result = await fn();
-    if (result.disposition.kind === "release") throw releaseFailure;
+    if (result.leaseOutcome.kind === "stop") throw releaseFailure;
     return { outcome: "ran", value: result.value };
   };
 

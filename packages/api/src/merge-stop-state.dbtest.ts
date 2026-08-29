@@ -25,7 +25,9 @@ import {
 import { type PullRequestSnapshot } from "./github-read.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
+import type { ReleaseMergeLease } from "./merge-lease.js";
 import { recordMergeLeaseHold } from "./merge-lease-hold.js";
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -53,6 +55,13 @@ const CONFIRMED_RELEASE = {
   acquiredAt: "2026-08-27T12:00:00.250Z",
 };
 
+const collectRelease: ReleaseMergeLease = async (target, database) => {
+  if (!target) return;
+  releasedChainLeases.push(target.chainId);
+  releasedLeaseTargets.push(target);
+  await recordMergeLeaseHold(database, target, CONFIRMED_RELEASE, CONFIRMED_RELEASED_AT);
+};
+
 const freshSnapshot = (): PullRequestSnapshot => ({
   repository: "acme/widgets", number: 123, state: "OPEN", isDraft: false, merged: false,
   mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", baseRefName: "master", baseSha: "b".repeat(40),
@@ -75,13 +84,7 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
   try {
     const response = await createApp(db, {
-      releaseMergeLease: async (target) => {
-        if (target) {
-          releasedChainLeases.push(target.chainId);
-          releasedLeaseTargets.push(target);
-          await recordMergeLeaseHold(db, target, CONFIRMED_RELEASE, CONFIRMED_RELEASED_AT);
-        }
-      },
+      releaseMergeLease: collectRelease,
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -143,6 +146,45 @@ const stoppedChain = async (
   assert.equal((await completeRun(run)).status, 200);
   return { chain, run };
 };
+
+test("a failed mechanical completion hands the lease to its delayed retry until orphan cleanup", async () => {
+  const chain = await seedIntegratorChain(db, { label: "completion-retry-handoff", shape: "twelve-step" });
+  const run = await liveIntegratorRun(chain, 1, 3);
+  const completed = await completeRun(run, {
+    exitCode: 1,
+    terminalSuccess: false,
+    failureClass: "TRANSIENT_PROVIDER",
+    retryable: true,
+    externalFailure: true,
+    failureReason: "provider disconnected",
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.retryCreated, true);
+  const retry = await db.run.findFirstOrThrow({ where: {
+    taskId: chain.integratorTask!.id,
+    runNumber: 2,
+  } });
+  const pending = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: chain.integratorTask!.id,
+    metadata: { path: ["state"], equals: "pending" },
+  } });
+  assert.equal((pending.metadata as Record<string, unknown>).kind, MERGE_TAIL_KIND.leaseHandoff);
+  assert.equal((pending.metadata as Record<string, unknown>).toRunId, retry.id);
+  assert.equal((pending.metadata as Record<string, unknown>).consumerReadyAt, retry.readyAt.toISOString());
+  assert.deepEqual(releasedChainLeases, []);
+
+  const handedOffAt = Date.parse(String((pending.metadata as Record<string, unknown>).handedOffAt));
+  const beforeConsumerGrace = new Date(handedOffAt + 61_000);
+  assert.ok(beforeConsumerGrace.getTime() < retry.readyAt.getTime() + 60_000);
+  assert.equal(await reconcileDatabaseRuns(db, beforeConsumerGrace, collectRelease), 0);
+  assert.deepEqual(releasedChainLeases, []);
+
+  assert.equal(
+    await reconcileDatabaseRuns(db, new Date(retry.readyAt.getTime() + 61_000), collectRelease),
+    1,
+  );
+  assert.deepEqual(releasedChainLeases, [chain.integratorTask!.chainId]);
+});
 
 test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, question open, no chain advance", async () => {
   const { chain, run } = await stoppedChain("n16");
