@@ -90,7 +90,8 @@ after(async () => { await db.$disconnect(); });
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const BRANCH = "agentos/merge-tail-test";
-const NEWER_CLAIM = "merge-readiness-claim:new-worker|2099-01-01T00:00:00.000Z";
+const NEWER_CLAIM_TOKEN = "new-worker-token";
+const NEWER_CLAIM_EXPIRY = new Date("2099-01-01T00:00:00.000Z");
 const CONFIRMED_RELEASED_AT = new Date("2026-08-27T12:01:02.999Z");
 
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
@@ -402,7 +403,8 @@ test("an expired orphaned DOING readiness claim is reclaimed after restart", asy
   const seeded = await seedReadiness();
   await db.task.update({ where: { id: seeded.readiness.id }, data: {
     status: TaskStatus.DOING,
-    failureReason: "merge-readiness-claim:dead-worker|2000-01-01T00:00:00.000Z",
+    readinessClaimToken: "dead-worker-token",
+    readinessClaimExpiresAt: new Date("2000-01-01T00:00:00.000Z"),
   } });
   assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
 });
@@ -515,7 +517,11 @@ test("a stale worker cannot stop readiness after a newer worker owns the claim",
   await readStarted;
   await db.task.update({
     where: { id: seeded.readiness.id },
-    data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+    data: {
+      status: TaskStatus.DOING,
+      readinessClaimToken: NEWER_CLAIM_TOKEN,
+      readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+    },
   });
   finishRead();
 
@@ -525,7 +531,7 @@ test("a stale worker cannot stop readiness after a newer worker owns the claim",
     db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
   ]);
   assert.equal(readiness.status, TaskStatus.DOING);
-  assert.equal(readiness.failureReason, NEWER_CLAIM);
+  assert.equal(readiness.readinessClaimToken, NEWER_CLAIM_TOKEN);
   assert.equal(regression.status, TaskStatus.DONE);
   assert.deepEqual(releasedChainLeases, []);
 });
@@ -548,7 +554,11 @@ test("a stale worker cannot requeue regression after a newer worker owns the cla
   await readStarted;
   await db.task.update({
     where: { id: seeded.readiness.id },
-    data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+    data: {
+      status: TaskStatus.DOING,
+      readinessClaimToken: NEWER_CLAIM_TOKEN,
+      readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+    },
   });
   finishRead();
 
@@ -567,7 +577,9 @@ test("an unreachable merge lease acquire defers mechanically without spending re
   );
   const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
   assert.equal(readiness.status, TaskStatus.DOING);
-  assert.match(readiness.failureReason ?? "", /^merge-readiness-claim:/u);
+  assert.notEqual(readiness.readinessClaimToken, null);
+  assert.notEqual(readiness.readinessClaimExpiresAt, null);
+  assert.equal(readiness.failureReason, null);
   const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.readiness.id } });
   assert.match(activity.body, /lease acquisition deferred.*ENOENT/ui);
   assert.deepEqual(releasedChainLeases, []);
@@ -609,7 +621,11 @@ test("a worker that acquired then lost its claim releases without a concrete suc
   const loseToWorker: MergeLeaseAcquirer = async () => {
     await db.task.update({
       where: { id: succeeded.readiness.id },
-      data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+      data: {
+        status: TaskStatus.DOING,
+        readinessClaimToken: NEWER_CLAIM_TOKEN,
+        readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+      },
     });
     return { outcome: "acquired" };
   };
@@ -618,7 +634,10 @@ test("a worker that acquired then lost its claim releases without a concrete suc
     { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
   );
   assert.deepEqual(releasedChainLeases, [succeeded.readiness.chainId]);
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).failureReason, NEWER_CLAIM);
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).readinessClaimToken,
+    NEWER_CLAIM_TOKEN,
+  );
 });
 
 test("a foreign project's active successor cannot receive a claim-loss lease handoff", async () => {
