@@ -46,7 +46,7 @@
     { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by AGENTS.md" },
     { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents list with each agent's role, model, effort and runner" },
     { "glob": "docs/media/chain.png", "purpose": "README screenshot: a twelve-step assurance chain with assigned agent roles" },
-    { "glob": "docs/media/parallel-tasks.png", "purpose": "README hero: multiple tasks running in parallel across the task board" },
+    { "glob": "docs/media/parallel-tasks.gif", "purpose": "README hero: multiple tasks running in parallel across the task board" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/architecture.md", "purpose": "README-linked architecture, task workflow and security-defaults detail" },
     { "glob": "docs/install.md", "purpose": "README-linked installation detail and the repository verification sequence" },
@@ -306,7 +306,7 @@
     },
     {
       "category": "binary-material",
-      "glob": "docs/media/parallel-tasks.png",
+      "glob": "docs/media/parallel-tasks.gif",
       "reason": "reviewed README hero: multiple tasks running in parallel across the task board"
     },
     {

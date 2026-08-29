@@ -18,7 +18,7 @@ worked metal. The defects come out in the process.*
 
 [Install](#quick-start) · [Docs](#documentation) · [Status](#status) · [简体中文](README.zh-CN.md)
 
-<img src="docs/media/parallel-tasks.png" alt="Multiple tasks running in parallel across the board" width="880">
+<img src="docs/media/parallel-tasks.gif" alt="Multiple tasks running in parallel across the board" width="880">
 
 </div>
 

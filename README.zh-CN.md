@@ -16,7 +16,7 @@ Anneal 就是负责审的那一层：面向 coding agent 的本地控制平面�
 
 [安装](#快速开始) · [文档](#文档) · [支持状态](#支持状态) · [English](README.md)
 
-<img src="docs/media/parallel-tasks.png" alt="看板上的多个任务正在并行运行" width="880">
+<img src="docs/media/parallel-tasks.gif" alt="看板上的多个任务正在并行运行" width="880">
 
 </div>
 
