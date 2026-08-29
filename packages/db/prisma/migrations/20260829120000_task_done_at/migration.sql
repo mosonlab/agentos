@@ -12,10 +12,10 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF NEW."status" = 'done'::"TaskStatus"
-     AND (TG_OP = 'INSERT' OR OLD."status" <> 'done'::"TaskStatus") THEN
+  IF NEW."status"::text = 'done'
+     AND (TG_OP = 'INSERT' OR OLD."status"::text <> 'done') THEN
     NEW."doneAt" = CURRENT_TIMESTAMP;
-  ELSIF NEW."status" <> 'done'::"TaskStatus" THEN
+  ELSIF NEW."status"::text <> 'done' THEN
     NEW."doneAt" = NULL;
   END IF;
   RETURN NEW;
