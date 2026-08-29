@@ -234,7 +234,9 @@ test("cards in one chain render their own positions and never the active-step na
   const fourth = card({ chainProgress: progress({ position: 4 }), chainId: "c1", chainIndex: 4, chainName: "Release" });
   assert.match(first, /step 1\/9/);
   assert.match(fourth, /step 4\/9/);
-  assert.match(fourth, /layer 2\/7/);
+  // The execution layer is a scheduling coordinate; the chain detail page groups
+  // its steps by it, and the card has no question it answers.
+  assert.doesNotMatch(first + fourth, /layer/);
   assert.doesNotMatch(first + fourth, /Implementation · doing/);
   assert.doesNotMatch(card(), /·/);
 });
@@ -371,6 +373,40 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
     await press("Archive All");
     assert.deepEqual(confirmations, ["Archive all 2 done tasks in this project?"]);
     assert.deepEqual(mutations, ["/api/projects/p1/tasks/archive-done"]);
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("the board renders Backlog oldest first and leaves every other column in the API's order", async () => {
+  const { dom, container } = installDom();
+  storage.set("agentos.projectId", "p1");
+  // As `GET /tasks` answers: newest first, for every column.
+  const rows = [
+    task({ id: "backlog-new", status: "BACKLOG" }),
+    task({ id: "backlog-mid", status: "BACKLOG" }),
+    task({ id: "backlog-old", status: "BACKLOG" }),
+    task({ id: "done-new", status: "DONE" }),
+    task({ id: "done-old", status: "DONE" }),
+  ];
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string) => {
+    const path = String(input);
+    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
+    if (path.includes("/api/tasks?")) return Response.json(rows);
+    return Response.json([]);
+  } });
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
+    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+    const rendered = [...container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
+    // Backlog is a queue dispatched from the top, so a numbered queue has to
+    // read top-to-bottom in dispatch order; Done reports what just happened.
+    assert.deepEqual(rendered, ["backlog-old", "backlog-mid", "backlog-new", "done-new", "done-old"]);
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
     await act(async () => root.unmount());
@@ -537,8 +573,40 @@ test("a card with neither a run nor an assignee has no model line", () => {
   assert.equal(cardModel(task()), null);
 });
 
-test("a card with no assignee still says so", () => {
-  assert.match(card(), /Unassigned/);
+test("a card with no agent shows a person, not the word Unassigned", () => {
+  // "Unassigned" beside a robot was on every card a human owns, which is most of
+  // them, and it named a state that is not a problem.
+  const markup = card();
+  assert.doesNotMatch(markup, /Unassigned/);
+  // The person icon, which is IconUser's own circle-over-shoulders path.
+  assert.match(markup, /M2.9 13.6a5.1 5.1 0 0 1 10.2 0/);
+  // An agent, named, is unchanged.
+  const assigned = card({ assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" } });
+  assert.match(assigned, new RegExp(`aria-label="${en("tasks.card.assignee", { name: "merge-resolver" })}"`));
+  assert.match(assigned, />merge-resolver</);
+});
+
+/* ------------------------------------------------------------- the card's diet */
+
+test("a NOW card carries no schedule row, and every informative schedule still does", () => {
+  // "Once" is the default and was on nearly every card: three of a Backlog
+  // card's five rows were constants while its title clamped.
+  assert.doesNotMatch(card(), /Once/);
+  assert.match(card({ scheduleKind: "CRON", cron: "0 9 * * 1" }), /At 09:00 AM, only on Monday/);
+  assert.match(
+    card({ status: "BACKLOG", scheduleKind: "AT", runAt: "2099-01-01T00:00:00.000Z", chainId: "c1", chainIndex: 4, chainProgress: progress({ position: 4 }) }),
+    new RegExp(en("tasks.schedule.waitingForPrevious")),
+  );
+  assert.match(card({ scheduleKind: "AT", runAt: "2026-08-20T14:30:00.000Z" }), /At \w{3} \d{1,2}/);
+});
+
+test("a card with no runs has no run row, and a card with a run reads exactly as before", () => {
+  assert.doesNotMatch(card(), /no runs/);
+  const withRun = card({
+    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+  });
+  assert.match(withRun, new RegExp(en("tasks.card.run", { n: 3 })));
+  assert.match(withRun, new RegExp(en("status.run.SUCCEEDED")));
 });
 
 /* ---------------------------------------------------------- the board frame */

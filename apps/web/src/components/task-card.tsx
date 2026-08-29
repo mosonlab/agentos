@@ -8,7 +8,7 @@ import { mergeBadge } from "../lib/merge-outcome";
 import { navigate } from "../lib/router";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
-import { IconRobot } from "./icons";
+import { IconRobot, IconUser } from "./icons";
 import { DOT, DOT_TONE, Pill, ROW, RowMenu, type RowMenuEntry } from "./ui";
 
 /* The card's geometry, stated once for both layout shells.
@@ -48,7 +48,9 @@ const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-mut
 // kanban-tasks-board-t1560.jpg; pills are reserved for the task detail header.
 const runLabel = (task: BoardTask, t: Translate): ReactNode => {
   const run = task.latestRun;
-  if (!run) return <span className="text-[color:var(--faint)]">{t("tasks.card.noRuns")}</span>;
+  // A card with no run says nothing about runs. "no runs" is what every fresh
+  // card said, and a row that is a constant is a row that is not read.
+  if (!run) return null;
   // §SF-1. The card's whole run line is one status word, so a mechanical merge
   // that stopped has nowhere else to say so: SUCCEEDED here reads as a merge
   // that happened. The badge is bound server-side to this very run.
@@ -173,7 +175,9 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
-  const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  const assignee = task.assigneeAgent?.title ?? null;
+  const schedule = scheduleLabel(task);
+  const run = runLabel(task, t);
   const model = cardModel(task);
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
@@ -203,8 +207,11 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
             "Waiting for previous step" came out as "Waiting for previous st…"
             and a cron's prose as "At 09:00 AM, only on M…". This line is the
             answer to "what starts this task" — an answer cut off two characters
-            from the end is not a shorter answer, it is no answer. */}
-        <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{scheduleLabel(task)}</span>
+            from the end is not a shorter answer, it is no answer.
+            Null on a `NOW` task, which is nearly every task: the row is shared
+            with the pills, so it survives an absent schedule and disappears
+            with them. */}
+        {schedule === null ? null : <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{schedule}</span>}
         {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.approval")}</Pill> : null}
         {/* MANUAL renders nothing: most tasks are manual, and a pill on every
             card would be noise rather than provenance ([A8]). */}
@@ -244,7 +251,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </div>
       )}
-      <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
+      {run === null ? null : <div className={TASK_META_ROW}>{run}</div>}
       {model === null ? null : (
         <div className={TASK_META_ROW}>
           <span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model })}>
@@ -255,9 +262,16 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, TASK_FAILURE)}>{task.failureReason}</div>}
     </div>
     <div className={TASK_FOOT}>
+      {/* An agent by name, or a person icon and no word. "Unassigned" beside a
+          robot was on every card a human owns — which is most of them — and it
+          named a state that is not a problem in the vocabulary of the one thing
+          the card cannot see: the board projection carries no assignee *type*,
+          so an agent task missing its agent is indistinguishable here from a
+          task no agent was ever meant to run. */}
       <span className={cn(ROW, "min-w-0 gap-[6px]")}>
-        <IconRobot />
-        <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
+        {assignee === null
+          ? <IconUser />
+          : <><IconRobot /><Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} /></>}
       </span>
       <span className="flex-1" />
       {task.taskCost !== null && !hasTokenFallback

@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { COLUMNS, type Counts, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, parseStatus, statusLabel, tabKey } from "../lib/board";
+import { COLUMNS, type Counts, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -192,6 +192,10 @@ export const TasksPage = (): ReactNode => {
   const byStatus = useMemo(() => {
     const groups = new Map<TaskStatus, BoardTask[]>(COLUMNS.map((column) => [column.status, []]));
     for (const task of tasks) groups.get(task.status)?.push(task);
+    // Ordered here rather than in either shell: the desktop column and the phone
+    // list both page their slice of this, and a column paged in one order and
+    // read in another would put its first card on its second page.
+    for (const [status, rows] of groups) groups.set(status, orderColumn(status, rows));
     return groups;
   }, [tasks]);
   const counts: Counts = useMemo(() => countByStatus(tasks), [tasks]);

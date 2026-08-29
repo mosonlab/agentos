@@ -25,4 +25,16 @@ test("a finished chain still reads as n/n rather than collapsing", () => {
 test("a board position marker names only the card's own ordinal", () => {
   assert.equal(chainPositionMarker({ position: 4, total: 9 }), "step 4/9");
   assert.equal(chainPositionMarker({ position: null, total: 9 }), null);
+  assert.equal(chainPositionMarker(null), null);
+});
+
+test("the execution layer stays off the board card, whatever the progress carries", () => {
+  // The layer is a scheduling coordinate — which steps may be enqueued together
+  // — and the chain detail page groups its steps by it. On a card it was a
+  // second pair of numbers answering a question the board is not asking.
+  const layered = { position: 4, total: 9, currentLayer: 2, layerCount: 7 };
+  const marker = chainPositionMarker(layered);
+  assert.ok(marker);
+  assert.equal(marker, "step 4/9");
+  assert.doesNotMatch(marker, /layer/);
 });
