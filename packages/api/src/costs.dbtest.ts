@@ -15,7 +15,7 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
  * compared with a raw SQL sum over the same bounded window, while the estimated
  * share is pinned separately. The other tests cover behaviours that one total
  * cannot express — runner-specific token normalization, unavailable costs,
- * stable agent identity, exact range parsing, and UTC window boundaries.
+ * stable agent identity, exact range parsing, and timezone-aware boundaries.
  */
 
 let db: PrismaClient;
@@ -37,6 +37,9 @@ const call = async (path: string): Promise<{ status: number; body: any }> => {
     if (prior === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = prior;
   }
 };
+
+const costsPath = (projectId: string, days?: number, tz = "UTC"): string =>
+  `/projects/${projectId}/costs?${days === undefined ? "" : `days=${days}&`}tz=${encodeURIComponent(tz)}`;
 
 const unique = (label: string): string => `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}`;
 
@@ -133,7 +136,7 @@ test("totalUsd reconciles with a raw SQL sum over the same window", async () => 
     session: { costUsd: "50.0000" },
   });
 
-  const { status, body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { status, body } = await call(costsPath(project.id, 7));
   assert.equal(status, 200);
 
   const [manual] = await db.$queryRaw<Array<{ sum: unknown }>>`
@@ -178,7 +181,7 @@ test("a codex session without a reported amount is counted apart, never as zero"
     agentId: dev.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: daysAgo(2), session: null,
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.equal(body.runCount, 4);
   assert.equal(body.costUnavailableRuns, 2);
   // The mixed aggregate has 900 uncached + 100 cached input and 50 output
@@ -203,7 +206,7 @@ test("a complete codex token set is priced and labelled as an estimate", async (
     session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.equal(Number(body.totalUsd), 0.782);
   assert.equal(Number(body.estimatedUsd), 0.782);
   assert.equal(body.costUnavailableRuns, 0);
@@ -234,7 +237,7 @@ test("canonical token rows price identically across runners", async () => {
     session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.equal(Number(body.totalUsd), 2.346);
   assert.equal(Number(body.estimatedUsd), 2.346);
   assert.deepEqual(body.byAgent.map((entry: { agent: string; usd: string }) => [entry.agent, Number(entry.usd)]), [
@@ -257,7 +260,7 @@ test("agents with the same title remain distinct by their unique names", async (
     session: { costUsd: "2.0000" },
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.deepEqual(
     body.daily.find((entry: { byAgent: Record<string, string> }) => Object.keys(entry.byAgent).length > 0)?.byAgent,
     { "backend-dev": "2", "frontend-dev": "1" },
@@ -274,11 +277,13 @@ test("an entirely unpriced agent is explicit rather than indistinguishable from 
     session: { costUsd: null, inputTokens: 100 },
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
-  assert.deepEqual(body.byAgent, [{ agent: "codex", usd: "0", runs: 1, costUnavailableRuns: 1, avgUsd: "0" }]);
+  const { body } = await call(costsPath(project.id, 7));
+  assert.deepEqual(body.byAgent, [{
+    agent: "codex", usd: "0", runs: 1, costUnavailableRuns: 1, avgUsd: "0", cachePct: null, wastedUsd: "0",
+  }]);
 });
 
-test("the window is a whole number of UTC day buckets, and every day is present", async () => {
+test("the window is a whole number of local day buckets, and every day is present", async () => {
   const { project, repo, agent } = await seedProject("costs-daily");
   const dev = await agent("dev", "Frontend Dev");
   const reviewer = await agent("reviewer", "Reviewer");
@@ -291,7 +296,7 @@ test("the window is a whole number of UTC day buckets, and every day is present"
     session: { costUsd: "1.0000" },
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.equal(body.daily.length, 7);
   assert.equal(body.days, 7);
   const today = new Date().toISOString().slice(0, 10);
@@ -302,7 +307,7 @@ test("the window is a whole number of UTC day buckets, and every day is present"
   assert.deepEqual(body.byAgent.map((entry: { agent: string }) => entry.agent), ["dev", "reviewer"]);
 });
 
-test("runs beyond the captured UTC window end are excluded", async () => {
+test("runs beyond the captured local window end are excluded", async () => {
   const { project, repo, agent } = await seedProject("costs-future");
   const dev = await agent("dev", "Developer");
   const tomorrow = new Date();
@@ -313,7 +318,7 @@ test("runs beyond the captured UTC window end are excluded", async () => {
     session: { costUsd: "9.0000" },
   });
 
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.equal(body.runCount, 0);
   assert.equal(Number(body.totalUsd), 0);
 });
@@ -327,7 +332,7 @@ test("top runs are the ten most expensive, most expensive first", async () => {
       session: { costUsd: `${index}.0000` },
     });
   }
-  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  const { body } = await call(costsPath(project.id, 7));
   assert.equal(body.runCount, COSTS_TOP_RUNS + 3);
   assert.equal(body.topRuns.length, COSTS_TOP_RUNS);
   assert.deepEqual(
@@ -336,19 +341,60 @@ test("top runs are the ten most expensive, most expensive first", async () => {
   );
 });
 
+test("timezone is required and invalid values are refused", async () => {
+  const { project } = await seedProject("costs-timezone-validation");
+  for (const path of [
+    `/projects/${project.id}/costs?days=7`,
+    `/projects/${project.id}/costs?days=7&tz=`,
+    `/projects/${project.id}/costs?days=7&tz=Not%2FA_Zone`,
+  ]) {
+    const response = await call(path);
+    assert.equal(response.status, 400, path);
+    assert.match(response.body.error, /tz/);
+  }
+});
+
+test("the same near-midnight run lands on the local date of each timezone", async () => {
+  const { project, repo, agent } = await seedProject("costs-timezone-buckets");
+  const dev = await agent("dev", "Developer");
+  const utcMidnight = new Date();
+  utcMidnight.setUTCHours(0, 30, 0, 0);
+  await seedRun(project.id, repo.id, "Near midnight", {
+    agentId: dev.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: utcMidnight,
+    session: { costUsd: "1.0000" },
+  });
+
+  const utc = await call(costsPath(project.id, 7, "UTC"));
+  const pacific = await call(costsPath(project.id, 7, "America/Los_Angeles"));
+  const nonEmptyDate = (body: any): string => body.daily.find((day: any) => Object.keys(day.byAgent).length > 0).date;
+  assert.notEqual(nonEmptyDate(utc.body), nonEmptyDate(pacific.body));
+});
+
+test("Today returns exactly the current calendar date in the supplied timezone", async () => {
+  const { project } = await seedProject("costs-today");
+  const tz = "America/Los_Angeles";
+  const response = await call(costsPath(project.id, 1, tz));
+  const expected = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+  assert.equal(response.status, 200);
+  assert.equal(response.body.daily.length, 1);
+  assert.equal(response.body.daily[0].date, expected);
+});
+
 test("the default window is 30 days and unsupported or malformed values are refused", async () => {
   const { project } = await seedProject("costs-range");
-  const fallback = await call(`/projects/${project.id}/costs`);
+  const fallback = await call(costsPath(project.id));
   assert.equal(fallback.status, 200);
   assert.equal(fallback.body.days, 30);
   assert.equal(fallback.body.daily.length, 30);
 
-  const refused = await call(`/projects/${project.id}/costs?days=45`);
+  const refused = await call(`/projects/${project.id}/costs?days=45&tz=UTC`);
   assert.equal(refused.status, 400);
-  assert.match(refused.body.error, /7, 30, 90/);
+  assert.match(refused.body.error, /1, 7, 30, 90/);
 
   for (const malformed of ["7.5", "7junk", "90days"]) {
-    const response = await call(`/projects/${project.id}/costs?days=${malformed}`);
+    const response = await call(`/projects/${project.id}/costs?days=${malformed}&tz=UTC`);
     assert.equal(response.status, 400, malformed);
   }
 });

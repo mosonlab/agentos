@@ -3,12 +3,13 @@ import test from "node:test";
 
 import {
   chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
-  focusAfterMove, moveTargets, parseStatus, retryable, sameEdges, scheduleLabel, statusLabel, storedScroll,
+  focusAfterMove, moveTargets, orderColumn, parseStatus, retryable, sameEdges, scheduleLabel, statusLabel, storedScroll,
 } from "../lib/board";
 import type { BoardTask, ChainProgress } from "../lib/types";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
+  assigneeType: "HUMAN", createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null, taskCost: null,
@@ -49,14 +50,17 @@ test("a merge-tail repair task binds to a chain it has no columns for", () => {
 
 /* --------------------------------------------------------- schedule labels */
 
-test("a NOW task says Once", () => {
-  assert.equal(scheduleLabel(task()), "Once");
+test("a NOW task has no schedule line at all", () => {
+  // The default, and true of nearly every card: "Once" on all of them was a row
+  // of filler under a title that had to clamp to make room for it.
+  assert.equal(scheduleLabel(task()), null);
 });
 
 test("an AT task with a real schedule shows the time, not the enum", () => {
   // 42 of the live board's 112 cards rendered a lone "at": the enum lower-cased,
   // with `runAt` never read at all.
   const label = scheduleLabel(task({ scheduleKind: "AT", runAt: "2026-08-20T14:30:00.000Z" }));
+  assert.ok(label);
   assert.match(label, /^At \w{3} \d{1,2}, \d{1,2}:\d{2} (AM|PM)$/, label);
   assert.notEqual(label, "at");
 });
@@ -78,7 +82,7 @@ test("the parking rule reads the chain columns, not the date", () => {
   // The chain's *first* step is genuinely fireable by the scheduler, so its
   // runAt is a real answer.
   assert.equal(chainParked(step(1)), false);
-  assert.match(scheduleLabel(step(1)), /^At /);
+  assert.match(scheduleLabel(step(1)) ?? "", /^At /);
   // Not a chain member at all.
   assert.equal(chainParked(task({ scheduleKind: "AT", runAt: "2099-01-01T00:00:00.000Z" })), false);
   // A chainId with no index is the broken one-row-chain case, not a parked step.
@@ -132,6 +136,30 @@ test("counts cover every status, including the empty ones", () => {
   assert.deepEqual(counts, { BACKLOG: 0, TODO: 1, DOING: 0, REVIEW: 0, DONE: 1 });
 });
 
+/* ------------------------------------------------------------ the ordering */
+
+test("Backlog reads oldest first, and every other column keeps the API's order", () => {
+  // The API answers newest-first, which is what a column reporting what just
+  // happened wants. Backlog is a queue dispatched from the top, so read in that
+  // order it prints backwards: card 1 of the numbered queue sat at the bottom.
+  const newest = task({ id: "new", createdAt: "2026-08-18T00:00:00.000Z" });
+  const middle = task({ id: "mid", createdAt: "2026-08-17T00:00:00.000Z" });
+  const oldest = task({ id: "old", createdAt: "2026-08-16T00:00:00.000Z" });
+  const asDelivered = [newest, middle, oldest];
+  assert.deepEqual(orderColumn("BACKLOG", asDelivered).map((row) => row.id), ["old", "mid", "new"]);
+  for (const status of ["TODO", "DOING", "REVIEW", "DONE"] as const) {
+    assert.deepEqual(orderColumn(status, asDelivered).map((row) => row.id), ["new", "mid", "old"]);
+  }
+  // Never in place: the page holds the polled rows and reorders a copy.
+  assert.deepEqual(asDelivered.map((row) => row.id), ["new", "mid", "old"]);
+});
+
+test("Backlog preserves the API's id-ascending tiebreak within one creation time", () => {
+  const createdAt = "2026-08-16T00:00:00.000Z";
+  const asDelivered = [task({ id: "a", createdAt }), task({ id: "b", createdAt })];
+  assert.deepEqual(orderColumn("BACKLOG", asDelivered).map((row) => row.id), ["a", "b"]);
+});
+
 /* ------------------------------------------------------------ the actions */
 
 test("a card may be moved everywhere it is not", () => {
@@ -160,6 +188,16 @@ test("focus follows the moved card when it is still on screen", () => {
 
 test("focus lands on the next card when the moved one leaves the list", () => {
   assert.equal(focusAfterMove(["a", "c"], "b", ["a", "b", "c"]), "c");
+});
+
+test("focus after a Backlog move follows the rendered oldest-first order", () => {
+  const asDelivered = [
+    task({ id: "new", status: "BACKLOG", createdAt: "2026-08-18T00:00:00.000Z" }),
+    task({ id: "mid", status: "BACKLOG", createdAt: "2026-08-17T00:00:00.000Z" }),
+    task({ id: "old", status: "BACKLOG", createdAt: "2026-08-16T00:00:00.000Z" }),
+  ];
+  const renderedBefore = orderColumn("BACKLOG", asDelivered).map((row) => row.id);
+  assert.equal(focusAfterMove(["old", "new"], "mid", renderedBefore), "new");
 });
 
 test("focus falls back upwards when the moved card was last", () => {

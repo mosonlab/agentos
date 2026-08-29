@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma, type PrismaClient } from "@anneal/db";
+import { markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
 
 import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, readBoard, repairBinding, taskChainName } from "./board.js";
 
@@ -14,6 +14,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   projectId: "p1",
   name: "Ship the thing",
   status: "TODO" as BoardRow["status"],
+  assigneeType: "AGENT" as BoardRow["assigneeType"],
   failureReason: null,
   scheduleKind: "NOW" as BoardRow["scheduleKind"],
   runAt: null,
@@ -26,6 +27,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainIndex: null,
   chainLayer: null,
   dispatchAfterTaskId: null,
+  createdAt: new Date("2026-08-15T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
   templateStep: null,
   assigneeAgent: null,
@@ -102,11 +104,11 @@ test("readBoard resolves every bound row in one deduplicated predecessor lookup"
 
 /* ------------------------------------------------------------ the projection */
 
-test("the board card carries every field the board renders and nothing else", () => {
+test("the board projection carries every field the board consumes and nothing else", () => {
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
-    "approvalGate", "assigneeAgent", "blockedOn", "chainId", "chainIndex", "chainName", "chainProgress", "cron", "displayName",
+    "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron", "displayName",
     "failureReason", "id", "latestRun", "mergeOutcome", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
     "taskCost", "templateId", "timezone", "updatedAt",
   ]);
@@ -115,17 +117,17 @@ test("the board card carries every field the board renders and nothing else", ()
 test("a repair task is bound to the chain of the regression task its marker names", () => {
   const chain = (): { chainId: string; chainName: string | null } => ({ chainId: "c1", chainName: "Release" });
   assert.deepEqual(
-    repairBinding({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "reg-1" }, chain),
+    repairBinding(markerFromMetadata({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "reg-1" }), chain),
     { chainId: "c1", chainName: "Release", repairKind: "gate-fix" },
   );
   // The regression side of the same marker names the repair task, not a chain
   // this card could be put under, so it is not this card's binding.
   assert.equal(
-    repairBinding({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", repairTaskId: "fix-1" }, chain),
+    repairBinding(markerFromMetadata({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", repairTaskId: "fix-1" }), chain),
     null,
   );
   // A regression task that is itself chain-detached binds nothing.
-  assert.equal(repairBinding({ repairKind: "review-fix", regressionTaskId: "reg-1" }, () => null), null);
+  assert.equal(repairBinding(markerFromMetadata({ kind: "mergeTail.repairAttempt", repairKind: "review-fix", regressionTaskId: "reg-1" }), () => null), null);
   assert.equal(repairBinding(null, chain), null);
   assert.equal(boardCard(row(), null).repairOf, null);
   assert.deepEqual(
@@ -152,6 +154,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     name: "Ship the thing",
     displayName: "Ship the thing",
     status: "TODO",
+    assigneeType: "AGENT",
     failureReason: null,
     scheduleKind: "NOW",
     runAt: null,
@@ -163,6 +166,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     chainId: null,
     chainIndex: null,
     chainName: null,
+    createdAt: new Date("2026-08-15T00:00:00.000Z"),
     updatedAt: new Date("2026-08-16T00:00:00.000Z"),
     assigneeAgent: null,
     chainProgress: null,
@@ -272,6 +276,11 @@ test("the assignee carries the model spec the card shows", () => {
   assert.deepEqual(card.assigneeAgent, { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" });
 });
 
+test("the card carries task ownership even when no agent is assigned", () => {
+  assert.equal(boardCard(row({ assigneeType: "HUMAN", assigneeAgent: null }), null).assigneeType, "HUMAN");
+  assert.equal(boardCard(row({ assigneeType: "AGENT", assigneeAgent: null }), null).assigneeType, "AGENT");
+});
+
 test("chain names are derived only from the exact persisted template-step suffix", () => {
   assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review", templateStep: { name: "Review" } })), "Release");
   assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review notes", templateStep: { name: "Review" } })), null);
@@ -344,9 +353,10 @@ test("a board card is an order of magnitude smaller than the row it projects", (
     runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "0.42" }) }],
   }), null);
   // The card carries both cost surfaces — the latest run's own cost and the
-  // cross-run task total — so the clean-card bound sits at 800, still under
-  // half the ~2.2KB acceptance budget.
-  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 800, "a clean card must stay well inside its budget");
+  // cross-run task total, ownership and the creation timestamp used for queue
+  // order — so the clean-card bound sits at 900, still under half the ~2.2KB
+  // acceptance budget.
+  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 900, "a clean card must stay well inside its budget");
 });
 
 /* --------------------------------------------------------------- the ETag */

@@ -349,6 +349,7 @@ export type BoardTask = {
   name: string;
   displayName: string;
   status: TaskStatus;
+  assigneeType: AssigneeType;
   failureReason: string | null;
   scheduleKind: "NOW" | "AT" | "CRON";
   runAt: string | null;
@@ -360,6 +361,7 @@ export type BoardTask = {
   chainId: string | null;
   chainIndex: number | null;
   chainName: string | null;
+  createdAt: string;
   updatedAt: string;
   assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: ChainProgress | null;
@@ -410,6 +412,9 @@ export type CostsReport = {
    *  letting the tiles imply those runs were free. */
   costUnavailableRuns: number;
   avgUsd: string;
+  /** The priced spend of settled runs that did not succeed — failed, timed out,
+   *  cancelled or lost. Money the project paid for nothing it kept. */
+  wastedUsd: string;
   daily: Array<{ date: string; byAgent: Record<string, string> }>;
   byAgent: Array<{
     agent: string;
@@ -417,6 +422,20 @@ export type CostsReport = {
     runs: number;
     costUnavailableRuns: number;
     avgUsd: string;
+    /** Cached share of this agent's input tokens, 0-100, over the runs that
+     *  reported both token columns. `null` when no run of the agent did: an
+     *  unmeasured cache is not a cold one. */
+    cachePct: number | null;
+    wastedUsd: string;
+  }>;
+  /** Spend per distinct `Run.model` string, verbatim. Runs whose session used
+   *  native children are blended across two model rates and so land in a single
+   *  `mixed` key rather than under their root model. */
+  byModel: Array<{
+    model: string;
+    usd: string;
+    runs: number;
+    costUnavailableRuns: number;
   }>;
   topRuns: Array<{
     runId: string;

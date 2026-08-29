@@ -27,6 +27,7 @@ export const MERGE_TAIL_KIND = {
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
+  requeue: "mergeTail.requeue",
   readiness: "mergeTail.readiness",
 } as const;
 

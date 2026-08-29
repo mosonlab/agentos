@@ -6,7 +6,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { installDom, reactDom } from "./dom-harness";
 
 import {
-  ChartLegend, DailySpendChart, SERIES_SLOTS, axisDates, chartSegments, chartSeries, seriesColor,
+  COSTS_COLUMNS, COSTS_RANGES, ChartLegend, DailySpendChart, ModelBar, SERIES_SLOTS, axisDates,
+  chartSegments, chartSeries, percent, seriesColor, sharePct, wasteShare,
 } from "../pages/Costs";
 import type { CostsReport } from "../lib/types";
 
@@ -114,7 +115,7 @@ test("the legend names every series, so identity is never colour alone", () => {
 const agents = (count: number): CostsReport["byAgent"] =>
   Array.from({ length: count }, (_, index) => ({
     agent: `Agent ${index}`, usd: String(count - index), runs: 1, costUnavailableRuns: 0,
-    avgUsd: String(count - index),
+    avgUsd: String(count - index), cachePct: null, wastedUsd: "0",
   }));
 
 test("six agents or fewer are each their own series", () => {
@@ -149,10 +150,21 @@ const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
   runCount: 688,
   costUnavailableRuns: 153,
   avgUsd: "4.653387",
+  wastedUsd: "180",
   daily: [bucket("2026-08-26", { "Senior Developer": "600", Planner: "45.87" })],
   byAgent: [
-    { agent: "Senior Developer", usd: "1800", runs: 400, costUnavailableRuns: 100, avgUsd: "6" },
-    { agent: "Planner", usd: "689.211742", runs: 288, costUnavailableRuns: 53, avgUsd: "2.932816" },
+    {
+      agent: "Senior Developer", usd: "1800", runs: 400, costUnavailableRuns: 100, avgUsd: "6",
+      cachePct: 72.5, wastedUsd: "180",
+    },
+    {
+      agent: "Planner", usd: "689.211742", runs: 288, costUnavailableRuns: 53, avgUsd: "2.932816",
+      cachePct: null, wastedUsd: "0",
+    },
+  ],
+  byModel: [
+    { model: "openai-codex/gpt-5.6-luna:max", usd: "1800", runs: 400, costUnavailableRuns: 100 },
+    { model: "mixed", usd: "689.211742", runs: 288, costUnavailableRuns: 53 },
   ],
   topRuns: [{
     runId: "run-1", taskName: "Costs dashboard page: Implementation", agent: "Senior Developer",
@@ -168,7 +180,7 @@ const settle = async (): Promise<void> => {
 /** Mounts the page against a scripted control plane, reads it, and unmounts.
  *  The unmount is not tidiness: `usePoll` holds a `setInterval`, and a root left
  *  mounted keeps the test process alive forever. */
-const readPage = async (body: CostsReport): Promise<{ text: string; requested: string[] }> => {
+const readPage = async (body: CostsReport): Promise<{ text: string; html: string; requested: string[] }> => {
   const { container } = installDom("http://127.0.0.1:5173/costs");
   const [{ createRoot }, { CostsPage }, { ProjectProvider }] = await Promise.all([
     reactDom(), import("../pages/Costs"), import("../lib/project"),
@@ -190,21 +202,56 @@ const readPage = async (body: CostsReport): Promise<{ text: string; requested: s
     // a project id to ask for costs with.
     await settle();
     await settle();
-    return { text: container.textContent ?? "", requested };
+    return { text: container.textContent ?? "", html: container.innerHTML, requested };
   } finally {
     act(() => root.unmount());
   }
 };
 
-test("the page reads the default window and shows the three tiles", async () => {
-  const { text, requested } = await readPage(report());
-  assert.ok(requested.some((url) => url === "/projects/p1/costs?days=30"), requested.join(" "));
+test("the page reads the default window in the browser timezone", async () => {
+  const { requested } = await readPage(report());
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // The control plane refuses a costs request without a timezone, so the page
+  // that omitted one would render an error rather than a window.
+  assert.ok(
+    requested.some((url) => url === `/projects/p1/costs?days=30&tz=${encodeURIComponent(timeZone)}`),
+    requested.join(" "),
+  );
+});
+
+test("one summary row carries the total, the runs, the average and the waste", async () => {
+  const { text, html } = await readPage(report());
   assert.match(text, /Total spend/);
   assert.match(text, /\$2489\.21/);
   assert.match(text, /Runs/);
   assert.match(text, /688/);
   assert.match(text, /Avg per priced run/);
   assert.match(text, /\$4\.65/);
+  assert.match(text, /Wasted spend/);
+  assert.match(text, /\$180\.00/);
+  // One row, not four tiles: the four figures share a single container.
+  assert.equal(html.split("Total spend").length - 1, 1);
+  assert.equal(html.match(/repeat\(auto-fit,minmax\(140px,1fr\)\)/g)?.length, 1);
+});
+
+test("the range control offers Today alongside the day windows", async () => {
+  assert.deepEqual([...COSTS_RANGES], [1, 7, 30, 90]);
+  const { text } = await readPage(report());
+  assert.match(text, /Today/);
+  assert.match(text, /7d/);
+  assert.match(text, /90d/);
+});
+
+test("the dashboard is two columns that collapse to one at narrow widths", async () => {
+  // The single-column default is the mobile state; the second column only
+  // appears where both are still wide enough to read.
+  assert.match(COSTS_COLUMNS, /^grid grid-cols-\[minmax\(0,1fr\)\]/);
+  assert.match(COSTS_COLUMNS, /\[@media\(min-width:1100px\)\]:grid-cols-\[minmax\(0,1\.6fr\)_minmax\(0,1fr\)\]/);
+  const { html } = await readPage(report());
+  assert.ok(html.includes(COSTS_COLUMNS), "the page renders the two-column grid");
+  // Chart above top runs on the left; by agent above by model on the right.
+  const order = ["Daily spend", "Top runs", "By agent", "By model"];
+  assert.deepEqual([...order].sort((left, right) => html.indexOf(left) - html.indexOf(right)), order);
 });
 
 test("the tiles never imply the total is complete when it is not", async () => {
@@ -232,11 +279,87 @@ test("both tables render, and an estimated run cost is labelled as one", async (
 
 test("an agent with no priced runs shows unavailable cost instead of zero spend", async () => {
   const { text } = await readPage(report({
-    totalUsd: "0", estimatedUsd: "0", runCount: 3, costUnavailableRuns: 3, avgUsd: "0",
-    daily: [], topRuns: [],
-    byAgent: [{ agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0" }],
+    totalUsd: "0", estimatedUsd: "0", runCount: 3, costUnavailableRuns: 3, avgUsd: "0", wastedUsd: "0",
+    daily: [], topRuns: [], byModel: [],
+    byAgent: [{
+      agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0", cachePct: null, wastedUsd: "0",
+    }],
   }));
   assert.match(text, /codex/);
   assert.match(text, /3 costs unavailable/);
-  assert.match(text, /codex3 costs unavailable—3—/);
+  // Spend, average, cache and waste are all unknown here, and every one of them
+  // says so rather than reporting a zero nobody measured.
+  assert.match(text, /codex3 costs unavailable—3———/);
+});
+
+/* --------------------------------------------------------- cache and waste */
+
+test("a percentage is one decimal, and a missing figure is an em dash", () => {
+  assert.equal(percent(72.5), "72.5%");
+  assert.equal(percent(0), "0.0%");
+  assert.equal(percent(null), "—");
+});
+
+test("a share is taken from the wire amounts, and is null when there is no total", () => {
+  assert.equal(sharePct("25", "200"), 12.5);
+  assert.equal(sharePct("1", "0"), null);
+  assert.equal(sharePct("0", "3"), 0);
+});
+
+test("waste is a share of the agent's own spend, and null when it has none", () => {
+  assert.equal(wasteShare({
+    agent: "dev", usd: "200", runs: 4, costUnavailableRuns: 0, avgUsd: "50",
+    cachePct: null, wastedUsd: "50",
+  }), 25);
+  assert.equal(wasteShare({
+    agent: "dev", usd: "0", runs: 2, costUnavailableRuns: 2, avgUsd: "0",
+    cachePct: null, wastedUsd: "0",
+  }), null);
+});
+
+test("the by-agent table states a cache rate and a waste rate per agent", async () => {
+  const { text } = await readPage(report());
+  assert.match(text, /Cache %/);
+  assert.match(text, /Waste %/);
+  // Senior Developer: 72.5% cached, $180 wasted of $1800 spent.
+  assert.match(text, /72\.5%/);
+  assert.match(text, /10\.0%/);
+  // Planner reported no cache columns at all, and reports an em dash for it —
+  // not the 0% that would claim it never hit a cache.
+  assert.match(text, /Planner.*—/s);
+  assert.ok(!/0\.0%\s*0\.0%/.test(text));
+});
+
+/* ------------------------------------------------------------------ by model */
+
+test("the by-model card names every model verbatim, with its share of the total", async () => {
+  const { text } = await readPage(report());
+  assert.match(text, /By model/);
+  // Provider prefix and effort suffix included: two efforts are two prices.
+  assert.match(text, /openai-codex\/gpt-5\.6-luna:max/);
+  // A run whose session used native children is a blend of two model rates and
+  // is reported as such rather than filed under its root model.
+  assert.match(text, /mixed/);
+  assert.match(text, /72\.3%/);
+  assert.match(text, /27\.7%/);
+});
+
+test("the model bar draws one segment per model and names it on hover", () => {
+  const byModel: CostsReport["byModel"] = [
+    { model: "claude-opus-5", usd: "75", runs: 3, costUnavailableRuns: 0 },
+    { model: "mixed", usd: "25", runs: 1, costUnavailableRuns: 0 },
+  ];
+  const markup = renderToStaticMarkup(
+    <ModelBar byModel={byModel} totalUsd="100" colors={colorsFor(["claude-opus-5", "mixed"])} />,
+  );
+  assert.equal(markup.match(/<span /g)?.length, 2);
+  assert.ok(markup.includes("width:75%"));
+  assert.ok(markup.includes("width:25%"));
+  assert.ok(markup.includes("claude-opus-5 · $75.00 · 75.0%"));
+  assert.ok(markup.includes('role="img"'));
+});
+
+test("a window with no priced spend draws no bar rather than an empty one", () => {
+  const byModel: CostsReport["byModel"] = [{ model: "claude-opus-5", usd: "0", runs: 2, costUnavailableRuns: 2 }];
+  assert.equal(renderToStaticMarkup(<ModelBar byModel={byModel} totalUsd="0" colors={colorsFor([])} />), "");
 });

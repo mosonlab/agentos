@@ -185,6 +185,17 @@ curl -X PATCH "$BASE_URL/projects/$PROJECT_ID" \
 curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
+### GET `/projects/:projectId/costs`
+
+- Required path parameter: `projectId`.
+- Required query parameter: `tz` (recognized IANA timezone).
+- Optional query parameter: `days` (`1`, `7`, `30`, or `90`; default `30`).
+
+```sh
+curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
 ### GET `/projects/:projectId/environments`
 
 - Required path parameter: `projectId`.
@@ -888,6 +899,10 @@ creation), `approvalGate`, `opensPullRequest`,
   `false`); `view` (`full` or `board`, default `full`); `enrich` (`true` or
   `false`, default `true`).
 
+The `board` view is a compact card projection. It includes `createdAt` for
+stable queue ordering and `assigneeType` so a human-owned task can be
+distinguished from an agent task whose agent assignment is missing.
+
 ```sh
 curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=full&archived=false" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
@@ -951,6 +966,22 @@ curl "$BASE_URL/tasks/$TASK_ID/startability" -H "Authorization: Bearer $OPERATOR
 curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
+### DELETE `/tasks/:taskId/chain`
+
+- Required path parameter: `taskId`, naming either a direct Chain member or a
+  detached merge-tail repair task bound to the Chain by its repair marker.
+- Deletes every Task in the project-scoped Chain, including its marker-bound
+  repair tasks, atomically.
+- Refusals: `404 Not Found` when the Task does not exist; `409 Conflict` when
+  the Task belongs to no Chain, any Chain member has an active Run, or a member
+  has retained Run/Session history. Active Run and retained-history refusals
+  return codes `chain_delete_active_run` and `chain_delete_run_history`,
+  respectively, and change nothing.
+
+```sh
+curl -X DELETE "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
 ### POST `/tasks/:taskId/chain/hold`
 
 - Required path parameter: `taskId`.
@@ -1007,6 +1038,10 @@ curl -X PATCH "$BASE_URL/tasks/$TASK_ID" \
 ### DELETE `/tasks/:taskId`
 
 - Required path parameter: `taskId`.
+- Chain members, including detached repair tasks resolved through their repair
+  markers, cannot be deleted individually. The route returns `400 Bad Request`
+  with code `chain_task_delete_required`, names the Chain, and directs callers
+  to `DELETE /tasks/:taskId/chain`.
 
 ```sh
 curl -X DELETE "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
