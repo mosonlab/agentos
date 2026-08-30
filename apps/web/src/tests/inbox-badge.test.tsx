@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act } from "react";
 
 import { App } from "../App";
 import { LocaleProvider } from "../lib/i18n";
 import { ThemeProvider } from "../lib/theme";
-import { installDom, reactDom } from "./dom-harness";
+import { mountPage } from "./dom-harness";
 
 /**
  * What the sidebar badge costs every page.
@@ -19,32 +18,22 @@ import { installDom, reactDom } from "./dom-harness";
  * nobody.
  */
 const mounted = async (routes: Record<string, string>): Promise<{ paths: string[]; markup: string }> => {
-  const { dom, container } = installDom();
   const paths: string[] = [];
-  const original = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string) => {
-    const path = String(url);
+  const page = await mountPage(
+    <ThemeProvider><LocaleProvider initialLocale="en"><App /></LocaleProvider></ThemeProvider>,
+    { "*": ({ input }) => {
+    const path = String(input);
     paths.push(path);
     const body = routes[path];
     return body === undefined
       ? new Response('{"error":"not found"}', { status: 404 })
       : new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
-  } });
-  const root = (await reactDom()).createRoot(container);
+    } },
+  );
   try {
-    await act(async () => root.render(
-      <ThemeProvider><LocaleProvider initialLocale="en"><App /></LocaleProvider></ThemeProvider>,
-    ));
-    // Twice: one tick resolves the bootstrap, the next lets the Shell that
-    // mounted because of it run its own first poll.
-    for (let round = 0; round < 2; round += 1) {
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    }
-    return { paths, markup: dom.window.document.body.innerHTML };
+    return { paths, markup: page.dom.window.document.body.innerHTML };
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 };
 

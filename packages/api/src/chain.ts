@@ -2,7 +2,6 @@ import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
   chainControlKey,
-  executionLayer,
   readChainControlRecord,
   readChainControls,
   resumeActivationAnchor,
@@ -14,8 +13,9 @@ import {
   type PrismaClient,
   TaskStatus,
 } from "@anneal/db";
+import { compare, denseOrdinals, layerOf } from "@anneal/db/chain-order";
 
-export { executionLayer, resumeActivationAnchor, resumeActivationNeedsSourceRun };
+export { resumeActivationAnchor, resumeActivationNeedsSourceRun };
 
 import { runBudgetCeiling } from "./execution.js";
 import type { Refusal } from "./refusal.js";
@@ -70,13 +70,17 @@ export const stepName = (row: Pick<ChainRow, "name" | "templateStep">): string =
 
 const byChainIndex = (left: ChainRow, right: ChainRow): number => (left.chainIndex ?? 0) - (right.chainIndex ?? 0);
 
+const chainLayerOf = <T extends { chainLayer?: number | null; chainIndex: number | null }>(row: T): number | null => layerOf({
+  layer: row.chainLayer === undefined ? null : row.chainLayer,
+  index: row.chainIndex,
+});
+
 const byExecutionPosition = <T extends { chainLayer?: number | null; chainIndex: number | null; id: string }>(
   left: T,
   right: T,
-): number => (
-  (executionLayer(left) ?? 0) - (executionLayer(right) ?? 0)
-    || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
-    || left.id.localeCompare(right.id)
+): number => compare(
+  { layer: left.chainLayer === undefined ? null : left.chainLayer, index: left.chainIndex, id: left.id },
+  { layer: right.chainLayer === undefined ? null : right.chainLayer, index: right.chainIndex, id: right.id },
 );
 
 /**
@@ -88,24 +92,28 @@ const byExecutionPosition = <T extends { chainLayer?: number | null; chainIndex:
  */
 export const chainProgress = (rows: ChainRow[]): Omit<ChainProgress, "chainId"> | null => {
   if (rows.length === 0) return null;
-  const ordered = [...rows].sort(byChainIndex);
+  const ordered = [...rows].sort(byExecutionPosition);
   const done = ordered.filter((row) => row.status === TaskStatus.DONE).length;
   const active = ordered.find((row) => row.status !== TaskStatus.DONE) ?? ordered[ordered.length - 1]!;
   // The expand migration backfills every legacy row, but keeping the
   // chainIndex fallback makes progress safe for rows read while that migration
-  // is staged and for malformed one-row fixtures. Stored layers may be sparse,
-  // zero-based, or one-based; the board presents their dense rank instead.
-  const effectiveLayer = (row: ChainRow, index: number): number => row.chainLayer ?? row.chainIndex ?? index;
-  const layerValues = ordered.map(effectiveLayer);
-  const distinctLayers = [...new Set(layerValues)].sort((left, right) => left - right);
-  const denseLayer = new Map(distinctLayers.map((layer, index) => [layer, index + 1]));
+  // is staged. Stored layers may be sparse, zero-based, or one-based; the board
+  // presents their dense rank instead. A malformed row missing both fields is
+  // one final unknown layer rather than a layer invented from arrival order.
+  const denseLayer = denseOrdinals(ordered.map((row) => ({ layer: row.chainLayer, index: row.chainIndex })));
+  const activeLayer = layerOf(
+    { layer: active.chainLayer, index: active.chainIndex },
+    { missing: "last" },
+  );
+  const currentLayer = denseLayer.get(activeLayer);
+  if (currentLayer === undefined) throw new Error(`Active Chain row ${active.id} has no dense layer ordinal`);
   return {
     done,
     total: ordered.length,
     activeStepName: stepName(active),
     activeStatus: active.status.toLowerCase(),
-    currentLayer: denseLayer.get(effectiveLayer(active, ordered.indexOf(active))) ?? 1,
-    layerCount: distinctLayers.length,
+    currentLayer,
+    layerCount: denseLayer.size,
   };
 };
 
@@ -227,9 +235,9 @@ export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id"
   const ordered = [...rows].sort(byExecutionPosition);
   const target = ordered.find((item) => item.id === targetId);
   if (!target) return null;
-  const targetLayer = executionLayer(target);
+  const targetLayer = chainLayerOf(target);
   return ordered.find((item) => {
-    const itemLayer = executionLayer(item);
+    const itemLayer = chainLayerOf(item);
     return itemLayer !== null && targetLayer !== null
       ? itemLayer < targetLayer && item.status !== TaskStatus.DONE
       : item.id !== target.id && item.status !== TaskStatus.DONE;
@@ -331,7 +339,7 @@ export const refusalForHeldChainStep = (
 ): Refusal | null => {
   if (!control?.held || task.chainId === null
     || control.projectId !== task.projectId || control.chainId !== task.chainId) return null;
-  const taskLayer = executionLayer(task);
+  const taskLayer = chainLayerOf(task);
   // A held control is only valid with a persisted layer, but fail closed if a
   // malformed legacy row reaches admission: an unknown layer must not bypass
   // an active Chain barrier.
