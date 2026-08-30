@@ -535,6 +535,19 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
   assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
 });
 
+test("a FAST run adds a fast marker to the single-task model line, but DEFAULT does not", () => {
+  const run = (codexServiceTier: "DEFAULT" | "FAST") => ({
+    id: "r1", runNumber: 1, status: "SUCCEEDED" as const, model: "gpt-5.6-sol:high", codexServiceTier,
+    costUsd: null, startedAt: null, endedAt: null,
+  } as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" });
+
+  const fast = card({ latestRun: run("FAST") });
+  assert.match(fast, /gpt-5\.6-sol:high · fast/u);
+  const standard = card({ latestRun: run("DEFAULT") });
+  assert.match(standard, /gpt-5\.6-sol:high/u);
+  assert.doesNotMatch(standard, /fast/u);
+});
+
 test("a task with no runs still shows the agent's configured model", () => {
   const markup = card({ assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" }, latestRun: null });
   assert.match(markup, /gpt-5\.6-sol:high/);

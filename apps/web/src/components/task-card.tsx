@@ -1,5 +1,7 @@
 import { type ReactNode, memo, useEffect, useState } from "react";
 
+import { splitModel } from "@anneal/db/model-routing";
+
 import { chainPositionMarker } from "../lib/chain";
 import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
 import { chainBinding, chainBindingLabel, retryable, scheduleLabel, statusLabel } from "../lib/board";
@@ -68,6 +70,15 @@ export const cardTitle = (task: BoardTask): string => {
 export const cardModel = (task: BoardTask): string | null =>
   task.latestRun?.model ?? task.assigneeAgent?.model ?? null;
 
+const cardModelFast = (task: BoardTask, model: string): string => {
+  const tier = task.latestRun === null ? null : (task.latestRun as BoardTask["latestRun"] & { codexServiceTier?: string }).codexServiceTier;
+  const parsed = splitModel(model);
+  // Keep the existing task-card model:effort presentation byte-for-byte while
+  // using the shared parser for the optional tier marker.
+  const encoded = parsed.effort === null ? parsed.model : `${parsed.model}:${parsed.effort}`;
+  return tier === "FAST" ? `${encoded} · fast` : encoded;
+};
+
 export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): string => {
   const run = task.latestRun;
   if (!run) return timeAgo(task.updatedAt);
@@ -115,6 +126,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const schedule = scheduleLabel(task);
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
   const model = cardModel(task);
+  const modelLine = model === null ? null : cardModelFast(task, model);
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   const title = cardTitle(task);
@@ -164,8 +176,8 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         </span>,
     ]),
     ...(task.latestRun === null ? [] : [<RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} />]),
-    ...(model === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model })}>
-      {model}
+    ...(modelLine === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: modelLine })}>
+      {modelLine}
     </span>]),
   ];
   const footer = <>

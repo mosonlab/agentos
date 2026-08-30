@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { splitModel } from "@anneal/db/model-routing";
+
 import { duration } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -46,22 +48,35 @@ export const RunLine = ({
   run,
   mergeOutcome,
   showElapsed = false,
+  showModel = false,
 }: {
   run: BoardLatestRun;
   mergeOutcome?: MergeOutcome | null | undefined;
   showElapsed?: boolean;
+  /** Aggregate cards put the claimed model beside the run; task cards retain
+   * their dedicated model row and leave this off. */
+  showModel?: boolean;
 }): ReactNode => {
   const t = useT();
   const presentation = runPresentation(run.status, mergeOutcome);
   const elapsed = showElapsed && isActiveRunStatus(run.status) && run.startedAt !== null
     ? t("tasks.card.runningDuration", { duration: duration(run.startedAt, null) })
     : null;
+  const model = showModel ? splitModel(run.model) : null;
+  const runDetails = [
+    ...(model === null ? [] : [model.model, ...(model.effort === null ? [] : [model.effort])]),
+    ...((run as BoardLatestRun & { codexServiceTier?: string }).codexServiceTier === "FAST" ? ["fast"] : []),
+    // An active run's elapsed copy already says "running". The chain state
+    // pill supplies the aggregate's state, so repeating the run status here
+    // made a live card read "Running ... running · running 12m".
+    elapsed === null ? t(presentation.key) : elapsed,
+  ].join(" · ");
   return (
     <span data-run-line="" className="inline-flex min-w-0 items-center gap-[6px] whitespace-nowrap">
       <span className={cn(DOT, DOT_TONE[dotTone(run.status, mergeOutcome)])} />
       <span className="text-primary">{t("tasks.card.run", { n: run.runNumber })}</span>
       <span className="overflow-hidden text-ellipsis text-[color:var(--faint)]">
-        {` · ${t(presentation.key)}${elapsed === null ? "" : ` · ${elapsed}`}`}
+        {` · ${runDetails}`}
       </span>
     </span>
   );
