@@ -29,19 +29,27 @@ failure rather than a silent inclusion.
 | Category | Count | Provenance |
 | --- | --- | --- |
 | First-party source, tests, configuration and manifests | the majority | Written for this repository. MIT, per `LICENSE`. |
-| Third-party source, vendored | 14 files | shadcn/ui. See below. |
+| Third-party source, vendored | 13 files | shadcn/ui. See below. |
 | Chain prompts carrying upstream text | `agents/roles/`, `agents/templates/` | mattpocock/skills. See below. |
 | Data fixtures | 5 files | See below. |
-| Images, fonts, audio, video, icons, compiled binaries, archives | **0** | There are none. |
+| Binary media | 3 files | First-party README captures. See below. |
 
-### There are no binary assets
+### Binary README assets
 
-The published set contains **zero binary files**. No image, no font, no icon
-file, no compiled artifact, no archive. That is not a claim about what we
-remembered to check — it is a property of the file set, and it is re-checked
-mechanically: `scripts/public-snapshot-scan.mjs` classifies a file as binary when
-its first 8 KiB contain a NUL byte or more than 10% control characters, and the
-scan reports any binary in scope.
+The published set contains three first-party media files used by the bilingual
+README pair. `public-snapshot.json` includes each file and records its reviewed
+`binary-material` finding by exact path.
+
+| Path | Media type | SHA-256 | Bytes | Provenance |
+| --- | --- | --- | --- | --- |
+| `docs/media/agents.png` | `image/png` | `f248b0a9ecc543a0ec438024272073022d570e9f9588e0e71c9882bb9917f2d5` | 341236 | Capture of Anneal's Agents view. |
+| `docs/media/chain.png` | `image/png` | `b51111e47afb1ec62caa2164e0eb50f9e4fc55ad025446d85a0ae437e80563c3` | 417380 | Capture of an Anneal Full Assurance chain. |
+| `docs/media/parallel-tasks.gif` | `image/gif` | `b38e64f16fe36cc13c5e845ca9263748ed4195a84eddb72add81228fa6f5cd6c` | 447169 | Capture of Anneal running multiple tasks on its board. |
+
+All three captures come from this repository's own application, are owned by
+Moson Lab, and are covered by `LICENSE`. The scanner classifies a file as binary
+when its first 8 KiB contain a NUL byte or more than 10% control characters and
+reports every binary in scope; no other binary file is published.
 
 To re-derive it from a clean checkout:
 
@@ -49,8 +57,8 @@ To re-derive it from a clean checkout:
 npm run snapshot:scan
 ```
 
-The consequence for licensing is that there is no unprovenanced media in this
-release, and no asset whose origin has to be taken on trust.
+The consequence for licensing is that every published media asset has explicit
+provenance rather than relying on an assumed zero-binary inventory.
 
 ## Third-party source carried in the tree
 
