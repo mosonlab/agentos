@@ -604,8 +604,13 @@ export const startBaseDriftRecoveryWorker = (
   db: PrismaClient,
   reader: PullRequestReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> => {
+  let inFlight = false;
   const run = (): void => {
-    void baseDriftRecoveryTick(db, reader).catch((error: unknown) => console.error("Base-drift recovery tick failed", error));
+    if (inFlight) return;
+    inFlight = true;
+    void baseDriftRecoveryTick(db, reader)
+      .catch((error: unknown) => console.error("Base-drift recovery tick failed", error))
+      .finally(() => { inFlight = false; });
   };
   run();
   const timer = setInterval(run, baseDriftRecoveryPollIntervalMs());
