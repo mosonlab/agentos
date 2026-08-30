@@ -130,6 +130,11 @@ test("api shared maintenance lock real-process acceptance", {
     ...process.env,
     ...spawnedStartupEnvironment({ DATABASE_URL: source.url }),
     SCHEDULER_POLL_INTERVAL_MS: "0",
+    // Two of the cases below wait for a retention tick to fire. At the shipped
+    // ten seconds that wait is the entire cost of this file; the protocol being
+    // proved is what the check does, not how long the service sat between two
+    // of them.
+    SERVICE_LOCK_RETENTION_INTERVAL_MS: "250",
     RUNNER_WORKSPACE_ROOT: workspace,
     FILES_ROOT: files,
     CONTROL_PLANE_STATE_DIR: state,

@@ -59,6 +59,44 @@ import {
 export const SERVICE_LOCK_RETENTION_INTERVAL_MS = 10_000;
 
 /**
+ * The one environment variable that moves the interval, and it may only move it
+ * *down*.
+ *
+ * Tests that prove this protocol have to start the shipped entrypoint — that is
+ * the whole point of them, a fixture holding its own shared lock would prove
+ * PostgreSQL's compatibility matrix instead of the service's participation — and
+ * a started process takes no options. Without an override those tests can only
+ * wait out a real ten-second tick, which is four intervals of pure sleep across
+ * the two suites and, measured on the gate, the two longest files in the
+ * database wave.
+ *
+ * Lengthening is refused rather than clamped. A shorter interval only makes a
+ * service more eager to discover it has lost the key; a longer one widens
+ * exactly the window this module exists to close, and an operator who set it by
+ * accident would get a quieter service that is wrong for longer. Refusing is
+ * also why this is parsed rather than `parseInt`-with-a-default: a typo that
+ * silently became `NaN` would schedule the check at an interval nobody chose.
+ */
+export const SERVICE_LOCK_RETENTION_INTERVAL_ENV = "SERVICE_LOCK_RETENTION_INTERVAL_MS";
+
+export const resolveServiceLockRetentionIntervalMs = (raw: string | undefined): number => {
+  if (raw === undefined || raw === "") return SERVICE_LOCK_RETENTION_INTERVAL_MS;
+  if (!/^[1-9][0-9]*$/u.test(raw)) {
+    throw new Error(
+      `${SERVICE_LOCK_RETENTION_INTERVAL_ENV} must be a positive integer of milliseconds, got '${raw}'`,
+    );
+  }
+  const requested = Number(raw);
+  if (requested > SERVICE_LOCK_RETENTION_INTERVAL_MS) {
+    throw new Error(
+      `${SERVICE_LOCK_RETENTION_INTERVAL_ENV} may only shorten the retention check: `
+        + `${requested} exceeds the ${SERVICE_LOCK_RETENTION_INTERVAL_MS}ms default`,
+    );
+  }
+  return requested;
+};
+
+/**
  * A reconnect can fail while PostgreSQL or the local network is recovering.
  * Retrying only the stable "connection unavailable" refusal gives that event
  * more than one chance without ever retrying past an observed lock conflict.
@@ -298,7 +336,8 @@ export const holdSharedServiceMaintenanceLock = async (
 
   state.cancel = (options.schedule ?? defaultSchedule)(
     () => { void verifyRetention(); },
-    options.retentionIntervalMs ?? SERVICE_LOCK_RETENTION_INTERVAL_MS,
+    options.retentionIntervalMs
+      ?? resolveServiceLockRetentionIntervalMs(process.env[SERVICE_LOCK_RETENTION_INTERVAL_ENV]),
   );
 
   return {

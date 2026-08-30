@@ -24,9 +24,9 @@ import {
 test("contract migration preserves a consistent legacy chain and removes follow-ups", {
   skip: !migrationHarnessEnabled,
 }, async () => {
-  const fixture = stageBeforeChainLayerExpand();
+  const fixture = await stageBeforeChainLayerExpand();
   try {
-    fixture.execute(`
+    await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
       VALUES ('contract-project', 'contract-project', 'contract-project', NOW());
       INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")
@@ -59,16 +59,16 @@ test("contract migration preserves a consistent legacy chain and removes follow-
       [],
     );
   } finally {
-    fixture.cleanup();
+    await fixture.cleanup();
   }
 });
 
 test("contract migration refuses an inconsistent follow-up before tightening or dropping", {
   skip: !migrationHarnessEnabled,
 }, async () => {
-  const fixture = stageBeforeChainLayerExpand();
+  const fixture = await stageBeforeChainLayerExpand();
   try {
-    fixture.execute(`
+    await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
       VALUES ('contract-fence-project', 'contract-fence-project', 'contract-fence-project', NOW());
       INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")
@@ -82,7 +82,7 @@ test("contract migration refuses an inconsistent follow-up before tightening or 
     fixture.applyExpandMigration();
     // The expand fence has already run. Introduce a legacy inconsistency after
     // it so this test exercises the contract migration's second fence.
-    fixture.execute(`UPDATE "Task" SET "${retiredFollowUpColumn}" = 'contract-fence-source' WHERE "id" = 'contract-fence-target';`);
+    await fixture.execute(`UPDATE "Task" SET "${retiredFollowUpColumn}" = 'contract-fence-source' WHERE "id" = 'contract-fence-target';`);
     const before = await migrationSnapshot(fixture);
     let error: unknown;
     try {
@@ -105,6 +105,6 @@ test("contract migration refuses an inconsistent follow-up before tightening or 
       [{ column_name: retiredFollowUpColumn }],
     );
   } finally {
-    fixture.cleanup();
+    await fixture.cleanup();
   }
 });

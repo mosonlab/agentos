@@ -8,7 +8,7 @@
 // than when it is finished with, and the run's result is not green unless the
 // cleanup was.
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -23,6 +23,7 @@ import {
   type DbtestAssignment,
   type DbtestPlan,
 } from "./dbtest-plan.js";
+import { formatTimingReport, parseTimings, timingsEnvironmentVariable } from "./dbtest-timings.js";
 
 /** Just enough of ScratchDatabaseManager to run against, and to fake. */
 export interface ScratchManagerLike {
@@ -122,6 +123,7 @@ export const runDbtest = async ({
   for (const [signal, handler] of handlers) signals.on(signal, handler);
 
   const planDirectory = mkdtempSync(join(tmpdir(), "agentos-dbtest-plan-"));
+  const timingsPath = join(planDirectory, "timings.jsonl");
   const abandoned = (): number => signalExitCode(signalled ?? "SIGTERM");
 
   const provisionAndRun = async (): Promise<number> => {
@@ -166,10 +168,19 @@ export const runDbtest = async ({
     writeFileSync(planPath, JSON.stringify(plan));
     log(`template ${template.name} cloned ${files.length} times, ${limit} connections each of ${maxConnections}`);
 
+    // Created empty rather than left to the first writer: an appending process
+    // should not have to decide whether the file exists, and an empty file is
+    // also the honest report for a run that was signalled before a file ended.
+    writeFileSync(timingsPath, "");
+
     return await runTests({
       files,
       concurrency,
-      environment: { ...environment, [planEnvironmentVariable]: planPath },
+      environment: {
+        ...environment,
+        [planEnvironmentVariable]: planPath,
+        [timingsEnvironmentVariable]: timingsPath,
+      },
       signal: controller.signal,
     });
   };
@@ -183,6 +194,14 @@ export const runDbtest = async ({
   }
 
   for (const [signal, handler] of handlers) signals.off(signal, handler);
+  // Read before the directory holding it goes, and reported even when the run
+  // failed: a red wave is exactly when someone wants to know which file it was.
+  try {
+    const { timings, unreadable } = parseTimings(readFileSync(timingsPath, "utf8"));
+    for (const line of formatTimingReport(timings, { unreadable })) log(line);
+  } catch {
+    // No timings file means the run never got as far as starting the tests.
+  }
   rmSync(planDirectory, { recursive: true, force: true });
   const leaked = await manager.dropAll();
   for (const { name, error } of leaked) log(`could not drop ${name}: ${error.message}`);

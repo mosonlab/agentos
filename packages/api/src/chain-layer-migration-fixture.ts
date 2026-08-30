@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { PrismaClient } from "@anneal/db";
 
+import { splitSqlStatements } from "./sql-statements.js";
 import { testDatabaseUrl } from "./testdb.js";
 
 export const chainLayerExpandMigration = "20260823100000_chain_layer_expand";
@@ -27,10 +28,10 @@ export interface ChainLayerMigrationFixture {
   schema: string;
   url: string;
   quotedSchema: string;
-  execute(sql: string): void;
+  execute(sql: string): Promise<void>;
   applyExpandMigration(): void;
   applyContractMigration(): void;
-  cleanup(): void;
+  cleanup(): Promise<void>;
 }
 
 /**
@@ -40,7 +41,7 @@ export interface ChainLayerMigrationFixture {
  * only when the test is ready to exercise it. A unique schema derived from
  * the explicitly opted-in test URL keeps the fixture away from live data.
  */
-export const stageBeforeChainLayerExpand = (): ChainLayerMigrationFixture => {
+export const stageBeforeChainLayerExpand = async (): Promise<ChainLayerMigrationFixture> => {
   const base = new URL(testDatabaseUrl);
   const sourceSchema = base.searchParams.get("schema");
   if (!sourceSchema || sourceSchema === "public") throw new Error("chain-layer migration fixture refuses public schema");
@@ -48,15 +49,18 @@ export const stageBeforeChainLayerExpand = (): ChainLayerMigrationFixture => {
   base.searchParams.set("schema", schema);
   const url = base.toString();
   const quotedSchema = `"${schema.replaceAll('"', '""')}"`;
-  const execute = (sql: string): void => {
-    execFileSync("npx", ["prisma", "db", "execute", "--url", url, "--stdin"], {
-      cwd: dbDirectory,
-      input: sql,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+
+  // One connection for the fixture's lifetime rather than a `prisma db execute`
+  // per call. The spawned form accepts a multi-statement block, which is why it
+  // was used; it also costs about two seconds of npx and engine startup every
+  // time, and this fixture is called once per case across five files. The
+  // statements are cut here instead — see `splitSqlStatements`.
+  const client = new PrismaClient({ datasources: { db: { url } } });
+  const execute = async (sql: string): Promise<void> => {
+    for (const statement of splitSqlStatements(sql)) await client.$executeRawUnsafe(statement);
   };
 
-  execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE; CREATE SCHEMA ${quotedSchema};`);
+  await execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE; CREATE SCHEMA ${quotedSchema};`);
   const staging = mkdtempSync(join(tmpdir(), "chain-layer-expand-fixture."));
   cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
   for (const entry of readdirSync(join(staging, "prisma", "migrations"), { withFileTypes: true })) {
@@ -95,13 +99,15 @@ export const stageBeforeChainLayerExpand = (): ChainLayerMigrationFixture => {
       );
       deploy();
     },
-    cleanup: () => {
+    cleanup: async (): Promise<void> => {
       rmSync(staging, { recursive: true, force: true });
       try {
-        execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE;`);
+        await execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE;`);
       } catch {
         // A failed fixture must not leave its private schema behind if the
         // server has already terminated the connection.
+      } finally {
+        await client.$disconnect();
       }
     },
   };

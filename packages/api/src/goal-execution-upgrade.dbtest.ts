@@ -21,7 +21,7 @@ import { preKernelRun, preKernelSeed, stageAtPreviousMigration } from "./goal-ex
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
-let fixture: ReturnType<typeof stageAtPreviousMigration>;
+let fixture: Awaited<ReturnType<typeof stageAtPreviousMigration>>;
 const quotedSchema = (): string => fixture.quoted;
 
 const query = async <T>(fn: (client: PrismaClient) => Promise<T>): Promise<T> => {
@@ -33,15 +33,15 @@ const query = async <T>(fn: (client: PrismaClient) => Promise<T>): Promise<T> =>
   }
 };
 
-after(() => fixture?.cleanup());
+after(async () => { await fixture?.cleanup(); });
 
 test("the kernel migration upgrades a database that already holds Goal-linked Runs", async () => {
-  fixture = stageAtPreviousMigration("upgrade");
+  fixture = await stageAtPreviousMigration("upgrade");
   // Two closed Tasks on one Goal, each with a Goal-linked Run: the ordinary
   // pre-kernel shape. Before the ordering fix this alone failed the migration,
   // because Run_goal_lineage_all_or_none_check was validated while every
   // freshly added goalGeneration/goalIteration was still null.
-  fixture.execute(preKernelSeed + [
+  await fixture.execute(preKernelSeed + [
     preKernelRun("r-old", "t-old", "g-up", 1),
     preKernelRun("r-old-2", "t-old", "g-up", 2),
     preKernelRun("r-new", "t-new", "g-up", 1),
@@ -95,12 +95,12 @@ test("the kernel migration upgrades a database that already holds Goal-linked Ru
 });
 
 test("an ambiguous pre-kernel Run aborts the migration with schema and data unchanged", async () => {
-  fixture.cleanup();
-  fixture = stageAtPreviousMigration("upgrade");
+  await fixture.cleanup();
+  fixture = await stageAtPreviousMigration("upgrade");
   // One Task whose Runs disagree: one carries the Goal, one does not. The
   // backfill refuses to fill a null Run from its sibling, so the deferred
   // VALIDATE is what must reject this — and reject it atomically.
-  fixture.execute(preKernelSeed + [
+  await fixture.execute(preKernelSeed + [
     preKernelRun("r-mixed", "t-old", "g-up", 1),
     preKernelRun("r-null", "t-old", null, 2),
   ].join("\n"));

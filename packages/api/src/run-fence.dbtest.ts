@@ -4,7 +4,8 @@ import { after, before, beforeEach, test } from "node:test";
 import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { publishRun, startRun } from "./run-lifecycle.js";
+import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -152,6 +153,149 @@ test("a run that has already started refuses a second start as not-active", asyn
   assert.equal(refused.status, 409);
   assert.equal(refused.body?.error, "Stale fencing token");
   assert.equal(refused.body?.reason, "not-active");
+});
+
+test("replacement start and late salvage publication complete without a Run-Task deadlock", { timeout: 20_000 }, async () => {
+  const seeded = await seed({ status: RunStatus.LOST, leaseExpiresAt: null });
+  const replacementRunner = "replacement-runner";
+  const replacementFence = `replacement-${seeded.run.id}`;
+  const originalBase = "main";
+  const replacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.task.assigneeAgentId!,
+    repoId: seeded.task.repoId,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    status: RunStatus.CLAIMED,
+    runner: "CODEX",
+    model: "gpt-5.6-sol:high",
+    promptHash: "b".repeat(64),
+    targetBranch: originalBase,
+    runnerId: replacementRunner,
+    fencingToken: replacementFence,
+    leaseGeneration: 2,
+    leaseExpiresAt: new Date(Date.now() + 600_000),
+    claimedAt: new Date(),
+  } });
+  await db.session.create({ data: {
+    runId: replacement.id,
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.task.assigneeAgentId!,
+    runner: "CODEX",
+    executionStatus: SessionExecutionStatus.PROVISIONING,
+  } });
+
+  const startClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const publishClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let reportStartLocked!: () => void;
+  let releaseStart!: () => void;
+  let reportTaskLocked!: () => void;
+  let reportRepairUpdate!: () => void;
+  const startLocked = new Promise<void>((resolve) => { reportStartLocked = resolve; });
+  const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+  const taskLocked = new Promise<void>((resolve) => { reportTaskLocked = resolve; });
+  const repairUpdate = new Promise<void>((resolve) => { reportRepairUpdate = resolve; });
+
+  const startDb = {
+    $transaction: (operation: (tx: unknown) => Promise<unknown>) => startClient.$transaction(async (tx) => {
+      const instrumented = new Proxy(tx, {
+        get(target, property, receiver) {
+          if (property !== "$queryRaw") return Reflect.get(target, property, receiver);
+          return async (...args: unknown[]) => {
+            const result = await Reflect.apply(target.$queryRaw, target, args);
+            const query = args[0] as string[] | { strings?: string[] } | undefined;
+            const sql = Array.isArray(query) ? query.join(" ") : query?.strings?.join(" ") ?? "";
+            if (sql.includes('FROM "Run"') && args[1] === replacement.id) {
+              reportStartLocked();
+              await startGate;
+            }
+            return result;
+          };
+        },
+      });
+      return operation(instrumented);
+    }),
+  } as unknown as PrismaClient;
+  const publishDb = {
+    $transaction: (operation: (tx: unknown) => Promise<unknown>) => publishClient.$transaction(async (tx) => {
+      const instrumented = new Proxy(tx, {
+        get(target, property, receiver) {
+          if (property === "$queryRaw") {
+            return async (...args: unknown[]) => {
+              const result = await Reflect.apply(target.$queryRaw, target, args);
+              const query = args[0] as string[] | { strings?: string[] } | undefined;
+              const sql = Array.isArray(query) ? query.join(" ") : query?.strings?.join(" ") ?? "";
+              if (sql.includes('FROM "Task"') && args[1] === seeded.task.id) reportTaskLocked();
+              return result;
+            };
+          }
+          if (property === "run") {
+            return new Proxy(target.run, {
+              get(runTarget, runProperty, runReceiver) {
+                if (runProperty !== "updateMany") return Reflect.get(runTarget, runProperty, runReceiver);
+                return (...args: unknown[]) => {
+                  const update = args[0] as { where?: { id?: string } } | undefined;
+                  if (update?.where?.id === replacement.id) reportRepairUpdate();
+                  return Reflect.apply(runTarget.updateMany, runTarget, args);
+                };
+              },
+            });
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      return operation(instrumented);
+    }),
+  } as unknown as PrismaClient;
+
+  const startedBranch = "replacement/original-base";
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+  let starting: Promise<unknown> | undefined;
+  let publishing: Promise<unknown> | undefined;
+  try {
+    starting = startRun(startDb, {
+      runId: replacement.id,
+      body: {
+        runnerId: replacementRunner,
+        fencingToken: replacementFence,
+        adapterVersion: "test-adapter",
+        cliVersion: "test-cli",
+        promptHash: "b".repeat(64),
+        manifest: {},
+        workspacePath: `/scratch/${replacement.id}`,
+        branch: startedBranch,
+      },
+    });
+    await startLocked;
+    publishing = publishRun(publishDb, {
+      runId: seeded.run.id,
+      body: { runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken!, pushedBranch: salvage },
+    });
+    await taskLocked;
+    await repairUpdate;
+    releaseStart();
+
+    const [startResult, publishResult] = await Promise.all([starting, publishing]);
+    assert.deepEqual(startResult, { ok: true });
+    assert.deepEqual(publishResult, {
+      reason: "conflict",
+      message: "Salvage is durable, but the replacement already started from its prior base",
+    });
+  } finally {
+    releaseStart();
+    await Promise.allSettled([starting, publishing].filter((pending): pending is Promise<unknown> => pending !== undefined));
+    await Promise.all([startClient.$disconnect(), publishClient.$disconnect()]);
+  }
+
+  const published = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+  const started = await db.run.findUniqueOrThrow({ where: { id: replacement.id } });
+  assert.equal(published.pushedBranch, salvage);
+  assert.equal(started.status, RunStatus.RUNNING);
+  assert.equal(started.targetBranch, originalBase);
+  assert.equal(started.branch, startedBranch);
+  assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 2);
 });
 
 test("every fenced route on one expired run names the same cause", async () => {

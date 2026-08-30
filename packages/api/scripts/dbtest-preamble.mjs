@@ -11,10 +11,11 @@
 // here costs one obvious red; failing open costs an intermittent one, somewhere
 // else, on a day when the paths happen not to match.
 
-import { readFileSync, realpathSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { assignmentFor, environmentForAssignment, planEnvironmentVariable } from "../src/dbtest-plan.ts";
+import { formatTimingLine, timingsEnvironmentVariable } from "../src/dbtest-timings.ts";
 
 const planPath = process.env[planEnvironmentVariable];
 
@@ -33,4 +34,27 @@ if (planPath) {
   const plan = JSON.parse(readFileSync(planPath, "utf8"));
   const assignment = assignmentFor(plan, canonical);
   Object.assign(process.env, environmentForAssignment(assignment));
+}
+
+// The other thing per-test-file granularity is good for. node:test runs the
+// tests inside one file in order, so this process's own lifetime is the file's
+// contribution to the wave, and the wave drains at the pace of its longest
+// file. Written on exit rather than reported through node:test, because the
+// reporter sees tests and this needs to see files.
+const timingsPath = process.env[timingsEnvironmentVariable];
+if (timingsPath) {
+  const startedAt = Date.now();
+  const entry = process.argv[1];
+  process.on("exit", () => {
+    try {
+      appendFileSync(
+        timingsPath,
+        // The whole path, not the basename: two packages contribute
+        // same-named files to one pool, and the report has to tell them apart.
+        formatTimingLine({ file: entry === undefined ? "unknown" : resolve(entry), ms: Date.now() - startedAt }),
+      );
+    } catch {
+      // A run that produced a verdict must not be failed by its own bookkeeping.
+    }
+  });
 }

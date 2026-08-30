@@ -21,9 +21,9 @@ import {
 test("chain-layer expand migration dense-ranks legacy template steps and chain nodes", {
   skip: !migrationHarnessEnabled,
 }, async () => {
-  const fixture = stageBeforeChainLayerExpand();
+  const fixture = await stageBeforeChainLayerExpand();
   try {
-    fixture.execute(`
+    await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
       VALUES ('chain-layer-project', 'chain-layer-project', 'chain-layer-project', NOW());
       INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")
@@ -61,16 +61,16 @@ test("chain-layer expand migration dense-ranks legacy template steps and chain n
       ],
     );
   } finally {
-    fixture.cleanup();
+    await fixture.cleanup();
   }
 });
 
 test("partial chain identity aborts expand before changing rows", {
   skip: !migrationHarnessEnabled,
 }, async () => {
-  const fixture = stageBeforeChainLayerExpand();
+  const fixture = await stageBeforeChainLayerExpand();
   try {
-    fixture.execute(`
+    await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
       VALUES ('partial-project', 'partial-project', 'partial-project', NOW());
       INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "updatedAt")
@@ -88,16 +88,16 @@ test("partial chain identity aborts expand before changing rows", {
     assert.deepEqual(await migrationSnapshot(fixture), before);
     assert.deepEqual(await migrationColumns(fixture), []);
   } finally {
-    fixture.cleanup();
+    await fixture.cleanup();
   }
 });
 
 test("inconsistent follow-up relationship aborts expand before changing rows", {
   skip: !migrationHarnessEnabled,
 }, async () => {
-  const fixture = stageBeforeChainLayerExpand();
+  const fixture = await stageBeforeChainLayerExpand();
   try {
-    fixture.execute(`
+    await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
       VALUES ('follow-up-project', 'follow-up-project', 'follow-up-project', NOW());
       INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "updatedAt")
@@ -117,6 +117,6 @@ test("inconsistent follow-up relationship aborts expand before changing rows", {
     assert.deepEqual(await migrationSnapshot(fixture), before);
     assert.deepEqual(await migrationColumns(fixture), []);
   } finally {
-    fixture.cleanup();
+    await fixture.cleanup();
   }
 });

@@ -3,7 +3,19 @@ import { test } from "node:test";
 
 import { type Prisma, RunStatus } from "@anneal/db";
 
-import { explainFenceRefusal, fencedRunWhere, type RunFence, withFencedRun } from "./run-fence.js";
+import {
+  cleanupAuthorityRefusal,
+  explainFenceRefusal,
+  fencedRunWhere,
+  liveAuthorityRefusal,
+  lockAuthorityRun,
+  runFenceRefusal,
+  type LockedAuthorityRun,
+  type RunFence,
+  salvageAuthorityRefusal,
+  withFencedRun,
+  withRunOnlyFencedRun,
+} from "./run-fence.js";
 
 const fence: RunFence = {
   runId: "run-1",
@@ -67,6 +79,28 @@ test("one fenced read owns its clock and Run -> Task lock order", async () => {
   assert.equal((predicates[1]?.leaseExpiresAt as { gt: Date }).gt, fence.at);
 });
 
+test("a Run-only fenced read preserves the complete predicate without taking the Task lock", async () => {
+  const calls: string[] = [];
+  let predicate: Prisma.RunWhereInput | undefined;
+  const tx = {
+    $queryRaw: async () => { calls.push("lock.run"); return [{ id: "run-1" }]; },
+    run: { findFirst: async ({ where }: { where: Prisma.RunWhereInput }) => {
+      calls.push("read.run");
+      predicate = where;
+      return { id: "run-1" };
+    } },
+  } as unknown as Prisma.TransactionClient;
+
+  const result = await withRunOnlyFencedRun(tx, fence, { id: true }, (run) => {
+    calls.push("body");
+    return run.id;
+  });
+
+  assert.equal(result, "run-1");
+  assert.deepEqual(calls, ["lock.run", "read.run", "body"]);
+  assert.deepEqual(predicate, fencedRunWhere(fence));
+});
+
 test("the predicate carries the six clauses that make a run this request's to write", () => {
   assert.deepEqual(fencedRunWhere(fence), {
     id: "run-1",
@@ -106,4 +140,72 @@ test("an unowned run is wrong-runner before it is stale-fence", async () => {
     await explain({ ...live, runnerId: "runner-2", fencingToken: "2:run-1:superseded" }),
     "wrong-runner",
   );
+});
+
+const authorityRun: LockedAuthorityRun = {
+  id: "run-1",
+  runnerId: "runner-1",
+  fencingToken: "3:run-1:current",
+  cancelRequestId: null,
+  cancelReason: null,
+  cancelRequestedAt: null,
+  leaseExpiresAt: new Date("2026-08-25T12:05:00.000Z"),
+  status: RunStatus.RUNNING,
+  taskId: "task-1",
+  repoId: "repo-1",
+  runNumber: 4,
+  pushedBranch: null,
+  branch: "feature/task-1",
+};
+
+test("authority modes stay distinct while sharing one refusal vocabulary", () => {
+  assert.equal(liveAuthorityRefusal(authorityRun, fence), null);
+  assert.equal(salvageAuthorityRefusal(authorityRun, {
+    runnerId: "runner-1",
+    fencingToken: "3:run-1:current",
+    pushedBranch: "agentos/task-1/run-4",
+  }), null);
+  assert.equal(salvageAuthorityRefusal(authorityRun, {
+    runnerId: "runner-1",
+    fencingToken: "3:run-1:current",
+    pushedBranch: "feature/task-1",
+  }), "not-active");
+  assert.equal(cleanupAuthorityRefusal(authorityRun, {
+    runnerId: "runner-1",
+    fencingToken: "3:run-1:current",
+    at: fence.at,
+  }), "cleanup-not-authorized");
+  assert.equal(cleanupAuthorityRefusal({ ...authorityRun, status: RunStatus.SUCCEEDED }, {
+    runnerId: "runner-1",
+    fencingToken: "3:run-1:current",
+    at: fence.at,
+  }), null);
+});
+
+test("authority refusals preserve their transport behavior from one vocabulary", () => {
+  assert.deepEqual(runFenceRefusal("stale-fence"), {
+    reason: "conflict",
+    message: "Stale fencing token",
+    detail: { reason: "stale-fence" },
+  });
+  assert.deepEqual(runFenceRefusal("waiting-inbox"), {
+    reason: "conflict",
+    message: "Run suspended for Inbox",
+    detail: { code: "WAITING_INBOX" },
+  });
+  assert.deepEqual(runFenceRefusal("cleanup-not-authorized"), {
+    reason: "conflict",
+    message: "Cleanup outcome is not authorized for a live or foreign run",
+  });
+});
+
+test("authority inspection locks the Run before reading it", async () => {
+  const calls: string[] = [];
+  const tx = {
+    $queryRaw: async () => { calls.push("lock.run"); return [{ id: "run-1" }]; },
+    run: { findFirst: async () => { calls.push("read.run"); return authorityRun; } },
+  } as unknown as Prisma.TransactionClient;
+
+  assert.equal(await lockAuthorityRun(tx, "run-1"), authorityRun);
+  assert.deepEqual(calls, ["lock.run", "read.run"]);
 });
