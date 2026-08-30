@@ -1,0 +1,14 @@
+Implement this task on refactor/wire-contract-session-run-task directly from the feature brief below — a direct chain carries no spec or plan phase, so the brief is the specification of record. The platform materializes `.chain/refactor/wire-contract-session-run-task/spec.md` as the specification of record; leave it untouched. The platform pins native child threads to Luna max and limits the session to eight concurrent children. Use them only when the brief contains independent, safely parallel work; group related change points instead of creating one child per item. In the controlled resource limit, fill as many slots as can execute safely in parallel. Give every concurrent writer its own branch and git worktree, and keep coupled work in your own context. When at least two child-writer branches need integration, start one long-lived merger after the first result is ready; integrate a sole child-writer branch yourself. The merger integrates completed branches in dependency-safe order, resolves only mechanical conflicts, reruns affected narrow tests, and reports semantic conflicts to you. Follow the platform-pinned Implementation proof boundary after integration. Give a failed child one bounded correction in the same thread, then take over its assignment yourself. A child must not perform irreversible external actions. Commit the result and persist exactly one JSON object as the task output: `{"schemaVersion":1,"headSha":"<final HEAD>","baseSha":"<starting HEAD>","summary":"<what changed>","testsRun":["<command>"]}`. Leave publication and pull-request creation to the platform. Complete when the brief's behavior is demonstrably delivered and tests are green at the recorded head.
+<!-- agentos:task-brief:v1 length=735 -->
+Lane C8 (PR #291) 把 wire contract 从 board 扩展到了 operator configuration 组——`Project`/`Agent`/`Environment`/`Repo`/`Secret`/`Skill`/`MCPConnection` 与 grant 类型，九个 enum union 改为从 Prisma 派生，web 侧删掉 138 行手抄镜像。brief 明确允许交子集，C8 如实说明了边界。
+
+剩下的是 `Session`、`Run`、`Task`、`Chain`、`Trigger`、`TriggerDetail`、`TriggerFire`、`RecurringFire`、`TaskActivity`、`TaskStepOutput`、`CostsReport`、`TaskStartability` 各组，以及它们那些「absent for older board responses」式的 legacy optional shim——那些是给早已不存在的响应留的兼容路径。
+
+做法照抄已经落地的 `packages/db/src/board-contract.ts (renamed from wire-contract.ts in 68c16f54)`，不要另起一套形状。参考 C8 对 GoalStatus 的处理：刻意的收窄要保留，并用 coverage 类型让 Prisma 侧任何加值/删值变成编译错误。
+
+上下文在 records/anneal-deepen-12-20260829/LEDGER.md。
+
+Route: implementation=senior-dev
+
+<!-- /agentos:task-brief:v1 -->
+Persist the final implementation output for this step through the Anneal task output endpoint.
