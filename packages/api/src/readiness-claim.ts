@@ -61,6 +61,8 @@ const newClaimState = (now: Date): ClaimState => ({
 });
 
 const expiredLegacyClaim = (reason: string | null, now: Date): boolean => {
+  // Remove this bridge after every deployment has crossed the claim-handle
+  // migration and its orphaned pre-migration claims have been swept.
   if (!reason?.startsWith(READINESS_CLAIM_PREFIX)) return false;
   const expiry = Date.parse(reason.slice(reason.lastIndexOf("|") + 1));
   return Number.isFinite(expiry) && expiry <= now.getTime();
