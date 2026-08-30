@@ -17,6 +17,9 @@ import { act, type ReactElement } from "react";
 export const installDom = (url = "http://127.0.0.1:5173/"): { dom: JSDOM; container: Element } => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true, url });
   for (const [key, value] of Object.entries({
+    // `getComputedStyle` is read as a bare global by Radix's presence layer, so
+    // a dialog mounted through a portal throws without it.
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement,
     HTMLFormElement: dom.window.HTMLFormElement, HTMLInputElement: dom.window.HTMLInputElement,
@@ -26,6 +29,8 @@ export const installDom = (url = "http://127.0.0.1:5173/"): { dom: JSDOM; contai
     // window whose Event/InputEvent/MouseEvent are not the global ones has its
     // events silently ignored by the reconciler.
     Event: dom.window.Event, InputEvent: dom.window.InputEvent, MouseEvent: dom.window.MouseEvent,
+    CustomEvent: dom.window.CustomEvent, KeyboardEvent: dom.window.KeyboardEvent, FocusEvent: dom.window.FocusEvent,
+    NodeFilter: dom.window.NodeFilter,
     IS_REACT_ACT_ENVIRONMENT: true,
   })) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   // jsdom has no scroll box, and `navigate` scrolls to the top of every new
@@ -205,8 +210,9 @@ export const mountPage = async (
   prepareDom?: (dom: JSDOM) => void,
 ): Promise<PageHarness> => {
   const globalKeys = [
-    "window", "document", "navigator", "HTMLElement", "HTMLButtonElement", "HTMLFormElement",
+    "window", "document", "navigator", "getComputedStyle", "HTMLElement", "HTMLButtonElement", "HTMLFormElement",
     "HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement", "Element", "Node", "MutationObserver", "Event", "InputEvent", "MouseEvent",
+    "CustomEvent", "KeyboardEvent", "FocusEvent", "NodeFilter",
     "IS_REACT_ACT_ENVIRONMENT",
   ] as const;
   const previousGlobals = new Map(globalKeys.map((key) => [key, descriptor(key)]));

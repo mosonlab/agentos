@@ -10,16 +10,11 @@ import {
   runSessionUsageCost,
   sumUsageCosts,
   TaskStatus,
-  type Agent,
   type AssigneeType,
   type Marker,
   type Prisma,
   type PrismaClient,
-  type Repo,
-  type Run,
   type ScheduleKind,
-  type Session,
-  type Task,
   type TaskSource,
   type TaskStatus as TaskStatusType,
   type UsageCost,
@@ -33,11 +28,12 @@ import type {
   ChainFrontier as BoardContractChainFrontier,
   RepairBinding as BoardContractRepairBinding,
   RunStatus as BoardRunStatus,
+  TaskList as TaskListContract,
   UsageCost as BoardUsageCost,
 } from "@anneal/db/board-contract";
 import { compare } from "@anneal/db/chain-order";
 
-import { chainExecutionOwner, type ChainExecutionOwner } from "./chain-execution-owner.js";
+import { chainExecutionOwner } from "./chain-execution-owner.js";
 import {
   blockingPredecessor,
   chainKey,
@@ -1049,21 +1045,7 @@ const taskListInclude = {
   },
 } as const satisfies Prisma.TaskInclude;
 
-export type TaskListRow = Task & {
-  assigneeAgent: Agent | null;
-  repo: Repo | null;
-  templateStep: {
-    name: string;
-    stepIndex: number;
-    outputKind: string;
-    taskTemplate: { name: string };
-  } | null;
-  runs: Array<Omit<Run, "output"> & { session: Session | null }>;
-  executionOwner: ChainExecutionOwner;
-  chainProgress: ChainProgressWire | null;
-  recurringLastFiredAt: Date | null;
-  recurringFireCount: number;
-};
+export type TaskListRow = TaskListContract<Date, Prisma.Decimal>;
 
 /** Read the full task list and optionally attach its expensive enrichment. */
 export const readTaskList = async (
@@ -1094,7 +1076,7 @@ export const readTaskList = async (
     chainProgress: progressFor(task),
     recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
     recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
-  }));
+  } satisfies TaskListRow));
 };
 
 /**

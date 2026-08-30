@@ -7,7 +7,7 @@ import { TasksPageHead, type TasksTab } from "../components/tasks-tabs";
 import { NewTask } from "../components/new-task-panel";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
-import type { ChainProgress, Task } from "../lib/types";
+import type { ChainProgress, TaskList } from "../lib/types";
 
 /* Same expected values as before batch 1; they now come from the `en`
  * dictionary rather than from a literal in the component (spec §7.20). */
@@ -20,10 +20,10 @@ const head = (active: TasksTab): string => renderToStaticMarkup(
   <ProjectProvider><TasksPageHead active={active} /></ProjectProvider>,
 );
 
-const task = (overrides: Partial<Task> = {}): Task => ({
+const task = (overrides: Partial<TaskList> = {}): TaskList => ({
   id: "t1", projectId: "p1", assigneeAgentId: null, repoId: null, templateId: null, templateStepId: null,
   name: "Ship the thing", description: "d", workingDirectory: null, targetBranch: null,
-  failureReason: null, status: "DONE", moveTargets: [], assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW",
+  failureReason: null, status: "DONE", assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW",
   runAt: null, cron: null, timezone: null,
   maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",

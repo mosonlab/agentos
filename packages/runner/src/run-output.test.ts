@@ -15,6 +15,12 @@ import { createControlPlaneDouble } from "./test-control-plane.js";
 
 const REGRESSION_OUTPUT_KIND = "regression-verification-v2";
 
+const committedFixtureChange = [
+  'printf "delivered fixture change\\n" > runner-fixture.txt',
+  "git add runner-fixture.txt",
+  'git commit -m "test: create delivered fixture change" >/dev/null',
+] as const;
+
 /**
  * What a failed run actually hands the API.
  *
@@ -63,6 +69,7 @@ const succeedingAgent = [
   '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
   "esac",
   "cat > /dev/null",
+  ...committedFixtureChange,
   'echo \'{"type":"result","is_error":false,"terminal_reason":"completed",'
   + '"result":"inverted the lock ordering in reconcile.ts and added the regression test"}\'',
   "exit 0",
@@ -94,6 +101,7 @@ const remediatingAgent = (
   "    ;;",
   "  *)",
   "    cat > /dev/null",
+  ...committedFixtureChange.map((command) => `    ${command}`),
   '    echo \'{"type":"system","session_id":"conversation-114"}\'',
   '    echo \'{"type":"result","is_error":false,"terminal_reason":"completed","session_id":"conversation-114","result":"implemented the requested change"}\'',
   "    ;;",
@@ -227,6 +235,7 @@ const regressionFailureAgent = [
   '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
   "esac",
   "cat > /dev/null",
+  ...committedFixtureChange,
   'head_sha="$(git rev-parse HEAD)"',
   'mkdir -p "$AGENTOS_WORKSPACE_PATH/.agentos"',
   'HEAD_SHA="$head_sha" node -e \'',

@@ -197,6 +197,7 @@ enum FailureClass {
   TOOL_FAILED            @map("tool-failed")
   TRANSIENT_PROVIDER     @map("transient-provider")
   PROTOCOL_ERROR         @map("protocol-error")
+  NO_CHANGES_PRODUCED    @map("no-changes-produced")
   TASK_FAILED            @map("task-failed")
   BUDGET_EXCEEDED        @map("budget-exceeded")
 }

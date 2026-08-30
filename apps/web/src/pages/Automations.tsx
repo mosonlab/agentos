@@ -8,7 +8,7 @@ import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { automationState, cronProse, nextRunLabel, scheduleLabel } from "../lib/schedule";
-import type { RecurringFire, Task } from "../lib/types";
+import type { RecurringFire, TaskList } from "../lib/types";
 import { IconBolt, IconChevron } from "../components/icons";
 import { TasksPageHead } from "../components/tasks-tabs";
 import {
@@ -24,7 +24,7 @@ import { cn } from "../lib/utils";
 /* Pure, exported and asserted directly by `automations.test.tsx`, so — like
  * `archiveDoneNotice` — it reads the locale through `formatT`, the WI-4
  * registration seam, rather than taking a `Translate` parameter. */
-export const stateLabel = (task: Task): { tone: "green" | "amber" | "red"; label: string; note: string | null } => {
+export const stateLabel = (task: TaskList): { tone: "green" | "amber" | "red"; label: string; note: string | null } => {
   const state = automationState(task);
   if (state === "paused") return { tone: "amber", label: formatT("automations.state.paused"), note: null };
   if (state === "quarantined") return { tone: "red", label: formatT("automations.state.quarantined"), note: formatT("automations.note.fixCron") };
@@ -61,7 +61,7 @@ const Fires = ({ taskId }: { taskId: string }): ReactNode => {
  *  expression and a bad IANA zone with a specific 400 and recomputes `runAt` on
  *  success; a second validator here could only disagree with it. The live prose
  *  preview is the feedback a builder would have provided. */
-export const CronEditor = ({ task, onSaved }: { task: Task; onSaved: () => void }): ReactNode => {
+export const CronEditor = ({ task, onSaved }: { task: TaskList; onSaved: () => void }): ReactNode => {
   const [cron, setCron] = useState(task.cron ?? "");
   const [timezone, setTimezone] = useState(task.timezone ?? "");
   const { pending, error, run } = useAction();
@@ -94,11 +94,11 @@ export const CronEditor = ({ task, onSaved }: { task: Task; onSaved: () => void 
 };
 
 export const AutomationRow = ({ task, expanded, onToggle, onPause, onDelete, onSaved }: {
-  task: Task;
+  task: TaskList;
   expanded: boolean;
   onToggle: () => void;
-  onPause: (task: Task) => void;
-  onDelete: (task: Task) => void;
+  onPause: (task: TaskList) => void;
+  onDelete: (task: TaskList) => void;
   onSaved: () => void;
 }): ReactNode => {
   const state = stateLabel(task);
@@ -152,7 +152,7 @@ export const AutomationRow = ({ task, expanded, onToggle, onPause, onDelete, onS
 export const AutomationsPage = (): ReactNode => {
   const { projectId } = useProjectScope();
   const path = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}`;
-  const { data, loading, error, reload } = usePoll<Task[]>(path);
+  const { data, loading, error, reload } = usePoll<TaskList[]>(path);
   const [expanded, setExpanded] = useState<string | null>(null);
   const { error: actionError, run } = useAction();
   const t = useT();
@@ -163,11 +163,11 @@ export const AutomationsPage = (): ReactNode => {
   // again here would read as a guard while removing nothing.
   const automations = (data ?? []).filter((task) => task.scheduleKind === "CRON");
 
-  const togglePause = (task: Task): void => {
+  const togglePause = (task: TaskList): void => {
     const action = task.schedulePausedAt === null ? "pause" : "resume";
     void run(async () => { await api.post(`/tasks/${task.id}/schedule/${action}`, {}); reload(); });
   };
-  const remove = (task: Task): void => {
+  const remove = (task: TaskList): void => {
     if (!window.confirm(t("automations.confirm.delete", { name: task.name }))) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
   };

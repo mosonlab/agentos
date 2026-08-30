@@ -43,7 +43,7 @@ const noop = (): void => undefined;
 const actions = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, onCopyError: noop, onFilterChain: noop };
 const column = (status: TaskStatus, entries: readonly BoardEntry[] = []): string => {
   const definition = COLUMNS.find((candidate) => candidate.status === status)!;
-  return renderToStaticMarkup(<BoardColumn column={definition} tasks={entries} loading={false} dragOver={null} onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} actions={actions} />);
+  return renderToStaticMarkup(<BoardColumn column={definition} tasks={entries} loading={false} dragOver={null} onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} onActivateAll={noop} actions={actions} />);
 };
 
 test("one aggregate entry owns chain steps and a detached repair, while standalone tasks remain cards", () => {

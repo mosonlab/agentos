@@ -623,7 +623,11 @@ export const executeClaim = async (
       && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
-    try { gitResult = await captureWorkspaceResult(config, workspace); } catch (error: unknown) {
+    let capturedHeadSha: string | undefined;
+    try {
+      gitResult = await captureWorkspaceResult(config, workspace);
+      capturedHeadSha = gitResult.headSha;
+    } catch (error: unknown) {
       await controlPlane.appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
     }
     // Bound outside the closures below: `workspace` is nullable at the top of
@@ -645,6 +649,7 @@ export const executeClaim = async (
           claim,
           delivered,
           {
+            ...(capturedHeadSha ? { headSha: capturedHeadSha } : {}),
             recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
             retryOptions,
           },

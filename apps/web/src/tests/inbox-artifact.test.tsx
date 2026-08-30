@@ -22,7 +22,7 @@ const gateCard = (): InboxMessage => ({
 
 const artifact: TaskStepOutput = {
   id: "output-1", taskId: "producing-task", runId: "run-1", kind: "spec",
-  body: "FULL ARTIFACT TAIL", createdAt: now, updatedAt: now,
+  body: "FULL ARTIFACT TAIL", metadata: null, commitSha: null, createdAt: now, updatedAt: now,
 };
 
 test("an approval gate shows the producing step's full artifact, not just the card's truncated preview", async () => {
