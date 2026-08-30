@@ -7,7 +7,7 @@ import { act } from "react";
 import { NewTask } from "../components/new-task-panel";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
-import { installDom, reactDom } from "./dom-harness";
+import { mountPage } from "./dom-harness";
 
 /**
  * The published smoke task, and the form that has to be able to send it.
@@ -46,63 +46,49 @@ const withForm = async (walk: (form: {
   press: (label: string) => Promise<void>;
   markup: () => string;
 }) => Promise<void>): Promise<Array<Record<string, unknown>>> => {
-  const { dom, container } = installDom();
   const posts: Array<Record<string, unknown>> = [];
-  const original = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init?: RequestInit) => {
-    if (init?.method === "POST") posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-    return new Response(String(url).endsWith("/task-templates") ? "[]" : "{}", {
+  const page = await mountPage(
+    <LocaleProvider initialLocale="en">
+      <NewTask projectId="p1" agents={[]} repos={[]} onClose={() => undefined} onCreated={() => undefined} />
+    </LocaleProvider>,
+    { "*": ({ input, init, method }) => {
+    if (method === "POST") posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return new Response(String(input).endsWith("/task-templates") ? "[]" : "{}", {
       status: 200, headers: { "Content-Type": "application/json" },
     });
-  } });
-  const root = (await reactDom()).createRoot(container);
-  const settle = async (): Promise<void> => {
-    for (let round = 0; round < 2; round += 1) {
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    }
-  };
+    } },
+  );
   const control = (label: string): HTMLElement => {
-    const found = [...dom.window.document.querySelectorAll("button")]
+    const found = [...page.dom.window.document.querySelectorAll("button")]
       .find((candidate) => candidate.textContent?.trim() === label || candidate.getAttribute("aria-label") === label);
     assert.ok(found, `no control labelled ${label}`);
     return found as HTMLElement;
   };
   try {
-    await act(async () => root.render(
-      <LocaleProvider initialLocale="en">
-        <NewTask projectId="p1" agents={[]} repos={[]} onClose={() => undefined} onCreated={() => undefined} />
-      </LocaleProvider>,
-    ));
-    await settle();
     await walk({
-      markup: () => dom.window.document.body.innerHTML,
+      markup: () => page.dom.window.document.body.innerHTML,
       fill: async (label, value) => {
-        const field = [...dom.window.document.querySelectorAll("label")]
+        const field = [...page.dom.window.document.querySelectorAll("label")]
           .find((candidate) => candidate.textContent?.trim() === label)
           ?.parentElement?.querySelector("input, textarea") as HTMLInputElement | null;
         assert.ok(field, `no field labelled ${label}`);
-        const prototype = field.tagName === "TEXTAREA" ? dom.window.HTMLTextAreaElement.prototype : dom.window.HTMLInputElement.prototype;
+        const prototype = field.tagName === "TEXTAREA" ? page.dom.window.HTMLTextAreaElement.prototype : page.dom.window.HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
         assert.ok(setter);
         await act(async () => {
           setter.call(field, value);
-          field.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+          field.dispatchEvent(new page.dom.window.Event("input", { bubbles: true }));
         });
       },
       toggle: async (label) => {
-        await act(async () => control(label).dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-        await settle();
+        await act(async () => control(label).dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
+        await page.settle();
       },
-      press: async (label) => {
-        await act(async () => control(label).dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-        await settle();
-      },
+      press: page.press,
     });
     return posts;
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 };
 

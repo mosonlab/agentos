@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { JSDOM } from "jsdom";
-import { act } from "react";
+import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApiError } from "../lib/api";
 import type { Chain, Run, Task, TaskStepOutput } from "../lib/types";
-import { RunRow } from "../pages/TaskDetail";
-import { installDom, reactDom } from "./dom-harness";
+import { RunRow, TaskDetailPage, TaskOutput } from "../pages/TaskDetail";
+import { mountPage } from "./dom-harness";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
@@ -65,37 +64,15 @@ test("a resumed run identifies Duration as wall-clock time that includes Inbox w
   assert.match(markup, /5m 0s wall-clock \(includes Inbox wait\)/);
 });
 
-const settle = async (): Promise<void> => {
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+let replaceSubject: ((subject: ReactNode) => void) | null = null;
+
+const SubjectHarness = ({ initial }: { initial: ReactNode }): ReactNode => {
+  const [subject, setSubject] = useState(initial);
+  replaceSubject = (next) => setSubject(next);
+  return subject;
 };
 
 test("task-id switches expose a clean loading shell and destination-scoped actions", async () => {
-  const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "http://localhost/tasks/a", pretendToBeVisual: true });
-  const previous = {
-    window: globalThis.window,
-    document: globalThis.document,
-    navigator: globalThis.navigator,
-    fetch: globalThis.fetch,
-  };
-  for (const [name, value] of Object.entries({
-    window: dom.window,
-    document: dom.window.document,
-    navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement,
-    HTMLFormElement: dom.window.HTMLFormElement,
-    HTMLInputElement: dom.window.HTMLInputElement,
-    Node: dom.window.Node,
-    Element: dom.window.Element,
-    Event: dom.window.Event,
-    InputEvent: dom.window.InputEvent,
-    MouseEvent: dom.window.MouseEvent,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-  const [{ createRoot }, { TaskDetailPage, TaskOutput }] = await Promise.all([
-    import("react-dom/client"),
-    import("../pages/TaskDetail"),
-  ]);
-
   const mutations: Array<{ url: string; method: string; body: string }> = [];
   let resolveB: ((response: Response) => void) | null = null;
   let resolveAActivity: ((response: Response) => void) | null = null;
@@ -103,9 +80,8 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
   let firstAActivity = true;
   const tasks = { a: task("a", "Source A", 0), b: task("b", "Destination B", 1), c: task("c", "Destination C", 2, "chain-c") };
   tasks.a.runs = [sourceRun("a")];
-  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+  const page = await mountPage(<SubjectHarness initial={<TaskDetailPage taskId="a" />} />, { "*": ({ input, init, method }) => {
     const url = String(input).replace(/^.*\/api/, "");
-    const method = init.method ?? "GET";
     if (method !== "GET") {
       mutations.push({ url, method, body: String(init.body ?? "") });
       return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
@@ -132,13 +108,9 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     const chain = /^\/tasks\/([^/]+)\/chain$/.exec(url);
     if (chain) return new Response(JSON.stringify(chain[1] === "c" ? chainFor("c") : emptyChain()), { status: 200 });
     return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
-  }) as typeof fetch;
-
-  const container = dom.window.document.getElementById("root")!;
-  const root = createRoot(container);
+  } }, "http://localhost/tasks/a");
+  const { dom, container } = page;
   try {
-    act(() => root.render(<TaskDetailPage taskId="a" />));
-    await settle();
     assert.match(container.textContent ?? "", /Source A/);
     assert.match(container.textContent ?? "", /revised-plan source artifact/);
 
@@ -153,14 +125,14 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     assert.match(container.textContent ?? "", /source-only-workspace/);
     assert.equal(sourceInput.value, "unsent source draft");
 
-    act(() => root.render(<TaskDetailPage taskId="b" />));
+    act(() => replaceSubject?.(<TaskDetailPage taskId="b" />));
     assert.match(container.textContent ?? "", /Loading/);
     assert.doesNotMatch(container.textContent ?? "", /Source A|revised-plan source artifact|unsent source draft|source-only-workspace/);
     assert.equal(container.querySelector("button"), null, "destination shell exposes no source action");
     assert.equal(container.querySelector("input"), null, "destination shell exposes no source draft field");
 
     resolveB!(new Response(JSON.stringify(tasks.b), { status: 200 }));
-    await settle();
+    await page.settle();
     assert.match(container.textContent ?? "", /Destination B/);
     assert.match(container.textContent ?? "", /No output recorded/);
     assert.match(container.textContent ?? "", /independently review the persisted plan/);
@@ -171,7 +143,7 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
       id: "late-a", taskId: "a", actorType: "operator", actorId: null,
       body: "late source activity", metadata: null, createdAt: now,
     }]), { status: 200 }));
-    await settle();
+    await page.settle();
     assert.doesNotMatch(container.textContent ?? "", /late source activity/);
     assert.equal(destinationInput.value, "", "a late source response must not restore the source draft");
     assert.doesNotMatch(container.textContent ?? "", /source-only-workspace/);
@@ -181,28 +153,28 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
       select.value = "DOING";
       select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
     });
-    await settle();
+    await page.settle();
     const archive = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Archive"))!;
     await act(async () => { archive.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
-    await settle();
+    await page.settle();
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!;
       setter.call(destinationInput, "destination comment");
       destinationInput.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "destination comment" }));
       destinationInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
     });
-    await settle();
+    await page.settle();
     const send = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Send"))!;
     assert.equal(send.disabled, false, `comment=${destinationInput.value}`);
     await act(async () => { send.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
-    await settle();
+    await page.settle();
 
-    act(() => root.render(<TaskDetailPage taskId="c" />));
+    act(() => replaceSubject?.(<TaskDetailPage taskId="c" />));
     assert.doesNotMatch(container.textContent ?? "", /Destination B|destination comment/);
-    await settle();
+    await page.settle();
     const start = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Start next step"))!;
     await act(async () => { start.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
-    await settle();
+    await page.settle();
 
     assert.ok(mutations.some((item) => item.url === "/tasks/b/start" && item.method === "POST"));
     assert.ok(mutations.some((item) => item.url === "/tasks/b/archive" && item.method === "POST"));
@@ -214,48 +186,27 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
       data: output("b", "same-resource artifact"), error: null, loading: false, missing: false,
       lastSuccessAt: now, reload: () => undefined,
     };
-    act(() => root.render(<TaskOutput poll={heldOutput} />));
+    act(() => replaceSubject?.(<TaskOutput poll={heldOutput} />));
     assert.match(container.textContent ?? "", /same-resource artifact/);
-    act(() => root.render(<TaskOutput poll={{
+    act(() => replaceSubject?.(<TaskOutput poll={{
       ...heldOutput, error: new ApiError(404, "/tasks/b/output", "Output not found"), missing: true,
     }} />));
     assert.match(container.textContent ?? "", /No output recorded/);
     assert.doesNotMatch(container.textContent ?? "", /same-resource artifact|Output not found/);
     for (const status of [405, 501]) {
-      act(() => root.render(<TaskOutput poll={{
+      act(() => replaceSubject?.(<TaskOutput poll={{
         ...heldOutput, data: null, error: new ApiError(status, "/tasks/b/output", `HTTP ${status}`), missing: true,
       }} />));
       assert.match(container.textContent ?? "", new RegExp(`HTTP ${status}`));
       assert.doesNotMatch(container.textContent ?? "", /No output recorded/);
     }
   } finally {
-    act(() => root.unmount());
-    globalThis.fetch = previous.fetch;
-    for (const [name, value] of Object.entries({ window: previous.window, document: previous.document, navigator: previous.navigator })) {
-      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-    }
-    dom.window.close();
+    replaceSubject = null;
+    await page.dispose();
   }
 });
 
 test("the task-detail Chain card reflects a completed held layer on the next poll and deduplicates Resume", async () => {
-  const previous = {
-    window: globalThis.window,
-    document: globalThis.document,
-    navigator: globalThis.navigator,
-    HTMLElement: globalThis.HTMLElement,
-    HTMLButtonElement: globalThis.HTMLButtonElement,
-    HTMLFormElement: globalThis.HTMLFormElement,
-    HTMLInputElement: globalThis.HTMLInputElement,
-    Element: globalThis.Element,
-    Node: globalThis.Node,
-    MutationObserver: globalThis.MutationObserver,
-    Event: globalThis.Event,
-    InputEvent: globalThis.InputEvent,
-    MouseEvent: globalThis.MouseEvent,
-    fetch: globalThis.fetch,
-  };
-  const { dom, container } = installDom("http://localhost/tasks/hold");
   const holdTask = task("hold", "Held task", 0, "chain-hold");
   const runningChain = chainFor("hold");
   runningChain.chainId = "chain-hold";
@@ -273,9 +224,8 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
   let latestChain = runningChain;
   let chainPolls = 0;
   const mutations: Array<{ url: string; method: string; body: string }> = [];
-  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+  const page = await mountPage(<TaskDetailPage taskId="hold" />, { "*": ({ input, init, method }) => {
     const url = String(input).replace(/^.*\/api/, "");
-    const method = init.method ?? "GET";
     if (method !== "GET") {
       mutations.push({ url, method, body: String(init.body ?? "") });
       return new Response("{}", { status: 200 });
@@ -293,19 +243,16 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
       return new Response(JSON.stringify(latestChain), { status: 200 });
     }
     return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
-  }) as typeof fetch;
-  const { createRoot } = await reactDom();
-  const { TaskDetailPage } = await import("../pages/TaskDetail");
-  const root = createRoot(container);
+  } }, "http://localhost/tasks/hold");
+  const { dom, container } = page;
   try {
-    act(() => root.render(<TaskDetailPage taskId="hold" />));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     assert.ok(chainPolls >= 1);
     assert.match(container.textContent ?? "", /Current execution/);
     assert.doesNotMatch(container.textContent ?? "", /Waiting for the operator to resume/);
 
     latestChain = completedChain;
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_600)); });
+    await page.settle();
     assert.ok(chainPolls >= 2, `expected a poll after the initial response, got ${chainPolls}`);
     assert.match(container.textContent ?? "", /Waiting for the operator to resume/);
 
@@ -315,8 +262,8 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
     await act(async () => {
       toggle!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
       toggle!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 20));
     });
+    await page.settle();
     const resumes = mutations.filter((item) => item.url === "/tasks/hold/chain/resume");
     assert.equal(resumes.length, 1, JSON.stringify(mutations));
     assert.match(JSON.parse(resumes[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
@@ -326,14 +273,12 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
     await act(async () => {
       stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
       stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 20));
     });
+    await page.settle();
     const holds = mutations.filter((item) => item.url === "/tasks/hold/chain/hold");
     assert.equal(holds.length, 1, JSON.stringify(mutations));
     assert.match(JSON.parse(holds[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
   } finally {
-    act(() => root.unmount());
-    Object.assign(globalThis, previous);
-    dom.window.close();
+    await page.dispose();
   }
 });

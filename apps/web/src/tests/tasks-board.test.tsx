@@ -14,7 +14,7 @@ import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
-import { installDom, reactDom } from "./dom-harness";
+import { installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
 
@@ -141,9 +141,7 @@ const withStartFlow = async (walk: (flow: {
   requests: BoardRequest[];
   press: (label: string) => Promise<void>;
 }) => Promise<void>, startStatus = 201): Promise<void> => {
-  const { dom, container } = installDom();
   const requests: BoardRequest[] = [];
-  const originalFetch = globalThis.fetch;
   const startability = {
     startable: true,
     checklist: {
@@ -155,11 +153,10 @@ const withStartFlow = async (walk: (flow: {
       repo: { id: "r1", name: "product" }, targetBranch: "main",
     },
   };
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init?: RequestInit) => {
-    const path = String(url);
-    const method = init?.method ?? "GET";
-    requests.push({ method, path, body: init?.body === undefined ? null : JSON.parse(String(init.body)) });
-    if (path === "/api/tasks/t1/startability") return Response.json(startability);
+  const page = await mountPage(<StartFlowHarness />, { "*": ({ input, init, method }) => {
+    const path = String(input);
+    requests.push({ method, path, body: init.body === undefined ? null : JSON.parse(String(init.body)) });
+    if (path === "/api/tasks/t1/startability") return startability;
     if (path === "/api/tasks/t1/start" && method === "POST") {
       return startStatus === 201
         ? Response.json({ runId: "run-1", runNumber: 1 }, { status: 201 })
@@ -167,27 +164,10 @@ const withStartFlow = async (walk: (flow: {
     }
     return Response.json([], { status: 404 });
   } });
-  const root = (await reactDom()).createRoot(container);
-  const settle = async (): Promise<void> => {
-    for (let round = 0; round < 3; round += 1) {
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    }
-  };
-  const press = async (label: string): Promise<void> => {
-    const found = [...dom.window.document.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent?.trim() === label || candidate.getAttribute("aria-label") === label);
-    assert.ok(found, `no button labelled ${label}`);
-    await act(async () => found.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await settle();
-  };
   try {
-    await act(async () => root.render(<StartFlowHarness />));
-    await settle();
-    await walk({ dom, requests, press });
+    await walk({ dom: page.dom, requests, press: page.press });
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 };
 
@@ -345,7 +325,6 @@ test("a non-template chain uses the API-derived badge and short card title", () 
 });
 
 test("Archive All confirms the project-wide Done scope even while one chain is visible", async () => {
-  const { dom, container } = installDom();
   storage.set("agentos.projectId", "p1");
   const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
@@ -358,51 +337,39 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
     task({ id: "visible", name: "Alpha: Review", displayName: "Review", status: "DONE", chainId: "alpha", chainName: "Alpha", chainProgress: progress({ chainId: "alpha" }), chainAggregate: settledAggregate("alpha", "Alpha", "visible") }),
     task({ id: "hidden", name: "Beta: Review", displayName: "Review", status: "DONE", chainId: "beta", chainName: "Beta", chainProgress: progress({ chainId: "beta" }), chainAggregate: settledAggregate("beta", "Beta", "hidden") }),
   ];
-  const originalFetch = globalThis.fetch;
   const confirmations: string[] = [];
   const mutations: string[] = [];
-  Object.defineProperty(dom.window, "confirm", { configurable: true, value: (message: string) => { confirmations.push(message); return true; } });
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
-    const path = String(input);
-    if ((init?.method ?? "GET") === "POST") {
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "POST /projects/p1/tasks/archive-done": ({ input }) => {
+      mutations.push(String(input));
+      return { archived: 2, skipped: 0 };
+    },
+    "*": ({ input, method }) => {
+      const path = String(input);
+      if (method === "POST") {
       mutations.push(path);
-      return Response.json({ archived: 2, skipped: 0 });
+        return { archived: 2, skipped: 0 };
+      }
+      return [];
     }
-    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
-    if (path.includes("/api/tasks?")) return Response.json(rows);
-    return Response.json([]);
-  } });
-  const root = (await reactDom()).createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-  };
-  const press = async (label: string): Promise<void> => {
-    const button = [...dom.window.document.querySelectorAll("button")].find((node) => (
-      node.textContent?.trim() === label || node.getAttribute("aria-label") === label
-    ));
-    assert.ok(button, `missing button ${label}: ${container.innerHTML}`);
-    await act(async () => button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await flush();
-  };
+  });
+  Object.defineProperty(page.dom.window, "confirm", { configurable: true, value: (message: string) => { confirmations.push(message); return true; } });
   try {
-    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
-    await flush();
-    await press("Show only chain Alpha");
-    assert.ok(container.querySelector('[data-card="visible"]'));
-    assert.equal(container.querySelector('[data-card="hidden"]'), null);
-    await press("Archive All");
+    await page.press("Show only chain Alpha");
+    assert.ok(page.container.querySelector('[data-card="visible"]'));
+    assert.equal(page.container.querySelector('[data-card="hidden"]'), null);
+    await page.press("Archive All");
     assert.deepEqual(confirmations, ["Archive all 2 done tasks in this project?"]);
     assert.deepEqual(mutations, ["/api/projects/p1/tasks/archive-done"]);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
     storage.remove("agentos.projectId");
   }
 });
 
 test("the board renders Backlog oldest first and leaves every other column in the API's order", async () => {
-  const { dom, container } = installDom();
   storage.set("agentos.projectId", "p1");
   // As `GET /tasks` answers: newest first, for every column.
   const rows = [
@@ -412,25 +379,18 @@ test("the board renders Backlog oldest first and leaves every other column in th
     task({ id: "done-new", status: "DONE" }),
     task({ id: "done-old", status: "DONE" }),
   ];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string) => {
-    const path = String(input);
-    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
-    if (path.includes("/api/tasks?")) return Response.json(rows);
-    return Response.json([]);
-  } });
-  const root = (await reactDom()).createRoot(container);
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "*": [],
+  });
   try {
-    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-    const rendered = [...container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
+    const rendered = [...page.container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
     // Backlog is a queue dispatched from the top, so a numbered queue has to
     // read top-to-bottom in dispatch order; Done reports what just happened.
     assert.deepEqual(rendered, ["backlog-old", "backlog-mid", "backlog-new", "done-new", "done-old"]);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
     storage.remove("agentos.projectId");
   }
 });

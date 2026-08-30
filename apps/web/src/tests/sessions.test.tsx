@@ -14,6 +14,7 @@ import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
 import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+import { installFetchFunction } from "./dom-harness";
 
 // Radix chooses useLayoutEffect or useEffect when its module is first loaded.
 // Seed a browser global before importing Sessions so portaled hover-card content
@@ -312,26 +313,22 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
   const sessions = [...today, yesterday, older];
 
   const { ProjectProvider } = await import("../lib/project");
-  const originalFetch = globalThis.fetch;
   try {
     for (const locale of ["en", "zh"] as const) {
       const dom = jsdom();
       const container = dom.window.document.querySelector("#root");
       assert.ok(container);
-      Object.defineProperty(globalThis, "fetch", {
-        configurable: true,
-        value: async (input: string) => {
+      const fetchHarness = installFetchFunction(async (input) => {
           const path = String(input);
           const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }] : sessions;
           return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-        },
       });
       const root = createRoot(container);
       try {
         await act(async () => {
           root.render(<LocaleProvider initialLocale={locale}><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
         });
-        for (let turn = 0; turn < 20; turn += 1) await act(async () => { await Promise.resolve(); });
+        await fetchHarness.settle();
 
         const dayGroups = [...dom.window.document.querySelectorAll<HTMLElement>("[data-session-day]")];
         assert.equal(dayGroups.length, 3, container.innerHTML);
@@ -353,12 +350,12 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
         await click(dom, expand);
         assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
       } finally {
+        fetchHarness.dispose();
         await act(async () => root.unmount());
         dom.window.close();
       }
     }
   } finally {
-    globalThis.fetch = originalFetch;
     setFormatLocale("en", (key, vars) => translate("en", key, vars));
   }
 });
@@ -376,16 +373,12 @@ test("day expansion resets when the Project scope changes", async () => {
   const dom = jsdom();
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/projects")
         ? [{ id: "p1", name: "One" }, { id: "p2", name: "Two" }]
         : path.includes("projectId=p2") ? byProject.p2 : byProject.p1;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
   const { ProjectProvider, useProjectScope } = await import("../lib/project");
   const ScopeProbe = (): ReactNode => {
@@ -393,9 +386,7 @@ test("day expansion resets when the Project scope changes", async () => {
     return <button type="button" data-switch-project onClick={() => scope.select("p2")}>Switch project</button>;
   };
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   try {
     await act(async () => {
       root.render(<LocaleProvider initialLocale="en"><ProjectProvider><ScopeProbe /><SessionsPage /></ProjectProvider></LocaleProvider>);
@@ -415,7 +406,7 @@ test("day expansion resets when the Project scope changes", async () => {
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
-    globalThis.fetch = originalFetch;
+    fetchHarness.dispose();
   }
 });
 
@@ -441,24 +432,18 @@ test("agent and status filters show loaded-only copy and localized choices", asy
     session({ id: "done-other", task: { id: "task-done", name: "Done other" }, agentId: "agent-other", agent: { id: "agent-other", title: "Agent Other" }, executionStatus: "SUCCEEDED" }),
     session({ id: "failed-match", task: { id: "task-failed", name: "Failed match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "FAILED" }),
   ];
-  const originalFetch = globalThis.fetch;
   try {
     for (const locale of ["en", "zh"] as const) {
       const dom = jsdom();
       const container = dom.window.document.querySelector("#root");
       assert.ok(container);
-      Object.defineProperty(globalThis, "fetch", {
-        configurable: true,
-        value: async (input: string) => {
+      const fetchHarness = installFetchFunction(async (input) => {
           const payload = String(input).includes("/projects") ? [{ id: "p1", name: "Demo" }] : sessions;
           return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-        },
       });
       const { ProjectProvider } = await import("../lib/project");
       const root = createRoot(container);
-      const flush = async (): Promise<void> => {
-        await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-      };
+      const flush = fetchHarness.settle;
       const choose = async (selector: string, value: string): Promise<void> => {
         const select = dom.window.document.querySelector<HTMLSelectElement>(selector);
         assert.ok(select, `${selector} not found in ${container.innerHTML}`);
@@ -496,12 +481,12 @@ test("agent and status filters show loaded-only copy and localized choices", asy
         assert.match(container.textContent ?? "", locale === "en" ? /No sessions match the selected filters\./u : /没有会话符合所选筛选条件。/u);
         assert.doesNotMatch(container.textContent ?? "", locale === "en" ? /No sessions yet\./u : /还没有会话。/u);
       } finally {
+        fetchHarness.dispose();
         await act(async () => root.unmount());
         dom.window.close();
       }
     }
   } finally {
-    globalThis.fetch = originalFetch;
     setFormatLocale("en", (key, vars) => translate("en", key, vars));
   }
 });
@@ -512,17 +497,13 @@ test("agent and status filters reset when the Project scope changes", async () =
     id: `${projectId}-session`, projectId, agentId: `${projectId}-agent`,
     agent: { id: `${projectId}-agent`, title: `${projectId} Agent` }, executionStatus: "RUNNING",
   })];
-  const originalFetch = globalThis.fetch;
   const dom = jsdom();
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/projects") ? projects : path.includes("projectId=p2") ? sessionsFor("p2") : sessionsFor("p1");
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
   const { ProjectProvider, useProjectScope } = await import("../lib/project");
   const ScopeProbe = (): ReactNode => {
@@ -530,9 +511,7 @@ test("agent and status filters reset when the Project scope changes", async () =
     return <button type="button" data-switch-project onClick={() => scope.select("p2")}>Switch project</button>;
   };
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   const choose = async (selector: string, value: string): Promise<void> => {
     const select = dom.window.document.querySelector<HTMLSelectElement>(selector);
     assert.ok(select);
@@ -560,7 +539,7 @@ test("agent and status filters reset when the Project scope changes", async () =
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
-    globalThis.fetch = originalFetch;
+    fetchHarness.dispose();
   }
 });
 
@@ -576,10 +555,7 @@ test("opening a Session marks it opened, and returning to the list clears its do
   const detail = session({ projectId: "p-open", executionStatus: "SUCCEEDED", endedAt: "2026-08-21T01:00:00.000Z" });
   const seenKey = sessionSeenKey("p-open");
   storage.set(seenKey, JSON.stringify({ since: "2026-08-20T00:00:00.000Z", opened: {} }));
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
         ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
@@ -587,14 +563,11 @@ test("opening a Session marks it opened, and returning to the list clears its do
           ? [{ id: "p-open", name: "Open project" }]
           : path.includes("/sessions/session-1") ? detail : [detail];
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
   const { SessionDetailPage } = await import("../pages/Sessions");
   const { ProjectProvider } = await import("../lib/project");
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
     await flush();
@@ -607,7 +580,7 @@ test("opening a Session marks it opened, and returning to the list clears its do
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
-    globalThis.fetch = originalFetch;
+    fetchHarness.dispose();
   }
 });
 
@@ -618,22 +591,16 @@ test("a Session finishing while its detail page is open is marked opened again",
   let detail = session({ projectId: "p-transition", executionStatus: "RUNNING", endedAt: null });
   const seenKey = sessionSeenKey("p-transition");
   storage.set(seenKey, JSON.stringify({ since: "2026-08-20T00:00:00.000Z", opened: {} }));
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
         ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
   const { SessionDetailPage } = await import("../pages/Sessions");
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
     await flush();
@@ -655,7 +622,7 @@ test("a Session finishing while its detail page is open is marked opened again",
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
-    globalThis.fetch = originalFetch;
+    fetchHarness.dispose();
   }
 });
 
@@ -960,16 +927,13 @@ test("Load more keeps page one and dedupes it against the live head", async () =
 
   let headRows = head(Array.from({ length: 50 }, (_, index) => `new-${index}`));
   const requests: string[] = [];
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       requests.push(path);
       const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }]
         : path.includes("before=") ? older
           : headRows;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
 
   const { ProjectProvider } = await import("../lib/project");
@@ -977,9 +941,7 @@ test("Load more keeps page one and dedupes it against the live head", async () =
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
   await flush();
 
@@ -1007,6 +969,7 @@ test("Load more keeps page one and dedupes it against the live head", async () =
 
   await act(async () => root.unmount());
   dom.window.close();
+  fetchHarness.dispose();
 });
 
 test("an applied filter remains active across Refresh and Load more", async () => {
@@ -1027,22 +990,16 @@ test("an applied filter remains active across Refresh and Load more", async () =
   const older = [listRow("older-match", 60, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`older-other-${index}`, index + 61, "agent-other"))];
   let headRows = initialHead;
   const requests: string[] = [];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       requests.push(path);
       const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }]
         : path.includes("before=") ? older : headRows;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
   const { ProjectProvider } = await import("../lib/project");
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   const chooseAgent = async (): Promise<void> => {
     const select = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]");
     assert.ok(select);
@@ -1077,7 +1034,7 @@ test("an applied filter remains active across Refresh and Load more", async () =
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
-    globalThis.fetch = originalFetch;
+    fetchHarness.dispose();
   }
 });
 
@@ -1096,9 +1053,7 @@ test("the detail page does not call the initial drain `N new`", async () => {
     payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `line ${index}` }] } },
   }));
   const detail = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-16T00:10:00.000Z" });
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       // Two pages, so the flag has to survive an intermediate render.
       const payload = path.includes("/events")
@@ -1107,7 +1062,6 @@ test("the detail page does not call the initial drain `N new`", async () => {
           : { events: events.slice(0, 6), nextAfterSeq: 6, hasMore: true, total: 12 }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
 
   const { SessionDetailPage } = await import("../pages/Sessions");
@@ -1116,8 +1070,8 @@ test("the detail page does not call the initial drain `N new`", async () => {
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
-    for (let turn = 0; turn < 6; turn += 1) {
-      await act(async () => { for (let inner = 0; inner < 20; inner += 1) await Promise.resolve(); });
+    for (let guard = 0; guard < 100 && !/line 5/u.test(container.innerHTML); guard += 1) {
+      await fetchHarness.settle();
       await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
     }
     assert.match(container.innerHTML, /line 5/, "both pages drained into the visible merged node");
@@ -1127,6 +1081,7 @@ test("the detail page does not call the initial drain `N new`", async () => {
     // path the runner never sees the event loop drain and the file hangs.
     await act(async () => root.unmount());
     dom.window.close();
+    fetchHarness.dispose();
   }
 });
 
@@ -1146,9 +1101,7 @@ test("the live stream counts a call added to the tail tool group as one new node
   ];
   let current = initial;
   const detail = session({ executionStatus: "RUNNING" });
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
         ? path.includes("afterSeq=2")
@@ -1156,16 +1109,13 @@ test("the live stream counts a call added to the tail tool group as one new node
           : { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
 
   const { SessionDetailPage } = await import("../pages/Sessions");
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
     await flush();
@@ -1188,6 +1138,7 @@ test("the live stream counts a call added to the tail tool group as one new node
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
+    fetchHarness.dispose();
   }
 });
 
@@ -1201,24 +1152,19 @@ test("a live stream at the bottom auto-scrolls after its initial drain", async (
   });
   let current = [initial];
   const detail = session({ executionStatus: "RUNNING" });
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
         ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
 
   const { SessionDetailPage } = await import("../pages/Sessions");
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
     await flush();
@@ -1236,6 +1182,7 @@ test("a live stream at the bottom auto-scrolls after its initial drain", async (
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
+    fetchHarness.dispose();
   }
 });
 
@@ -1247,24 +1194,19 @@ test("a live stream counts assistant prose absorbed by the tail text node", asyn
   const first = event({ id: "assistant-1", seq: 1, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT });
   let current = [first];
   const detail = session({ executionStatus: "RUNNING" });
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
         ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-    },
   });
 
   const { SessionDetailPage } = await import("../pages/Sessions");
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
     await flush();
@@ -1284,6 +1226,7 @@ test("a live stream counts assistant prose absorbed by the tail text node", asyn
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
+    fetchHarness.dispose();
   }
 });
 
@@ -1292,9 +1235,7 @@ test("a capped stream keeps the visible event-cap notice", async () => {
   Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
   const detail = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-16T00:10:00.000Z" });
   let seq = 0;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       if (!path.includes("/runs/")) {
         return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(detail) } as unknown as Response;
@@ -1307,7 +1248,6 @@ test("a capped stream keeps the visible event-cap notice", async () => {
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({
         events: [row], nextAfterSeq: seq, hasMore: true, total: 100,
       }) } as unknown as Response;
-    },
   });
 
   const { SessionDetailPage } = await import("../pages/Sessions");
@@ -1316,8 +1256,8 @@ test("a capped stream keeps the visible event-cap notice", async () => {
   const root = createRoot(container);
   try {
     await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
-    for (let turn = 0; turn < 100 && seq < 40; turn += 1) {
-      await act(async () => { await Promise.resolve(); });
+    for (let guard = 0; guard < 100 && seq < 40; guard += 1) {
+      await fetchHarness.settle();
       await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
     }
     assert.equal(seq, 40);
@@ -1325,6 +1265,7 @@ test("a capped stream keeps the visible event-cap notice", async () => {
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
+    fetchHarness.dispose();
   }
 });
 
@@ -1335,9 +1276,7 @@ test("a failed Load more tells the operator instead of vanishing into the consol
     return session({ id: `new-${index}`, requestedAt: at, startedAt: at });
   });
 
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       if (path.includes("/projects")) {
         return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify([{ id: "p1", name: "Demo" }]) } as unknown as Response;
@@ -1347,7 +1286,6 @@ test("a failed Load more tells the operator instead of vanishing into the consol
         return { ok: false, status: 503, headers: new Headers(), text: async () => JSON.stringify({ error: "Service unavailable" }) } as unknown as Response;
       }
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(headRows) } as unknown as Response;
-    },
   });
 
   const { ProjectProvider } = await import("../lib/project");
@@ -1355,9 +1293,7 @@ test("a failed Load more tells the operator instead of vanishing into the consol
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
   await flush();
 
@@ -1374,4 +1310,5 @@ test("a failed Load more tells the operator instead of vanishing into the consol
 
   await act(async () => root.unmount());
   dom.window.close();
+  fetchHarness.dispose();
 });
