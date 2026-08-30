@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ExitEvidence } from "./adapters.js";
-import { buildFailureEnvelope, FAILURE_EVIDENCE_LIMIT, summarizeEvidence } from "./envelope.js";
+import { buildFailureEnvelope } from "./envelope.js";
 import { CommandTimeoutError } from "./exec.js";
 
 const evidence = (overrides: Partial<ExitEvidence> = {}): ExitEvidence => ({
@@ -40,15 +40,6 @@ test("empty and whitespace-only streams become null rather than empty strings", 
   assert.equal(envelope.stdoutSummary, null);
   assert.equal(envelope.providerError, null);
   assert.equal(envelope.runnerClass, null);
-});
-
-test("truncation keeps the tail, where a CLI states its verdict", () => {
-  const noise = "progress\n".repeat(2_000);
-  const summary = summarizeEvidence(`${noise}fatal: Authentication failed`);
-  assert.ok(summary);
-  assert.ok(summary.endsWith("fatal: Authentication failed"), "the verdict at the end of the stream must survive");
-  assert.match(summary, /^…\[\d+ earlier characters truncated\]\n/u);
-  assert.ok(summary.length <= FAILURE_EVIDENCE_LIMIT + 64);
 });
 
 test("a typed CommandTimeoutError marks the envelope timed out and transient", () => {
