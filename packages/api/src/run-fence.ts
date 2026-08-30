@@ -1,5 +1,7 @@
 import { lockRunRow, lockTaskRow, Prisma, RunStatus } from "@anneal/db";
 
+import type { Refusal } from "./refusal.js";
+
 /**
  * The statuses a lease can still be live under. Distinct from the database
  * package's `ACTIVE_RUN_STATUSES`, which answers "does this task already have a
@@ -41,7 +43,7 @@ export type RunFence = {
 
 /** Why a fenced query matched nothing. Ordered from the most specific cause to
  *  the least: a run that does not exist is `unknown-run`, never `stale-fence`. */
-export type FenceRefusal =
+export type LeaseFenceRefusal =
   | "unknown-run"
   | "wrong-runner"
   | "stale-fence"
@@ -49,15 +51,42 @@ export type FenceRefusal =
   | "lease-expired"
   | "not-active";
 
+export type FenceRefusal =
+  | LeaseFenceRefusal
+  | "waiting-inbox"
+  | "cleanup-not-authorized";
+
 export type FenceRefusalResponse = {
   error: "Stale fencing token";
-  reason: FenceRefusal;
+  reason: LeaseFenceRefusal;
 };
 
-export const fenceRefusalResponse = (reason: FenceRefusal): FenceRefusalResponse => ({
+export const fenceRefusalResponse = (reason: LeaseFenceRefusal): FenceRefusalResponse => ({
   error: "Stale fencing token",
   reason,
 });
+
+/** The one transport-neutral refusal vocabulary for every Run authority mode. */
+export const runFenceRefusal = (reason: FenceRefusal): Refusal => {
+  if (reason === "waiting-inbox") {
+    return {
+      reason: "conflict",
+      message: "Run suspended for Inbox",
+      detail: { code: "WAITING_INBOX" },
+    };
+  }
+  if (reason === "cleanup-not-authorized") {
+    return {
+      reason: "conflict",
+      message: "Cleanup outcome is not authorized for a live or foreign run",
+    };
+  }
+  return {
+    reason: "conflict",
+    message: "Stale fencing token",
+    detail: { reason },
+  };
+};
 
 export const isFenceRefusalResponse = (value: unknown): value is FenceRefusalResponse => (
   typeof value === "object"
@@ -92,7 +121,7 @@ export const fencedRunWhere = (fence: RunFence): Prisma.RunWhereInput => ({
 export const explainFenceRefusal = async (
   tx: Prisma.TransactionClient,
   fence: RunFence,
-): Promise<FenceRefusal> => {
+): Promise<LeaseFenceRefusal> => {
   const run = await tx.run.findUnique({
     where: { id: fence.runId },
     select: { runnerId: true, fencingToken: true, cancelRequestedAt: true, leaseExpiresAt: true, status: true },
@@ -104,6 +133,113 @@ export const explainFenceRefusal = async (
   if (run.leaseExpiresAt === null || run.leaseExpiresAt <= fence.at) return "lease-expired";
   if (!(fence.statuses ?? activeRunStatuses).includes(run.status)) return "not-active";
   return "stale-fence";
+};
+
+export type LockedAuthorityRun = {
+  id: string;
+  runnerId: string | null;
+  fencingToken: string | null;
+  cancelRequestId: string | null;
+  cancelReason: string | null;
+  cancelRequestedAt: Date | null;
+  leaseExpiresAt: Date | null;
+  status: RunStatus;
+  taskId: string | null;
+  repoId: string | null;
+  runNumber: number;
+  pushedBranch: string | null;
+  branch: string | null;
+};
+
+/**
+ * Locks the Run mutex before reading any authority mode. Callers that also
+ * mutate Task state acquire that lock only after this function returns.
+ */
+export const lockAuthorityRun = async (
+  tx: Prisma.TransactionClient,
+  runId: string,
+): Promise<LockedAuthorityRun | null> => {
+  await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT candidate."id" FROM "Run" AS candidate WHERE candidate."id" = ${runId} FOR UPDATE
+  `;
+  return tx.run.findFirst({
+    where: { id: runId },
+    select: {
+      id: true,
+      runnerId: true,
+      fencingToken: true,
+      cancelRequestId: true,
+      cancelReason: true,
+      cancelRequestedAt: true,
+      leaseExpiresAt: true,
+      status: true,
+      taskId: true,
+      repoId: true,
+      runNumber: true,
+      pushedBranch: true,
+      branch: true,
+    },
+  });
+};
+
+/** Live authority is the full six-clause lease fence. */
+export const liveAuthorityRefusal = (
+  run: LockedAuthorityRun | null,
+  fence: RunFence,
+): LeaseFenceRefusal | null => {
+  if (!run) return "unknown-run";
+  if (fence.runnerId !== undefined && run.runnerId !== fence.runnerId) return "wrong-runner";
+  if (run.fencingToken !== fence.fencingToken) return "stale-fence";
+  if (run.cancelRequestedAt !== null) return "cancel-requested";
+  if (run.leaseExpiresAt === null || run.leaseExpiresAt <= fence.at) return "lease-expired";
+  if (!(fence.statuses ?? activeRunStatuses).includes(run.status)) return "not-active";
+  return null;
+};
+
+export type SalvageAuthority = {
+  runnerId: string;
+  fencingToken: string;
+  pushedBranch: string;
+};
+
+/**
+ * Salvage authority is deliberately narrower than live authority: it admits
+ * only the recorded owner publishing this Run's deterministic per-run ref.
+ */
+export const salvageAuthorityRefusal = (
+  run: LockedAuthorityRun | null,
+  authority: SalvageAuthority,
+): LeaseFenceRefusal | null => {
+  if (!run) return "unknown-run";
+  if (run.runnerId !== authority.runnerId) return "wrong-runner";
+  if (run.fencingToken !== authority.fencingToken) return "stale-fence";
+  const expectedBranch = run.taskId ? `agentos/${run.taskId}/run-${run.runNumber}` : null;
+  if (
+    run.repoId === null
+    || authority.pushedBranch !== expectedBranch
+    || run.pushedBranch !== null && run.pushedBranch !== authority.pushedBranch
+  ) return "not-active";
+  return null;
+};
+
+export type CleanupAuthority = {
+  runnerId: string;
+  fencingToken: string;
+  at: Date;
+};
+
+/** Cleanup authority admits only the recorded owner after lease loss or terminalization. */
+export const cleanupAuthorityRefusal = (
+  run: LockedAuthorityRun | null,
+  authority: CleanupAuthority,
+): FenceRefusal | null => {
+  if (
+    !run
+    || run.runnerId !== authority.runnerId
+    || run.fencingToken !== authority.fencingToken
+    || run.leaseExpiresAt !== null && run.leaseExpiresAt > authority.at && activeRunStatuses.includes(run.status)
+  ) return "cleanup-not-authorized";
+  return null;
 };
 
 /**
