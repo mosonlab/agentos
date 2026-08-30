@@ -1833,6 +1833,8 @@ test("successful completion commits output and parks an archived chain successor
       assert.equal(successorUpdate?.status, "REVIEW");
       assert.match(String(successorUpdate?.failureReason), /Archived Successor/);
       assert.match(String(successorUpdate?.failureReason), /archived/i);
+      assert.equal(successorActivity?.taskId, successor.id);
+      assert.equal(successorActivity?.actorType, "control-plane");
       assert.match(String(successorActivity?.body), /predecessor.*complet/i);
       assert.match(String(successorActivity?.body), /Archived Successor/);
       assert.match(String(successorActivity?.body), /archived/i);
