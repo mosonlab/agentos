@@ -55,6 +55,21 @@ LaunchDaemon and Linux systemd profiles in the public
 Those procedures do not change the platform classifications above or the
 authoritative support matrix.
 
+## Advanced delivery infrastructure
+
+Direct and Full Assurance are self-hosted workflows, not facilities the
+Quickstart creates. Their operator supplies and configures every additional
+dependency: the Codex, Claude Code and Pi CLIs and model entitlement required by
+the selected roles; authenticated `gh` for GitHub pull-request creation;
+`GITHUB_READ_TOKEN` for merge-readiness evidence; an SSH-reachable gate worker
+configured through `RUNNER_GATE_SERVER`; and a private GitHub App plus the
+isolated `@anneal/merge-executor` service for the mechanical merge. The public
+[`gate-worker`](runbooks/gate-worker.md) and
+[`merge-executor`](runbooks/merge-executor.md) runbooks document those two
+services. Anneal bundles no host, credential, provider account or GitHub App,
+and a missing prerequisite stops the chain rather than authorizing a weaker
+merge.
+
 Read [`docs/release/security.md`](release/security.md)
 before pointing this at anything, and
 [`docs/release/migration-and-recovery.md`](release/migration-and-recovery.md)

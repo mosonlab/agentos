@@ -50,8 +50,8 @@ installation.
 ### 1. Clone the release source
 
 ```sh
-git clone https://github.com/mosonlab/agentos.git
-cd agentos
+git clone https://github.com/mosonlab/anneal.git
+cd anneal
 git checkout v0.4.0
 ```
 

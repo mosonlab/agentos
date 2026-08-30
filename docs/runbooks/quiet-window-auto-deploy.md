@@ -1,5 +1,11 @@
 # Quiet-window auto-deploy
 
+> **Audience and support status.** This runbook documents the repository
+> maintainer's macOS appliance-deployment profile. It is published for
+> auditability and reproducibility, but it is not part of the Developer Preview
+> Quickstart, the supported installation shape, or a production-support
+> commitment.
+
 This job advances the macOS appliance from the release named by `current` to an
 exact `main` commit. It controls `com.agentos.api`, `com.agentos.inbox`, ten
 runner labels, and `com.agentos.web`. The release artifact also carries the

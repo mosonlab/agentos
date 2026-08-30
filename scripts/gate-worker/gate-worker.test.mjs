@@ -776,6 +776,13 @@ test("every gate-worker script parses", () => {
   }
 });
 
+test("the standalone worker provisioner pins the repository's .nvmrc version", () => {
+  const nvmrc = readFileSync(join(here, "..", "..", ".nvmrc"), "utf8").trim();
+  const provision = readFileSync(provisionPath, "utf8");
+  const pinned = /^GATE_NODE_VERSION="\$\{GATE_NODE_VERSION:-v([^}]+)\}"$/mu.exec(provision)?.[1];
+  assert.equal(pinned, nvmrc, "provision.sh drifted from .nvmrc");
+});
+
 test("a usage error is 2 everywhere the exit-code table applies", () => {
   // The table has one row for a usage error. remote-gate.sh documented 2 and
   // exited sysexits' 64 in every one of its argument checks, which is two

@@ -10,7 +10,6 @@
     { "glob": ".github/ISSUE_TEMPLATE/bug-report.yml", "purpose": "bug report issue form carrying the fields CONTRIBUTING.md requires" },
     { "glob": ".github/ISSUE_TEMPLATE/documentation-correction.yml", "purpose": "documentation correction issue form" },
     { "glob": ".github/ISSUE_TEMPLATE/config.yml", "purpose": "issue chooser routing security reports to the private channel and questions to Discussions" },
-    { "glob": ".github/workflows/ci.yml", "purpose": "continuous integration definition" },
     { "glob": ".gitignore", "purpose": "source hygiene" },
     { "glob": ".nvmrc", "purpose": "pinned Node.js major version" },
     { "glob": ".npmrc", "purpose": "npm engine enforcement" },
@@ -304,11 +303,6 @@
       "category": "credential-placeholder",
       "glob": ".env.example",
       "reason": "documented empty or non-secret development placeholders"
-    },
-    {
-      "category": "credential-placeholder",
-      "glob": ".github/workflows/ci.yml",
-      "reason": "localhost-only CI database connection fixtures"
     },
     {
       "category": "credential-placeholder",

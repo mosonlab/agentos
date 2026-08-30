@@ -9,11 +9,13 @@
 #   scripts/gate-worker/gate-dispatch.sh <oid> --allow-local
 #   scripts/gate-worker/gate-dispatch.sh <oid> --server <one-server>
 #
-# The slot model rations measured host capacity, not arbitrary processes. The
-# default desktop worker contributes two fixed slots and the fallback worker
-# contributes one. The explicit --server form remains one slot. The local
-# machine contributes one only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1)
-# says this invocation may spend its resources.
+# The slot model rations measured host capacity, not arbitrary processes. An
+# explicitly configured primary worker contributes two fixed slots and an
+# explicitly configured fallback worker contributes one. The explicit --server
+# form remains one slot. With no remote configured, --allow-local selects a
+# local-only dispatch. The local machine otherwise contributes one last-resort
+# slot only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1) says this
+# invocation may spend its resources.
 #
 # The accounting is one lock file per configured slot under
 # ${XDG_CACHE_HOME:-~/.cache}/gate-dispatch/, outside any repository because the
@@ -70,8 +72,8 @@ set -uo pipefail
 EXIT_USAGE=2
 EXIT_NO_SLOT=75
 
-PRIMARY_SERVER="${AGENTOS_GATE_PRIMARY_SERVER:-ci-desktop-worker}"
-FALLBACK_SERVER="${AGENTOS_GATE_FALLBACK_SERVER:-agentos-gate}"
+PRIMARY_SERVER="${AGENTOS_GATE_PRIMARY_SERVER:-}"
+FALLBACK_SERVER="${AGENTOS_GATE_FALLBACK_SERVER:-}"
 SINGLE_SERVER=0
 if [ -n "${AGENTOS_GATE_SERVER:-}" ]; then
   PRIMARY_SERVER="$AGENTOS_GATE_SERVER"
@@ -155,7 +157,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-if [ "$SINGLE_SERVER" -eq 1 ]; then
+if [ -z "$PRIMARY_SERVER" ]; then
+  PRIMARY_SLOTS=()
+elif [ "$SINGLE_SERVER" -eq 1 ]; then
   PRIMARY_SLOTS=(remote-1)
 else
   PRIMARY_SLOTS=(remote-1 remote-1-2)
@@ -178,11 +182,19 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 [ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
   || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch and no verdict exists" "$GATE_EXIT_NO_VERDICT"
 
+[ -n "$PRIMARY_SERVER" ] || [ -z "$FALLBACK_SERVER" ] \
+  || die "a fallback worker requires a primary worker" "$EXIT_USAGE"
+if [ -z "$PRIMARY_SERVER" ] && [ "$ALLOW_LOCAL" -ne 1 ]; then
+  die "no gate capacity configured; set AGENTOS_GATE_SERVER, configure a primary worker, pass --server, or opt in with --allow-local" "$GATE_EXIT_NO_VERDICT"
+fi
+
 # Validated here as well as inside the scripts that send it: this one decides
 # which of them to call, and a destination it cannot vouch for is a dispatch
 # that should not start rather than one that fails halfway through a push.
-gate_valid_server "$PRIMARY_SERVER" >/dev/null \
-  || die "not a usable primary ssh destination: ${PRIMARY_SERVER}" "$EXIT_USAGE"
+if [ -n "$PRIMARY_SERVER" ]; then
+  gate_valid_server "$PRIMARY_SERVER" >/dev/null \
+    || die "not a usable primary ssh destination: ${PRIMARY_SERVER}" "$EXIT_USAGE"
+fi
 if [ -n "$FALLBACK_SERVER" ]; then
   gate_valid_server "$FALLBACK_SERVER" >/dev/null \
     || die "not a usable fallback ssh destination: ${FALLBACK_SERVER}" "$EXIT_USAGE"
@@ -276,7 +288,12 @@ local_eligible() {
 
 mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$GATE_EXIT_NO_VERDICT"
 
-printf 'gate-dispatch: %s, primary %s(%s)' "$OID" "$PRIMARY_SERVER" "${#PRIMARY_SLOTS[@]}" >&2
+printf 'gate-dispatch: %s' "$OID" >&2
+if [ -n "$PRIMARY_SERVER" ]; then
+  printf ', primary %s(%s)' "$PRIMARY_SERVER" "${#PRIMARY_SLOTS[@]}" >&2
+else
+  printf ', no remote worker' >&2
+fi
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
 [ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(1, explicit)' >&2
 printf ', poll %ss, timeout %smin\n' "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
@@ -328,6 +345,11 @@ BROKEN_EVER=""
 UNAVAILABLE_EVER=""
 PRIMARY_DISABLED=0
 FALLBACK_DISABLED=0
+if [ -z "$PRIMARY_SERVER" ] && ! local_eligible; then
+  no_verdict \
+    "explicitly enabled local slot is ineligible (worktree not clean at ${OID:0:12})" \
+    "the explicitly enabled local gate is ineligible"
+fi
 while :; do
   # Per round, because "busy" is a fact with a shelf life. round_busy counts the
   # slots that could have been taken and were not; round_broken the ones whose
@@ -335,7 +357,7 @@ while :; do
   # a busy slot frees when its gate ends, a broken one does not free at all.
   round_busy=0
   round_broken=""
-  if [ "$PRIMARY_DISABLED" -eq 0 ]; then
+  if [ -n "$PRIMARY_SERVER" ] && [ "$PRIMARY_DISABLED" -eq 0 ]; then
     for primary_slot in "${PRIMARY_SLOTS[@]}"; do
       outcome=0
       try_slot "$primary_slot" || outcome=$?
