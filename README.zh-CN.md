@@ -4,7 +4,7 @@
 
 **你只写 spec，它清空看板。**
 
-Anneal 在你自己的 Mac 上驱动一条条 coding agent 任务链。把任务挂进
+Anneal 在你自己的本地机器上驱动一条条 coding agent 任务链。把任务挂进
 看板，每个任务都会被无人值守地计划、评审、实现、验证、合并，全程使用
 你已登录的 Codex 与 Claude 订阅。
 
@@ -49,7 +49,7 @@ Anneal 在你自己的 Mac 上驱动一条条 coding agent 任务链。把任务
 ## Anneal 由 Anneal 构建
 
 这个仓库里的 PR 由 Anneal 自己的任务链完成规格、计划、评审、
-实现与合并，全部跑在一台 Mac 上。链交付的提交带有
+实现与合并，全部跑在一台本地机器上。链交付的提交带有
 `Co-Authored-By: Anneal Chain` 以及 `X-Anneal-Run` / `X-Anneal-Step`
 trailer，你可以直接在 git log 里核对哪些提交出自链。
 

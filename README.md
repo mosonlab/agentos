@@ -4,7 +4,7 @@
 
 **You write the specs. It clears the board.**
 
-Anneal runs chains of coding agents on your own Mac. Queue tasks on
+Anneal runs chains of coding agents on your own machine. Queue tasks on
 the board, and each one is planned, reviewed, implemented, verified and
 merged unattended, on the Codex and Claude subscriptions you are
 already signed in to.
@@ -58,7 +58,8 @@ you answer in the Inbox, the board moves on.
 ## Anneal is built with Anneal
 
 The pull requests in this repository are specified, planned, reviewed,
-implemented and merged by Anneal's own chains, running on one Mac.
+implemented and merged by Anneal's own chains, running on one local
+machine.
 Chain-delivered commits carry `Co-Authored-By: Anneal Chain` and
 `X-Anneal-Run` / `X-Anneal-Step` trailers, so you can check in the git
 log which commits the chains produced.
