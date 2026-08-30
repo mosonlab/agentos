@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 import { flock } from "fs-ext";
 
 import type { RunnerConfig } from "./config.js";
-import { runCommand, type CommandOptions } from "./exec.js";
+import type { CommandOptions } from "./exec.js";
 import {
   NPM_INSTALL_COMMAND_TIMEOUT_MS, NPM_INSTALL_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
 } from "./network-retry.js";
@@ -34,17 +34,8 @@ export type DependencyCommandExecutor = (
 ) => Promise<string>;
 
 export type DependencyCacheDependencies = {
-  execute?: DependencyCommandExecutor;
+  execute: DependencyCommandExecutor;
 };
-
-const command: DependencyCommandExecutor = (
-  config,
-  executable,
-  args,
-  cwd,
-  env,
-  options = {},
-): Promise<string> => runCommand(config.runAsPrefix, executable, args, cwd, env, options);
 
 export type DependencyCacheToolchain = {
   node: string;
@@ -502,10 +493,10 @@ export const deriveDependencyCacheKey = async (
   config: RunnerConfig,
   workspacePath: string,
   env: NodeJS.ProcessEnv,
-  dependencies: DependencyCacheDependencies = {},
+  dependencies: DependencyCacheDependencies,
   options: { toolchain?: DependencyCacheToolchain } = {},
 ): Promise<DependencyCacheIdentity | null> => {
-  const execute = dependencies.execute ?? command;
+  const execute = dependencies.execute;
   const project = await inspectDependencyProject(workspacePath);
   if (project === null) return null;
   if (project.inputMissCondition) throw new DependencyCacheInputMissError(project.inputMissCondition, project.targets);
@@ -998,10 +989,10 @@ export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
   env: NodeJS.ProcessEnv,
-  dependencies: DependencyCacheDependencies = {},
+  dependencies: DependencyCacheDependencies,
   options: DependencyCacheOptions = {},
 ): Promise<DependencyCacheResult> => {
-  const execute = dependencies.execute ?? command;
+  const execute = dependencies.execute;
   const started = Date.now();
   const report = options.report ?? progressReporter;
   const requestedWorkspace = resolve(workspacePath);
