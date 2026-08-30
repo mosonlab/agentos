@@ -7,9 +7,12 @@ import {
   executionModeFor,
   isRegressionVerificationOutputKind,
   latestMarker,
-  MERGE_TAIL_KIND,
+  listUnresolvedLeaseEvents,
   Prisma,
   readMarkers,
+  recordLeaseDeferral,
+  recordLeaseHandoff,
+  settleLeaseEvent,
   type PrismaClient,
 } from "@anneal/db";
 import {
@@ -198,39 +201,20 @@ export type LeaseOutcome =
   | {
     kind: "stop";
     taskId: string | null;
-    releasedHandoff?: { toRunId: string; at: Date };
-    deferredRelease?: { activityId: string; target: MergeLeaseTarget; at: Date };
+    releasedHandoff?: { eventId: string; toRunId: string; target: MergeLeaseTarget; at: Date };
+    deferredRelease?: { eventId: string; target: MergeLeaseTarget; at: Date };
   }
   | { kind: "hand-off"; taskId: string | null; handoffRunId: string; at: Date };
 
 type LeaseSettlement = {
   target: MergeLeaseTarget | null;
-  releasedHandoff: { chainId: string; toRunId: string; taskId: string; at: Date } | null;
+  releasedHandoff: { eventId: string; taskId: string; at: Date } | null;
   deferredRelease: {
-    activityId: string;
+    eventId: string;
     target: MergeLeaseTarget;
     taskId: string;
     at: Date;
   } | null;
-};
-
-const noteLeaseHandoffInvalid = async (
-  tx: Prisma.TransactionClient,
-  input: { taskId: string; toRunId: string; at: Date; reason: string },
-): Promise<void> => {
-  await tx.taskActivity.create({ data: {
-    taskId: input.taskId,
-    actorType: "control-plane",
-    body: `Invalid Chain Lease handoff for queued Run ${input.toRunId}: ${input.reason}`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.leaseHandoff,
-      schemaVersion: 1,
-      state: "invalid",
-      toRunId: input.toRunId,
-      invalidAt: input.at.toISOString(),
-      reason: input.reason,
-    },
-  } });
 };
 
 /** Resolve one declared outcome to the module-owned holder and persistence. */
@@ -244,8 +228,8 @@ const settleLease = async (
   const holder = await leaseHolderFor(tx, outcome.taskId);
   if (outcome.kind === "hand-off") {
     if (!holder) throw new Error(`Cannot hand off a Merge Lease from Task ${outcome.taskId ?? "without a Task"}`);
-    await noteLeaseHandoff(tx, {
-      chainId: holder.chainId,
+    await recordLeaseHandoff(tx, {
+      target: { projectId: holder.projectId, chainId: holder.chainId },
       toRunId: outcome.handoffRunId,
       at: outcome.at,
     });
@@ -256,24 +240,22 @@ const settleLease = async (
   }
   if (outcome.releasedHandoff && !holder) {
     if (!outcome.taskId) throw new Error("Cannot diagnose a Merge Lease handoff without a Task");
-    await noteLeaseHandoffInvalid(tx, {
-      taskId: outcome.taskId,
-      toRunId: outcome.releasedHandoff.toRunId,
+    await settleLeaseEvent(tx, {
+      eventId: outcome.releasedHandoff.eventId,
+      state: "invalid",
       at: outcome.releasedHandoff.at,
-      reason: "the handoff Task does not resolve to a Merge Lease holder",
+      failureDetail: "the handoff Task does not resolve to a Merge Lease holder",
     });
     return { target: null, releasedHandoff: null, deferredRelease: null };
   }
   if (outcome.deferredRelease) {
     const expected = outcome.deferredRelease.target;
     if (!holder || holder.chainId !== expected.chainId || holder.projectId !== expected.projectId) {
-      await noteLeaseReleaseTerminal(tx, {
-        activityId: outcome.deferredRelease.activityId,
-        taskId: outcome.taskId,
-        target: expected,
+      await settleLeaseEvent(tx, {
+        eventId: outcome.deferredRelease.eventId,
         state: "invalid",
         at: outcome.deferredRelease.at,
-        reason: holder
+        failureDetail: holder
           ? "the deferred target no longer matches the Task's Merge Lease holder"
           : "the deferred Task no longer resolves to a Merge Lease holder",
       });
@@ -286,15 +268,14 @@ const settleLease = async (
       : null,
     releasedHandoff: holder && outcome.releasedHandoff
       ? {
-        chainId: holder.chainId,
-        toRunId: outcome.releasedHandoff.toRunId,
+        eventId: outcome.releasedHandoff.eventId,
         taskId: holder.taskId,
         at: outcome.releasedHandoff.at,
       }
       : null,
     deferredRelease: holder && outcome.deferredRelease
       ? {
-        activityId: outcome.deferredRelease.activityId,
+        eventId: outcome.deferredRelease.eventId,
         target: { projectId: holder.projectId, chainId: holder.chainId },
         taskId: holder.taskId,
         at: outcome.deferredRelease.at,
@@ -304,8 +285,15 @@ const settleLease = async (
 };
 
 const LEASE_HANDOFF_GRACE_MS = 60_000;
-const LEASE_HANDOFF_QUERY_LIMIT = 100;
-const LEASE_RELEASE_QUERY_LIMIT = 100;
+
+/** Query-plan evidence retained for the sibling dbtest; production reads use the ledger module. */
+export const deferredLeaseReleasesStatement = Prisma.sql`
+  SELECT "id"
+  FROM "MergeLeaseEvent"
+  WHERE "state" = 'release-deferred'::"MergeLeaseEventState"
+  ORDER BY "deferredAt" ASC, "id" ASC
+  LIMIT 100
+`;
 
 export class LeaseReleaseDeferralRecordError extends Error {
   readonly target: MergeLeaseTarget;
@@ -320,62 +308,7 @@ export class LeaseReleaseDeferralRecordError extends Error {
   }
 }
 
-/** Persist the queued Run that must consume a retained Chain Lease. */
-const noteLeaseHandoff = async (
-  tx: Prisma.TransactionClient,
-  input: { chainId: string; toRunId: string; at: Date },
-): Promise<void> => {
-  const run = await tx.run.findUnique({ where: { id: input.toRunId }, select: { taskId: true } });
-  if (!run?.taskId) throw new Error(`Lease handoff target Run ${input.toRunId} has no Task`);
-  await tx.taskActivity.create({ data: {
-    taskId: run.taskId,
-    actorType: "control-plane",
-    body: `Chain Lease handed to queued Run ${input.toRunId}`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.leaseHandoff,
-      schemaVersion: 1,
-      state: "pending",
-      chainId: input.chainId,
-      toRunId: input.toRunId,
-      handedOffAt: input.at.toISOString(),
-    },
-  } });
-};
-
-const noteLeaseReleaseTerminal = async (
-  tx: Prisma.TransactionClient,
-  input: {
-    activityId: string;
-    taskId: string | null;
-    target: MergeLeaseTarget;
-    state: "released" | "invalid";
-    at: Date;
-    reason?: string;
-  },
-): Promise<void> => {
-  if (!input.taskId) throw new Error("Cannot record a deferred Merge Lease release without a Task");
-  await tx.taskActivity.create({ data: {
-    taskId: input.taskId,
-    actorType: "control-plane",
-    body: input.state === "released"
-      ? `Deferred Merge Lease release completed for chain ${input.target.chainId}`
-      : `Deferred Merge Lease release invalid for chain ${input.target.chainId}: ${input.reason ?? "invalid target"}`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.leaseRelease,
-      schemaVersion: 1,
-      state: input.state,
-      deferredActivityId: input.activityId,
-      projectId: input.target.projectId,
-      chainId: input.target.chainId,
-      taskId: input.taskId,
-      ...(input.state === "released"
-        ? { releasedAt: input.at.toISOString() }
-        : { invalidAt: input.at.toISOString(), reason: input.reason ?? "invalid target" }),
-    },
-  } });
-};
-
-const noteLeaseReleaseDeferred = async (
+const recordDeferredLeaseRelease = async (
   db: PrismaClient,
   input: { target: MergeLeaseTarget; taskId: string; detail: string; at: Date },
 ): Promise<void> => {
@@ -385,169 +318,32 @@ const noteLeaseReleaseDeferred = async (
       if (!holder || holder.projectId !== input.target.projectId || holder.chainId !== input.target.chainId) {
         throw new Error(`Cannot defer Merge Lease release for Task ${input.taskId}: target validation failed`);
       }
-      await tx.taskActivity.create({ data: {
+      await recordLeaseDeferral(tx, {
+        target: { projectId: holder.projectId, chainId: holder.chainId },
         taskId: holder.taskId,
-        actorType: "control-plane",
-        body: `Merge Lease release deferred for chain ${holder.chainId}: ${input.detail}`,
-        metadata: {
-          kind: MERGE_TAIL_KIND.leaseRelease,
-          schemaVersion: 1,
-          state: "release-deferred",
-          projectId: holder.projectId,
-          chainId: holder.chainId,
-          taskId: holder.taskId,
-          failureDetail: input.detail,
-          deferredAt: input.at.toISOString(),
-        },
-      } });
+        failureDetail: input.detail,
+        at: input.at,
+      });
     });
   } catch (error: unknown) {
     throw new LeaseReleaseDeferralRecordError(input.target, input.taskId, error);
   }
 };
 
-export const deferredLeaseReleasesStatement = Prisma.sql`
-    SELECT
-      deferred.id AS "activityId",
-      deferred."taskId" AS "taskId",
-      deferred.metadata->>'projectId' AS "projectId",
-      deferred.metadata->>'chainId' AS "chainId"
-    FROM "TaskActivity" AS deferred
-    WHERE deferred."actorType" = 'control-plane'
-      AND deferred.metadata->>'kind' = 'mergeTail.leaseRelease'
-      AND deferred.metadata->>'state' = 'release-deferred'
-      AND deferred.metadata->>'projectId' IS NOT NULL
-      AND deferred.metadata->>'chainId' IS NOT NULL
-      AND deferred.metadata->>'taskId' = deferred."taskId"
-      AND NOT EXISTS (
-        SELECT 1
-        FROM "TaskActivity" AS terminal
-        WHERE terminal."taskId" = deferred."taskId"
-          AND terminal."createdAt" >= deferred."createdAt"
-          AND terminal."actorType" = 'control-plane'
-          AND terminal.metadata->>'kind' = 'mergeTail.leaseRelease'
-          AND terminal.metadata->>'deferredActivityId' = deferred.id
-          AND terminal.metadata->>'state' IN ('released', 'invalid')
-      )
-    ORDER BY deferred."createdAt" ASC, deferred.id ASC
-    LIMIT ${LEASE_RELEASE_QUERY_LIMIT}
-  `;
-
 export const deferredLeaseReleases = async (
   tx: Prisma.TransactionClient,
-): Promise<Array<{ activityId: string; taskId: string; target: MergeLeaseTarget }>> => (
-  tx.$queryRaw<Array<{ activityId: string; taskId: string; projectId: string; chainId: string }>>(
-    deferredLeaseReleasesStatement,
-  )
-).then((rows) => rows.map(({ activityId, taskId, projectId, chainId }) => ({
-  activityId,
-  taskId,
-  target: { projectId, chainId },
-})));
+  staleBefore: Date = new Date(),
+): Promise<Array<{ eventId: string; taskId: string; target: MergeLeaseTarget }>> => (
+  listUnresolvedLeaseEvents(tx, { kind: "deferral", staleBefore })
+);
 
 /** Find retained handoffs whose queued Run never became a Lease consumer. */
 export const leaseHandoffsWithoutConsumer = async (
   tx: Prisma.TransactionClient,
   now: Date,
-): Promise<Array<{ toRunId: string; taskId: string }>> => {
+): Promise<Array<{ eventId: string; toRunId: string; taskId: string; target: MergeLeaseTarget }>> => {
   const staleBefore = new Date(now.getTime() - LEASE_HANDOFF_GRACE_MS);
-  return tx.$queryRaw<Array<{ toRunId: string; taskId: string }>>`
-    WITH consumers AS (
-      SELECT
-        consumer.id AS "toRunId",
-        consumer."taskId" AS "taskId",
-        consumer."createdAt" AS "createdAt",
-        consumer."readyAt" AS "readyAt"
-      FROM "Run" AS consumer
-      WHERE consumer.status = 'queued'::"RunStatus"
-        AND consumer."claimedAt" IS NULL
-        AND consumer."startedAt" IS NULL
-        AND GREATEST(consumer."createdAt", consumer."readyAt") < ${staleBefore}
-        AND EXISTS (
-          SELECT 1
-          FROM "TaskActivity" AS activity
-          WHERE activity."taskId" = consumer."taskId"
-            AND activity."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
-            AND activity."actorType" = 'control-plane'
-            AND activity.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
-            AND activity.metadata->>'toRunId' = consumer.id
-            AND activity.metadata->>'state' = 'pending'
-            AND activity.metadata->>'chainId' IS NOT NULL
-            AND GREATEST(
-              consumer."createdAt",
-              consumer."readyAt",
-              CASE
-                WHEN activity.metadata->>'handedOffAt' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
-                  THEN (activity.metadata->>'handedOffAt')::timestamptz
-                ELSE activity."createdAt"
-              END
-            ) < ${staleBefore}
-            AND NOT EXISTS (
-              SELECT 1
-              FROM "TaskActivity" AS newer
-              WHERE newer."taskId" = consumer."taskId"
-                AND newer."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
-                AND newer."actorType" = 'control-plane'
-                AND newer.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
-                AND newer.metadata->>'toRunId' = consumer.id
-                AND (newer."createdAt", newer.id) > (activity."createdAt", activity.id)
-            )
-        )
-      ORDER BY GREATEST(consumer."createdAt", consumer."readyAt") ASC, consumer.id ASC
-      LIMIT ${LEASE_HANDOFF_QUERY_LIMIT}
-    ), unresolved AS (
-      SELECT
-        consumer."toRunId" AS "toRunId",
-        consumer."taskId" AS "taskId",
-        GREATEST(
-          consumer."createdAt",
-          consumer."readyAt",
-          CASE
-            WHEN latest.metadata->>'handedOffAt' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
-              THEN (latest.metadata->>'handedOffAt')::timestamptz
-            ELSE latest."createdAt"
-          END
-        ) AS "staleAt"
-      FROM consumers AS consumer
-      JOIN LATERAL (
-        SELECT activity."taskId", activity.metadata, activity."createdAt", activity.id
-        FROM "TaskActivity" AS activity
-        WHERE activity."taskId" = consumer."taskId"
-          AND activity."createdAt" >= LEAST(consumer."createdAt", consumer."readyAt")
-          AND activity."actorType" = 'control-plane'
-          AND activity.metadata->>'kind' = ${MERGE_TAIL_KIND.leaseHandoff}
-          AND activity.metadata->>'toRunId' = consumer."toRunId"
-        ORDER BY activity."createdAt" DESC, activity.id DESC
-        LIMIT 1
-      ) AS latest ON true
-      WHERE latest.metadata->>'state' = 'pending'
-        AND latest.metadata->>'chainId' IS NOT NULL
-    )
-    SELECT "toRunId", "taskId"
-    FROM unresolved
-    WHERE "staleAt" < ${staleBefore}
-    ORDER BY "staleAt" ASC, "toRunId" ASC
-  `;
-};
-
-/** Record a completed orphan-handoff release after the external release attempt. */
-const noteLeaseHandoffReleased = async (
-  tx: Prisma.TransactionClient,
-  input: { chainId: string; toRunId: string; taskId: string; at: Date },
-): Promise<void> => {
-  await tx.taskActivity.create({ data: {
-    taskId: input.taskId,
-    actorType: "control-plane",
-    body: `Queued Run ${input.toRunId} did not consume its Chain Lease handoff`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.leaseHandoff,
-      schemaVersion: 1,
-      state: "released",
-      chainId: input.chainId,
-      toRunId: input.toRunId,
-      releasedAt: input.at.toISOString(),
-    },
-  } });
+  return listUnresolvedLeaseEvents(tx, { kind: "handoff", staleBefore });
 };
 
 export type TransactionLeaseOutcome<T> = {
@@ -613,12 +409,16 @@ const releaseCommittedLeaseOutcomes = async (
     if (entry.handoffs.length > 0 || entry.deferredReleases.length > 0) {
       try {
         await db.$transaction(async (tx) => {
-          for (const handoff of entry.handoffs) await noteLeaseHandoffReleased(tx, handoff);
+          for (const handoff of entry.handoffs) {
+            await settleLeaseEvent(tx, {
+              eventId: handoff.eventId,
+              state: "released",
+              at: handoff.at,
+            });
+          }
           for (const deferred of entry.deferredReleases) {
-            await noteLeaseReleaseTerminal(tx, {
-              activityId: deferred.activityId,
-              taskId: deferred.taskId,
-              target: deferred.target,
+            await settleLeaseEvent(tx, {
+              eventId: deferred.eventId,
               state: "released",
               at: deferred.at,
             });
@@ -794,7 +594,7 @@ export const withMergeLease = async <T>(
       releaseDeferred?: true;
     }> => {
       if (!leaseOutcome.taskId) return { outcome: "unreachable", detail };
-      await noteLeaseReleaseDeferred(db, {
+      await recordDeferredLeaseRelease(db, {
         target,
         taskId: leaseOutcome.taskId,
         detail,
