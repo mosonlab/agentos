@@ -37,10 +37,70 @@ export const candidateRefusalCodes = [
 
 export type CandidateRefusalCode = typeof candidateRefusalCodes[number];
 
-export type CandidateLoad =
-  | { kind: "skip" }
-  | { kind: "refused"; code: CandidateRefusalCode; stopId: string; detail?: string }
-  | { kind: "candidate"; candidate: RecoveryCandidate };
+export type DurableCandidateFacts = {
+  task: {
+    id: string;
+    chainId: string | null;
+    chainIndex: number | null;
+    repoId: string | null;
+    repositoryPresent: boolean;
+    status: string;
+    isIntegratorStep: boolean;
+  } | null;
+  stop: {
+    stopId: string;
+    condition: string;
+    evidence: string;
+    sourceRunId: string | null;
+  } | null;
+  existingAttempt: {
+    status: string;
+    reopenableLegacyRefusal: boolean;
+  } | null;
+  sourceRun: {
+    id: string;
+    taskId: string | null;
+    status: string;
+    hasSession: boolean;
+  } | null;
+  activeRunCount: number | null;
+  output: {
+    runId: string | null;
+    kind: string;
+    outcome: string;
+    condition: string | null;
+    evidence: string | null;
+  } | null;
+  readiness: {
+    id: string;
+    status: string;
+    isReadinessStep: boolean;
+    outputCommitSha: string | null;
+  } | null;
+  regression: { id: string; status: string } | null;
+  authorizationSelection: {
+    authorization: {
+      activityId: string;
+      repository: string;
+      prNumber: number;
+      headSha: string;
+      baseSha: string;
+      baseRef: string;
+    } | null;
+    refusal: string | null;
+  } | null;
+  intents: Array<{
+    sourceRunId?: unknown;
+    authorizationActivityId?: unknown;
+    prNumber?: unknown;
+    headSha?: unknown;
+  }> | null;
+  target:
+    | { resolved: false; unresolvable: string }
+    | { resolved: true; repository: string; prNumber: number }
+    | null;
+  firstRunTargetRef: string | null;
+};
 
 type Comparison = { status: string; behindBy: number };
 
@@ -77,13 +137,15 @@ export type Inspect = { kind: "inspect"; candidate: RecoveryCandidate };
 export type Queue = { kind: "queue"; candidate: RecoveryCandidate; currentBaseSha: string };
 export type Exhausted = { kind: "exhausted"; reason: string };
 
-export type CandidateDecision = Skip | (Retry & { stopId: string }) | (Ineligible & { stopId: string }) | Inspect;
+type CandidateRefusal = { code: CandidateRefusalCode; stopId: string };
+
+export type CandidateDecision = Skip | (Retry & CandidateRefusal) | (Ineligible & CandidateRefusal) | Inspect;
 export type FreshDecision = Retry | Ineligible | Queue;
 export type DurableDecision = Skip | Retry | Ineligible | Exhausted | Queue;
 export type RetryBudgetDecision = (Retry & { classificationAttempt: number }) | Ineligible;
 
-const refusalReason = (refusal: Extract<CandidateLoad, { kind: "refused" }>): string => {
-  switch (refusal.code) {
+const refusalReason = (code: CandidateRefusalCode, detail?: string): string => {
+  switch (code) {
     case "identity-incomplete": return "chain or repository identity is incomplete";
     case "source-run-unbound": return "stop is not bound to an executor run";
     case "evidence-invalid": return "base-drift evidence is malformed or is not a SHA-only drift payload";
@@ -92,30 +154,108 @@ const refusalReason = (refusal: Extract<CandidateLoad, { kind: "refused" }>): st
     case "output-mismatch": return "executor output does not exactly match the recorded source stop";
     case "tail-unresolved": return "current direct/compound regression and readiness tail cannot be resolved";
     case "tail-state-mismatch": return "merge tail task state is not the completed-readiness/stopped-executor shape";
-    case "authorization-invalid": return `authorized readiness evidence is ${refusal.detail ?? "missing"}`;
+    case "authorization-invalid": return `authorized readiness evidence is ${detail ?? "missing"}`;
     case "intent-count": return "source executor run has multiple server-bound merge intents";
     case "intent-mismatch": return "executor intent does not match the selected authorization";
     case "authorized-base-mismatch": return "stop evidence does not match the authorized base SHA";
     case "readiness-head-mismatch": return "readiness output does not match the authorized head SHA";
-    case "target-unresolved": return `pull-request identity is ${refusal.detail ?? "unresolved"}`;
+    case "target-unresolved": return `pull-request identity is ${detail ?? "unresolved"}`;
     case "target-mismatch": return "resolved repository or pull-request identity differs from the authorization";
     case "target-branch-mismatch": return "chain first-run target ref differs from the authorized base ref";
   }
 };
 
-export const classifyCandidate = (load: CandidateLoad): CandidateDecision => {
-  switch (load.kind) {
-    case "skip":
-      return { kind: "skip" };
-    case "candidate":
-      return { kind: "inspect", candidate: load.candidate };
-    case "refused": {
-      const reason = refusalReason(load);
-      return load.code === "chain-active"
-        ? { kind: "retry", reason, stopId: load.stopId }
-        : { kind: "ineligible", reason, stopId: load.stopId };
-    }
+const parseBaseDriftEvidence = (value: string): { observed: string; authorized: string } | null => {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return null; }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const evidence = parsed as Record<string, unknown>;
+  if (Object.keys(evidence).sort().join(",") !== "authorized,observed") return null;
+  if (typeof evidence.observed !== "string" || !/^[0-9a-f]{40}$/u.test(evidence.observed)) return null;
+  if (typeof evidence.authorized !== "string" || !/^[0-9a-f]{40}$/u.test(evidence.authorized)) return null;
+  if (evidence.observed === evidence.authorized) return null;
+  return { observed: evidence.observed, authorized: evidence.authorized };
+};
+
+/**
+ * Owns all durable candidate eligibility policy. The reader supplies database
+ * facts only; this decider turns those facts into the one recovery ruling.
+ */
+export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecision => {
+  const { task, stop } = facts;
+  if (!task?.isIntegratorStep || !stop || stop.condition !== "base-drift") return { kind: "skip" };
+  if (facts.existingAttempt
+    && facts.existingAttempt.status !== "VALIDATING"
+    && !facts.existingAttempt.reopenableLegacyRefusal) return { kind: "skip" };
+
+  const refuse = (code: CandidateRefusalCode, detail?: string): CandidateDecision => ({
+    kind: code === "chain-active" ? "retry" : "ineligible",
+    code,
+    reason: refusalReason(code, detail),
+    stopId: stop.stopId,
+  });
+  if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repositoryPresent) {
+    return refuse("identity-incomplete");
   }
+  if (!stop.sourceRunId) return refuse("source-run-unbound");
+  const evidence = parseBaseDriftEvidence(stop.evidence);
+  if (!evidence) return refuse("evidence-invalid");
+  const sourceRun = facts.sourceRun;
+  if (!sourceRun || sourceRun.taskId !== task.id || sourceRun.status !== "SUCCEEDED" || !sourceRun.hasSession) {
+    return refuse("source-run-mismatch");
+  }
+  if (facts.activeRunCount === null) throw new Error(`Candidate facts for ${task.id} omit the active Run count`);
+  if (facts.activeRunCount !== 0) return refuse("chain-active");
+
+  const output = facts.output;
+  if (output?.runId !== sourceRun.id || output?.kind !== "merge-result"
+    || output.outcome !== "stopped" || output.condition !== "base-drift"
+    || output.evidence !== stop.evidence) {
+    return refuse("output-mismatch");
+  }
+  const { readiness, regression } = facts;
+  if (!readiness?.isReadinessStep || !regression) return refuse("tail-unresolved");
+  if (task.status !== "REVIEW" || readiness.status !== "DONE" || regression.status !== "DONE") {
+    return refuse("tail-state-mismatch");
+  }
+
+  const selection = facts.authorizationSelection;
+  if (!selection) throw new Error(`Candidate facts for ${task.id} omit the authorization selection`);
+  if (!selection.authorization || selection.refusal) {
+    return refuse("authorization-invalid", selection.refusal ?? "missing");
+  }
+  const authorization = selection.authorization;
+  if (!facts.intents) throw new Error(`Candidate facts for ${task.id} omit merge intents`);
+  const intents = facts.intents.filter((intent) => intent.sourceRunId === sourceRun.id);
+  if (intents.length > 1) return refuse("intent-count");
+  const intent = intents[0];
+  if (intent && (intent.authorizationActivityId !== authorization.activityId
+    || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha)) {
+    return refuse("intent-mismatch");
+  }
+  if (evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");
+  if (readiness.outputCommitSha !== authorization.headSha) return refuse("readiness-head-mismatch");
+
+  if (!facts.target) throw new Error(`Candidate facts for ${task.id} omit the resolved target`);
+  if (!facts.target.resolved) return refuse("target-unresolved", facts.target.unresolvable);
+  if (facts.target.repository !== authorization.repository || facts.target.prNumber !== authorization.prNumber) {
+    return refuse("target-mismatch");
+  }
+  if (facts.firstRunTargetRef !== authorization.baseRef) return refuse("target-branch-mismatch");
+  return { kind: "inspect", candidate: {
+    integratorTaskId: task.id,
+    readinessTaskId: readiness.id,
+    regressionTaskId: regression.id,
+    sourceRunId: sourceRun.id,
+    stopId: stop.stopId,
+    authorizationActivityId: authorization.activityId,
+    repository: facts.target.repository,
+    prNumber: facts.target.prNumber,
+    targetBranch: authorization.baseRef,
+    authorizedHeadSha: authorization.headSha,
+    authorizedBaseSha: authorization.baseSha,
+    observedBaseSha: evidence.observed,
+  } };
 };
 
 const candidatesMatch = (left: RecoveryCandidate, right: RecoveryCandidate): boolean => {
@@ -196,24 +336,24 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
 
 export const classifyDurable = (facts: {
   expected: RecoveryCandidate;
-  load: CandidateLoad;
+  candidateDecision: CandidateDecision;
   aggregateValidating: boolean;
   recoveryCount: number;
   maxRecoveries: number;
   currentBaseSha: string;
 }): DurableDecision => {
   if (!facts.aggregateValidating) return { kind: "skip" };
-  switch (facts.load.kind) {
+  switch (facts.candidateDecision.kind) {
     case "skip":
       return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
-    case "refused": {
-      const reason = refusalReason(facts.load);
-      return facts.load.code === "chain-active" ? { kind: "retry", reason } : { kind: "ineligible", reason };
-    }
-    case "candidate":
+    case "retry":
+      return { kind: "retry", reason: facts.candidateDecision.reason };
+    case "ineligible":
+      return { kind: "ineligible", reason: facts.candidateDecision.reason };
+    case "inspect":
       break;
   }
-  if (!candidatesMatch(facts.load.candidate, facts.expected)) {
+  if (!candidatesMatch(facts.candidateDecision.candidate, facts.expected)) {
     return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
   }
   if (facts.recoveryCount >= facts.maxRecoveries) {
