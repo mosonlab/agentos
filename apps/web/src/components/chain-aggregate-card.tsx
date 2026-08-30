@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 import { timeAgo, usageCostLabel } from "../lib/format";
-import type { BoardLatestRun, BoardTask, ChainAggregate, ChainAggregateState, MergeOutcome } from "../lib/types";
+import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
 import { navigate } from "../lib/router";
 import { BoardCardShell } from "./board-card-shell";
 import { IconLock } from "./icons";
@@ -43,19 +43,6 @@ const aggregateCost = (value: ChainAggregate["totalCost"]): string =>
 
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
 
-/** Kept local until the board contract grows its active-repair projection.
- * The API owns the shape; the card only needs the repair binding and the same
- * latest-run projection it already displays for the frontier. */
-type ActiveRepairProjection = {
-  repairKind: string;
-  latestRun: BoardLatestRun | null;
-  mergeOutcome?: MergeOutcome | null;
-};
-
-type AggregateWithActiveRepair = ChainAggregate & {
-  activeRepair?: ActiveRepairProjection | null;
-};
-
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
@@ -86,7 +73,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
   const memberTaskIds = members.map((member) => member.id);
-  const activeRepair = (aggregate as AggregateWithActiveRepair).activeRepair ?? null;
+  const activeRepair = aggregate.activeRepair;
   const handlers: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
   const metaRows: ReactNode[] = [
       <span data-chain-progress="" className="contents">
@@ -112,7 +99,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
         <span data-chain-repair="" className="contents">
           <span>{activeRepair.repairKind}</span>
           <span aria-hidden="true"> · </span>
-          <RunLine run={activeRepair.latestRun} mergeOutcome={activeRepair.mergeOutcome} showElapsed showModel />
+          <RunLine run={activeRepair.latestRun} showElapsed showModel />
         </span>,
       ]),
       ...(state === "parked-unactivated" && aggregate.activation.taskId !== null ? [

@@ -38,6 +38,7 @@ export type {
   BoardMoveTarget,
   BoardTask,
   ChainAggregate,
+  ChainActiveRepair,
   ChainAggregateState,
   ChainControl,
   ChainFrontier,

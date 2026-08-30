@@ -27,13 +27,14 @@ const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => (
   detailTaskId: "step-1",
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
+  activeRepair: null,
   activation: { state: "running", predecessor: null, taskId: "step-1" }, totalCost: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z", ...overrides,
 });
 
 type RunWithTier = NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" };
 type AggregateWithRepair = ChainAggregate & {
-  activeRepair: { repairKind: string; latestRun: RunWithTier; mergeOutcome: null };
+  activeRepair: { repairKind: string; latestRun: RunWithTier };
 };
 
 const runWithTier = (overrides: Partial<RunWithTier> = {}): RunWithTier => ({
@@ -46,7 +47,6 @@ const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): Aggrega
   activeRepair: {
     repairKind: "gate-fix",
     latestRun: runWithTier({ id: "repair-run", runNumber: 3, status: "RUNNING", codexServiceTier: "FAST", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }),
-    mergeOutcome: null,
   },
 });
 

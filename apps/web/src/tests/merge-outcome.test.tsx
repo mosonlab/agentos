@@ -45,7 +45,7 @@ const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
   chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
-  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null }, taskCost: null,
+  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null }, taskCost: null,
   blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null,
   ...overrides,
 });
@@ -95,6 +95,7 @@ test("a succeeded frontier Run with a stopped merge outcome does not render the 
       failureReason: null,
       position: 1,
     },
+    activeRepair: null,
     activation: { state: "settled", predecessor: null, taskId: "merge-step" },
     totalCost: null,
     createdAt: "2026-08-17T00:00:00.000Z",

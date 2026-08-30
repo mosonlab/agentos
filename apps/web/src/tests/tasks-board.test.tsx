@@ -329,7 +329,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
   const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
     statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
-    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 },
+    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 }, activeRepair: null,
     activation: { state: "settled" as const, predecessor: null, taskId }, totalCost: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   });
@@ -400,10 +400,10 @@ test("running, ended, and absent runs render only durations their timestamps pro
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
   try {
     const t = (key: string, vars?: Record<string, string | number>): string => key === "tasks.card.runningDuration" ? `running ${vars?.duration}` : key;
-    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null } }), t), "running 12m 0s");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" } }), t), "8m 0s · 3h ago");
+    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null } }), t), "running 12m 0s");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" } }), t), "8m 0s · 3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" }), t), "3h ago");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
   } finally {
     Date.now = originalNow;
   }
@@ -423,7 +423,7 @@ test("a mounted running card advances elapsed time while its props stay unchange
   Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
   const root = (await reactDom()).createRoot(container);
   const running = task({ latestRun: {
-    id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", costUsd: null,
+    id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null,
     startedAt: "2026-08-16T00:00:00.000Z", endedAt: null,
   } });
   try {
@@ -528,7 +528,7 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
   // claude-opus-5:medium showed as gpt-5.6-sol:high.
   const markup = card({
     assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" },
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null },
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.doesNotMatch(markup, /gpt-5\.6-sol:high/);
@@ -556,7 +556,7 @@ test("a task with no runs still shows the agent's configured model", () => {
 test("an unassigned task with a run still shows the run's model snapshot", () => {
   const markup = card({
     assigneeAgent: null,
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null },
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
@@ -602,7 +602,7 @@ test("a NOW card carries no schedule row, and every informative schedule still d
 test("a card with no runs has no run row, and a card with a run reads exactly as before", () => {
   assert.doesNotMatch(card(), /no runs/);
   const withRun = card({
-    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null },
   });
   assert.match(withRun, new RegExp(en("tasks.card.run", { n: 3 })));
   assert.match(withRun, new RegExp(en("status.run.SUCCEEDED")));

@@ -65,7 +65,7 @@ export const RunLine = ({
   const model = showModel ? splitModel(run.model) : null;
   const runDetails = [
     ...(model === null ? [] : [model.model, ...(model.effort === null ? [] : [model.effort])]),
-    ...((run as BoardLatestRun & { codexServiceTier?: string }).codexServiceTier === "FAST" ? ["fast"] : []),
+    ...(run.codexServiceTier === "FAST" ? ["fast"] : []),
     // An active run's elapsed copy already says "running". The chain state
     // pill supplies the aggregate's state, so repeating the run status here
     // made a live card read "Running ... running · running 12m".

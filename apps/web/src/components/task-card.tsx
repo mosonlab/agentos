@@ -71,7 +71,7 @@ export const cardModel = (task: BoardTask): string | null =>
   task.latestRun?.model ?? task.assigneeAgent?.model ?? null;
 
 const cardModelFast = (task: BoardTask, model: string): string => {
-  const tier = task.latestRun === null ? null : (task.latestRun as BoardTask["latestRun"] & { codexServiceTier?: string }).codexServiceTier;
+  const tier = task.latestRun?.codexServiceTier;
   const parsed = splitModel(model);
   // Keep the existing task-card model:effort presentation byte-for-byte while
   // using the shared parser for the optional tier marker.
