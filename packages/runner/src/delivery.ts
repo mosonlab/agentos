@@ -120,6 +120,20 @@ const noPullRequest = (branch: string, remote: string): DeliveryResult => ({
   deliveryInstructions: `Branch '${branch}' was pushed. This step does not open a pull request.`,
 });
 
+/** The agent exited successfully but left the branch at its starting commit. */
+const noChangesProduced = (branch: string, remote: string): DeliveryResult => {
+  const reason = `no-changes-produced: the session ended cleanly without committing any change on ${branch}`;
+  const error = new Error(reason);
+  return {
+    pushStatus: "FAILED",
+    pushRemote: remote,
+    pushError: reason,
+    deliveryInstructions: reason,
+    failureClass: "TASK_FAILED",
+    failure: { operation: "workspace head comparison", message: reason, error },
+  };
+};
+
 /** A GitHub delivery failure after the branch was published. */
 const failedPullRequestDelivery = (
   branch: string,
@@ -203,8 +217,26 @@ export const deliverWorkspace = async (
   // No step name, output kind or task name is consulted here or anywhere in
   // this package.
   const opensPullRequest = claim.run.opensPullRequest !== false;
-  // The push is unconditional: a step that opens no PR still publishes its
-  // branch, which is what lets the *next* step of the chain clone it.
+  // A clean provider exit is not sufficient delivery evidence: when the agent
+  // made no commit there is nothing to publish, regardless of whether this step
+  // was meant to open a pull request. Detect that before any remote write so an
+  // empty session cannot masquerade as a push or GitHub failure.
+  try {
+    const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env,
+      { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) });
+    if (head === workspace.baseSha) return noChangesProduced(workspace.branch, remote);
+  } catch (error: unknown) {
+    const message = messageOf(error);
+    return {
+      pushStatus: "FAILED",
+      pushRemote: remote,
+      pushError: message,
+      failureClass: failureClassFor(message),
+      failure: { operation: "git rev-parse HEAD", message, error },
+    };
+  }
+  // A step that opens no PR still publishes its changed branch, which is what
+  // lets the *next* step of the chain clone it.
   try {
     await runWithNetworkRetry("git", ["push"],
       ({ timeoutMs }) => command("git", ["push", "--set-upstream", "origin", workspace.branch], workspace.path, env, { timeoutMs }),

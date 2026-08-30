@@ -25,6 +25,60 @@ const salvageIdentity = {
 };
 const workspace = { path: "/fake/work", branch: "feature/test", baseSha: "base" };
 
+test("a clean session with no commit fails before push or pull-request creation", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, { command: fake });
+  const reason = "no-changes-produced: the session ended cleanly without committing any change on feature/test";
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failureClass, "TASK_FAILED");
+  assert.equal(result.pushError, reason);
+  assert.equal(result.deliveryInstructions, reason);
+  assert.equal(result.pushedBranch, undefined);
+  assert.equal(result.failure?.operation, "workspace head comparison");
+  assert.equal(result.failure?.message, reason);
+  assert.ok(result.failure?.error instanceof Error);
+  assert.deepEqual(calls, ["git rev-parse HEAD"]);
+});
+
+test("a clean no-PR session with no commit also fails before publication", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
+  };
+  const result = await deliverWorkspace(config, {
+    ...claim,
+    run: { ...claim.run, opensPullRequest: false },
+  }, workspace, { command: fake });
+  assert.equal(result.pushStatus, "FAILED");
+  assert.match(result.pushError ?? "", /^no-changes-produced:/u);
+  assert.deepEqual(calls, ["git rev-parse HEAD"]);
+});
+
+test("a session with a commit keeps the existing push and pull-request path", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "git" && args[0] === "rev-parse") return "new-head";
+    if (executable === "gh" && args[1] === "list") {
+      return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, { command: fake });
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pullRequestNumber, 7);
+  assert.deepEqual(calls.slice(0, 3), [
+    "git rev-parse HEAD",
+    "git push --set-upstream origin feature/test",
+    "gh --version",
+  ]);
+});
+
 test("delivery fails loudly with the gh probe error when gh is unavailable", async () => {
   const calls: string[] = [];
   const probeError = new Error("ENOENT");
@@ -39,7 +93,7 @@ test("delivery fails loudly with the gh probe error when gh is unavailable", asy
   assert.equal(result.failure?.operation, "gh --version");
   assert.equal(result.failure?.error, probeError);
   assert.match(result.deliveryInstructions ?? "", /gh CLI is unavailable/);
-  assert.deepEqual(calls, ["git push --set-upstream origin feature/test", "gh --version"]);
+  assert.deepEqual(calls, ["git rev-parse HEAD", "git push --set-upstream origin feature/test", "gh --version"]);
 });
 
 test("delivery records a pushed branch without invoking gh for a non-GitHub remote", async () => {
@@ -51,7 +105,7 @@ test("delivery records a pushed branch without invoking gh for a non-GitHub remo
   assert.equal(result.pushStatus, "SUCCEEDED");
   assert.equal(result.failure, undefined);
   assert.match(result.deliveryInstructions ?? "", /not hosted on GitHub/);
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls, ["git rev-parse HEAD", "git push --set-upstream origin feature/test"]);
 });
 
 test("a chain step reuses the open pull request on its shared head branch", async () => {
@@ -129,7 +183,8 @@ test("publication is acknowledged immediately after push and before GitHub work"
     command: fake,
     recordPublication: async (branch) => { calls.push(`ack ${branch}`); },
   });
-  assert.deepEqual(calls.slice(0, 3), [
+  assert.deepEqual(calls.slice(0, 4), [
+    "git rev-parse HEAD",
     "git push --set-upstream origin feature/test",
     "ack feature/test",
     "gh --version",
@@ -589,7 +644,8 @@ const LEASE_MS = 60_000;
 test("a hung push is timed out and reported as a transient failure, not a lease-eating stall", async () => {
   let clock = 0;
   const timeouts: Array<number | undefined> = [];
-  const fake: CommandExecutor = async (_executable, _args, _cwd, _env, options) => {
+  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+    if (executable === "git" && args[0] === "rev-parse") return "changed-head";
     timeouts.push(options?.timeoutMs);
     clock += (options?.timeoutMs ?? 0) + KILL_OVERHEAD_MS;
     throw new CommandTimeoutError("git", ["push"], options?.timeoutMs ?? 0);
@@ -630,7 +686,8 @@ test("a hung push is timed out and reported as a transient failure, not a lease-
  */
 test("a hung push arrives at the API as a typed timeout, not as a failed task", async () => {
   let clock = 0;
-  const fake: CommandExecutor = async (_executable, _args, _cwd, _env, options) => {
+  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+    if (executable === "git" && args[0] === "rev-parse") return "changed-head";
     clock += (options?.timeoutMs ?? 0) + KILL_OVERHEAD_MS;
     throw new CommandTimeoutError("git", ["push"], options?.timeoutMs ?? 0);
   };
@@ -721,6 +778,7 @@ test("every command of a slow delivery is capped, and the whole phase fits one l
     // Nothing in delivery may run uncapped: an uncapped command is a hole in
     // the phase bound, whatever the budget arithmetic says.
     assert.ok(timeoutMs !== undefined, `${executable} ${args[0]} ran without a ceiling`);
+    if (executable === "git" && args[0] === "rev-parse") { clock += 50; return "changed-head"; }
     if (executable === "git") { clock += timeoutMs; return ""; }
     if (args[0] === "--version") { clock += 50; return "gh version 2.0.0"; }
     if (args[1] === "list") { clock += 2_000; return calls.filter((call) => call === "gh pr create").length > 0 ? JSON.stringify([{ url: "https://github.com/acme/app/pull/9", number: 9 }]) : "[]"; }
@@ -736,7 +794,7 @@ test("every command of a slow delivery is capped, and the whole phase fits one l
     },
   });
   assert.equal(result.pullRequestNumber, 9);
-  assert.deepEqual(calls, ["git push --set-upstream", "gh --version", "gh pr list", "gh pr create", "gh pr list"]);
+  assert.deepEqual(calls, ["git rev-parse HEAD", "git push --set-upstream", "gh --version", "gh pr list", "gh pr create", "gh pr list"]);
   assert.ok(clock < LEASE_MS, `delivery outlived its lease: ${clock}ms`);
 });
 
