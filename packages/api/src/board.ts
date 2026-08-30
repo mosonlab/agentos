@@ -27,10 +27,10 @@ import {
 import type {
   BoardCard as BoardContractCard,
   BoardChainActivationState as BoardContractChainActivationState,
-  BoardChainAggregate as BoardContractChainAggregate,
-  BoardChainFrontier as BoardContractChainFrontier,
   BoardLatestRun as BoardContractLatestRun,
   BoardMoveTarget as BoardContractMoveTarget,
+  ChainAggregate as BoardContractChainAggregate,
+  ChainFrontier as BoardContractChainFrontier,
   RepairBinding as BoardContractRepairBinding,
   RunStatus as BoardRunStatus,
   UsageCost as BoardUsageCost,
@@ -65,15 +65,7 @@ import { taskMoveAuthority } from "./task-move-authority.js";
  * point of the shape is that its cost is legible.
  */
 export type BoardMoveTarget = BoardContractMoveTarget;
-export type BoardChainFrontier = BoardContractChainFrontier<Date> & {
-  mergeOutcome: BoardContractCard<Date>["mergeOutcome"];
-};
-export type BoardChainAggregate = Omit<BoardContractChainAggregate<Date>, "frontier"> & {
-  frontier: BoardChainFrontier;
-};
-export type BoardCard = Omit<BoardContractCard<Date>, "chainAggregate"> & {
-  chainAggregate: BoardChainAggregate | null;
-};
+export type BoardCard = BoardContractCard<Date>;
 export type BoardLatestRun = BoardContractLatestRun<Date>;
 export type BoardChainActivationState = BoardContractChainActivationState;
 export type RepairBinding = BoardContractRepairBinding;
@@ -85,10 +77,28 @@ type JsonSerialized<T> = T extends Date
     : T extends object
       ? { [Key in keyof T]: JsonSerialized<T[Key]> }
       : T;
-type ContractCheck<T extends BoardContractCard> = T;
+type ExactKeys<Left, Right> = [
+  Exclude<keyof Left, keyof Right>,
+  Exclude<keyof Right, keyof Left>,
+] extends [never, never] ? true : false;
+type ContractCheck<
+  Projection extends BoardContractCard,
+  Proof extends [true, true, true, false, false],
+> = Proof extends [true, true, true, false, false] ? Projection : never;
 /** Compile-time proof that JSON serialization turns the native projection into
- * the shared browser contract, including every required field. */
-export type SerializedBoardCardProjection = ContractCheck<JsonSerialized<BoardCard>>;
+ * the exact shared browser contract, including every nested aggregate and
+ * frontier key. The final two checks prove missing and surplus adapter keys
+ * both fail the bidirectional key comparison. */
+export type SerializedBoardCardProjection = ContractCheck<
+  JsonSerialized<BoardCard>,
+  [
+    ExactKeys<JsonSerialized<BoardCard>, BoardContractCard>,
+    ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>, BoardContractChainAggregate>,
+    ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>["frontier"], BoardContractChainFrontier>,
+    ExactKeys<Omit<JsonSerialized<BoardCard>, "id">, BoardContractCard>,
+    ExactKeys<JsonSerialized<BoardCard> & { surplus: never }, BoardContractCard>,
+  ]
+>;
 
 /** The Prisma row shape `boardCard` needs — declared structurally so `readBoard`
  *  can select exactly these columns and nothing else. */
@@ -313,7 +323,7 @@ export const chainAggregate = (
   primaryMembers: readonly BoardChainMember[],
   repairMembers: readonly BoardChainMember[],
   predecessorById: ReadonlyMap<string, BoardBlockedOnTask> = new Map(),
-): BoardChainAggregate => {
+): BoardContractChainAggregate<Date> => {
   const primary = [...primaryMembers].sort(chainMemberOrder);
   const repairs = [...repairMembers].sort(chainMemberOrder);
   const members = [...primary, ...repairs];
@@ -403,7 +413,7 @@ export const chainAggregate = (
     totalCost: serializeUsageCost(totalCost),
     createdAt,
     updatedAt,
-  } satisfies BoardChainAggregate;
+  } satisfies BoardContractChainAggregate<Date>;
 };
 
 /** The instantiated chain name is persisted as the prefix of every task name.
@@ -945,7 +955,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     const group = addChain(key, repairByTask.get(row.id)?.chainName ?? null);
     group.repairs.push(memberWithDisplay(row));
   }
-  const aggregateByChain = new Map<string, BoardChainAggregate>();
+  const aggregateByChain = new Map<string, BoardContractChainAggregate<Date>>();
   for (const [key, group] of membersByChain) {
     const chainId = group.primary[0]?.chainId
       ?? (group.repairs[0] === undefined

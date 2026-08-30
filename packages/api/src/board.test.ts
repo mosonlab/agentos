@@ -291,6 +291,18 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.equal(done.frontier.taskId, "step-2");
 });
 
+test("chainAggregate returns the exact board contract keys", () => {
+  const aggregate = chainAggregate("c1", "Release", [member()], []);
+
+  assert.deepEqual(Object.keys(aggregate).sort(), [
+    "activation", "chainId", "chainName", "createdAt", "detailTaskId", "frontier",
+    "status", "statusCounts", "stepCount", "totalCost", "updatedAt",
+  ]);
+  assert.deepEqual(Object.keys(aggregate.frontier).sort(), [
+    "failureReason", "latestRun", "mergeOutcome", "position", "status", "taskId", "title",
+  ]);
+});
+
 test("board aggregate and Chain detail choose the same first unfinished execution layer", () => {
   const shared = [
     { id: "done", name: "Completed layer", chainIndex: 1, chainLayer: 10, status: "DONE" as const },
