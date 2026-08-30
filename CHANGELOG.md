@@ -15,7 +15,7 @@ The fifth preview makes the board read at chain level, makes completed work
 self-clearing, and replaces the maintainer appliance's mutable checkout deploy
 with immutable release directories. As with every 0.x minor, behaviour changes
 below are breaking-eligible. There is still no supported upgrade path between
-previews other than a fresh install. This release adds four migrations.
+previews other than a fresh install. This release adds five migrations.
 
 ### Board and task lifecycle
 
@@ -48,8 +48,9 @@ previews other than a fresh install. This release adds four migrations.
 
 - Readiness claims have an explicit durable handle, so only one worker owns the
   transition while recovery reads are performed.
-- Deferred merge-lease releases are indexed, retried and recorded rather than
-  being lost after a transient failure.
+- Merge-lease handoffs and deferrals are recorded in a durable ledger, and
+  deferred releases are indexed and retried rather than being lost after a
+  transient failure.
 - Requeue attempt authority and budget are persisted for merge-tail repair, and
   chain deletion is serialized with concurrent member creation.
 - Recovery refusals and merge-tail transitions are typed and applied through
