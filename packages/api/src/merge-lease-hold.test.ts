@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PrismaClient } from "@anneal/db";
+import type { Prisma, PrismaClient } from "@anneal/db";
 
 import {
   mergeLeaseHold,
@@ -28,11 +28,9 @@ test("mergeLeaseHold records whole elapsed seconds and clamps clock skew", () =>
 });
 
 test("recordMergeLeaseHold ignores unsuccessful releases but surfaces malformed confirmation", async () => {
-  let taskLookups = 0;
-  let writes = 0;
+  let transactions = 0;
   const db = {
-    task: { findFirst: async () => { taskLookups += 1; return { id: "tail-task" }; } },
-    taskActivity: { createMany: async () => { writes += 1; return { count: 1 }; } },
+    $transaction: async () => { transactions += 1; },
   } as unknown as PrismaClient;
 
   assert.equal(await recordMergeLeaseHold(db, target, { outcome: "not-held" }, releasedAt), "ignored");
@@ -45,22 +43,47 @@ test("recordMergeLeaseHold ignores unsuccessful releases but surfaces malformed 
     }, releasedAt),
     /confirmed merge lease release.*invalid acquiredAt/u,
   );
-  assert.equal(taskLookups, 0);
-  assert.equal(writes, 0);
+  assert.equal(transactions, 0);
 });
 
 test("recordMergeLeaseHold writes the project-scoped marker payload", async () => {
   const writes: Array<Record<string, unknown>> = [];
   let query: Record<string, unknown> | undefined;
-  const db = {
+  const ledgerRow = {
+    id: "ledger-1",
+    projectId: "project-1",
+    chainId: "chain-1",
+    leaseRef: "refs/merge-lease/holder",
+    leaseSha: "lease-sha",
+    state: "RELEASED",
+    owningTaskId: "tail-task",
+    handedOffRunId: null,
+    handedOffAt: null,
+    deferredAt: null,
+    settledAt: releasedAt,
+    acquiredAt: new Date("2026-08-27T12:00:00.250Z"),
+    failureDetail: null,
+    createdAt: releasedAt,
+    updatedAt: releasedAt,
+  };
+  const tx = {
     task: { findFirst: async (input: Record<string, unknown>) => {
       query = input;
       return { id: "tail-task" };
     } },
-    taskActivity: { createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
-      writes.push(...data);
-      return { count: 1 };
+    mergeLeaseEvent: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      createMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => ledgerRow,
+    },
+    taskActivity: { create: async ({ data }: { data: Record<string, unknown> }) => {
+      writes.push(data);
+      return {};
     } },
+  } as unknown as Prisma.TransactionClient;
+  const db = {
+    $transaction: async (operation: (client: Prisma.TransactionClient) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
 
   assert.equal(await recordMergeLeaseHold(db, target, {
@@ -81,6 +104,7 @@ test("recordMergeLeaseHold writes the project-scoped marker payload", async () =
   assert.deepEqual(writes[0]?.metadata, {
     kind: "mergeTail.leaseHold",
     schemaVersion: 1,
+    ledgerId: "ledger-1",
     chainId: "chain-1",
     leaseRef: "refs/merge-lease/holder",
     leaseSha: "lease-sha",
