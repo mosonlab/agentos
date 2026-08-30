@@ -672,8 +672,42 @@ test("readBoard restores partly archived primary facts when only a detached repa
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
     name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE", archivedAt,
+    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: session({ costUsd: "0.75" }) }],
   });
   const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
+  const { db } = boardReadDatabase({
+    rows: [repair, regression],
+    chainRows: [implementation, regression],
+    related: [{ id: regression.id, projectId: "p1", chainId: "c1" }],
+    activities: [{ taskId: repair.id, metadata: {
+      schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: regression.id,
+    } }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  const repairCard = cards.find((card) => card.id === repair.id);
+  const projection = repairCard?.chainAggregate;
+  assert.ok(projection);
+  assert.equal(repairCard.repairOf?.chainId, "c1");
+  assert.equal(projection.stepCount, 2);
+  assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
+  assert.equal(projection.totalCost?.costUsd, "2");
+  assert.equal(projection.frontier.taskId, repair.id);
+  assert.equal(projection.detailTaskId, implementation.id);
+});
+
+test("readBoard keeps an archived repair bound when its primary chain remains live", async () => {
+  const archivedAt = new Date("2026-08-15T00:00:00Z");
+  const implementation = row({
+    id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE",
+    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: session({ costUsd: "0.75" }) }],
+  });
+  const regression = row({
+    id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
+    name: "Release: Regression", templateStep: { name: "Regression" }, status: "TODO",
+  });
+  const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO", archivedAt });
   const { db } = boardReadDatabase({
     rows: [repair],
     chainRows: [implementation, regression],
@@ -683,14 +717,12 @@ test("readBoard restores partly archived primary facts when only a detached repa
     } }],
   });
 
-  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
-  const projection = cards[0]?.chainAggregate;
-  assert.ok(projection);
-  assert.equal(projection.stepCount, 2);
-  assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
-  assert.equal(projection.totalCost?.costUsd, "1.25");
-  assert.equal(projection.frontier.taskId, repair.id);
-  assert.equal(projection.detailTaskId, implementation.id);
+  const [card] = await readBoard(db, { projectId: "p1", archived: "true" });
+
+  assert.equal(card?.repairOf?.chainId, "c1");
+  assert.equal(card?.chainAggregate?.stepCount, 2);
+  assert.deepEqual(card?.chainAggregate?.statusCounts, { BACKLOG: 0, TODO: 1, DOING: 0, REVIEW: 0, DONE: 1 });
+  assert.equal(card?.chainAggregate?.totalCost?.costUsd, "0.75");
 });
 
 test("readBoard does not invent a direct-chain name from a duplicated single row", async () => {

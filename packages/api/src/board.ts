@@ -670,6 +670,15 @@ const taskWhere = (scope: TaskReadScope): Prisma.TaskWhereInput => ({
     : {}),
 });
 
+const chainKeysOf = <Row extends { projectId: string; chainId: string | null }>(
+  rows: readonly Row[],
+  include: (row: Row) => boolean = () => true,
+): Set<string> => new Set(rows.flatMap((row) => (
+  row.chainId === null || !include(row)
+    ? []
+    : [chainKey({ projectId: row.projectId, chainId: row.chainId })]
+)));
+
 const taskOrderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
 
 /**
@@ -856,9 +865,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     // A detached repair can be the only visible member. Resolve its regression
     // binding before finalizing the primary lookup so archived siblings still
     // contribute the real step count, progress, spend and chain-detail target.
-    const loadedKeys = new Set(primaryRows.flatMap((row) => row.chainId === null ? [] : [
-      chainKey({ projectId: row.projectId, chainId: row.chainId }),
-    ]));
+    const loadedKeys = chainKeysOf(primaryRows);
     const missingChains = [...repairChainByTask.values()]
       .filter((binding) => !loadedKeys.has(chainKey(binding)));
     if (missingChains.length > 0) {
@@ -871,13 +878,11 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
   // A detached repair may recover complete primary facts, but it cannot be the
   // sole visible owner of a fully archived Chain. Keep repair aggregation when
   // the page contains a primary row, or the complete lookup finds a live one.
+  // Repair binding and aggregate ownership must be removed together: the web
+  // groups every repairOf card with the Chain aggregate carried by that group.
   const aggregateOwnerKeys = new Set([
-    ...rows.flatMap((row) => row.chainId === null ? [] : [
-      chainKey({ projectId: row.projectId, chainId: row.chainId }),
-    ]),
-    ...primaryRows.flatMap((row) => row.chainId === null || (row.archivedAt ?? null) !== null ? [] : [
-      chainKey({ projectId: row.projectId, chainId: row.chainId }),
-    ]),
+    ...chainKeysOf(rows),
+    ...chainKeysOf(primaryRows, (row) => (row.archivedAt ?? null) === null),
   ]);
   for (const [taskId, key] of repairChainKeyByTask) {
     if (!aggregateOwnerKeys.has(key)) repairChainKeyByTask.delete(taskId);
@@ -954,7 +959,6 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
   for (const member of primaryRows) {
     if (member.chainId === null) continue;
     const key = chainKey({ projectId: member.projectId, chainId: member.chainId });
-    if (!aggregateOwnerKeys.has(key)) continue;
     const group = addChain(key, displayByTask.get(member.id)?.chainName ?? null);
     if (!group.primary.some((candidate) => candidate.id === member.id)) group.primary.push(memberWithDisplay(member));
   }
