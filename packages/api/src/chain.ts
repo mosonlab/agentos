@@ -13,6 +13,7 @@ import {
   type PrismaClient,
   TaskStatus,
 } from "@anneal/db";
+import { heldPredicate } from "@anneal/db/chain-hold";
 import { compare, denseOrdinals, layerOf } from "@anneal/db/chain-order";
 
 export { resumeActivationAnchor, resumeActivationNeedsSourceRun };
@@ -337,8 +338,12 @@ export const refusalForHeldChainStep = (
   task: Pick<StepAdmissionTask, "projectId" | "chainId" | "chainIndex" | "chainLayer" | "name">,
   control: ChainControlSnapshot | null | undefined,
 ): Refusal | null => {
-  if (!control?.held || task.chainId === null
-    || control.projectId !== task.projectId || control.chainId !== task.chainId) return null;
+  if (!control || !heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: task.chainLayer,
+    index: task.chainIndex,
+  }, control)) return null;
   const taskLayer = chainLayerOf(task);
   // A held control is only valid with a persisted layer, but fail closed if a
   // malformed legacy row reaches admission: an unknown layer must not bypass
@@ -346,7 +351,6 @@ export const refusalForHeldChainStep = (
   if (taskLayer === null || control.heldLayer === null) {
     return { reason: "conflict", message: `Cannot start ${task.name}; Chain is held` };
   }
-  if (taskLayer <= control.heldLayer) return null;
   return {
     reason: "conflict",
     message: `Cannot start ${task.name}; Chain is held after layer ${control.heldLayer}`,

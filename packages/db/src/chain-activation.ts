@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 
 import { readChainControl } from "./chain-control.js";
+import { heldPredicate } from "./chain-hold.js";
 import { compare, layerOf } from "./chain-order.js";
 import { lockAgentRepoGrant, lockAgentRow, lockChainRows } from "./locks.js";
 import { parseAuthorizationMetadata } from "./merge-integrator.js";
@@ -651,6 +652,35 @@ const activateChainSuccessorInternal = async (
     .filter((value) => value > currentLayer)
     .sort((left, right) => left - right)
     .find((value) => chainRows.some((row) => chainLayerOf(row) === value && row.status !== TaskStatus.DONE));
+  const missingSuccessorLayer = nextLayer === undefined
+    && chainRows.some((row) => chainLayerOf(row) === null && row.status !== TaskStatus.DONE);
+  const withholdSuccessorActivation = async (withheldLayer: number | null) => {
+    await tx.taskActivity.create({ data: {
+      taskId: current.id,
+      actorType: "control-plane",
+      body: chainControl.heldLayer === null
+        ? "Predecessor layer completed; successor activation withheld because Chain is held"
+        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
+      metadata: {
+        kind: "chainControl.activationWithheld",
+        schemaVersion: 1,
+        heldLayer: chainControl.heldLayer,
+        nextLayer: withheldLayer,
+      },
+    } });
+    return { nextTaskId: null, gated: false };
+  };
+  if (missingSuccessorLayer && heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: null,
+    index: null,
+  }, chainControl)) {
+    if (boundSuccessor && current.archivedAt === null) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+    }
+    return withholdSuccessorActivation(null);
+  }
   if (nextLayer === undefined) {
     const predecessorComplete = chainRows.every((row) => row.status === TaskStatus.DONE);
     if (!boundSuccessor || predecessorComplete) {
@@ -674,21 +704,13 @@ const activateChainSuccessorInternal = async (
     await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
   }
 
-  if (chainControl.held && (chainControl.heldLayer === null || nextLayer > chainControl.heldLayer)) {
-    await tx.taskActivity.create({ data: {
-      taskId: current.id,
-      actorType: "control-plane",
-      body: chainControl.heldLayer === null
-        ? "Predecessor layer completed; successor activation withheld because Chain is held"
-        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
-      metadata: {
-        kind: "chainControl.activationWithheld",
-        schemaVersion: 1,
-        heldLayer: chainControl.heldLayer,
-        nextLayer,
-      },
-    } });
-    return { nextTaskId: null, gated: false };
+  if (heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: nextLayer,
+    index: null,
+  }, chainControl)) {
+    return withholdSuccessorActivation(nextLayer);
   }
 
   const nextRows = chainRows.filter((row) => chainLayerOf(row) === nextLayer).sort(layerOrder);
