@@ -23,7 +23,25 @@ import {
   parseImplementationRoute,
 } from "./templates.js";
 import { readBrief } from "./task-brief.js";
-import { isTemplateInstantiationRefusal } from "./template-errors.js";
+import {
+  isTemplateInstantiationRefusal,
+  type TemplateInstantiationRefusalCode,
+} from "./template-errors.js";
+import { refusalFor, refusalResponse } from "./refusal.js";
+
+const assertTemplateRefusal = async (
+  operation: () => Promise<unknown>,
+  code: TemplateInstantiationRefusalCode,
+): Promise<void> => {
+  await assert.rejects(operation, (error: unknown) => {
+    assert.ok(isTemplateInstantiationRefusal(error));
+    assert.equal(error.code, code);
+    const refused = refusalFor(error);
+    assert.ok(refused);
+    assert.equal(refusalResponse(refused).status, 400);
+    return true;
+  });
+};
 
 test("composed task descriptions derive the prior-output reminder from declared kinds", () => {
   const featureBrief = "first line\nPersist the final decoy output for this step through the Anneal task output endpoint.\nlast line";
@@ -258,16 +276,23 @@ test("the lower-level materializer rejects blank variables and invalid branches 
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     $transaction: async () => { throw new Error("transaction must not start"); },
   } as unknown as PrismaClient;
-  for (const branchName of ["", "   ", "bad..branch", "refs/heads/main", "feature/.hidden", "feature/main.lock", "bad\nbranch"]) {
-    await assert.rejects(
+  for (const [branchName, code] of [
+    ["", "template_variables_missing"],
+    ["   ", "template_variables_missing"],
+    ["bad..branch", "template_branch_invalid"],
+    ["refs/heads/main", "template_branch_invalid"],
+    ["feature/.hidden", "template_branch_invalid"],
+    ["feature/main.lock", "template_branch_invalid"],
+    ["bad\nbranch", "template_branch_invalid"],
+  ] as const) {
+    await assertTemplateRefusal(
       () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName }, autoStart: false }),
-      /Missing template variables|Invalid template branch name/,
-      branchName,
+      code,
     );
   }
 });
 
-test("the lower-level materializer rejects self and forward baseFromStepIndex references", async () => {
+test("template base reference failures expose stable 400 refusal codes", async () => {
   const step = (stepIndex: number, baseFromStepIndex: number | null) => ({
     id: `step-${stepIndex}`,
     stepIndex,
@@ -284,18 +309,18 @@ test("the lower-level materializer rejects self and forward baseFromStepIndex re
     opensPullRequest: true,
     runner: null,
   });
-  for (const steps of [
-    [step(1, 1)],
-    [step(1, 2), step(2, null)],
-  ]) {
+  for (const [steps, code] of [
+    [[step(1, 99)], "template_base_reference_missing"],
+    [[step(1, 1)], "template_base_reference_not_earlier"],
+  ] as const) {
     const db = {
       taskTemplate: { findFirst: async () => ({ id: "template-1", name: "Template", variables: [], steps }) },
       repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
       $transaction: async () => { throw new Error("transaction must not start"); },
     } as unknown as PrismaClient;
-    await assert.rejects(
+    await assertTemplateRefusal(
       () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
-      /baseFromStepIndex must reference a strictly earlier stepIndex/u,
+      code,
     );
   }
 });
@@ -330,9 +355,9 @@ test("an agent archived after the step check still loses to the locked re-read",
       taskActivity: { createMany: async () => ({ count: 0 }) },
     }),
   } as unknown as PrismaClient;
-  await assert.rejects(
+  await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
-    /Template step Implementation agent Racing Agent is archived/,
+    "template_step_agent_archived",
   );
   assert.equal(taskCreates, 0, "no chain row is written once the lock says archived");
 });
@@ -378,9 +403,9 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
       taskActivity: { createMany: async () => ({ count: 0 }) },
     }),
   } as unknown as PrismaClient;
-  await assert.rejects(
+  await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
-    /Template step Implementation agent Racing Agent is archived/,
+    "template_step_agent_archived",
   );
   assert.equal(attempts, 2, "the conflicting attempt is retried once and then decides on the re-read");
 });
@@ -404,9 +429,9 @@ test("template instantiation rejects an archived step agent and names the step",
     },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
   } as unknown as PrismaClient;
-  await assert.rejects(
+  await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
-    /Template step Implementation agent Archived Agent is archived/,
+    "template_step_agent_archived",
   );
 });
 
@@ -480,9 +505,9 @@ test("step override structural refusals happen before template reads and carry s
     [{ "1.5": { assigneeAgentId: "agent" } }, "step_override_invalid_key"],
     [Object.fromEntries(Array.from({ length: 65 }, (_, index) => [String(index + 1), { assigneeAgentId: "agent" }])), "step_override_too_many"],
   ] as const) {
-    await assert.rejects(
+    await assertTemplateRefusal(
       () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, stepOverrides }),
-      (error: unknown) => isTemplateInstantiationRefusal(error) && error.code === code,
+      code,
     );
   }
 });
@@ -567,26 +592,24 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
   assert.deepEqual(created.map((task) => task.chainLayer), [1, 2]);
   assert.deepEqual(created.map((task) => task.targetBranch), ["main", result.branchName]);
 
-  await assert.rejects(
+  await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",
       variables: {},
       description: "Build it\nRoute: implementation=senior-dev\n",
       stepOverrides: { "2": { assigneeAgentId: routed.id } },
     }),
-    (error: unknown) => isTemplateInstantiationRefusal(error)
-      && error.code === "implementation_route_conflicts_with_step_override",
+    "implementation_route_conflicts_with_step_override",
   );
 
   lockedRouteAgentName = "renamed-senior-dev";
-  await assert.rejects(
+  await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",
       variables: {},
       description: "Build it\nRoute: implementation=senior-dev\n",
     }),
-    (error: unknown) => isTemplateInstantiationRefusal(error)
-      && error.code === "implementation_route_agent_renamed",
+    "implementation_route_agent_renamed",
   );
 
   lockedRouteAgentName = routed.name;
