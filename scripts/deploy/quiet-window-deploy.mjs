@@ -57,6 +57,7 @@ import {
   DEPLOY_STEP_TIMEOUT_MS,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
   waitForEscalationClear,
+  waitForQuietWithWatchdog,
 } from "./quiet-window-deadlines.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
 import {
@@ -410,37 +411,15 @@ const acquireDeployBarrier = async () => {
   }
 };
 
-const waitForQuiet = async () => {
-  while (true) {
-    throwIfInterrupted();
-    const before = await blockingRuns();
-    if (before.length > 0) {
-      log(`HOLD quiet-window blockers=${before.length} statuses=${[...new Set(before.map((run) => run.status))].join(",")}`);
-      await sleep(POLL_MS);
-      continue;
-    }
-    const barrier = await acquireDeployBarrier();
-    if (barrier === null) {
-      log("HOLD quiet-window deploy-barrier-contended");
-      await sleep(POLL_MS);
-      continue;
-    }
-    let after;
-    try {
-      after = await blockingRuns();
-    } catch (error) {
-      await barrier.release();
-      throw error;
-    }
-    if (after.length === 0) {
-      log("PASS quiet-window deploy-barrier-held blockers=0");
-      return barrier;
-    }
-    await barrier.release();
-    log(`HOLD quiet-window raced-blockers=${after.length}`);
-    await sleep(POLL_MS);
-  }
-};
+const waitForQuiet = (startWatchdog) => waitForQuietWithWatchdog({
+  blockingRuns,
+  acquireBarrier: acquireDeployBarrier,
+  startWatchdog,
+  wait: () => sleep(POLL_MS),
+  onBlockingRuns: (runs) => log(`HOLD quiet-window blockers=${runs.length} statuses=${[...new Set(runs.map((run) => run.status))].join(",")}`),
+  onBarrierContended: () => log("HOLD quiet-window deploy-barrier-contended"),
+  onRacedBlockingRuns: (runs) => log(`HOLD quiet-window raced-blockers=${runs.length}`),
+});
 
 const acquireLock = async () => {
   const lock = acquireProcessLock({ path: LOCK_PATH, stateDir: STATE_DIR });
@@ -669,34 +648,34 @@ const createDeployHost = () => createProductionHost({
     };
   },
   waitForQuiet: async (attempt) => {
-    const barrier = await waitForQuiet();
     const revisions = attempt.requireFact("revisions");
-    const watchdog = await createBarrierWatchdog({
-      timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
-      escalationPath: ESCALATION_PATH,
-      escalationRecord: {
-        outcome: "failure",
-        reason: BARRIER_TIMEOUT_REASON,
-        detail: `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
-        from: revisions.from,
-        to: revisions.to,
-      },
-      onTimeout: async () => {
-        const failure = new DeployFailure(
-          BARRIER_TIMEOUT_REASON,
-          `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
-        );
-        if (!interruption.interruptWithFailure(failure)) return;
-        log(`STOP ${failure.reason} detail=${failure.detail}`);
-      },
-      onError: (error) => {
-        const failure = error instanceof DeployFailure
-          ? error
-          : new DeployFailure("deploy-barrier-watchdog-alert-failed", error instanceof Error ? error.name : "unknown");
-        log(`STOP ${failure.reason} detail=${failure.detail}`);
-        interruption.interruptWithFailure(failure);
-      },
-    });
+    const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
+        timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
+        escalationPath: ESCALATION_PATH,
+        escalationRecord: {
+          outcome: "failure",
+          reason: BARRIER_TIMEOUT_REASON,
+          detail: `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+          from: revisions.from,
+          to: revisions.to,
+        },
+        onTimeout: async () => {
+          const failure = new DeployFailure(
+            BARRIER_TIMEOUT_REASON,
+            `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+          );
+          if (!interruption.interruptWithFailure(failure)) return;
+          log(`STOP ${failure.reason} detail=${failure.detail}`);
+        },
+        onError: (error) => {
+          const failure = error instanceof DeployFailure
+            ? error
+            : new DeployFailure("deploy-barrier-watchdog-alert-failed", error instanceof Error ? error.name : "unknown");
+          log(`STOP ${failure.reason} detail=${failure.detail}`);
+          interruption.interruptWithFailure(failure);
+        },
+      }));
+    log("PASS quiet-window deploy-barrier-held blockers=0");
     return { barrier, resources: [barrier, watchdog] };
   },
   prepareWorkspace: async (attempt) => {

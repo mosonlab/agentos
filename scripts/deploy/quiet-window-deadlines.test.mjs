@@ -18,13 +18,14 @@ import {
   DEPLOY_BARRIER_TIMEOUT_MS,
   DEPLOY_BARRIER_WATCHDOG_MARGIN_MS,
   DEPLOY_STEP_TIMEOUT_MS,
+  waitForQuietWithWatchdog,
   waitForEscalationClear,
 } from "./quiet-window-deadlines.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 
-const timeoutUpgrade = ({ phase, run, escalationFails = false, wait }) => {
+const timeoutUpgrade = ({ phase, run, escalationFails = false, wait, barrierHeld = true }) => {
   const calls = [];
   const state = { escalationExists: false, retained: false, released: false };
   const barrier = {
@@ -33,7 +34,7 @@ const timeoutUpgrade = ({ phase, run, escalationFails = false, wait }) => {
       if (state.retained) {
         await waitForEscalationClear({
           escalationExists: () => state.escalationExists,
-          verifyBarrier: async () => true,
+          verifyBarrier: async () => barrierHeld,
           wait: wait ?? (async () => { state.escalationExists = false; calls.push("clear-escalation"); }),
           onHold: () => { calls.push("hold-barrier"); },
         });
@@ -41,7 +42,7 @@ const timeoutUpgrade = ({ phase, run, escalationFails = false, wait }) => {
       state.released = true;
       calls.push("release-barrier");
     },
-    verify: async () => true,
+    verify: async () => barrierHeld,
   };
   const host = {};
   for (const { hostMethod } of DEPLOY_PHASES) host[hostMethod] = async () => undefined;
@@ -138,6 +139,31 @@ test("a retained barrier surfaces loss of its advisory lock", async () => {
   );
 });
 
+test("the barrier watchdog starts before the post-lock blocking-runs query", async () => {
+  const calls = [];
+  let queryCount = 0;
+  const barrier = { release: async () => { calls.push("release-barrier"); } };
+  const watchdog = { release: async () => { calls.push("release-watchdog"); } };
+  const result = await waitForQuietWithWatchdog({
+    blockingRuns: async () => {
+      queryCount += 1;
+      calls.push(queryCount === 1 ? "query-before-lock" : "query-after-lock");
+      return [];
+    },
+    acquireBarrier: async () => {
+      calls.push("acquire-barrier");
+      return barrier;
+    },
+    startWatchdog: async () => {
+      calls.push("start-watchdog");
+      return watchdog;
+    },
+    wait: async () => undefined,
+  });
+  assert.deepEqual(calls, ["query-before-lock", "acquire-barrier", "start-watchdog", "query-after-lock"]);
+  assert.deepEqual(result, { barrier, watchdog });
+});
+
 test("ordinary step timeout escalates, notifies, fails, and releases the barrier", async () => {
   const execution = timeoutUpgrade({
     phase: "prepareWorkspace",
@@ -166,6 +192,25 @@ test("migration timeout escalates and retains the barrier through explicit clear
   assert.equal(execution.state.released, true);
   assert.ok(execution.calls.indexOf("escalate-migration-deploy-timeout") < execution.calls.indexOf("hold-barrier"));
   assert.ok(execution.calls.indexOf("clear-escalation") < execution.calls.indexOf("release-barrier"));
+});
+
+test("lock loss during a retained migration hold becomes the terminal deploy failure", async () => {
+  const execution = timeoutUpgrade({
+    phase: "guardedMigration",
+    barrierHeld: false,
+    run: async ({ barrier }) => hangingCommand({
+      timeoutReason: "migration-deploy-timeout",
+      onTermination: () => barrier.retainUntilEscalationCleared(),
+    }),
+  });
+  const result = await execution.execute();
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "deploy-barrier-lost-during-hold");
+  assert.deepEqual(
+    execution.calls.filter((call) => call.startsWith("escalate-")),
+    ["escalate-migration-deploy-timeout", "escalate-deploy-barrier-lost-during-hold"],
+  );
+  assert.equal(execution.calls.at(-1), "mark-notified");
 });
 
 test("watchdog expiry during active migration retains the barrier", async () => {

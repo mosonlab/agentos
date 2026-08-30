@@ -78,6 +78,47 @@ export const waitForEscalationClear = async ({
   onCleared();
 };
 
+/** Start barrier observation as soon as the lock is acquired, before the
+ * second blocking-runs query closes the acquisition race. */
+export const waitForQuietWithWatchdog = async ({
+  blockingRuns,
+  acquireBarrier,
+  startWatchdog,
+  wait,
+  onBlockingRuns = () => undefined,
+  onBarrierContended = () => undefined,
+  onRacedBlockingRuns = () => undefined,
+}) => {
+  while (true) {
+    const before = await blockingRuns();
+    if (before.length > 0) {
+      onBlockingRuns(before);
+      await wait();
+      continue;
+    }
+    const barrier = await acquireBarrier();
+    if (barrier === null) {
+      onBarrierContended();
+      await wait();
+      continue;
+    }
+    let watchdog;
+    try {
+      watchdog = await startWatchdog();
+      const after = await blockingRuns();
+      if (after.length === 0) return { barrier, watchdog };
+      await watchdog.release();
+      await barrier.release();
+      onRacedBlockingRuns(after);
+    } catch (error) {
+      await watchdog?.release().catch(() => undefined);
+      await barrier.release().catch(() => undefined);
+      throw error;
+    }
+    await wait();
+  }
+};
+
 /** The barrier is the outage boundary, so a separately scheduled child owns
  * its deadline and persists the alert even if the deploy event loop blocks.
  * The callback aborts the current deployment through its existing path. */

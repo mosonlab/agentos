@@ -13,19 +13,24 @@ test("database backup has an explicit phase deadline", async () => {
   const child = new EventEmitter();
   child.stderr = new EventEmitter();
   child.stderr.setEncoding = () => undefined;
-  child.kill = (signal) => { signals.push(signal); };
+  child.pid = 4242;
   try {
     await assert.rejects(
       writePgDumpBackup({
         configuration: { mode: "host", pgDumpBinary: "/fixture/pg_dump" },
-        databaseUrl: "postgresql://user:secret@example.invalid/db",
+        databaseUrl: "postgresql://fixture@localhost/db",
         output: join(directory, "fixture.dump"),
         spawnImpl: () => child,
-        timeoutMs: 10,
+        killImpl: (pid, signal) => {
+          signals.push([pid, signal]);
+          if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", null, signal));
+        },
+        killGraceMs: 10,
+        timeoutMs: 5,
       }),
       /pg_dump-timeout/u,
     );
-    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.deepEqual(signals, [[-4242, "SIGTERM"], [-4242, "SIGKILL"]]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
