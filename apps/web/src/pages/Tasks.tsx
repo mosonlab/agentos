@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
+import { type BoardEntry, type Counts, type ParkedChain, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -135,6 +135,85 @@ export const StartTaskDialog = ({ request, pending, error, onCancel, onConfirm }
   );
 };
 
+/* ------------------------------------------------- the Todo column's wave */
+
+export type ChainRefusal = { name: string; reason: string };
+
+/**
+ * Starts a wave of parked chains through the path one card already takes: the
+ * startability check first, then `POST /tasks/:id/start` on the chain's
+ * activation task. There is no bulk route on the server and this does not
+ * invent one.
+ *
+ * Sequential, and it never stops early. A chain the server refuses — an
+ * exhausted budget, an unbound repo, a predecessor that is not done — is
+ * collected by name and the rest of the wave still starts, because an operator
+ * who parked ten chains meant the nine that can go to go.
+ */
+export const activateParkedChains = async (chains: readonly ParkedChain[]): Promise<ChainRefusal[]> => {
+  const refused: ChainRefusal[] = [];
+  for (const chain of chains) {
+    try {
+      const verdict = await api.get<TaskStartability>(`/tasks/${chain.taskId}/startability`);
+      if (!verdict.startable) {
+        refused.push({ name: chain.name, reason: startabilityRefusal(verdict) });
+        continue;
+      }
+      await api.post(`/tasks/${chain.taskId}/start`, {});
+    } catch (reason: unknown) {
+      refused.push({ name: chain.name, reason: reason instanceof Error ? reason.message : String(reason) });
+    }
+  }
+  return refused;
+};
+
+/* Pure and exported for the same reason `archiveDoneNotice` is: the counts the
+ * operator is told about are asserted directly rather than through a click. */
+export const activateAllNotice = (total: number, refused: number): string =>
+  formatT("tasks.activateAll.notice", { started: total - refused, total });
+
+/** One confirmation for the whole wave, listing what it will start. Ten parked
+ *  chains are ten cards and ten dialogs otherwise. */
+export const ActivateAllDialog = ({ chains, refusals, pending, settled, onClose, onConfirm }: {
+  chains: readonly ParkedChain[];
+  refusals: readonly ChainRefusal[];
+  pending: boolean;
+  settled: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}): ReactNode => {
+  const t = useT();
+  return (
+    <Modal title={t("tasks.activateAll.title")} onClose={onClose} footer={(
+      <>
+        <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={onClose}>
+          {settled ? t("common.close") : t("common.cancel")}
+        </Button>
+        {settled ? null : (
+          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={onConfirm}>
+            {t("tasks.activateAll.confirm")}
+          </Button>
+        )}
+      </>
+    )}>
+      <div className="text-[13px] text-foreground">{t("tasks.activateAll.what")}</div>
+      <ul data-activate-chains="" className="flex flex-col gap-[4px] text-[13px] text-muted-foreground">
+        {chains.map((chain) => (
+          <li key={chain.chainId} data-activate-chain={chain.chainId}>
+            {t("tasks.activateAll.chain", { name: chain.name, steps: chain.stepCount })}
+          </li>
+        ))}
+      </ul>
+      {/* The refusals stay in the dialog that offered the wave, so the chains
+          that did not start are read beside the ones that did. */}
+      {refusals.length === 0 ? null : <ErrorNotice message={[
+        formatT("tasks.activateAll.refusedTitle"),
+        ...refusals.map((refusal) => formatT("tasks.activateAll.refused", refusal)),
+      ].join(" ")} />}
+    </Modal>
+  );
+};
+
 export const useTaskStartConfirmation = (reload: () => void): {
   request: TaskStartability | null;
   pending: boolean;
@@ -190,7 +269,8 @@ export const TasksPage = (): ReactNode => {
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [chainFilter, setChainFilter] = useState<{ id: string; name: string } | null>(null);
-  const { error: actionError, run } = useAction();
+  const [wave, setWave] = useState<{ chains: readonly ParkedChain[]; refusals: ChainRefusal[]; settled: boolean } | null>(null);
+  const { error: actionError, pending: pendingAction, run } = useAction();
   const t = useT();
   const allTasks = useStableRows(useMemo(() => data ?? [], [data]));
   const tasks = useMemo(() => tasksForChain(allTasks, chainFilter?.id ?? null), [allTasks, chainFilter]);
@@ -392,6 +472,23 @@ export const TasksPage = (): ReactNode => {
     if (ok && result !== null) setNotice(archiveDoneNotice(result));
   }, [projectId, run, reload, t]);
 
+  /** The whole wave, confirmed once. `run` carries a transport failure to the
+   *  page's one error surface; a chain the server refuses is not that — it is
+   *  reported by name in the dialog while the rest of the wave still starts. */
+  const activateAll = useCallback(async (): Promise<void> => {
+    if (wave === null || wave.settled) return;
+    setNotice(null);
+    let refusals: ChainRefusal[] | null = null;
+    const ok = await run(async () => {
+      refusals = await activateParkedChains(wave.chains);
+      reload();
+    });
+    if (!ok || refusals === null) return;
+    const refused: ChainRefusal[] = refusals;
+    setNotice(activateAllNotice(wave.chains.length, refused.length));
+    setWave(refused.length === 0 ? null : { ...wave, refusals: refused, settled: true });
+  }, [wave, run, reload]);
+
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
@@ -403,6 +500,16 @@ export const TasksPage = (): ReactNode => {
           error={start.error}
           onCancel={start.cancel}
           onConfirm={() => void start.confirm()}
+        />
+      )}
+      {wave === null ? null : (
+        <ActivateAllDialog
+          chains={wave.chains}
+          refusals={wave.refusals}
+          pending={pendingAction}
+          settled={wave.settled}
+          onClose={() => { if (!pendingAction) setWave(null); }}
+          onConfirm={() => void activateAll()}
         />
       )}
       <TasksPageHead active="tasks" onCreated={reload} />
@@ -437,6 +544,7 @@ export const TasksPage = (): ReactNode => {
             setDragOver={setDragOver}
             onMove={drop}
             onArchiveDone={() => void archiveDone()}
+            onActivateAll={(chains) => setWave({ chains, refusals: [], settled: false })}
             actions={actions}
             aggregateActions={aggregateActions}
             boardRef={boardRef}
