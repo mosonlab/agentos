@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient, TaskStatus } from "@anneal/db";
+import { PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
 
 import { patchTask } from "./task-patch.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -65,6 +65,42 @@ test("an archived task refuses a status write from inside the transaction", asyn
   assert.deepEqual(result, {
     reason: "conflict",
     message: "Cannot change the status of an archived task; unarchive it first",
+  });
+});
+
+test("an active Run refuses a move to Backlog from inside the transaction", async () => {
+  const { project, agent, task } = await seed();
+  await db.run.create({ data: {
+    projectId: project.id,
+    taskId: task.id,
+    agentId: agent.id,
+    runNumber: 1,
+    dedupeKey: `task:${task.id}:run:1`,
+    status: RunStatus.QUEUED,
+    runner: "CODEX",
+    model: agent.model,
+    promptHash: "hash",
+    branch: `codex/${task.id}`,
+    workspacePath: `/scratch/${task.id}`,
+  } });
+
+  const result = await patchTask(db, task.id, { status: TaskStatus.BACKLOG });
+
+  assert.deepEqual(result, {
+    reason: "conflict",
+    message: "Cannot move a task with an active run to Backlog",
+  });
+});
+
+test("an archived stored assignee refuses Backlog reactivation", async () => {
+  const { agent, task } = await seed({ status: TaskStatus.BACKLOG });
+  await db.agent.update({ where: { id: agent.id }, data: { archivedAt: new Date() } });
+
+  const result = await patchTask(db, task.id, { status: TaskStatus.TODO });
+
+  assert.deepEqual(result, {
+    reason: "conflict",
+    message: `Assignee ${agent.name} is archived; unarchive the agent or reassign this task first`,
   });
 });
 

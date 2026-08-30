@@ -4,53 +4,7 @@ import test from "node:test";
 import { AssigneeType, type PrismaClient, TaskStatus } from "@anneal/db";
 
 import { composeBrief, readBrief } from "./task-brief.js";
-import { operatorStatusTransitionRefusal, patchTask } from "./task-patch.js";
-
-const statusSubject = (
-  status: TaskStatus,
-  assigneeType: AssigneeType,
-  chainId: string | null = null,
-) => ({ status, assigneeType, chainId });
-
-test("operator status ownership excludes agent execution and chain-derived states", () => {
-  assert.equal(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.TODO, AssigneeType.AGENT),
-    TaskStatus.BACKLOG,
-  ), null);
-  assert.equal(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.BACKLOG, AssigneeType.AGENT),
-    TaskStatus.TODO,
-  ), null);
-  for (const target of [TaskStatus.DOING, TaskStatus.REVIEW, TaskStatus.DONE]) {
-    assert.match(operatorStatusTransitionRefusal(
-      statusSubject(TaskStatus.TODO, AssigneeType.AGENT),
-      target,
-    ) ?? "", /controlled by execution/u);
-  }
-  assert.match(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.TODO, AssigneeType.AGENT, "chain-1"),
-    TaskStatus.BACKLOG,
-  ) ?? "", /controlled by chain execution/u);
-});
-
-test("a Human owns queue movement and the Done decision", () => {
-  assert.equal(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.BACKLOG, AssigneeType.HUMAN),
-    TaskStatus.TODO,
-  ), null);
-  assert.equal(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.TODO, AssigneeType.HUMAN),
-    TaskStatus.BACKLOG,
-  ), null);
-  assert.equal(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.REVIEW, AssigneeType.HUMAN, "chain-1"),
-    TaskStatus.DONE,
-  ), null);
-  assert.match(operatorStatusTransitionRefusal(
-    statusSubject(TaskStatus.TODO, AssigneeType.HUMAN),
-    TaskStatus.REVIEW,
-  ) ?? "", /may move between Backlog and Todo or be marked Done/u);
-});
+import { patchTask } from "./task-patch.js";
 
 const patchFixture = (description: string, outputKind = "implementation") => {
   let update: Record<string, unknown> | null = null;
