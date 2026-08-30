@@ -1,6 +1,8 @@
+import "./dom-preload";
+
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, type ReactNode } from "react";
+import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
@@ -8,12 +10,12 @@ import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavig
 import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, columnStep, countByStatus, taskBoardEntry } from "../lib/board";
+import { COLUMNS, type BoardEntry, boardEntries, columnStep, countByStatus, parkedChains, taskBoardEntry } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
-import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
-import type { BoardTask, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
+import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, TasksPage, activateAllNotice, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
+import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
 import { installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
@@ -73,13 +75,13 @@ const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
 /** Renders one real column. Everything the board decides per column — the head,
  *  the count, `Archive All`, the drop invitation — is decided in here, so these
  *  assertions read markup rather than the page's source text. */
-const column = (status: TaskStatus, tasks: BoardTask[] = [], loading = false): string => {
+const column = (status: TaskStatus, tasks: (BoardEntry | BoardTask)[] = [], loading = false): string => {
   const found = COLUMNS.find((candidate) => candidate.status === status);
   assert.ok(found, `no ${status} column`);
   return renderToStaticMarkup(
     <BoardColumn
       column={found} tasks={tasks} loading={loading} dragOver={null}
-      onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} actions={ACTIONS}
+      onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} onActivateAll={noop} actions={ACTIONS}
     />,
   );
 };
@@ -753,6 +755,11 @@ test("TaskCard is memoized", () => {
   assert.equal((TaskCard as unknown as { $$typeof: symbol }).$$typeof, Symbol.for("react.memo"));
 });
 
+const PaginatedHarness = ({ entries }: { entries: readonly BoardEntry[] }): ReactNode => {
+  const [page, setPage] = useState(0);
+  return <PaginatedBoardEntries entries={entries} page={page} onPageChange={setPage} actions={ACTIONS} />;
+};
+
 test("the shared paginated entry list owns page controls and clamps after shrink", async () => {
   const { dom, container } = installDom();
   const rows = Array.from({ length: CARD_PAGE_SIZE * 2 + 1 }, (_, index) => (
@@ -760,7 +767,7 @@ test("the shared paginated entry list owns page controls and clamps after shrink
   ));
   const root = (await reactDom()).createRoot(container);
   try {
-    await act(async () => root.render(<PaginatedBoardEntries entries={rows} actions={ACTIONS} />));
+    await act(async () => root.render(<PaginatedHarness entries={rows} />));
     assert.equal(container.querySelectorAll("[data-card]").length, CARD_PAGE_SIZE);
     const more = [...container.querySelectorAll("button")].find((button) => button.textContent === `Show ${CARD_PAGE_SIZE} more`);
     assert.ok(more);
@@ -768,7 +775,7 @@ test("the shared paginated entry list owns page controls and clamps after shrink
     assert.equal(container.querySelectorAll("[data-card]").length, CARD_PAGE_SIZE);
     assert.match(container.textContent ?? "", new RegExp(en("tasks.column.previous", { n: CARD_PAGE_SIZE })));
 
-    await act(async () => root.render(<PaginatedBoardEntries entries={rows.slice(0, 1)} actions={ACTIONS} />));
+    await act(async () => root.render(<PaginatedHarness entries={rows.slice(0, 1)} />));
     assert.equal(container.querySelector("[data-card]")?.getAttribute("data-card"), "done-0");
     assert.equal(container.querySelectorAll("button").length, 1, "only the card menu remains after pagination clamps");
   } finally {
@@ -798,4 +805,210 @@ test("InfoNotice borrows neither the amber nor the destructive palette", () => {
   const markup = renderToStaticMarkup(<InfoNotice message="Archived 6" onDismiss={() => undefined} />);
   assert.doesNotMatch(markup, /status-amber|destructive/);
   assert.match(markup, new RegExp(en("common.dismiss")));
+});
+
+/* ------------------------------------------------- the Todo column's wave */
+
+const chainRow = (options: {
+  chainId: string;
+  name: string | null;
+  stepCount: number;
+  state: ChainAggregateState;
+  activationTaskId?: string | null;
+  status?: TaskStatus;
+}): BoardTask => {
+  const status = options.status ?? "TODO";
+  const headId = `${options.chainId}-head`;
+  const chainName = options.name === null ? null : options.name;
+  const aggregate: ChainAggregate = {
+    chainId: options.chainId, chainName, stepCount: options.stepCount,
+    statusCounts: { BACKLOG: 0, TODO: options.stepCount, DOING: 0, REVIEW: 0, DONE: 0 },
+    detailTaskId: headId, status,
+    frontier: { taskId: headId, title: "Implementation", status, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 },
+    activation: {
+      state: options.state,
+      predecessor: options.state === "waiting-on-predecessor" ? { taskId: "release", taskName: "Release cut" } : null,
+      taskId: options.activationTaskId === undefined ? headId : options.activationTaskId,
+    },
+    totalCost: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
+  };
+  return task({
+    id: headId, name: `${options.name ?? options.chainId}: Implementation`, displayName: "Implementation", status,
+    chainId: options.chainId, chainName, chainIndex: 0,
+    chainProgress: progress({ chainId: options.chainId }), chainAggregate: aggregate,
+  });
+};
+
+test("Activate all is offered only where the Todo column holds a parked chain", () => {
+  const parked = chainRow({ chainId: "alpha", name: "Alpha", stepCount: 2, state: "parked-unactivated" });
+  assert.match(column("TODO", boardEntries([parked])), new RegExp(en("tasks.activateAll")));
+  // Nothing to activate: an empty column, a card that is not a chain, and a
+  // chain the control plane will dispatch itself when its predecessor lands.
+  assert.doesNotMatch(column("TODO"), new RegExp(en("tasks.activateAll")));
+  assert.doesNotMatch(column("TODO", [task({ name: "Plain work" })]), new RegExp(en("tasks.activateAll")));
+  const waiting = chainRow({ chainId: "beta", name: "Beta", stepCount: 4, state: "waiting-on-predecessor", activationTaskId: null });
+  assert.doesNotMatch(column("TODO", boardEntries([waiting])), new RegExp(en("tasks.activateAll")));
+  // Done keeps its own head action and gains nothing.
+  const settled = chainRow({ chainId: "gamma", name: "Gamma", stepCount: 1, state: "settled", status: "DONE" });
+  const done = column("DONE", boardEntries([settled]));
+  assert.match(done, new RegExp(en("tasks.archiveAll")));
+  assert.doesNotMatch(done, new RegExp(en("tasks.activateAll")));
+});
+
+test("Activate all follows the parked chains on the visible Todo page", async () => {
+  const { dom, container } = installDom();
+  const definition = COLUMNS.find((candidate) => candidate.status === "TODO");
+  assert.ok(definition);
+  const rows = boardEntries([
+    ...Array.from({ length: CARD_PAGE_SIZE }, (_, index) => task({ id: `plain-${index}`, name: `Plain ${index}` })),
+    chainRow({ chainId: "parked", name: "Parked", stepCount: 2, state: "parked-unactivated" }),
+  ]);
+  const activated: Array<readonly { chainId: string }[]> = [];
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BoardColumn
+        column={definition} tasks={rows} loading={false} dragOver={null}
+        onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop}
+        onActivateAll={(chains) => activated.push(chains)} actions={ACTIONS}
+      />,
+    ));
+    assert.doesNotMatch(container.textContent ?? "", new RegExp(en("tasks.activateAll")));
+    const more = [...container.querySelectorAll("button")].find((button) => button.textContent === en("tasks.column.more", { n: 1 }));
+    assert.ok(more);
+    await act(async () => more.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    const activate = [...container.querySelectorAll("button")].find((button) => button.textContent === en("tasks.activateAll"));
+    assert.ok(activate);
+    await act(async () => activate.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.deepEqual(activated.map((chains) => chains.map((chain) => chain.chainId)), [["parked"]]);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("parkedChains projects exactly the chains an operator can start", () => {
+  const entries = boardEntries([
+    chainRow({ chainId: "alpha", name: "Alpha", stepCount: 2, state: "parked-unactivated" }),
+    chainRow({ chainId: "beta", name: "Beta", stepCount: 4, state: "waiting-on-predecessor", activationTaskId: null }),
+    chainRow({ chainId: "gamma", name: "Gamma", stepCount: 3, state: "parked-unactivated" }),
+    chainRow({ chainId: "delta", name: "Delta", stepCount: 5, state: "running" }),
+    task({ id: "plain", name: "Plain work" }),
+  ]);
+  assert.deepEqual(parkedChains(entries), [
+    { chainId: "alpha", name: "Alpha", stepCount: 2, taskId: "alpha-head" },
+    { chainId: "gamma", name: "Gamma", stepCount: 3, taskId: "gamma-head" },
+  ]);
+  // An unnamed chain is still listed, under the short id the cards use.
+  const unnamed = boardEntries([chainRow({ chainId: "c1234567890", name: null, stepCount: 1, state: "parked-unactivated" })]);
+  assert.deepEqual(parkedChains(unnamed).map((chain) => chain.name), ["c1234567"]);
+});
+
+test("the Todo head starts the whole wave from one dialog and names the chain that refused", async () => {
+  storage.set("agentos.projectId", "p1");
+  const checklist = {
+    repoBound: true, agentAssignee: true, repoAccessGrant: true,
+    budgetRemaining: true, noActiveRun: true, predecessorsDone: true,
+  };
+  const verdict = (id: string, name: string, startable: boolean): TaskStartability => ({
+    startable,
+    checklist: { ...checklist, budgetRemaining: startable },
+    task: {
+      id, name, agent: { id: "a1", title: "Senior dev" },
+      repo: { id: "r1", name: "product" }, targetBranch: "main",
+    },
+  } as TaskStartability);
+  const rows = [
+    chainRow({ chainId: "alpha", name: "Alpha", stepCount: 2, state: "parked-unactivated" }),
+    chainRow({ chainId: "beta", name: "Beta", stepCount: 4, state: "waiting-on-predecessor", activationTaskId: null }),
+    chainRow({ chainId: "gamma", name: "Gamma", stepCount: 3, state: "parked-unactivated" }),
+    chainRow({ chainId: "delta", name: "Delta", stepCount: 5, state: "parked-unactivated" }),
+    task({ id: "plain", name: "Plain work" }),
+  ];
+  const started: string[] = [];
+  let releaseAlpha!: (verdict: TaskStartability) => void;
+  const alphaVerdict = new Promise<TaskStartability>((resolve) => { releaseAlpha = resolve; });
+  let markDeltaStarted!: () => void;
+  const deltaStarted = new Promise<void>((resolve) => { markDeltaStarted = resolve; });
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "GET /tasks/alpha-head/startability": () => alphaVerdict,
+    "GET /tasks/gamma-head/startability": verdict("gamma-head", "Gamma: Implementation", true),
+    "GET /tasks/delta-head/startability": verdict("delta-head", "Delta: Implementation", true),
+    "POST /tasks/gamma-head/start": Response.json({ error: "Task already has an active run" }, { status: 409 }),
+    "POST /tasks/delta-head/start": () => {
+      started.push("delta-head");
+      markDeltaStarted();
+      return Response.json({ runId: "run-1", runNumber: 1 }, { status: 201 });
+    },
+    "*": [],
+  });
+  try {
+    await page.press(en("tasks.activateAll"));
+    const listed = [...page.dom.window.document.querySelectorAll("[data-activate-chain]")]
+      .map((node) => node.textContent?.trim());
+    // Exactly the parked chains, with their step counts. Beta dispatches itself
+    // and the plain card is not a chain at all.
+    assert.deepEqual(listed, [
+      en("tasks.activateAll.chain", { name: "Alpha", steps: 2 }),
+      en("tasks.activateAll.chain", { name: "Gamma", steps: 3 }),
+      en("tasks.activateAll.chain", { name: "Delta", steps: 5 }),
+    ]);
+
+    const confirm = [...page.dom.window.document.querySelectorAll("button")]
+      .find((node) => node.textContent?.trim() === en("tasks.activateAll.confirm"));
+    assert.ok(confirm);
+    await act(async () => confirm.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
+    await Promise.race([
+      deltaStarted,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Delta was held behind Alpha")), 500)),
+    ]);
+    // Alpha's check is still pending, but the later chains have already taken
+    // their own GET-then-POST paths. One refusal or slow request cannot hold the
+    // rest of the wave behind it.
+    assert.deepEqual(started, ["delta-head"]);
+    assert.equal(page.requests.some(({ method, path }) => method === "POST" && path === "/tasks/alpha-head/start"), false);
+    assert.equal(page.requests.some(({ method, path }) => method === "GET" && path === "/tasks/gamma-head/startability"), true);
+    assert.equal(page.requests.some(({ method, path }) => method === "POST" && path === "/tasks/gamma-head/start"), true);
+    assert.equal(page.requests.some(({ method, path }) => method === "GET" && path === "/tasks/delta-head/startability"), true);
+    assert.equal(page.requests.some(({ method, path }) => method === "POST" && path === "/tasks/delta-head/start"), true);
+    assert.equal(page.requests.some(({ path }) => path.includes("activate")), false);
+    releaseAlpha(verdict("alpha-head", "Alpha: Implementation", false));
+    await page.settle();
+    const body = page.dom.window.document.body.textContent ?? "";
+    assert.match(body, new RegExp(en("tasks.activateAll.refused", { name: "Alpha", reason: en("tasks.startRefused", { reasons: en("taskDetail.startability.budgetRemaining") }) })));
+    assert.match(body, new RegExp(en("tasks.activateAll.refused", { name: "Gamma", reason: "409 Task already has an active run" })));
+    assert.doesNotMatch(body, /Delta: Task cannot start/);
+    assert.match(page.container.textContent ?? "", new RegExp(activateAllNotice(3, 2)));
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("the settled activation dialog no longer promises refused chains will start", async () => {
+  const { dom, container } = installDom();
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ActivateAllDialog
+        chains={[{ chainId: "alpha", name: "Alpha", stepCount: 2, taskId: "alpha-head" }]}
+        refusals={[{ name: "Alpha", reason: "Task cannot start" }]}
+        pending={false} settled onClose={noop} onConfirm={noop}
+      />,
+    ));
+    const text = dom.window.document.body.textContent ?? "";
+    assert.doesNotMatch(text, new RegExp(en("tasks.activateAll.what")));
+    assert.doesNotMatch(text, new RegExp(en("tasks.activateAll.chain", { name: "Alpha", steps: 2 })));
+    assert.match(text, new RegExp(en("tasks.activateAll.refused", { name: "Alpha", reason: "Task cannot start" })));
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("the wave notice counts what started, not what was asked for", () => {
+  assert.equal(activateAllNotice(10, 0), "Started 10 of 10 chains");
+  assert.equal(activateAllNotice(10, 3), "Started 7 of 10 chains");
 });
