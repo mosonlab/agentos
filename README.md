@@ -183,3 +183,6 @@ Copyright (c) 2026 Matt Pocock) supply working text for the chain's
 prompts; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). This
 snapshot is licensed under the [MIT License](LICENSE), with its
 boundary defined by [`public-snapshot.json`](public-snapshot.json).
+
+Community link: [LINUX DO](https://linux.do/) — sincere, friendly,
+united, and professional.
