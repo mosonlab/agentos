@@ -9,6 +9,7 @@ import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus, taskBoardEntry } from "../lib/board";
+import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
@@ -34,6 +35,10 @@ const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, 
 const card = (overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
   <TaskCard task={task(overrides)} actions={ACTIONS} />,
 );
+
+const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
+  <LocaleProvider initialLocale={locale}><TaskCard task={task(overrides)} actions={ACTIONS} /></LocaleProvider>,
+).replace(/<[^>]*>/gu, "");
 
 test("a card marks estimated cumulative dollars and falls back to token counts", () => {
   assert.match(card({
@@ -543,9 +548,28 @@ test("a FAST run adds a fast marker to the single-task model line, but DEFAULT d
 
   const fast = card({ latestRun: run("FAST") });
   assert.match(fast, /gpt-5\.6-sol:high · fast/u);
+  const fastText = fast.replace(/<[^>]*>/gu, "");
+  assert.equal((fastText.match(/fast/gu) ?? []).length, 1, fastText);
   const standard = card({ latestRun: run("DEFAULT") });
   assert.match(standard, /gpt-5\.6-sol:high/u);
   assert.doesNotMatch(standard, /fast/u);
+});
+
+test("a running single-task card keeps localized elapsed copy without a redundant run status", () => {
+  const latestRun = {
+    id: "r1", runNumber: 1, status: "RUNNING" as const, model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT" as const,
+    costUsd: null, startedAt: new Date(Date.now() - 4 * 60_000).toISOString(), endedAt: null,
+  };
+
+  const chinese = localizedCard("zh", { status: "DOING", latestRun });
+  assert.doesNotMatch(chinese, /运行中/u);
+  assert.match(chinese, /已运行 \d+ 分/u);
+
+  // Render English last because the test i18n adapter retains the latest
+  // requested locale for helpers exercised later in this process.
+  const english = localizedCard("en", { status: "DOING", latestRun });
+  assert.equal((english.match(/running/gu) ?? []).length, 1, english);
+  assert.match(english, /running \d+m/u);
 });
 
 test("a task with no runs still shows the agent's configured model", () => {

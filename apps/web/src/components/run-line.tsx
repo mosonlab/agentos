@@ -49,6 +49,7 @@ export const RunLine = ({
   mergeOutcome,
   showElapsed = false,
   showModel = false,
+  suppressRunningStatus = false,
 }: {
   run: BoardLatestRun;
   mergeOutcome?: MergeOutcome | null | undefined;
@@ -56,6 +57,8 @@ export const RunLine = ({
   /** Aggregate cards put the claimed model beside the run; task cards retain
    * their dedicated model row and leave this off. */
   showModel?: boolean;
+  /** Task cards render a live RUNNING duration in their footer. */
+  suppressRunningStatus?: boolean;
 }): ReactNode => {
   const t = useT();
   const presentation = runPresentation(run.status, mergeOutcome);
@@ -63,21 +66,31 @@ export const RunLine = ({
     ? t("tasks.card.runningDuration", { duration: duration(run.startedAt, null) })
     : null;
   const model = showModel ? splitModel(run.model) : null;
+  const badge = mergeBadge(mergeOutcome);
+  const hideStatus = run.status === "RUNNING"
+    && badge === null
+    && (elapsed !== null || suppressRunningStatus);
   const runDetails = [
-    ...(model === null ? [] : [model.model, ...(model.effort === null ? [] : [model.effort])]),
-    ...(run.codexServiceTier === "FAST" ? ["fast"] : []),
-    // An active run's elapsed copy already says "running". The chain state
-    // pill supplies the aggregate's state, so repeating the run status here
-    // made a live card read "Running ... running · running 12m".
-    elapsed === null ? t(presentation.key) : elapsed,
+    ...(model === null ? [] : [
+      model.model,
+      ...(model.effort === null ? [] : [model.effort]),
+      ...(run.codexServiceTier === "FAST" ? ["fast"] : []),
+    ]),
+    // An active run's elapsed copy already says "running". It may sit on this
+    // line or in the task-card footer; either way, repeating the plain run
+    // status made a live card say "running" twice.
+    ...(hideStatus ? [] : [t(presentation.key)]),
+    ...(elapsed === null ? [] : [elapsed]),
   ].join(" · ");
   return (
     <span data-run-line="" className="inline-flex min-w-0 items-center gap-[6px] whitespace-nowrap">
       <span className={cn(DOT, DOT_TONE[dotTone(run.status, mergeOutcome)])} />
       <span className="text-primary">{t("tasks.card.run", { n: run.runNumber })}</span>
-      <span className="overflow-hidden text-ellipsis text-[color:var(--faint)]">
-        {` · ${runDetails}`}
-      </span>
+      {runDetails.length === 0 ? null : (
+        <span className="overflow-hidden text-ellipsis text-[color:var(--faint)]">
+          {` · ${runDetails}`}
+        </span>
+      )}
     </span>
   );
 };

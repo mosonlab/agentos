@@ -1,7 +1,5 @@
 import { type ReactNode, memo, useEffect, useState } from "react";
 
-import { splitModel } from "@anneal/db/model-routing";
-
 import { chainPositionMarker } from "../lib/chain";
 import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
 import { chainBinding, chainBindingLabel, retryable, scheduleLabel, statusLabel } from "../lib/board";
@@ -72,11 +70,7 @@ export const cardModel = (task: BoardTask): string | null =>
 
 const cardModelFast = (task: BoardTask, model: string): string => {
   const tier = task.latestRun?.codexServiceTier;
-  const parsed = splitModel(model);
-  // Keep the existing task-card model:effort presentation byte-for-byte while
-  // using the shared parser for the optional tier marker.
-  const encoded = parsed.effort === null ? parsed.model : `${parsed.model}:${parsed.effort}`;
-  return tier === "FAST" ? `${encoded} · fast` : encoded;
+  return tier === "FAST" ? `${model} · fast` : model;
 };
 
 export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): string => {
@@ -175,7 +169,11 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </span>,
     ]),
-    ...(task.latestRun === null ? [] : [<RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} />]),
+    ...(task.latestRun === null ? [] : [<RunLine
+      run={task.latestRun}
+      mergeOutcome={task.mergeOutcome}
+      suppressRunningStatus={task.latestRun.status === "RUNNING" && task.latestRun.startedAt !== null}
+    />]),
     ...(modelLine === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: modelLine })}>
       {modelLine}
     </span>]),

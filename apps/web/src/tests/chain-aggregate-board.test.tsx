@@ -146,6 +146,34 @@ test("aggregate run lines split model effort, mark FAST only, and avoid duplicat
   assert.match(chineseText, /第 3 次运行 · gpt-5\.6-sol · high · fast · 已运行 \d+ 分/u);
 });
 
+test("active elapsed preserves non-running statuses and merge-outcome badges", () => {
+  const waiting = {
+    ...activeRepairAggregate(),
+    activeRepair: {
+      repairKind: "review-fix",
+      latestRun: runWithTier({ status: "WAITING_INBOX", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }),
+    },
+  };
+  const waitingText = visibleText(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={waiting} /></LocaleProvider>,
+  ));
+  assert.match(waitingText, /review-fix · .*waiting inbox · running \d+m/u);
+
+  const stopped = aggregate({
+    status: "DOING",
+    frontier: {
+      taskId: "step-3", title: "Merge", status: "DOING",
+      latestRun: runWithTier({ status: "RUNNING", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }),
+      mergeOutcome: { outcome: "stopped", condition: "head-drift", incident: false },
+      failureReason: null, position: 3,
+    },
+  });
+  const stoppedText = visibleText(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={stopped} /></LocaleProvider>,
+  ));
+  assert.match(stoppedText, /Stopped · running \d+m/u);
+});
+
 test("the shared card shell does not navigate a Chain card while text is selected", async () => {
   const { dom, container } = installDom();
   let selection = "Release";
