@@ -35,7 +35,7 @@ const row = (overrides: Partial<Trigger> = {}): string => renderToStaticMarkup(
 const fire = (overrides: Partial<TriggerFire> = {}): TriggerFire => ({
   id: "f1", createdAt: "2026-08-16T00:00:00.000Z", source: "WEBHOOK", chainId: "c1",
   firstTask: { id: "t1", name: "Triage" },
-  progress: { chainId: "c1", done: 1, total: 3, activeStepName: "Triage", activeStatus: "doing", currentLayer: 1, layerCount: 3, position: 1 },
+  progress: { chainId: "c1", done: 1, total: 3, activeStepName: "Triage", activeStatus: "doing", currentLayer: 1, layerCount: 3 },
   ...overrides,
 });
 

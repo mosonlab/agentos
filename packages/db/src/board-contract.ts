@@ -20,7 +20,6 @@ import type {
   RunStatus as PrismaRunStatus,
   RunnerKind as PrismaRunnerKind,
   ScheduleKind as PrismaScheduleKind,
-  SessionEventSource as PrismaSessionEventSource,
   SessionExecutionStatus as PrismaSessionExecutionStatus,
   TaskSource as PrismaTaskSource,
   TaskStatus as PrismaTaskStatus,
@@ -39,11 +38,22 @@ export type CodexServiceTier = PrismaCodexServiceTier;
 export type SessionExecutionStatus = PrismaSessionExecutionStatus;
 export type CleanupStatus = PrismaCleanupStatus;
 export type FailureClass = PrismaFailureClass;
-export type SessionEventSource = PrismaSessionEventSource;
 export type PushStatus = PrismaPushStatus;
-export type ChainControlState = PrismaChainControlState;
 export type MergeRecoveryStatus = PrismaMergeRecoveryStatus;
 export type TriggerFireSource = PrismaTriggerFireSource;
+
+type KnownChainControlState = "HELD" | "RELEASED";
+type ChainControlStateCoverage =
+  Exclude<PrismaChainControlState, KnownChainControlState> extends never
+    ? Exclude<KnownChainControlState, PrismaChainControlState> extends never
+      ? unknown
+      : never
+    : never;
+
+/** Chain control is serialized as lower-case operator state. Keeping the
+ * known persisted set explicit makes a Prisma addition or removal fail at this
+ * seam until its wire spelling and projection are deliberately handled. */
+export type ChainControlState = PrismaChainControlState & ChainControlStateCoverage;
 
 export type ExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
 
@@ -133,7 +143,7 @@ export type MergeOutcome = {
 export type MergeRecovery<DateTime = string> = {
   id: string;
   attempt: number;
-  status: "VALIDATING" | "REPAIRING" | "AWAITING_AUTHORIZATION" | "BLOCKED_DOWNSTREAM" | "SUCCEEDED" | "FAILED";
+  status: MergeRecoveryStatus;
   phase: "validation" | "repair" | "authorization-wait" | "downstream-stop" | "succeeded" | "actual-failure";
   sourceStopId: string;
   boundSourceRunId: string | null;
@@ -367,7 +377,7 @@ export type ChainStep<DateTime = string> = {
 };
 
 export type ChainControl<DateTime = string> = {
-  state: "held" | "released";
+  state: Lowercase<ChainControlState>;
   heldLayer: number | null;
   heldAt: DateTime | null;
   holdRequestId: string | null;
@@ -425,7 +435,8 @@ export type TriggerFire<DateTime = string> = {
   source: TriggerFireSource;
   chainId: string | null;
   firstTask: { id: string; name: string } | null;
-  progress: ChainProgress | null;
+  /** Trigger history projects chain-wide progress, not one task's position. */
+  progress: Omit<ChainProgress, "position"> | null;
 };
 
 /** One fired copy of a recurring definition, newest first. */

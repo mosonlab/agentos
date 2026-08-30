@@ -89,7 +89,7 @@ const partitionAmounts = (values: readonly Prisma.Decimal[], total: Prisma.Decim
   if (!allocatedUnits.equals(targetUnits)) {
     throw new Error("Could not reconcile rounded cost partition");
   }
-  return allocations.map((entry) => entry.units.dividedBy(scale).toString());
+  return allocations.map((entry) => entry.units.dividedBy(scale));
 };
 
 type CalendarParts = { year: number; month: number; day: number; hour: number; minute: number; second: number };
