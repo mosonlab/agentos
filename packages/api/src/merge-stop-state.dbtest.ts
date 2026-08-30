@@ -16,6 +16,7 @@ import {
   enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
+  MergeLeaseEventState,
   MERGE_TAIL_KIND,
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
@@ -355,9 +356,18 @@ test("a merged outcome advances the chain and lands DONE", async () => {
   const hold = await db.taskActivity.findFirstOrThrow({
     where: { taskId: chain.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHold } },
   });
+  const ledger = await db.mergeLeaseEvent.findUniqueOrThrow({
+    where: { projectId_chainId_leaseSha: {
+      projectId: chain.project.id,
+      chainId: chain.integratorTask!.chainId!,
+      leaseSha: CONFIRMED_RELEASE.sha,
+    } },
+  });
+  assert.equal(ledger.state, MergeLeaseEventState.RELEASED);
   assert.deepEqual(hold.metadata, {
     kind: MERGE_TAIL_KIND.leaseHold,
     schemaVersion: 1,
+    ledgerId: ledger.id,
     chainId: chain.integratorTask!.chainId,
     leaseRef: CONFIRMED_RELEASE.ref,
     leaseSha: CONFIRMED_RELEASE.sha,
