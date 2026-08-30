@@ -1,20 +1,18 @@
 import "./test-workspace-root.js";
 
 import assert from "node:assert/strict";
-import { after, before, beforeEach, test } from "node:test";
+import { test } from "node:test";
 
 import {
   INTEGRATOR_TEMPLATE_NAME,
-  PrismaClient,
   RunStatus,
   TaskStatus,
   legacyTemplateName,
 } from "@anneal/db";
 import { runDbScript } from "./test-db-script.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb } from "./testdb.js";
 import {
-  createParallelReviewHarness,
-  OPERATOR_TOKEN,
+  installParallelReviewLifecycle,
   RUNNER_TOKEN,
   SPECIFICATION_BRIEF,
   type Claim,
@@ -23,51 +21,21 @@ import { createApp } from "./test-app.js";
 import { GitHubReadError } from "./github-read.js";
 import { instantiateTemplate } from "./templates.js";
 
-let db: PrismaClient;
-let materializedSpecification = SPECIFICATION_BRIEF;
-const specificationReads: Array<{ repository: string; path: string; commitSha: string }> = [];
-const previousEnvironment = {
-  runner: process.env.RUNNER_TOKEN,
-  operator: process.env.OPERATOR_TOKEN,
-};
-
-before(() => {
-  process.env.RUNNER_TOKEN = RUNNER_TOKEN;
-  process.env.OPERATOR_TOKEN = OPERATOR_TOKEN;
-  db = setupTestDb();
-});
-
-beforeEach(async () => {
-  materializedSpecification = SPECIFICATION_BRIEF;
-  specificationReads.length = 0;
-  await resetTestDb(db);
-  await runDbScript("seed.ts");
-});
-
-after(async () => {
-  await db.$disconnect();
-  if (previousEnvironment.runner === undefined) delete process.env.RUNNER_TOKEN;
-  else process.env.RUNNER_TOKEN = previousEnvironment.runner;
-  if (previousEnvironment.operator === undefined) delete process.env.OPERATOR_TOKEN;
-  else process.env.OPERATOR_TOKEN = previousEnvironment.operator;
-});
-
 const {
+  db,
   claim,
   completeImplementation,
   instantiateDirect,
   instantiateFullAtReviewFrontier,
   operatorRequest,
   runnerRequest,
-} = createParallelReviewHarness({
-  getDb: () => db,
-  getMaterializedSpecification: () => materializedSpecification,
+  setMaterializedSpecification,
   specificationReads,
-});
+} = installParallelReviewLifecycle();
 
 test("a faithful direct brief ending in the prior-output reminder remains claimable", async () => {
   const brief = "Preserve this exact ending.\nRead the prior template steps' persisted outputs before working.";
-  materializedSpecification = brief;
+  setMaterializedSpecification(brief);
   const fixture = await instantiateDirect(brief);
   await completeImplementation(fixture, "reminder-implementation");
   const reviewed = await claim("reminder-review");
@@ -76,7 +44,7 @@ test("a faithful direct brief ending in the prior-output reminder remains claima
 
 test("a faithful direct spec with one conventional final newline remains claimable", async () => {
   const brief = "Preserve this exact ending without a final newline.";
-  materializedSpecification = `${brief}\n`;
+  setMaterializedSpecification(`${brief}\n`);
   const fixture = await instantiateDirect(brief);
   await completeImplementation(fixture, "final-newline-implementation");
   const reviewed = await claim("final-newline-review");
@@ -565,9 +533,11 @@ test("tampered direct and compound materializations refuse claim with the named 
   for (const shape of ["direct", "compound"] as const) {
     await resetTestDb(db);
     await runDbScript("seed.ts");
-    materializedSpecification = shape === "direct"
-      ? `Feature brief:\n${SPECIFICATION_BRIEF}\nPersist the final implementation output for this step through the Anneal task output endpoint.`
-      : "tampered specification";
+    setMaterializedSpecification(
+      shape === "direct"
+        ? `Feature brief:\n${SPECIFICATION_BRIEF}\nPersist the final implementation output for this step through the Anneal task output endpoint.`
+        : "tampered specification",
+    );
     specificationReads.length = 0;
     const fixture = shape === "direct"
       ? await instantiateDirect()
@@ -607,7 +577,7 @@ test("tampered direct and compound materializations refuse claim with the named 
       },
     }), 0);
 
-    materializedSpecification = SPECIFICATION_BRIEF;
+    setMaterializedSpecification(SPECIFICATION_BRIEF);
     const sibling = await claim(`${shape}-sibling`);
     assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(sibling.run.taskId));
     assert.notEqual(sibling.run.taskId, failed.taskId);

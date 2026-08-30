@@ -1,50 +1,21 @@
 import "./test-workspace-root.js";
 
 import assert from "node:assert/strict";
-import { after, before, beforeEach, test } from "node:test";
+import { test } from "node:test";
 
-import { PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import { RunStatus, TaskStatus } from "@anneal/db";
 import { runDbScript } from "./test-db-script.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb } from "./testdb.js";
 import {
-  createParallelReviewHarness,
   IMPLEMENTATION_BASE,
   IMPLEMENTATION_HEAD,
-  OPERATOR_TOKEN,
-  RUNNER_TOKEN,
+  installParallelReviewLifecycle,
   SPECIFICATION_BRIEF,
   type Claim,
 } from "./parallel-review-fixture.js";
 
-let db: PrismaClient;
-let materializedSpecification = SPECIFICATION_BRIEF;
-const specificationReads: Array<{ repository: string; path: string; commitSha: string }> = [];
-const previousEnvironment = {
-  runner: process.env.RUNNER_TOKEN,
-  operator: process.env.OPERATOR_TOKEN,
-};
-
-before(() => {
-  process.env.RUNNER_TOKEN = RUNNER_TOKEN;
-  process.env.OPERATOR_TOKEN = OPERATOR_TOKEN;
-  db = setupTestDb();
-});
-beforeEach(async () => {
-  materializedSpecification = SPECIFICATION_BRIEF;
-  specificationReads.length = 0;
-  await resetTestDb(db);
-  await runDbScript("seed.ts");
-});
-
-after(async () => {
-  await db.$disconnect();
-  if (previousEnvironment.runner === undefined) delete process.env.RUNNER_TOKEN;
-  else process.env.RUNNER_TOKEN = previousEnvironment.runner;
-  if (previousEnvironment.operator === undefined) delete process.env.OPERATOR_TOKEN;
-  else process.env.OPERATOR_TOKEN = previousEnvironment.operator;
-});
-
 const {
+  db,
   claim,
   complete,
   completeImplementation,
@@ -54,11 +25,7 @@ const {
   operatorRequest,
   queuedRunsFor,
   reviewClaims,
-} = createParallelReviewHarness({
-  getDb: () => db,
-  getMaterializedSpecification: () => materializedSpecification,
-  specificationReads,
-});
+} = installParallelReviewLifecycle();
 
 test("Direct sync instantiates a parallel review frontier claimable by distinct runners with one pinned range", async () => {
   const fixture = await instantiateDirect();

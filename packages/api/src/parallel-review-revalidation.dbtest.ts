@@ -1,55 +1,21 @@
 import "./test-workspace-root.js";
 
 import assert from "node:assert/strict";
-import { after, before, beforeEach, test } from "node:test";
+import { test } from "node:test";
 
 import {
-  PrismaClient,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
 } from "@anneal/db";
-import { runDbScript } from "./test-db-script.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
 import {
   BOUND_SPECIFICATION_BRIEF,
-  createParallelReviewHarness,
   IMPLEMENTATION_BASE,
-  OPERATOR_TOKEN,
-  RUNNER_TOKEN,
-  SPECIFICATION_BRIEF,
+  installParallelReviewLifecycle,
 } from "./parallel-review-fixture.js";
 
-let db: PrismaClient;
-let materializedSpecification = SPECIFICATION_BRIEF;
-const specificationReads: Array<{ repository: string; path: string; commitSha: string }> = [];
-const previousEnvironment = {
-  runner: process.env.RUNNER_TOKEN,
-  operator: process.env.OPERATOR_TOKEN,
-};
-
-before(() => {
-  process.env.RUNNER_TOKEN = RUNNER_TOKEN;
-  process.env.OPERATOR_TOKEN = OPERATOR_TOKEN;
-  db = setupTestDb();
-});
-
-beforeEach(async () => {
-  materializedSpecification = SPECIFICATION_BRIEF;
-  specificationReads.length = 0;
-  await resetTestDb(db);
-  await runDbScript("seed.ts");
-});
-
-after(async () => {
-  await db.$disconnect();
-  if (previousEnvironment.runner === undefined) delete process.env.RUNNER_TOKEN;
-  else process.env.RUNNER_TOKEN = previousEnvironment.runner;
-  if (previousEnvironment.operator === undefined) delete process.env.OPERATOR_TOKEN;
-  else process.env.OPERATOR_TOKEN = previousEnvironment.operator;
-});
-
 const {
+  db,
   claim,
   complete,
   completeImplementation,
@@ -58,11 +24,8 @@ const {
   operatorRequest,
   request,
   reviewClaims,
-} = createParallelReviewHarness({
-  getDb: () => db,
-  getMaterializedSpecification: () => materializedSpecification,
-  specificationReads,
-});
+  setMaterializedSpecification,
+} = installParallelReviewLifecycle();
 
 test("bound revalidation PATCH becomes implementation spec.md authority for both reviews", async () => {
   const fixture = await instantiateBoundDirect();
@@ -122,7 +85,7 @@ test("bound revalidation PATCH becomes implementation spec.md authority for both
     path: `.chain/${fixture.branchName}/spec.md`,
     body: refreshedBrief,
   });
-  materializedSpecification = refreshedBrief;
+  setMaterializedSpecification(refreshedBrief);
   const reviews = await reviewClaims(fixture, "bound-sol-runner", "bound-blind-runner");
   assert.notEqual(reviews.first.run.id, reviews.second.run.id);
 });
