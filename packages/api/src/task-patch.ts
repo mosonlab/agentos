@@ -1,5 +1,6 @@
 import {
   activateChainSuccessor,
+  AssigneeType,
   CompoundImplementationAssigneeError,
   compoundImplementationAssigneeValid,
   InboxStatus,
@@ -13,9 +14,10 @@ import {
   type Task,
   TaskStatus,
 } from "@anneal/db";
+import { z } from "zod";
 
-import type { TaskPatchInput } from "./app.js";
 import { blockingPredecessor } from "./chain.js";
+import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import { type Refusal, refusalFor } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
 import { rewriteBrief, stepHasTaskBrief } from "./task-brief.js";
@@ -28,6 +30,69 @@ import {
   type TaskWriteRefusal,
 } from "./task-write.js";
 import { withoutUndefined } from "./without-undefined.js";
+
+const id = z.string().min(1);
+const taskFields = {
+  name: z.string().trim().min(1).max(200),
+  description: z.string(),
+  workingDirectory: z.string().trim().min(1).nullable(),
+  repoId: id.nullable(),
+  targetBranch: z.string().trim().min(1).nullable(),
+  assigneeType: z.nativeEnum(AssigneeType),
+  assigneeAgentId: id.nullable(),
+  approvalGate: z.boolean(),
+  opensPullRequest: z.boolean(),
+  maxDurationMin: z.number().int().min(1).max(24 * 60),
+  stallTimeoutMin: z.number().int().min(1).max(24 * 60),
+  maxSessionsPerTask: z.number().int().min(1).max(100),
+  scheduleKind: z.nativeEnum(ScheduleKind),
+  runAt: z.coerce.date().nullable(),
+  cron: z.string().trim().min(9).max(100).nullable(),
+  timezone: z.string().trim().min(1).max(64).nullable(),
+};
+const taskCreateStatus = z.nativeEnum(TaskStatus).refine(
+  (status) => status === TaskStatus.BACKLOG || status === TaskStatus.TODO,
+  "Task creation status must be BACKLOG or TODO",
+);
+
+/** Exported for `smoke-fixture.test.ts`: the published release fixture and this
+ *  schema have to agree about `opensPullRequest`, and the only way to assert
+ *  that is to parse the fixture with the schema the route actually uses. */
+export const taskInput = z.object({
+  ...taskFields,
+  status: taskCreateStatus.default(TaskStatus.TODO),
+  description: taskFields.description.default(""),
+  workingDirectory: taskFields.workingDirectory.default(null),
+  repoId: taskFields.repoId.default(null),
+  targetBranch: taskFields.targetBranch.default(null),
+  assigneeType: taskFields.assigneeType.default(AssigneeType.AGENT),
+  assigneeAgentId: taskFields.assigneeAgentId.default(null),
+  approvalGate: taskFields.approvalGate.default(false),
+  opensPullRequest: taskFields.opensPullRequest.default(true),
+  maxDurationMin: taskFields.maxDurationMin.default(240),
+  stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
+  maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
+  scheduleKind: taskFields.scheduleKind.default(ScheduleKind.NOW),
+  runAt: taskFields.runAt.default(null),
+  cron: taskFields.cron.default(null),
+  timezone: taskFields.timezone.default(null),
+  chainId: z.string().trim().min(1).max(100).optional(),
+  chainIndex: z.number().int().min(0).optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
+    context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
+  }
+});
+
+// `failureReason` is patchable but not creatable: a task is never born with a
+// failure, and an operator whose task carries a stale one needs a way to clear
+// it — an explicit null — without inventing a run.
+export const taskPatch = z.object(taskFields).partial().extend({
+  status: z.nativeEnum(TaskStatus).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
+
+export type TaskPatchInput = z.infer<typeof taskPatch>;
 
 export type TaskPatchRefusal = Refusal;
 

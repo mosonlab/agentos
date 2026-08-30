@@ -23,8 +23,8 @@ import {
   taskIsIntegratorStep,
   TaskStatus,
 } from "@anneal/db";
+import { z } from "zod";
 
-import type { ClaimInput } from "./app.js";
 import { issueSessionToken } from "./auth.js";
 import { isCanonicalBlindFindingsStep, previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { makeFencingToken } from "./execution.js";
@@ -45,6 +45,26 @@ import {
 } from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
 import { isSerializationConflict, serializable } from "./transaction.js";
+
+const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
+  console.warn("Discarded runner telemetry", { input, issues: error.issues });
+  return undefined;
+});
+
+export const runnerTelemetryFields = {
+  daemonVersion: telemetry(z.string().trim().max(40)),
+  diskFreeBytes: telemetry(z.number().int().nonnegative()),
+  pollIntervalMs: telemetry(z.number().int().positive().max(3_600_000)),
+  workspaceRoot: telemetry(z.string().trim().max(500)),
+};
+
+export const claimInput = z.object({
+  runnerId: z.string().trim().min(1).max(120),
+  leaseSeconds: z.number().int().min(15).max(3600).default(60),
+  ...runnerTelemetryFields,
+});
+
+export type ClaimInput = z.infer<typeof claimInput>;
 
 class PinnedRunTargetError extends Error {
   constructor(readonly runId: string, targetBranch: string | null, implementationHeadSha: string) {
