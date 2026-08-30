@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
   TaskStatus,
@@ -15,6 +16,8 @@ import {
   ensureRecoveryValidation,
   exhaust,
   reopenAfterHeadAdoption,
+  retireLegacyRefusal,
+  type RecoveryValidationIdentity,
 } from "./merge-tail-state.js";
 
 const recovery: RecoveryContext = {
@@ -87,6 +90,57 @@ const stateTx = (
     },
   } as unknown as Prisma.TransactionClient;
   return { tx, recoveryUpdates, taskUpdates, outputDeletes, activities, notices };
+};
+
+const legacyAttempt = (overrides: Partial<MergeRecoveryAttempt>): MergeRecoveryAttempt => ({
+  id: recovery.aggregateId,
+  integratorTaskId: recovery.integratorTaskId,
+  sourceStopId: recovery.sourceStopId,
+  attempt: recovery.attempt,
+  status: MergeRecoveryStatus.FAILED,
+  failureReason: "historical refusal wording",
+  refusalCode: null,
+  boundSourceRunId: null,
+  authorizationActivityId: null,
+  recoveryRunId: null,
+  readinessTaskId: null,
+  regressionTaskId: null,
+  repository: null,
+  prNumber: null,
+  targetBranch: null,
+  authorizedHeadSha: null,
+  authorizedBaseSha: null,
+  observedBaseSha: null,
+  currentBaseSha: null,
+  ...overrides,
+} as MergeRecoveryAttempt);
+
+const recoveryValidationIdentity = (): RecoveryValidationIdentity => ({
+  sourceRunId: recovery.sourceRunId,
+  authorizationActivityId: recovery.authorizationActivityId,
+  readinessTaskId: recovery.readinessTaskId,
+  regressionTaskId: recovery.regressionTaskId,
+  repository: recovery.repository,
+  prNumber: recovery.prNumber,
+  targetBranch: recovery.targetBranch,
+  authorizedHeadSha: recovery.authorizedHeadSha,
+  authorizedBaseSha: recovery.authorizedBaseSha,
+  observedBaseSha: recovery.observedBaseSha,
+});
+
+const ensureLegacyRecoveryValidation = (
+  observed: ReturnType<typeof stateTx>,
+  legacy: MergeRecoveryAttempt,
+): Promise<MergeRecoveryAttempt> => {
+  const tx = observed.tx as unknown as {
+    mergeRecoveryAttempt: { findFirst: (args: unknown) => Promise<MergeRecoveryAttempt | null> };
+  };
+  tx.mergeRecoveryAttempt.findFirst = async () => legacy;
+  return ensureRecoveryValidation(observed.tx, {
+    integratorTaskId: recovery.integratorTaskId,
+    sourceStopId: recovery.sourceStopId,
+    identity: recoveryValidationIdentity(),
+  });
 };
 
 test("awaitAuthorization changes only aggregate authority before the activation seam runs", async () => {
@@ -167,51 +221,60 @@ test("reopenAfterHeadAdoption skips a stale full-snapshot CAS without touching T
 });
 
 test("ensureRecoveryValidation owns the declared FAILED legacy reopen edge", async () => {
-  const legacy = {
-    id: recovery.aggregateId,
-    integratorTaskId: recovery.integratorTaskId,
-    sourceStopId: recovery.sourceStopId,
-    attempt: recovery.attempt,
-    status: MergeRecoveryStatus.FAILED,
-    failureReason: "source executor run does not have exactly one server-bound merge intent",
-    boundSourceRunId: null,
-    authorizationActivityId: null,
-    recoveryRunId: null,
-    readinessTaskId: null,
-    regressionTaskId: null,
-    repository: null,
-    prNumber: null,
-    targetBranch: null,
-    authorizedHeadSha: null,
-    authorizedBaseSha: null,
-    observedBaseSha: null,
-    currentBaseSha: null,
-  } as MergeRecoveryAttempt;
-  const observed = stateTx(MergeRecoveryStatus.FAILED);
-  const tx = observed.tx as unknown as {
-    mergeRecoveryAttempt: { findFirst: (args: unknown) => Promise<MergeRecoveryAttempt | null> };
-  };
-  tx.mergeRecoveryAttempt.findFirst = async () => legacy;
-
-  await ensureRecoveryValidation(observed.tx, {
-    integratorTaskId: recovery.integratorTaskId,
-    sourceStopId: recovery.sourceStopId,
-    identity: {
-      sourceRunId: recovery.sourceRunId,
-      authorizationActivityId: recovery.authorizationActivityId,
-      readinessTaskId: recovery.readinessTaskId,
-      regressionTaskId: recovery.regressionTaskId,
-      repository: recovery.repository,
-      prNumber: recovery.prNumber,
-      targetBranch: recovery.targetBranch,
-      authorizedHeadSha: recovery.authorizedHeadSha,
-      authorizedBaseSha: recovery.authorizedBaseSha,
-      observedBaseSha: recovery.observedBaseSha,
-    },
+  const legacy = legacyAttempt({
+    failureReason: "historical pre-intent wording changed",
+    refusalCode: MergeRecoveryRefusalCode.PRE_INTENT,
   });
+  const observed = stateTx(MergeRecoveryStatus.FAILED);
+
+  await ensureLegacyRecoveryValidation(observed, legacy);
 
   assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.VALIDATING);
+  assert.equal(observed.recoveryUpdates[0]?.data.refusalCode, null);
   assert.equal(observed.activities[0]?.metadata.state, "legacy-validation-reopened");
+});
+
+test("ensureRecoveryValidation reopens the target-branch legacy code regardless of its prose", async () => {
+  const legacy = legacyAttempt({
+    failureReason: "historical target-branch wording changed",
+    refusalCode: MergeRecoveryRefusalCode.TARGET_BRANCH_MISMATCH,
+  });
+  const observed = stateTx(MergeRecoveryStatus.FAILED);
+
+  await ensureLegacyRecoveryValidation(observed, legacy);
+
+  assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.VALIDATING);
+  assert.equal(observed.recoveryUpdates[0]?.data.refusalCode, null);
+  assert.equal(observed.activities[0]?.metadata.state, "legacy-validation-reopened");
+});
+
+test("retireLegacyRefusal clears the durable code after the refusal is settled", async () => {
+  const observed = stateTx(MergeRecoveryStatus.FAILED);
+
+  await retireLegacyRefusal(observed.tx, {
+    aggregateId: recovery.aggregateId,
+    integratorTaskId: recovery.integratorTaskId,
+    sourceStopId: recovery.sourceStopId,
+    priorReason: "historical target-branch wording changed",
+    reason: "target changed again",
+    at: new Date("2026-08-29T12:00:00.000Z"),
+  });
+
+  assert.equal(observed.recoveryUpdates[0]?.data.refusalCode, null);
+});
+
+test("ensureRecoveryValidation does not reopen a prose-only historical refusal", async () => {
+  const legacy = legacyAttempt({
+    failureReason: "source executor run does not have exactly one server-bound merge intent",
+    refusalCode: null,
+  });
+  const observed = stateTx(MergeRecoveryStatus.FAILED);
+
+  const result = await ensureLegacyRecoveryValidation(observed, legacy);
+
+  assert.equal(result, legacy);
+  assert.deepEqual(observed.recoveryUpdates, []);
+  assert.deepEqual(observed.activities, []);
 });
 
 test("ensureRecoveryValidation fails loudly instead of overwriting conflicting VALIDATING identity", async () => {
