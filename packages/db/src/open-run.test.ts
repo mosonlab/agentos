@@ -303,7 +303,10 @@ test("integrator-authorized is the named human reauthorization exit from an unre
 
 test("openRun names every intent-specific refusal exit", async () => {
   const missing = await openRun(fakeTx(null).tx, "missing", { kind: "enqueue", readyAt: now });
-  assert.deepEqual(missing, { ok: false, refusal: { reason: "not-found", message: "Task not found" } });
+  assert.deepEqual(missing, {
+    ok: false,
+    refusal: { code: "task-not-found", reason: "not-found", message: "Task not found" },
+  });
 
   const noAgentTask = taskRow({ assigneeType: AssigneeType.HUMAN, assigneeAgent: null, assigneeAgentId: null });
   const noAgent = await openRun(fakeTx(noAgentTask).tx, noAgentTask.id, { kind: "retry", readyAt: now });
@@ -341,7 +344,10 @@ test("openRun names every intent-specific refusal exit", async () => {
 
   const exhaustedTask = taskRow({ maxSessionsPerTask: 2, runs: [priorRun({ runNumber: 3, budgetGrants: 1 })] });
   const exhausted = await openRun(fakeTx(exhaustedTask).tx, exhaustedTask.id, { kind: "retry", readyAt: now });
-  assert.deepEqual(exhausted, { ok: false, refusal: { reason: "conflict", message: "Run budget exhausted" } });
+  assert.deepEqual(exhausted, {
+    ok: false,
+    refusal: { code: "run-budget-exhausted", reason: "conflict", message: "Run budget exhausted" },
+  });
 });
 
 test("each OpenRunIntent creates through one seam with its named budget rule", async () => {

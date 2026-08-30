@@ -1,11 +1,10 @@
 import {
   AssigneeType,
   ACTIVE_RUN_STATUSES,
-  isChainHeldError,
-  enqueueTaskRun,
   INTEGRATOR_AGENT_NAME,
   lockChainRows,
   lockChainStructure,
+  openRun,
   Prisma,
   type PrismaClient,
   ScheduleKind,
@@ -172,7 +171,50 @@ export const fireCronTask = async (
       recurringSourceTaskId: task.id,
     } });
     if (copy.assigneeType === AssigneeType.AGENT && copy.assigneeAgentId && copy.repoId) {
-      await enqueueTaskRun(tx, copy.id, now);
+      const opened = await openRun(tx, copy.id, { kind: "enqueue", readyAt: now });
+      if (!opened.ok) {
+        const refusal = opened.refusal;
+        switch (refusal.code) {
+          case "assignee-archived":
+          case "chain-held":
+          case "compound-implementation-assignee":
+          case "initial-run-already-exists":
+          case "integrator-binding-invalid":
+          case "integrator-stopped":
+          case "prior-run-required":
+          case "repo-required":
+          case "run-budget-exhausted":
+          case "source-run-stale":
+          case "task-archived":
+          case "task-assignee-missing":
+          case "task-assignee-type-invalid":
+          case "task-not-found":
+          case "task-not-integrator":
+            await tx.task.update({
+              where: { id: copy.id },
+              data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+            });
+            await tx.taskActivity.createMany({ data: [
+              {
+                taskId: task.id,
+                actorType: "scheduler",
+                body: `Recurring schedule advanced without a Run: ${refusal.message}`,
+                metadata: { recurringTaskId: task.id, copyTaskId: copy.id, refusal: refusal.code },
+              },
+              {
+                taskId: copy.id,
+                actorType: "scheduler",
+                body: `Created from recurring task ${task.id}; Run birth refused: ${refusal.message}`,
+                metadata: { recurringTaskId: task.id, refusal: refusal.code },
+              },
+            ] });
+            return false;
+          default: {
+            const unhandled: never = refusal;
+            return unhandled;
+          }
+        }
+      }
     }
     const metadata = { recurringTaskId: task.id, firedAt: now.toISOString() };
     await tx.taskActivity.createMany({ data: [
@@ -213,15 +255,46 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       // deriving the same runNumber and losing to the dedupe key; serialised,
       // the loser would otherwise observe run 1 and happily queue run 2.
       if (current._count.runs > 0) return false;
-      await enqueueTaskRun(tx, task.id, now);
-      return true;
+      const opened = await openRun(tx, task.id, { kind: "enqueue", readyAt: now });
+      if (opened.ok) return true;
+      const refusal = opened.refusal;
+      switch (refusal.code) {
+        case "chain-held":
+          return false;
+        case "assignee-archived":
+        case "compound-implementation-assignee":
+        case "initial-run-already-exists":
+        case "integrator-binding-invalid":
+        case "integrator-stopped":
+        case "prior-run-required":
+        case "repo-required":
+        case "run-budget-exhausted":
+        case "source-run-stale":
+        case "task-archived":
+        case "task-assignee-missing":
+        case "task-assignee-type-invalid":
+        case "task-not-found":
+        case "task-not-integrator":
+          await tx.task.update({ where: { id: task.id }, data: { runAt: null } });
+          await tx.taskActivity.create({ data: {
+            taskId: task.id,
+            actorType: "scheduler",
+            body: `Schedule quarantined after Run birth refusal: ${refusal.message}`,
+            metadata: { refusal: refusal.code },
+          } });
+          return false;
+        default: {
+          const unhandled: never = refusal;
+          return unhandled;
+        }
+      }
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   } catch (error: unknown) {
     // A held successor is intentionally left due: the scheduler must be able
     // to try it again after Resume releases the live Chain authority. The
     // shared Run-open seam has already rolled the transaction back, so this is
     // an ordinary no-fire result rather than a quarantinable schedule error.
-    if (uniqueConflict(error) || isChainHeldError(error)) return false;
+    if (uniqueConflict(error)) return false;
     throw error;
   }
 };

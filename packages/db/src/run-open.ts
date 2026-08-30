@@ -540,16 +540,9 @@ export type OpenRunIntent =
     sourceBudgetGrants: number;
   };
 
-export type OpenRunRefusal = {
-  reason:
-    | "invalid-request"
-    | "not-found"
-    | "conflict"
-    | "compound-implementation-assignee"
-    | "archived-assignee"
-    | "archived-task"
-    | "integrator-stopped"
-    | "chain-held";
+type OpenRunRefusalShape<Code extends string, Reason extends string> = {
+  code: Code;
+  reason: Reason;
   message: string;
   detail?: Readonly<Record<string, string | number | boolean | null>>;
   context?: Readonly<{
@@ -564,24 +557,43 @@ export type OpenRunRefusal = {
   }>;
 };
 
+export type OpenRunRefusal =
+  | OpenRunRefusalShape<"task-not-found", "not-found">
+  | OpenRunRefusalShape<"task-assignee-type-invalid", "invalid-request">
+  | OpenRunRefusalShape<"task-assignee-missing", "conflict">
+  | OpenRunRefusalShape<"repo-required", "invalid-request">
+  | OpenRunRefusalShape<"task-archived", "archived-task">
+  | OpenRunRefusalShape<"integrator-stopped", "integrator-stopped">
+  | OpenRunRefusalShape<"assignee-archived", "archived-assignee">
+  | OpenRunRefusalShape<"compound-implementation-assignee", "compound-implementation-assignee">
+  | OpenRunRefusalShape<"integrator-binding-invalid", "invalid-request">
+  | OpenRunRefusalShape<"initial-run-already-exists", "conflict">
+  | OpenRunRefusalShape<"prior-run-required", "conflict">
+  | OpenRunRefusalShape<"source-run-stale", "conflict">
+  | OpenRunRefusalShape<"task-not-integrator", "invalid-request">
+  | OpenRunRefusalShape<"run-budget-exhausted", "conflict">
+  | OpenRunRefusalShape<"chain-held", "chain-held">;
+
 export type OpenRunResult =
   | { ok: true; run: Run }
   | { ok: false; refusal: OpenRunRefusal };
 
-const openRunRefusal = (
-  reason: OpenRunRefusal["reason"],
+const openRunRefusal = <Code extends OpenRunRefusal["code"]>(
+  code: Code,
+  reason: Extract<OpenRunRefusal, { code: Code }>["reason"],
   message: string,
   detail?: OpenRunRefusal["detail"],
   context?: OpenRunRefusal["context"],
-): OpenRunResult => ({
-  ok: false,
-  refusal: {
+): OpenRunResult => {
+  const refusal = {
+    code,
     reason,
     message,
     ...(detail ? { detail } : {}),
     ...(context ? { context } : {}),
-  },
-});
+  } as Extract<OpenRunRefusal, { code: Code }>;
+  return { ok: false, refusal };
+};
 
 const sourceRetryIntent = (
   intent: OpenRunIntent,
@@ -611,18 +623,18 @@ export const openRun = async (
       runs: { orderBy: { runNumber: "desc" }, take: 1 },
     },
   });
-  if (!task) return openRunRefusal("not-found", "Task not found");
+  if (!task) return openRunRefusal("task-not-found", "not-found", "Task not found");
   if (task.assigneeType !== AssigneeType.AGENT) {
-    return openRunRefusal("invalid-request", `Task ${task.id} cannot open a Run without an Agent assignee`);
+    return openRunRefusal("task-assignee-type-invalid", "invalid-request", `Task ${task.id} cannot open a Run without an Agent assignee`);
   }
   if (!task.assigneeAgent) {
-    return openRunRefusal("conflict", "Task assignee no longer exists; assign an agent before retrying");
+    return openRunRefusal("task-assignee-missing", "conflict", "Task assignee no longer exists; assign an agent before retrying");
   }
   if (!task.repo && (intent.kind === "enqueue"
     || intent.kind === "merge-tail-requeue"
     || intent.kind === "task-created"
     || intent.kind === "integrator-authorized")) {
-    return openRunRefusal("invalid-request", `Task ${task.id} cannot open a ${intent.kind} Run without a Repo`);
+    return openRunRefusal("repo-required", "invalid-request", `Task ${task.id} cannot open a ${intent.kind} Run without a Repo`);
   }
   // Checked before the assignee, because an archived task is archived whoever
   // it is assigned to. The runner claims only `TODO|DOING` and unarchived tasks,
@@ -631,7 +643,7 @@ export const openRun = async (
     const message = intent.kind === "retry"
       ? "Cannot retry an archived task"
       : `Task ${task.name} is archived; unarchive it before queueing a run`;
-    return openRunRefusal("archived-task", message, undefined, {
+    return openRunRefusal("task-archived", "archived-task", message, undefined, {
       taskId: task.id,
       taskName: task.name,
     });
@@ -649,6 +661,7 @@ export const openRun = async (
     && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
     return openRunRefusal(
       "integrator-stopped",
+      "integrator-stopped",
       `Merge integrator stopped on ${stopped.stop.condition}; answer the stop question before starting another run`,
       undefined,
       { taskId: task.id, condition: stopped.stop.condition },
@@ -664,6 +677,7 @@ export const openRun = async (
       ? `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`
       : `Task ${task.name} assignee ${task.assigneeAgent.name} is archived; unarchive the agent to queue this step`;
     return openRunRefusal(
+      "assignee-archived",
       "archived-assignee",
       message,
       undefined,
@@ -676,8 +690,12 @@ export const openRun = async (
     lockedAgent,
     task.templateStep,
   )) {
-    const error = new CompoundImplementationAssigneeError();
-    return openRunRefusal("compound-implementation-assignee", error.message, { code: error.code });
+    return openRunRefusal(
+      "compound-implementation-assignee",
+      "compound-implementation-assignee",
+      `Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`,
+      { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
+    );
   }
   // §D-P4, the last line of the binding invariant, for the same reason. The
   // Agent name comes from the locked re-read, never the stale task relation.
@@ -686,23 +704,29 @@ export const openRun = async (
     templateStep: task.templateStep,
   });
   if (bindingRefusal) {
-    return openRunRefusal("invalid-request", bindingRefusal, undefined, { code: "INTEGRATOR_BINDING_INVALID" });
+    return openRunRefusal(
+      "integrator-binding-invalid",
+      "invalid-request",
+      bindingRefusal,
+      undefined,
+      { code: "INTEGRATOR_BINDING_INVALID" },
+    );
   }
 
   const prior = task.runs[0];
   if (intent.kind === "task-created" && prior) {
-    return openRunRefusal("conflict", `Task ${task.name} already has a Run`);
+    return openRunRefusal("initial-run-already-exists", "conflict", `Task ${task.name} already has a Run`);
   }
   if ((intent.kind === "retry"
     || intent.kind === "integrator-authorized"
     || sourceRetryIntent(intent)) && !prior) {
-    return openRunRefusal("conflict", `Task ${task.name} has no Run to continue`);
+    return openRunRefusal("prior-run-required", "conflict", `Task ${task.name} has no Run to continue`);
   }
   if (sourceRetryIntent(intent) && prior?.id !== intent.sourceRunId) {
-    return openRunRefusal("conflict", `Run ${intent.sourceRunId} is no longer the latest Run for task ${task.name}`);
+    return openRunRefusal("source-run-stale", "conflict", `Run ${intent.sourceRunId} is no longer the latest Run for task ${task.name}`);
   }
   if (intent.kind === "integrator-authorized" && (!task.templateStep || stepRole(task.templateStep) !== "integrator")) {
-    return openRunRefusal("invalid-request", `Task ${task.name} is not an integrator Step`);
+    return openRunRefusal("task-not-integrator", "invalid-request", `Task ${task.name} is not an integrator Step`);
   }
 
   const runNumber = (prior?.runNumber ?? 0) + 1;
@@ -728,7 +752,7 @@ export const openRun = async (
     maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
   }
   if (intent.kind === "retry" && prior && prior.runNumber >= maxRunsPerTask) {
-    return openRunRefusal("conflict", "Run budget exhausted");
+    return openRunRefusal("run-budget-exhausted", "conflict", "Run budget exhausted");
   }
 
   // `chainLayer` is the post-expand authority, with `chainIndex` as the
@@ -745,10 +769,13 @@ export const openRun = async (
       layer: task.chainLayer,
       index: task.chainIndex,
     }, control)) {
-      const error = new ChainHeldError(task.id, task.chainId, taskLayer, control.heldLayer);
+      const message = taskLayer === null || control.heldLayer === null
+        ? `Chain ${task.chainId} is held; Task ${task.id} cannot queue a Run`
+        : `Chain ${task.chainId} is held after layer ${control.heldLayer}; Task ${task.id} at layer ${taskLayer} cannot queue a Run`;
       return openRunRefusal(
         "chain-held",
-        error.message,
+        "chain-held",
+        message,
         { chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
         { taskId: task.id, chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
       );
@@ -888,13 +915,9 @@ export const enqueueTaskRunInternal = async (
   now: Date,
   stopBypass: IntegratorStopBypass | null,
   options: EnqueueTaskRunOptions = {},
-): Promise<Run> => {
-  const opened = await openRun(tx, taskId, options.budgetGrant === 1
+): Promise<OpenRunResult> => openRun(tx, taskId, options.budgetGrant === 1
     ? { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 }
     : { kind: "enqueue", readyAt: now, stopBypass });
-  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
-  return opened.run;
-};
 
 /**
  * The only enqueue option that may alter a task's budget. It is deliberately
@@ -909,7 +932,11 @@ export const enqueueTaskRun = async (
   taskId: string,
   now = new Date(),
   options: EnqueueTaskRunOptions = {},
-) => enqueueTaskRunInternal(tx, taskId, now, null, options);
+): Promise<Run> => {
+  const opened = await enqueueTaskRunInternal(tx, taskId, now, null, options);
+  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
+  return opened.run;
+};
 
 // The card body is one string serving two readers. Feishu is the binding one:
 // `cards.ts` caps the rendered body at 3 000 characters because Feishu rejects
