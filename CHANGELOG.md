@@ -88,6 +88,8 @@ previews other than a fresh install. This release adds five migrations.
 - Settings now reports the Anneal product version and exact build SHA returned
   by `/version`, separately from runner daemon and provider CLI versions. A
   failed version request is shown as a failure rather than as an unknown build.
+- Repository links recognise both SCP-style and `ssh://` GitHub remotes while
+  rejecting unsupported SSH remote shapes.
 - The README is rewritten around the unattended chain workflow, with current
   board and agent views, clearer trust boundaries and a Linux Do community link.
 
