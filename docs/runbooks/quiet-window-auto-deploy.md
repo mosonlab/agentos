@@ -223,6 +223,9 @@ cycle that reads remote main successfully clears that escalation automatically.
 The deploy log or audit trail records one clearing entry that names the
 remote-main-unreadable escalation, its failed window, and the successful
 clearing read. This is the only escalation class that self-clears.
+The original operator-facing Inbox record remains open as historical evidence
+after an unattended self-clear; dismiss that record after confirming the audit
+entry. The absent local marker means `--clear-escalation` has no further work.
 
 A retry budget exhausted by persistent unreachability still writes
 `.agentos-deploy/escalated.json` and an Anneal Inbox record. Authentication

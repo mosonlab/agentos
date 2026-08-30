@@ -3,8 +3,17 @@ import { runCommandWithRetry } from "./quiet-window-retry.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const TRANSIENT_REASON = "remote-main-unreadable";
-const AUTH_FAILURE = /(?:authentication failed|could not read username|could not read from remote repository|terminal prompts disabled|invalid (?:username|password)|permission denied|access denied|forbidden|requested url returned error: (?:401|403|407)|repository not found)/iu;
+const AUTH_FAILURE = /(?:authentication failed|could not read username|terminal prompts disabled|invalid (?:username|password)|permission denied|access denied|forbidden|requested url returned error: (?:401|403|407)|repository not found)/iu;
 const TRANSIENT_FAILURE = /(?:could not resolve (?:host|proxy)|failed to connect|connection (?:timed out|reset|refused|closed)|operation timed out|network is unreachable|proxy .*(?:aborted|failed)|connect tunnel failed|recv failure|tls .*(?:connection|handshake)|ssl(?:_error_syscall| .*(?:connect|error))|gnutls_handshake.*terminated|unexpected (?:disconnect|eof)|remote end hung up|early eof|econnreset|etimedout|eai_again|http\/2 stream.*not closed cleanly|requested url returned error: (?:408|429|5\d\d)|empty reply from server)/iu;
+const AUTO_CLEAR_PROVENANCE = Object.freeze({
+  schemaVersion: 1,
+  source: "remote-main-transport-classifier",
+});
+
+export const transientRemoteMainEscalationFields = (failure) =>
+  failure?.reason === TRANSIENT_REASON && failure.autoClear === AUTO_CLEAR_PROVENANCE
+    ? { autoClear: AUTO_CLEAR_PROVENANCE }
+    : {};
 
 const failureDetail = (result) => `exit-${Number.isInteger(result?.code) ? result.code : 1}`;
 
@@ -31,7 +40,9 @@ export const classifyRemoteMainResult = (result) => {
     return { failure: new DeployFailure("remote-main-ref-missing", failureDetail(result)) };
   }
   if (TRANSIENT_FAILURE.test(diagnosis)) {
-    return { failure: new DeployFailure(TRANSIENT_REASON, failureDetail(result)) };
+    const failure = new DeployFailure(TRANSIENT_REASON, failureDetail(result));
+    failure.autoClear = AUTO_CLEAR_PROVENANCE;
+    return { failure };
   }
   return { failure: new DeployFailure("remote-main-read-failed", failureDetail(result)) };
 };
@@ -44,8 +55,8 @@ export const readRemoteMainRevision = async ({
   onRetry = () => undefined,
 }) => {
   const result = await runCommandWithRetry(run, {
-    ...(delaysMs === undefined ? {} : { delaysMs }),
-    ...(wait === undefined ? {} : { wait }),
+    delaysMs,
+    wait,
     shouldRetry: (attemptResult) =>
       classifyRemoteMainResult(attemptResult).failure?.reason === TRANSIENT_REASON,
     onRetry: (retry) => onRetry({ ...retry, reason: TRANSIENT_REASON }),
@@ -65,11 +76,14 @@ export const autoClearTransientRemoteMainEscalation = async ({
   now = () => new Date(),
 }) => {
   if (escalation?.reason !== TRANSIENT_REASON) return { cleared: false };
+  if (escalation?.autoClear?.schemaVersion !== AUTO_CLEAR_PROVENANCE.schemaVersion
+    || escalation.autoClear.source !== AUTO_CLEAR_PROVENANCE.source) return { cleared: false };
   if (typeof escalation.escalatedAt !== "string"
     || Number.isNaN(Date.parse(escalation.escalatedAt))) return { cleared: false };
   const revision = await readRemoteMain();
   const clearedAt = now().toISOString();
-  await clear();
+  const removed = await clear();
+  if (removed === false) return { cleared: true, revision };
   await audit(`AUDIT escalation-auto-cleared escalation=${TRANSIENT_REASON} failed-window=${escalation.escalatedAt}..${clearedAt} clearing-read=${revision}`);
   return { cleared: true, revision };
 };

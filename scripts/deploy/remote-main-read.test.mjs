@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   autoClearTransientRemoteMainEscalation,
+  classifyRemoteMainResult,
   readRemoteMainRevision,
+  transientRemoteMainEscalationFields,
 } from "./remote-main-read.mjs";
 
 const revision = "b".repeat(40);
@@ -58,6 +60,39 @@ test("a transient remote-main flap past the retry budget escalates", async () =>
   assert.equal(retries.length, 2);
 });
 
+test("only a classifier-proven transport failure carries auto-clear provenance", () => {
+  const classified = classifyRemoteMainResult(transientFailure).failure;
+  assert.deepEqual(transientRemoteMainEscalationFields(classified), {
+    autoClear: { schemaVersion: 1, source: "remote-main-transport-classifier" },
+  });
+  assert.deepEqual(transientRemoteMainEscalationFields({
+    reason: "remote-main-unreadable",
+    autoClear: { schemaVersion: 1, source: "remote-main-transport-classifier" },
+  }), {});
+});
+
+test("SSH timeout and reset failures remain transient despite git's generic footer", async () => {
+  const diagnostics = [
+    "ssh: connect to host github.com port 22: Operation timed out\nfatal: Could not read from remote repository.\n",
+    "Connection reset by 140.82.114.4 port 22\nfatal: Could not read from remote repository.\n",
+  ];
+
+  for (const stderr of diagnostics) {
+    const result = { code: 128, stdout: "", stderr };
+    assert.equal(classifyRemoteMainResult(result).failure?.reason, "remote-main-unreadable");
+    let attempts = 0;
+    await assert.rejects(
+      readRemoteMainRevision({
+        run: async () => { attempts += 1; return result; },
+        delaysMs: [2_000, 5_000],
+        wait: async () => undefined,
+      }),
+      (error) => error?.reason === "remote-main-unreadable",
+    );
+    assert.equal(attempts, 3);
+  }
+});
+
 test("authentication and malformed successful reads are never transient", async () => {
   const cases = [
     {
@@ -90,6 +125,7 @@ test("a latched transient escalation self-clears after a successful clearing rea
   const escalation = {
     reason: "remote-main-unreadable",
     escalatedAt: "2026-08-30T15:00:00.000Z",
+    autoClear: { schemaVersion: 1, source: "remote-main-transport-classifier" },
   };
 
   const result = await autoClearTransientRemoteMainEscalation({
@@ -135,6 +171,7 @@ test("a corrupt clearing read leaves a latched transient escalation untouched", 
       escalation: {
         reason: "remote-main-unreadable",
         escalatedAt: "2026-08-30T15:00:00.000Z",
+        autoClear: { schemaVersion: 1, source: "remote-main-transport-classifier" },
       },
       readRemoteMain: async () => readRemoteMainRevision({
         run: async () => ({ code: 0, stdout: "invalid\n", stderr: "" }),
@@ -150,11 +187,33 @@ test("a corrupt clearing read leaves a latched transient escalation untouched", 
 test("a transient marker without a valid failed window stays latched", async () => {
   let readCalls = 0;
   const result = await autoClearTransientRemoteMainEscalation({
-    escalation: { reason: "remote-main-unreadable", escalatedAt: "invalid" },
+    escalation: {
+      reason: "remote-main-unreadable",
+      escalatedAt: "invalid",
+      autoClear: { schemaVersion: 1, source: "remote-main-transport-classifier" },
+    },
     readRemoteMain: async () => { readCalls += 1; return revision; },
     clear: async () => assert.fail("an unauditable escalation must not clear"),
     audit: () => assert.fail("an unauditable escalation must not emit a clear audit"),
   });
   assert.deepEqual(result, { cleared: false });
   assert.equal(readCalls, 0);
+});
+
+test("legacy auth and malformed-response markers are never eligible for auto-clear", async () => {
+  for (const detail of ["exit-128", "invalid-main-ref"]) {
+    let readCalls = 0;
+    const result = await autoClearTransientRemoteMainEscalation({
+      escalation: {
+        reason: "remote-main-unreadable",
+        detail,
+        escalatedAt: "2026-08-30T15:00:00.000Z",
+      },
+      readRemoteMain: async () => { readCalls += 1; return revision; },
+      clear: async () => assert.fail("legacy markers must remain latched"),
+      audit: () => assert.fail("legacy markers must not emit a clear audit"),
+    });
+    assert.deepEqual(result, { cleared: false });
+    assert.equal(readCalls, 0);
+  }
 });

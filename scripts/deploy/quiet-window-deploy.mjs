@@ -38,9 +38,13 @@ import {
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
 import {
-  autoClearTransientRemoteMainEscalation,
   readRemoteMainRevision,
+  transientRemoteMainEscalationFields,
 } from "./remote-main-read.mjs";
+import {
+  checkExistingEscalation,
+  resolveRemoteMainTarget,
+} from "./quiet-window-escalation.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
@@ -452,43 +456,15 @@ const retryEscalationNotification = async () => {
   await markEscalationNotified();
 };
 
-const checkExistingEscalation = async () => {
-  if (!existsSync(ESCALATION_PATH)) return { active: false };
-  let snapshot;
-  try {
-    snapshot = readFileSync(ESCALATION_PATH, "utf8");
-  } catch {
-    fail("escalation-state-unreadable", "unreadable-or-invalid-json");
-  }
-  const escalation = parseJson(snapshot, "escalation-state-unreadable");
-  try {
-    const recovery = await autoClearTransientRemoteMainEscalation({
-      escalation,
-      readRemoteMain: remoteMainRevision,
-      clear: async () => {
-        let current;
-        try {
-          current = readFileSync(ESCALATION_PATH, "utf8");
-        } catch {
-          fail("escalation-state-changed", "marker-no-longer-readable");
-        }
-        if (current !== snapshot) fail("escalation-state-changed", "marker-replaced-during-clearing-read");
-        unlinkSync(ESCALATION_PATH);
-      },
-      audit: log,
-    });
-    if (recovery.cleared) return { active: false, revision: recovery.revision };
-  } catch (error) {
-    const failure = failureOf(error);
-    log(`STOP escalation-auto-clear-probe-failed latched-reason=${String(escalation.reason ?? "unknown")} clearing-read-reason=${failure.reason}`);
-  }
-  await retryEscalationNotification();
-  log(`STOP escalation-active path=${ESCALATION_PATH}`);
-  return { active: true };
-};
-
 const persistAndNotifyFailure = async (failure, from, to) => {
-  await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from, to });
+  await writeEscalation({
+    outcome: "failure",
+    reason: failure.reason,
+    detail: failure.detail,
+    from,
+    to,
+    ...transientRemoteMainEscalationFields(failure),
+  });
   try {
     await retryEscalationNotification();
   } catch {
@@ -858,17 +834,21 @@ const main = async () => {
 
   await loadEnvironment();
   loadBinaries();
-  let targetCommit = "unknown";
-  const escalation = await checkExistingEscalation();
-  if (escalation.active) return 2;
-  if (escalation.revision) targetCommit = escalation.revision;
-  try {
-    if (targetCommit === "unknown") targetCommit = await remoteMainRevision();
-  } catch (error) {
-    const failure = failureOf(error);
-    await persistAndNotifyFailure(failure, "unknown", targetCommit);
-    return 1;
-  }
+  const startup = await resolveRemoteMainTarget({
+    acquireLock,
+    log,
+    checkEscalation: () => checkExistingEscalation({
+      escalationPath: ESCALATION_PATH,
+      readRemoteMain: remoteMainRevision,
+      retryEscalationNotification,
+      log,
+    }),
+    readRemoteMain: remoteMainRevision,
+    persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
+  });
+  if (startup.skipped === "lock-held") return 0;
+  if (startup.exitCode) return startup.exitCode;
+  const targetCommit = startup.targetCommit;
 
   const attempt = openDeploymentAttempt({
     deployRoot: REPOSITORY_ROOT,

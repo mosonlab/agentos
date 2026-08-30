@@ -10,7 +10,7 @@ export const runCommandWithRetry = async (
     delaysMs = DEFAULT_DELAYS_MS,
     wait = delay,
     onRetry = () => undefined,
-    shouldRetry = (result) => result.code !== 0,
+    shouldRetry,
   } = {},
 ) => {
   let result;
