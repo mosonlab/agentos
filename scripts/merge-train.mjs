@@ -87,9 +87,9 @@ const defaultFetchCandidate = async (repoRoot, candidate) => {
   }
 };
 
-const defaultGate = async (repoRoot, prefix) => {
-  const script = path.join(repoRoot, "scripts", "gate-worker", "gate-dispatch.sh");
-  const result = await runProcess("bash", [script, prefix.oid, "--master", prefix.predecessor], { cwd: repoRoot });
+const defaultGate = async (_repoRoot, prefix, checkout) => {
+  const script = path.join(checkout, "scripts", "gate-worker", "gate-dispatch.sh");
+  const result = await runProcess("bash", [script, prefix.oid, "--master", prefix.predecessor], { cwd: checkout });
   const output = `${result.stdout}${result.stderr}`;
   const exactPass = new RegExp(`(?:^|\\n)MERGE GATE: PASS ${prefix.oid}(?:\\r?$|\\n)`, "u").test(
     output.replaceAll("\u001b[32m", "").replaceAll("\u001b[0m", ""),
@@ -279,16 +279,25 @@ export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapter
     return { status: "all-already-delivered", baseSha, alreadyDelivered, prefixes: [], gateResults: [], published: [] };
   }
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), "agentos-merge-train-"));
-  const checkout = path.join(temporaryRoot, "checkout");
-  let worktreeAdded = false;
+  const buildCheckout = path.join(temporaryRoot, "build");
+  const gateCheckouts = [];
+  let buildWorktreeAdded = false;
   let leaseHeld = false;
   let safeToRelease = false;
   let primaryError = null;
   try {
-    worktreeAdded = true;
-    const built = await buildPrefixes(repoRoot, checkout, baseSha, pending);
+    buildWorktreeAdded = true;
+    const built = await buildPrefixes(repoRoot, buildCheckout, baseSha, pending);
+    for (const prefix of built.prefixes) {
+      const gateCheckout = path.join(temporaryRoot, `prefix-${prefix.index}`);
+      await git(repoRoot, ["worktree", "add", "--detach", gateCheckout, prefix.oid]);
+      gateCheckouts.push(gateCheckout);
+    }
     const gateResults = await Promise.all(
-      built.prefixes.map(async (prefix) => ({ prefix, ...(await adapters.gate(repoRoot, prefix)) })),
+      built.prefixes.map(async (prefix, index) => ({
+        prefix,
+        ...(await adapters.gate(repoRoot, prefix, gateCheckouts[index])),
+      })),
     );
     const passingCount = contiguousPassingCount(gateResults);
     if (passingCount === 0) {
@@ -370,10 +379,16 @@ export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapter
       }
       else process.stderr.write(`merge-train: publication read-back is unknown; lease for task ${task} was retained\n`);
     }
-    if (worktreeAdded) {
-      const removed = await gitResult(repoRoot, ["worktree", "remove", "--force", checkout]);
+    for (const gateCheckout of gateCheckouts) {
+      const removed = await gitResult(repoRoot, ["worktree", "remove", "--force", gateCheckout]);
       if (removed.code !== 0 && !cleanupError) {
-        cleanupError = new CommandError(`git worktree remove --force ${checkout}`, removed);
+        cleanupError = new CommandError(`git worktree remove --force ${gateCheckout}`, removed);
+      }
+    }
+    if (buildWorktreeAdded) {
+      const removed = await gitResult(repoRoot, ["worktree", "remove", "--force", buildCheckout]);
+      if (removed.code !== 0 && !cleanupError) {
+        cleanupError = new CommandError(`git worktree remove --force ${buildCheckout}`, removed);
       }
     }
     try {
