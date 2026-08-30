@@ -4,12 +4,15 @@ import {
   heartbeat as sendHeartbeat,
   type Authority,
   type CancellationRequest,
-  type ClaimedTask,
+  type ControlPlaneRunClaim,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { deliveryDeadline, type RetryOptions } from "./network-retry.js";
 
 export type LeaseHeartbeat = typeof sendHeartbeat;
+
+/** The fenced Run identity renewed during delivery. */
+export type DeliveryLeaseClaim = ControlPlaneRunClaim;
 
 /**
  * The runner's authority over a run during the phase that follows the agent
@@ -46,7 +49,7 @@ export type DeliveryLease = {
  */
 export const openDeliveryLease = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: DeliveryLeaseClaim,
   lastKnownRenewalAt: number,
   options: {
     send?: LeaseHeartbeat;

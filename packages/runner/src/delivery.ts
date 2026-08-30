@@ -57,6 +57,23 @@ export type CommandExecutor = (
   options?: CommandOptions,
 ) => Promise<string>;
 
+export type DeliveryClaim = {
+  task: Pick<ClaimedTask["task"], "id" | "name" | "templateStep">;
+  repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch">;
+  run: Partial<Pick<ClaimedTask["run"], "opensPullRequest" | "pullRequestBase">>;
+};
+
+export type DeliverWorkspaceDependencies = {
+  command?: CommandExecutor;
+  recordPublication?: (branch: string) => Promise<void>;
+  retryOptions?: RetryOptions;
+};
+
+export type SalvageWorkspaceDependencies = {
+  command?: CommandExecutor;
+  retryOptions?: RetryOptions;
+};
+
 export const executeCommand = (config: RunnerConfig): CommandExecutor => (
   executable,
   args,
@@ -156,7 +173,9 @@ const pullRequestFromUrl = (stdout: string): { url: string; number: number } | n
 };
 
 // A chain step is named "<chain>: <step>"; the PR is the chain's, not the step's.
-export const pullRequestTitle = (task: ClaimedTask["task"]): string => {
+export const pullRequestTitle = (
+  task: Pick<ClaimedTask["task"], "name" | "templateStep">,
+): string => {
   const step = task.templateStep?.name;
   const suffix = step ? `: ${step}` : null;
   return suffix && task.name.endsWith(suffix) && task.name.length > suffix.length
@@ -166,21 +185,21 @@ export const pullRequestTitle = (task: ClaimedTask["task"]): string => {
 
 export const deliverWorkspace = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: DeliveryClaim,
   workspace: Workspace,
-  command: CommandExecutor = executeCommand(config),
-  recordPublication: (branch: string) => Promise<void> = async () => undefined,
-  retryOptions: RetryOptions = {},
+  dependencies: DeliverWorkspaceDependencies = {},
 ): Promise<DeliveryResult> => {
+  const command = dependencies.command ?? executeCommand(config);
+  const recordPublication = dependencies.recordPublication ?? (async () => undefined);
+  const retryOptions = dependencies.retryOptions ?? {};
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
   // `!== false`, not a truthiness test, and the difference is the whole point.
-  // The field is required in ClaimedTask so our own code cannot omit it; the
-  // comparison is what makes a *stale API build* that omits it from the claim
-  // payload degrade to today's behaviour (open the PR) instead of to the
-  // expensive failure (never open one again, silently). Read from `run`, not
-  // `task`: the run carries the snapshot taken when it was created, so an
-  // operator's PATCH cannot change a run that is already queued.
+  // ClaimedTask requires the field, while this interface keeps it optional so
+  // a stale API build that omits it degrades to today's behaviour (open the PR)
+  // instead of to the expensive failure (never open one again, silently). Read
+  // from `run`, not `task`: the run carries the snapshot taken when it was
+  // created, so an operator's PATCH cannot change a run that is already queued.
   // No step name, output kind or task name is consulted here or anywhere in
   // this package.
   const opensPullRequest = claim.run.opensPullRequest !== false;
@@ -430,9 +449,10 @@ export const salvageWorkspace = async (
   config: RunnerConfig,
   identity: { taskId: string; runId: string; runNumber: number; remoteUrl?: string },
   workspace: Workspace,
-  command: CommandExecutor = executeCommand(config),
-  retryOptions: RetryOptions = {},
+  dependencies: SalvageWorkspaceDependencies = {},
 ): Promise<DeliveryResult | null> => {
+  const command = dependencies.command ?? executeCommand(config);
+  const retryOptions = dependencies.retryOptions ?? {};
   const env = workspaceEnvironment(config);
   const remote = identity.remoteUrl ?? "origin";
   const branch = `agentos/${identity.taskId}/run-${identity.runNumber}`;
@@ -469,16 +489,3 @@ export const salvageWorkspace = async (
     return { pushStatus: "FAILED", pushRemote: remote, pushError: `WIP salvage failed: ${message}` };
   }
 };
-
-export const deliverFailedWorkspace = async (
-  config: RunnerConfig,
-  claim: ClaimedTask,
-  workspace: Workspace,
-  command: CommandExecutor = executeCommand(config),
-  retryOptions: RetryOptions = {},
-): Promise<DeliveryResult | null> => salvageWorkspace(config, {
-  taskId: claim.task.id,
-  runId: claim.run.id,
-  runNumber: claim.run.runNumber,
-  remoteUrl: claim.repo.remoteUrl,
-}, workspace, command, retryOptions);

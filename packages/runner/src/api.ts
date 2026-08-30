@@ -157,6 +157,14 @@ export type ClaimedTask = {
   regressionRepairHandoff: RegressionRepairHandoff | null;
 };
 
+/** The fenced Run identity consumed by runner-to-control-plane writes. */
+export type ControlPlaneRunClaim = Pick<ClaimedTask, "fencingToken"> & {
+  run: Pick<ClaimedTask["run"], "id">;
+};
+
+/** The session principal consumed by session-authenticated control-plane writes. */
+export type ControlPlaneSessionClaim = ControlPlaneRunClaim & Pick<ClaimedTask, "sessionToken">;
+
 export type SessionEventPayload = {
   seq: number;
   at?: string;
@@ -232,7 +240,7 @@ export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | nul
 
 export const startRun = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   snapshot: Record<string, unknown> & { promptHash: string },
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/start`, {
@@ -247,7 +255,7 @@ export const startRun = async (
 
 export const heartbeat = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   state: { processAlive: boolean; lastProgressEventAt: Date | null; inFlightTool: Record<string, unknown> | null },
 ): Promise<HeartbeatResult> => {
   const response = await request(config, `/runner/runs/${claim.run.id}/heartbeat`, {
@@ -267,7 +275,7 @@ export const heartbeat = async (
 
 export const acknowledgeCancellation = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   cancellation: CancellationRequest,
   workspace?: { path: string; branch: string; baseSha: string } | null,
   containment: { worktreeContainmentViolations?: string[] } = {},
@@ -304,7 +312,7 @@ export type SessionTaskOutput = {
  * never needs control-plane network access or session credentials. */
 export const persistSessionTaskOutput = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneSessionClaim,
   output: SessionTaskOutput,
 ): Promise<void> => {
   await request(config, `/session/runs/${claim.run.id}/output`, {
@@ -318,7 +326,7 @@ export const persistSessionTaskOutput = async (
  * late for recovery: by then the provider process and workspace are gone. */
 export const readSessionTaskOutputStatus = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneSessionClaim,
 ): Promise<SessionTaskOutputStatus | null> => {
   const response = await request(config, `/session/runs/${claim.run.id}/status`, {
     method: "GET",
@@ -356,7 +364,7 @@ export const readSessionTaskOutputStatus = async (
  * work, cleanup, or process loss may happen after publication. */
 export const recordPublishedBranch = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   pushedBranch: string,
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/publication`, {
@@ -374,7 +382,7 @@ export const recordPublishedBranch = async (
  * run; unlike completion, it carries no authority over run outcome. */
 export const recordLeaseIndependentCleanup = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   cleanup: { cleanupStatus: CleanupStatus; cleanupFailureReason?: string; workspaceRetained: boolean },
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/cleanup`, {
@@ -389,7 +397,7 @@ export const recordLeaseIndependentCleanup = async (
 
 export const appendEvents = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   events: SessionEventPayload[],
   providerConversationId?: string | null,
 ): Promise<void> => {
@@ -407,7 +415,7 @@ export const appendEvents = async (
 
 export const appendActivity = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ControlPlaneRunClaim,
   body: string,
   metadata: Record<string, unknown> = {},
 ): Promise<void> => {
@@ -464,7 +472,11 @@ export type Completion = {
   failureEnvelope?: FailureEnvelope;
 };
 
-export const completeRun = async (config: RunnerConfig, claim: ClaimedTask, completion: Completion): Promise<void> => {
+export const completeRun = async (
+  config: RunnerConfig,
+  claim: ControlPlaneRunClaim,
+  completion: Completion,
+): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/complete`, {
     method: "POST",
     body: JSON.stringify({ runnerId: config.runnerId, fencingToken: claim.fencingToken, ...completion }),
