@@ -173,6 +173,11 @@ export const repoWebUrl = (remoteUrl: string | null | undefined): string | null 
   if (https) return `https://github.com/${https[1]}/${https[2]}`;
   const ssh = /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(remoteUrl);
   if (ssh) return `https://github.com/${ssh[1]}/${ssh[2]}`;
+  // The `ssh://` form of the same remote. Only the standard `git` user and the
+  // bare `github.com` host: another user or a port is a shape we do not know how
+  // to browse, so it stays `null` rather than becoming a guessed link.
+  const sshUrl = /^ssh:\/\/git@github\.com\/([^/\s?#]+)\/([^/\s?#]+?)(?:\.git)?$/.exec(remoteUrl);
+  if (sshUrl) return `https://github.com/${sshUrl[1]}/${sshUrl[2]}`;
   return null;
 };
 
