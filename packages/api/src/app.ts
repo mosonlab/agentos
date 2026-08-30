@@ -65,6 +65,10 @@ import {
 import type {
   Chain as ChainContract,
   ChainStep as ChainStepContract,
+  RecurringFire as RecurringFireContract,
+  Trigger as TriggerContract,
+  TriggerDetail as TriggerDetailContract,
+  TriggerFire as TriggerFireContract,
 } from "@anneal/db/board-contract";
 import type {
   Agent as AgentContract,
@@ -784,6 +788,10 @@ type SecretResponse = SecretContract<Date>;
 type SkillResponse = SkillContract<Date>;
 type MCPConnectionResponse = MCPConnectionContract<Date>;
 type RepoResponse = RepoContract<Date>;
+type TriggerResponse = TriggerContract<Date>;
+type TriggerDetailResponse = TriggerDetailContract<Date>;
+type TriggerFireResponse = TriggerFireContract<Date>;
+type RecurringFireResponse = RecurringFireContract<Date>;
 
 export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
@@ -1821,7 +1829,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       secretDisabled: trigger.webhookSecret?.disabledAt != null,
       lastFiredAt: stats.get(trigger.id)?.lastFiredAt ?? null,
       fireCount: stats.get(trigger.id)?.fireCount ?? 0,
-    })));
+    })) satisfies TriggerResponse[]);
   });
 
   app.get("/triggers/:templateId", async (context) => {
@@ -1850,7 +1858,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       lastFiredAt: stats?.lastFiredAt ?? null,
       canFire: reason === null,
       cannotFireReason: reason,
-    });
+    } satisfies TriggerDetailResponse);
   });
 
   app.get("/triggers/:templateId/fires", async (context) => {
@@ -1891,7 +1899,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       chainId: fire.chainId,
       firstTask: fire.chainId ? firstByChain.get(keyOf(fire.chainId)) ?? null : null,
       progress: fire.chainId ? progress.get(keyOf(fire.chainId)) ?? null : null,
-    })));
+    })) satisfies TriggerFireResponse[]);
   });
 
   const setTriggerPaused = async (context: Context, paused: boolean) => {
@@ -2480,9 +2488,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         id: copy.runs[0].id,
         status: copy.runs[0].status,
         runNumber: copy.runs[0].runNumber,
-        session: copy.runs[0].session ? { id: copy.runs[0].session.id, costUsd: copy.runs[0].session.costUsd } : null,
+        session: copy.runs[0].session ? {
+          id: copy.runs[0].session.id,
+          costUsd: copy.runs[0].session.costUsd === null ? null : String(copy.runs[0].session.costUsd),
+        } : null,
       } : null,
-    })));
+    })) satisfies RecurringFireResponse[]);
   });
   app.get("/tasks/:taskId/activity", async (context) => context.json(await db.taskActivity.findMany({
     where: { taskId: id.parse(context.req.param("taskId")) },

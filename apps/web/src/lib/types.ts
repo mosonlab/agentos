@@ -7,10 +7,14 @@ import type {
   ExecutionOwner,
   MergeOutcome,
   MergeRecovery,
+  RecurringFire,
   RunStatus,
   TaskMoveTarget,
   TaskSource,
   TaskStatus,
+  Trigger,
+  TriggerDetail,
+  TriggerFire,
   UsageCost,
 } from "@anneal/db/board-contract";
 import type {
@@ -45,11 +49,15 @@ export type {
   ExecutionOwner,
   MergeOutcome,
   MergeRecovery,
+  RecurringFire,
   RunStatus,
   ScheduleKind,
   TaskMoveTarget,
   TaskSource,
   TaskStatus,
+  Trigger,
+  TriggerDetail,
+  TriggerFire,
   UsageCost,
 } from "@anneal/db/board-contract";
 export type {
@@ -305,63 +313,12 @@ export type TaskStartability = {
   };
 };
 
-/** A webhook-configured template. `repo` is nullable: a trigger is defined by
- *  its secret, so one without a repository is listed and un-fireable rather
- *  than hidden. */
-export type Trigger = {
-  id: string;
-  name: string;
-  description: string;
-  repo: { id: string; name: string } | null;
-  stepCount: number;
-  paused: boolean;
-  secretDisabled: boolean;
-  lastFiredAt: string | null;
-  fireCount: number;
-};
-
-export type TriggerDetail = {
-  id: string;
-  name: string;
-  description: string;
-  projectId: string;
-  endpointPath: string;
-  secretName: string | null;
-  secretDisabled: boolean;
-  repo: { id: string; name: string } | null;
-  variables: string[];
-  mapping: Record<string, string>;
-  defaults: Record<string, unknown>;
-  replayWindowSec: number | null;
-  paused: boolean;
-  stepCount: number;
-  fireCount: number;
-  lastFiredAt: string | null;
-  canFire: boolean;
-  cannotFireReason: string | null;
-};
-
-export type TriggerFire = {
-  id: string;
-  createdAt: string;
-  source: "WEBHOOK" | "MANUAL";
+export type Chain = {
   chainId: string | null;
-  firstTask: { id: string; name: string } | null;
-  progress: ChainProgress | null;
-};
-
-/** One fired copy of a recurring definition, newest first. */
-export type RecurringFire = {
-  taskId: string;
-  name: string;
-  createdAt: string;
-  status: TaskStatus;
-  latestRun: {
-    id: string;
-    status: RunStatus;
-    runNumber: number;
-    session: { id: string; costUsd: string | null } | null;
-  } | null;
+  total: number;
+  done: number;
+  steps: ChainStep[];
+  control: ChainControl | null;
 };
 
 export type TaskActivity = {

@@ -223,3 +223,62 @@ export type Chain<DateTime = string> = {
   steps: ChainStep<DateTime>[];
   control: ChainControl<DateTime> | null;
 };
+
+/** A webhook-configured template. `repo` is nullable: a trigger is defined by
+ * its secret, so one without a repository is listed and un-fireable rather
+ * than hidden. */
+export type Trigger<DateTime = string> = {
+  id: string;
+  name: string;
+  description: string;
+  repo: { id: string; name: string } | null;
+  stepCount: number;
+  paused: boolean;
+  secretDisabled: boolean;
+  lastFiredAt: DateTime | null;
+  fireCount: number;
+};
+
+export type TriggerDetail<DateTime = string> = {
+  id: string;
+  name: string;
+  description: string;
+  projectId: string;
+  endpointPath: string;
+  secretName: string | null;
+  secretDisabled: boolean;
+  repo: { id: string; name: string } | null;
+  variables: string[];
+  mapping: Record<string, string>;
+  defaults: Record<string, unknown>;
+  replayWindowSec: number | null;
+  paused: boolean;
+  stepCount: number;
+  fireCount: number;
+  lastFiredAt: DateTime | null;
+  canFire: boolean;
+  cannotFireReason: string | null;
+};
+
+export type TriggerFire<DateTime = string> = {
+  id: string;
+  createdAt: DateTime;
+  source: TriggerFireSource;
+  chainId: string | null;
+  firstTask: { id: string; name: string } | null;
+  progress: ChainProgress | null;
+};
+
+/** One fired copy of a recurring definition, newest first. */
+export type RecurringFire<DateTime = string> = {
+  taskId: string;
+  name: string;
+  createdAt: DateTime;
+  status: TaskStatus;
+  latestRun: {
+    id: string;
+    status: RunStatus;
+    runNumber: number;
+    session: { id: string; costUsd: string | null } | null;
+  } | null;
+};
