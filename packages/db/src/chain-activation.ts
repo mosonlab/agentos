@@ -8,9 +8,11 @@ import {
 } from "@prisma/client";
 
 import { readChainControl } from "./chain-control.js";
-import { lockAgentRepoGrant, lockAgentRow, lockChainRows } from "./locks.js";
+import { heldPredicate } from "./chain-hold.js";
+import { compare, layerOf } from "./chain-order.js";
+import { lockAgentRepoGrant, lockChainRows } from "./locks.js";
 import { parseAuthorizationMetadata } from "./merge-integrator.js";
-import { isIntegratorBindingError, stopStateFor } from "./merge-integrator-db.js";
+import { stopStateFor } from "./merge-integrator-db.js";
 import {
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
@@ -19,18 +21,13 @@ import {
 } from "./merge-tail.js";
 import {
   ArchivedAssigneeError,
-  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   CompoundImplementationAssigneeError,
+  errorForOpenRunRefusal,
   type IntegratorStopBypass,
   WorkflowRefusalError,
-  compoundImplementationAssigneeValid,
   enqueueTaskRunInternal,
   gateQuestion,
-  isArchivedAssigneeError,
-  isArchivedTaskError,
-  isCompoundImplementationAssigneeError,
   isCompoundImplementationStep,
-  isIntegratorStoppedError,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -351,9 +348,47 @@ const dispatchBoundSuccessor = async (
   const savepoint = "chain_dispatch_enqueue";
   if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
   try {
-    const run = await enqueueTaskRunInternal(tx, successor.id, now, null);
+    const opened = await enqueueTaskRunInternal(tx, successor.id, now, null);
+    if (!opened.ok) {
+      if (hasSavepoint) {
+        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      const refusal = opened.refusal;
+      switch (refusal.code) {
+        case "chain-held":
+          await tx.taskActivity.create({ data: {
+            taskId: successor.id,
+            actorType: "control-plane",
+            body: `Bound predecessor completed; ${refusal.message}`,
+          } });
+          return;
+        case "assignee-archived":
+        case "compound-implementation-assignee":
+        case "initial-run-already-exists":
+        case "integrator-binding-invalid":
+        case "integrator-stopped":
+        case "prior-run-required":
+        case "repo-required":
+        case "run-budget-exhausted":
+        case "source-run-stale":
+        case "task-archived":
+        case "task-assignee-missing":
+        case "task-assignee-type-invalid":
+        case "task-not-found":
+        case "task-not-integrator":
+          await parkBoundSuccessor(tx, predecessor, successor, refusal.message, {
+            refusal: refusal.code,
+          });
+          return;
+        default: {
+          const unhandled: never = refusal;
+          return unhandled;
+        }
+      }
+    }
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", run.id);
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", opened.run.id);
   } catch (error: unknown) {
     if (isUniqueConflict(error)) {
       if (hasSavepoint) {
@@ -366,54 +401,6 @@ const dispatchBoundSuccessor = async (
     if (hasSavepoint) {
       await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
       await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    }
-    if (isArchivedTaskError(error)) {
-      await parkBoundSuccessor(
-        tx,
-        predecessor,
-        successor,
-        `successor ${successor.name} is archived; unarchive the task and retry dispatch`,
-      );
-      return;
-    }
-    if (isArchivedAssigneeError(error)) {
-      await parkBoundSuccessor(
-        tx,
-        predecessor,
-        successor,
-        `assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry dispatch`,
-      );
-      return;
-    }
-    if (isIntegratorStoppedError(error)) {
-      await parkBoundSuccessor(
-        tx,
-        predecessor,
-        successor,
-        `merge integrator stopped on ${error.condition}; predecessor success preserved and successor not activated`,
-        { condition: error.condition },
-      );
-      return;
-    }
-    if (isIntegratorBindingError(error)) {
-      await parkBoundSuccessor(
-        tx,
-        predecessor,
-        successor,
-        `successor ${successor.name} violates the merge-integrator binding invariant: ${error.refusal}; restore the canonical assignee binding and retry dispatch`,
-        { refusal: "integrator-binding", detail: error.refusal },
-      );
-      return;
-    }
-    if (isCompoundImplementationAssigneeError(error)) {
-      await parkBoundSuccessor(
-        tx,
-        predecessor,
-        successor,
-        `successor ${successor.name} violates the compound implementation assignee invariant: ${error.message}; restore the canonical assignee binding and retry dispatch`,
-        { refusal: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
-      );
-      return;
     }
     throw error;
   }
@@ -560,17 +547,17 @@ const parkStoppedIntegratorSuccessor = async (
   return { nextTaskId: successor.id, gated: false };
 };
 
-const layerOf = (task: { chainLayer?: number | null; chainIndex: number | null }): number | null => (
-  task.chainLayer ?? task.chainIndex
-);
+const chainLayerOf = (task: { chainLayer?: number | null; chainIndex: number | null }): number | null => layerOf({
+  layer: task.chainLayer === undefined ? null : task.chainLayer,
+  index: task.chainIndex,
+});
 
 const layerOrder = (
   left: { chainLayer?: number | null; chainIndex: number | null; id: string },
   right: { chainLayer?: number | null; chainIndex: number | null; id: string },
-): number => (
-  (layerOf(left) ?? 0) - (layerOf(right) ?? 0)
-    || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
-    || left.id.localeCompare(right.id)
+): number => compare(
+  { layer: left.chainLayer === undefined ? null : left.chainLayer, index: left.chainIndex, id: left.id },
+  { layer: right.chainLayer === undefined ? null : right.chainLayer, index: right.chainIndex, id: right.id },
 );
 
 /**
@@ -609,7 +596,7 @@ const activateChainSuccessorInternal = async (
   });
   chainRows.sort(layerOrder);
   const current = chainRows.find((row) => row.id === task.id);
-  const currentLayer = current ? layerOf(current) : layerOf(task);
+  const currentLayer = current ? chainLayerOf(current) : chainLayerOf(task);
   if (!current || currentLayer === null) {
     await tx.taskActivity.create({ data: {
       taskId: task.id,
@@ -619,7 +606,7 @@ const activateChainSuccessorInternal = async (
     return { nextTaskId: null, gated: false };
   }
 
-  const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  const currentRows = chainRows.filter((row) => chainLayerOf(row) === currentLayer);
   // The full-chain lock is already held here. Read the persisted control only
   // after taking it so a completion and an operator Hold have one defined
   // winner, rather than allowing a stale pre-lock read to leak activation.
@@ -646,10 +633,39 @@ const activateChainSuccessorInternal = async (
   // history and select the first higher layer that still has work. This keeps
   // the one-node-per-layer migration linear without recursively re-entering the
   // activation routine.
-  const nextLayer = [...new Set(chainRows.map(layerOf).filter((value): value is number => value !== null))]
+  const nextLayer = [...new Set(chainRows.map(chainLayerOf).filter((value): value is number => value !== null))]
     .filter((value) => value > currentLayer)
     .sort((left, right) => left - right)
-    .find((value) => chainRows.some((row) => layerOf(row) === value && row.status !== TaskStatus.DONE));
+    .find((value) => chainRows.some((row) => chainLayerOf(row) === value && row.status !== TaskStatus.DONE));
+  const missingSuccessorLayer = nextLayer === undefined
+    && chainRows.some((row) => chainLayerOf(row) === null && row.status !== TaskStatus.DONE);
+  const withholdSuccessorActivation = async (withheldLayer: number | null) => {
+    await tx.taskActivity.create({ data: {
+      taskId: current.id,
+      actorType: "control-plane",
+      body: chainControl.heldLayer === null
+        ? "Predecessor layer completed; successor activation withheld because Chain is held"
+        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
+      metadata: {
+        kind: "chainControl.activationWithheld",
+        schemaVersion: 1,
+        heldLayer: chainControl.heldLayer,
+        nextLayer: withheldLayer,
+      },
+    } });
+    return { nextTaskId: null, gated: false };
+  };
+  if (missingSuccessorLayer && heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: null,
+    index: null,
+  }, chainControl)) {
+    if (boundSuccessor && current.archivedAt === null) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+    }
+    return withholdSuccessorActivation(null);
+  }
   if (nextLayer === undefined) {
     const predecessorComplete = chainRows.every((row) => row.status === TaskStatus.DONE);
     if (!boundSuccessor || predecessorComplete) {
@@ -673,24 +689,16 @@ const activateChainSuccessorInternal = async (
     await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
   }
 
-  if (chainControl.held && (chainControl.heldLayer === null || nextLayer > chainControl.heldLayer)) {
-    await tx.taskActivity.create({ data: {
-      taskId: current.id,
-      actorType: "control-plane",
-      body: chainControl.heldLayer === null
-        ? "Predecessor layer completed; successor activation withheld because Chain is held"
-        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
-      metadata: {
-        kind: "chainControl.activationWithheld",
-        schemaVersion: 1,
-        heldLayer: chainControl.heldLayer,
-        nextLayer,
-      },
-    } });
-    return { nextTaskId: null, gated: false };
+  if (heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: nextLayer,
+    index: null,
+  }, chainControl)) {
+    return withholdSuccessorActivation(nextLayer);
   }
 
-  const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
+  const nextRows = chainRows.filter((row) => chainLayerOf(row) === nextLayer).sort(layerOrder);
   if (nextRows.some((row) => row.approvalGate) && nextRows.length > 1) {
     throw new WorkflowRefusalError("invalid-request", `Approval gate is not allowed in multi-node chain layer ${nextLayer}`);
   }
@@ -736,22 +744,7 @@ const activateChainSuccessorInternal = async (
         select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
       })
       : null;
-    if (isCompoundImplementationStep(successorStep)) {
-      const lockedAgent = successor.assigneeAgentId
-        ? await lockAgentRow(tx, successor.assigneeAgentId)
-        : null;
-      if (lockedAgent?.archivedAt) {
-        throw new ArchivedAssigneeError(successor.id, successor.name, lockedAgent.name);
-      }
-      if (!compoundImplementationAssigneeValid(
-        successor.projectId,
-        successor.assigneeType,
-        lockedAgent,
-        successorStep,
-      )) {
-        throw new CompoundImplementationAssigneeError();
-      }
-    }
+    const compoundImplementation = isCompoundImplementationStep(successorStep);
     if (isMergeReadinessStep(successorStep)) {
       await tx.taskActivity.create({ data: {
         taskId: successor.id,
@@ -767,7 +760,8 @@ const activateChainSuccessorInternal = async (
       continue;
     }
 
-    if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {
+    if (!compoundImplementation
+      && (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId)) {
       if (options.sourceRunId) {
         await tx.task.update({ where: { id: successor.id }, data: { status: TaskStatus.REVIEW } });
         await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
@@ -782,30 +776,6 @@ const activateChainSuccessorInternal = async (
       continue;
     }
 
-    const stopped = await stopStateFor(tx, successor.id);
-    if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
-      await parkStoppedIntegratorSuccessor(tx, current, successor, stopped, options.sourceRunId ?? null);
-      continue;
-    }
-    if (successor.assigneeAgent?.archivedAt) {
-      if (options.archivedAssignee === "throw") {
-        throw new ArchivedAssigneeError(successor.id, successor.name, successor.assigneeAgent.name);
-      }
-      await tx.task.update({
-        where: { id: successor.id },
-        data: {
-          status: TaskStatus.REVIEW,
-          failureReason: `Assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
-        },
-      });
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: `Predecessor layer completed but assignee ${successor.assigneeAgent.name} is archived; step not queued`,
-      } });
-      continue;
-    }
-
     const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
     const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
     // Each successor is handled serially and the savepoint is released before
@@ -814,7 +784,7 @@ const activateChainSuccessorInternal = async (
     const savepoint = "chain_layer_enqueue";
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
     try {
-      await enqueueTaskRunInternal(
+      const opened = await enqueueTaskRunInternal(
         tx,
         successor.id,
         now,
@@ -823,17 +793,87 @@ const activateChainSuccessorInternal = async (
           ? { budgetGrant: 1 }
           : {},
       );
+      if (!opened.ok) {
+        if (hasSavepoint) {
+          await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+        }
+        const refusal = opened.refusal;
+        switch (refusal.code) {
+          case "chain-held":
+            await tx.taskActivity.create({ data: {
+              taskId: successor.id,
+              actorType: "control-plane",
+              body: `Predecessor layer completed; ${refusal.message}`,
+            } });
+            continue;
+          case "integrator-stopped": {
+            const stoppedAfterRollback = await stopStateFor(tx, successor.id);
+            if (stoppedAfterRollback) {
+              await parkStoppedIntegratorSuccessor(
+                tx,
+                current,
+                successor,
+                stoppedAfterRollback,
+                options.sourceRunId ?? null,
+              );
+              continue;
+            }
+            throw errorForOpenRunRefusal(refusal);
+          }
+          case "assignee-archived":
+            if (options.archivedAssignee === "throw") {
+              throw new ArchivedAssigneeError(
+                String(refusal.context?.taskId ?? successor.id),
+                String(refusal.context?.taskName ?? successor.name),
+                String(refusal.context?.agentName ?? successor.assigneeAgent?.name ?? "unknown"),
+              );
+            }
+            break;
+          case "compound-implementation-assignee":
+            if (options.archivedAssignee === "throw") {
+              throw new CompoundImplementationAssigneeError();
+            }
+            break;
+          case "initial-run-already-exists":
+          case "integrator-binding-invalid":
+          case "prior-run-required":
+          case "repo-required":
+          case "run-budget-exhausted":
+          case "source-run-stale":
+          case "task-archived":
+          case "task-assignee-missing":
+          case "task-assignee-type-invalid":
+            if (options.archivedAssignee === "throw" && compoundImplementation) {
+              throw new CompoundImplementationAssigneeError();
+            }
+            break;
+          case "task-not-found":
+          case "task-not-integrator":
+            break;
+          default: {
+            const unhandled: never = refusal;
+            return unhandled;
+          }
+        }
+        await tx.task.update({
+          where: { id: successor.id },
+          data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+        });
+        await tx.taskActivity.create({ data: {
+          taskId: successor.id,
+          actorType: "control-plane",
+          body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
+          metadata: { refusal: refusal.code },
+        } });
+        continue;
+      }
       if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
     } catch (error: unknown) {
-      if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
+      if (!isUniqueConflict(error)) throw error;
       if (hasSavepoint) {
         await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-      }
-      if (isIntegratorStoppedError(error)) {
-        const stoppedAfterRollback = await stopStateFor(tx, successor.id);
-        if (!stoppedAfterRollback) throw error;
-        await parkStoppedIntegratorSuccessor(tx, current, successor, stoppedAfterRollback, options.sourceRunId ?? null);
       }
       continue;
     }
@@ -1019,7 +1059,7 @@ export const advanceTemplateTask = async (
   }
   if (task.approvalGate) {
     if (task.chainId) {
-      const layer = layerOf(task);
+      const layer = chainLayerOf(task);
       const siblingCount = layer === null ? 0 : await tx.task.count({
         where: {
           projectId: task.projectId,

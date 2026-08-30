@@ -119,6 +119,10 @@ const spawnRunner = async (databaseUrl: string): Promise<{ child: ChildProcess; 
       RUNNER_API_URL: `http://127.0.0.1:${controlPlane.port}`,
       RUNNER_WORKSPACE_ROOT: workspace,
       RUNNER_POLL_INTERVAL_MS: "200",
+      // Same reason as the poll interval above: the cases that lose a backend
+      // wait for the next retention check, and ten real seconds of sleeping
+      // proves nothing the check itself does not.
+      SERVICE_LOCK_RETENTION_INTERVAL_MS: "250",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

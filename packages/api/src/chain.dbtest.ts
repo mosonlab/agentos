@@ -688,6 +688,54 @@ test("non-template chained completion advances the next execution layer and pers
   assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: predecessor.id } })).body, "reviewable artifact");
 });
 
+test("runner completion durably parks a layer successor refused by the compound Run-birth guard", async () => {
+  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
+  const template = await db.taskTemplate.create({ data: {
+    projectId: project.id,
+    name: "compound-engineer-workflow",
+    description: "compound refusal regression",
+    variables: [],
+  } });
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: agent.id,
+    stepIndex: 5,
+    layer: 5,
+    name: "Implementation",
+    assigneeType: "AGENT",
+    prompt: "implement",
+    outputKind: "implementation",
+  } });
+  await db.task.update({
+    where: { id: successor.id },
+    data: { templateId: template.id, templateStepId: step.id },
+  });
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING" } });
+  const { run, runnerId, fencingToken } = await seedRunningRun(predecessor.id, project.id, agent.id, repo.id);
+
+  const response = await withRunnerToken(() => createApp(db).request(`/runner/runs/${run.id}/complete`, {
+    method: "POST",
+    headers: { Authorization: "Bearer runner-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify(completionBody(runnerId, fencingToken, "durable predecessor output")),
+  }));
+
+  assert.equal(response.status, 200, await response.text());
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: predecessor.id } })).body, "durable predecessor output");
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  const parked = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  assert.equal(parked.status, "REVIEW");
+  assert.equal(
+    parked.failureReason,
+    "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+  );
+  const refusalActivity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: successor.id, body: { contains: "Run birth was refused" } },
+    orderBy: { createdAt: "desc" },
+  });
+  assert.deepEqual(refusalActivity.metadata, { refusal: "compound-implementation-assignee" });
+});
+
 test("gated non-template run completion creates an OPEN card and reviewable output", async () => {
   const { project, agent, repo, predecessor } = await seedExecutableChain();
   await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING", approvalGate: true } });

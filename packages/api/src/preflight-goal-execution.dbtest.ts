@@ -18,12 +18,12 @@ import { preflightHarness, preKernelRun } from "./goal-execution-fixture.js";
  */
 
 const harness = preflightHarness("preflight");
-after(() => {
-  harness.cleanup();
+after(async () => {
+  await harness.cleanup();
 });
 
-test("a clean history passes and the report carries only IDs and counts", () => {
-  harness.stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
+test("a clean history passes and the report carries only IDs and counts", async () => {
+  await harness.stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
 
   const result = harness.runPreflight();
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
@@ -33,24 +33,24 @@ test("a clean history passes and the report carries only IDs and counts", () => 
   assert.doesNotMatch(result.stdout + result.stderr, /secret-looking/u, "no prompt or spec text reaches the report");
 });
 
-test("a Goal/Run project disagreement cannot even be created on the pre-kernel schema", () => {
-  const fixture = harness.stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
+test("a Goal/Run project disagreement cannot even be created on the pre-kernel schema", async () => {
+  const fixture = await harness.stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
   // The preflight checks this condition anyway, as defence in depth. The pre-kernel
   // composite foreign key Run(goalId, projectId) -> Goal already makes the corrupt
   // state unreachable, and that is worth pinning: if a future migration weakens the
   // key, this test fails and the preflight's query becomes the live guard rather
   // than a redundant one.
-  assert.throws(
-    () => fixture.execute(`
+  await assert.rejects(
+    async () => { await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt") VALUES ('p-other', 'other', 'other', NOW());
       INSERT INTO "Goal" ("id", "projectId", "title", "spec", "updatedAt") VALUES ('g-other', 'p-other', 'Other', 'spec', NOW());
-      ${preKernelRun("r-cross", "t-old", "g-other", 2)}`),
+      ${preKernelRun("r-cross", "t-old", "g-other", 2)}`); },
     /Run_goalId_projectId_fkey/u,
   );
 });
 
-test("an unnamed schema stops the preflight", () => {
-  const fixture = harness.stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
+test("an unnamed schema stops the preflight", async () => {
+  const fixture = await harness.stage([preKernelRun("r-1", "t-old", "g-up", 1)]);
 
   const url = new URL(fixture.url);
   url.searchParams.delete("schema");

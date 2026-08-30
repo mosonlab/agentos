@@ -4,7 +4,7 @@ import { act, type ReactNode, useCallback, useState } from "react";
 
 import type { CardActions } from "../components/task-card";
 import type { BoardTask, TaskStatus } from "../lib/types";
-import { installDom, reactDom } from "./dom-harness";
+import { installDom, mountPage } from "./dom-harness";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.displayName ?? overrides.name ?? "Ship the thing", status: "TODO", moveTargets: [],
@@ -57,12 +57,6 @@ const startability = (startable: boolean) => ({
   },
 });
 
-const settle = async (): Promise<void> => {
-  await act(async () => {
-    for (let round = 0; round < 4; round += 1) await Promise.resolve();
-  });
-};
-
 const installComputedStyle = (dom: ReturnType<typeof installDom>["dom"]): void => {
   Object.defineProperty(globalThis, "getComputedStyle", {
     configurable: true,
@@ -73,7 +67,7 @@ const installComputedStyle = (dom: ReturnType<typeof installDom>["dom"]): void =
   Object.defineProperty(globalThis, "DOMRect", { configurable: true, value: dom.window.DOMRect });
 };
 
-const openDoing = async (dom: ReturnType<typeof installDom>["dom"]): Promise<HTMLElement> => {
+const openDoing = async (dom: ReturnType<typeof installDom>["dom"], settle: () => Promise<void>): Promise<HTMLElement> => {
   const trigger = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label^='Actions for']");
   assert.ok(trigger, dom.window.document.body.innerHTML);
   await act(async () => trigger.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, button: 0 })));
@@ -85,31 +79,28 @@ const openDoing = async (dom: ReturnType<typeof installDom>["dom"]): Promise<HTM
 };
 
 test("the agent menu Doing action opens confirmation and never PATCHes", async () => {
-  const { dom, container } = installDom();
-  installComputedStyle(dom);
+  const preload = installDom();
+  installComputedStyle(preload.dom);
   const { useTaskStartConfirmation } = await import("../pages/Tasks");
   const { TaskCard } = await import("../components/task-card");
-  const originalFetch = globalThis.fetch;
   const requests: Array<{ method: string; path: string }> = [];
   const mutations: TaskStatus[] = [];
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
+  const page = await mountPage(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({
+    assigneeType: "AGENT",
+    assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" },
+    moveTargets: [{ status: "BACKLOG", via: "patch" }, { status: "DOING", via: "start" }],
+  })} onMutation={(status) => mutations.push(status)} />, { "*": ({ input, method }) => {
     const path = String(input);
-    requests.push({ method: init?.method ?? "GET", path });
+    requests.push({ method, path });
     if (path === "/api/tasks/t1/startability") return Response.json(startability(true));
     if (path === "/api/tasks/t1/start") return Response.json({ runId: "r1", runNumber: 1 }, { status: 201 });
     return Response.json([], { status: 404 });
   } });
-  const root = (await reactDom()).createRoot(container);
+  const { dom, container } = page;
   try {
-    await act(async () => root.render(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({
-      assigneeType: "AGENT",
-      assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" },
-      moveTargets: [{ status: "BACKLOG", via: "patch" }, { status: "DOING", via: "start" }],
-    })} onMutation={(status) => mutations.push(status)} />));
-    await settle();
-    const doing = await openDoing(dom);
+    const doing = await openDoing(dom, page.settle);
     await act(async () => doing.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await settle();
+    await page.settle();
     assert.ok(container.querySelector("[data-confirmation]"), container.innerHTML);
     assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 1);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
@@ -120,47 +111,42 @@ test("the agent menu Doing action opens confirmation and never PATCHes", async (
       .find((button) => button.textContent?.trim() === "Start task");
     assert.ok(confirm);
     await act(async () => confirm.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await settle();
+    await page.settle();
     assert.equal(requests.filter(({ method, path }) => method === "POST" && path === "/api/tasks/t1/start").length, 1);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
     assert.equal(container.querySelector("[data-confirmation]"), null);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
+    preload.dom.window.close();
   }
 });
 
 test("a non-startable agent menu does not advertise Doing", async () => {
-  const { dom, container } = installDom();
-  installComputedStyle(dom);
+  const preload = installDom();
+  installComputedStyle(preload.dom);
   const { useTaskStartConfirmation } = await import("../pages/Tasks");
   const { TaskCard } = await import("../components/task-card");
-  const originalFetch = globalThis.fetch;
   const requests: Array<{ method: string; path: string }> = [];
   const mutations: TaskStatus[] = [];
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
+  const page = await mountPage(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" } })} onMutation={(status) => mutations.push(status)} />, { "*": ({ input, method }) => {
     const path = String(input);
-    requests.push({ method: init?.method ?? "GET", path });
+    requests.push({ method, path });
     if (path === "/api/tasks/t1/startability") return Response.json(startability(false));
     return Response.json([], { status: 404 });
   } });
-  const root = (await reactDom()).createRoot(container);
+  const { dom } = page;
   try {
-    await act(async () => root.render(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" } })} onMutation={(status) => mutations.push(status)} />));
-    await settle();
     const trigger = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label^='Actions for']");
     assert.ok(trigger);
     await act(async () => trigger.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, button: 0 })));
-    await settle();
+    await page.settle();
     assert.equal([...dom.window.document.querySelectorAll<HTMLElement>("[role='menuitem']")]
       .some((item) => item.textContent?.trim() === "Doing"), false);
     assert.equal(requests.filter(({ method, path }) => method === "GET" && path === "/api/tasks/t1/startability").length, 0);
     assert.equal(requests.some(({ method }) => method === "PATCH"), false);
     assert.deepEqual(mutations, []);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
+    preload.dom.window.close();
   }
 });

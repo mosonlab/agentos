@@ -15,6 +15,7 @@ import {
   repairBinding,
   taskChainName,
 } from "./board.js";
+import { chainProgress, type ChainRow } from "./chain.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
   nativeChildUsed: false, costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
@@ -197,6 +198,35 @@ test("the board projection carries the operator transition matrix", () => {
   assert.equal(agentTargets.some(({ status, via }) => via === "patch" && ["DOING", "REVIEW", "DONE"].includes(status)), false);
 });
 
+test("a standalone Agent task with an active Run does not offer Backlog", () => {
+  const card = boardCard(row({
+    status: "TODO",
+    assigneeAgentId: "a1",
+    repoId: "r1",
+    assigneeAgent: {
+      id: "a1", name: "developer", title: "Developer", model: "gpt-5.6-sol", archivedAt: null,
+    },
+    runs: [{
+      id: "run-1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", budgetGrants: 0, session: null,
+    }],
+  }), null, { hasRepoGrant: true, chainPredecessorsDone: true });
+
+  assert.equal(card.moveTargets.some(({ status }) => status === "BACKLOG"), false);
+});
+
+test("a Backlog task with an archived assignee does not offer Todo", () => {
+  const card = boardCard(row({
+    status: "BACKLOG",
+    assigneeAgentId: "a1",
+    repoId: "r1",
+    assigneeAgent: {
+      id: "a1", name: "retired", title: "Retired", model: "gpt-5.6-sol", archivedAt: new Date(),
+    },
+  }), null, { hasRepoGrant: true, chainPredecessorsDone: true });
+
+  assert.equal(card.moveTargets.some(({ status }) => status === "TODO"), false);
+});
+
 test("a repair task is bound to the chain of the regression task its marker names", () => {
   const chain = (): { chainId: string; chainName: string | null } => ({ chainId: "c1", chainName: "Release" });
   assert.deepEqual(
@@ -259,6 +289,43 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.equal(done.status, "DONE");
   assert.equal(done.activation.state, "settled");
   assert.equal(done.frontier.taskId, "step-2");
+});
+
+test("chainAggregate returns the exact board contract keys", () => {
+  const aggregate = chainAggregate("c1", "Release", [member()], []);
+
+  assert.deepEqual(Object.keys(aggregate).sort(), [
+    "activation", "chainId", "chainName", "createdAt", "detailTaskId", "frontier",
+    "status", "statusCounts", "stepCount", "totalCost", "updatedAt",
+  ]);
+  assert.deepEqual(Object.keys(aggregate.frontier).sort(), [
+    "failureReason", "latestRun", "mergeOutcome", "position", "status", "taskId", "title",
+  ]);
+});
+
+test("board aggregate and Chain detail choose the same first unfinished execution layer", () => {
+  const shared = [
+    { id: "done", name: "Completed layer", chainIndex: 1, chainLayer: 10, status: "DONE" as const },
+    { id: "later", name: "Later layer", chainIndex: 2, chainLayer: 90, status: "TODO" as const },
+    { id: "parallel-done", name: "Finished sibling", chainIndex: 3, chainLayer: 40, status: "DONE" as const },
+    { id: "frontier", name: "First unfinished layer", chainIndex: 4, chainLayer: 40, status: "TODO" as const },
+  ];
+  const aggregate = chainAggregate("c1", "Release", shared.map((item) => member({
+    ...item,
+    displayName: item.name,
+    templateStep: { name: item.name },
+  })), []);
+  const detail = chainProgress(shared.map((item): ChainRow => ({
+    ...item,
+    projectId: "p1",
+    chainId: "c1",
+    archivedAt: null,
+    templateStep: { name: item.name },
+  })));
+
+  assert.equal(aggregate.frontier.taskId, "frontier");
+  assert.equal(aggregate.frontier.title, detail?.activeStepName);
+  assert.equal(detail?.currentLayer, 2);
 });
 
 test("chainAggregate reports a predecessor-bound chain and never offers parked activation", () => {

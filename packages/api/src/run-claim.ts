@@ -23,6 +23,7 @@ import {
   taskIsIntegratorStep,
   TaskStatus,
 } from "@anneal/db";
+import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import { z } from "zod";
 
 import { issueSessionToken } from "./auth.js";
@@ -114,18 +115,11 @@ const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
 const heldChainTaskIdsForClaim = async (tx: Prisma.TransactionClient): Promise<string[]> => {
   const controls = await tx.chainControl.findMany({
     where: { state: ChainControlState.HELD },
-    select: { projectId: true, chainId: true, heldLayer: true },
+    select: { projectId: true, chainId: true, state: true, heldLayer: true },
   });
-  const heldChains = controls.flatMap(({ projectId, chainId, heldLayer }) => {
-    if (heldLayer === null) return [{ projectId, chainId }];
-    return [{
-      projectId,
-      chainId,
-      OR: [
-        { chainLayer: { gt: heldLayer } },
-        { chainLayer: null, chainIndex: { gt: heldLayer } },
-      ],
-    }];
+  const heldChains = controls.flatMap((control) => {
+    const where = heldWhere(control);
+    return where === null ? [] : [where];
   });
   if (heldChains.length === 0) return [];
   const tasks = await tx.task.findMany({ where: { OR: heldChains }, select: { id: true } });
@@ -280,14 +274,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             AND NOT EXISTS (
               SELECT 1
               FROM "ChainControl" AS chain_control
-              WHERE chain_control."projectId" = task."projectId"
-                AND chain_control."chainId" = task."chainId"
-                AND chain_control."state" = lower(${ChainControlState.HELD})::"ChainControlState"
-                AND (
-                  chain_control."heldLayer" IS NULL
-                  OR COALESCE(task."chainLayer", task."chainIndex") IS NULL
-                  OR COALESCE(task."chainLayer", task."chainIndex") > chain_control."heldLayer"
-                )
+              WHERE ${heldSql(Prisma.sql`task`, Prisma.sql`chain_control`)}
             )
           ORDER BY COALESCE(chain_priority."unfinished", 1) ASC,
             candidate."readyAt" ASC,
@@ -761,11 +748,14 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             projectId: candidate.task.projectId,
             chainId: candidate.task.chainId,
           } },
-          select: { state: true, heldLayer: true },
+          select: { projectId: true, chainId: true, state: true, heldLayer: true },
         });
-        const taskLayer = candidate.task.chainLayer ?? candidate.task.chainIndex;
-        if (control?.state === ChainControlState.HELD
-          && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
+        if (heldPredicate({
+          projectId: candidate.task.projectId,
+          chainId: candidate.task.chainId,
+          layer: candidate.task.chainLayer,
+          index: candidate.task.chainIndex,
+        }, control)) {
           // The Chain mutex was acquired after the candidate scan. Hold may
           // have won that race, so the live authority under this lock decides.
           // End the scan while retaining lock order; the Run stays QUEUED.

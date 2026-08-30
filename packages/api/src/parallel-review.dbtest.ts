@@ -1342,7 +1342,18 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
         select: { assigneeAgentId: true, status: true, failureReason: true },
       });
       assert.equal(blindTask.status, TaskStatus.REVIEW);
-      assert.match(blindTask.failureReason ?? "", /Assignee .* is archived/u);
+      const refusalActivity = await db.taskActivity.findFirstOrThrow({
+        where: {
+          taskId: fixture.blindTaskId,
+          metadata: { path: ["refusal"], equals: "assignee-archived" },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      assert.equal((refusalActivity.metadata as Record<string, unknown>).refusal, "assignee-archived");
+      assert.match(
+        blindTask.failureReason ?? "",
+        /assignee review-coordinator-opus is archived; unarchive the agent to queue this step/u,
+      );
       assert.ok(blindTask.assigneeAgentId);
       const unarchived = await operatorRequest(`/agents/${blindTask.assigneeAgentId}/unarchive`, "POST");
       assert.equal(unarchived.status, 200, JSON.stringify(unarchived.body));

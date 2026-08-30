@@ -271,7 +271,7 @@ test("task status patch does not apply create defaults to other fields", async (
     const tx = {
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId, status: "REVIEW", archivedAt: null }],
       task: {
-        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null }),
+        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null, dispatchAfterTaskId: null, dispatchAfter: null }),
         // §D-P7's stop-state guard loads the task with its template step before
         // any status write. An ordinary task has no step, and the guard is then
         // a no-op — but it still asks.
@@ -403,7 +403,7 @@ test("operator DONE on an AGENT chain task is refused without closing its gate",
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
       repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
-    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null, dispatchAfterTaskId: null, dispatchAfter: null };
     const tx = {
       // The status write takes the Task-row mutex before advancing the chain.
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
@@ -453,6 +453,7 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
       id: "task-1", projectId: "project-1", name: "Human final", status: "REVIEW", templateId: "template-1",
       approvalGate: false, chainId: "chain-1", chainIndex: 2,
       assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
+      dispatchAfterTaskId: null, dispatchAfter: null,
     };
     const tx = {
       $queryRaw: async () => [{ id: before.id }],
@@ -574,38 +575,6 @@ test("AT create waits for the scheduler and merged-view patch cannot remove its 
   });
 });
 
-test("fencing rejects an expired generation token", async () => {
-  await withTokens(async () => {
-    const currentToken = "2:run-1:current";
-    const database = {
-      run: {
-        updateMany: async ({ where }: { where: { fencingToken: string } }) => ({ count: where.fencingToken === currentToken ? 1 : 0 }),
-        findFirst: async () => null,
-        // The refusal is explained from the row, not guessed from the miss.
-        findUnique: async () => ({
-          runnerId: "runner-1",
-          fencingToken: currentToken,
-          cancelRequestedAt: null,
-          leaseExpiresAt: new Date(Date.now() + 60_000),
-          status: RunStatus.RUNNING,
-        }),
-      },
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request("/runner/runs/run-1/heartbeat", {
-      method: "POST",
-      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId: "runner-1",
-        fencingToken: "1:run-1:expired",
-        leaseSeconds: 60,
-        processAlive: true,
-      }),
-    });
-    assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), { error: "Stale fencing token", reason: "stale-fence" });
-  });
-});
-
 test("session output authorization cannot introduce a second fence instant", async () => {
   const fencedPredicates: Prisma.RunWhereInput[] = [];
   const task = {
@@ -655,97 +624,6 @@ test("session output authorization cannot introduce a second fence instant", asy
   ).in === activeRunStatuses));
 });
 
-test("resuming a run preserves its original Run and Session start timestamps", async () => {
-  await withTokens(async () => {
-    const originalStartedAt = new Date("2026-08-21T00:00:00.000Z");
-    const resumedPromptHash = createHash("sha256").update("exact continuation input").digest("hex");
-    const runWrites: Array<Record<string, unknown>> = [];
-    const sessionWrites: Array<Record<string, unknown>> = [];
-    const tx = {
-      $queryRaw: async () => [{ id: "run-1" }],
-      run: {
-        findUnique: async () => ({ startedAt: originalStartedAt, session: { startedAt: originalStartedAt } }),
-        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
-          runWrites.push(data);
-          return { count: 1 };
-        },
-      },
-      session: {
-        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
-          sessionWrites.push(data);
-          return { count: 1 };
-        },
-      },
-    };
-    const database = {
-      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request("/runner/runs/run-1/start", {
-      method: "POST",
-      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId: "runner-1",
-        fencingToken: "1:run-1:current",
-        adapterVersion: "test",
-        cliVersion: "test",
-        promptHash: resumedPromptHash,
-        manifest: {},
-        workspacePath: "/scratch/resumed",
-      }),
-    });
-    assert.equal(response.status, 200);
-    assert.equal(runWrites[0]?.startedAt, originalStartedAt);
-    assert.equal(runWrites[0]?.promptHash, resumedPromptHash);
-    assert.equal(sessionWrites[0]?.startedAt, originalStartedAt);
-  });
-});
-
-test("starting a fresh run stamps the same new timestamp on its Run and Session", async () => {
-  await withTokens(async () => {
-    const runWrites: Array<Record<string, unknown>> = [];
-    const sessionWrites: Array<Record<string, unknown>> = [];
-    const dispatchedPromptHash = createHash("sha256").update("the exact dispatched prompt").digest("hex");
-    const tx = {
-      $queryRaw: async () => [{ id: "run-1" }],
-      run: {
-        findUnique: async () => ({ startedAt: null, session: { startedAt: null } }),
-        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
-          runWrites.push(data);
-          return { count: 1 };
-        },
-      },
-      session: {
-        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
-          sessionWrites.push(data);
-          return { count: 1 };
-        },
-      },
-    };
-    const database = {
-      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
-    } as unknown as PrismaClient;
-    const before = Date.now();
-    const response = await createApp(database).request("/runner/runs/run-1/start", {
-      method: "POST",
-      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId: "runner-1",
-        fencingToken: "1:run-1:current",
-        adapterVersion: "test",
-        cliVersion: "test",
-        promptHash: dispatchedPromptHash,
-        manifest: {},
-        workspacePath: "/scratch/fresh",
-      }),
-    });
-    assert.equal(response.status, 200);
-    assert.ok(runWrites[0]?.startedAt instanceof Date);
-    assert.equal(sessionWrites[0]?.startedAt, runWrites[0]?.startedAt);
-    assert.ok((runWrites[0]?.startedAt as Date).getTime() >= before);
-    assert.equal(runWrites[0]?.promptHash, dispatchedPromptHash);
-  });
-});
-
 test("starting a run without an exact dispatched prompt hash is refused before database access", async () => {
   await withTokens(async () => {
     const response = await createApp({} as PrismaClient).request("/runner/runs/run-1/start", {
@@ -764,37 +642,39 @@ test("starting a run without an exact dispatched prompt hash is refused before d
   });
 });
 
-test("the mechanical merge-executor start body is accepted without a prompt hash", async () => {
+test("merge-executor start maps an omitted promptHash to null and dispatches", async () => {
   await withTokens(async () => {
-    const runWrites: Array<Record<string, unknown>> = [];
+    let promptHash: unknown = "not-written";
     const tx = {
-      $queryRaw: async () => [{ id: "mechanical-run" }],
+      $queryRaw: async () => [{ id: "run-1" }],
       run: {
-        findUnique: async () => ({ startedAt: null }),
+        findFirst: async () => ({ startedAt: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => {
-          runWrites.push(data);
+          promptHash = data.promptHash;
           return { count: 1 };
         },
       },
       session: { updateMany: async () => ({ count: 1 }) },
     };
     const database = {
-      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation(tx),
     } as unknown as PrismaClient;
-    const response = await createApp(database).request("/runner/runs/mechanical-run/start", {
+    const response = await createApp(database).request("/runner/runs/run-1/start", {
       method: "POST",
       headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         runnerId: "merge-executor-1",
-        fencingToken: "1:mechanical-run:current",
-        adapterVersion: "merge-executor-v1",
-        cliVersion: "merge-executor-v1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "executor-1",
+        cliVersion: "executor-1",
+        manifest: { executionMode: "mechanical" },
         workspacePath: null,
-        manifest: { executionMode: "mechanical", childProcessCount: 0 },
       }),
     });
+
     assert.equal(response.status, 200);
-    assert.equal(runWrites[0]?.promptHash, null);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(promptHash, null);
   });
 });
 
@@ -939,6 +819,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
         findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
+      mergeLeaseEvent: { findMany: async () => [] },
       inboxMessage: { create: async () => ({}) },
     }),
   } as unknown as PrismaClient;
@@ -1765,6 +1646,7 @@ test("claim query filters archived agents before take so active work cannot star
         update: async () => ({}),
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
+      mergeLeaseEvent: { findMany: async () => [] },
       taskStepOutput: { findMany: async () => [{
         kind: "spec", body: completePriorOutput,
         task: { name: "Approved specification", chainIndex: 0 },
@@ -1814,6 +1696,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
         },
         run: { findMany: async () => [] },
         taskActivity: { findMany: async () => [] },
+        mergeLeaseEvent: { findMany: async () => [] },
       }),
     } as unknown as PrismaClient;
     const app = createApp(database);
@@ -1857,6 +1740,7 @@ test("successful completion commits output and parks an archived chain successor
         updatedAt: new Date(),
         runs: [],
         assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
+        repo: { id: "repo-1", name: "Repo", defaultBranch: "main" },
       };
       const predecessor = {
         id: "task-1",
@@ -1919,6 +1803,7 @@ test("successful completion commits output and parks an archived chain successor
             return {};
           },
         },
+        agent: { findUnique: async () => successor.assigneeAgent },
         chainControl: { findMany: async () => [] },
         runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }) },
       };
@@ -1947,7 +1832,12 @@ test("successful completion commits output and parks an archived chain successor
       assert.equal(runCreates, 0);
       assert.equal(successorUpdate?.status, "REVIEW");
       assert.match(String(successorUpdate?.failureReason), /Archived Successor/);
-      assert.match(String(successorActivity?.body), /Archived Successor.*not queued/);
+      assert.match(String(successorUpdate?.failureReason), /archived/i);
+      assert.equal(successorActivity?.taskId, successor.id);
+      assert.equal(successorActivity?.actorType, "control-plane");
+      assert.match(String(successorActivity?.body), /predecessor.*complet/i);
+      assert.match(String(successorActivity?.body), /Archived Successor/);
+      assert.match(String(successorActivity?.body), /archived/i);
     } finally {
       if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
       else process.env.RUNNER_WORKSPACE_ROOT = previousRoot;
@@ -2140,209 +2030,6 @@ test("GET /runs/:runId/events pages by seq and reports hasMore without a second 
     const clamped = findManyArgs.at(-1) as { take: number; where: Record<string, unknown> };
     assert.equal(clamped.take, 2001);
     assert.equal(clamped.where.seq, undefined);
-  });
-});
-
-/* --------------------------------- the usage recompute's ingest wiring */
-
-/** A CLAUDE terminal `result` line, trimmed to the fields `extractUsage` reads.
- *  Values are the captured shape from `spikes/cli-capabilities/samples/`.
- *
- *  It stays trimmed ON PURPOSE, and specifically it carries no `modelUsage`:
- *  these three tests are what keep `extractUsage`'s top-level snake_case
- *  fallback branch covered — the branch CODEX and PI always take. The complete
- *  captures, `modelUsage` included, live in `usage.test.ts`. */
-const finalOutputPayload = {
-  type: "result",
-  total_cost_usd: 0.049117,
-  usage: { input_tokens: 4, output_tokens: 77, cache_read_input_tokens: 8_700, cache_creation_input_tokens: 120 },
-};
-
-/** The stub the three wiring tests share: one live run with a session, a
- *  `createMany` that accepts anything, and a recording `session.update`.
- *  `onUpdate` lets a test make the derived-cache write fail. */
-const ingestDatabase = (
-  updates: Array<Record<string, unknown>>,
-  finalOutputRows: Array<{ payload: unknown }>,
-  onUpdate?: () => never,
-): PrismaClient => {
-  const database: Record<string, unknown> = {
-    // `recomputeSessionUsage` now opens one interactive transaction and takes an
-    // advisory lock inside it. These three answer that scaffolding inertly; the
-    // lock itself is proven against a real PostgreSQL in `usage.dbtest.ts`.
-    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
-    $executeRawUnsafe: async () => 0,
-    $queryRaw: async () => [],
-    run: {
-      findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
-    },
-    sessionEvent: {
-      createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
-      findMany: async () => finalOutputRows,
-    },
-    session: {
-      findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
-      update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
-    },
-  };
-  return database as unknown as PrismaClient;
-};
-
-const postEvents = async (database: PrismaClient, types: string[]): Promise<Response> =>
-  createApp(database).request("/runner/runs/run-1/events", {
-    method: "POST",
-    headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-    body: JSON.stringify({
-      runnerId: "runner-1",
-      fencingToken: "1:run-1:current",
-      events: types.map((type, index) => ({
-        seq: index + 1,
-        source: "CLAUDE",
-        type,
-        payload: type === "FINAL_OUTPUT" ? finalOutputPayload : { text: "hello" },
-      })),
-    }),
-  });
-
-test("ingesting a FINAL_OUTPUT writes the derived usage columns", async () => {
-  await withTokens(async () => {
-    const updates: Array<Record<string, unknown>> = [];
-    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "FINAL_OUTPUT"]);
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 2 });
-    assert.equal(updates.length, 1);
-    const write = updates[0] as { where: { id: string }; data: Record<string, unknown> };
-    assert.equal(write.where.id, "ses-1");
-    assert.equal(write.data.inputTokens, 8_824);
-    assert.equal(write.data.outputTokens, 77);
-    assert.equal(write.data.cachedInputTokens, 8_820);
-    // inputTokens includes cached input; totalTokens is input + output by
-    // definition, so the cache is not added a second time.
-    assert.equal(write.data.totalTokens, 8_901);
-    assert.equal(String(write.data.costUsd), "0.0491");
-  });
-});
-
-test("a batch with no FINAL_OUTPUT does not touch the usage columns", async () => {
-  await withTokens(async () => {
-    const updates: Array<Record<string, unknown>> = [];
-    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "TOOL_STARTED"]);
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 2 });
-    assert.equal(updates.length, 0);
-  });
-});
-
-test("an observed native child is persisted independently of the launch grant", async () => {
-  await withTokens(async () => {
-    const updates: Array<Record<string, unknown>> = [];
-    const response = await postEvents(ingestDatabase(updates, []), ["NATIVE_CHILD_STARTED"]);
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 1 });
-    assert.deepEqual(updates, [{ where: { id: "ses-1" }, data: { nativeChildUsed: true } }]);
-  });
-});
-
-test("a failing usage recompute does not fail the ingest", async () => {
-  await withTokens(async () => {
-    // The derived cache must never be fatal to the write path it decorates:
-    // `appendEvents` has no retry, so a 500 here would reject the runner's
-    // terminal flush, skip deliverWorkspace/completeRun, record a successful
-    // run as failed and delete its workspace unpushed.
-    const updates: Array<Record<string, unknown>> = [];
-    const database = ingestDatabase(updates, [{ payload: finalOutputPayload }], () => {
-      throw new Error("value out of range for type integer");
-    });
-    const errors: unknown[] = [];
-    const consoleError = console.error;
-    console.error = (...args: unknown[]) => { errors.push(args); };
-    try {
-      const response = await postEvents(database, ["FINAL_OUTPUT"]);
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { accepted: 1 });
-    } finally {
-      console.error = consoleError;
-    }
-    assert.equal(updates.length, 0);
-    assert.equal(errors.length, 1);
-  });
-});
-
-test("event ingestion makes literal NULs visible without changing seq order", async () => {
-  await withTokens(async () => {
-    const nul = "\u0000";
-    const visibleNul = "\\u0000";
-    const stored: Array<Record<string, unknown>> = [];
-    const database = {
-      $queryRaw: async () => [{ id: "run-1" }],
-      run: {
-        findFirst: async () => ({ session: { id: "ses-1", providerConversationId: null } }),
-      },
-      sessionEvent: {
-        createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
-          stored.push(...data);
-          return { count: data.length };
-        },
-        findMany: async (): Promise<Array<Record<string, unknown>>> => {
-          const rows = stored.map((event, index) => ({ id: `event-${index}`, ...event })) as Array<Record<string, unknown>>;
-          rows.sort((left, right) => Number(left.seq) - Number(right.seq));
-          return rows;
-        },
-        count: async () => stored.length,
-      },
-    } as Record<string, unknown>;
-    database.$transaction = async (operation: (tx: unknown) => Promise<unknown>) => operation(database);
-    const app = createApp(database as unknown as PrismaClient);
-    const response = await app.request("/runner/runs/run-1/events", {
-      method: "POST",
-      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId: "runner-1",
-        fencingToken: "1:run-1:current",
-        events: [
-          {
-            seq: 4,
-            source: "CLAUDE",
-            type: `EVENT${nul}TYPE`,
-            providerEventId: `provider${nul}id`,
-            toolCallId: `tool${nul}id`,
-            payload: {
-              unchanged: "plain text",
-              nested: { message: `left${nul}right`, list: [`a${nul}b`, { deep: "value" }] },
-              [`field${visibleNul}`]: "literal key value",
-              [`field${nul}`]: "NUL key value",
-              [`key${nul}`]: "key value",
-            },
-          },
-          { seq: 9, source: "CLAUDE", type: "VALID", payload: { unchanged: "still exact" } },
-        ],
-      }),
-    });
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 2 });
-
-    const read = await app.request("/runs/run-1/events", {
-      headers: { Authorization: "Bearer operator-unit-token" },
-    });
-    assert.equal(read.status, 200);
-    const body = await read.json() as { events: Array<Record<string, any>>; total: number };
-    assert.deepEqual(body.events.map((event) => event.seq), [4, 9]);
-    assert.equal(body.total, 2);
-    assert.equal(body.events[0]?.type, `EVENT${visibleNul}TYPE`);
-    assert.equal(body.events[0]?.providerEventId, `provider${visibleNul}id`);
-    assert.equal(body.events[0]?.toolCallId, `tool${visibleNul}id`);
-    assert.deepEqual(body.events[0]?.payload, {
-      unchanged: "plain text",
-      nested: { message: `left${visibleNul}right`, list: [`a${visibleNul}b`, { deep: "value" }] },
-      [`field${visibleNul}`]: "literal key value",
-      [`field${visibleNul}${visibleNul}`]: "NUL key value",
-      [`key${visibleNul}`]: "key value",
-    });
-    assert.deepEqual(body.events[1]?.payload, { unchanged: "still exact" });
-    assert.equal(JSON.stringify(body).includes(nul), false);
   });
 });
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PrismaClient } from "@anneal/db";
+import type { Prisma, PrismaClient } from "@anneal/db";
 
 import {
   recordMergeLeaseHold,
@@ -13,14 +13,30 @@ const releasedAt = new Date("2026-08-27T12:01:02.999Z");
 
 test("a confirmed-release recording failure propagates and never claims evidence was stored", async () => {
   let writes = 0;
-  const db = {
+  const tx = {
     task: { findFirst: async () => ({ id: "tail-task" }) },
+    mergeLeaseEvent: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      createMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => ({
+        id: "ledger-1", projectId: "project-1", chainId: "chain-1",
+        leaseRef: "refs/merge-lease/holder", leaseSha: "lease-sha", state: "RELEASED",
+        owningTaskId: "tail-task", handedOffRunId: null, handedOffAt: null,
+        deferredAt: null, settledAt: releasedAt,
+        acquiredAt: new Date("2026-08-27T12:00:00.250Z"), failureDetail: null,
+        createdAt: releasedAt, updatedAt: releasedAt,
+      }),
+    },
     taskActivity: {
-      createMany: async () => {
+      create: async () => {
         writes += 1;
         throw new Error("database unavailable");
       },
     },
+  } as unknown as Prisma.TransactionClient;
+  const db = {
+    $transaction: async (operation: (client: Prisma.TransactionClient) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
 
   await assert.rejects(
@@ -36,14 +52,11 @@ test("a confirmed-release recording failure propagates and never claims evidence
 });
 
 test("an unconfirmed release performs no lookup or write", async () => {
-  let lookups = 0;
-  let writes = 0;
+  let transactions = 0;
   const db = {
-    task: { findFirst: async () => { lookups += 1; return { id: "tail-task" }; } },
-    taskActivity: { createMany: async () => { writes += 1; return { count: 1 }; } },
+    $transaction: async () => { transactions += 1; },
   } as unknown as PrismaClient;
 
   assert.equal(await recordMergeLeaseHold(db, target, { outcome: "not-held" }, releasedAt), "ignored");
-  assert.equal(lookups, 0);
-  assert.equal(writes, 0);
+  assert.equal(transactions, 0);
 });

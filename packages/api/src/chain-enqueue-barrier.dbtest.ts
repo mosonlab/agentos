@@ -145,3 +145,27 @@ test("a direct producer cannot bypass the held-layer gate", async () => {
   assert.equal(await db.run.count({ where: { taskId: task.id } }), 0);
   assert.equal(await db.taskActivity.count({ where: { taskId: task.id } }), 0);
 });
+
+test("a direct producer fails closed when both Chain execution fields are null", async () => {
+  const seed = await seedExecutor();
+  await db.$executeRawUnsafe('ALTER TABLE "Task" DROP CONSTRAINT "Task_chain_identity_all_or_none_check"');
+  try {
+    const task = await scheduledTask(seed, { chainId: "held-chain", chainIndex: null, chainLayer: null });
+    await hold(seed.project.id, task.chainId!, 1);
+
+    await assert.rejects(
+      () => db.$transaction((tx) => enqueueTaskRun(tx, task.id, due)),
+      /Chain .* is held; Task .* cannot queue a Run/u,
+    );
+    assert.equal(await db.run.count({ where: { taskId: task.id } }), 0);
+    assert.equal(await db.taskActivity.count({ where: { taskId: task.id } }), 0);
+  } finally {
+    await resetTestDb(db);
+    await db.$executeRawUnsafe(`ALTER TABLE "Task"
+      ADD CONSTRAINT "Task_chain_identity_all_or_none_check" CHECK (
+        ("chainId" IS NULL AND "chainIndex" IS NULL AND "chainLayer" IS NULL)
+        OR
+        ("chainId" IS NOT NULL AND "chainIndex" IS NOT NULL AND "chainLayer" IS NOT NULL)
+      )`);
+  }
+});

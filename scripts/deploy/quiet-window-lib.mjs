@@ -1,4 +1,4 @@
-import { UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
+import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
 
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
@@ -47,7 +47,7 @@ export const quietWindowIsOpen = (runs) =>
 
 const DEPLOYED_API_PACKAGE_NAMES = new Set(["@anneal/api", "@agentos/api"]);
 
-/** Accept the one live rename boundary while still requiring a clean exact commit. */
+/** Accept the one live rename seam while still requiring a clean exact commit. */
 export const deployedBuildStampRefusal = (stamp) => {
   if (typeof stamp?.commit !== "string" || !/^[0-9a-f]{40}$/u.test(stamp.commit)) return "invalid-commit";
   if (stamp.dirty !== false) return "dirty-build";
@@ -62,137 +62,69 @@ export const failureOf = (error) => error instanceof DeployFailure
   ? error
   : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
 
-/**
- * The mutating upgrade pipeline. The host is deliberately narrow so the test
- * harness can prove ordering and stop-on-first-failure without a live checkout,
- * launchd, or PostgreSQL.
- */
-export const executeUpgrade = async (host, initialRevisions, options = {}) => {
-  const ledger = options?.ledger ?? host.ledger;
-  const ledgerStarted = options?.ledgerStarted === true || ledger?.started === true;
-  let publication = null;
-  let revisions = initialRevisions;
+/** Execute the full deployment attempt through the host seam. Every phase
+ * receives the attempt and establishes facts for the phases that follow. */
+export const executeUpgrade = async (host, attempt) => {
   let schemaAdvanced = false;
   let activationAttempted = false;
   let activationOutcomeProven = false;
-  let candidateBuildStamp = null;
-  let context = {};
+  let upgradeStarted = false;
   const ledgerError = (operation, error) => error instanceof DeploymentLedgerError
     ? error
     : new DeploymentLedgerError(operation, error);
   const recordLedger = async (state, metadata = {}) => {
-    if (typeof ledger?.record !== "function") return;
+    const ledger = attempt.fact("ledger");
+    if (!ledger) throw new TypeError("deployment-attempt-fact-missing:ledger");
     try {
-      await ledger.record(state, {
-        targetCommit: revisions.to,
-        ...context,
-        ...metadata,
-      });
+      const record = attempt.ledgerMetadata(metadata);
+      if (state === "STARTED" && typeof ledger.start === "function") await ledger.start(record);
+      else if (typeof ledger.record === "function") await ledger.record(state, record);
+      else throw new TypeError("deployment-ledger-record-missing");
     } catch (error) {
       throw ledgerError("record", error);
     }
   };
   try {
-    if (ledger && !ledgerStarted) {
-      if (typeof ledger.start === "function") {
-        try {
-          await ledger.start({ targetCommit: revisions.to });
-        } catch (error) {
-          throw ledgerError("start", error);
-        }
-      }
-      else await recordLedger("STARTED");
-    }
-    let artifact = null;
     let publicationReady = false;
-    const executePhase = async ({ hostMethod }) => {
-      switch (hostMethod) {
-        case "verifyArtifact": {
-          artifact = await host[hostMethod](revisions.to);
-          candidateBuildStamp = artifact?.buildStamp ?? null;
-          context = {
-            ...context,
-            activatedBuildStamp: candidateBuildStamp,
-            releaseDirectoryIdentity: artifact?.releaseDirectoryIdentity ?? null,
-          };
-          break;
-        }
-        case "prepareWorkspace":
-          await host[hostMethod](artifact);
-          break;
-        case "backup": {
-          const backup = await host[hostMethod]();
-          context = { ...context, backupIdentity: backup?.backupIdentity ?? null };
-          break;
-        }
-        case "guardedMigration": {
-          const migration = await host[hostMethod]();
-          context = {
-            ...context,
-            migrationTailBefore: migration?.migrationTailBefore ?? null,
-            migrationTailAfter: migration?.migrationTailAfter ?? null,
-          };
-          schemaAdvanced = true;
-          break;
-        }
-        case "publishBuild":
-          activationAttempted = true;
-          try {
-            publication = await host[hostMethod]();
-            publicationReady = true;
-            activationOutcomeProven = publication !== null && publication !== undefined;
-          } catch (error) {
-            if (error instanceof DeployFailure && ["build-swap-failed", "release-pointer-activation-failed"].includes(error.reason)) {
-              activationOutcomeProven = true;
-            }
-            throw error;
-          }
-          context = {
-            ...context,
-            activatedBuildStamp: candidateBuildStamp,
-            ...(publication?.releaseDirectoryIdentity
-              ? { releaseDirectoryIdentity: publication.releaseDirectoryIdentity }
-              : publication?.releaseIdentity?.name
-                ? { releaseDirectoryIdentity: publication.releaseIdentity.name }
-                : {}),
-            ...(publication?.pointerOldTarget !== undefined ? { pointerOldTarget: publication.pointerOldTarget } : {}),
-            ...(publication?.pointerNewTarget !== undefined ? { pointerNewTarget: publication.pointerNewTarget } : {}),
-            ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
-            ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
-          };
-          break;
-        case "verifyServices": {
-          const verification = await host[hostMethod](revisions);
-          context = {
-            ...context,
-            activatedBuildStamp: verification?.activatedBuildStamp ?? context.activatedBuildStamp,
-          };
-          break;
-        }
-        default:
-          await host[hostMethod]();
-      }
-    };
     try {
-      for (const phase of UPGRADE_DEPLOY_PHASES) {
-        await executePhase(phase);
+      for (const phase of DEPLOY_PHASES) {
+        if (phase.scope === "upgrade") upgradeStarted = true;
+        if (phase.hostMethod === "publishBuild") activationAttempted = true;
+        let facts;
+        try {
+          facts = await host[phase.hostMethod](attempt);
+        } catch (error) {
+          if (phase.hostMethod === "publishBuild"
+            && error instanceof DeployFailure
+            && ["build-swap-failed", "release-pointer-activation-failed"].includes(error.reason)) {
+            activationOutcomeProven = true;
+          }
+          throw error;
+        }
+        attempt.establish(facts);
+        if (phase.hostMethod === "guardedMigration") schemaAdvanced = true;
+        if (phase.hostMethod === "publishBuild") {
+          publicationReady = attempt.fact("publication") !== undefined;
+          activationOutcomeProven = publicationReady;
+        }
         if (phase.ledgerState !== null) await recordLedger(phase.ledgerState);
+        if (attempt.fact("skip")) return { ok: true, skipped: attempt.fact("skip") };
       }
       await recordLedger("SUCCEEDED");
-      await host.notify({ outcome: "success", reason: "deployed", ...revisions });
+      await host.notify({ outcome: "success", reason: "deployed", ...attempt.requireFact("revisions") });
     } catch (error) {
       if (publicationReady) {
         try {
-          const rollbackPointerOutcome = await publication.rollback();
+          const rollbackPointerOutcome = await attempt.requireFact("publication").rollback();
           if (rollbackPointerOutcome !== null && rollbackPointerOutcome !== undefined) {
             const durableOutcome = typeof rollbackPointerOutcome === "string"
               ? rollbackPointerOutcome
               : rollbackPointerOutcome.operation && rollbackPointerOutcome.oldTarget && rollbackPointerOutcome.newTarget
                 ? `${rollbackPointerOutcome.operation}:${rollbackPointerOutcome.oldTarget}->${rollbackPointerOutcome.newTarget}`
                 : String(rollbackPointerOutcome.outcome ?? rollbackPointerOutcome);
-            context = { ...context, rollbackPointerOutcome: durableOutcome };
+            attempt.establish({ rollbackPointerOutcome: durableOutcome });
           }
-          await host.restorePreviousServices();
+          await host.restorePreviousServices(attempt);
           activationOutcomeProven = true;
         } catch (recoveryError) {
           activationOutcomeProven = false;
@@ -201,11 +133,11 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       }
       throw error;
     }
-    await publication.commit();
     return { ok: true };
   } catch (error) {
     const failure = failureOf(error);
     let terminalLedgerFailure = null;
+    const ledger = attempt.fact("ledger");
     if (ledger && failure.reason !== "deployment-ledger-write-failed") {
       const terminalState = schemaAdvanced && activationAttempted && !activationOutcomeProven
         ? "MANUAL_RECOVERY"
@@ -219,13 +151,18 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
     } else if (failure.reason === "deployment-ledger-write-failed") {
       host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
     }
+    const revisions = attempt.fact("revisions") ?? { from: "unknown", to: attempt.targetCommit };
     const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
-    await host.escalate(record);
-    try {
-      await host.notify(record);
-      await host.markEscalationNotified?.();
-    } catch (notificationError) {
-      host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
+    if (shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted })) {
+      await host.escalate(record);
+      try {
+        await host.notify(record);
+        await host.markEscalationNotified?.();
+      } catch (notificationError) {
+        host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
+      }
+    } else {
+      host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}; no-upgrade-started`);
     }
     return {
       ok: false,
@@ -233,7 +170,7 @@ export const executeUpgrade = async (host, initialRevisions, options = {}) => {
       ...(terminalLedgerFailure ? { ledgerFailure: terminalLedgerFailure } : {}),
     };
   } finally {
-    await host.cleanupWorkspace();
+    await attempt.release();
   }
 };
 

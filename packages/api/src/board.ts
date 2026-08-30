@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  isIntegratorStep,
   markerFromMetadata,
   MERGE_TAIL_KIND,
   projectMergeOutcome,
@@ -26,14 +27,15 @@ import {
 import type {
   BoardCard as BoardContractCard,
   BoardChainActivationState as BoardContractChainActivationState,
-  BoardChainAggregate as BoardContractChainAggregate,
-  BoardChainFrontier as BoardContractChainFrontier,
   BoardLatestRun as BoardContractLatestRun,
   BoardMoveTarget as BoardContractMoveTarget,
+  ChainAggregate as BoardContractChainAggregate,
+  ChainFrontier as BoardContractChainFrontier,
   RepairBinding as BoardContractRepairBinding,
   RunStatus as BoardRunStatus,
   UsageCost as BoardUsageCost,
 } from "@anneal/db/board-contract";
+import { compare } from "@anneal/db/chain-order";
 
 import { chainExecutionOwner, type ChainExecutionOwner } from "./chain-execution-owner.js";
 import {
@@ -44,7 +46,7 @@ import {
   taskStartability,
   type ChainProgress,
 } from "./chain.js";
-import { operatorStatusTransitionRefusal } from "./task-patch.js";
+import { taskMoveAuthority } from "./task-move-authority.js";
 
 /**
  * The Tasks board's own wire shape.
@@ -63,15 +65,7 @@ import { operatorStatusTransitionRefusal } from "./task-patch.js";
  * point of the shape is that its cost is legible.
  */
 export type BoardMoveTarget = BoardContractMoveTarget;
-export type BoardChainFrontier = BoardContractChainFrontier<Date> & {
-  mergeOutcome: BoardContractCard<Date>["mergeOutcome"];
-};
-export type BoardChainAggregate = Omit<BoardContractChainAggregate<Date>, "frontier"> & {
-  frontier: BoardChainFrontier;
-};
-export type BoardCard = Omit<BoardContractCard<Date>, "chainAggregate"> & {
-  chainAggregate: BoardChainAggregate | null;
-};
+export type BoardCard = BoardContractCard<Date>;
 export type BoardLatestRun = BoardContractLatestRun<Date>;
 export type BoardChainActivationState = BoardContractChainActivationState;
 export type RepairBinding = BoardContractRepairBinding;
@@ -83,10 +77,28 @@ type JsonSerialized<T> = T extends Date
     : T extends object
       ? { [Key in keyof T]: JsonSerialized<T[Key]> }
       : T;
-type ContractCheck<T extends BoardContractCard> = T;
+type ExactKeys<Left, Right> = [
+  Exclude<keyof Left, keyof Right>,
+  Exclude<keyof Right, keyof Left>,
+] extends [never, never] ? true : false;
+type ContractCheck<
+  Projection extends BoardContractCard,
+  Proof extends [true, true, true, false, false],
+> = Proof extends [true, true, true, false, false] ? Projection : never;
 /** Compile-time proof that JSON serialization turns the native projection into
- * the shared browser contract, including every required field. */
-export type SerializedBoardCardProjection = ContractCheck<JsonSerialized<BoardCard>>;
+ * the exact shared browser contract, including every nested aggregate and
+ * frontier key. The final two checks prove missing and surplus adapter keys
+ * both fail the bidirectional key comparison. */
+export type SerializedBoardCardProjection = ContractCheck<
+  JsonSerialized<BoardCard>,
+  [
+    ExactKeys<JsonSerialized<BoardCard>, BoardContractCard>,
+    ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>, BoardContractChainAggregate>,
+    ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>["frontier"], BoardContractChainFrontier>,
+    ExactKeys<Omit<JsonSerialized<BoardCard>, "id">, BoardContractCard>,
+    ExactKeys<JsonSerialized<BoardCard> & { surplus: never }, BoardContractCard>,
+  ]
+>;
 
 /** The Prisma row shape `boardCard` needs — declared structurally so `readBoard`
  *  can select exactly these columns and nothing else. */
@@ -114,8 +126,13 @@ export type BoardRow = {
   dispatchAfterTaskId: string | null;
   createdAt: Date;
   updatedAt: Date;
-  assigneeAgent: { id: string; title: string; model: string; archivedAt: Date | null } | null;
-  templateStep: { name: string } | null;
+  assigneeAgent: { id: string; name?: string; title: string; model: string; archivedAt: Date | null } | null;
+  templateStep: {
+    name: string;
+    stepIndex?: number;
+    outputKind?: string;
+    taskTemplate?: { name: string };
+  } | null;
   runs: Array<{
     id: string;
     runNumber: number;
@@ -153,31 +170,73 @@ export type SerializedUsageCost = BoardUsageCost;
 export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
   cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
 
-const TASK_STATUSES: TaskStatusType[] = [
-  TaskStatus.BACKLOG,
-  TaskStatus.TODO,
-  TaskStatus.DOING,
-  TaskStatus.REVIEW,
-  TaskStatus.DONE,
-];
+type MoveProjectionFacts = {
+  dispatchAfter?: BoardBlockedOnTask | null;
+  chainPredecessor?: { name: string } | null;
+  stopStateRefusal?: string | null;
+};
 
-/** Project operator destinations from the same ownership refusal used by
+/** Project operator destinations from the move authority shared with
  * `PATCH /tasks/:id`. A startable standalone Agent queue task may additionally
  * reach Doing through the start action; it is never represented as a PATCH. */
 export const operatorMoveTargets = (
-  task: Pick<BoardRow, "assigneeType" | "chainId" | "status">,
-  startability: { startable: boolean; checklist: { predecessorsDone: boolean } },
+  task: Pick<BoardRow,
+    | "name" | "status" | "assigneeType" | "chainId" | "archivedAt"
+    | "dispatchAfterTaskId" | "assigneeAgentId" | "assigneeAgent" | "templateStep"
+  >,
+  startability: { startable: boolean; checklist: { predecessorsDone: boolean; noActiveRun: boolean } },
+  projected: MoveProjectionFacts = {},
 ): BoardMoveTarget[] => {
-  const targets = TASK_STATUSES.flatMap((status): BoardMoveTarget[] => {
-    if (status === task.status) return [];
-    const refusal = operatorStatusTransitionRefusal(task, status);
-    if (refusal === null) return [{ status, via: "patch" }];
-    const startsStandaloneAgent = status === TaskStatus.DOING
-      && task.chainId === null
-      && task.assigneeType === "AGENT"
-      && (task.status === TaskStatus.BACKLOG || task.status === TaskStatus.TODO);
-    return startsStandaloneAgent && startability.startable ? [{ status, via: "start" }] : [];
+  const dispatchAfter = projected.dispatchAfter !== undefined
+    ? projected.dispatchAfter
+    : task.dispatchAfterTaskId === null || startability.checklist.predecessorsDone
+      ? null
+      : { id: task.dispatchAfterTaskId, name: task.dispatchAfterTaskId, status: TaskStatus.TODO };
+  const assigneeName = task.assigneeAgent?.name ?? task.assigneeAgent?.title ?? task.assigneeAgentId;
+  const reactivationRefusal = task.assigneeAgentId === null
+    ? null
+    : task.assigneeAgent === null
+      ? "Assignee does not belong to this project"
+      : task.assigneeAgent.archivedAt === null
+        ? null
+        : `Assignee ${assigneeName} is archived; unarchive the agent or reassign this task first`;
+  const templateStep = task.templateStep?.stepIndex === undefined
+    || task.templateStep.outputKind === undefined
+    || task.templateStep.taskTemplate === undefined
+    ? null
+    : {
+        stepIndex: task.templateStep.stepIndex,
+        outputKind: task.templateStep.outputKind,
+        taskTemplate: task.templateStep.taskTemplate,
+      };
+  const stopStateRefusal = projected.stopStateRefusal !== undefined
+    ? projected.stopStateRefusal
+    : isIntegratorStep(templateStep) ? undefined : null;
+  const chainPredecessor = projected.chainPredecessor !== undefined
+    ? projected.chainPredecessor
+    : task.chainId !== null && !startability.checklist.predecessorsDone
+      ? { name: "an earlier Chain task" }
+      : null;
+  const authority = taskMoveAuthority({
+    name: task.name,
+    status: task.status,
+    assigneeType: task.assigneeType,
+    chainId: task.chainId,
+    archivedAt: task.archivedAt,
+    dispatchAfterTaskId: task.dispatchAfterTaskId,
+    dispatchAfter,
+    reactivationRefusal,
+    activeRun: !startability.checklist.noActiveRun,
+    stopStateRefusal,
+    chainPredecessor,
   });
+  const targets = authority.targets.map((status): BoardMoveTarget => ({ status, via: "patch" }));
+  const startsStandaloneAgent = task.chainId === null
+    && task.assigneeType === "AGENT"
+    && (task.status === TaskStatus.BACKLOG || task.status === TaskStatus.TODO);
+  if (startsStandaloneAgent && startability.startable) {
+    targets.push({ status: TaskStatus.DOING, via: "start" });
+  }
   return startability.checklist.predecessorsDone ? targets : [];
 };
 
@@ -238,13 +297,9 @@ const chainStatuses = (): Record<TaskStatusType, number> => ({
   [TaskStatus.DONE]: 0,
 });
 
-const chainMemberLayer = (member: Pick<BoardChainMember, "chainLayer" | "chainIndex">): number =>
-  member.chainLayer ?? member.chainIndex ?? Number.MAX_SAFE_INTEGER;
-
-const chainMemberOrder = (left: BoardChainMember, right: BoardChainMember): number => (
-  chainMemberLayer(left) - chainMemberLayer(right)
-    || (left.chainIndex ?? Number.MAX_SAFE_INTEGER) - (right.chainIndex ?? Number.MAX_SAFE_INTEGER)
-    || left.id.localeCompare(right.id)
+const chainMemberOrder = (left: BoardChainMember, right: BoardChainMember): number => compare(
+  { layer: left.chainLayer, index: left.chainIndex, id: left.id },
+  { layer: right.chainLayer, index: right.chainIndex, id: right.id },
 );
 
 const memberTitle = (member: BoardChainMember): string => member.displayName
@@ -268,7 +323,7 @@ export const chainAggregate = (
   primaryMembers: readonly BoardChainMember[],
   repairMembers: readonly BoardChainMember[],
   predecessorById: ReadonlyMap<string, BoardBlockedOnTask> = new Map(),
-): BoardChainAggregate => {
+): BoardContractChainAggregate<Date> => {
   const primary = [...primaryMembers].sort(chainMemberOrder);
   const repairs = [...repairMembers].sort(chainMemberOrder);
   const members = [...primary, ...repairs];
@@ -358,7 +413,7 @@ export const chainAggregate = (
     totalCost: serializeUsageCost(totalCost),
     createdAt,
     updatedAt,
-  } satisfies BoardChainAggregate;
+  } satisfies BoardContractChainAggregate<Date>;
 };
 
 /** The instantiated chain name is persisted as the prefix of every task name.
@@ -413,7 +468,11 @@ export const chainDisplayByTask = (rows: readonly Pick<BoardRow, "id" | "project
 export const boardCard = (
   row: BoardRow,
   chainProgress: (ChainProgress & { position: number | null }) | null,
-  moveContext: { hasRepoGrant: boolean; chainPredecessorsDone: boolean },
+  moveContext: {
+    hasRepoGrant: boolean;
+    chainPredecessorsDone: boolean;
+    chainPredecessor?: { name: string } | null;
+  },
   display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
   predecessor: BoardBlockedOnTask | null = null,
   repairOf: RepairBinding | null = null,
@@ -465,7 +524,10 @@ export const boardCard = (
       ? null
       : { id: row.assigneeAgent.id, title: row.assigneeAgent.title, model: row.assigneeAgent.model },
     chainProgress,
-    moveTargets: operatorMoveTargets(row, startability),
+    moveTargets: operatorMoveTargets(row, startability, {
+      dispatchAfter: predecessor,
+      chainPredecessor: moveContext.chainPredecessor ?? null,
+    }),
     latestRun: latestRunProjection(row.runs),
     taskCost: serializeUsageCost(taskCost),
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
@@ -754,8 +816,15 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
       templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, createdAt: true, updatedAt: true,
       dispatchAfterTaskId: true,
-      assigneeAgent: { select: { id: true, title: true, model: true, archivedAt: true } },
-      templateStep: { select: { name: true } },
+      assigneeAgent: { select: { id: true, name: true, title: true, model: true, archivedAt: true } },
+      templateStep: {
+        select: {
+          name: true,
+          stepIndex: true,
+          outputKind: true,
+          taskTemplate: { select: { name: true } },
+        },
+      },
       runs: {
         orderBy: { runNumber: "desc" },
         select: {
@@ -886,7 +955,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     const group = addChain(key, repairByTask.get(row.id)?.chainName ?? null);
     group.repairs.push(memberWithDisplay(row));
   }
-  const aggregateByChain = new Map<string, BoardChainAggregate>();
+  const aggregateByChain = new Map<string, BoardContractChainAggregate<Date>>();
   for (const [key, group] of membersByChain) {
     const chainId = group.primary[0]?.chainId
       ?? (group.repairs[0] === undefined
@@ -907,13 +976,13 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     const key = row.chainId === null
       ? repairKey
       : chainKey({ projectId: row.projectId, chainId: row.chainId });
-    let chainPredecessorsDone = true;
+    let chainPredecessor: { name: string } | null = null;
     if (row.chainId !== null) {
       const chainGroup = membersByChain.get(chainKey({ projectId: row.projectId, chainId: row.chainId }));
       if (chainGroup === undefined) {
         throw new Error(`Board move target projection is missing Chain ${row.chainId}`);
       }
-      chainPredecessorsDone = blockingPredecessor(chainGroup.primary, row.id) === null;
+      chainPredecessor = blockingPredecessor(chainGroup.primary, row.id);
     }
     const card = boardCard(
       row,
@@ -924,7 +993,8 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
           agentId: row.assigneeAgentId,
           repoId: row.repoId,
         })),
-        chainPredecessorsDone,
+        chainPredecessorsDone: chainPredecessor === null,
+        chainPredecessor,
       },
       displayByTask.get(row.id),
       row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,

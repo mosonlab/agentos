@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { REQUEST_TIMEOUT_MS } from "../lib/api";
 import { CARD_PAGE_SIZE } from "../lib/board";
+import type { BoardTask } from "../lib/types";
 
 const chromePath = [
   process.env.CHROME_BIN,
@@ -99,13 +100,14 @@ const waitFor = async (cdp: Cdp, expression: string, timeoutMs = 10_000): Promis
   throw new Error(`Browser condition timed out: ${expression}`);
 };
 
-const taskRow = (index: number) => ({
+const taskRow = (index: number): BoardTask => ({
   id: `done-${index}`, name: `Completed task ${index}`, displayName: `Completed task ${index}`,
   assigneeType: "HUMAN", createdAt: "2026-08-27T00:00:00.000Z",
   status: "DONE", failureReason: null, scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-28T00:00:00.000Z", assigneeAgent: null,
-  chainProgress: null, blockedOn: null, latestRun: null, taskCost: null, repairOf: null,
+  moveTargets: [], chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
+  mergeOutcome: null, repairOf: null, chainAggregate: null,
 });
 
 test("Chrome recovers from a bounded stalled startup and keeps large Tasks DOM work fixed", {

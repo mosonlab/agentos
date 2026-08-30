@@ -84,6 +84,7 @@ export const DEPLOY_RELEASE_EXTRA_ARTIFACT_PATHS = Object.freeze([
   "agents/roles",
   "agents/templates",
   "scripts/deploy",
+  "scripts/merge-lease-adapter.mjs",
   "scripts/merge-lease.sh",
 ]);
 

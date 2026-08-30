@@ -19,6 +19,7 @@ test("database reconciliation active status query remains limited to three execu
     } },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       $queryRaw: async () => [],
+      mergeLeaseEvent: { findMany: async () => [] },
     }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database), 0);
@@ -136,6 +137,7 @@ test("database reconciliation times out expired Inbox waits and makes retained w
       inboxMessage: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "message", data }); return { count: 1 }; } },
       task: { update: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "task", data }); return {}; } },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
+      mergeLeaseEvent: { findMany: async () => [] },
     }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
@@ -162,6 +164,7 @@ test("startup reconciliation does not fail when archived notice persistence fail
     taskTemplate: { findMany: async () => [] },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       $queryRaw: async () => [],
+      mergeLeaseEvent: { findMany: async () => [] },
     }),
   } as unknown as PrismaClient;
   const originalError = console.error;
@@ -234,6 +237,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
         findMany: async () => [],
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
+      mergeLeaseEvent: { findMany: async () => [] },
       inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     }),
     taskActivity: {

@@ -10,7 +10,7 @@ import { COLUMNS, type BoardEntry, boardEntries, boardEntriesByStatus, countBySt
 import { translate } from "../lib/i18n-core";
 import type { BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
 import { useTaskStartConfirmation } from "../pages/Tasks";
-import { installDom, reactDom } from "./dom-harness";
+import { installDom, mountPage, reactDom } from "./dom-harness";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "task-1", name: "Release: Build", displayName: "Build", status: "TODO", moveTargets: [], failureReason: null,
@@ -158,14 +158,11 @@ const AggregateActivationHarness = (): ReactNode => {
 };
 
 test("aggregate Activate starts step zero and keeps a stale-view 4xx visible", async () => {
-  const { dom, container } = installDom();
-  const originalFetch = globalThis.fetch;
   const requests: Array<{ method: string; path: string }> = [];
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
+  const page = await mountPage(<AggregateActivationHarness />, { "*": ({ input, method }) => {
     const path = String(input);
-    const method = init?.method ?? "GET";
     requests.push({ method, path });
-    if (path === "/api/tasks/step-1/startability") return Response.json({
+    if (path === "/api/tasks/step-1/startability") return {
       startable: true,
       checklist: {
         repoBound: true, agentAssignee: true, repoAccessGrant: true,
@@ -175,35 +172,19 @@ test("aggregate Activate starts step zero and keeps a stale-view 4xx visible", a
         id: "step-1", name: "Release: Build", agent: { id: "a1", title: "Senior dev" },
         repo: { id: "r1", name: "product" }, targetBranch: "main",
       },
-    });
+    };
     if (path === "/api/tasks/step-1/start" && method === "POST") {
       return Response.json({ error: "This chain was already activated." }, { status: 409 });
     }
     return Response.json([], { status: 404 });
   } });
-  const root = (await reactDom()).createRoot(container);
-  const settle = async (): Promise<void> => {
-    for (let round = 0; round < 3; round += 1) {
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    }
-  };
-  const press = async (label: string): Promise<void> => {
-    const button = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((candidate) => candidate.textContent?.trim() === label);
-    assert.ok(button, `no ${label} button`);
-    await act(async () => button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await settle();
-  };
   try {
-    await act(async () => root.render(<AggregateActivationHarness />));
-    await press("Activate");
-    assert.ok(container.querySelector("[data-aggregate-confirmation]"));
-    await press("Confirm activation");
+    await page.press("Activate");
+    assert.ok(page.container.querySelector("[data-aggregate-confirmation]"));
+    await page.press("Confirm activation");
     assert.equal(requests.filter(({ method, path }) => method === "POST" && path === "/api/tasks/step-1/start").length, 1);
-    assert.match(container.textContent ?? "", /already activated/u);
+    assert.match(page.container.textContent ?? "", /already activated/u);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 });

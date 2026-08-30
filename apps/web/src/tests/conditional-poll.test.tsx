@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiError, api } from "../lib/api";
+import { installFetchFunction } from "./dom-harness";
 
 type Call = { url: string; init: RequestInit };
 
@@ -11,12 +12,9 @@ const withFetch = async (
   work: () => Promise<void>,
 ): Promise<Call[]> => {
   const calls: Call[] = [];
-  const original = globalThis.fetch;
   let index = 0;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (url: string, init: RequestInit) => {
-      calls.push({ url, init });
+  const fetchHarness = installFetchFunction(async (url, init = {}) => {
+      calls.push({ url: String(url), init });
       const scripted = responses[index++] ?? { status: 500 };
       const headers = new Headers();
       if (scripted.etag !== null && scripted.etag !== undefined) headers.set("ETag", scripted.etag);
@@ -24,12 +22,11 @@ const withFetch = async (
         status: scripted.status,
         headers,
       });
-    },
   });
   try {
     await work();
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
+    fetchHarness.dispose();
   }
   return calls;
 };

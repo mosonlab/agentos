@@ -6,6 +6,7 @@ import {
   TaskStatus,
   type PrismaClient,
 } from "@anneal/db";
+import { layerOf } from "@anneal/db/chain-order";
 
 import {
   fenceRefusalResponse,
@@ -60,9 +61,10 @@ export type RevalidationCancellation = {
   reason: string;
 } | Refusal | FenceRefusalResponse;
 
-const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => (
-  task.chainLayer ?? task.chainIndex
-);
+const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => layerOf({
+  layer: task.chainLayer,
+  index: task.chainIndex,
+});
 
 const callerRefusal = (message: string): Refusal => ({ reason: "forbidden", message });
 

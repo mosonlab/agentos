@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { installDom, reactDom } from "./dom-harness";
+import { mountPage } from "./dom-harness";
 
 import {
   COSTS_COLUMNS, COSTS_RANGES, ChartLegend, DailySpendChart, ModelBar, SERIES_SLOTS, axisDates,
@@ -173,20 +172,13 @@ const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
   ...overrides,
 });
 
-const settle = async (): Promise<void> => {
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-};
-
 /** Mounts the page against a scripted control plane, reads it, and unmounts.
  *  The unmount is not tidiness: `usePoll` holds a `setInterval`, and a root left
  *  mounted keeps the test process alive forever. */
 const readPage = async (body: CostsReport): Promise<{ text: string; html: string; requested: string[] }> => {
-  const { container } = installDom("http://127.0.0.1:5173/costs");
-  const [{ createRoot }, { CostsPage }, { ProjectProvider }] = await Promise.all([
-    reactDom(), import("../pages/Costs"), import("../lib/project"),
-  ]);
+  const [{ CostsPage }, { ProjectProvider }] = await Promise.all([import("../pages/Costs"), import("../lib/project")]);
   const requested: string[] = [];
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  const page = await mountPage(<ProjectProvider><CostsPage /></ProjectProvider>, { "*": ({ input }) => {
     const url = String(input).replace(/^.*\/api/, "");
     requested.push(url);
     if (url === "/projects") {
@@ -194,17 +186,11 @@ const readPage = async (body: CostsReport): Promise<{ text: string; html: string
     }
     if (url.startsWith("/projects/p1/costs")) return new Response(JSON.stringify(body), { status: 200 });
     return new Response("[]", { status: 200 });
-  }) as typeof fetch;
-  const root = createRoot(container);
+  } }, "http://127.0.0.1:5173/costs");
   try {
-    act(() => root.render(<ProjectProvider><CostsPage /></ProjectProvider>));
-    // Two settles: the first resolves `/projects`, which is what gives the page
-    // a project id to ask for costs with.
-    await settle();
-    await settle();
-    return { text: container.textContent ?? "", html: container.innerHTML, requested };
+    return { text: page.container.textContent ?? "", html: page.container.innerHTML, requested };
   } finally {
-    act(() => root.unmount());
+    await page.dispose();
   }
 };
 

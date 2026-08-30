@@ -117,6 +117,7 @@ const makeDatabase = (
       update: async () => ({}),
     },
     taskActivity: { findMany: async () => [], create: async () => ({}) },
+    mergeLeaseEvent: { findMany: async () => [] },
     taskStepOutput: { findMany: async () => [] },
   };
   return {
