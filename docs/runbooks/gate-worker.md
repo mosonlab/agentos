@@ -40,25 +40,31 @@ hand states no share and has the machine. Do not restore a per-phase fan-out in
 recomputed that same variable moments later, and the bound silently never took
 effect while both logs claimed it had.
 
-Measured on the 12-vCPU, 20 GiB desktop worker at capacity two, 2026-08-25.
-A single full gate is about **122 seconds** end to end with a build-cache miss —
-which is every ordinary new commit. The serial predecessor was 241 seconds. Two
-overlapping full gates take about **175 seconds each**, against 270 seconds
-before, with a 7.58 GiB peak and 12.00 GiB still available, and no leaked
-container, scratch database, worktree or lock. On the 4-vCPU fallback worker at
-capacity one a full gate is about **252 seconds**, against 367 before; that one
-was run three times in a row, 3/3 PASS, because the risk in the proof waves is
-flakiness rather than latency and one green run does not measure it. The
+Measured on the 14-vCPU, 20 GiB desktop worker at capacity two, 2026-08-30.
+A single full gate is about **172 seconds** end to end with a build-cache miss —
+which is every ordinary new commit. Two overlapping full gates take about **262
+seconds each**, which is still 24% more throughput than running them serially,
+and neither leaks a container, scratch database, worktree or lock. On the
+4-vCPU fallback worker at capacity one a full gate is about **384 seconds**. The
 install-free `docs-only` profile still takes about 4 seconds.
 
-Within a gate the proof waves are now the whole cost: 83 seconds for the
-database tests and 53 for the unit tests, running together, against 27 for lint
-and 26 for a cold build. Widening the database lanes does not move
-it — 4, 6 and 8 lanes all landed within 3 seconds of each other over one fixed
-commit — because the waves saturate PostgreSQL and the CPU share together rather
-than running out of lanes. `NODE_COMPILE_CACHE` was measured and rejected: 80
-seconds cold against 82 warm, for 77 MiB of cache. Use
-`scripts/gate-worker/bench-postgres.sh` and
+These numbers replace the 2026-08-25 baseline (122 seconds single, 175 each
+concurrent, 252 on the fallback) and the gap is corpus growth, not regression:
+the database pool went from 65 files to 78 and the schema from about 30
+migrations to 43 over those five days. The fallback worker moved the most in
+absolute terms because it has 4 cores against 14, and every wave there scales at
+roughly that ratio — build 2.2x, database 2.3x, lint 2.7x, unit 3.6x. A fallback
+number that drifts *away* from its core-count ratio is the one worth
+investigating; one that tracks it is just a smaller machine doing more work.
+
+Within a gate the proof waves are still the whole cost: 120 seconds for the
+database tests and 42 for the unit tests when a gate runs alone, 188 and 79 when
+two gates overlap, against 36 for lint and 38 for a cold build. Widening the
+database lanes does not move it — 4, 6 and 8 lanes all landed within 3 seconds
+of each other over one fixed commit — because the waves saturate PostgreSQL and
+the CPU share together rather than running out of lanes. `NODE_COMPILE_CACHE`
+was measured and rejected: 80 seconds cold against 82 warm, for 77 MiB of cache.
+Use `scripts/gate-worker/bench-postgres.sh` and
 `scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
 runner itself; each alternates its arms over one fixed commit so a tuning claim
 is not inferred from unrelated gate runs. The lane widths are overridable
@@ -433,13 +439,17 @@ occupied, every later caller waits and re-polls; requests are not pinned to a
 machine and strict FIFO order is not promised. The first waiter to acquire
 whichever slot frees runs there.
 
-The database step normally runs cores-1 files at once, capped at four: three on
-a four-vCPU worker and four on larger single-slot workers. Each gets a database
-of its own and its own subdirectory of the roots the gate exports. A worker
-permits one gate by default or two only when `~/gate/worker-capacity` contains
-`2`; in capacity-two mode `run-gate.sh` fixes each gate's database concurrency
-at two, keeping the host-wide maximum at four. `AGENTOS_DBTEST_CONCURRENCY`
-lowers the file concurrency on other paths and
+The database step runs one file per lane, each with a database of its own and
+its own subdirectory of the roots the gate exports. The lane count is not read
+from the CPU count here: `run-gate.sh` exports only `AGENTOS_GATE_HOST_SHARE`,
+the worker's configured slot count, and `merge-gate.sh` derives every parallel
+width in the run from `availableParallelism() / AGENTOS_GATE_HOST_SHARE`. A
+worker permits one gate by default or two only when `~/gate/worker-capacity`
+contains `2`, so on the 14-vCPU desktop worker a capacity-two gate gets 7 unit
+and 7 database lanes and two of them add up to the host, while a hand-run gate
+states no share and gets all 14. Deriving both from the one number is what keeps
+that invariant true; do not fix a width independently of the share.
+`AGENTOS_DBTEST_CONCURRENCY` lowers the file concurrency on other paths and
 `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 
 ## Troubleshooting
