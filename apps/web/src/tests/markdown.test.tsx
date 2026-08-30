@@ -106,7 +106,11 @@ test("repoWebUrl recognises GitHub only", () => {
   assert.equal(repoWebUrl("ssh://git@github.com/mosonlab/anneal"), "https://github.com/mosonlab/anneal");
   // A different SSH user or host is not a shape we can browse.
   assert.equal(repoWebUrl("ssh://deploy@github.com/o/r.git"), null);
+  assert.equal(repoWebUrl("ssh://GIT@github.com/o/r.git"), null);
   assert.equal(repoWebUrl("ssh://git@gitlab.com/o/r.git"), null);
+  assert.equal(repoWebUrl("ssh://git@github.com/o/r?tab=readme"), null);
+  assert.equal(repoWebUrl("ssh://git@github.com/o/r#readme"), null);
+  assert.equal(repoWebUrl("ssh://git@github.com/o/r/"), null);
   assert.equal(repoWebUrl("https://gitlab.com/o/r"), null);
   assert.equal(repoWebUrl(null), null);
   assert.equal(repoWebUrl(""), null);
