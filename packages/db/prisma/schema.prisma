@@ -155,6 +155,11 @@ enum MergeRecoveryStatus {
   FAILED                 @map("failed")
 }
 
+enum MergeRecoveryRefusalCode {
+  ACTIVATION_AUTHORIZATION_STALE @map("activation-authorization-stale")
+  HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
+}
+
 enum SessionExecutionStatus {
   REQUESTED     @map("requested")
   PROVISIONING  @map("provisioning")
@@ -690,6 +695,7 @@ model MergeRecoveryAttempt {
   observedBaseSha         String?
   currentBaseSha          String?
   failureReason           String?
+  refusalCode             MergeRecoveryRefusalCode?
   startedAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   endedAt                 DateTime?
@@ -697,6 +703,7 @@ model MergeRecoveryAttempt {
 
   @@unique([sourceStopId, attempt])
   @@index([integratorTaskId, status])
+  @@index([status, refusalCode, updatedAt])
   @@index([recoveryRunId])
   @@index([repository, prNumber, targetBranch])
 }
