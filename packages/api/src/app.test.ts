@@ -642,6 +642,46 @@ test("starting a run without an exact dispatched prompt hash is refused before d
   });
 });
 
+test("merge-executor start maps an omitted promptHash to null and dispatches", async () => {
+  await withTokens(async () => {
+    let fencedRead = 0;
+    let promptHash: unknown = "not-written";
+    const tx = {
+      $queryRaw: async () => [{ id: "run-1" }],
+      run: {
+        findFirst: async () => {
+          fencedRead += 1;
+          return fencedRead === 1 ? { taskId: null } : { startedAt: null };
+        },
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          promptHash = data.promptHash;
+          return { count: 1 };
+        },
+      },
+      session: { updateMany: async () => ({ count: 1 }) },
+    };
+    const database = {
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/runner/runs/run-1/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "merge-executor-1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "executor-1",
+        cliVersion: "executor-1",
+        manifest: { executionMode: "mechanical" },
+        workspacePath: null,
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(promptHash, null);
+  });
+});
+
 test("completion requires both exit zero and a successful terminal event", () => {
   assert.equal(completionSucceeded({
     exitCode: 0,
@@ -1987,209 +2027,6 @@ test("GET /runs/:runId/events pages by seq and reports hasMore without a second 
     const clamped = findManyArgs.at(-1) as { take: number; where: Record<string, unknown> };
     assert.equal(clamped.take, 2001);
     assert.equal(clamped.where.seq, undefined);
-  });
-});
-
-/* --------------------------------- the usage recompute's ingest wiring */
-
-/** A CLAUDE terminal `result` line, trimmed to the fields `extractUsage` reads.
- *  Values are the captured shape from `spikes/cli-capabilities/samples/`.
- *
- *  It stays trimmed ON PURPOSE, and specifically it carries no `modelUsage`:
- *  these three tests are what keep `extractUsage`'s top-level snake_case
- *  fallback branch covered — the branch CODEX and PI always take. The complete
- *  captures, `modelUsage` included, live in `usage.test.ts`. */
-const finalOutputPayload = {
-  type: "result",
-  total_cost_usd: 0.049117,
-  usage: { input_tokens: 4, output_tokens: 77, cache_read_input_tokens: 8_700, cache_creation_input_tokens: 120 },
-};
-
-/** The stub the three wiring tests share: one live run with a session, a
- *  `createMany` that accepts anything, and a recording `session.update`.
- *  `onUpdate` lets a test make the derived-cache write fail. */
-const ingestDatabase = (
-  updates: Array<Record<string, unknown>>,
-  finalOutputRows: Array<{ payload: unknown }>,
-  onUpdate?: () => never,
-): PrismaClient => {
-  const database: Record<string, unknown> = {
-    // `recomputeSessionUsage` now opens one interactive transaction and takes an
-    // advisory lock inside it. These three answer that scaffolding inertly; the
-    // lock itself is proven against a real PostgreSQL in `usage.dbtest.ts`.
-    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
-    $executeRawUnsafe: async () => 0,
-    $queryRaw: async () => [],
-    run: {
-      findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
-    },
-    sessionEvent: {
-      createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
-      findMany: async () => finalOutputRows,
-    },
-    session: {
-      findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
-      update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
-    },
-  };
-  return database as unknown as PrismaClient;
-};
-
-const postEvents = async (database: PrismaClient, types: string[]): Promise<Response> =>
-  createApp(database).request("/runner/runs/run-1/events", {
-    method: "POST",
-    headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-    body: JSON.stringify({
-      runnerId: "runner-1",
-      fencingToken: "1:run-1:current",
-      events: types.map((type, index) => ({
-        seq: index + 1,
-        source: "CLAUDE",
-        type,
-        payload: type === "FINAL_OUTPUT" ? finalOutputPayload : { text: "hello" },
-      })),
-    }),
-  });
-
-test("ingesting a FINAL_OUTPUT writes the derived usage columns", async () => {
-  await withTokens(async () => {
-    const updates: Array<Record<string, unknown>> = [];
-    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "FINAL_OUTPUT"]);
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 2 });
-    assert.equal(updates.length, 1);
-    const write = updates[0] as { where: { id: string }; data: Record<string, unknown> };
-    assert.equal(write.where.id, "ses-1");
-    assert.equal(write.data.inputTokens, 8_824);
-    assert.equal(write.data.outputTokens, 77);
-    assert.equal(write.data.cachedInputTokens, 8_820);
-    // inputTokens includes cached input; totalTokens is input + output by
-    // definition, so the cache is not added a second time.
-    assert.equal(write.data.totalTokens, 8_901);
-    assert.equal(String(write.data.costUsd), "0.0491");
-  });
-});
-
-test("a batch with no FINAL_OUTPUT does not touch the usage columns", async () => {
-  await withTokens(async () => {
-    const updates: Array<Record<string, unknown>> = [];
-    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "TOOL_STARTED"]);
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 2 });
-    assert.equal(updates.length, 0);
-  });
-});
-
-test("an observed native child is persisted independently of the launch grant", async () => {
-  await withTokens(async () => {
-    const updates: Array<Record<string, unknown>> = [];
-    const response = await postEvents(ingestDatabase(updates, []), ["NATIVE_CHILD_STARTED"]);
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 1 });
-    assert.deepEqual(updates, [{ where: { id: "ses-1" }, data: { nativeChildUsed: true } }]);
-  });
-});
-
-test("a failing usage recompute does not fail the ingest", async () => {
-  await withTokens(async () => {
-    // The derived cache must never be fatal to the write path it decorates:
-    // `appendEvents` has no retry, so a 500 here would reject the runner's
-    // terminal flush, skip deliverWorkspace/completeRun, record a successful
-    // run as failed and delete its workspace unpushed.
-    const updates: Array<Record<string, unknown>> = [];
-    const database = ingestDatabase(updates, [{ payload: finalOutputPayload }], () => {
-      throw new Error("value out of range for type integer");
-    });
-    const errors: unknown[] = [];
-    const consoleError = console.error;
-    console.error = (...args: unknown[]) => { errors.push(args); };
-    try {
-      const response = await postEvents(database, ["FINAL_OUTPUT"]);
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { accepted: 1 });
-    } finally {
-      console.error = consoleError;
-    }
-    assert.equal(updates.length, 0);
-    assert.equal(errors.length, 1);
-  });
-});
-
-test("event ingestion makes literal NULs visible without changing seq order", async () => {
-  await withTokens(async () => {
-    const nul = "\u0000";
-    const visibleNul = "\\u0000";
-    const stored: Array<Record<string, unknown>> = [];
-    const database = {
-      $queryRaw: async () => [{ id: "run-1" }],
-      run: {
-        findFirst: async () => ({ session: { id: "ses-1", providerConversationId: null } }),
-      },
-      sessionEvent: {
-        createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
-          stored.push(...data);
-          return { count: data.length };
-        },
-        findMany: async (): Promise<Array<Record<string, unknown>>> => {
-          const rows = stored.map((event, index) => ({ id: `event-${index}`, ...event })) as Array<Record<string, unknown>>;
-          rows.sort((left, right) => Number(left.seq) - Number(right.seq));
-          return rows;
-        },
-        count: async () => stored.length,
-      },
-    } as Record<string, unknown>;
-    database.$transaction = async (operation: (tx: unknown) => Promise<unknown>) => operation(database);
-    const app = createApp(database as unknown as PrismaClient);
-    const response = await app.request("/runner/runs/run-1/events", {
-      method: "POST",
-      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runnerId: "runner-1",
-        fencingToken: "1:run-1:current",
-        events: [
-          {
-            seq: 4,
-            source: "CLAUDE",
-            type: `EVENT${nul}TYPE`,
-            providerEventId: `provider${nul}id`,
-            toolCallId: `tool${nul}id`,
-            payload: {
-              unchanged: "plain text",
-              nested: { message: `left${nul}right`, list: [`a${nul}b`, { deep: "value" }] },
-              [`field${visibleNul}`]: "literal key value",
-              [`field${nul}`]: "NUL key value",
-              [`key${nul}`]: "key value",
-            },
-          },
-          { seq: 9, source: "CLAUDE", type: "VALID", payload: { unchanged: "still exact" } },
-        ],
-      }),
-    });
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { accepted: 2 });
-
-    const read = await app.request("/runs/run-1/events", {
-      headers: { Authorization: "Bearer operator-unit-token" },
-    });
-    assert.equal(read.status, 200);
-    const body = await read.json() as { events: Array<Record<string, any>>; total: number };
-    assert.deepEqual(body.events.map((event) => event.seq), [4, 9]);
-    assert.equal(body.total, 2);
-    assert.equal(body.events[0]?.type, `EVENT${visibleNul}TYPE`);
-    assert.equal(body.events[0]?.providerEventId, `provider${visibleNul}id`);
-    assert.equal(body.events[0]?.toolCallId, `tool${visibleNul}id`);
-    assert.deepEqual(body.events[0]?.payload, {
-      unchanged: "plain text",
-      nested: { message: `left${visibleNul}right`, list: [`a${visibleNul}b`, { deep: "value" }] },
-      [`field${visibleNul}`]: "literal key value",
-      [`field${visibleNul}${visibleNul}`]: "NUL key value",
-      [`key${visibleNul}`]: "key value",
-    });
-    assert.deepEqual(body.events[1]?.payload, { unchanged: "still exact" });
-    assert.equal(JSON.stringify(body).includes(nul), false);
   });
 });
 

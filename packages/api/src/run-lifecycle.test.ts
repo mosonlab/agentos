@@ -41,6 +41,69 @@ const authorityRun = (overrides: Partial<LockedAuthorityRun> = {}): LockedAuthor
   ...overrides,
 });
 
+const finalOutputPayload = {
+  type: "result",
+  total_cost_usd: 0.049117,
+  usage: { input_tokens: 4, output_tokens: 77, cache_read_input_tokens: 8_700, cache_creation_input_tokens: 120 },
+};
+
+const eventDatabase = (options: {
+  finalOutputRows?: Array<{ payload: unknown }>;
+  onUsageUpdate?: () => void;
+  stored?: Array<Record<string, unknown>>;
+  sessionWrites?: Array<Record<string, unknown>>;
+} = {}): PrismaClient => {
+  let fencedRead = 0;
+  const stored = options.stored ?? [];
+  const sessionWrites = options.sessionWrites ?? [];
+  const tx = {
+    $queryRaw: async (query: TemplateStringsArray) => query.join("?").includes('FROM "Run"')
+      ? [{ id: "run-1" }]
+      : [{ id: "task-1", archivedAt: null }],
+    $executeRawUnsafe: async () => 0,
+    run: { findFirst: async () => {
+      fencedRead += 1;
+      return fencedRead === 1
+        ? { taskId: "task-1" }
+        : { session: { id: "session-1", providerConversationId: null } };
+    } },
+    sessionEvent: {
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        stored.push(...data);
+        return { count: data.length };
+      },
+      findMany: async () => options.finalOutputRows ?? [],
+    },
+    session: {
+      findUnique: async () => ({
+        inputTokens: null,
+        outputTokens: null,
+        cachedInputTokens: null,
+        totalTokens: null,
+        costUsd: null,
+      }),
+      update: async (args: Record<string, unknown>) => {
+        const data = args.data as Record<string, unknown>;
+        if ("inputTokens" in data) options.onUsageUpdate?.();
+        sessionWrites.push(args);
+        return {};
+      },
+    },
+  };
+  return databaseFor(tx);
+};
+
+const eventBody = (types: string[]) => eventsInput.parse({
+  runnerId: "runner-1",
+  fencingToken: "fence-1",
+  events: types.map((type, index) => ({
+    seq: index + 1,
+    source: "CLAUDE",
+    type,
+    payload: type === "FINAL_OUTPUT" ? finalOutputPayload : { text: "hello" },
+  })),
+});
+
 test("start owns the transaction and preserves one Run and Session lifecycle timestamp", async () => {
   const calls: string[] = [];
   const runWrites: Array<Record<string, unknown>> = [];
@@ -288,35 +351,168 @@ test("cleanup admits only the owning fence after live authority has ended", asyn
   assert.deepEqual(writes, ["run", "session"]);
 });
 
-test("events normalize and persist through the lifecycle interface", async () => {
+test("events normalize and persist through the lifecycle interface without changing seq order", async () => {
+  const nul = "\u0000";
+  const visibleNul = "\\u0000";
   const stored: Array<Record<string, unknown>> = [];
-  let fencedRead = 0;
-  const tx = {
-    $queryRaw: async (query: TemplateStringsArray) => query.join("?").includes('FROM "Run"')
-      ? [{ id: "run-1" }]
-      : [{ id: "task-1", archivedAt: null }],
-    run: { findFirst: async () => {
-      fencedRead += 1;
-      return fencedRead === 1
-        ? { taskId: "task-1" }
-        : { session: { id: "session-1", providerConversationId: null } };
-    } },
-    sessionEvent: { createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
-      stored.push(...data);
-      return { count: data.length };
-    } },
-    session: { update: async () => ({}) },
-  };
   const body = eventsInput.parse({
     runnerId: "runner-1",
     fencingToken: "fence-1",
-    events: [{ seq: 1, source: "CLAUDE", type: "NUL\u0000EVENT", payload: { text: "a\u0000b" } }],
+    events: [
+      {
+        seq: 4,
+        source: "CLAUDE",
+        type: `EVENT${nul}TYPE`,
+        providerEventId: `provider${nul}id`,
+        toolCallId: `tool${nul}id`,
+        payload: {
+          unchanged: "plain text",
+          nested: { message: `left${nul}right`, list: [`a${nul}b`, { deep: "value" }] },
+          [`field${visibleNul}`]: "literal key value",
+          [`field${nul}`]: "NUL key value",
+          [`key${nul}`]: "key value",
+        },
+      },
+      { seq: 9, source: "CLAUDE", type: "VALID", payload: { unchanged: "still exact" } },
+    ],
   });
 
-  const result = await appendRunEvents(databaseFor(tx), { runId: "run-1", body, now });
+  const result = await appendRunEvents(eventDatabase({ stored }), { runId: "run-1", body, now });
+  assert.deepEqual(result, { accepted: 2 });
+  assert.deepEqual(stored.map((event) => event.seq), [4, 9]);
+  assert.equal(stored[0]?.type, `EVENT${visibleNul}TYPE`);
+  assert.equal(stored[0]?.providerEventId, `provider${visibleNul}id`);
+  assert.equal(stored[0]?.toolCallId, `tool${visibleNul}id`);
+  assert.deepEqual(stored[0]?.payload, {
+    unchanged: "plain text",
+    nested: { message: `left${visibleNul}right`, list: [`a${visibleNul}b`, { deep: "value" }] },
+    [`field${visibleNul}`]: "literal key value",
+    [`field${visibleNul}${visibleNul}`]: "NUL key value",
+    [`key${visibleNul}`]: "key value",
+  });
+  assert.deepEqual(stored[1]?.payload, { unchanged: "still exact" });
+});
+
+test("FINAL_OUTPUT recomputes derived usage through the lifecycle interface", async () => {
+  const sessionWrites: Array<Record<string, unknown>> = [];
+  const result = await appendRunEvents(eventDatabase({
+    finalOutputRows: [{ payload: finalOutputPayload }],
+    sessionWrites,
+  }), { runId: "run-1", body: eventBody(["MODEL_COMPLETED", "FINAL_OUTPUT"]), now });
+
+  assert.deepEqual(result, { accepted: 2 });
+  assert.equal(sessionWrites.length, 1);
+  const write = sessionWrites[0] as { where: { id: string }; data: Record<string, unknown> };
+  assert.equal(write.where.id, "session-1");
+  assert.equal(write.data.inputTokens, 8_824);
+  assert.equal(write.data.outputTokens, 77);
+  assert.equal(write.data.cachedInputTokens, 8_820);
+  assert.equal(write.data.totalTokens, 8_901);
+  assert.equal(String(write.data.costUsd), "0.0491");
+});
+
+test("events without FINAL_OUTPUT do not touch derived usage", async () => {
+  const sessionWrites: Array<Record<string, unknown>> = [];
+  const result = await appendRunEvents(eventDatabase({
+    finalOutputRows: [{ payload: finalOutputPayload }],
+    sessionWrites,
+  }), { runId: "run-1", body: eventBody(["MODEL_COMPLETED", "TOOL_STARTED"]), now });
+
+  assert.deepEqual(result, { accepted: 2 });
+  assert.deepEqual(sessionWrites, []);
+});
+
+test("an observed native child is persisted independently of the launch grant", async () => {
+  const sessionWrites: Array<Record<string, unknown>> = [];
+  const result = await appendRunEvents(eventDatabase({ sessionWrites }), {
+    runId: "run-1",
+    body: eventBody(["NATIVE_CHILD_STARTED"]),
+    now,
+  });
+
   assert.deepEqual(result, { accepted: 1 });
-  assert.equal(stored[0]?.type, "NUL\\u0000EVENT");
-  assert.deepEqual(stored[0]?.payload, { text: "a\\u0000b" });
+  assert.deepEqual(sessionWrites, [{
+    where: { id: "session-1" },
+    data: { nativeChildUsed: true },
+  }]);
+});
+
+test("a failing derived usage write does not fail event ingestion", async () => {
+  const errors: unknown[] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    const result = await appendRunEvents(eventDatabase({
+      finalOutputRows: [{ payload: finalOutputPayload }],
+      onUsageUpdate: () => { throw new Error("value out of range for type integer"); },
+    }), { runId: "run-1", body: eventBody(["FINAL_OUTPUT"]), now });
+    assert.deepEqual(result, { accepted: 1 });
+  } finally {
+    console.error = consoleError;
+  }
+  assert.equal(errors.length, 1);
+});
+
+test("events decide WAITING_INBOX refusal before the locked transaction releases", async () => {
+  let transactionOpen = false;
+  let signalWaitingRead: (() => void) | undefined;
+  let continueWaitingRead: (() => void) | undefined;
+  const waitingReadStarted = new Promise<void>((resolve) => { signalWaitingRead = resolve; });
+  const waitingReadAllowed = new Promise<void>((resolve) => { continueWaitingRead = resolve; });
+  const calls: string[] = [];
+  let findFirstCalls = 0;
+  const tx = {
+    $queryRaw: async () => { calls.push("lock.run"); return [{ id: "run-1" }]; },
+    run: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        findFirstCalls += 1;
+        if (findFirstCalls === 1) return null;
+        assert.deepEqual(where, { id: "run-1", status: RunStatus.WAITING_INBOX });
+        calls.push("read.waiting");
+        signalWaitingRead?.();
+        await waitingReadAllowed;
+        assert.equal(transactionOpen, true);
+        return { id: "run-1" };
+      },
+      findUnique: async () => ({
+        runnerId: "runner-1",
+        fencingToken: "fence-1",
+        cancelRequestedAt: null,
+        leaseExpiresAt: null,
+        status: RunStatus.WAITING_INBOX,
+      }),
+    },
+  };
+  const database = {
+    $transaction: async (operation: (client: unknown) => Promise<unknown>) => {
+      transactionOpen = true;
+      try {
+        return await operation(tx);
+      } finally {
+        calls.push("transaction.release");
+        transactionOpen = false;
+      }
+    },
+    run: { findFirst: async () => { calls.push("outside.read"); return null; } },
+  } as unknown as PrismaClient;
+
+  const pending = appendRunEvents(database, {
+    runId: "run-1",
+    body: eventBody(["MODEL_COMPLETED"]),
+    now,
+  });
+  await waitingReadStarted;
+  assert.equal(transactionOpen, true);
+  assert.equal(calls.includes("transaction.release"), false);
+  continueWaitingRead?.();
+
+  assert.deepEqual(await pending, {
+    reason: "conflict",
+    message: "Run suspended for Inbox",
+    detail: { code: "WAITING_INBOX" },
+  });
+  assert.ok(calls.indexOf("read.waiting") < calls.indexOf("transaction.release"));
+  assert.equal(calls.includes("outside.read"), false);
 });
 
 test("activity persists the authenticated principal through the lifecycle interface", async () => {

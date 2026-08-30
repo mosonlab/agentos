@@ -310,46 +310,48 @@ export const appendRunEvents = async (
     fencingToken: input.body.fencingToken,
     at: now,
   };
-  const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
-    session: { select: { id: true, providerConversationId: true } },
-  }, async (run) => {
-    if (!run.session) return fenceRefusalResponse("stale-fence");
-    await tx.sessionEvent.createMany({
-      data: input.body.events.map((event) => ({
-        sessionId: run.session!.id,
-        runId: input.runId,
-        seq: event.seq,
-        at: event.at ?? new Date(),
-        source: event.source,
-        type: normalizeSessionEventValue(event.type) as string,
-        providerEventId: event.providerEventId === undefined || event.providerEventId === null
-          ? null
-          : normalizeSessionEventValue(event.providerEventId) as string,
-        toolCallId: event.toolCallId === undefined || event.toolCallId === null
-          ? null
-          : normalizeSessionEventValue(event.toolCallId) as string,
-        payload: jsonValue(normalizeSessionEventValue(event.payload)),
-      })),
-      skipDuplicates: true,
-    });
-    if (input.body.events.some((event) => event.type === "NATIVE_CHILD_STARTED")) {
-      await tx.session.update({ where: { id: run.session.id }, data: { nativeChildUsed: true } });
-    }
-    if (input.body.providerConversationId && !run.session.providerConversationId) {
-      await tx.session.update({
-        where: { id: run.session.id },
-        data: { providerConversationId: input.body.providerConversationId },
+  const result = await db.$transaction(async (tx) => {
+    const appended = await withFencedRun(tx, fence, {
+      session: { select: { id: true, providerConversationId: true } },
+    }, async (run) => {
+      if (!run.session) return fenceRefusalResponse("stale-fence");
+      await tx.sessionEvent.createMany({
+        data: input.body.events.map((event) => ({
+          sessionId: run.session!.id,
+          runId: input.runId,
+          seq: event.seq,
+          at: event.at ?? new Date(),
+          source: event.source,
+          type: normalizeSessionEventValue(event.type) as string,
+          providerEventId: event.providerEventId === undefined || event.providerEventId === null
+            ? null
+            : normalizeSessionEventValue(event.providerEventId) as string,
+          toolCallId: event.toolCallId === undefined || event.toolCallId === null
+            ? null
+            : normalizeSessionEventValue(event.toolCallId) as string,
+          payload: jsonValue(normalizeSessionEventValue(event.payload)),
+        })),
+        skipDuplicates: true,
       });
-    }
-    return { sessionId: run.session.id };
-  }));
-  if (isFenceRefusalResponse(result)) {
-    const waiting = await db.run.findFirst({
+      if (input.body.events.some((event) => event.type === "NATIVE_CHILD_STARTED")) {
+        await tx.session.update({ where: { id: run.session.id }, data: { nativeChildUsed: true } });
+      }
+      if (input.body.providerConversationId && !run.session.providerConversationId) {
+        await tx.session.update({
+          where: { id: run.session.id },
+          data: { providerConversationId: input.body.providerConversationId },
+        });
+      }
+      return { sessionId: run.session.id };
+    });
+    if (!isFenceRefusalResponse(appended)) return appended;
+    const waiting = await tx.run.findFirst({
       where: { id: input.runId, status: RunStatus.WAITING_INBOX },
       select: { id: true },
     });
-    return waiting ? runFenceRefusal("waiting-inbox") : runFenceRefusal(result.reason);
-  }
+    return waiting ? runFenceRefusal("waiting-inbox") : runFenceRefusal(appended.reason);
+  });
+  if ("message" in result) return result;
 
   if (input.body.events.some((event) => event.type === "FINAL_OUTPUT")) {
     try {
