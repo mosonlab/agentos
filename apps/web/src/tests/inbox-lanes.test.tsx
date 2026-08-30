@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { act } from "react";
 
-import { installDom, reactDom } from "./dom-harness";
+import { mountPage } from "./dom-harness";
 import type { InboxMessage } from "../lib/types";
 
 const now = "2026-08-26T00:00:00.000Z";
@@ -29,10 +29,6 @@ const deployed = card({
   body: "[auto-deploy] success: cd63e56186022274da18288bfd7ef36bd6b318ea -> cb46e4a003c3296fbd2f9ee49d6450ae7b7b3b3b; reason=deployed",
 });
 
-const settle = async (): Promise<void> => {
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-};
-
 const serve = (messages: InboxMessage[], posted: string[] = []): typeof fetch =>
   (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input).replace(/^.*\/api/, "");
@@ -42,15 +38,9 @@ const serve = (messages: InboxMessage[], posted: string[] = []): typeof fetch =>
   }) as typeof fetch;
 
 const renderInbox = async (messages: InboxMessage[], posted: string[] = []) => {
-  const { container } = installDom("http://127.0.0.1:5173/inbox");
-  const [{ createRoot }, { InboxPage }, { ProjectProvider }] = await Promise.all([
-    reactDom(), import("../pages/Inbox"), import("../lib/project"),
-  ]);
-  globalThis.fetch = serve(messages, posted);
-  const root = createRoot(container);
-  act(() => root.render(<ProjectProvider><InboxPage /></ProjectProvider>));
-  await settle();
-  return { container, root };
+  const [{ InboxPage }, { ProjectProvider }] = await Promise.all([import("../pages/Inbox"), import("../lib/project")]);
+  const page = await mountPage(<ProjectProvider><InboxPage /></ProjectProvider>, { "*": ({ input, init }) => serve(messages, posted)(input, init) }, "http://127.0.0.1:5173/inbox");
+  return { container: page.container, page };
 };
 
 const lane = (container: Element, label: RegExp): HTMLButtonElement => {
@@ -60,7 +50,7 @@ const lane = (container: Element, label: RegExp): HTMLButtonElement => {
 };
 
 test("the active lane holds only cards that owe a reply; a detached notification is not one", async () => {
-  const { container, root } = await renderInbox([gate, notice, deployed]);
+  const { container, page } = await renderInbox([gate, notice, deployed]);
   try {
     const text = container.textContent ?? "";
     assert.match(text, /合并 PR/);
@@ -68,19 +58,19 @@ test("the active lane holds only cards that owe a reply; a detached notification
     // nothing from them — that is what made the badge read 145.
     assert.doesNotMatch(text, /merge tail stopped/);
   } finally {
-    act(() => root.unmount());
+    await page.dispose();
   }
 });
 
 test("the notices lane lists the detached notification and dismisses it without a decision", async () => {
   const posted: string[] = [];
-  const { container, root } = await renderInbox([gate, notice, deployed], posted);
+  const { container, page } = await renderInbox([gate, notice, deployed], posted);
   try {
     // The lane's own count tells the operator there is something there without
     // spending the sidebar badge on it.
     assert.match(lane(container, /^Notices/).textContent ?? "", /^Notices 1$/);
     act(() => { lane(container, /^Notices/).click(); });
-    await settle();
+    await page.settle();
     const text = container.textContent ?? "";
     assert.match(text, /merge tail stopped/);
     assert.doesNotMatch(text, /合并 PR/);
@@ -89,22 +79,22 @@ test("the notices lane lists the detached notification and dismisses it without 
       .find((button) => (button.textContent ?? "").trim() === "Dismiss");
     assert.ok(dismiss, "the notices lane offers a row-level dismiss");
     act(() => { (dismiss as HTMLButtonElement).click(); });
-    await settle();
+    await page.settle();
     assert.deepEqual(posted, ["/inbox/messages/notice-1/close"]);
   } finally {
-    act(() => root.unmount());
+    await page.dispose();
   }
 });
 
 test("a deploy that succeeded reports where production is, without occupying a lane", async () => {
-  const { container, root } = await renderInbox([deployed]);
+  const { container, page } = await renderInbox([deployed]);
   try {
     const text = container.textContent ?? "";
     assert.match(text, /cb46e4a/);
     // Archived on write, so it is not in the active lane it is rendered above.
     assert.match(text, /Nothing waiting on you/);
   } finally {
-    act(() => root.unmount());
+    await page.dispose();
   }
 });
 

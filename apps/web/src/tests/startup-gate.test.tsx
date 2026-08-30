@@ -8,7 +8,7 @@ import { App } from "../App";
 import { StartupGate } from "../components/startup-gate";
 import { LocaleProvider } from "../lib/i18n";
 import { ThemeProvider } from "../lib/theme";
-import { installDom, reactDom } from "./dom-harness";
+import { mountPage } from "./dom-harness";
 
 /**
  * The first-load contract (plan Step 5, evidence row E6).
@@ -49,41 +49,27 @@ const mounted = async (
    *  without it is a gate no developer can get past. */
   strict = false,
 ): Promise<{ calls: Call[]; markup: string }> => {
-  const { dom, container } = installDom();
   const calls: Call[] = [];
-  const original = globalThis.fetch;
   let index = 0;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init?: RequestInit) => {
-    const path = String(url);
-    calls.push({ path, polling: init?.cache === "no-store" });
+  const tree = <ThemeProvider><LocaleProvider initialLocale="en">{subject()}</LocaleProvider></ThemeProvider>;
+  const page = await mountPage(strict ? <StrictMode>{tree}</StrictMode> : tree, { "*": ({ input, init }) => {
+    const path = String(input);
+    calls.push({ path, polling: init.cache === "no-store" });
     if (path !== "/api/projects") return new Response("[]", { status: 404 });
     // A poll repeats whatever the bootstrap last answered rather than advancing
     // the script: the provider that mounts after the gate is polling the same
     // control plane, and answering it differently would be a fixture artefact.
-    const at = init?.cache === "no-store" ? Math.max(0, index - 1) : index++;
+    const at = init.cache === "no-store" ? Math.max(0, index - 1) : index++;
     const scripted = bootstrap[Math.min(at, bootstrap.length - 1)] ?? { status: 500 };
     if ("throws" in scripted) throw new TypeError("Failed to fetch");
     if ("timesOut" in scripted) throw timeoutError();
     return new Response(scripted.body ?? "", { status: scripted.status, headers: { "Content-Type": "application/json" } });
   } });
-  const root = (await reactDom()).createRoot(container);
   try {
-    const tree = <ThemeProvider><LocaleProvider initialLocale="en">{subject()}</LocaleProvider></ThemeProvider>;
-    await act(async () => root.render(strict ? <StrictMode>{tree}</StrictMode> : tree));
-    const settle = async (): Promise<void> => {
-      // Twice: one tick lets the request resolve, the next lets whatever mounted
-      // because of it run its own first effect.
-      for (let round = 0; round < 2; round += 1) {
-        await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-      }
-    };
-    await settle();
-    await drive(dom, settle);
-    return { calls, markup: dom.window.document.body.innerHTML };
+    await drive(page.dom, page.settle);
+    return { calls, markup: page.dom.window.document.body.innerHTML };
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 };
 
@@ -183,24 +169,18 @@ test("a 500 is neither a refusal nor an outage, and says so without inventing a 
 });
 
 test("the pending state renders loading only, and never the application", async () => {
-  const { dom, container } = installDom();
-  const original = globalThis.fetch;
   let calls = 0;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async () => {
+  const page = await mountPage(<ThemeProvider><LocaleProvider initialLocale="en"><App /></LocaleProvider></ThemeProvider>, { "*": async () => {
     calls += 1;
     return await new Promise<Response>(() => undefined);
   } });
-  const root = (await reactDom()).createRoot(container);
   try {
-    await act(async () => root.render(<ThemeProvider><LocaleProvider initialLocale="en"><App /></LocaleProvider></ThemeProvider>));
-    const markup = dom.window.document.body.innerHTML;
+    const markup = page.dom.window.document.body.innerHTML;
     assert.equal(calls, 1);
     assert.match(markup, /data-startup-state="pending"/u);
     assert.doesNotMatch(markup, /data-runner-state=|Set up Anneal/u);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 });
 

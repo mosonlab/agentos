@@ -11,6 +11,7 @@ import type { Agent, RunnerPreference } from "../lib/types";
 import { claudeDeclaration } from "../../../../packages/runner/src/adapters/claude.js";
 import { codexDeclaration } from "../../../../packages/runner/src/adapters/codex.js";
 import { piDeclaration } from "../../../../packages/runner/src/adapters/pi.js";
+import { installFetchFunction } from "./dom-harness";
 
 const agent = (overrides: Partial<Agent> = {}): Agent => ({
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
@@ -90,11 +91,10 @@ test("rapid tool toggles serialize union writes and ignore a stale poll in fligh
   const root = createRoot(container);
   const calls: RequestInit[] = [];
   const releases: Array<(response: Response) => void> = [];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (_input: string | URL | Request, init?: RequestInit) => {
+  const fetchHarness = installFetchFunction(async (_input, init) => {
     calls.push(init ?? {});
     return await new Promise<Response>((resolve) => releases.push(resolve));
-  } });
+  });
   let saved = 0;
   const stale = agent();
   const state = (label: string): string | null => dom.window.document.querySelector(`[aria-label="${label}"]`)?.getAttribute("data-state") ?? null;
@@ -129,7 +129,7 @@ test("rapid tool toggles serialize union writes and ignore a stale poll in fligh
     });
     assert.equal(saved, 1);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }
@@ -148,11 +148,10 @@ test("a failed tool write rolls back while a later queued intent converges from 
   const root = createRoot(container);
   const calls: RequestInit[] = [];
   const releases: Array<(response: Response) => void> = [];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (_input: string | URL | Request, init?: RequestInit) => {
+  const fetchHarness = installFetchFunction(async (_input, init) => {
     calls.push(init ?? {});
     return await new Promise<Response>((resolve) => releases.push(resolve));
-  } });
+  });
   let saved = 0;
   const state = (label: string): string | null => dom.window.document.querySelector(`[aria-label="${label}"]`)?.getAttribute("data-state") ?? null;
   const click = async (label: string): Promise<void> => {
@@ -186,7 +185,7 @@ test("a failed tool write rolls back while a later queued intent converges from 
     assert.equal(state("Enable Bash"), "checked");
     assert.equal(state("Enable Web search"), "unchecked");
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }

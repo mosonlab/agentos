@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 
 import { ApiError, REQUEST_TIMEOUT_MS, api } from "../lib/api";
+import { installFetchFunction } from "./dom-harness";
 
 /**
  * Every control-plane request is bounded.
@@ -20,19 +21,15 @@ const withFetch = async (
   work: () => Promise<void>,
 ): Promise<Call[]> => {
   const calls: Call[] = [];
-  const original = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (url: string, init: RequestInit) => {
-      const call = { url, init };
+  const fetchHarness = installFetchFunction(async (url, init = {}) => {
+      const call = { url: String(url), init };
       calls.push(call);
       return await answer(call);
-    },
   });
   try {
     await work();
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
+    fetchHarness.dispose();
   }
   return calls;
 };
@@ -141,10 +138,7 @@ test("a response that sends headers and then stalls its body is translated to a 
     configurable: true,
     value: () => originalTimeout(100),
   });
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: (_url: string, init: RequestInit) => originalFetch(`http://127.0.0.1:${port}/projects`, init),
-  });
+  const fetchHarness = installFetchFunction((_url, init = {}) => originalFetch(`http://127.0.0.1:${port}/projects`, init));
   try {
     await assert.rejects(() => api.get("/projects"), (reason: unknown) => {
       assert.ok(reason instanceof ApiError);
@@ -153,7 +147,7 @@ test("a response that sends headers and then stalls its body is translated to a 
       return true;
     });
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     Object.defineProperty(AbortSignal, "timeout", { configurable: true, value: originalTimeout });
     server.closeAllConnections();
     await new Promise<void>((resolve) => { server.close(() => resolve()); });

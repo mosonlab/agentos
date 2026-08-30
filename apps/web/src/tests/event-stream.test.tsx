@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JSDOM } from "jsdom";
+import type { JSDOM } from "jsdom";
 import { act } from "react";
-import { createRoot } from "react-dom/client";
 
 import { BACKOFF_CEILING_MS, EVENT_PAGE_CEILING, nextIntervalMs, toEnvelope } from "../lib/use-event-stream";
 import type { SessionEvent } from "../lib/types";
+import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
 const row = (seq: number): SessionEvent => ({
   id: `e${seq}`, sessionId: "s1", runId: "r1", seq, at: "2026-08-16T00:00:00.000Z",
@@ -54,26 +54,15 @@ const withHook = async (
     setTerminal: (value: boolean) => Promise<void>;
   }) => Promise<void>,
 ): Promise<void> => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true });
-  const globals = {
-    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node,
-    MutationObserver: dom.window.MutationObserver,
-  };
-  for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  const { dom, container } = installDom();
 
   const requests: string[] = [];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       requests.push(path);
       const result = respond(path);
       if (result instanceof Error) throw result;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(result) } as unknown as Response;
-    },
   });
 
   // A tiny hand-rolled clock: node:test's mock timers do not survive React's
@@ -98,15 +87,10 @@ const withHook = async (
     return null;
   };
 
-  const container = dom.window.document.querySelector("#root");
-  assert.ok(container);
-  const root = createRoot(container);
+  const root = (await reactDom()).createRoot(container);
   rerender = () => root.render(<Probe isTerminal={terminal} />);
 
-  // Let every microtask-resolved fetch settle before asserting.
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 12; turn += 1) await Promise.resolve(); });
-  };
+  const flush = fetchHarness.settle;
   const advance = async (ms: number): Promise<void> => {
     const target = now + ms;
     for (let guard = 0; guard < 200; guard += 1) {
@@ -138,7 +122,7 @@ const withHook = async (
   } finally {
     await act(async () => root.unmount());
     Object.defineProperty(dom.window, "setTimeout", { configurable: true, value: realSetTimeout });
-    if (originalFetch) Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     dom.window.close();
   }
 };

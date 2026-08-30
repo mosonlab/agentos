@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JSDOM } from "jsdom";
+import type { JSDOM } from "jsdom";
 import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
@@ -10,6 +9,7 @@ import {
 } from "../components/runner-status";
 import { LocaleProvider } from "../lib/i18n";
 import type { RunnersResponse } from "../lib/types";
+import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
 const now = new Date();
 const payload = (overrides: Partial<RunnersResponse> = {}): RunnersResponse => ({
@@ -113,18 +113,11 @@ const withProvider = async (
   respond: (path: string, count: number) => { ok: boolean; body: unknown },
   operation: (context: { dom: JSDOM; requests: string[]; advance: (ms: number) => Promise<void>; latest: () => ReturnType<typeof useRunners> }) => Promise<void>,
 ): Promise<void> => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true });
-  for (const [key, value] of Object.entries({
-    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node,
-    MutationObserver: dom.window.MutationObserver,
-  })) Object.defineProperty(globalThis, key, { configurable: true, value });
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  const { dom, container } = installDom();
 
   const requests: string[] = [];
   const counts = new Map<string, number>();
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string) => {
+  const fetchHarness = installFetchFunction(async (input) => {
     const path = String(input);
     requests.push(path);
     const count = (counts.get(path) ?? 0) + 1;
@@ -136,7 +129,7 @@ const withProvider = async (
       headers: new Headers(),
       text: async () => JSON.stringify(response.body),
     } as Response;
-  } });
+  });
 
   let clock = now.getTime();
   let handle = 0;
@@ -158,10 +151,8 @@ const withProvider = async (
 
   let snapshot: ReturnType<typeof useRunners> | null = null;
   const Probe = () => { snapshot = useRunners(); return null; };
-  const container = dom.window.document.querySelector("#root");
-  assert.ok(container);
-  const root = createRoot(container);
-  const flush = async (): Promise<void> => { await act(async () => { for (let turn = 0; turn < 10; turn += 1) await Promise.resolve(); }); };
+  const root = (await reactDom()).createRoot(container);
+  const flush = fetchHarness.settle;
   const advance = async (ms: number): Promise<void> => {
     const target = clock + ms;
     for (let guard = 0; guard < 100; guard += 1) {
@@ -182,7 +173,7 @@ const withProvider = async (
     await operation({ dom, requests, advance, latest: () => { assert.ok(snapshot); return snapshot; } });
   } finally {
     await act(async () => root.unmount());
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     Object.defineProperty(Date, "now", { configurable: true, value: originalDateNow });
     dom.window.close();
   }
