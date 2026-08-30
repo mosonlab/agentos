@@ -1,20 +1,47 @@
 /**
  * Browser-safe serialized contracts for the Tasks board and Chain detail.
  *
- * This module deliberately imports nothing. String-literal unions mirror the
- * persisted enums without making a browser consumer load Prisma, and the
- * default `DateTime` parameter is the ISO string produced on the HTTP wire.
- * Server projections may instantiate the same contract with `Date` before
- * JSON serialization.
+ * Prisma is imported as types only: browser consumers receive no generated
+ * client code, while persisted enum widening becomes a compile-time change at
+ * this seam. String-literal unions that are not persisted remain local to the
+ * contract, and the default `DateTime` parameter is the ISO string produced on
+ * the HTTP wire. Server projections may instantiate the same contract with
+ * `Date` before JSON serialization.
  */
 
-export type TaskStatus = "BACKLOG" | "TODO" | "DOING" | "REVIEW" | "DONE";
-export type TaskSource = "MANUAL" | "CRON" | "WEBHOOK";
-export type AssigneeType = "AGENT" | "HUMAN";
-export type ScheduleKind = "NOW" | "AT" | "CRON";
-export type RunStatus =
-  | "QUEUED" | "CLAIMED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
-  | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
+import type {
+  AssigneeType as PrismaAssigneeType,
+  ChainControlState as PrismaChainControlState,
+  CleanupStatus as PrismaCleanupStatus,
+  CodexServiceTier as PrismaCodexServiceTier,
+  FailureClass as PrismaFailureClass,
+  MergeRecoveryStatus as PrismaMergeRecoveryStatus,
+  PushStatus as PrismaPushStatus,
+  RunStatus as PrismaRunStatus,
+  RunnerKind as PrismaRunnerKind,
+  ScheduleKind as PrismaScheduleKind,
+  SessionEventSource as PrismaSessionEventSource,
+  SessionExecutionStatus as PrismaSessionExecutionStatus,
+  TaskSource as PrismaTaskSource,
+  TaskStatus as PrismaTaskStatus,
+  TriggerFireSource as PrismaTriggerFireSource,
+} from "@prisma/client";
+
+export type TaskStatus = PrismaTaskStatus;
+export type TaskSource = PrismaTaskSource;
+export type AssigneeType = PrismaAssigneeType;
+export type ScheduleKind = PrismaScheduleKind;
+export type RunStatus = PrismaRunStatus;
+export type RunnerKind = PrismaRunnerKind;
+export type CodexServiceTier = PrismaCodexServiceTier;
+export type SessionExecutionStatus = PrismaSessionExecutionStatus;
+export type CleanupStatus = PrismaCleanupStatus;
+export type FailureClass = PrismaFailureClass;
+export type SessionEventSource = PrismaSessionEventSource;
+export type PushStatus = PrismaPushStatus;
+export type ChainControlState = PrismaChainControlState;
+export type MergeRecoveryStatus = PrismaMergeRecoveryStatus;
+export type TriggerFireSource = PrismaTriggerFireSource;
 export type ExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
 
 export type BoardMoveTarget = { status: TaskStatus; via: "patch" | "start" };
