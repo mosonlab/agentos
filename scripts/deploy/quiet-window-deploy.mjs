@@ -37,7 +37,14 @@ import {
 } from "./deploy-preflight.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
-import { runCommandWithRetry } from "./quiet-window-retry.mjs";
+import {
+  readRemoteMainRevision,
+  transientRemoteMainEscalationFields,
+} from "./remote-main-read.mjs";
+import {
+  checkExistingEscalation,
+  resolveRemoteMainTarget,
+} from "./quiet-window-escalation.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
@@ -62,7 +69,6 @@ const SHARED_PATH = join(REPOSITORY_ROOT, "shared");
 const POLL_SECONDS_TEXT = process.env.QUIET_WINDOW_POLL_SECONDS ?? "60";
 const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT) : Number.NaN;
 const POLL_MS = POLL_SECONDS * 1_000;
-const SHA = /^[0-9a-f]{40}$/u;
 const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @anneal/db deploy-barrier.ts ("AGDP").
 const DEPLOY_BARRIER_KEY = 1;
 
@@ -151,24 +157,21 @@ const checked = (reason, program, args, options) => checkedResult(
   () => command(program, args, options),
 );
 
-const retryingGitCommand = (operation, args, options) => runCommandWithRetry(
-  () => command(loadBinaries().git, args, options).catch((error) => {
-    if (error instanceof DeployFailure) throw error;
-    return { code: 1, stderr: String(error), stdout: "" };
-  }),
-  {
-    onRetry: ({ attempt, nextAttempt, waitMs }) => log(
-      `RETRY git-network operation=${operation} attempt=${attempt} next-attempt=${nextAttempt} wait-ms=${waitMs}`,
-    ),
-  },
-);
-
-const readJson = (path, reason) => {
+const parseJson = (contents, reason) => {
   try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
+    const value = JSON.parse(contents);
     if (typeof value !== "object" || value === null || Array.isArray(value)) fail(reason, "json-root-is-not-an-object");
     return value;
   } catch {
+    fail(reason, "unreadable-or-invalid-json");
+  }
+};
+
+const readJson = (path, reason) => {
+  try {
+    return parseJson(readFileSync(path, "utf8"), reason);
+  } catch (error) {
+    if (error instanceof DeployFailure) throw error;
     fail(reason, "unreadable-or-invalid-json");
   }
 };
@@ -195,13 +198,20 @@ const environmentFilePath = () => join(SHARED_PATH, ".env");
 const remoteMainRevision = async () => {
   const sourceRemote = process.env.DEPLOY_SOURCE_REMOTE;
   if (!sourceRemote) fail("environment-unreadable", "DEPLOY_SOURCE_REMOTE-missing");
-  const result = await retryingGitCommand(
-    "ls-remote-main",
-    ["ls-remote", "--exit-code", sourceRemote, "refs/heads/main"],
-    { capture: true },
-  );
-  const revision = result.stdout.trim().split(/\s+/u)[0] ?? "";
-  if (result.code !== 0 || !SHA.test(revision)) fail("remote-main-unreadable", `exit-${result.code}`);
+  const revision = await readRemoteMainRevision({
+    run: () => command(
+      loadBinaries().git,
+      ["ls-remote", "--exit-code", sourceRemote, "refs/heads/main"],
+      { capture: true },
+    ).catch((error) => {
+      if (error instanceof DeployFailure) throw error;
+      return { code: 1, stderr: String(error), stdout: "" };
+    }),
+    onRetry: ({ reason, attempt, nextAttempt, waitMs }) => log(
+      `RETRY ${reason} operation=ls-remote-main attempt=${attempt} next-attempt=${nextAttempt} wait-ms=${waitMs}`,
+    ),
+  });
+  log(`PASS remote-main-read revision=${revision}`);
   return revision;
 };
 
@@ -447,7 +457,14 @@ const retryEscalationNotification = async () => {
 };
 
 const persistAndNotifyFailure = async (failure, from, to) => {
-  await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from, to });
+  await writeEscalation({
+    outcome: "failure",
+    reason: failure.reason,
+    detail: failure.detail,
+    from,
+    to,
+    ...transientRemoteMainEscalationFields(failure),
+  });
   try {
     await retryEscalationNotification();
   } catch {
@@ -817,20 +834,21 @@ const main = async () => {
 
   await loadEnvironment();
   loadBinaries();
-  if (existsSync(ESCALATION_PATH)) {
-    await retryEscalationNotification();
-    log(`STOP escalation-active path=${ESCALATION_PATH}`);
-    return 2;
-  }
-
-  let targetCommit = "unknown";
-  try {
-    targetCommit = await remoteMainRevision();
-  } catch (error) {
-    const failure = failureOf(error);
-    await persistAndNotifyFailure(failure, "unknown", targetCommit);
-    return 1;
-  }
+  const startup = await resolveRemoteMainTarget({
+    acquireLock,
+    log,
+    checkEscalation: () => checkExistingEscalation({
+      escalationPath: ESCALATION_PATH,
+      readRemoteMain: remoteMainRevision,
+      retryEscalationNotification,
+      log,
+    }),
+    readRemoteMain: remoteMainRevision,
+    persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
+  });
+  if (startup.skipped === "lock-held") return 0;
+  if (startup.exitCode) return startup.exitCode;
+  const targetCommit = startup.targetCommit;
 
   const attempt = openDeploymentAttempt({
     deployRoot: REPOSITORY_ROOT,

@@ -212,10 +212,27 @@ node current/scripts/deploy/quiet-window-deploy.mjs --prune-history
 
 ## Failure and escalation
 
-A failed attempt writes `.agentos-deploy/escalated.json` and an Anneal Inbox
-record. Scheduled invocations do not retry while the marker exists. Inspect the
-ledger, logs, pointer identities, service states, and Inbox record; repair the
-named cause; build and verify the artifact again; and rerun `--dry-run`.
+Remote-main-unreadable is treated as a potentially transient transport failure.
+Before escalating that class, a scheduled invocation retries the remote-main
+read within a bounded retry budget and uses backoff between attempts. The retry
+burst and each resulting outcome are visible in the deploy log; a successful
+retry continues without writing an escalation.
+
+If a prior escalation is latched for remote-main-unreadable, a later scheduled
+cycle that reads remote main successfully clears that escalation automatically.
+The deploy log or audit trail records one clearing entry that names the
+remote-main-unreadable escalation, its failed window, and the successful
+clearing read. This is the only escalation class that self-clears.
+The original operator-facing Inbox record remains open as historical evidence
+after an unattended self-clear; dismiss that record after confirming the audit
+entry. The absent local marker means `--clear-escalation` has no further work.
+
+A retry budget exhausted by persistent unreachability still writes
+`.agentos-deploy/escalated.json` and an Anneal Inbox record. Authentication
+failures, malformed or corrupt remote state, and every other failure class also
+escalate loudly and remain latched for manual clearing. Inspect the ledger,
+logs, pointer identities, service states, and Inbox record; repair the named
+cause; build and verify the artifact again; and rerun `--dry-run`.
 
 Only then clear and retry:
 
