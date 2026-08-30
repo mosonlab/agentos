@@ -259,8 +259,8 @@ for (const invariant of [
     templateName: INTEGRATOR_TEMPLATE_NAME,
     stepIndex: INTEGRATOR_STEP_INDEX,
     outputKind: INTEGRATOR_OUTPUT_KIND,
-    expectedReason: /violates the merge-integrator binding invariant: A merge-execution step may bind only agent merge-integrator/u,
-    expectedRefusal: "integrator-binding",
+    expectedReason: /A merge-execution step may bind only agent merge-integrator/u,
+    expectedRefusal: "integrator-binding-invalid",
   },
   {
     name: "compound implementation",
@@ -269,8 +269,8 @@ for (const invariant of [
     templateName: INTEGRATOR_TEMPLATE_NAME,
     stepIndex: 5,
     outputKind: "implementation",
-    expectedReason: /violates the compound implementation assignee invariant/u,
-    expectedRefusal: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID",
+    expectedReason: /Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner/u,
+    expectedRefusal: "compound-implementation-assignee",
   },
 ] as const) {
   test(`runner completion preserves DONE and parks a post-instantiation ${invariant.name} rename`, async () => {

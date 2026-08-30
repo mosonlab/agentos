@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AssigneeType, type PrismaClient, TaskStatus } from "@anneal/db";
+import {
+  AssigneeType,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  type PrismaClient,
+  TaskStatus,
+} from "@anneal/db";
 
 import { composeBrief, readBrief } from "./task-brief.js";
 import { patchTask } from "./task-patch.js";
@@ -93,4 +98,38 @@ test("a mechanical template Step keeps its free-form description patch", async (
 
   assert.ok("task" in result);
   assert.equal(fixture.update()?.description, "concurrent writer completed after recovery");
+});
+
+test("a compound implementation reassignment returns a structured refusal directly", async () => {
+  const task = {
+    id: "task-compound",
+    projectId: "project-1",
+    templateStepId: "step-compound",
+    chainId: "chain-1",
+    approvalGate: false,
+    archivedAt: null,
+    status: TaskStatus.TODO,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: "executioner",
+    repoId: "repo-1",
+    scheduleKind: null,
+  };
+  const db = {
+    task: { findUniqueOrThrow: async () => task },
+    agent: { findFirst: async () => null },
+    taskTemplateStep: { findUnique: async () => ({
+      stepIndex: 5,
+      outputKind: "implementation",
+      taskTemplate: { name: "compound-engineer-workflow" },
+    }) },
+  } as unknown as PrismaClient;
+
+  assert.deepEqual(await patchTask(db, task.id, {
+    assigneeType: AssigneeType.HUMAN,
+    assigneeAgentId: null,
+  }), {
+    reason: "compound-implementation-assignee",
+    message: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    detail: { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
+  });
 });

@@ -46,6 +46,39 @@ test("due CRON fires one fully-normalized copy and advances strictly into the fu
   assert.equal(await db.taskActivity.count({ where: { taskId: { in: [definition.id, copy.id] } } }), 2);
 });
 
+test("an archived assignee refusal advances CRON durably instead of retrying every tick", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const now = new Date("2026-08-15T12:05:00Z");
+  const definition = await db.task.create({ data: {
+    projectId: project.id,
+    assigneeAgentId: agent.id,
+    repoId: repo.id,
+    name: "Archived assignee recurring",
+    description: "work",
+    scheduleKind: "CRON",
+    cron: "*/2 * * * *",
+    timezone: "UTC",
+    runAt: new Date("2026-08-15T11:00:00Z"),
+  } });
+  await db.agent.update({ where: { id: agent.id }, data: { archivedAt: new Date() } });
+
+  assert.deepEqual(await schedulerTick(db, now), { cronFired: 0, atFired: 0, quarantined: 0 });
+  const advanced = await db.task.findUniqueOrThrow({ where: { id: definition.id } });
+  assert.ok(advanced.runAt && advanced.runAt > now);
+  const copy = await db.task.findFirstOrThrow({
+    where: { recurringSourceTaskId: definition.id },
+  });
+  assert.equal(copy.status, "REVIEW");
+  assert.match(copy.failureReason ?? "", /archived/u);
+  assert.equal(await db.run.count({ where: { taskId: copy.id } }), 0);
+
+  assert.deepEqual(
+    await schedulerTick(db, new Date(now.getTime() + 1_000)),
+    { cronFired: 0, atFired: 0, quarantined: 0 },
+  );
+  assert.equal(await db.task.count({ where: { recurringSourceTaskId: definition.id } }), 1);
+});
+
 test("concurrent CRON ticks materialize exactly one copy", async () => {
   const { project, agent, repo } = await seedExecutor();
   const now = new Date();

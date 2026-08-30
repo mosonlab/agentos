@@ -1,7 +1,8 @@
 import {
   activateChainSuccessor,
   AssigneeType,
-  CompoundImplementationAssigneeError,
+  COMPOUND_IMPLEMENTATION_AGENT_NAME,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   compoundImplementationAssigneeValid,
   InboxStatus,
   integratorBindingRefusalFor,
@@ -18,7 +19,7 @@ import { z } from "zod";
 
 import { blockingPredecessor } from "./chain.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
-import { type Refusal, refusalFor } from "./refusal.js";
+import type { Refusal } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
 import { rewriteBrief, stepHasTaskBrief } from "./task-brief.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
@@ -171,10 +172,11 @@ export const patchTask = async (
       effectiveAgent,
       templateStep,
     )) {
-      const error = new CompoundImplementationAssigneeError();
-      const refusal = refusalFor(error);
-      if (!refusal) throw error;
-      return refusal;
+      return {
+        reason: "compound-implementation-assignee",
+        message: `Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`,
+        detail: { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
+      };
     }
   }
   if (body.assigneeAgentId) {
