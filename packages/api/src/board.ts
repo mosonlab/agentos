@@ -868,6 +868,21 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     }
   }
 
+  // A detached repair may recover complete primary facts, but it cannot be the
+  // sole visible owner of a fully archived Chain. Keep repair aggregation when
+  // the page contains a primary row, or the complete lookup finds a live one.
+  const aggregateOwnerKeys = new Set([
+    ...rows.flatMap((row) => row.chainId === null ? [] : [
+      chainKey({ projectId: row.projectId, chainId: row.chainId }),
+    ]),
+    ...primaryRows.flatMap((row) => row.chainId === null || (row.archivedAt ?? null) !== null ? [] : [
+      chainKey({ projectId: row.projectId, chainId: row.chainId }),
+    ]),
+  ]);
+  for (const [taskId, key] of repairChainKeyByTask) {
+    if (!aggregateOwnerKeys.has(key)) repairChainKeyByTask.delete(taskId);
+  }
+
   // Visible primary rows also occur in the complete lookup. Deduplicate before
   // deriving direct-chain names so one punctuation-bearing row never looks like
   // corroborating evidence for itself.
@@ -909,6 +924,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
     }
     for (const [taskId, binding] of repairChainByTask) {
+      if (!repairChainKeyByTask.has(taskId)) continue;
       repairByTask.set(taskId, {
         chainId: binding.chainId,
         chainName: chainNameByKey.get(chainKey(binding)) ?? null,
@@ -938,6 +954,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
   for (const member of primaryRows) {
     if (member.chainId === null) continue;
     const key = chainKey({ projectId: member.projectId, chainId: member.chainId });
+    if (!aggregateOwnerKeys.has(key)) continue;
     const group = addChain(key, displayByTask.get(member.id)?.chainName ?? null);
     if (!group.primary.some((candidate) => candidate.id === member.id)) group.primary.push(memberWithDisplay(member));
   }

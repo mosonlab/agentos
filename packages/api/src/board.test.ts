@@ -634,7 +634,36 @@ test("readBoard carries one aggregate for visible chain members and repair", asy
   assert.equal(projection.detailTaskId, regression.id);
 });
 
-test("readBoard restores archived primary facts when only a detached repair is visible", async () => {
+test("readBoard does not resurrect a fully archived chain through a detached repair", async () => {
+  const archivedAt = new Date("2026-08-15T00:00:00Z");
+  const implementation = row({
+    id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE", archivedAt,
+  });
+  const regression = row({
+    id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
+    name: "Release: Regression", templateStep: { name: "Regression" }, status: "BACKLOG", archivedAt,
+  });
+  const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
+  const { db } = boardReadDatabase({
+    rows: [repair],
+    chainRows: [implementation, regression],
+    related: [{ id: regression.id, projectId: "p1", chainId: "c1" }],
+    activities: [{ taskId: repair.id, metadata: {
+      schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: regression.id,
+    } }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]?.id, repair.id);
+  assert.equal(cards[0]?.repairOf, null);
+  assert.equal(cards[0]?.chainAggregate, null);
+});
+
+test("readBoard restores partly archived primary facts when only a detached repair is visible", async () => {
+  const archivedAt = new Date("2026-08-15T00:00:00Z");
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
     name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
@@ -642,7 +671,7 @@ test("readBoard restores archived primary facts when only a detached repair is v
   });
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
-    name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE",
+    name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE", archivedAt,
   });
   const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
   const { db } = boardReadDatabase({
