@@ -253,6 +253,11 @@ export const retryTransientNetwork = async <T>(
  *  through. */
 export const GH_PROBE_TIMEOUT_MS = 10_000;
 
+/** Reading the current commit is a local repository query. It should finish
+ *  promptly, but still needs a ceiling because it runs inside delivery's
+ *  lease-bound phase. */
+export const WORKSPACE_HEAD_TIMEOUT_MS = 5_000;
+
 /** The ceiling for a command that is not on the retry allowlist but still runs
  *  inside a deadline-bounded phase. Same clamp the retry loop applies, minus
  *  the retrying. */

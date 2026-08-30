@@ -746,6 +746,7 @@ export const en = {
   "status.failure.BINARY_NOT_FOUND": "binary not found",
   "status.failure.BUDGET_EXCEEDED": "budget exceeded",
   "status.failure.CANCELLED_OR_TIMED_OUT": "cancelled or timed out",
+  "status.failure.NO_CHANGES_PRODUCED": "no changes produced",
   "status.failure.PROTOCOL_ERROR": "protocol error",
   "status.failure.RATE_LIMITED": "rate limited",
   "status.failure.TASK_FAILED": "task failed",

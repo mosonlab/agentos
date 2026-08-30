@@ -5,7 +5,7 @@ import type { RunnerConfig } from "./config.js";
 import { isCommandTimeout, KILL_OVERHEAD_MS, platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
 import {
   boundedTimeout, budgetRemains, GH_PROBE_TIMEOUT_MS, MIN_ATTEMPT_TIMEOUT_MS, NETWORK_ATTEMPTS,
-  NETWORK_COMMAND_TIMEOUT_MS, runWithNetworkRetry, transientBackoff,
+  NETWORK_COMMAND_TIMEOUT_MS, runWithNetworkRetry, transientBackoff, WORKSPACE_HEAD_TIMEOUT_MS,
   type AttemptBudget, type RetryOptions,
 } from "./network-retry.js";
 import type { Workspace } from "./workspace.js";
@@ -65,6 +65,9 @@ export type DeliveryClaim = {
 
 export type DeliverWorkspaceDependencies = {
   command?: CommandExecutor;
+  /** HEAD already captured by the runner before delivery. Direct callers may
+   *  omit it and let delivery resolve the commit itself. */
+  headSha?: string;
   recordPublication?: (branch: string) => Promise<void>;
   retryOptions?: RetryOptions;
 };
@@ -129,7 +132,7 @@ const noChangesProduced = (branch: string, remote: string): DeliveryResult => {
     pushRemote: remote,
     pushError: reason,
     deliveryInstructions: reason,
-    failureClass: "TASK_FAILED",
+    failureClass: "NO_CHANGES_PRODUCED",
     failure: { operation: "workspace head comparison", message: reason, error },
   };
 };
@@ -222,8 +225,8 @@ export const deliverWorkspace = async (
   // was meant to open a pull request. Detect that before any remote write so an
   // empty session cannot masquerade as a push or GitHub failure.
   try {
-    const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env,
-      { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) });
+    const head = dependencies.headSha ?? await command("git", ["rev-parse", "HEAD"], workspace.path, env,
+      { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
     if (head === workspace.baseSha) return noChangesProduced(workspace.branch, remote);
   } catch (error: unknown) {
     const message = messageOf(error);

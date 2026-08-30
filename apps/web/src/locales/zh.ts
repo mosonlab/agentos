@@ -739,6 +739,7 @@ export const zh = {
   "status.failure.BINARY_NOT_FOUND": "找不到可执行文件",
   "status.failure.BUDGET_EXCEEDED": "超出预算",
   "status.failure.CANCELLED_OR_TIMED_OUT": "已取消或超时",
+  "status.failure.NO_CHANGES_PRODUCED": "未生成更改",
   "status.failure.PROTOCOL_ERROR": "协议错误",
   "status.failure.RATE_LIMITED": "被限流",
   "status.failure.TASK_FAILED": "任务失败",

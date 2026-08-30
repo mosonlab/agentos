@@ -9,7 +9,9 @@ import {
 } from "./delivery.js";
 import { completionEnvelope } from "./envelope.js";
 import { CommandTimeoutError, KILL_OVERHEAD_MS } from "./exec.js";
-import { deliveryDeadline, NETWORK_COMMAND_TIMEOUT_MS } from "./network-retry.js";
+import {
+  deliveryDeadline, NETWORK_COMMAND_TIMEOUT_MS, WORKSPACE_HEAD_TIMEOUT_MS,
+} from "./network-retry.js";
 
 const config = { runAsPrefix: [], path: "/fake/bin", home: "/fake/home" } as unknown as RunnerConfig;
 const claim = {
@@ -29,18 +31,34 @@ test("a clean session with no commit fails before push or pull-request creation"
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
-    return executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
+    return "";
   };
-  const result = await deliverWorkspace(config, claim, workspace, { command: fake });
+  const result = await deliverWorkspace(config, claim, workspace, { command: fake, headSha: workspace.baseSha });
   const reason = "no-changes-produced: the session ended cleanly without committing any change on feature/test";
   assert.equal(result.pushStatus, "FAILED");
-  assert.equal(result.failureClass, "TASK_FAILED");
+  assert.equal(result.failureClass, "NO_CHANGES_PRODUCED");
   assert.equal(result.pushError, reason);
   assert.equal(result.deliveryInstructions, reason);
   assert.equal(result.pushedBranch, undefined);
   assert.equal(result.failure?.operation, "workspace head comparison");
   assert.equal(result.failure?.message, reason);
   assert.ok(result.failure?.error instanceof Error);
+  assert.deepEqual(calls, []);
+});
+
+test("a workspace-head read failure is reported without any remote operation", async () => {
+  const calls: string[] = [];
+  const headError = new Error("fatal: not a git repository");
+  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    assert.equal(options?.timeoutMs, WORKSPACE_HEAD_TIMEOUT_MS);
+    throw headError;
+  };
+  const result = await deliverWorkspace(config, claim, workspace, { command: fake });
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failureClass, "TOOL_FAILED");
+  assert.equal(result.failure?.operation, "git rev-parse HEAD");
+  assert.equal(result.failure?.error, headError);
   assert.deepEqual(calls, ["git rev-parse HEAD"]);
 });
 
@@ -59,21 +77,19 @@ test("a clean no-PR session with no commit also fails before publication", async
   assert.deepEqual(calls, ["git rev-parse HEAD"]);
 });
 
-test("a session with a commit keeps the existing push and pull-request path", async () => {
+test("a session with a captured commit keeps the existing push and pull-request path", async () => {
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
-    if (executable === "git" && args[0] === "rev-parse") return "new-head";
     if (executable === "gh" && args[1] === "list") {
       return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
     }
     return "";
   };
-  const result = await deliverWorkspace(config, claim, workspace, { command: fake });
+  const result = await deliverWorkspace(config, claim, workspace, { command: fake, headSha: "new-head" });
   assert.equal(result.pushStatus, "SUCCEEDED");
   assert.equal(result.pullRequestNumber, 7);
-  assert.deepEqual(calls.slice(0, 3), [
-    "git rev-parse HEAD",
+  assert.deepEqual(calls.slice(0, 2), [
     "git push --set-upstream origin feature/test",
     "gh --version",
   ]);
