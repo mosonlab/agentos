@@ -112,10 +112,12 @@ root-owned service adoption to the matching runbook profile.
 ## Templates release demo
 
 `npm run demo:templates -- preflight|setup|instantiate|capture|verify|reset`
-drives the retained v0.2 twelve-node release-demo workflow; it is not evidence
-for the current layered canonical templates. The demo's limits and exact
-commands are in [`docs/demos/templates-release-demo.md`](demos/templates-release-demo.md).
-The current Direct and Full Assurance graphs are documented in
+drives the retained OSS-C release-demo protocol over the current canonical
+twelve-node Full Assurance template. It records exact-commit chain evidence but
+does not independently inspect the target diff or command output. The demo's
+limits and exact commands are in
+[`docs/demos/templates-release-demo.md`](demos/templates-release-demo.md). The
+current Direct and Full Assurance graphs are documented in
 [`agents/README.md`](../agents/README.md). A rehearsal or one provider run proves
 neither universal provider compatibility nor a fresh install.
 

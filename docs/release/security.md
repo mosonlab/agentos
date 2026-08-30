@@ -20,9 +20,10 @@ to face a network.
   bind. Compose shorthand with no bind emits a notice because it publishes on
   every interface, while the migration target URL must still name literal
   loopback.
-- The web console is served at `http://127.0.0.1:5173` and its dev/preview
-  server decides per request that the caller is its own loopback origin before
-  it will attach the operator's authority.
+- The web console is served at `http://127.0.0.1:5173` by the development
+  server and at `http://127.0.0.1:4173` by the deployed preview server. In
+  either mode, the server decides per request that the caller is its own
+  loopback origin before it will attach the operator's authority.
 
 **Exposing any of this beyond the loopback interface is unsupported.** There is
 no authentication design for a remote caller here — no login, no per-user

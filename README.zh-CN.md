@@ -82,7 +82,7 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 | 7 | 盲评 | `review-coordinator-opus` | 对同一 diff 再评一次，看不到第 6 步的发现 | Claude | Claude Opus 5 · high |
 | 8 | 落地评审修复 | `senior-dev` | 裁决两轮评审的全部发现并落地采纳项 | Codex | GPT-5.6 Sol · high |
 | 9 | 文档 | `librarian` | 让内部文档与交付代码保持一致 | Pi | GPT-5.6 Luna · xhigh |
-| 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Codex | GPT-5.6 Luna · max |
+| 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Codex | GPT-5.6 Luna · xhigh |
 | 11 | 合并就绪 | — | 重算 head，要求所有评审清零，签发精确到 head 的授权 | — | 机械步骤，无模型运行 |
 | 12 | 合并执行 | `merge-integrator` | 对照线上 pull request 复核全部前置条件后合并 | — | 机械步骤，无模型运行 |
 
@@ -110,7 +110,8 @@ merge-tail 修复。</sub>
 你需要：
 
 - Apple Silicon 的 Mac
-- Node.js `22.17.0`（见 `.nvmrc`）与 npm 10.9.2+
+- Node.js 满足 `^20.19.0 || ^22.13.0 || >=24`；使用 `.nvmrc` 指定的
+  `22.17.0`，并配合 npm 10.9.2+
 - Docker Compose 与 Git
 - 在同一 macOS 账户下已登录的官方 Codex CLI（Claude Code 与 Pi 可选）
 

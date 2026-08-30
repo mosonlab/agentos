@@ -97,7 +97,7 @@ chain into a workflow for your own team of agents.
 | 7 | Blind code review | `review-coordinator-opus` | Reviews the same diff again, blind to step 6's findings | Claude | Claude Opus 5 · high |
 | 8 | Apply review fixes | `senior-dev` | Dispositions every finding from both reviews and applies the adopted ones | Codex | GPT-5.6 Sol · high |
 | 9 | Documentation | `librarian` | Updates internal documentation to match the delivered code | Pi | GPT-5.6 Luna · xhigh |
-| 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · max |
+| 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · xhigh |
 | 11 | Merge readiness | — | Recomputes the head, requires every open review to clear, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
 
@@ -127,7 +127,8 @@ board column semantics in the
 You need:
 
 - an Apple Silicon Mac
-- Node.js `22.17.0` (from `.nvmrc`) and npm 10.9.2+
+- Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`; use `22.17.0` from
+  `.nvmrc`, with npm 10.9.2+
 - Docker Compose and Git
 - the official Codex CLI signed in under the same macOS account
   (Claude Code and Pi optional)
