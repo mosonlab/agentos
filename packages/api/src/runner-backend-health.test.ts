@@ -30,8 +30,6 @@ test("runner backend claim allowance requires available CLI and a closed circuit
   assert.equal(runnerBackendAllowsClaim({ capabilities: cliAvailability(true), circuitOpen: false }), true);
   assert.equal(runnerBackendAllowsClaim({ capabilities: cliAvailability(false), circuitOpen: false }), false);
   assert.equal(runnerBackendAllowsClaim({ capabilities: cliAvailability(true), circuitOpen: true }), false);
-  if (false) {
-    // @ts-expect-error Prisma findUnique returns null, never undefined.
-    runnerBackendAllowsClaim(undefined);
-  }
+  // @ts-expect-error Prisma findUnique returns null, never undefined.
+  runnerBackendAllowsClaim(undefined);
 });
