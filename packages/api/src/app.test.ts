@@ -644,15 +644,11 @@ test("starting a run without an exact dispatched prompt hash is refused before d
 
 test("merge-executor start maps an omitted promptHash to null and dispatches", async () => {
   await withTokens(async () => {
-    let fencedRead = 0;
     let promptHash: unknown = "not-written";
     const tx = {
       $queryRaw: async () => [{ id: "run-1" }],
       run: {
-        findFirst: async () => {
-          fencedRead += 1;
-          return fencedRead === 1 ? { taskId: null } : { startedAt: null };
-        },
+        findFirst: async () => ({ startedAt: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => {
           promptHash = data.promptHash;
           return { count: 1 };

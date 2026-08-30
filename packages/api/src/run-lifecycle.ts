@@ -27,6 +27,7 @@ import {
   salvageAuthorityRefusal,
   type RunFence,
   withFencedRun,
+  withRunOnlyFencedRun,
 } from "./run-fence.js";
 import { repairReplacementAfterSalvage } from "./workspace-reclaim.js";
 
@@ -120,7 +121,7 @@ export const startRun = async (
     at: now,
     statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING],
   };
-  const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+  const result = await db.$transaction((tx) => withRunOnlyFencedRun(tx, fence, {
     startedAt: true,
   }, async (run) => {
     const startedAt = run.startedAt ?? now;

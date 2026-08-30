@@ -243,6 +243,27 @@ export const cleanupAuthorityRefusal = (
 };
 
 /**
+ * Runs one write-authorizing read behind the complete fence while holding only
+ * the Run mutex. Callers use this when every mutation is owned by the Run and
+ * its Session, so taking the Task mutex would add a lock-order dependency that
+ * the transition does not need.
+ */
+export const withRunOnlyFencedRun = async <Select extends Prisma.RunSelect, Result>(
+  tx: Prisma.TransactionClient,
+  fence: RunFence,
+  select: Select,
+  body: (run: Prisma.RunGetPayload<{ select: Select }>) => Promise<Result> | Result,
+): Promise<Result | FenceRefusalResponse> => {
+  await lockRunRow(tx, fence.runId);
+  const run = await tx.run.findFirst({
+    where: fencedRunWhere(fence),
+    select,
+  });
+  if (!run) return fenceRefusalResponse(await explainFenceRefusal(tx, fence));
+  return body(run);
+};
+
+/**
  * Runs one write-authorizing read behind the complete fence.
  *
  * Run owns fencing and cancellation, while Task owns the lifecycle mutations

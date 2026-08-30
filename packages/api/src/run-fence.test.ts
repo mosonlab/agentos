@@ -14,6 +14,7 @@ import {
   type RunFence,
   salvageAuthorityRefusal,
   withFencedRun,
+  withRunOnlyFencedRun,
 } from "./run-fence.js";
 
 const fence: RunFence = {
@@ -76,6 +77,28 @@ test("one fenced read owns its clock and Run -> Task lock order", async () => {
   assert.equal(predicates.length, 2);
   assert.equal((predicates[0]?.leaseExpiresAt as { gt: Date }).gt, fence.at);
   assert.equal((predicates[1]?.leaseExpiresAt as { gt: Date }).gt, fence.at);
+});
+
+test("a Run-only fenced read preserves the complete predicate without taking the Task lock", async () => {
+  const calls: string[] = [];
+  let predicate: Prisma.RunWhereInput | undefined;
+  const tx = {
+    $queryRaw: async () => { calls.push("lock.run"); return [{ id: "run-1" }]; },
+    run: { findFirst: async ({ where }: { where: Prisma.RunWhereInput }) => {
+      calls.push("read.run");
+      predicate = where;
+      return { id: "run-1" };
+    } },
+  } as unknown as Prisma.TransactionClient;
+
+  const result = await withRunOnlyFencedRun(tx, fence, { id: true }, (run) => {
+    calls.push("body");
+    return run.id;
+  });
+
+  assert.equal(result, "run-1");
+  assert.deepEqual(calls, ["lock.run", "read.run", "body"]);
+  assert.deepEqual(predicate, fencedRunWhere(fence));
 });
 
 test("the predicate carries the six clauses that make a run this request's to write", () => {

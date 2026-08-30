@@ -108,19 +108,12 @@ test("start owns the transaction and preserves one Run and Session lifecycle tim
   const calls: string[] = [];
   const runWrites: Array<Record<string, unknown>> = [];
   const sessionWrites: Array<Record<string, unknown>> = [];
-  let fencedRead = 0;
   const tx = {
-    $queryRaw: async (query: TemplateStringsArray) => {
-      calls.push(query.join("?").includes('FROM "Run"') ? "lock.run" : "lock.task");
-      return query.join("?").includes('FROM "Run"')
-        ? [{ id: "run-1" }]
-        : [{ id: "task-1", archivedAt: null }];
-    },
+    $queryRaw: async () => { calls.push("lock.run"); return [{ id: "run-1" }]; },
     run: {
       findFirst: async () => {
         calls.push("read.run");
-        fencedRead += 1;
-        return fencedRead === 1 ? { taskId: "task-1" } : { startedAt: null };
+        return { startedAt: null };
       },
       updateMany: async ({ data }: { data: Record<string, unknown> }) => {
         calls.push("write.run");
@@ -156,8 +149,6 @@ test("start owns the transaction and preserves one Run and Session lifecycle tim
     "transaction",
     "lock.run",
     "read.run",
-    "lock.task",
-    "read.run",
     "write.run",
     "write.session",
   ]);
@@ -167,16 +158,10 @@ test("start preserves a resumed lifecycle anchor and admits the mechanical null 
   const originalStartedAt = new Date("2026-08-29T10:00:00.000Z");
   const runWrites: Array<Record<string, unknown>> = [];
   const sessionWrites: Array<Record<string, unknown>> = [];
-  let fencedRead = 0;
   const tx = {
-    $queryRaw: async (query: TemplateStringsArray) => query.join("?").includes('FROM "Run"')
-      ? [{ id: "run-1" }]
-      : [{ id: "task-1", archivedAt: null }],
+    $queryRaw: async () => [{ id: "run-1" }],
     run: {
-      findFirst: async () => {
-        fencedRead += 1;
-        return fencedRead === 1 ? { taskId: "task-1" } : { startedAt: originalStartedAt };
-      },
+      findFirst: async () => ({ startedAt: originalStartedAt }),
       updateMany: async ({ data }: { data: Record<string, unknown> }) => {
         runWrites.push(data);
         return { count: 1 };
