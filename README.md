@@ -4,7 +4,7 @@
 
 **You write the specs. It clears the board.**
 
-Anneal runs chains of coding agents on your own Mac. Queue tasks on
+Anneal runs chains of coding agents on your own machine. Queue tasks on
 the board, and each one is planned, reviewed, implemented, verified and
 merged unattended, on the Codex and Claude subscriptions you are
 already signed in to.
@@ -18,20 +18,24 @@ already signed in to.
 
 <img src="docs/media/parallel-tasks.gif" alt="Multiple tasks running in parallel across the board" width="880">
 
+<sub>Live capture: Anneal clearing its own task board. This repository is built by Anneal itself.</sub>
+
 </div>
 
 ## The workflow it is built for
 
-You do one thing: write specs. Queue them on the board and walk away. A
+You do one thing: write specs. You queue them on the board, Anneal
+breaks them down and orchestrates the work, and you walk away. A
 chain picks up each task and takes it the whole way through plan, plan
 review, implementation, two independent code reviews, fix application,
-regression verification, and the merge itself. When you come back, you
-read the pull requests that matter, open an agent window on the ones
-you care about, and iterate until you are satisfied.
+regression verification, and the merge itself. When you come back, the
+board is clear: you read the pull requests that matter, open an agent
+window on the ones you care about, and iterate until you are satisfied.
 
-In between, nothing needs you. A chain only stops for you when an agent
-asks a question through the Inbox, when a step you marked as gated
-needs a human decision, or when a run escalates.
+In between, nothing needs you. A chain only stops when a human
+decision is needed: an agent asks a question through the web Inbox, a
+step you marked as gated waits for your call, or a run escalates. Once
+you answer in the Inbox, the board moves on.
 
 ## What you get
 
@@ -42,9 +46,10 @@ needs a human decision, or when a run escalates.
 - **Nothing merges on faith.** Two blind code reviews, an independent
   regression run, and a merge gate stand between an agent's diff and
   your main branch.
-- **Parallel by default.** Chains for different tasks and different
-  repositories run at the same time; throughput comes from how many
-  runners you register, not from your hours.
+- **Parallel by default.** Chains for different projects, repositories
+  and tasks run at the same time. Concurrency is bounded by your
+  machine's resources and your subscription's rate limits; registering
+  more runners raises throughput.
 - **Your subscriptions, no keys.** Anneal launches the official Codex
   CLI, Claude Code and Pi you have already installed and signed in to.
   It holds no credential of its own, runs no proxy, and there is no key
@@ -53,7 +58,8 @@ needs a human decision, or when a run escalates.
 ## Anneal is built with Anneal
 
 The pull requests in this repository are specified, planned, reviewed,
-implemented and merged by Anneal's own chains, running on one Mac.
+implemented and merged by Anneal's own chains, running on one local
+machine.
 Chain-delivered commits carry `Co-Authored-By: Anneal Chain` and
 `X-Anneal-Run` / `X-Anneal-Step` trailers, so you can check in the git
 log which commits the chains produced.
@@ -66,7 +72,8 @@ executes on. The flagship Full Assurance template covers delivery in
 twelve steps.
 
 The template is data, not code. Roles, prompts, models and gates are
-all editable, so you can reshape the chain into your own process.
+all editable, so you can define your own agent roles and reshape the
+chain into a workflow for your own team of agents.
 
 <div align="center">
 
@@ -77,9 +84,7 @@ all editable, so you can reshape the chain into your own process.
 </div>
 
 <details>
-<summary><b>The twelve steps in full</b> — role, runner, model and effort for each</summary>
-
-`Sol` and `Luna` below are the GPT-5.6 variants the Codex CLI exposes.
+<summary><b>The twelve steps in full</b>: role, runner, model and effort for each</summary>
 
 | # | Step | Agent role | What it does | Runner | Model · effort |
 | --- | --- | --- | --- | --- | --- |

@@ -11,11 +11,12 @@ import {
 } from "./ui/dropdown-menu";
 import { Switch } from "./ui/switch";
 import { titleCase } from "../lib/format";
-import { mergeBadge } from "../lib/merge-outcome";
 import { useT, useTNodes } from "../lib/i18n";
 import { cn } from "../lib/utils";
-import type { Agent, GoalStatus, InboxStatus, MergeOutcome, RunStatus, TaskStatus } from "../lib/types";
+import type { Agent, GoalStatus, InboxStatus, TaskStatus } from "../lib/types";
 import { IconChevron, IconDots, IconRobot, IconUser } from "./icons";
+
+export { DOT, DOT_TONE, RunPill } from "./run-line";
 
 /* ------------------------------------------------------------------ layout
  *
@@ -54,17 +55,6 @@ export const TOOLBAR = "mb-[16px] flex items-center gap-[10px]";
 export const FIELD = "grid grid-cols-[minmax(0,1fr)] gap-[6px]";
 export const FIELD_LABEL = "text-[12.5px] text-secondary-foreground";
 export const FIELD_ROW = "grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] items-start gap-[14px]";
-
-/** The status dot and its tones, as a lookup rather than a built class string
- *  (plan B13). `.dot.on` carries a glow; `.dot.green` deliberately does not. */
-export const DOT = "size-[7px] rounded-full bg-[color:var(--faint)]";
-export const DOT_TONE = {
-  on: "bg-[color:var(--status-green-fg)] shadow-[0_0_8px_color-mix(in_srgb,var(--status-green-fg)_55%,transparent)]",
-  off: "bg-destructive",
-  green: "bg-[color:var(--status-green-fg)]",
-  amber: "bg-[color:var(--status-amber-fg)]",
-  red: "bg-[color:var(--destructive-fg)]",
-} as const;
 
 export const CARD_TITLE = "mb-[14px] flex items-center gap-[9px] text-[13.5px]";
 export const COUNT = "inline-grid h-[19px] min-w-[20px] place-items-center rounded-md bg-accent px-[6px] text-[11.5px] text-muted-foreground";
@@ -120,10 +110,6 @@ export const Pill = ({ tone, className, children }: { tone: PillTone; className?
 /** Status semantics follow ui-notes §0: green = succeeded, amber = a human or a
  *  runner is still owed something, red = danger, grey = inert. */
 const taskTones: Record<TaskStatus, PillTone> = { BACKLOG: "grey", TODO: "grey", DOING: "amber", REVIEW: "accent", DONE: "green" };
-const runTones: Record<RunStatus, PillTone> = {
-  QUEUED: "grey", CLAIMED: "amber", PROVISIONING: "amber", RUNNING: "amber", WAITING_INBOX: "accent",
-  SUCCEEDED: "green", FAILED: "red", TIMED_OUT: "red", CANCELLED: "grey", LOST: "red",
-};
 /* No `STOPPED_*` entries: see `GoalStatus` in lib/types.ts — the server has no
  * writer for those states, so a red pill for them is a legend for nothing. */
 const goalTones: Record<GoalStatus, PillTone> = {
@@ -140,17 +126,6 @@ const inboxTones: Record<InboxStatus, PillTone> = { OPEN: "amber", ANSWERED: "gr
 export const TaskPill = ({ status }: { status: TaskStatus }): ReactNode => {
   const t = useT();
   return <Pill tone={taskTones[status]}>{t(`status.task.${status}`)}</Pill>;
-};
-
-/** `mergeOutcome` is §SF-1: a mechanical merge that stopped ends its run
- *  SUCCEEDED, so the run's own status is not what an operator needs to read
- *  here. Absent on every other run, and then this is the pill it always was. */
-export const RunPill = ({ status, mergeOutcome }: { status: RunStatus; mergeOutcome?: MergeOutcome | null | undefined }): ReactNode => {
-  const t = useT();
-  const badge = mergeBadge(mergeOutcome);
-  return badge
-    ? <Pill tone={badge.tone}>{t(badge.key)}</Pill>
-    : <Pill tone={runTones[status]}>{t(`status.run.${status}`)}</Pill>;
 };
 
 export const GoalPill = ({ status }: { status: GoalStatus }): ReactNode => {

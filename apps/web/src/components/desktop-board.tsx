@@ -5,10 +5,11 @@ import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
+import { type ChainAggregateActions } from "./chain-aggregate-card";
+import { PaginatedBoardEntries } from "./paginated-board-entries";
+import { type CardActions } from "./task-card";
 import { COUNT } from "./ui";
 import { Button } from "./ui/button";
-import { ChainAggregateCard, type ChainAggregateActions } from "./chain-aggregate-card";
-import { type CardActions, TaskCard } from "./task-card";
 
 /**
  * The board is one scroll surface, in both directions.
@@ -59,7 +60,6 @@ const COLUMN_HEAD = "sticky top-0 z-[2] flex h-[36px] flex-none items-center gap
 const COLUMN_BODY = "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] content-start gap-[10px] rounded-xl border border-[color:var(--border-soft)] bg-[color-mix(in_srgb,var(--foreground)_1%,transparent)] p-[10px]";
 const COLUMN_BODY_OVER = "border-[color:var(--primary-soft)] bg-[color-mix(in_srgb,var(--primary)_4%,transparent)]";
 const COLUMN_EMPTY = "px-0 py-[26px] text-center text-[12px] text-[color:var(--faint)]";
-const COLUMN_PAGER = "flex items-center justify-center gap-[8px] pt-[2px]";
 
 export { CARD_PAGE_SIZE };
 
@@ -80,16 +80,6 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
 }): ReactNode => {
   const t = useT();
   const entries = normalizeBoardEntries(tasks);
-  const [page, setPage] = useState(0);
-  const lastPage = Math.max(0, Math.ceil(entries.length / CARD_PAGE_SIZE) - 1);
-  const visiblePage = Math.min(page, lastPage);
-  const start = visiblePage * CARD_PAGE_SIZE;
-  const visibleTasks = entries.slice(start, start + CARD_PAGE_SIZE);
-  const nextCount = Math.min(CARD_PAGE_SIZE, Math.max(0, entries.length - start - CARD_PAGE_SIZE));
-  const previousCount = Math.min(CARD_PAGE_SIZE, start);
-  useEffect(() => {
-    if (page > lastPage) setPage(lastPage);
-  }, [lastPage, page]);
   return <div className={COLUMN}>
     <div className={COLUMN_HEAD}>
       {t(column.labelKey)}<span className={COUNT}>{entries.length}</span>
@@ -113,23 +103,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
         onDrop(event.dataTransfer.getData("text/plain"), column.status);
       }}
     >
-      {visibleTasks.map((entry) => entry.kind === "chain"
-        ? <ChainAggregateCard key={entry.id} aggregate={entry.aggregate} members={entry.members} representativeTaskId={entry.representativeTaskId} actions={aggregateActions} />
-        : <TaskCard key={entry.id} task={entry.task} actions={actions} draggable={entry.task.moveTargets.length > 0} />)}
-      {previousCount > 0 || nextCount > 0 ? (
-        <div className={COLUMN_PAGER}>
-          {previousCount > 0 ? (
-            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage - 1)}>
-              {t("tasks.column.previous", { n: previousCount })}
-            </Button>
-          ) : null}
-          {nextCount > 0 ? (
-            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage + 1)}>
-              {t("tasks.column.more", { n: nextCount })}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
+      <PaginatedBoardEntries entries={entries} actions={actions} aggregateActions={aggregateActions} draggable />
       {/* Every column gets the same invitation, Backlog included (E16). */}
       {entries.length === 0 ? <div className={COLUMN_EMPTY}>{t(loading ? "common.loading" : "tasks.column.drop")}</div> : null}
     </div>

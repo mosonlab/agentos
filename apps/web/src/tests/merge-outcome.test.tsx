@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { ChainAggregateCard } from "../components/chain-aggregate-card";
 import { RunPill } from "../components/ui";
 import { TaskCard } from "../components/task-card";
 import { translate } from "../lib/i18n-core";
-import { mergeBadge } from "../lib/merge-outcome";
 import { lifecycleStat, sessionPill } from "../pages/Sessions";
-import type { BoardTask, MergeOutcome, RunStatus } from "../lib/types";
+import type { BoardTask, ChainAggregate, MergeOutcome, RunStatus } from "../lib/types";
 
 /**
  * §SF-1 — the merge integrator's outcome as an operator reads it.
@@ -78,6 +78,35 @@ test("a pre-merge stop reads amber Stopped in all four run-centric surfaces", ()
   assert.ok(!markup.includes(en("status.run.SUCCEEDED")), markup);
 });
 
+test("a succeeded frontier Run with a stopped merge outcome does not render the Chain as succeeded", () => {
+  const aggregate: ChainAggregate = {
+    chainId: "chain-1",
+    chainName: "Release",
+    stepCount: 1,
+    detailTaskId: "merge-step",
+    statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 },
+    status: "DONE",
+    frontier: {
+      taskId: "merge-step",
+      title: "Merge execution",
+      status: "DONE",
+      latestRun: boardTask().latestRun,
+      mergeOutcome: STOPPED,
+      failureReason: null,
+      position: 1,
+    },
+    activation: { state: "settled", predecessor: null, taskId: "merge-step" },
+    totalCost: null,
+    createdAt: "2026-08-17T00:00:00.000Z",
+    updatedAt: "2026-08-18T00:00:00.000Z",
+  };
+  const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate} />);
+
+  assert.ok(markup.includes(en("status.merge.stopped")), markup);
+  assert.ok(markup.includes(AMBER_DOT), markup);
+  assert.ok(!markup.includes(en("status.run.SUCCEEDED")), markup);
+});
+
 /* ------------------------------------------------------- the post-merge incident */
 
 test("a post-merge incident reads red Incident in all four run-centric surfaces", () => {
@@ -94,19 +123,6 @@ test("a post-merge incident reads red Incident in all four run-centric surfaces"
   const markup = card({ mergeOutcome: INCIDENT });
   assert.ok(markup.includes(label), markup);
   assert.ok(markup.includes(RED_DOT), markup);
-});
-
-test("both post-merge conditions are incidents and the other stops are not", () => {
-  // The projection carries the classification; the client only reads the flag,
-  // so this asserts the two surfaces agree about which flag means which colour.
-  for (const condition of ["base-drift-post-merge", "changed-underneath-me"]) {
-    const badge = mergeBadge({ outcome: "stopped", condition, incident: true });
-    assert.deepEqual(badge, { tone: "red", key: "status.merge.incident" }, condition);
-  }
-  for (const condition of ["head-drift", "target-unresolvable", "no-authorization"]) {
-    const badge = mergeBadge({ outcome: "stopped", condition, incident: false });
-    assert.deepEqual(badge, { tone: "amber", key: "status.merge.stopped" }, condition);
-  }
 });
 
 /* ------------------------------------------------------------------ regression */
@@ -135,13 +151,4 @@ test("a failed run is untouched by the merge projection", () => {
   assert.ok(row.includes(RED), row);
   assert.deepEqual(sessionPill("FAILED"), { tone: "red", label: en("status.session.FAILED") });
   assert.deepEqual(lifecycleStat("FAILED"), { tone: "red", label: en("sessions.lifecycle.failed") });
-});
-
-test("a merged outcome adds no badge at all", () => {
-  assert.equal(mergeBadge(MERGED), null);
-  assert.equal(mergeBadge(null), null);
-  assert.equal(mergeBadge(undefined), null);
-  // `malformed` never reaches the client — the server projection returns null
-  // for any output that is not a `merge-result` — and is inert if it ever does.
-  assert.equal(mergeBadge({ outcome: "malformed", condition: "missing-or-malformed-result", incident: false }), null);
 });

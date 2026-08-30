@@ -229,7 +229,7 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.equal(allTodo.stepCount, 3);
   assert.deepEqual(allTodo.statusCounts, { BACKLOG: 0, TODO: 3, DOING: 0, REVIEW: 0, DONE: 0 });
   assert.deepEqual(allTodo.frontier, {
-    taskId: "step-1", title: "Build", status: "TODO", latestRun: null, failureReason: null, position: 1,
+    taskId: "step-1", title: "Build", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 1,
   });
   assert.deepEqual(allTodo.activation, { state: "parked-unactivated", predecessor: null, taskId: "step-1" });
 
@@ -249,7 +249,7 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.equal(review.status, "REVIEW");
   assert.equal(review.activation.state, "idle");
   assert.deepEqual(review.frontier, {
-    taskId: "step-2", title: "Step 1", status: "REVIEW", latestRun: null, failureReason: "needs approval", position: 2,
+    taskId: "step-2", title: "Step 1", status: "REVIEW", latestRun: null, mergeOutcome: null, failureReason: "needs approval", position: 2,
   });
 
   const done = chainAggregate("c1", "Release", [
@@ -310,10 +310,28 @@ test("chainAggregate sums member usage and groups a detached repair without infl
   assert.deepEqual(aggregate.frontier, {
     taskId: "repair", title: "Merge-tail repair", status: "TODO", latestRun: {
       id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", costUsd: "0.50", startedAt: null, endedAt: null,
-    }, failureReason: null,
+    }, mergeOutcome: null, failureReason: null,
   });
   assert.equal(aggregate.activation.state, "idle");
   assert.equal(aggregate.totalCost?.costUsd, "1.75");
+});
+
+test("the Chain frontier projects a stopped merge outcome only for the Run it shows", () => {
+  const stopped = JSON.stringify({ outcome: "stopped", condition: "head-drift", evidence: "live head changed" });
+  const frontierRun = {
+    id: "run-2", runNumber: 2, status: "SUCCEEDED" as const,
+    model: "claude-opus-5", budgetGrants: 0, session: null,
+  };
+  const projection = (runId: string) => chainAggregate("c1", "Release", [member({
+    status: "DONE",
+    runs: [frontierRun],
+    stepOutput: { kind: "merge-result", body: stopped, runId },
+  })], []);
+
+  assert.deepEqual(projection("run-2").frontier.mergeOutcome, {
+    outcome: "stopped", condition: "head-drift", incident: false,
+  });
+  assert.equal(projection("run-1").frontier.mergeOutcome, null);
 });
 
 test("blockedOn is projected from the resolved predecessor without storing its status", () => {

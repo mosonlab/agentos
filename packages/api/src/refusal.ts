@@ -11,6 +11,11 @@ import {
   type WorkflowRefusalReason,
 } from "@anneal/db";
 
+import {
+  isTemplateInstantiationRefusal,
+  type TemplateInstantiationRefusalCode,
+} from "./template-errors.js";
+
 export type RefusalReason =
   | WorkflowRefusalReason
   | "forbidden"
@@ -35,7 +40,7 @@ export type RefusalValue =
 export type RefusalDetail = Readonly<Record<string, RefusalValue> & { error?: never }>;
 
 export type Refusal = {
-  reason: RefusalReason;
+  reason: RefusalReason | TemplateInstantiationRefusalCode;
   message: string;
   detail?: RefusalDetail;
 };
@@ -48,6 +53,40 @@ export type RefusalResponse = {
 export const refusalResponse = (refusal: Refusal): RefusalResponse => {
   let status: RefusalResponse["status"];
   switch (refusal.reason) {
+    case "after_task_already_bound":
+    case "after_task_already_done":
+    case "after_task_archived":
+    case "after_task_not_chained":
+    case "after_task_not_found":
+    case "after_task_not_terminal":
+    case "dispatch_conflicts_with_auto_start":
+    case "implementation_route_agent_renamed":
+    case "implementation_route_conflicts_with_step_override":
+    case "implementation_route_unknown_agent":
+    case "repo_not_found":
+    case "step_override_agent_archived":
+    case "step_override_agent_not_found":
+    case "step_override_compound_implementation":
+    case "step_override_integrator_binding":
+    case "step_override_invalid_key":
+    case "step_override_missing_repo_grant":
+    case "step_override_step_not_agent":
+    case "step_override_too_many":
+    case "step_override_unknown_step":
+    case "template_agent_repo_grant_missing":
+    case "template_base_reference_missing":
+    case "template_base_reference_not_earlier":
+    case "template_branch_invalid":
+    case "template_compound_implementation_assignee_invalid":
+    case "template_first_step_not_agent":
+    case "template_has_no_instantiable_steps":
+    case "template_has_no_steps":
+    case "template_integrator_binding_invalid":
+    case "template_not_found":
+    case "template_step_agent_archived":
+    case "template_step_agent_missing":
+    case "template_variables_missing":
+    case "template_variables_unknown":
     case "invalid-request":
       status = 400;
       break;
@@ -87,6 +126,13 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
 };
 
 export const refusalFor = (error: unknown): Refusal | null => {
+  if (isTemplateInstantiationRefusal(error)) {
+    return {
+      reason: error.code,
+      message: error.message,
+      detail: { code: error.code },
+    };
+  }
   if (isWorkflowRefusalError(error)) return { reason: error.reason, message: error.message };
   if (isCompoundImplementationAssigneeError(error)) {
     return {
