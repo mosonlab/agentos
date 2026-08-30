@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -48,6 +48,16 @@ import {
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
+import { runDeployCommand } from "./quiet-window-command.mjs";
+import {
+  BARRIER_TIMEOUT_REASON,
+  createBarrierWatchdog,
+  DEPLOY_BARRIER_TIMEOUT_MS,
+  DEPLOY_STEP_TIMEOUT_MS,
+  MIGRATION_DEPLOY_TIMEOUT_REASON,
+  retainBarrierOnMigrationTimeout,
+  waitForEscalationClear,
+} from "./quiet-window-deadlines.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
 import {
   pruneReleaseDirectories,
@@ -96,47 +106,20 @@ const command = (program, args, {
   cwd = REPOSITORY_ROOT,
   env = process.env,
   capture = false,
+  timeoutMs,
+  timeoutReason,
   allowAfterInterrupt = false,
-} = {}) => {
-  if (!allowAfterInterrupt) throwIfInterrupted();
-  return new Promise((accept, reject) => {
-    const child = spawn(program, args, {
-      cwd,
-      env,
-      shell: false,
-      stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    });
-    let settled = false;
-    let stdout = "";
-    let stderr = "";
-    if (capture) {
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => { stdout += chunk; });
-      child.stderr.on("data", (chunk) => { stderr += chunk; });
-    }
-    const cleanUp = () => interruptController.signal.removeEventListener("abort", onAbort);
-    const rejectOnce = (error) => {
-      if (settled) return;
-      settled = true;
-      cleanUp();
-      reject(error);
-    };
-    const acceptOnce = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanUp();
-      accept(result);
-    };
-    const onAbort = () => {
-      child.kill(interruption.receivedSignal() === "SIGINT" ? "SIGINT" : "SIGTERM");
-      rejectOnce(interruptFailure());
-    };
-    if (!allowAfterInterrupt) interruptController.signal.addEventListener("abort", onAbort, { once: true });
-    child.once("error", rejectOnce);
-    child.once("exit", (code, signal) => acceptOnce({ code: code ?? 1, signal, stdout, stderr }));
-  });
-};
+} = {}) => runDeployCommand(program, args, {
+  cwd,
+  env,
+  capture,
+  timeoutMs,
+  timeoutReason,
+  signal: interruptController.signal,
+  abortFailure: interruptFailure,
+  abortSignal: () => interruption.receivedSignal() === "SIGINT" ? "SIGINT" : "SIGTERM",
+  allowAfterAbort: allowAfterInterrupt,
+});
 
 const checkedResult = async (reason, run) => {
   log(`START ${reason}`);
@@ -202,7 +185,11 @@ const remoteMainRevision = async () => {
     run: () => command(
       loadBinaries().git,
       ["ls-remote", "--exit-code", sourceRemote, "refs/heads/main"],
-      { capture: true },
+      {
+        capture: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.remoteMainRead,
+        timeoutReason: "remote-main-read-timeout",
+      },
     ).catch((error) => {
       if (error instanceof DeployFailure) throw error;
       return { code: 1, stderr: String(error), stdout: "" };
@@ -337,7 +324,12 @@ const sleep = (milliseconds) => {
   });
 };
 
-const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/launchctl", args, { capture: true, ...options });
+const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/launchctl", args, {
+  capture: true,
+  timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceRestart,
+  timeoutReason: `${reason}-timeout`,
+  ...options,
+});
 const domain = () => `gui/${process.getuid()}`;
 
 const acquireDeployBarrier = async () => {
@@ -360,7 +352,9 @@ const acquireDeployBarrier = async () => {
     if (rows.length !== 1 || rows[0]?.granted !== true) { await session.$disconnect(); return null; }
     const pid = Number(rows[0].pid);
     let released = false;
+    let retainUntilCleared = false;
     return trackResource({
+      retainUntilEscalationCleared: () => { retainUntilCleared = true; },
       verify: async () => {
         if (released) return false;
         const checks = await session.$queryRawUnsafe(
@@ -379,6 +373,14 @@ const acquireDeployBarrier = async () => {
       },
       release: async () => {
         if (released) return;
+        if (retainUntilCleared) {
+          await waitForEscalationClear({
+            escalationExists: () => existsSync(ESCALATION_PATH),
+            wait: () => new Promise((resolveWait) => setTimeout(resolveWait, 1_000)),
+            onHold: () => log(`HOLD deploy-barrier migration-timeout escalation=${ESCALATION_PATH}`),
+            onCleared: () => log("PASS deploy-barrier operator-cleared-migration-timeout"),
+          });
+        }
         released = true;
         try { await session.$queryRawUnsafe("SELECT pg_advisory_unlock($1::int4, $2::int4)", DEPLOY_BARRIER_CLASS, DEPLOY_BARRIER_KEY); }
         finally { await session.$disconnect(); }
@@ -429,6 +431,10 @@ const acquireLock = async () => {
 };
 
 const writeEscalation = async (record) => {
+  if (existsSync(ESCALATION_PATH)) {
+    log(`ESCALATION already-active path=${ESCALATION_PATH}`);
+    return;
+  }
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   const temporary = `${ESCALATION_PATH}.${process.pid}.${randomUUID()}`;
   writeFileSync(temporary, `${JSON.stringify({ notificationDelivered: false, ...record, escalatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -497,7 +503,11 @@ const pruneHistory = () => {
 const serviceState = async () => {
   const unavailable = [];
   for (const label of SERVICE_LABELS) {
-    const result = await command("/bin/launchctl", ["print", `${domain()}/${label}`], { capture: true });
+    const result = await command("/bin/launchctl", ["print", `${domain()}/${label}`], {
+      capture: true,
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+      timeoutReason: "service-inspection-timeout",
+    });
     if (result.code !== 0 || !/^\s*state = running\s*$/mu.test(result.stdout)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
@@ -513,7 +523,11 @@ const verifyStableServicePaths = async () => {
     return await verifyServiceInventory({
       repositoryRoot: REPOSITORY_ROOT,
       start: async (invocation) => {
-        const result = await command("/bin/launchctl", ["print", `${domain()}/${invocation.label}`], { capture: true });
+        const result = await command("/bin/launchctl", ["print", `${domain()}/${invocation.label}`], {
+          capture: true,
+          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+          timeoutReason: "service-inspection-timeout",
+        });
         const running = result.code === 0 && /^\s*state = running\s*$/mu.test(result.stdout);
         const wrapped = result.stdout.includes(wrapper) && result.stdout.includes(invocation.label);
         return { ok: running && wrapped, targetReleaseId: invocation.releaseIdentity };
@@ -626,7 +640,11 @@ const createDeployHost = () => createProductionHost({
       "release-artifact-build-failed",
       loadBinaries().node,
       [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
-      { capture: true },
+      {
+        capture: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
+        timeoutReason: "release-artifact-build-timeout",
+      },
     );
     const hasReceipt = built.stdout.trim().split("\n").some((line) => line.startsWith("RELEASE-ARTIFACT "));
     const receipt = parseReleaseArtifactReceipt(built.stdout);
@@ -648,9 +666,23 @@ const createDeployHost = () => createProductionHost({
       }),
     };
   },
-  waitForQuiet: async () => {
+  waitForQuiet: async (attempt) => {
     const barrier = await waitForQuiet();
-    return { barrier, resources: [barrier] };
+    const revisions = attempt.requireFact("revisions");
+    const watchdog = createBarrierWatchdog({
+      timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
+      onTimeout: async () => {
+        const failure = new DeployFailure(
+          BARRIER_TIMEOUT_REASON,
+          `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+        );
+        if (!interruption.interruptWithFailure(failure)) return;
+        log(`STOP ${failure.reason} detail=${failure.detail}`);
+        await persistAndNotifyFailure(failure, revisions.from, revisions.to);
+      },
+      onError: (error) => log(`STOP barrier-watchdog-alert-failed detail=${error instanceof Error ? error.name : "unknown"}`),
+    });
+    return { barrier, resources: [barrier, watchdog] };
   },
   prepareWorkspace: async (attempt) => {
     const release = attempt.requireFact("verifiedRelease");
@@ -702,16 +734,25 @@ const createDeployHost = () => createProductionHost({
     const migrationTailBefore = await migrationTail();
     await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
       cwd: operationWorkspace,
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
+      timeoutReason: "migration-preflight-timeout",
     });
-    await checked("guarded-migration-refused", loadBinaries().node, [
-      "node_modules/prisma/build/index.js",
-      "migrate",
-      "deploy",
-      "--schema",
-      "packages/db/prisma/schema.prisma",
-    ], {
-      cwd: operationWorkspace,
-    });
+    await retainBarrierOnMigrationTimeout(attempt.requireFact("barrier"), () => checked(
+      "guarded-migration-refused",
+      loadBinaries().node,
+      [
+        "node_modules/prisma/build/index.js",
+        "migrate",
+        "deploy",
+        "--schema",
+        "packages/db/prisma/schema.prisma",
+      ],
+      {
+        cwd: operationWorkspace,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
+        timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
+      },
+    ));
     const migrationTailAfter = await migrationTail();
     return { migration: { migrationTailBefore, migrationTailAfter } };
   },
@@ -720,11 +761,19 @@ const createDeployHost = () => createProductionHost({
     "generate",
     "--schema",
     "packages/db/prisma/schema.prisma",
-  ], { cwd: attempt.requireFact("operationWorkspace") }),
+  ], {
+    cwd: attempt.requireFact("operationWorkspace"),
+    timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
+    timeoutReason: "prisma-client-generation-timeout",
+  }),
   syncCanonicalPrompts: (attempt) => checked("canonical-prompt-sync-refused", loadBinaries().node, [
     "node_modules/tsx/dist/cli.mjs",
     "packages/db/prisma/sync-canonical-prompts.ts",
-  ], { cwd: attempt.requireFact("operationWorkspace") }),
+  ], {
+    cwd: attempt.requireFact("operationWorkspace"),
+    timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
+    timeoutReason: "canonical-prompt-sync-timeout",
+  }),
   verifyRuntimePrismaClient: async (attempt) => {
     if (!generatedPrismaClientIsComplete(attempt.requireFact("operationWorkspace"))) {
       fail("runtime-prisma-client-missing", "operation-generated-client-is-absent");
@@ -805,7 +854,11 @@ const createDeployHost = () => createProductionHost({
   },
   restorePreviousServices: async () => {
     for (const label of SERVICE_LABELS) {
-      await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], { allowAfterInterrupt: true });
+      await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], {
+        allowAfterInterrupt: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore,
+        timeoutReason: "previous-service-restore-timeout",
+      });
     }
   },
   escalate: writeEscalation,

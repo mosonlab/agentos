@@ -196,8 +196,8 @@ directory selected by the pointer.
 ### Step deadlines and barrier watchdog
 
 Every command-backed deployment step has its own deadline. The artifact build,
-backup, migration preflight, migration, Prisma Client generation, prompt sync,
-and other bounded steps are budgeted independently; there is no single global
+migration preflight, migration, Prisma Client generation, prompt sync, and
+service-control commands are budgeted independently; there is no single global
 step timeout. A step that reaches its deadline is terminated with `SIGTERM`,
 followed by `SIGKILL` if it does not exit, and is reported as a
 `DeployFailure`.
