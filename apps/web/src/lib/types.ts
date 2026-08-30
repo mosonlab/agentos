@@ -48,6 +48,7 @@ export type {
   ChainFrontier,
   ChainProgress,
   ChainStep,
+  CostsReport,
   ExecutionOwner,
   MergeOutcome,
   MergeRecovery,
@@ -156,57 +157,6 @@ export type Task = {
   recurringFireCount: number;
 };
 
-/** `GET /projects/:projectId/costs`. Every amount is a decimal string, as every
- *  other money field on the wire is. */
-export type CostsReport = {
-  days: number;
-  since: string;
-  totalUsd: string;
-  /** The part of `totalUsd` the control plane priced itself rather than read
-   *  from a provider. */
-  estimatedUsd: string;
-  runCount: number;
-  /** Settled runs whose cost could not be established at all. They are in
-   *  `runCount` and in no total, so the page states the count rather than
-   *  letting the tiles imply those runs were free. */
-  costUnavailableRuns: number;
-  avgUsd: string;
-  /** The priced spend of settled runs that did not succeed — failed, timed out,
-   *  cancelled or lost. Money the project paid for nothing it kept. */
-  wastedUsd: string;
-  daily: Array<{ date: string; byAgent: Record<string, string> }>;
-  byAgent: Array<{
-    agent: string;
-    usd: string;
-    runs: number;
-    costUnavailableRuns: number;
-    avgUsd: string;
-    /** Cached share of this agent's input tokens, 0-100, over the runs that
-     *  reported both token columns. `null` when no run of the agent did: an
-     *  unmeasured cache is not a cold one. */
-    cachePct: number | null;
-    wastedUsd: string;
-  }>;
-  /** Spend per distinct `Run.model` string, verbatim. Runs whose session used
-   *  native children are blended across two model rates and so land in a single
-   *  `mixed` key rather than under their root model. */
-  byModel: Array<{
-    model: string;
-    usd: string;
-    runs: number;
-    costUnavailableRuns: number;
-  }>;
-  topRuns: Array<{
-    runId: string;
-    taskName: string | null;
-    agent: string;
-    model: string;
-    usd: string;
-    estimated: boolean;
-    startedAt: string;
-  }>;
-};
-
 export type TaskStartability = {
   startable: boolean;
   checklist: {
@@ -224,14 +174,6 @@ export type TaskStartability = {
     repo: { id: string; name: string } | null;
     targetBranch: string | null;
   };
-};
-
-export type Chain = {
-  chainId: string | null;
-  total: number;
-  done: number;
-  steps: ChainStep[];
-  control: ChainControl | null;
 };
 
 export type TaskActivity = {

@@ -56,6 +56,69 @@ export type UsageCost = {
   outputTokens: number | null;
 };
 
+/** A local calendar day in the costs window and its spend by agent. */
+export type CostsDailyBucket<DecimalValue = string> = {
+  date: string;
+  byAgent: Record<string, DecimalValue>;
+};
+
+export type CostsAgentTotal<DecimalValue = string> = {
+  agent: string;
+  usd: DecimalValue;
+  runs: number;
+  costUnavailableRuns: number;
+  avgUsd: DecimalValue;
+  /** Cached share of this agent's input tokens, 0-100, or null when no run
+   * reported both token columns. */
+  cachePct: number | null;
+  wastedUsd: DecimalValue;
+};
+
+export type CostsModelTotal<DecimalValue = string> = {
+  model: string;
+  usd: DecimalValue;
+  runs: number;
+  costUnavailableRuns: number;
+};
+
+export type CostsTopRun<DateTime = string, DecimalValue = string> = {
+  runId: string;
+  taskName: string | null;
+  agent: string;
+  model: string;
+  usd: DecimalValue;
+  estimated: boolean;
+  startedAt: DateTime;
+};
+
+/** `GET /projects/:projectId/costs` and its native API projection.
+ *
+ * `DateTime` and `DecimalValue` default to their JSON wire forms. API-side
+ * projections can instantiate them with `Date` and `Prisma.Decimal`; Hono's
+ * JSON serialization then produces the browser-facing default shape without
+ * giving the web app a second hand-maintained copy of this contract.
+ */
+export type CostsReport<DateTime = string, DecimalValue = string> = {
+  days: number;
+  /** Inclusive lower bound of the whole-day window. */
+  since: DateTime;
+  totalUsd: DecimalValue;
+  /** The part of `totalUsd` priced by repository rates rather than a provider. */
+  estimatedUsd: DecimalValue;
+  /** Settled runs that started inside the window, priced or not. */
+  runCount: number;
+  /** Runs whose cost could not be established; they contribute to no total. */
+  costUnavailableRuns: number;
+  /** Mean over runs that have a cost, not over all settled runs. */
+  avgUsd: DecimalValue;
+  /** Priced spend of settled runs that did not succeed. */
+  wastedUsd: DecimalValue;
+  daily: CostsDailyBucket<DecimalValue>[];
+  byAgent: CostsAgentTotal<DecimalValue>[];
+  byModel: CostsModelTotal<DecimalValue>[];
+  topRuns: CostsTopRun<DateTime, DecimalValue>[];
+};
+
 /** The server's parse of a persisted `merge-result`; post-merge conditions set
  * `incident` so run-centric clients distinguish them from pre-merge stops. */
 export type MergeOutcome = {

@@ -1,4 +1,11 @@
 import { Prisma, type PrismaClient, RunStatus, runSessionUsageCost, type UsageCost } from "@anneal/db";
+import type {
+  CostsAgentTotal as CostsAgentTotalContract,
+  CostsDailyBucket as CostsDailyBucketContract,
+  CostsModelTotal as CostsModelTotalContract,
+  CostsReport as CostsReportContract,
+  CostsTopRun as CostsTopRunContract,
+} from "@anneal/db/board-contract";
 
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 
@@ -47,64 +54,23 @@ export type CostsRunRow = {
   } | null;
 };
 
-export type CostsDailyBucket = { date: string; byAgent: Record<string, string> };
-export type CostsAgentTotal = {
-  agent: string;
-  usd: string;
-  runs: number;
-  costUnavailableRuns: number;
-  avgUsd: string;
-  cachePct: number | null;
-  wastedUsd: string;
-};
-export type CostsModelTotal = {
-  model: string;
-  usd: string;
-  runs: number;
-  costUnavailableRuns: number;
-};
-export type CostsTopRun = {
-  runId: string;
-  taskName: string | null;
-  agent: string;
-  model: string;
-  usd: string;
-  estimated: boolean;
-  startedAt: string;
-};
+export type CostsDailyBucket<DecimalValue = string> = CostsDailyBucketContract<DecimalValue>;
+export type CostsAgentTotal<DecimalValue = string> = CostsAgentTotalContract<DecimalValue>;
+export type CostsModelTotal<DecimalValue = string> = CostsModelTotalContract<DecimalValue>;
+export type CostsTopRun<DateTime = string, DecimalValue = string> = CostsTopRunContract<DateTime, DecimalValue>;
 
-export type CostsReport = {
-  days: number;
-  /** Inclusive lower bound of the whole-day window, as an ISO instant. Together
-   *  with `days`, it gives a reader both bounds needed for reconciliation. */
-  since: string;
-  totalUsd: string;
-  /** The part of `totalUsd` that came from repository pricing rather than from
-   *  a provider-reported amount. */
-  estimatedUsd: string;
-  /** Settled runs that started inside the window, priced or not. */
-  runCount: number;
-  /** Runs inside `runCount` whose cost could not be established at all. They
-   *  contribute to no total; the page states the count instead of hiding it. */
-  costUnavailableRuns: number;
-  /** Mean over the runs that *have* a cost, not over `runCount`: dividing by
-   *  runs known to be unpriced would report an average nobody spent. */
-  avgUsd: string;
-  wastedUsd: string;
-  daily: CostsDailyBucket[];
-  byAgent: CostsAgentTotal[];
-  byModel: CostsModelTotal[];
-  topRuns: CostsTopRun[];
-};
+export type CostsReport<DateTime = string, DecimalValue = string> = CostsReportContract<DateTime, DecimalValue>;
+
+type NativeCostsReport = CostsReport<Date, Prisma.Decimal>;
 
 const ZERO = new Prisma.Decimal(0);
 
-const amount = (value: Prisma.Decimal): string => value.toDecimalPlaces(AMOUNT_DECIMALS).toString();
+const amount = (value: Prisma.Decimal): Prisma.Decimal => value.toDecimalPlaces(AMOUNT_DECIMALS);
 
 /** Round a partition at wire precision without letting independently rounded
  *  rows disagree with their rounded total. Largest remainders receive the
  *  remaining micro-units, with source order as the deterministic tie-breaker. */
-const partitionAmounts = (values: readonly Prisma.Decimal[], total: Prisma.Decimal): string[] => {
+const partitionAmounts = (values: readonly Prisma.Decimal[], total: Prisma.Decimal): Prisma.Decimal[] => {
   const scale = new Prisma.Decimal(10).pow(AMOUNT_DECIMALS);
   const allocations = values.map((value, index) => {
     const scaled = value.times(scale);
@@ -261,7 +227,7 @@ export const aggregateCosts = (
   since: Date,
   days: number,
   timeZone: string,
-): CostsReport => {
+): NativeCostsReport => {
   const daily = new Map<string, Map<string, Prisma.Decimal>>(
     windowDays(since, days, timeZone).map((date) => [date, new Map<string, Prisma.Decimal>()]),
   );
@@ -352,7 +318,7 @@ export const aggregateCosts = (
   const modelAmounts = partitionAmounts(modelTotals.map((entry) => entry.usd), total);
   return {
     days,
-    since: since.toISOString(),
+    since,
     totalUsd: amount(total),
     estimatedUsd: amount(estimated),
     runCount,
@@ -395,7 +361,7 @@ export const aggregateCosts = (
         model: run.model,
         usd: amount(cost.costUsd),
         estimated: cost.estimated,
-        startedAt: run.startedAt.toISOString(),
+        startedAt: run.startedAt,
       })),
   };
 };
@@ -406,7 +372,7 @@ export const readProjectCosts = async (
   days: number,
   timeZone: string,
   now: Date = new Date(),
-): Promise<CostsReport> => {
+): Promise<NativeCostsReport> => {
   const since = costsWindowStart(now, days, timeZone);
   const until = costsWindowEnd(now, timeZone);
   const where: Prisma.RunWhereInput = {
