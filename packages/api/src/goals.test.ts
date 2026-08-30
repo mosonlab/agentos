@@ -112,6 +112,35 @@ test("approved Goals advance ACTIVE → COMPLETED and reopen when a DoD item is 
   });
 });
 
+test("Goal action routes keep canonical forms and remove project-scoped aliases", async () => {
+  await withOperatorToken(async () => {
+    const app = createApp({} as PrismaClient);
+    const inventory = app.routes.map(({ method, path }) => `${method} ${path}`);
+    const removed = [
+      "POST /projects/:projectId/goals/:goalId/approve-dod",
+      "POST /projects/:projectId/goals/:goalId/pause",
+    ];
+    const retained = [
+      "POST /goals/:goalId/approve-dod",
+      "POST /goals/:goalId/pause",
+    ];
+    assert.deepEqual(inventory.filter((route) => removed.includes(route)), []);
+    for (const route of retained) assert.ok(inventory.includes(route), `${route} is not registered`);
+
+    for (const [method, path] of removed.map((route) => route.split(" ") as [string, string])) {
+      const response = await app.request(path, {
+        method,
+        headers: {
+          Authorization: "Bearer goals-test-operator",
+          "Content-Type": "application/json",
+        },
+      });
+      assert.equal(response.status, 404, `${method} ${path}`);
+      assert.deepEqual(await response.json(), { error: "Not found" });
+    }
+  });
+});
+
 test("a DoD write returns 503 after its Serializable retry budget is exhausted", async () => {
   await withOperatorToken(async () => {
     let attempts = 0;

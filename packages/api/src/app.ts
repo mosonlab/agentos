@@ -1666,7 +1666,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }));
   };
   app.post("/goals/:goalId/approve-dod", approveGoalDod);
-  app.post("/projects/:projectId/goals/:goalId/approve-dod", approveGoalDod);
 
   const pauseGoal = async (context: Context<AppEnvironment, string>) => {
     const goalId = id.parse(context.req.param("goalId"));
@@ -1679,7 +1678,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(await db.goal.findUniqueOrThrow({ where: { id: goalId }, include: goalInclude }));
   };
   app.post("/goals/:goalId/pause", pauseGoal);
-  app.post("/projects/:projectId/goals/:goalId/pause", pauseGoal);
 
   app.get("/goals/:goalId/definition-of-done", async (context) => context.json(await db.goalDefinitionItem.findMany({
     where: { goalId: id.parse(context.req.param("goalId")) }, orderBy: { itemIndex: "asc" },

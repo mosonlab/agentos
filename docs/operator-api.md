@@ -676,28 +676,12 @@ curl -X DELETE "$BASE_URL/goals/$GOAL_ID" -H "Authorization: Bearer $OPERATOR_TO
 curl -X POST "$BASE_URL/goals/$GOAL_ID/approve-dod" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
-### POST `/projects/:projectId/goals/:goalId/approve-dod`
-
-- Required path parameters: `projectId`, `goalId`.
-
-```sh
-curl -X POST "$BASE_URL/projects/$PROJECT_ID/goals/$GOAL_ID/approve-dod" -H "Authorization: Bearer $OPERATOR_TOKEN"
-```
-
 ### POST `/goals/:goalId/pause`
 
 - Required path parameter: `goalId`.
 
 ```sh
 curl -X POST "$BASE_URL/goals/$GOAL_ID/pause" -H "Authorization: Bearer $OPERATOR_TOKEN"
-```
-
-### POST `/projects/:projectId/goals/:goalId/pause`
-
-- Required path parameters: `projectId`, `goalId`.
-
-```sh
-curl -X POST "$BASE_URL/projects/$PROJECT_ID/goals/$GOAL_ID/pause" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
 ### GET `/goals/:goalId/definition-of-done`
