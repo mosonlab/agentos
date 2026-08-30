@@ -48,6 +48,9 @@ previews other than a fresh install. This release adds five migrations.
 
 - Readiness claims have an explicit durable handle, so only one worker owns the
   transition while recovery reads are performed.
+- Claims left in the pre-migration `failureReason` format are reclaimed at
+  their recorded expiry, so a crashed worker at the migration boundary cannot
+  leave its merge chain stuck.
 - Merge-lease handoffs and deferrals are recorded in a durable ledger, and
   deferred releases are indexed and retried rather than being lost after a
   transient failure.
