@@ -134,7 +134,7 @@ const deriveFixtureKey = (
 ): ReturnType<typeof deriveDependencyCacheKey> => {
   const configured = config(root);
   return deriveDependencyCacheKey(
-    configured, workspace, workspaceEnvironment(configured), fakeInstallExecutor().execute, { toolchain },
+    configured, workspace, workspaceEnvironment(configured), { execute: fakeInstallExecutor().execute }, { toolchain },
   );
 };
 
@@ -189,7 +189,7 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
     const events: DependencyCacheProgress[] = [];
     const configured = config(root);
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(first.status, "installed");
@@ -214,7 +214,7 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
     await writeFile(join(workspace, "node_modules/fake-package/index.js"), "workspace mutation\n");
 
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(second.status, "restored");
@@ -262,7 +262,7 @@ test("a cache hit rebuilds binding.gyp workspaces whose install artifacts live o
     const configured = config(root);
 
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute,
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(first.status, "installed");
@@ -270,7 +270,7 @@ test("a cache hit rebuilds binding.gyp workspaces whose install artifacts live o
     await rm(join(workspace, "apps/web/build"), { recursive: true });
 
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute,
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(second.status, "restored");
@@ -322,7 +322,7 @@ test("the shipped cache key stays byte-identical to the recorded fixture key", a
     const configured = config(root);
     const fake = fakeInstallExecutor();
     const shipped = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(shipped.key, FIXTURE_CACHE_KEY, "a changed key misses every published cache entry");
@@ -346,10 +346,10 @@ test("the effective npm configuration is one of the derived inputs", async () =>
         ? Promise.resolve(effective)
         : fake.execute(runnerConfig, executable, args, cwd, env, options);
     const environment = workspaceEnvironment(configured);
-    const baseline = await deriveDependencyCacheKey(configured, workspace, environment, execute, { toolchain: TOOLCHAIN });
+    const baseline = await deriveDependencyCacheKey(configured, workspace, environment, { execute }, { toolchain: TOOLCHAIN });
     assert.ok(baseline);
     effective = '{"install-links":false}';
-    const drifted = await deriveDependencyCacheKey(configured, workspace, environment, execute, { toolchain: TOOLCHAIN });
+    const drifted = await deriveDependencyCacheKey(configured, workspace, environment, { execute }, { toolchain: TOOLCHAIN });
     assert.ok(drifted);
     assert.notEqual(drifted.key, baseline.key, "effective npm configuration drift must change the key");
   } finally {
@@ -372,7 +372,7 @@ test("missing required inputs are named misses while unreadable or ambiguous inp
     const configured = config(root);
     const events: DependencyCacheProgress[] = [];
     const installed = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(installed.status, "installed");
@@ -420,16 +420,16 @@ test("effective user npm configuration and the child Node tuple determine the pr
       return fake.execute(runnerConfig, executable, args, cwd, env, options);
     };
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute, { report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute }, { report: () => undefined },
     );
     await writeFile(join(home, ".npmrc"), "omit=dev\n//registry.npmjs.org/:_authToken=second-secret\n");
     const configDrift = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute, { report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute }, { report: () => undefined },
     );
     assert.notEqual(configDrift.key, first.key, "effective user config drift must change the key");
     child = { ...child, node: "v23.0.0", architecture: "x64" };
     const childDrift = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute, { report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute }, { report: () => undefined },
     );
     assert.notEqual(childDrift.key, configDrift.key, "the key must follow child Node coordinates");
     assert.equal(fake.installs(), 3);
@@ -458,7 +458,7 @@ test("non-Prisma and alternate-schema repositories install and key their actual 
     const configured = config(root);
     const events: DependencyCacheProgress[] = [];
     const plain = await materializeWorkspaceDependencies(
-      configured, nonPrisma, workspaceEnvironment(configured), fake.execute,
+      configured, nonPrisma, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(plain.status, "installed");
@@ -495,7 +495,7 @@ test("symlinked workspace targets and cache roots are rejected without following
     const configured = config(root);
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, workspaceEnvironment(configured), fake.execute, { toolchain: TOOLCHAIN, report: () => undefined },
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
       ),
       /Dependency target is a symlink: node_modules/u,
     );
@@ -507,7 +507,7 @@ test("symlinked workspace targets and cache roots are rejected without following
     await symlink(join(root, "outside-cache"), join(root, "cache-link"));
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, workspaceEnvironment(configured), fake.execute,
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
         { cacheRoot: join(root, "cache-link"), toolchain: TOOLCHAIN, report: () => undefined },
       ),
       /Dependency cache root is a symlink/u,
@@ -581,13 +581,13 @@ for (const corruption of corruptions) test(`refuses ${corruption.name} cache ent
     const fake = fakeInstallExecutor();
     const configured = config(root);
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(first.key);
     await corruption.corrupt(entryPath(root, first.key), root);
     const events: DependencyCacheProgress[] = [];
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(second.status, "installed");
@@ -618,7 +618,7 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
     });
     const configured = config(root);
     const results = await Promise.all(workspaces.map((workspace) => materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     )));
     assert.equal(fake.installs(), 2);
     assert.equal(new Set(results.map(({ key }) => key)).size, 1);
@@ -649,7 +649,7 @@ test("retention keeps four recently used entries and reports phase latency", asy
         configured,
         workspace,
         workspaceEnvironment(configured),
-        fake.execute,
+        { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       );
     }
@@ -678,10 +678,10 @@ test("workspace mutations always flow through the configured run-as execution id
     const configured = config(root, prefix);
     const fake = fakeInstallExecutor();
     await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     );
     await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     );
     const mutations = fake.calls.filter(({ executable, args }) =>
       (executable === "npm" && args[0] === "ci") || ["/bin/rm", "/bin/cp", "/bin/chmod"].includes(executable));
@@ -712,7 +712,7 @@ test("dependency discovery does not enumerate a workspace root without read perm
     });
     const configured = config(root);
     const result = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(result.status, "installed");
@@ -753,13 +753,13 @@ test("a distinct run-as uid restores readable cache entries and owns the workspa
       return realExecutor(runnerConfig, executable, args, cwd, env, options);
     };
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute,
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(first.status, "installed");
     await runCommand(configured.runAsPrefix, "/bin/sh", ["-c", "printf changed > node_modules/owned-package/index.js"], workspace, workspaceEnvironment(configured));
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, workspaceEnvironment(configured), execute,
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(second.status, "restored");
@@ -787,7 +787,7 @@ test("a non-terminating npm install receives a process-group timeout", async () 
     const started = Date.now();
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, workspaceEnvironment(configured), execute,
+        configured, workspace, workspaceEnvironment(configured), { execute },
         {
           toolchain: TOOLCHAIN,
           installRetryOptions: { attempts: 1, commandTimeoutMs: 50, budgetMs: 10_000 },

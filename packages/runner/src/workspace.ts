@@ -415,7 +415,7 @@ export const provisionWorkspace = async (
       execute,
       env,
     );
-    await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
+    await materializeWorkspaceDependencies(config, workspace, env, { execute }, dependencyCacheOptions);
     return materialized;
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);

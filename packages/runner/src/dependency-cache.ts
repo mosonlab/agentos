@@ -33,6 +33,10 @@ export type DependencyCommandExecutor = (
   options?: CommandOptions,
 ) => Promise<string>;
 
+export type DependencyCacheDependencies = {
+  execute: DependencyCommandExecutor;
+};
+
 export type DependencyCacheToolchain = {
   node: string;
   npm: string;
@@ -489,9 +493,10 @@ export const deriveDependencyCacheKey = async (
   config: RunnerConfig,
   workspacePath: string,
   env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
+  dependencies: DependencyCacheDependencies,
   options: { toolchain?: DependencyCacheToolchain } = {},
 ): Promise<DependencyCacheIdentity | null> => {
+  const execute = dependencies.execute;
   const project = await inspectDependencyProject(workspacePath);
   if (project === null) return null;
   if (project.inputMissCondition) throw new DependencyCacheInputMissError(project.inputMissCondition, project.targets);
@@ -984,9 +989,10 @@ export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
   env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
+  dependencies: DependencyCacheDependencies,
   options: DependencyCacheOptions = {},
 ): Promise<DependencyCacheResult> => {
+  const execute = dependencies.execute;
   const started = Date.now();
   const report = options.report ?? progressReporter;
   const requestedWorkspace = resolve(workspacePath);
@@ -997,7 +1003,7 @@ export const materializeWorkspaceDependencies = async (
   try {
     let identity: DependencyCacheIdentity | null;
     try {
-      identity = await timed("identity", report, () => deriveDependencyCacheKey(config, workspace, env, execute, options));
+      identity = await timed("identity", report, () => deriveDependencyCacheKey(config, workspace, env, { execute }, options));
     } catch (error: unknown) {
       if (!(error instanceof DependencyCacheInputMissError)) throw error;
       report({ event: "miss", condition: error.condition });
