@@ -215,3 +215,11 @@ export type ChainControl<DateTime = string> = {
   holdReason: string | null;
   releasedAt: DateTime | null;
 };
+
+export type Chain<DateTime = string> = {
+  chainId: string | null;
+  total: number;
+  done: number;
+  steps: ChainStep<DateTime>[];
+  control: ChainControl<DateTime> | null;
+};

@@ -3,9 +3,7 @@
 
 import type {
   AssigneeType,
-  ChainControl,
   ChainProgress,
-  ChainStep,
   ExecutionOwner,
   MergeOutcome,
   MergeRecovery,
@@ -37,6 +35,7 @@ export type {
   BoardLatestRun,
   BoardMoveTarget,
   BoardTask,
+  Chain,
   ChainAggregate,
   ChainAggregateState,
   ChainControl,
@@ -304,15 +303,6 @@ export type TaskStartability = {
     repo: { id: string; name: string } | null;
     targetBranch: string | null;
   };
-};
-
-export type Chain = {
-  chainId: string | null;
-  total: number;
-  done: number;
-  steps: ChainStep[];
-  /** Present on a real Chain response; omitted by the legacy chainless envelope. */
-  control?: ChainControl | null;
 };
 
 /** A webhook-configured template. `repo` is nullable: a trigger is defined by

@@ -44,7 +44,7 @@ const sourceRun = (taskId: string): Run => ({
   terminationReason: null, queuedAt: now, claimedAt: now, startedAt: now, endedAt: now, session: null,
 });
 
-const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, steps: [] });
+const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, control: null, steps: [] });
 const chainFor = (taskId: string): Chain => ({
   chainId: "chain-c", total: 1, done: 0, steps: [{
     taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
@@ -52,7 +52,7 @@ const chainFor = (taskId: string): Chain => ({
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
     failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
     blockedOn: null, currentExecution: false, mergeRecovery: null,
-  }],
+  }], control: null,
 });
 
 test("a resumed run identifies Duration as wall-clock time that includes Inbox wait", () => {

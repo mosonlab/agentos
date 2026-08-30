@@ -62,7 +62,10 @@ import {
   holdChain,
   resumeChain,
 } from "@anneal/db";
-import type { ChainStep as ChainStepContract } from "@anneal/db/board-contract";
+import type {
+  Chain as ChainContract,
+  ChainStep as ChainStepContract,
+} from "@anneal/db/board-contract";
 import type {
   Agent as AgentContract,
   AgentRepoAccess as AgentRepoAccessContract,
@@ -2138,7 +2141,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const taskId = id.parse(context.req.param("taskId"));
     const detail = await readChainDetail(db, taskId);
     if (detail.kind === "not-found") return context.json({ error: "Task not found" }, 404);
-    if (detail.kind === "chainless") return context.json({ chainId: null, total: 0, done: 0, steps: [] });
+    if (detail.kind === "chainless") {
+      return context.json({ chainId: null, total: 0, done: 0, control: null, steps: [] } satisfies ChainContract<Date>);
+    }
     const { admissions, chainId, control, dispatchAfter, firstTaskId, rows: chainRows } = detail;
     const mergeRecovery = mergeRecoveryProjection(detail.recoveryRow);
     const ordinals = positions(chainRows);
@@ -2180,7 +2185,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           : null,
         mergeRecovery,
       } satisfies ChainStepContract<Date>)),
-    });
+    } satisfies ChainContract<Date>);
   });
   app.post("/tasks/:taskId/chain/hold", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
