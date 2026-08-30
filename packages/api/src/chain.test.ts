@@ -161,7 +161,7 @@ test("a resolved dispatch binding restores the ordinary first-step decision", ()
   assert.equal(taskStartability(resolved, { total: 0, active: false }, 3, true).startable, true);
 });
 
-const heldControl = (heldLayer: number): ChainControlSnapshot => ({
+const heldControl = (heldLayer: number | null): ChainControlSnapshot => ({
   projectId: "project-1",
   chainId: "chain-1",
   state: ChainControlState.HELD,
@@ -205,6 +205,18 @@ test("held-layer admission prefers chainLayer and falls back to chainIndex", () 
   assert.match(refusalForHeldChainStep({
     projectId: "project-1", chainId: "chain-1", chainIndex: 3, chainLayer: null, name: "Legacy later",
   }, control)?.message ?? "", /held after layer 2/u);
+  assert.deepEqual(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: null, chainLayer: null, name: "Missing layer",
+  }, control), {
+    reason: "conflict",
+    message: "Cannot start Missing layer; Chain is held",
+  });
+  assert.deepEqual(refusalForHeldChainStep({
+    projectId: "project-1", chainId: "chain-1", chainIndex: 1, chainLayer: 1, name: "Invalid control",
+  }, heldControl(null)), {
+    reason: "conflict",
+    message: "Cannot start Invalid control; Chain is held",
+  });
 });
 
 test("released, absent, and chainless control states do not refuse admission", () => {

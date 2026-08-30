@@ -13,6 +13,7 @@ import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js
 import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
 import { sharedChainBranch } from "./chain-branch.js";
 import { readChainControl } from "./chain-control.js";
+import { heldPredicate } from "./chain-hold.js";
 import { layerOf } from "./chain-order.js";
 import { lockAgentRow } from "./locks.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
@@ -738,7 +739,12 @@ export const openRun = async (
   const taskLayer = layerOf({ layer: task.chainLayer, index: task.chainIndex });
   if (task.chainId) {
     const control = await readChainControl(tx, { projectId: task.projectId, chainId: task.chainId });
-    if (control.held && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
+    if (heldPredicate({
+      projectId: task.projectId,
+      chainId: task.chainId,
+      layer: task.chainLayer,
+      index: task.chainIndex,
+    }, control)) {
       const error = new ChainHeldError(task.id, task.chainId, taskLayer, control.heldLayer);
       return openRunRefusal(
         "chain-held",
@@ -852,11 +858,19 @@ export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
     );
   }
   if (refusal.reason === "chain-held") {
+    const nullableLayer = (field: "taskLayer" | "heldLayer"): number | null => {
+      const value = refusal.context?.[field];
+      if (value === null) return null;
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error(`Chain hold refusal is missing numeric ${field}`);
+      }
+      return value;
+    };
     return new ChainHeldError(
       String(refusal.context?.taskId ?? "unknown"),
       String(refusal.context?.chainId ?? "unknown"),
-      Number(refusal.context?.taskLayer ?? 0),
-      Number(refusal.context?.heldLayer ?? 0),
+      nullableLayer("taskLayer"),
+      nullableLayer("heldLayer"),
     );
   }
   if (refusal.reason === "compound-implementation-assignee") {
