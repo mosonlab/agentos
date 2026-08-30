@@ -2,8 +2,9 @@ import * as React from "react"
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
 import { cn } from "@/lib/utils"
 
-/** The two Radix aliases below render no DOM node of their own, so `data-slot` is
- *  inert there at runtime; see the same note in `dialog.tsx`. */
+/** The Root alias renders no DOM node of its own. The Trigger alias renders a
+ *  `Primitive.button`; its isolated generation test is source-only because it
+ *  needs Root context. */
 function DropdownMenu(props: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
   return <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />
 }
