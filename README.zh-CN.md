@@ -161,3 +161,5 @@ Copyright (c) 2026 Matt Pocock）中的五个技能，见
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。本快照以
 [MIT License](LICENSE) 许可，快照边界由
 [`public-snapshot.json`](public-snapshot.json) 定义。
+
+社区友链：[LINUX DO](https://linux.do/)——真诚、友善、团结、专业。
