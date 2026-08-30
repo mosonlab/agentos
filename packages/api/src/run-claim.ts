@@ -32,7 +32,7 @@ import { makeFencingToken } from "./execution.js";
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
 import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js";
 import { activeRunStatuses } from "./run-fence.js";
-import { readStoredCliAvailability } from "./runner-cli-availability.js";
+import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
 import { decryptSecret } from "./secrets.js";
 import {
   prepareSpecificationVerification,
@@ -522,7 +522,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       // `runner` on its row is an inert artifact of the sentinel Agent.
       if (executionMode === "agent") {
         const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
-        if (readStoredCliAvailability(backend?.capabilities)?.available === false || backend?.circuitOpen) return SKIP;
+        if (!runnerBackendAllowsClaim(backend)) return SKIP;
       }
       if (executionMode === "mechanical") {
         const targetBranch = candidate.task.targetBranch ?? candidate.repo.defaultBranch;
