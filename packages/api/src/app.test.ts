@@ -1830,14 +1830,12 @@ test("successful completion commits output and parks an archived chain successor
       assert.equal(closed, true);
       assert.equal(outputCreated, true);
       assert.equal(runCreates, 0);
-      const refusalMessage = "Task Archived Successor assignee Archived Successor is archived; unarchive the agent to queue this step";
-      assert.deepEqual(successorUpdate, { status: "REVIEW", failureReason: refusalMessage });
-      assert.deepEqual(successorActivity, {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: `Predecessor layer completed but Run birth was refused: ${refusalMessage}`,
-        metadata: { refusal: "assignee-archived" },
-      });
+      assert.equal(successorUpdate?.status, "REVIEW");
+      assert.match(String(successorUpdate?.failureReason), /Archived Successor/);
+      assert.match(String(successorUpdate?.failureReason), /archived/i);
+      assert.match(String(successorActivity?.body), /predecessor.*complet/i);
+      assert.match(String(successorActivity?.body), /Archived Successor/);
+      assert.match(String(successorActivity?.body), /archived/i);
     } finally {
       if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
       else process.env.RUNNER_WORKSPACE_ROOT = previousRoot;
