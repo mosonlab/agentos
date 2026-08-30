@@ -198,6 +198,35 @@ test("the board projection carries the operator transition matrix", () => {
   assert.equal(agentTargets.some(({ status, via }) => via === "patch" && ["DOING", "REVIEW", "DONE"].includes(status)), false);
 });
 
+test("a standalone Agent task with an active Run does not offer Backlog", () => {
+  const card = boardCard(row({
+    status: "TODO",
+    assigneeAgentId: "a1",
+    repoId: "r1",
+    assigneeAgent: {
+      id: "a1", name: "developer", title: "Developer", model: "gpt-5.6-sol", archivedAt: null,
+    },
+    runs: [{
+      id: "run-1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", budgetGrants: 0, session: null,
+    }],
+  }), null, { hasRepoGrant: true, chainPredecessorsDone: true });
+
+  assert.equal(card.moveTargets.some(({ status }) => status === "BACKLOG"), false);
+});
+
+test("a Backlog task with an archived assignee does not offer Todo", () => {
+  const card = boardCard(row({
+    status: "BACKLOG",
+    assigneeAgentId: "a1",
+    repoId: "r1",
+    assigneeAgent: {
+      id: "a1", name: "retired", title: "Retired", model: "gpt-5.6-sol", archivedAt: new Date(),
+    },
+  }), null, { hasRepoGrant: true, chainPredecessorsDone: true });
+
+  assert.equal(card.moveTargets.some(({ status }) => status === "TODO"), false);
+});
+
 test("a repair task is bound to the chain of the regression task its marker names", () => {
   const chain = (): { chainId: string; chainName: string | null } => ({ chainId: "c1", chainName: "Release" });
   assert.deepEqual(
