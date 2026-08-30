@@ -46,7 +46,7 @@ has never walked.
 | Method | Status | Evidence boundary |
 | --- | --- | --- |
 | `git clone` of the published repository, then `git checkout <tag>` | **Supported** | The only supported medium. Several release-path checks read the checkout's Git history and tracked-file list. |
-| GitHub-generated source `.zip` / `.tar.gz` | **Unsupported as an install medium** | They carry no `.git`. `npm run snapshot:scan` invokes `git ls-files` and `git rev-parse HEAD` and fails outright without a repository; the migration preflight's authority check drops to its content-only binding, losing the commit, tree and ancestry checks. The archives exist so that the release's `SHA256SUMS` can be verified; they are release evidence, not an install path. |
+| GitHub-generated source `.zip` / `.tar.gz` | **Unsupported as an install medium** | They carry no `.git`. `npm run snapshot:scan` invokes `git ls-files` and `git rev-parse HEAD` and fails outright without a repository; the migration preflight's authority check drops to its content-only binding, losing the commit, tree and ancestry checks. They are GitHub-generated source snapshots, not a supported install path or a repository-published checksum artifact. |
 
 ## Provider runtimes
 

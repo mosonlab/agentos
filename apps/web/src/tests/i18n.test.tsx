@@ -35,7 +35,8 @@ test("Chinese dictionary values do not repeat English prose outside technical id
   // Product names, CLI/runtime vocabulary, code-shaped placeholders and protocol
   // identifiers remain untranslated by design. Human-facing prose does not.
   const technicalValues = new Set([
-    "Agent", "Agents", "Bash", "Claude", "Codex", "Cron", "Daemon", "Endpoint",
+    "Agent", "Agents", "Bash", "Build SHA", "Claude", "Codex", "Commit", "Cron",
+    "Daemon", "Endpoint",
     "English", "Environment ID", "Glob", "Grep", "Inbox", "Pi", "Pull request",
     "Runner", "Slug", "cron", "provider/model:effort", "rev", "webhook",
     "Implement feat/inbox-search", "runner {runner}", "{runner} CLI {version}",

@@ -52,15 +52,14 @@ installation.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.4.0
+git checkout v0.5.0
 ```
 
 Check out the exact tag or commit the release names. A branch tip is not a
 release.
 
-**It has to be a clone.** The GitHub Release also offers generated source
-`.zip` and `.tar.gz` archives, and those are there so you can verify the
-release's published `SHA256SUMS` — they are not an install medium. They carry no
+**It has to be a clone.** GitHub also generates source `.zip` and `.tar.gz`
+archives for the release, but they are not an install medium. They carry no
 `.git`, and parts of this repository read the checkout's Git history rather than
 just its files:
 

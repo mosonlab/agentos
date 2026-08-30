@@ -1,6 +1,6 @@
 {
   "name": "@anneal/merge-executor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,8 +13,8 @@
     "schema-gate": "MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED=1 node --import tsx --test src/schema-gate.test.ts"
   },
   "dependencies": {
-    "@anneal/db": "0.4.0",
-    "@anneal/github-client": "0.4.0",
+    "@anneal/db": "0.5.0",
+    "@anneal/github-client": "0.5.0",
     "dotenv": "^17.2.3"
   },
   "devDependencies": {

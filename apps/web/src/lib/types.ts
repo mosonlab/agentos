@@ -524,6 +524,21 @@ export type GoalProgressEntry = {
 
 export type Health = { status: string; database: string; checkedAt: string };
 
+/**
+ * `GET /version`: the product build identity of the control plane answering
+ * this page — what an operator quotes in a report. Distinct from the runner
+ * daemon and CLI versions, which describe machines and backends, not the build.
+ */
+export type VersionInfo = {
+  service: string;
+  version: string | null;
+  buildSha: string;
+  commit: string | null;
+  dirty: boolean;
+  stamped: boolean;
+  builtAt: string | null;
+};
+
 export type DaemonStatus = {
   runnerId: string;
   lastSeenAt: string;

@@ -9,14 +9,95 @@ written.
 
 ## Unreleased
 
+## v0.5.0 — Developer Preview 5
+
+The fifth preview makes the board read at chain level, makes completed work
+self-clearing, and replaces the maintainer appliance's mutable checkout deploy
+with immutable release directories. As with every 0.x minor, behaviour changes
+below are breaking-eligible. There is still no supported upgrade path between
+previews other than a fresh install. This release adds four migrations.
+
+### Board and task lifecycle
+
+- Chains collapse into aggregate board cards that carry their task count,
+  progress and available actions. The individual tasks remain available in the
+  chain and task detail views.
+- Individual task moves are projected from operator-owned transitions rather
+  than from every status the runtime can produce. Aggregate chain cards expose
+  activation, filtering and archival actions; they are not draggable.
+- DONE tasks are archived automatically after seven days, in batches of at
+  most 100 tasks. A chain member becomes eligible only after every persisted
+  member of that chain is DONE.
+- `DELETE /tasks/:taskId/chain` deletes a whole chain and its marker-bound
+  repair tasks atomically. It refuses while active runs or retained run/session
+  history remain. Chain members can no longer be deleted individually through
+  `DELETE /tasks/:taskId`.
+- Card rendering, pagination and status projection now share one contract
+  between the desktop board, mobile list and API.
+
+### Costs
+
+- The Costs page is rebuilt as a two-column dashboard with model, cache and
+  waste breakdowns, while preserving the period totals and top-run views.
+- The API now reports model and cache usage, reconciles rounding in the model
+  breakdown, and fixes date-bucket gaps across local day and DST boundaries.
+  The costs endpoint now requires an IANA `tz` query parameter; omitting it
+  returns `400` rather than guessing a timezone.
+
+### Merge-tail reliability
+
+- Readiness claims have an explicit durable handle, so only one worker owns the
+  transition while recovery reads are performed.
+- Deferred merge-lease releases are indexed, retried and recorded rather than
+  being lost after a transient failure.
+- Requeue attempt authority and budget are persisted for merge-tail repair, and
+  chain deletion is serialized with concurrent member creation.
+- Recovery refusals and merge-tail transitions are typed and applied through
+  shared decision seams, preserving the existing external behaviour while
+  removing competing implementations.
+
+### Maintainer deployment
+
+- The macOS appliance deployment path now assembles immutable, verified release
+  directories and activates them through an atomic `current` pointer. Service
+  wrappers read that pointer, so deployment no longer mutates or serves a source
+  checkout.
+- A durable ledger records build, backup, migration, activation, verification
+  and rollback evidence. Database maintenance runtime and nested dependency data
+  are included in the verified artifact.
+- These changes apply to the maintainer appliance. The public Developer Preview
+  continues to use the foreground fresh-install sequence in the README.
+
+### Release and support surface
+
 - **The public `verify:oss-b0` and `test:oss-b0-harness` commands are removed as
-  a breaking change in the next pre-1.0 minor.** No compatibility alias or
+  a breaking change.** No compatibility alias or
   replacement harness is provided. Current verification remains with
   `scripts/merge-gate.sh` and its `scripts/gate-worker/` dispatch path, `npm run
   test:release-docs`, `npm run test:dependency-gate`, `npm run
   verify:secret-hygiene`, and the public-snapshot scans. The merge-integrator
   real/system checks and documented templates release demo remain unchanged;
   the frozen OSS-B0 smoke fixture remains for release, UI and API parity.
+- The project-scoped goal action aliases are removed. Call
+  `POST /goals/:goalId/approve-dod` and `POST /goals/:goalId/pause` instead of
+  the former `/projects/:projectId/goals/...` routes.
+- `view=board` adds a `chainAggregate` projection to one row in each chain. The
+  web client uses it to render one aggregate card while the API retains the
+  underlying task rows.
+- Settings now reports the Anneal product version and exact build SHA returned
+  by `/version`, separately from runner daemon and provider CLI versions. A
+  failed version request is shown as a failure rather than as an unknown build.
+- The README is rewritten around the unattended chain workflow, with current
+  board and agent views, clearer trust boundaries and a Linux Do community link.
+
+### Known limitations
+
+- There is no supported in-place upgrade from v0.4.0. Install v0.5.0 against an
+  empty schema with `npm run db:migrate:release -- --fresh`.
+- macOS on Apple Silicon remains the only target platform. Linux remains
+  unverified and Windows unsupported.
+- Anneal still launches coding CLIs with the operator account's authority and
+  is not a sandbox.
 
 ## v0.4.0 — Developer Preview 4
 

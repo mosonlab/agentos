@@ -4,7 +4,7 @@ Thank you for reading this before opening something.
 
 ## The current state of contributions
 
-Anneal v0.4.0 is a Developer Preview published so that people can evaluate it,
+Anneal v0.5.0 is a Developer Preview published so that people can evaluate it,
 read it, and tell us where it is wrong. **We are not yet accepting outside pull
 requests.** The review and merge process this repository uses is built around a
 single gate run by maintainers, and we would rather say that plainly than leave

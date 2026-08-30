@@ -7,12 +7,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ROUTES } from "../App";
 import { ThemeCycleButton } from "../components/Shell";
+import { RunnersProvider } from "../components/runner-status";
 import { ApiError } from "../lib/api";
 import type { Poll } from "../lib/hooks";
 import { LocaleProvider } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import { ThemeProvider } from "../lib/theme";
-import type { Health, RunnersResponse } from "../lib/types";
+import type { Health, RunnersResponse, VersionInfo } from "../lib/types";
 import { SecretsPage } from "../pages/Secrets";
 import { SettingsContent, SettingsPage } from "../pages/Settings";
 
@@ -20,9 +21,16 @@ const idle = <T,>(overrides: Partial<Poll<T>> = {}): Poll<T> => ({
   data: null, error: null, loading: false, missing: false, lastSuccessAt: null, reload: () => undefined, ...overrides,
 });
 
-const renderSettings = (health: Poll<Health> = idle<Health>()): string => renderToStaticMarkup(
-  <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>()} health={health} /></LocaleProvider></ThemeProvider>,
+const renderSettings = (health: Poll<Health> = idle<Health>(), version: Poll<VersionInfo> = idle<VersionInfo>()): string => renderToStaticMarkup(
+  <ThemeProvider><LocaleProvider initialLocale="en">
+    <SettingsContent runners={idle<RunnersResponse>()} health={health} version={version} />
+  </LocaleProvider></ThemeProvider>,
 );
+
+const versionPayload = (overrides: Partial<VersionInfo> = {}): VersionInfo => ({
+  service: "@anneal/api", version: "0.5.0", buildSha: "a".repeat(40), commit: "a".repeat(40),
+  dirty: false, stamped: true, builtAt: new Date().toISOString(), ...overrides,
+});
 
 const runnerPayload = (diskFreeBytes = 1024 ** 3): RunnersResponse => ({
   checkedAt: new Date().toISOString(), online: 1, total: 1,
@@ -41,9 +49,9 @@ test("settings and secrets resolve to distinct pages", () => {
   assert.equal((secrets.render({}) as { type: unknown }).type, SecretsPage);
 });
 
-test("the three settings cards render complete missing states", () => {
+test("the four settings cards render complete missing states", () => {
   const markup = renderSettings();
-  for (const title of ["Appearance", "Runner", "Control plane"]) assert.match(markup, new RegExp(`>${title}<`));
+  for (const title of ["Appearance", "Runner", "Product build", "Control plane"]) assert.match(markup, new RegExp(`>${title}<`));
   for (const field of ["Daemon version", "Disk free", "Workspace root", "CLI version", "Auth mode", "Last preflight", "Circuit reason"]) assert.match(markup, new RegExp(field));
   assert.ok((markup.match(/—/gu) ?? []).length >= 10);
 });
@@ -65,14 +73,14 @@ test("a failed health poll keeps and renders its earlier success time", () => {
 
 test("the Settings runner card emphasizes online, Busy, and low disk independently", () => {
   const low = renderToStaticMarkup(
-    <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>({ data: runnerPayload() })} health={idle<Health>()} /></LocaleProvider></ThemeProvider>,
+    <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>({ data: runnerPayload() })} health={idle<Health>()} version={idle<VersionInfo>()} /></LocaleProvider></ThemeProvider>,
   );
   assert.match(low, /data-runner-state="running"[\s\S]*?bg-\[color:var\(--status-green-fg\)\][\s\S]*?>Running</u);
   assert.match(low, /data-runner-busy=""[\s\S]*?>Busy</u);
   assert.match(low, /data-low-disk="" class="text-destructive">1\.0 GB/u);
 
   const high = renderToStaticMarkup(
-    <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>({ data: runnerPayload(8 * 1024 ** 3) })} health={idle<Health>()} /></LocaleProvider></ThemeProvider>,
+    <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>({ data: runnerPayload(8 * 1024 ** 3) })} health={idle<Health>()} version={idle<VersionInfo>()} /></LocaleProvider></ThemeProvider>,
   );
   assert.doesNotMatch(high, /data-low-disk=""/u);
 });
@@ -94,7 +102,7 @@ test("appearance controls share locale and theme stores with the sidebar", async
   try {
     await act(async () => root.render(
       <ThemeProvider><LocaleProvider>
-        <SettingsContent runners={idle<RunnersResponse>()} health={idle<Health>()} />
+        <SettingsContent runners={idle<RunnersResponse>()} health={idle<Health>()} version={idle<VersionInfo>()} />
         <ThemeCycleButton />
       </LocaleProvider></ThemeProvider>,
     ));
@@ -134,7 +142,7 @@ const backendsPayload = (): RunnersResponse => ({
 
 const renderRunners = (data: RunnersResponse): string => renderToStaticMarkup(
   <ThemeProvider><LocaleProvider initialLocale="en">
-    <SettingsContent runners={idle<RunnersResponse>({ data })} health={idle<Health>()} freshnessNow={Date.now()} />
+    <SettingsContent runners={idle<RunnersResponse>({ data })} health={idle<Health>()} version={idle<VersionInfo>()} freshnessNow={Date.now()} />
   </LocaleProvider></ThemeProvider>,
 );
 
@@ -169,4 +177,103 @@ test("a failing Codex is the one backend Settings reports as blocking", () => {
   });
   assert.match(markup, /data-codex-state="unauthenticated"/u);
   assert.match(markup, /codex login/u);
+});
+
+test("Settings reports the product build separately from the runner versions", () => {
+  const markup = renderSettings(idle<Health>(), idle<VersionInfo>({ data: versionPayload() }));
+  assert.match(markup, /data-build-state="ready"/u);
+  for (const field of ["Version", "Build SHA", "Commit", "Built"]) assert.match(markup, new RegExp(`>${field}<`));
+  assert.match(markup, new RegExp(`<code>${"a".repeat(40)}</code>`, "u"));
+  assert.match(markup, />0\.5\.0</u);
+  // The runner's own version is a different number about a different thing: it
+  // stays the daemon card's empty value while the product build reports 0.5.0.
+  assert.match(markup, /Daemon version<\/div><div [^>]*>—</u);
+});
+
+test("an unbuilt process reports itself as unbuilt rather than as an error", () => {
+  const markup = renderSettings(idle<Health>(), idle<VersionInfo>({
+    data: versionPayload({ version: null, buildSha: "unbuilt", commit: null, stamped: false, builtAt: null }),
+  }));
+  assert.match(markup, /data-build-state="ready"/u);
+  assert.match(markup, /<code>unbuilt<\/code>/u);
+  assert.match(markup, /runs from source/u);
+  assert.doesNotMatch(markup, /Could not read the product build identity/u);
+});
+
+test("a dirty build says so, so a report is not attributed to a clean commit", () => {
+  const markup = renderSettings(idle<Health>(), idle<VersionInfo>({
+    data: versionPayload({ buildSha: `${"a".repeat(40)}-dirty`, dirty: true }),
+  }));
+  assert.match(markup, /uncommitted changes/u);
+});
+
+test("a failed version poll says so instead of showing a misleading identity", () => {
+  const markup = renderSettings(idle<Health>(), idle<VersionInfo>({
+    error: new ApiError(503, "/version", "down"),
+  }));
+  assert.match(markup, /data-build-state="error"/u);
+  assert.match(markup, /Could not read the product build identity/u);
+  assert.doesNotMatch(markup, /data-build-state="ready"/u);
+  assert.doesNotMatch(markup, /unbuilt|unknown/u);
+});
+
+test("a transient version failure preserves the last good build identity", () => {
+  const markup = renderSettings(idle<Health>(), idle<VersionInfo>({
+    data: versionPayload(), error: new ApiError(503, "/version", "down"),
+  }));
+  assert.match(markup, /data-build-state="ready"/u);
+  assert.match(markup, />0\.5\.0</u);
+  assert.doesNotMatch(markup, /Could not read the product build identity/u);
+});
+
+test("the build card is loading until the first version response lands", () => {
+  const markup = renderSettings(idle<Health>(), idle<VersionInfo>({ loading: true }));
+  assert.match(markup, /data-build-state="loading"/u);
+  assert.doesNotMatch(markup, /Could not read the product build identity/u);
+});
+
+test("SettingsPage polls the product version endpoint every 60 seconds", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true, url: "http://localhost/settings" });
+  for (const [key, value] of Object.entries({
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node,
+    MutationObserver: dom.window.MutationObserver,
+  })) Object.defineProperty(globalThis, key, { configurable: true, value });
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+
+  const requests: string[] = [];
+  const intervals: number[] = [];
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string) => {
+    const path = String(input);
+    requests.push(path);
+    const body = path.endsWith("/version")
+      ? versionPayload()
+      : path.endsWith("/runners")
+        ? runnerPayload()
+        : { status: "ok", database: "connected", checkedAt: new Date().toISOString() };
+    return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(body) } as Response;
+  } });
+  Object.defineProperty(dom.window, "setInterval", { configurable: true, value: (_run: () => void, every: number) => {
+    intervals.push(every);
+    return intervals.length;
+  } });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
+
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <RunnersProvider><ThemeProvider><LocaleProvider initialLocale="en"><SettingsPage /></LocaleProvider></ThemeProvider></RunnersProvider>,
+    ));
+    await act(async () => { for (let turn = 0; turn < 10; turn += 1) await Promise.resolve(); });
+    assert.equal(requests.filter((path) => path.endsWith("/version")).length, 1);
+    assert.ok(intervals.includes(60_000));
+    assert.match(dom.window.document.body.textContent ?? "", /Product build.*0\.5\.0/su);
+  } finally {
+    await act(async () => root.unmount());
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    dom.window.close();
+  }
 });

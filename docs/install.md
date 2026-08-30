@@ -29,7 +29,7 @@ into a provider and never reads a credential store.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.4.0
+git checkout v0.5.0
 npm ci
 npm run setup:local
 npm run build

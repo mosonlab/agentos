@@ -1,6 +1,6 @@
 {
   "name": "@anneal/api",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,9 +14,9 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@anneal/build-info": "0.4.0",
-    "@anneal/db": "0.4.0",
-    "@anneal/github-client": "0.4.0",
+    "@anneal/build-info": "0.5.0",
+    "@anneal/db": "0.5.0",
+    "@anneal/github-client": "0.5.0",
     "@hono/node-server": "^1.19.6",
     "cron-parser": "^5.10.0",
     "dotenv": "^17.2.3",
@@ -25,7 +25,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@anneal/runner": "0.4.0",
+    "@anneal/runner": "0.5.0",
     "@types/fs-ext": "^2.0.3",
     "@types/node": "^24.10.1",
     "tsx": "^4.20.6"
