@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
-  focusAfterMove, orderColumn, parseStatus, retryable, sameEdges, scheduleLabel, storedScroll,
+  ACTIVE_RUN_STATUSES, chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
+  focusAfterMove, isActiveRunStatus, orderColumn, parseStatus, retryable, sameEdges, scheduleLabel, storedScroll,
 } from "../lib/board";
 import type { BoardTask, ChainProgress } from "../lib/types";
 
@@ -169,8 +169,17 @@ test("a retry waits for the last run to be terminal", () => {
   assert.equal(retryable(task(), null), false, "a task with no runs cannot be retried");
   assert.equal(retryable(task(), { status: "RUNNING" }), false);
   assert.equal(retryable(task(), { status: "QUEUED" }), false);
+  assert.equal(retryable(task(), { status: "WAITING_INBOX" }), false);
   assert.equal(retryable(task(), { status: "SUCCEEDED" }), false);
   assert.equal(retryable(task({ status: "REVIEW" }), { status: "SUCCEEDED" }), true);
+});
+
+test("the active Run statuses include suspended Inbox work and exclude every terminal status", () => {
+  assert.deepEqual(ACTIVE_RUN_STATUSES, ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"]);
+  for (const status of ACTIVE_RUN_STATUSES) assert.equal(isActiveRunStatus(status), true, status);
+  for (const status of ["SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "LOST"] as const) {
+    assert.equal(isActiveRunStatus(status), false, status);
+  }
 });
 
 /* -------------------------------------------------------------- the focus */

@@ -63,11 +63,17 @@ import { operatorStatusTransitionRefusal } from "./task-patch.js";
  * point of the shape is that its cost is legible.
  */
 export type BoardMoveTarget = BoardContractMoveTarget;
-export type BoardCard = BoardContractCard<Date>;
+export type BoardChainFrontier = BoardContractChainFrontier<Date> & {
+  mergeOutcome: BoardContractCard<Date>["mergeOutcome"];
+};
+export type BoardChainAggregate = Omit<BoardContractChainAggregate<Date>, "frontier"> & {
+  frontier: BoardChainFrontier;
+};
+export type BoardCard = Omit<BoardContractCard<Date>, "chainAggregate"> & {
+  chainAggregate: BoardChainAggregate | null;
+};
 export type BoardLatestRun = BoardContractLatestRun<Date>;
 export type BoardChainActivationState = BoardContractChainActivationState;
-export type BoardChainFrontier = BoardContractChainFrontier<Date>;
-export type BoardChainAggregate = BoardContractChainAggregate<Date>;
 export type RepairBinding = BoardContractRepairBinding;
 
 type JsonSerialized<T> = T extends Date
@@ -192,6 +198,7 @@ export type BoardChainMember = {
   updatedAt: Date;
   templateStep: { name: string } | null;
   runs: BoardRow["runs"];
+  stepOutput?: BoardRow["stepOutput"];
 };
 
 const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | undefined): BoardLatestRun | null => {
@@ -207,6 +214,17 @@ const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | 
         startedAt: run.session?.startedAt ?? null,
         endedAt: run.session?.endedAt ?? null,
       } satisfies BoardLatestRun);
+};
+
+/** Bind a merge result to the newest Run displayed beside it. */
+const latestRunMergeOutcome = (
+  runs: readonly Pick<BoardRow["runs"][number], "id">[] | null | undefined,
+  stepOutput: BoardRow["stepOutput"],
+): BoardCard["mergeOutcome"] => {
+  const run = runs?.[0];
+  return run !== undefined && runOwnsMergeOutcome(stepOutput, run.id, run.id)
+    ? projectMergeOutcome(stepOutput)
+    : null;
 };
 
 const memberUsageCost = (member: Pick<BoardChainMember, "runs">): UsageCost | null =>
@@ -326,6 +344,7 @@ export const chainAggregate = (
       title: memberTitle(frontierMember),
       status: frontierMember.status,
       latestRun: latestRunProjection(frontierMember.runs),
+      mergeOutcome: latestRunMergeOutcome(frontierMember.runs, frontierMember.stepOutput),
       failureReason: frontierMember.failureReason,
       ...(frontierPosition >= 0 ? { position: frontierPosition + 1 } : {}),
     },
@@ -399,7 +418,6 @@ export const boardCard = (
   predecessor: BoardBlockedOnTask | null = null,
   repairOf: RepairBinding | null = null,
 ): BoardCard => {
-  const run = row.runs[0];
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
     : [runSessionUsageCost(item)!]));
@@ -452,9 +470,7 @@ export const boardCard = (
     taskCost: serializeUsageCost(taskCost),
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
     // run 2's outcome, and the card's only run line is the newest run's.
-    mergeOutcome: run !== undefined && runOwnsMergeOutcome(row.stepOutput, run.id, run.id)
-      ? projectMergeOutcome(row.stepOutput)
-      : null,
+    mergeOutcome: latestRunMergeOutcome(row.runs, row.stepOutput),
     repairOf,
     chainAggregate: null,
   } satisfies BoardCard;
@@ -699,6 +715,7 @@ const boardChainRows = async (
       createdAt: true,
       updatedAt: true,
       templateStep: { select: { name: true } },
+      stepOutput: { select: { kind: true, body: true, runId: true } },
       runs: {
         orderBy: { runNumber: "desc" },
         select: {

@@ -6,8 +6,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { InfoNotice } from "../components/ui";
 import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
+import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, columnStep, countByStatus } from "../lib/board";
+import { COLUMNS, columnStep, countByStatus, taskBoardEntry } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
@@ -349,7 +350,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
   const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
     statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
-    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, failureReason: null, position: 1 },
+    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 },
     activation: { state: "settled" as const, predecessor: null, taskId }, totalCost: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   });
@@ -792,22 +793,28 @@ test("TaskCard is memoized", () => {
   assert.equal((TaskCard as unknown as { $$typeof: symbol }).$$typeof, Symbol.for("react.memo"));
 });
 
-test("desktop columns mount one fixed page as completed history grows", () => {
-  for (const total of [CARD_PAGE_SIZE + 1, CARD_PAGE_SIZE * 20]) {
-    const rows = Array.from({ length: total }, (_, index) => task({ id: `done-${index}`, status: "DONE" }));
-    const markup = column("DONE", rows);
-    assert.equal((markup.match(/data-card=/gu) ?? []).length, CARD_PAGE_SIZE);
-    assert.match(markup, new RegExp(`Done<span[^>]*>${total}</span>`));
-    assert.match(markup, new RegExp(`Show ${Math.min(CARD_PAGE_SIZE, total - CARD_PAGE_SIZE)} more`));
-  }
-});
+test("the shared paginated entry list owns page controls and clamps after shrink", async () => {
+  const { dom, container } = installDom();
+  const rows = Array.from({ length: CARD_PAGE_SIZE * 2 + 1 }, (_, index) => (
+    taskBoardEntry(task({ id: `done-${index}`, status: "DONE" }))
+  ));
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<PaginatedBoardEntries entries={rows} actions={ACTIONS} />));
+    assert.equal(container.querySelectorAll("[data-card]").length, CARD_PAGE_SIZE);
+    const more = [...container.querySelectorAll("button")].find((button) => button.textContent === `Show ${CARD_PAGE_SIZE} more`);
+    assert.ok(more);
+    await act(async () => more.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.equal(container.querySelectorAll("[data-card]").length, CARD_PAGE_SIZE);
+    assert.match(container.textContent ?? "", new RegExp(en("tasks.column.previous", { n: CARD_PAGE_SIZE })));
 
-test("mobile task lists mount one fixed page as completed history grows", () => {
-  const total = CARD_PAGE_SIZE * 20;
-  const rows = Array.from({ length: total }, (_, index) => task({ id: `done-${index}`, status: "DONE" }));
-  const markup = mobile("DONE", rows, rows);
-  assert.equal((markup.match(/data-card=/gu) ?? []).length, CARD_PAGE_SIZE);
-  assert.match(markup, new RegExp(`Show ${CARD_PAGE_SIZE} more`));
+    await act(async () => root.render(<PaginatedBoardEntries entries={rows.slice(0, 1)} actions={ACTIONS} />));
+    assert.equal(container.querySelector("[data-card]")?.getAttribute("data-card"), "done-0");
+    assert.equal(container.querySelectorAll("button").length, 1, "only the card menu remains after pagination clamps");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
 });
 
 /* -------------------------------------------------------------- the notice */

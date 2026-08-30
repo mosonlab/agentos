@@ -229,7 +229,12 @@ export const orderColumn = <T extends BoardTask | BoardEntry>(status: TaskStatus
 
 /* -------------------------------------------------------------- the actions */
 
-const ACTIVE_RUN: RunStatus[] = ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING"];
+export const ACTIVE_RUN_STATUSES = [
+  "QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX",
+] as const satisfies readonly RunStatus[];
+
+export const isActiveRunStatus = (status: RunStatus): boolean =>
+  ACTIVE_RUN_STATUSES.includes(status as (typeof ACTIVE_RUN_STATUSES)[number]);
 
 /**
  * A retry only lands once the last run is terminal; the API rejects the rest.
@@ -244,7 +249,7 @@ export const retryable = (
   run: { status: RunStatus } | null | undefined,
 ): boolean => {
   if (!run) return false;
-  if (ACTIVE_RUN.includes(run.status)) return false;
+  if (isActiveRunStatus(run.status)) return false;
   return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
 };
 

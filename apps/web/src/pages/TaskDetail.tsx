@@ -17,7 +17,7 @@ import {
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
 } from "../components/ui";
-import { retryable } from "../lib/board";
+import { isActiveRunStatus, retryable } from "../lib/board";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
@@ -340,7 +340,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   // `app.ts` orders runs `runNumber desc`, so the newest run is the head.
   const newest = runs[0];
   const newestIsActive = task.executionOwner === "agent" && newest !== undefined
-    && ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"].includes(newest.status);
+    && isActiveRunStatus(newest.status);
   const newestIsCancelling = newestIsActive && newest.cancelRequestedAt !== null && newest.cancelAcknowledgedAt === null;
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
