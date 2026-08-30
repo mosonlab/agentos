@@ -158,8 +158,8 @@ enum MergeRecoveryStatus {
 enum MergeRecoveryRefusalCode {
   ACTIVATION_AUTHORIZATION_STALE @map("activation-authorization-stale")
   HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
-  PRE_INTENT                    @map("pre-intent")
-  TARGET_BRANCH_MISMATCH        @map("target-branch-mismatch")
+  PRE_INTENT                     @map("pre-intent")
+  TARGET_BRANCH_MISMATCH         @map("target-branch-mismatch")
 }
 
 enum MergeLeaseEventState {

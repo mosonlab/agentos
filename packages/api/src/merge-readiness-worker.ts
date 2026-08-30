@@ -79,7 +79,11 @@ const READINESS_REGRESSION_INCLUDE = {
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
 
-const RECOVERY_REFUSAL_MESSAGES: Record<MergeRecoveryRefusalCode, string> = {
+type HeadAdoptionRefusalCode =
+  | typeof MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE
+  | typeof MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT;
+
+const RECOVERY_REFUSAL_MESSAGES: Record<HeadAdoptionRefusalCode, string> = {
   [MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE]:
     "Recovery activation authorization is not fresh for the recovered exact head and current base",
   [MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT]:
@@ -87,9 +91,9 @@ const RECOVERY_REFUSAL_MESSAGES: Record<MergeRecoveryRefusalCode, string> = {
 };
 
 class MergeRecoveryRefusalError extends Error {
-  readonly refusalCode: MergeRecoveryRefusalCode;
+  readonly refusalCode: HeadAdoptionRefusalCode;
 
-  constructor(refusalCode: MergeRecoveryRefusalCode, cause?: unknown) {
+  constructor(refusalCode: HeadAdoptionRefusalCode, cause?: unknown) {
     super(
       cause instanceof Error ? cause.message : RECOVERY_REFUSAL_MESSAGES[refusalCode],
       cause === undefined ? undefined : { cause },
