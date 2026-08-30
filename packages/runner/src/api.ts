@@ -1,22 +1,10 @@
 import { statfs } from "node:fs/promises";
 
-import type { RegressionRepairHandoff } from "@anneal/db";
+import type { CleanupStatus, FailureClass, FailureEnvelope, RegressionRepairHandoff } from "@anneal/db";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import type { FailureEnvelope } from "./envelope.js";
 
-export type FailureClass =
-  | "BINARY_NOT_FOUND"
-  | "AUTH_REQUIRED"
-  | "RATE_LIMITED"
-  | "CANCELLED_OR_TIMED_OUT"
-  | "TOOL_FAILED"
-  | "TRANSIENT_PROVIDER"
-  | "PROTOCOL_ERROR"
-  | "TASK_FAILED"
-  | "BUDGET_EXCEEDED";
-
-export type CleanupStatus = "SUCCEEDED" | "FAILED" | "RETAINED";
+export type { CleanupStatus, FailureClass } from "@anneal/db";
 export type CodexServiceTier = "DEFAULT" | "FAST";
 export type CancellationRequest = { requestId: string; reason: string; requestedAt: string };
 export type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null };
