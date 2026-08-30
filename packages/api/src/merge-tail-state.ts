@@ -499,6 +499,9 @@ export const retireLegacyRefusal = async (
   });
 };
 
+export const RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE =
+  "Recovery authorization could not adopt the verified regression head";
+
 export const adoptRecoveryHead = async (
   tx: DbTx,
   input: {
@@ -521,6 +524,6 @@ export const adoptRecoveryHead = async (
     },
   });
   if (adopted.count !== 1) {
-    throw new Error("Recovery authorization could not adopt the verified regression head");
+    throw new Error(RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE);
   }
 };

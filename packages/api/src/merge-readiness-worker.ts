@@ -29,6 +29,7 @@ import {
   adoptRecoveryHead,
   awaitAuthorization,
   enterRepair,
+  RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE,
   reopenAfterHeadAdoption,
 } from "./merge-tail-state.js";
 import { createGitHubReader, type PullRequestReader } from "./github-read.js";
@@ -79,15 +80,18 @@ const READINESS_REGRESSION_INCLUDE = {
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
 
-type HeadAdoptionRefusalCode =
-  | typeof MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE
-  | typeof MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT;
+const HEAD_ADOPTION_REFUSAL_CODES = [
+  MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
+  MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT,
+] as const;
+
+type HeadAdoptionRefusalCode = (typeof HEAD_ADOPTION_REFUSAL_CODES)[number];
 
 const RECOVERY_REFUSAL_MESSAGES: Record<HeadAdoptionRefusalCode, string> = {
   [MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE]:
     "Recovery activation authorization is not fresh for the recovered exact head and current base",
   [MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT]:
-    "Recovery authorization could not adopt the verified regression head",
+    RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE,
 };
 
 class MergeRecoveryRefusalError extends Error {
@@ -102,11 +106,6 @@ class MergeRecoveryRefusalError extends Error {
     this.refusalCode = refusalCode;
   }
 }
-
-const HEAD_ADOPTION_REFUSAL_CODES = [
-  MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
-  MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT,
-] as const;
 
 const recoveryHeadAdoptionSnapshotChanged = async (
   tx: Prisma.TransactionClient,
