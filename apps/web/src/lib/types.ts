@@ -1,33 +1,16 @@
 /** Wire shapes as serialised by the control plane (packages/db/prisma/schema.prisma).
  *  Decimal columns arrive as strings, DateTime as ISO strings. */
 
-import type {
-  AssigneeType,
-  ChainControl,
-  ChainProgress,
-  ChainStep,
-  ExecutionOwner,
-  MergeOutcome,
-  MergeRecovery,
-  RunStatus,
-  TaskMoveTarget,
-  TaskSource,
-  TaskStatus,
-  UsageCost,
-} from "@anneal/db/board-contract";
+import type { AssigneeType } from "@anneal/db/board-contract";
 import type {
   Agent,
-  CodexServiceTier,
-  FailureClass,
   GoalStatus,
   InboxDeliveryStatus,
   InboxKind,
   InboxStatus,
-  Repo,
   RepoPermission,
   RunnerKind,
   RunnerPreference,
-  SessionExecutionStatus,
 } from "@anneal/db/wire-contract";
 
 export type {
@@ -37,20 +20,33 @@ export type {
   BoardLatestRun,
   BoardMoveTarget,
   BoardTask,
+  Chain,
   ChainAggregate,
   ChainAggregateState,
   ChainControl,
   ChainFrontier,
   ChainProgress,
   ChainStep,
+  CostsReport,
   ExecutionOwner,
   MergeOutcome,
   MergeRecovery,
+  RecurringFire,
+  Run,
   RunStatus,
   ScheduleKind,
+  Session,
+  TaskActivity,
+  TaskDetail,
+  TaskList,
   TaskMoveTarget,
   TaskSource,
+  TaskStartability,
   TaskStatus,
+  TaskStepOutput,
+  Trigger,
+  TriggerDetail,
+  TriggerFire,
   UsageCost,
 } from "@anneal/db/board-contract";
 export type {
@@ -76,97 +72,6 @@ export type {
   Skill,
 } from "@anneal/db/wire-contract";
 
-export type Session = {
-  id: string;
-  runId: string;
-  /** §SF-1. Null unless this session's own run recorded a `merge-result`. */
-  mergeOutcome?: MergeOutcome | null;
-  projectId: string;
-  agentId: string;
-  taskId: string | null;
-  goalId: string | null;
-  runner: RunnerKind;
-  executionStatus: SessionExecutionStatus;
-  cleanupStatus: string;
-  providerConversationId: string | null;
-  waitingOnMessageId: string | null;
-  resumeAttempt: number;
-  requestedAt: string;
-  startedAt: string | null;
-  endedAt: string | null;
-  terminationReason: string | null;
-  exitCode: number | null;
-  costUsd: string | null;
-  inputTokens: number | null;
-  outputTokens: number | null;
-  cachedInputTokens: number | null;
-  totalTokens: number | null;
-  usageCost?: UsageCost | null;
-  failureReason: string | null;
-  /** Relations GET /sessions and GET /sessions/:id include; absent on the
-   *  session rows nested inside a Run. `run.repo` is a nullable relation, and
-   *  its remoteUrl is what makes the Branch field a link. */
-  agent?: { id: string; title: string } | null;
-  task?: { id: string; name: string } | null;
-  goal?: { id: string; title: string } | null;
-  run?: {
-    id: string;
-    runNumber: number;
-    model: string;
-    branch: string | null;
-    pullRequestUrl: string | null;
-    workspacePath: string | null;
-    repo?: { id: string; name: string; remoteUrl: string } | null;
-  } | null;
-};
-
-export type Run = {
-  id: string;
-  projectId: string;
-  taskId: string | null;
-  goalId: string | null;
-  agentId: string;
-  repoId: string | null;
-  runNumber: number;
-  status: RunStatus;
-  runner: RunnerKind;
-  runnerId: string | null;
-  model: string;
-  codexServiceTier: CodexServiceTier;
-  subagentModel: string | null;
-  subagentMaxConcurrent: number | null;
-  leaseGeneration: number;
-  cancelRequestId: string | null;
-  cancelReason: string | null;
-  cancelRequestedAt: string | null;
-  cancelAcknowledgedAt: string | null;
-  workspacePath: string | null;
-  workspaceRetained: boolean;
-  targetBranch: string | null;
-  branch: string | null;
-  baseSha: string | null;
-  headSha: string | null;
-  pushStatus: string;
-  pullRequestUrl: string | null;
-  maxDurationMin: number;
-  stallTimeoutMin: number;
-  maxRunsPerTask: number;
-  failureClass: FailureClass | null;
-  failureReason: string | null;
-  retryable: boolean | null;
-  retryAt: string | null;
-  terminationReason: string | null;
-  queuedAt: string;
-  claimedAt: string | null;
-  startedAt: string | null;
-  endedAt: string | null;
-  session?: Session | null;
-  /** Null on every run that did not record a `merge-result` — which is every
-   *  run but the mechanical executor's. */
-  mergeOutcome?: MergeOutcome | null;
-  mergeRecovery?: MergeRecovery | null;
-};
-
 export type SessionEvent = {
   id: string;
   sessionId: string;
@@ -177,222 +82,6 @@ export type SessionEvent = {
   type: string;
   toolCallId: string | null;
   payload: unknown;
-};
-
-export type Task = {
-  id: string;
-  projectId: string;
-  assigneeAgentId: string | null;
-  repoId: string | null;
-  templateId: string | null;
-  templateStepId: string | null;
-  name: string;
-  description: string;
-  workingDirectory: string | null;
-  targetBranch: string | null;
-  failureReason: string | null;
-  status: TaskStatus;
-  moveTargets: TaskMoveTarget[];
-  assigneeType: AssigneeType;
-  executionOwner: ExecutionOwner;
-  approvalGate: boolean;
-  scheduleKind: "NOW" | "AT" | "CRON";
-  // The scheduler's own columns. `runAt === null` on a live CRON definition is
-  // the quarantine marker, not an absence — see lib/schedule.ts.
-  runAt: string | null;
-  cron: string | null;
-  timezone: string | null;
-  maxDurationMin: number;
-  stallTimeoutMin: number;
-  maxSessionsPerTask: number;
-  createdAt: string;
-  updatedAt: string;
-  assigneeAgent: Agent | null;
-  repo: Repo | null;
-  runs: Run[];
-  taskCost?: UsageCost | null;
-  chainId: string | null;
-  chainIndex: number | null;
-  source: TaskSource;
-  archivedAt: string | null;
-  schedulePausedAt: string | null;
-  recurringSourceTaskId: string | null;
-  templateStep: {
-    name: string;
-    stepIndex: number;
-    outputKind: string;
-    taskTemplate: { name: string };
-  } | null;
-  /** §SF-1, the task's own latest merge outcome; the run rows carry the same
-   *  projection bound to the run that recorded it. */
-  mergeOutcome?: MergeOutcome | null;
-  mergeRecovery?: MergeRecovery | null;
-  /** Assembled by the API, never recomputed here: a second implementation could
-   *  disagree with the board's own numbers. Null when the task is not in a chain. */
-  chainProgress: ChainProgress | null;
-  /** Present only on recurring definitions, so a collapsed Automations row can
-   *  render `Last run` without opening a second poll per row. */
-  recurringLastFiredAt: string | null;
-  recurringFireCount: number;
-};
-
-/** `GET /projects/:projectId/costs`. Every amount is a decimal string, as every
- *  other money field on the wire is. */
-export type CostsReport = {
-  days: number;
-  since: string;
-  totalUsd: string;
-  /** The part of `totalUsd` the control plane priced itself rather than read
-   *  from a provider. */
-  estimatedUsd: string;
-  runCount: number;
-  /** Settled runs whose cost could not be established at all. They are in
-   *  `runCount` and in no total, so the page states the count rather than
-   *  letting the tiles imply those runs were free. */
-  costUnavailableRuns: number;
-  avgUsd: string;
-  /** The priced spend of settled runs that did not succeed — failed, timed out,
-   *  cancelled or lost. Money the project paid for nothing it kept. */
-  wastedUsd: string;
-  daily: Array<{ date: string; byAgent: Record<string, string> }>;
-  byAgent: Array<{
-    agent: string;
-    usd: string;
-    runs: number;
-    costUnavailableRuns: number;
-    avgUsd: string;
-    /** Cached share of this agent's input tokens, 0-100, over the runs that
-     *  reported both token columns. `null` when no run of the agent did: an
-     *  unmeasured cache is not a cold one. */
-    cachePct: number | null;
-    wastedUsd: string;
-  }>;
-  /** Spend per distinct `Run.model` string, verbatim. Runs whose session used
-   *  native children are blended across two model rates and so land in a single
-   *  `mixed` key rather than under their root model. */
-  byModel: Array<{
-    model: string;
-    usd: string;
-    runs: number;
-    costUnavailableRuns: number;
-  }>;
-  topRuns: Array<{
-    runId: string;
-    taskName: string | null;
-    agent: string;
-    model: string;
-    usd: string;
-    estimated: boolean;
-    startedAt: string;
-  }>;
-};
-
-export type TaskStartability = {
-  startable: boolean;
-  checklist: {
-    repoBound: boolean;
-    agentAssignee: boolean;
-    repoAccessGrant: boolean;
-    budgetRemaining: boolean;
-    noActiveRun: boolean;
-    predecessorsDone: boolean;
-  };
-  task: {
-    id: string;
-    name: string;
-    agent: { id: string; title: string } | null;
-    repo: { id: string; name: string } | null;
-    targetBranch: string | null;
-  };
-};
-
-export type Chain = {
-  chainId: string | null;
-  total: number;
-  done: number;
-  steps: ChainStep[];
-  /** Present on a real Chain response; omitted by the legacy chainless envelope. */
-  control?: ChainControl | null;
-};
-
-/** A webhook-configured template. `repo` is nullable: a trigger is defined by
- *  its secret, so one without a repository is listed and un-fireable rather
- *  than hidden. */
-export type Trigger = {
-  id: string;
-  name: string;
-  description: string;
-  repo: { id: string; name: string } | null;
-  stepCount: number;
-  paused: boolean;
-  secretDisabled: boolean;
-  lastFiredAt: string | null;
-  fireCount: number;
-};
-
-export type TriggerDetail = {
-  id: string;
-  name: string;
-  description: string;
-  projectId: string;
-  endpointPath: string;
-  secretName: string | null;
-  secretDisabled: boolean;
-  repo: { id: string; name: string } | null;
-  variables: string[];
-  mapping: Record<string, string>;
-  defaults: Record<string, unknown>;
-  replayWindowSec: number | null;
-  paused: boolean;
-  stepCount: number;
-  fireCount: number;
-  lastFiredAt: string | null;
-  canFire: boolean;
-  cannotFireReason: string | null;
-};
-
-export type TriggerFire = {
-  id: string;
-  createdAt: string;
-  source: "WEBHOOK" | "MANUAL";
-  chainId: string | null;
-  firstTask: { id: string; name: string } | null;
-  progress: ChainProgress | null;
-};
-
-/** One fired copy of a recurring definition, newest first. */
-export type RecurringFire = {
-  taskId: string;
-  name: string;
-  createdAt: string;
-  status: TaskStatus;
-  latestRun: {
-    id: string;
-    status: RunStatus;
-    runNumber: number;
-    session: { id: string; costUsd: string | null } | null;
-  } | null;
-};
-
-export type TaskActivity = {
-  id: string;
-  taskId: string;
-  actorType: string;
-  actorId: string | null;
-  body: string;
-  commitSha: string | null;
-  metadata: unknown;
-  createdAt: string;
-};
-
-export type TaskStepOutput = {
-  id: string;
-  taskId: string;
-  runId: string | null;
-  kind: string;
-  body: string;
-  createdAt: string;
-  updatedAt: string;
 };
 
 export type TaskTemplateStep = {

@@ -1,7 +1,7 @@
 import cronstrue from "cronstrue/i18n";
 
 import { formatDateTime, formatLocale, formatT, timeAgo } from "./format";
-import type { Task } from "./types";
+import type { TaskList } from "./types";
 
 /** cronstrue's own locale ids, not BCP 47. Verified against the installed
  *  `cronstrue@3.24.0`: `node_modules/cronstrue/dist/i18n/locales/zh_CN` exists and
@@ -56,7 +56,7 @@ export type AutomationState = "active" | "paused" | "quarantined";
  * expression stops parsing — so it is a state, not an absence.
  */
 export const automationState = (
-  task: Pick<Task, "schedulePausedAt" | "runAt">,
+  task: Pick<TaskList, "schedulePausedAt" | "runAt">,
 ): AutomationState => {
   if (task.schedulePausedAt !== null) return "paused";
   if (task.runAt === null) return "quarantined";
@@ -78,7 +78,7 @@ export const automationState = (
  * `runAt` precisely because its own parser refused the expression.
  */
 export const scheduleLabel = (
-  task: Pick<Task, "schedulePausedAt" | "runAt" | "cron" | "timezone">,
+  task: Pick<TaskList, "schedulePausedAt" | "runAt" | "cron" | "timezone">,
 ): string => (
   automationState(task) === "quarantined"
     ? task.cron ?? "—"
