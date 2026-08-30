@@ -20,6 +20,7 @@ import {
   retiredFollowUpIndex,
 } from "./chain-layer-migration-fixture.js";
 import { fireCronTask } from "./scheduler.js";
+import { splitSqlStatements } from "./sql-statements.js";
 import { resetTestDb, setupTestDb, testDatabaseSchema, testDatabaseUrl } from "./testdb.js";
 
 const taskDispatchBindingMigration = "20260825120000_task_dispatch_binding";
@@ -28,9 +29,9 @@ interface TaskDispatchBindingMigrationFixture {
   schema: string;
   url: string;
   quotedSchema: string;
-  execute(sql: string): void;
+  execute(sql: string): Promise<void>;
   applyMigration(): void;
-  cleanup(): void;
+  cleanup(): Promise<void>;
 }
 
 /**
@@ -38,7 +39,7 @@ interface TaskDispatchBindingMigrationFixture {
  * migration. The fixture deliberately creates a task before the migration so
  * the additive-only proof can compare its row content and count after deploy.
  */
-const stageBeforeTaskDispatchBinding = (): TaskDispatchBindingMigrationFixture => {
+const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigrationFixture> => {
   const base = new URL(testDatabaseUrl);
   const sourceSchema = base.searchParams.get("schema");
   if (!sourceSchema || sourceSchema === "public") throw new Error("dispatch-binding migration fixture refuses public schema");
@@ -46,15 +47,14 @@ const stageBeforeTaskDispatchBinding = (): TaskDispatchBindingMigrationFixture =
   base.searchParams.set("schema", schema);
   const url = base.toString();
   const quotedSchema = `"${schema.replaceAll('"', '""')}"`;
-  const execute = (sql: string): void => {
-    execFileSync("npx", ["prisma", "db", "execute", "--url", url, "--stdin"], {
-      cwd: dbDirectory,
-      input: sql,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  // In-process, for the same reason as the two sibling fixtures: a spawned
+  // `prisma db execute` costs about two seconds of startup per call.
+  const client = new PrismaClient({ datasources: { db: { url } } });
+  const execute = async (sql: string): Promise<void> => {
+    for (const statement of splitSqlStatements(sql)) await client.$executeRawUnsafe(statement);
   };
 
-  execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE; CREATE SCHEMA ${quotedSchema};`);
+  await execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE; CREATE SCHEMA ${quotedSchema};`);
   const staging = mkdtempSync(join(tmpdir(), "task-dispatch-binding-fixture."));
   cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
   for (const entry of readdirSync(join(staging, "prisma", "migrations"), { withFileTypes: true })) {
@@ -85,13 +85,15 @@ const stageBeforeTaskDispatchBinding = (): TaskDispatchBindingMigrationFixture =
       );
       deploy();
     },
-    cleanup: () => {
+    cleanup: async (): Promise<void> => {
       rmSync(staging, { recursive: true, force: true });
       try {
-        execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE;`);
+        await execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE;`);
       } catch {
         // A failed fixture must not leave its private schema behind if the
         // server has already terminated the connection.
+      } finally {
+        await client.$disconnect();
       }
     },
   };
@@ -483,9 +485,9 @@ test("final contract accepts standalone tasks and requires complete chain identi
 test("dispatch binding migration is additive and preserves existing task rows", {
   skip: !migrationHarnessEnabled,
 }, async () => {
-  const fixture = stageBeforeTaskDispatchBinding();
+  const fixture = await stageBeforeTaskDispatchBinding();
   try {
-    fixture.execute(`
+    await fixture.execute(`
       INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
       VALUES ('dispatch-migration-project', 'dispatch-migration-project', 'dispatch-migration-project', NOW());
       INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "updatedAt")
@@ -523,7 +525,7 @@ test("dispatch binding migration is additive and preserves existing task rows", 
     `);
     assert.deepEqual(columns, [{ column_name: "dispatchAfterTaskId", is_nullable: "YES", column_default: null }]);
   } finally {
-    fixture.cleanup();
+    await fixture.cleanup();
   }
 });
 

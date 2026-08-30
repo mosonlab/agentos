@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { PrismaClient } from "@anneal/db";
+
+import { splitSqlStatements } from "./sql-statements.js";
 import { testDatabaseUrl } from "./testdb.js";
 
 /**
@@ -24,14 +27,14 @@ export interface PreKernelDatabase {
   url: string;
   schema: string;
   quoted: string;
-  /** Runs SQL against the staged schema. */
-  execute: (sql: string) => void;
+  /** Runs SQL against the staged schema, over the fixture's own connection. */
+  execute: (sql: string) => Promise<void>;
   /** Applies the kernel migration through the real `prisma migrate deploy`. */
   applyKernelMigration: () => void;
-  cleanup: () => void;
+  cleanup: () => Promise<void>;
 }
 
-export const stageAtPreviousMigration = (label: string): PreKernelDatabase => {
+export const stageAtPreviousMigration = async (label: string): Promise<PreKernelDatabase> => {
   const base = new URL(testDatabaseUrl);
   const schema = `${base.searchParams.get("schema") ?? "public"}_${label}`;
   if (schema.startsWith("public")) throw new Error("the pre-kernel fixture refuses to touch the public schema");
@@ -39,15 +42,16 @@ export const stageAtPreviousMigration = (label: string): PreKernelDatabase => {
   const url = base.toString();
   const quoted = `"${schema.replaceAll('"', '""')}"`;
 
-  const execute = (sql: string): void => {
-    execFileSync("npx", ["prisma", "db", "execute", "--url", url, "--stdin"], {
-      cwd: dbDirectory,
-      input: sql,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  // One connection for the fixture's lifetime. `prisma db execute` accepts a
+  // multi-statement block, which is why it was used, but it also pays about two
+  // seconds of npx and engine startup per call and this fixture stages once per
+  // case. The block is cut here instead — see `splitSqlStatements`.
+  const client = new PrismaClient({ datasources: { db: { url } } });
+  const execute = async (sql: string): Promise<void> => {
+    for (const statement of splitSqlStatements(sql)) await client.$executeRawUnsafe(statement);
   };
 
-  execute(`DROP SCHEMA IF EXISTS ${quoted} CASCADE; CREATE SCHEMA ${quoted};`);
+  await execute(`DROP SCHEMA IF EXISTS ${quoted} CASCADE; CREATE SCHEMA ${quoted};`);
   const staging = mkdtempSync(join(tmpdir(), "goal5a0-fixture."));
   cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
   // This fixture is staged *before* the kernel. Remove the kernel and every
@@ -81,12 +85,14 @@ export const stageAtPreviousMigration = (label: string): PreKernelDatabase => {
       );
       deploy();
     },
-    cleanup: () => {
+    cleanup: async (): Promise<void> => {
       rmSync(staging, { recursive: true, force: true });
       try {
-        execute(`DROP SCHEMA IF EXISTS ${quoted} CASCADE;`);
+        await execute(`DROP SCHEMA IF EXISTS ${quoted} CASCADE;`);
       } catch {
         // A test schema that will not drop must not fail the suite.
+      } finally {
+        await client.$disconnect();
       }
     },
   };
@@ -122,16 +128,16 @@ export interface PreflightResult { code: number; stdout: string; stderr: string 
  * happen to share a database.
  */
 export const preflightHarness = (label: string): {
-  stage: (rows: string[]) => PreKernelDatabase;
+  stage: (rows: string[]) => Promise<PreKernelDatabase>;
   runPreflight: (environment?: Record<string, string | undefined>) => PreflightResult;
-  cleanup: () => void;
+  cleanup: () => Promise<void>;
 } => {
   let fixture: PreKernelDatabase | undefined;
   return {
-    stage: (rows: string[]): PreKernelDatabase => {
-      fixture?.cleanup();
-      fixture = stageAtPreviousMigration(label);
-      fixture.execute(preKernelSeed + rows.join("\n"));
+    stage: async (rows: string[]): Promise<PreKernelDatabase> => {
+      await fixture?.cleanup();
+      fixture = await stageAtPreviousMigration(label);
+      await fixture.execute(preKernelSeed + rows.join("\n"));
       return fixture;
     },
     runPreflight: (environment: Record<string, string | undefined> = {}): PreflightResult => {
@@ -158,7 +164,7 @@ export const preflightHarness = (label: string): {
         return { code: failure.status ?? -1, stdout: String(failure.stdout ?? ""), stderr: String(failure.stderr ?? "") };
       }
     },
-    cleanup: (): void => { fixture?.cleanup(); },
+    cleanup: async (): Promise<void> => { await fixture?.cleanup(); },
   };
 };
 
