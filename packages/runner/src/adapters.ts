@@ -13,6 +13,7 @@ import {
   launchAdapterArgv,
   mcpServerPath,
   nodeBinaryPath,
+  promptHashFor,
   type AdapterDeclaration,
   type CliAdapter,
   type ResumeSpec,
