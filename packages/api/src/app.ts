@@ -69,6 +69,17 @@ import {
   resumeChain,
 } from "@anneal/db";
 import type { ChainStep as ChainStepContract } from "@anneal/db/board-contract";
+import type {
+  Agent as AgentContract,
+  AgentRepoAccess as AgentRepoAccessContract,
+  Environment as EnvironmentContract,
+  FilesystemGrant as FilesystemGrantContract,
+  MCPConnection as MCPConnectionContract,
+  Project as ProjectContract,
+  Repo as RepoContract,
+  Secret as SecretContract,
+  Skill as SkillContract,
+} from "@anneal/db/wire-contract";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -826,6 +837,13 @@ const goalInclude = {
   progressLog: { orderBy: { createdAt: "asc" as const } },
 };
 
+type ProjectResponse = ProjectContract<Date, Prisma.Decimal>;
+type AgentResponse = AgentContract<Date>;
+type SecretResponse = SecretContract<Date>;
+type SkillResponse = SkillContract<Date>;
+type MCPConnectionResponse = MCPConnectionContract<Date>;
+type RepoResponse = RepoContract<Date>;
+
 export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const releaseChainLease = options.releaseMergeLease ?? releaseMergeLease;
@@ -1076,16 +1094,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(result.installation, 201);
   });
 
-  app.get("/projects", async (context) => validated(context, await db.project.findMany({ orderBy: { createdAt: "asc" } })));
-  app.post("/projects", async (context) => context.json(await db.project.create({ data: await readJson(context.req.raw, projectInput) }), 201));
+  app.get("/projects", async (context) => validated(context,
+    (await db.project.findMany({ orderBy: { createdAt: "asc" } })) satisfies ProjectResponse[]));
+  app.post("/projects", async (context) => context.json(
+    (await db.project.create({ data: await readJson(context.req.raw, projectInput) })) satisfies ProjectResponse, 201));
   app.get("/projects/:projectId", async (context) => {
     const project = await db.project.findUnique({ where: { id: id.parse(context.req.param("projectId")) } });
-    return project ? context.json(project) : context.json({ error: "Project not found" }, 404);
+    return project ? context.json(project satisfies ProjectResponse) : context.json({ error: "Project not found" }, 404);
   });
-  app.patch("/projects/:projectId", async (context) => context.json(await db.project.update({
+  app.patch("/projects/:projectId", async (context) => context.json((await db.project.update({
     where: { id: id.parse(context.req.param("projectId")) },
     data: withoutUndefined(await readJson(context.req.raw, projectPatch)) as Prisma.ProjectUpdateInput,
-  })));
+  })) satisfies ProjectResponse));
   app.delete("/projects/:projectId", async (context) => {
     await db.project.delete({ where: { id: id.parse(context.req.param("projectId")) } });
     return context.body(null, 204);
@@ -1108,36 +1128,36 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days, timeZone));
   });
 
-  app.get("/projects/:projectId/environments", async (context) => context.json(await db.environment.findMany({
+  app.get("/projects/:projectId/environments", async (context) => context.json((await db.environment.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
-  })));
-  app.post("/projects/:projectId/environments", async (context) => context.json(await db.environment.create({
+  })) satisfies EnvironmentContract[]));
+  app.post("/projects/:projectId/environments", async (context) => context.json((await db.environment.create({
     data: { projectId: id.parse(context.req.param("projectId")), ...await readJson(context.req.raw, environmentInput) },
-  }), 201));
+  })) satisfies EnvironmentContract, 201));
   app.get("/environments/:environmentId", async (context) => {
     const environment = await db.environment.findUnique({
       where: { id: id.parse(context.req.param("environmentId")) },
       include: { secrets: { include: { secret: { select: secretPublicSelect } } } },
     });
-    return environment ? context.json(environment) : context.json({ error: "Environment not found" }, 404);
+    return environment ? context.json(environment satisfies EnvironmentContract) : context.json({ error: "Environment not found" }, 404);
   });
-  app.patch("/environments/:environmentId", async (context) => context.json(await db.environment.update({
+  app.patch("/environments/:environmentId", async (context) => context.json((await db.environment.update({
     where: { id: id.parse(context.req.param("environmentId")) },
     data: withoutUndefined(await readJson(context.req.raw, environmentPatch)),
-  })));
+  })) satisfies EnvironmentContract));
   app.delete("/environments/:environmentId", async (context) => {
     await db.environment.delete({ where: { id: id.parse(context.req.param("environmentId")) } });
     return context.body(null, 204);
   });
 
-  app.get("/secrets", async (context) => context.json(await db.secret.findMany({
+  app.get("/secrets", async (context) => context.json((await db.secret.findMany({
     select: {
       ...secretPublicSelect,
       agentGrants: { include: { agent: { select: { id: true, name: true, title: true, projectId: true } } } },
     },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies SecretResponse[]));
   app.post("/secrets", async (context) => {
     const body = await readJson(context.req.raw, secretInput);
     const secret = await db.secret.create({
@@ -1149,7 +1169,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       },
       select: secretPublicSelect,
     });
-    return context.json(secret, 201);
+    return context.json(secret satisfies SecretResponse, 201);
   });
   app.get("/secrets/:secretId", async (context) => {
     const secret = await db.secret.findUnique({
@@ -1159,19 +1179,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         agentGrants: { include: { agent: { select: { id: true, name: true, title: true, projectId: true } } } },
       },
     });
-    return secret ? context.json(secret) : context.json({ error: "Secret not found" }, 404);
+    return secret ? context.json(secret satisfies SecretResponse) : context.json({ error: "Secret not found" }, 404);
   });
   app.patch("/secrets/:secretId", async (context) => {
     const body = await readJson(context.req.raw, secretPatch);
     const { value, ...fields } = body;
-    return context.json(await db.secret.update({
+    return context.json((await db.secret.update({
       where: { id: id.parse(context.req.param("secretId")) },
       data: {
         ...withoutUndefined(fields),
         ...(value === undefined ? {} : { encryptedValue: encryptSecret(value), rotatedAt: new Date() }),
       },
       select: secretPublicSelect,
-    }));
+    })) satisfies SecretResponse);
   });
   app.delete("/secrets/:secretId", async (context) => {
     await db.secret.delete({ where: { id: id.parse(context.req.param("secretId")) } });
@@ -1189,7 +1209,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   })).map((agent) => {
     const mechanical = agent.name === INTEGRATOR_AGENT_NAME;
     return { ...agent, mechanical, assignable: !mechanical };
-  })));
+  }) satisfies AgentResponse[]));
   app.post("/projects/:projectId/agents", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, agentInput);
@@ -1205,7 +1225,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (foundationalPrompt === undefined) {
       return context.json({ error: "This project has no foundation yet. Run npm run db:seed." }, 400);
     }
-    return context.json(await db.agent.create({ data: { ...body, foundationalPrompt, projectId } }), 201);
+    return context.json((await db.agent.create({
+      data: { ...body, foundationalPrompt, projectId },
+    })) satisfies AgentResponse, 201);
   });
   app.get("/agents/:agentId", async (context) => {
     const agent = await db.agent.findUnique({
@@ -1220,7 +1242,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         collaborators: { include: { allowedAgent: true } },
       },
     });
-    return agent ? context.json(agent) : context.json({ error: "Agent not found" }, 404);
+    return agent ? context.json(agent satisfies AgentResponse) : context.json({ error: "Agent not found" }, 404);
   });
   app.patch("/agents/:agentId", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1251,7 +1273,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.agent);
+    return context.json(result.agent satisfies AgentResponse);
   });
   app.post("/agents/:agentId/reset-runtime-config", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1284,7 +1306,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.agent);
+    return context.json(result.agent satisfies AgentResponse);
   });
   app.delete("/agents/:agentId", async (context) => {
     try {
@@ -1318,17 +1340,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
     await noteArchivedQueuedRuns(db, { agentId });
-    return context.json(result.agent);
+    return context.json(result.agent satisfies AgentResponse);
   });
   app.post("/agents/:agentId/unarchive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const agent = await db.agent.findUnique({ where: { id: agentId } });
     if (!agent) return context.json({ error: "Agent not found" }, 404);
-    if (!agent.archivedAt) return context.json(agent);
-    return context.json(await db.agent.update({
+    if (!agent.archivedAt) return context.json(agent satisfies AgentResponse);
+    return context.json((await db.agent.update({
       where: { id: agentId },
       data: { archivedAt: null },
-    }));
+    })) satisfies AgentResponse);
   });
 
   app.get("/agents/:agentId/secret-grants", async (context) => context.json(await db.agentSecretGrant.findMany({
@@ -1362,9 +1384,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.body(null, 204);
   });
 
-  app.get("/agents/:agentId/filesystem-grants", async (context) => context.json(await db.filesystemGrant.findMany({
+  app.get("/agents/:agentId/filesystem-grants", async (context) => context.json((await db.filesystemGrant.findMany({
     where: { agentId: id.parse(context.req.param("agentId")) }, orderBy: { folderPath: "asc" },
-  })));
+  })) satisfies FilesystemGrantContract[]));
   /**
    * Two spellings of one physical folder must not become two grants. On a case- and
    * normalization-insensitive volume `protected` and `Protected` are the same directory,
@@ -1396,11 +1418,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, filesystemGrantInput);
     const aliased = await aliasingGrant(agentId, body.folderPath);
     if (aliased !== null) return aliasConflict(context, body.folderPath, aliased);
-    return context.json(await db.filesystemGrant.upsert({
+    return context.json((await db.filesystemGrant.upsert({
       where: { agentId_folderPath: { agentId, folderPath: body.folderPath } },
       create: { agentId, ...body },
       update: body,
-    }), 201);
+    })) satisfies FilesystemGrantContract, 201);
   });
   app.patch("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1412,10 +1434,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const aliased = await aliasingGrant(agentId, patch.folderPath, grantId);
       if (aliased !== null) return aliasConflict(context, patch.folderPath, aliased);
     }
-    return context.json(await db.filesystemGrant.update({
+    return context.json((await db.filesystemGrant.update({
       where: { id: grantId },
       data: withoutUndefined(patch) as Prisma.FilesystemGrantUncheckedUpdateInput,
-    }));
+    })) satisfies FilesystemGrantContract);
   });
   app.delete("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
     const deleted = await db.filesystemGrant.deleteMany({ where: {
@@ -1443,16 +1465,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Collaboration binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/skills", async (context) => context.json(await db.skill.findMany({
+  app.get("/projects/:projectId/skills", async (context) => context.json((await db.skill.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     include: { agents: true },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies SkillResponse[]));
   app.post("/projects/:projectId/skills", async (context) => {
     const body = await readJson(context.req.raw, skillInput);
-    return context.json(await db.skill.create({
+    return context.json((await db.skill.create({
       data: { projectId: id.parse(context.req.param("projectId")), ...body },
-    }), 201);
+    })) satisfies SkillResponse, 201);
   });
   app.post("/agents/:agentId/skills", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1475,11 +1497,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Skill binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/mcp-connections", async (context) => context.json(await db.mCPConnection.findMany({
+  app.get("/projects/:projectId/mcp-connections", async (context) => context.json((await db.mCPConnection.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     include: { agents: true },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies MCPConnectionResponse[]));
   app.post("/projects/:projectId/mcp-connections", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, mcpConnectionInput);
@@ -1487,9 +1509,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "MCP credential secret is unavailable" }, 400);
     }
-    return context.json(await db.mCPConnection.create({
+    return context.json((await db.mCPConnection.create({
       data: { ...body, config: jsonValue(body.config), projectId },
-    }), 201);
+    })) satisfies MCPConnectionResponse, 201);
   });
   app.post("/agents/:agentId/mcp-connections", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1512,10 +1534,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "MCP binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/repos", async (context) => validated(context, await db.repo.findMany({
+  app.get("/projects/:projectId/repos", async (context) => validated(context, (await db.repo.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies RepoResponse[]));
   app.post("/projects/:projectId/repos", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, repoInput);
@@ -1523,7 +1545,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
-    return context.json(await db.repo.create({ data: { ...body, projectId } }), 201);
+    return context.json((await db.repo.create({ data: { ...body, projectId } })) satisfies RepoResponse, 201);
   });
   app.patch("/repos/:repoId", async (context) => {
     const body = await readJson(context.req.raw, repoPatch);
@@ -1531,9 +1553,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
-    return context.json(await db.repo.update({
+    return context.json((await db.repo.update({
       where: { id: id.parse(context.req.param("repoId")) }, data: withoutUndefined(body),
-    }));
+    })) satisfies RepoResponse);
   });
   app.delete("/repos/:repoId", async (context) => {
     await db.repo.delete({ where: { id: id.parse(context.req.param("repoId")) } });
@@ -1549,11 +1571,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     ]);
     if (!agent || !repo) return context.json({ error: "Agent or Repo not found" }, 404);
     if (agent.projectId !== repo.projectId) return context.json({ error: "Agent and Repo belong to different projects" }, 400);
-    return context.json(await db.agentRepoAccess.upsert({
+    return context.json((await db.agentRepoAccess.upsert({
       where: { agentId_repoId: { agentId, repoId } },
       create: { agentId, repoId, projectId: agent.projectId, ...body },
       update: body,
-    }), 201);
+    })) satisfies AgentRepoAccessContract, 201);
   });
   app.delete("/agents/:agentId/repos/:repoId/access", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
