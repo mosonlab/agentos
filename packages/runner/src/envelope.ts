@@ -1,18 +1,23 @@
+import {
+  FAILURE_ENVELOPE_VERSION,
+  truncateEvidence,
+  type FailureClass,
+  type FailureEnvelope,
+  type FailurePhase,
+} from "@anneal/db";
+
 import type { ExitEvidence } from "./adapters.js";
-import type { FailureClass } from "./api.js";
 import type { DeliveryFailure } from "./delivery.js";
 import { isCommandTimeout } from "./exec.js";
 import { isTransientNetworkError } from "./network-retry.js";
 
+export {
+  type FailureEnvelope,
+  type FailurePhase,
+  truncateEvidence as summarizeEvidence,
+} from "@anneal/db";
+
 /**
- * The runner half of the structured failure envelope.
- *
- * `packages/db/src/failure-envelope.ts` is the canonical definition; this is a
- * hand-kept mirror, for the same reason `FailureClass` and `CleanupStatus` are
- * mirrored in api.ts — this package deliberately does not import the Prisma
- * client. The API's zod schema for the complete route is the boundary that
- * catches drift.
- *
  * What this module does *not* do is decide anything. It reports facts: which
  * phase the run was in, what exited with what, which channel each piece of text
  * came off, and whether the runner's own typed `CommandTimeoutError` fired. The
@@ -21,43 +26,6 @@ import { isTransientNetworkError } from "./network-retry.js";
  * regex sweep that produced it is precisely what misread an agent's stdout as
  * an auth failure.
  */
-export type FailureEnvelope = {
-  version: number;
-  phase: FailurePhase;
-  runnerClass: FailureClass | null;
-  exitCode: number | null;
-  signal: string | null;
-  terminationReason: string | null;
-  terminalEventSeen: boolean;
-  terminalSuccess: boolean;
-  agentExited: boolean;
-  providerError: string | null;
-  stderrSummary: string | null;
-  stdoutSummary: string | null;
-  timedOut: boolean;
-  transient: boolean;
-  timeoutMs: number | null;
-};
-
-export type FailurePhase = "PROVISION" | "EXECUTE" | "DELIVER" | "COMPLETE";
-
-export const FAILURE_ENVELOPE_VERSION = 1;
-
-export const FAILURE_EVIDENCE_LIMIT = 4_000;
-
-/** Keeps the tail: a CLI states its verdict last, and a head-truncated stderr is
- *  a progress log with the error cut off. */
-export const summarizeEvidence = (
-  value: string | null | undefined,
-  limit: number = FAILURE_EVIDENCE_LIMIT,
-): string | null => {
-  const text = value?.trim();
-  if (!text) return null;
-  if (text.length <= limit) return text;
-  const dropped = text.length - limit;
-  return `…[${dropped} earlier characters truncated]\n${text.slice(text.length - limit)}`;
-};
-
 export const buildFailureEnvelope = (input: {
   phase: FailurePhase;
   evidence: ExitEvidence;
@@ -85,9 +53,9 @@ export const buildFailureEnvelope = (input: {
     terminalEventSeen: input.evidence.terminalEventSeen,
     terminalSuccess: input.evidence.terminalSuccess,
     agentExited: input.agentExited,
-    providerError: summarizeEvidence(input.evidence.providerError),
-    stderrSummary: summarizeEvidence(input.evidence.stderr),
-    stdoutSummary: summarizeEvidence(input.evidence.stdout),
+    providerError: truncateEvidence(input.evidence.providerError),
+    stderrSummary: truncateEvidence(input.evidence.stderr),
+    stdoutSummary: truncateEvidence(input.evidence.stdout),
     timedOut: timeout !== null,
     transient: timeout !== null || (input.error !== undefined && isTransientNetworkError(input.error)),
     timeoutMs: timeout?.timeoutMs ?? null,
