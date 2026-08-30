@@ -1,8 +1,3 @@
-import { execFile } from "node:child_process";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
-
 import {
   executionModeFor,
   isRegressionVerificationOutputKind,
@@ -16,19 +11,17 @@ import {
   type PrismaClient,
 } from "@anneal/db";
 import {
+  acquireMergeLease as invokeMergeLeaseAcquisition,
+  isMergeLeaseReleaseAnomaly,
+  releaseMergeLease as invokeMergeLeaseRelease,
+  type LeaseRunner,
+  type MergeLeaseAcquisition as LeaseScriptAcquisition,
+} from "../../../scripts/merge-lease-adapter.mjs";
+import {
   recordMergeLeaseHold,
   type MergeLeaseRelease,
   type MergeLeaseTarget,
 } from "./merge-lease-hold.js";
-
-const execFileAsync = promisify(execFile);
-
-export const mergeLeaseScriptPath = (environment: NodeJS.ProcessEnv = process.env): string =>
-  environment.AGENTOS_RELEASE_ROOT
-    ? join(resolve(environment.AGENTOS_RELEASE_ROOT), "scripts/merge-lease.sh")
-    : fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
-
-const mergeLeaseScript = mergeLeaseScriptPath();
 
 /**
  * What one `merge-lease.sh release` did. The script has four outcomes and three
@@ -39,51 +32,21 @@ const mergeLeaseScript = mergeLeaseScriptPath();
  */
 export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>;
 
-// The line scripts/merge-lease.sh prints beside its prose for the operator.
-const MACHINE_LINE = /^MERGE LEASE: (.+)$/mu;
-
-/** Parse the machine-readable result emitted after a release attempt. */
-export const readMergeLeaseRelease = (output: string): MergeLeaseRelease | null => {
-  const spoken = MACHINE_LINE.exec(output)?.[1]?.trim();
-  if (!spoken) return null;
-  const [outcome, ...tokens] = spoken.split(" ");
-  switch (outcome) {
-    case "released": {
-      const [ref, sha, acquiredAt, ...extra] = tokens;
-      if (ref === undefined || sha === undefined || acquiredAt === undefined || extra.length > 0) return null;
-      return { outcome: "released", ref, sha, acquiredAt };
-    }
-    case "not-held":
-      return tokens.length === 0 ? { outcome: "not-held" } : null;
-    case "skipped":
-      return tokens.length === 1 && tokens[0] !== undefined ? { outcome: "skipped", heldFor: tokens[0] } : null;
-    case "refused":
-      return tokens.length === 1 && tokens[0] !== undefined ? { outcome: "refused", heldBy: tokens[0] } : null;
-    default:
-      return null;
+export const releaseMergeLeaseAdapter = async (
+  chainId: string,
+  options: { environment?: NodeJS.ProcessEnv; runner?: LeaseRunner } = {},
+): Promise<MergeLeaseRelease> => {
+  const release = await invokeMergeLeaseRelease({
+    environment: options.environment ?? process.env,
+    ...(options.runner ? { runner: options.runner } : {}),
+    task: chainId,
+    processTimeoutMs: 90_000,
+  });
+  if (release.detail) {
+    if (release.outcome === "unreachable") console.error(`Merge lease release failed for chain ${chainId}: ${release.detail}`);
+    else console.log(release.detail);
   }
-};
-
-const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
-  try {
-    const { stdout, stderr } = await execFileAsync("bash", [mergeLeaseScript, "release", "--task", chainId], {
-      timeout: 90_000,
-      encoding: "utf8",
-    });
-    const detail = `${stdout}${stderr}`.trim();
-    if (detail) console.log(detail);
-    return readMergeLeaseRelease(detail) ?? { outcome: "unreachable", detail: detail || "the release printed nothing" };
-  } catch (error: unknown) {
-    const failure = error as { stdout?: string; stderr?: string };
-    const detail = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
-    console.error(`Merge lease release failed for chain ${chainId}${detail ? `: ${detail}` : ""}`);
-    // A refusal is the one non-zero exit the script means: it read the lease and
-    // declined to break it. Anything else never got that far, so the state of
-    // the lock on main is unknown rather than decided.
-    const spoken = readMergeLeaseRelease(detail);
-    if (spoken?.outcome === "refused") return spoken;
-    return { outcome: "unreachable", detail: detail || String(error) };
-  }
+  return release;
 };
 
 const releaseMergeLeaseWith = async (
@@ -117,6 +80,7 @@ export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
  * obligation: every release adapter result is consumed inside this module.
  */
 const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): void => {
+  if (!isMergeLeaseReleaseAnomaly(release)) return;
   switch (release.outcome) {
     case "released":
     case "not-held":
@@ -483,14 +447,9 @@ export const commitWithLeaseOutcomes = async <T>(
  * same task id, which is what its own regression run leaves behind -- and 75
  * means somebody else holds it. Anything else never got far enough to say.
  */
-export type MergeLeaseAcquisition =
-  | { outcome: "acquired" }
-  | { outcome: "contended" }
-  | { outcome: "unreachable"; detail: string };
+export type MergeLeaseAcquisition = LeaseScriptAcquisition;
 
 export type MergeLeaseAcquirer = (chainId: string) => Promise<MergeLeaseAcquisition>;
-
-const CONTENDED_EXIT = 75;
 
 /**
  * One attempt, never a poll. The caller is the readiness tick, which cannot
@@ -499,28 +458,23 @@ const CONTENDED_EXIT = 75;
  * string matches the one the chain's own regression run writes, so an operator
  * reading `merge-lease.sh status` sees the same lease either way.
  */
-const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
-  try {
-    const { stdout, stderr } = await execFileAsync("bash", [
-      mergeLeaseScript,
-      "acquire",
-      "--task",
-      chainId,
-      "--reason",
-      `chain merge tail ${chainId}`,
-      "--timeout-minutes",
-      "0",
-    ], { timeout: 30_000, encoding: "utf8" });
-    const detail = `${stdout}${stderr}`.trim();
-    if (detail) console.log(detail);
-    return { outcome: "acquired" };
-  } catch (error: unknown) {
-    const failure = error as { code?: number; stdout?: string; stderr?: string };
-    if (failure.code === CONTENDED_EXIT) return { outcome: "contended" };
-    const detail = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
-    console.error(`Merge lease acquire failed for chain ${chainId}${detail ? `: ${detail}` : ""}`);
-    return { outcome: "unreachable", detail: detail || String(error) };
+export const acquireMergeLeaseAdapter = async (
+  chainId: string,
+  options: { environment?: NodeJS.ProcessEnv; runner?: LeaseRunner } = {},
+): Promise<MergeLeaseAcquisition> => {
+  const acquisition = await invokeMergeLeaseAcquisition({
+    environment: options.environment ?? process.env,
+    ...(options.runner ? { runner: options.runner } : {}),
+    task: chainId,
+    reason: `chain merge tail ${chainId}`,
+    timeoutMinutes: 0,
+    processTimeoutMs: 30_000,
+  });
+  if (acquisition.detail) {
+    if (acquisition.outcome === "unreachable") console.error(`Merge lease acquire failed for chain ${chainId}: ${acquisition.detail}`);
+    else if (acquisition.outcome === "acquired") console.log(acquisition.detail);
   }
+  return acquisition;
 };
 
 export type HeldLeaseOutcome =
@@ -557,7 +511,7 @@ export const withMergeLease = async <T>(
   fn: () => Promise<{ leaseOutcome: HeldLeaseOutcome; value: T }>,
   db: PrismaClient,
   dependencies: MergeLeaseDependencies = {
-    acquire: acquireMergeLease,
+    acquire: acquireMergeLeaseAdapter,
     release: releaseMergeLeaseAdapter,
   },
 ): Promise<
