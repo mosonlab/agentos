@@ -194,6 +194,55 @@ test("completion under a held Chain persists output and withholds successor acti
   assert.ok(activity, "completion records why the successor was withheld");
 });
 
+test("completion under a held Chain records fail-closed activity for a successor with no execution layer", async () => {
+  const chain = await seedRunningHeldChain();
+  await db.$executeRawUnsafe('ALTER TABLE "Task" DROP CONSTRAINT "Task_chain_identity_all_or_none_check"');
+  try {
+    await db.task.update({
+      where: { id: chain.successor.id },
+      data: { chainLayer: null, chainIndex: null },
+    });
+    const response = await createApp(db).request(`/runner/runs/${chain.run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "activation-runner",
+        fencingToken: "activation-fence",
+        exitCode: 0,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        cleanupStatus: "SUCCEEDED",
+        output: "completed before malformed successor",
+      }),
+    });
+
+    assert.equal(response.status, 200, await response.text());
+    assert.equal(await db.run.count({ where: { taskId: chain.successor.id } }), 0);
+    const activity = await db.taskActivity.findFirstOrThrow({
+      where: { taskId: chain.predecessor.id, metadata: { path: ["kind"], equals: "chainControl.activationWithheld" } },
+      orderBy: { createdAt: "desc" },
+    });
+    assert.match(activity.body, /activation withheld because Chain is held after layer 1/u);
+    assert.deepEqual(activity.metadata, {
+      kind: "chainControl.activationWithheld",
+      schemaVersion: 1,
+      heldLayer: 1,
+      nextLayer: null,
+    });
+  } finally {
+    await db.task.update({
+      where: { id: chain.successor.id },
+      data: { chainLayer: 2, chainIndex: 1 },
+    });
+    await db.$executeRawUnsafe(`ALTER TABLE "Task"
+      ADD CONSTRAINT "Task_chain_identity_all_or_none_check" CHECK (
+        ("chainId" IS NULL AND "chainIndex" IS NULL AND "chainLayer" IS NULL)
+        OR
+        ("chainId" IS NOT NULL AND "chainIndex" IS NOT NULL AND "chainLayer" IS NOT NULL)
+      )`);
+  }
+});
+
 test("a held fan-out layer completes every sibling while its join remains unactivated", async () => {
   const chain = await seedBasicChain(db, {
     statuses: [TaskStatus.DOING, TaskStatus.DOING, TaskStatus.TODO],

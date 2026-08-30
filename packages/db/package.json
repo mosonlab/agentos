@@ -26,6 +26,10 @@
       "types": "./src/chain-order.ts",
       "import": "./dist/chain-order.js"
     },
+    "./chain-hold": {
+      "types": "./src/chain-hold.ts",
+      "import": "./dist/chain-hold.js"
+    },
     "./wire-contract": {
       "types": "./src/wire-contract.ts",
       "import": "./dist/wire-contract.js"
