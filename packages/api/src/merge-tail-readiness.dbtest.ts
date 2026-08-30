@@ -25,6 +25,7 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { claimReadinessStep } from "./readiness-claim.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
@@ -530,6 +531,33 @@ test("an expired orphaned DOING readiness claim is reclaimed after restart", asy
     readinessClaimExpiresAt: new Date("2000-01-01T00:00:00.000Z"),
   } });
   assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
+});
+
+test("an expired pre-migration readiness claim is adopted into the durable claim columns", async () => {
+  const seeded = await seedReadiness();
+  const expiresAt = new Date("2026-08-29T12:01:00.000Z");
+  await db.task.update({ where: { id: seeded.readiness.id }, data: {
+    status: TaskStatus.DOING,
+    failureReason: `merge-readiness-claim:legacy|${expiresAt.toISOString()}`,
+    readinessClaimToken: null,
+    readinessClaimExpiresAt: null,
+  } });
+
+  assert.equal(
+    await claimReadinessStep(db, seeded.readiness.id, new Date(expiresAt.getTime() - 1)),
+    null,
+  );
+  const reclaimedAt = new Date(expiresAt.getTime() + 1);
+  assert.ok(await claimReadinessStep(db, seeded.readiness.id, reclaimedAt));
+
+  const adopted = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  assert.equal(adopted.status, TaskStatus.DOING);
+  assert.equal(adopted.failureReason, null);
+  assert.match(adopted.readinessClaimToken ?? "", /^merge-readiness-claim:/u);
+  assert.equal(
+    adopted.readinessClaimExpiresAt?.getTime(),
+    reclaimedAt.getTime() + READINESS_CLAIM_LEASE_MS,
+  );
 });
 
 test("an incomplete compare response and a behind head fail closed", async () => {
