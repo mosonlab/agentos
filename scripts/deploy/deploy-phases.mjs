@@ -6,11 +6,8 @@ const phase = (scope, name, hostMethod, mutating, ledgerState = null) => Object.
   ledgerState,
 });
 
-/**
- * The declaration is ordered across the main prefix and the host upgrade. A
- * prefix entry names the main operation that owns the boundary; an upgrade
- * entry names the production-host method that executes it.
- */
+/** The full ordered deployment. Every row names a host method that receives
+ * the DeploymentAttempt and returns the facts it established. */
 export const DEPLOY_PHASES = Object.freeze([
   phase("prefix", "parse-arguments", "parseArgs", false),
   phase("prefix", "check-escalation", "checkEscalation", false),
