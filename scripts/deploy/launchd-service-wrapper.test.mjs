@@ -261,7 +261,8 @@ test("the real web invocation starts from a read-only release without writing in
   child.stderr.on("data", (chunk) => { output += chunk; });
 
   let response = null;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  const readinessDeadline = Date.now() + 30_000;
+  while (Date.now() < readinessDeadline) {
     if (child.exitCode !== null) break;
     try {
       response = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(250) });
