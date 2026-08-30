@@ -1,6 +1,7 @@
 import {
   closeIntegratorQuestions,
   enqueueTaskRun,
+  MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
   TaskStatus,
@@ -12,9 +13,6 @@ import {
 } from "@anneal/db";
 
 type DbTx = Prisma.TransactionClient;
-
-const LEGACY_PRE_INTENT_REFUSAL = "source executor run does not have exactly one server-bound merge intent";
-const LEGACY_TARGET_BRANCH_REFUSAL = "authorized target ref differs from the chain target branch";
 
 export type RecoveryValidationIdentity = {
   sourceRunId: string;
@@ -76,12 +74,12 @@ const fillValidationIdentity = async (
 
 export const recoveryIsReopenableLegacyRefusal = (attempt: MergeRecoveryAttempt): boolean => (
   (attempt.status === MergeRecoveryStatus.FAILED
-    && attempt.failureReason === LEGACY_PRE_INTENT_REFUSAL
+    && attempt.refusalCode === MergeRecoveryRefusalCode.PRE_INTENT
     && attempt.boundSourceRunId === null
     && attempt.authorizationActivityId === null
     && attempt.recoveryRunId === null)
   || (attempt.status === MergeRecoveryStatus.FAILED
-    && attempt.failureReason === LEGACY_TARGET_BRANCH_REFUSAL
+    && attempt.refusalCode === MergeRecoveryRefusalCode.TARGET_BRANCH_MISMATCH
     && attempt.boundSourceRunId === null
     && attempt.authorizationActivityId === null
     && attempt.recoveryRunId === null
@@ -116,6 +114,7 @@ export const ensureRecoveryValidation = async (
     if (!input.identity || !recoveryIsReopenableLegacyRefusal(existing)) return existing;
     const reopened = await transitionMergeRecovery(tx, existing.id, MergeRecoveryStatus.VALIDATING, {
       failureReason: null,
+      refusalCode: null,
       endedAt: null,
       ...validationData(input.identity),
     });
@@ -481,7 +480,7 @@ export const retireLegacyRefusal = async (
   const retiredReason = `Historical base-drift recovery refusal retired after current validation: ${input.reason}`;
   await tx.mergeRecoveryAttempt.update({
     where: { id: input.aggregateId },
-    data: { failureReason: retiredReason, endedAt: input.at },
+    data: { failureReason: retiredReason, refusalCode: null, endedAt: input.at },
   });
   await tx.task.update({ where: { id: input.integratorTaskId }, data: {
     status: TaskStatus.REVIEW,
@@ -499,6 +498,9 @@ export const retireLegacyRefusal = async (
     },
   });
 };
+
+export const RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE =
+  "Recovery authorization could not adopt the verified regression head";
 
 export const adoptRecoveryHead = async (
   tx: DbTx,
@@ -522,6 +524,6 @@ export const adoptRecoveryHead = async (
     },
   });
   if (adopted.count !== 1) {
-    throw new Error("Recovery authorization could not adopt the verified regression head");
+    throw new Error(RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE);
   }
 };
