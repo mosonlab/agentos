@@ -5,8 +5,8 @@
 **你只写 spec，它清空看板。**
 
 Anneal 在你自己的 Mac 上驱动一条条 coding agent 任务链。把任务挂进
-看板，每个任务都会被无人值守地计划、评审、实现、验证、合并，全程跑在
-你已经登录的 Codex 与 Claude 订阅上。
+看板，每个任务都会被无人值守地计划、评审、实现、验证、合并，全程使用
+你已登录的 Codex 与 Claude 订阅。
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#当前状态)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -17,47 +17,48 @@ Anneal 在你自己的 Mac 上驱动一条条 coding agent 任务链。把任务
 
 <img src="docs/media/parallel-tasks.gif" alt="看板上多个任务并行推进" width="880">
 
+<sub>实拍：Anneal 清空自己的任务看板——这个仓库就是 Anneal 用自己开发的。</sub>
+
 </div>
 
 ## 它服务的工作流
 
-你只做一件事：写 spec。把它们挂进看板，然后走开。任务链接过每个任务
-并走完全程：计划、计划评审、实现、两次相互独立的代码评审、修复落地、
-回归验证，直至合并。等你回来，只读真正重要的 pull request，对在意的
-那几个开一个 agent 窗口，和 AI 迭代到满意为止。
+你只做一件事：写 spec。你把 spec 挂进看板，Anneal 负责任务拆解与
+编排，人就可以离开。任务链接过每个任务并走完全程：计划、计划评审、
+实现、两次相互独立的代码评审、修复落地、回归验证，直至合并。等你
+回来时看板已清空，只需读真正重要的 PR，对在意的那几个开一个 agent
+窗口，和 AI 迭代到满意为止。
 
-中间它不需要你。链只在三种情况下停下来等你：agent 通过 Inbox 向你
-提问、你标记为 gated 的步骤需要人来决策、或某次运行升级（escalate）。
+中间它不需要你。链只在需要人做决策时停下来等你：agent 通过 Web 端
+的 Inbox 向你提问、你标记为 gated 的步骤等待人的裁决、或某次运行
+升级（escalate）。你在 Inbox 里回复后，看板继续推进。
 
 ## 你得到什么
 
-- **Spec 进，merge 出。** 一张任务卡最终成为一个分支、一个 pull
-  request 和一次通过 merge gate 的合并。中间的每个产物（计划、评审
+- **Spec 进，merge 出。** 一张任务卡最终成为一个分支、一个 PR 和一次通过 merge gate 的合并。中间的每个产物（计划、评审
   发现、修复裁决、回归结果）都记录在你的机器上，事后可以逐步回溯
   整条链。
 - **不靠信任合并。** 两次盲评、一次独立回归验证和一道 merge gate，
   隔在 agent 的 diff 和你的主分支之间。
-- **默认并行。** 不同任务、不同仓库的链同时在飞；吞吐量取决于你注册了
-  多少 runner，而不是你的工时。
+- **默认并行。** 不同项目、不同仓库、不同任务的链同时在跑；并发度
+  受限于机器资源和订阅套餐的并发额度，注册更多 runner 即可拉高吞吐。
 - **用你的订阅，不用 API key。** Anneal 启动的是你已经安装并登录的官方
-  Codex CLI、Claude Code 和 Pi。它自己不持有任何凭据，不做代理，也没有
-  任何要粘贴的 key。
+  Codex CLI、Claude Code 和 Pi，以 CLI 方式直接调用。它自己不持有
+  任何凭据，不做代理，也没有任何要粘贴的 API key。
 
 ## Anneal 由 Anneal 构建
 
-这个仓库里的 pull request 由 Anneal 自己的任务链完成规格、计划、评审、
+这个仓库里的 PR 由 Anneal 自己的任务链完成规格、计划、评审、
 实现与合并，全部跑在一台 Mac 上。链交付的提交带有
 `Co-Authored-By: Anneal Chain` 以及 `X-Anneal-Run` / `X-Anneal-Step`
 trailer，你可以直接在 git log 里核对哪些提交出自链。
 
 ## 工作原理
 
-链由模板实例化而来。每一步绑定一个 agent 角色：提示词、模型、推理档位
-以及执行它的 runner CLI。旗舰的 Full Assurance 模板用十二步覆盖整条
-交付路径。
+链由模板实例化而来。每一步绑定一个 agent 角色：提示词、模型、推理档位以及执行它的 runner CLI。旗舰的 Full Assurance 模板用十二步覆盖整条交付路径。
 
-模板是数据，不是代码。角色、提示词、模型和 gate 都可以编辑，你可以把
-这条链改造成自己的流程。
+模板是数据，不是代码。角色、提示词、模型和 gate 都可以编辑，你可以
+定义自己的 agent 角色，把这条链改造编排成属于你自己的团队工作流。
 
 <div align="center">
 
@@ -69,8 +70,6 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 
 <details>
 <summary><b>完整十二步</b>——每一步的角色、runner、模型与档位</summary>
-
-表中的 `Sol` 和 `Luna` 是 Codex CLI 暴露的 GPT-5.6 变体。
 
 | # | 步骤 | Agent 角色 | 做什么 | Runner | 模型 · 档位 |
 | --- | --- | --- | --- | --- | --- |
