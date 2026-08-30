@@ -30,8 +30,7 @@ import {
   classifyDurable,
   classifyFresh,
   classifyRetryBudget,
-  type CandidateLoad,
-  type CandidateRefusalCode,
+  type DurableCandidateFacts,
   type Ineligible,
   type RecoveryCandidate,
   type RecoveryIdentity,
@@ -48,7 +47,6 @@ import {
 
 type DbReader = PrismaClient | Prisma.TransactionClient;
 
-const SHA = /^[0-9a-f]{40}$/u;
 export const baseDriftRecoveryPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
@@ -62,18 +60,6 @@ const recoveryAttemptFor = async (
   where: { integratorTaskId, sourceStopId },
   orderBy: [{ attempt: "desc" }, { id: "desc" }],
 });
-
-const parseBaseDriftEvidence = (evidence: string): { observed: string; authorized: string } | null => {
-  let value: unknown;
-  try { value = JSON.parse(evidence); } catch { return null; }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).sort().join(",") !== "authorized,observed") return null;
-  if (typeof record.observed !== "string" || !SHA.test(record.observed)) return null;
-  if (typeof record.authorized !== "string" || !SHA.test(record.authorized)) return null;
-  if (record.observed === record.authorized) return null;
-  return { observed: record.observed, authorized: record.authorized };
-};
 
 /**
  * Base-drift recovery mutates the three merge-tail Steps together, so it uses
@@ -95,47 +81,62 @@ const lockRecoveryChain = async (
   return taskIds.includes(integratorTaskId);
 };
 
-const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<CandidateLoad> => {
+export const readCandidateFacts = async (
+  db: DbReader,
+  integratorTaskId: string,
+): Promise<DurableCandidateFacts> => {
   const task = await db.task.findUnique({
     where: { id: integratorTaskId },
     include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true },
   });
-  if (!task || !taskIsIntegratorStep(task)) return { kind: "skip" };
+  const facts: DurableCandidateFacts = {
+    task: task ? {
+      id: task.id,
+      chainId: task.chainId,
+      chainIndex: task.chainIndex,
+      repoId: task.repoId,
+      repositoryPresent: task.repo !== null,
+      status: task.status,
+      isIntegratorStep: taskIsIntegratorStep(task),
+    } : null,
+    stop: null,
+    existingAttempt: null,
+    sourceRun: null,
+    activeRunCount: null,
+    output: null,
+    readiness: null,
+    regression: null,
+    authorizationSelection: null,
+    intents: null,
+    target: null,
+    firstRunTargetRef: null,
+  };
+  if (!task || !facts.task?.isIntegratorStep) return facts;
   const stop = await latestRecordedStop(db as Prisma.TransactionClient, task.id);
-  if (!stop || stop.condition !== "base-drift") return { kind: "skip" };
+  if (!stop) return facts;
+  facts.stop = {
+    stopId: stop.stopId,
+    condition: stop.condition,
+    evidence: stop.evidence,
+    sourceRunId: stop.sourceRunId,
+  };
+  if (stop.condition !== "base-drift") return facts;
   const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
-  if (existingAttempt
-    && existingAttempt.status !== MergeRecoveryStatus.VALIDATING
-    && !recoveryIsReopenableLegacyRefusal(existingAttempt)) return { kind: "skip" };
-  const refuse = (code: CandidateRefusalCode, detail?: string): CandidateLoad => ({
-    kind: "refused", code, stopId: stop.stopId, ...(detail ? { detail } : {}),
-  });
-  if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repo) return refuse("identity-incomplete");
-  if (!stop.sourceRunId) return refuse("source-run-unbound");
-  const evidence = parseBaseDriftEvidence(stop.evidence);
-  if (!evidence) return refuse("evidence-invalid");
+  facts.existingAttempt = existingAttempt ? {
+    status: existingAttempt.status,
+    reopenableLegacyRefusal: recoveryIsReopenableLegacyRefusal(existingAttempt),
+  } : null;
+  if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repo) return facts;
 
-  const sourceRun = await db.run.findUnique({
-    where: { id: stop.sourceRunId },
-    include: { session: { select: { id: true } } },
-  });
-  if (!sourceRun || sourceRun.taskId !== task.id || sourceRun.status !== "SUCCEEDED" || !sourceRun.session) {
-    return refuse("source-run-mismatch");
-  }
-  const active = await db.run.count({
-    where: { task: { projectId: task.projectId, chainId: task.chainId }, status: { in: ACTIVE_RUN_STATUSES } },
-  });
-  if (active !== 0) return refuse("chain-active");
-
-  const output = await db.taskStepOutput.findUnique({ where: { taskId: task.id } });
-  const outputResult = parseMergeResult(output);
-  if (output?.runId !== sourceRun.id || output?.kind !== INTEGRATOR_OUTPUT_KIND
-    || outputResult.outcome !== "stopped" || outputResult.condition !== "base-drift"
-    || outputResult.evidence !== stop.evidence) {
-    return refuse("output-mismatch");
-  }
-
-  const [readiness, regression] = await Promise.all([
+  const [sourceRun, activeRunCount, output, readiness, regression, intentRows, target, firstRun] = await Promise.all([
+    stop.sourceRunId ? db.run.findUnique({
+      where: { id: stop.sourceRunId },
+      include: { session: { select: { id: true } } },
+    }) : null,
+    db.run.count({
+      where: { task: { projectId: task.projectId, chainId: task.chainId }, status: { in: ACTIVE_RUN_STATUSES } },
+    }),
+    db.taskStepOutput.findUnique({ where: { taskId: task.id } }),
     db.task.findFirst({
       where: { projectId: task.projectId, chainId: task.chainId, chainIndex: task.chainIndex - 1 },
       include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, stepOutput: true },
@@ -147,13 +148,49 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
         templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
       },
     }),
+    db.taskActivity.findMany({
+      where: { taskId: task.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.intent } },
+      orderBy: { createdAt: "asc" }, select: { metadata: true },
+    }),
+    resolveChainTarget(db as Prisma.TransactionClient, task),
+    db.run.findFirst({
+      where: { task: { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } } },
+      orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }], select: { targetBranch: true },
+    }),
   ]);
-  if (!readiness || !isMergeReadinessStep(readiness.templateStep) || !regression) {
-    return refuse("tail-unresolved");
+  facts.sourceRun = sourceRun ? {
+    id: sourceRun.id,
+    taskId: sourceRun.taskId,
+    status: sourceRun.status,
+    hasSession: sourceRun.session !== null,
+  } : null;
+  facts.activeRunCount = activeRunCount;
+  if (output) {
+    const result = parseMergeResult(output);
+    facts.output = {
+      runId: output.runId,
+      kind: output.kind,
+      outcome: result.outcome,
+      condition: result.outcome === "stopped" ? result.condition : null,
+      evidence: result.outcome === "stopped" ? result.evidence : null,
+    };
   }
-  if (task.status !== TaskStatus.REVIEW || readiness.status !== TaskStatus.DONE || regression.status !== TaskStatus.DONE) {
-    return refuse("tail-state-mismatch");
-  }
+  facts.readiness = readiness ? {
+    id: readiness.id,
+    status: readiness.status,
+    isReadinessStep: isMergeReadinessStep(readiness.templateStep),
+    outputCommitSha: readiness.stepOutput?.commitSha ?? null,
+  } : null;
+  facts.regression = regression ? { id: regression.id, status: regression.status } : null;
+  facts.intents = intentRows
+    .map((row) => asJsonObject(row.metadata))
+    .filter((metadata): metadata is NonNullable<typeof metadata> => metadata !== null);
+  facts.target = target.resolved
+    ? { resolved: true, repository: target.repository, prNumber: target.prNumber }
+    : { resolved: false, unresolvable: target.unresolvable };
+  facts.firstRunTargetRef = firstRun?.targetBranch ?? null;
+
+  if (!readiness) return facts;
 
   const activities = await db.taskActivity.findMany({
     where: { taskId: readiness.id }, orderBy: { createdAt: "asc" },
@@ -170,56 +207,18 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
   const selection = selectAuthorization(
     activities as CandidateActivity[], decisions as DecisionRow[], cards as CardRow[], readiness.id,
   );
-  if (!selection.authorization || selection.refusal) return refuse("authorization-invalid", selection.refusal ?? "missing");
-  const authorization = selection.authorization;
-
-  const intentRows = await db.taskActivity.findMany({
-    where: { taskId: task.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.intent } },
-    orderBy: { createdAt: "asc" }, select: { metadata: true },
-  });
-  const intents = intentRows.map((row) => asJsonObject(row.metadata)).filter((metadata) => metadata?.sourceRunId === sourceRun.id);
-  // The executor's first pull-request read can observe base drift before the
-  // irreversible path writes an intent. A successful, run-bound stop with no
-  // intent is therefore the expected pre-intent shape and is safe to recover.
-  // Once an intent exists it must still bind the selected authorization, and
-  // multiple rows remain ambiguous rather than being guessed through.
-  if (intents.length > 1) return refuse("intent-count");
-  const intent = intents[0];
-  if (intent && (intent.authorizationActivityId !== authorization.activityId
-    || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha)) {
-    return refuse("intent-mismatch");
-  }
-  if (evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");
-  if (readiness.stepOutput?.commitSha !== authorization.headSha) return refuse("readiness-head-mismatch");
-
-  const target = await resolveChainTarget(db as Prisma.TransactionClient, task);
-  if (!target.resolved) return refuse("target-unresolved", target.unresolvable);
-  if (target.repository !== authorization.repository || target.prNumber !== authorization.prNumber) {
-    return refuse("target-mismatch");
-  }
-  const firstRun = await db.run.findFirst({
-    where: { task: { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } } },
-    orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }], select: { targetBranch: true },
-  });
-  // The chain's first Run pins the authorized base. The integrator Task may
-  // instead carry the delivered feature branch propagated through the chain.
-  if (firstRun?.targetBranch !== authorization.baseRef) {
-    return refuse("target-branch-mismatch");
-  }
-  return { kind: "candidate", candidate: {
-    integratorTaskId: task.id,
-    readinessTaskId: readiness.id,
-    regressionTaskId: regression.id,
-    sourceRunId: sourceRun.id,
-    stopId: stop.stopId,
-    authorizationActivityId: authorization.activityId,
-    repository: target.repository,
-    prNumber: target.prNumber,
-    targetBranch: authorization.baseRef,
-    authorizedHeadSha: authorization.headSha,
-    authorizedBaseSha: authorization.baseSha,
-    observedBaseSha: evidence.observed,
-  } };
+  facts.authorizationSelection = {
+    authorization: selection.authorization ? {
+      activityId: selection.authorization.activityId,
+      repository: selection.authorization.repository,
+      prNumber: selection.authorization.prNumber,
+      headSha: selection.authorization.headSha,
+      baseSha: selection.authorization.baseSha,
+      baseRef: selection.authorization.baseRef,
+    } : null,
+    refusal: selection.refusal,
+  };
+  return facts;
 };
 
 const openAbandonQuestion = async (
@@ -363,7 +362,7 @@ const queueRecovery = async (
     sourceStopId: expected.stopId,
     identity: expected,
   });
-  const loaded = await loadCandidate(tx, expected.integratorTaskId);
+  const candidateFacts = await readCandidateFacts(tx, expected.integratorTaskId);
 
   // A recovery spends an attempt only once it owns a fresh regression Run.
   // Validation refusals remain visible aggregate rows but do not consume the
@@ -379,7 +378,7 @@ const queueRecovery = async (
   } });
   const decision = classifyDurable({
     expected,
-    load: loaded,
+    candidateDecision: classifyCandidate(candidateFacts),
     aggregateValidating: aggregate.status === MergeRecoveryStatus.VALIDATING,
     recoveryCount: attempts,
     maxRecoveries: MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
@@ -449,7 +448,7 @@ const queueRecovery = async (
   return { kind: "recovered" };
 });
 
-export type RecoveryTickDelta = { recovered: number; exhausted: number; ineligible: number };
+type RecoveryTickDelta = { recovered: number; exhausted: number; ineligible: number };
 
 type RecoverySettlementTask = {
   id: string;
@@ -458,22 +457,11 @@ type RecoverySettlementTask = {
 
 type RecoverySettlementDecision = Retry | Ineligible | QueueRecoveryResult;
 
-type RecoverySettlementOperations = {
-  recordRetry: typeof recordClassificationRetry;
-  settleIneligible: typeof settleIneligible;
-};
-
-const recoverySettlementOperations: RecoverySettlementOperations = {
-  recordRetry: recordClassificationRetry,
-  settleIneligible,
-};
-
-export const settleRecovery = async (
+const settleRecovery = async (
   db: PrismaClient,
   task: RecoverySettlementTask,
   stopId: string,
   decision: RecoverySettlementDecision,
-  operations: RecoverySettlementOperations = recoverySettlementOperations,
 ): Promise<RecoveryTickDelta> => {
   const tickDelta: RecoveryTickDelta = { recovered: 0, exhausted: 0, ineligible: 0 };
   switch (decision.kind) {
@@ -484,11 +472,11 @@ export const settleRecovery = async (
     case "exhausted":
       return { ...tickDelta, exhausted: 1 };
     case "retry": {
-      const outcome = await operations.recordRetry(db, task.id, stopId, decision.reason);
+      const outcome = await recordClassificationRetry(db, task.id, stopId, decision.reason);
       return outcome === "ineligible" ? { ...tickDelta, ineligible: 1 } : tickDelta;
     }
     case "ineligible": {
-      const settled = await operations.settleIneligible(db, task.id, stopId, decision.reason, task.identity);
+      const settled = await settleIneligible(db, task.id, stopId, decision.reason, task.identity);
       return settled ? { ...tickDelta, ineligible: 1 } : tickDelta;
     }
   }
@@ -527,8 +515,8 @@ export const baseDriftRecoveryTick = async (
     for (const task of tasks) {
       cursor = task.id;
       if (result.examined >= limit) break;
-      const loaded = await loadCandidate(db, task.id);
-      const candidateDecision = classifyCandidate(loaded);
+      const candidateFacts = await readCandidateFacts(db, task.id);
+      const candidateDecision = classifyCandidate(candidateFacts);
       switch (candidateDecision.kind) {
         case "skip":
           continue;
