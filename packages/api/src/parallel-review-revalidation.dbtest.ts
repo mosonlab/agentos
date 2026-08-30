@@ -39,7 +39,6 @@ beforeEach(async () => {
   specificationReads.length = 0;
   await resetTestDb(db);
   await runDbScript("seed.ts");
-  await runDbScript("sync-canonical-prompts.ts");
 });
 
 after(async () => {

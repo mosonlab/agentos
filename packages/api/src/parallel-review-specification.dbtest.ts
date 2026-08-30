@@ -42,7 +42,6 @@ beforeEach(async () => {
   specificationReads.length = 0;
   await resetTestDb(db);
   await runDbScript("seed.ts");
-  await runDbScript("sync-canonical-prompts.ts");
 });
 
 after(async () => {
@@ -566,7 +565,6 @@ test("tampered direct and compound materializations refuse claim with the named 
   for (const shape of ["direct", "compound"] as const) {
     await resetTestDb(db);
     await runDbScript("seed.ts");
-    await runDbScript("sync-canonical-prompts.ts");
     materializedSpecification = shape === "direct"
       ? `Feature brief:\n${SPECIFICATION_BRIEF}\nPersist the final implementation output for this step through the Anneal task output endpoint.`
       : "tampered specification";

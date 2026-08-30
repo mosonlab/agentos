@@ -34,7 +34,6 @@ beforeEach(async () => {
   specificationReads.length = 0;
   await resetTestDb(db);
   await runDbScript("seed.ts");
-  await runDbScript("sync-canonical-prompts.ts");
 });
 
 after(async () => {
@@ -109,7 +108,6 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
   for (const mode of ["failed", "parked", "archived-agent"] as const) {
     await resetTestDb(db);
     await runDbScript("seed.ts");
-    await runDbScript("sync-canonical-prompts.ts");
     const fixture = await instantiateDirect();
     const blindBeforeImplementation = fixture.blindTaskId;
 
