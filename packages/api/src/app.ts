@@ -161,7 +161,6 @@ import { InboxRunFenceRefusal, supersedeTaskInboxMessage, suspendForInbox } from
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
-import { isTemplateInstantiationRefusal } from "./template-errors.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
 import {
   readCommitted,
@@ -803,18 +802,7 @@ const inboxQuestionInput = z.object({
   resumableUntil: z.coerce.date().nullable().optional(),
 });
 const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
-const stepOverridesInput = z.record(z.string(), stepOverrideInput).superRefine((overrides, context) => {
-  for (const stepIndex of Object.keys(overrides)) {
-    if (!/^[1-9]\d*$/u.test(stepIndex)) {
-      context.addIssue({
-        code: "custom",
-        path: [stepIndex],
-        message: `Step override key ${stepIndex} must be a positive decimal step index without leading zeros`,
-        params: { templateRefusalCode: "step_override_invalid_key" },
-      });
-    }
-  }
-});
+const stepOverridesInput = z.record(z.string(), stepOverrideInput);
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
@@ -828,31 +816,7 @@ const instantiateTemplateInput = z.object({
   if (branchName !== undefined && !isValidBranchName(branchName)) {
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
   }
-  if (value.afterTaskId && value.autoStart) {
-    context.addIssue({
-      code: "custom",
-      path: ["afterTaskId"],
-      message: `afterTaskId ${value.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
-      params: { templateRefusalCode: "dispatch_conflicts_with_auto_start" },
-    });
-  }
 });
-const isTemplateInputError = (error: unknown): error is Error => (
-  error instanceof Error
-  && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
-);
-const templateSchemaRefusal = (error: unknown): Refusal | null => {
-  if (!(error instanceof z.ZodError)) return null;
-  const issue = error.issues.find((candidate) => {
-    const params = (candidate as unknown as { params?: Record<string, unknown> }).params;
-    return typeof params?.templateRefusalCode === "string";
-  });
-  if (!issue) return null;
-  const params = (issue as unknown as { params?: Record<string, unknown> }).params;
-  return typeof params?.templateRefusalCode === "string"
-    ? refusal("invalid-request", issue.message, { code: params.templateRefusalCode })
-    : null;
-};
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -1159,20 +1123,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     const resolved = resolvePayloadVariables(template, payload as Record<string, unknown>);
     if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
-    try {
-      const result = await instantiateTemplate(db, template.projectId, template.id, {
-        repoId: template.webhookRepoId!, variables: resolved.variables, autoStart: true,
-      }, {
-        actorType: "webhook",
-        activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
-        source: TaskSource.WEBHOOK,
-        fire: { source: TriggerFireSource.WEBHOOK, dedupeKey },
-      });
-      return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
-    } catch (error: unknown) {
-      if (isTemplateInputError(error)) return context.json({ error: error.message }, 400);
-      throw error;
-    }
+    const result = await instantiateTemplate(db, template.projectId, template.id, {
+      repoId: template.webhookRepoId!, variables: resolved.variables, autoStart: true,
+    }, {
+      actorType: "webhook",
+      activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
+      source: TaskSource.WEBHOOK,
+      fire: { source: TriggerFireSource.WEBHOOK, dedupeKey },
+    });
+    return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
   });
 
   app.get("/files", async (context) => {
@@ -1984,24 +1943,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }));
   });
   app.post("/projects/:projectId/task-templates/:templateId/instantiate", async (context) => {
-    try {
-      return context.json(await instantiateTemplate(
-        db,
-        id.parse(context.req.param("projectId")),
-        id.parse(context.req.param("templateId")),
-        await readJson(context.req.raw, instantiateTemplateInput),
-      ), 201);
-    } catch (error: unknown) {
-      if (isTemplateInstantiationRefusal(error)) {
-        return refusalJson(context, refusal("invalid-request", error.message, { code: error.code }));
-      }
-      const schemaRefusal = templateSchemaRefusal(error);
-      if (schemaRefusal) return refusalJson(context, schemaRefusal);
-      if (isTemplateInputError(error)) {
-        return context.json({ error: error.message }, 400);
-      }
-      throw error;
-    }
+    return context.json(await instantiateTemplate(
+      db,
+      id.parse(context.req.param("projectId")),
+      id.parse(context.req.param("templateId")),
+      await readJson(context.req.raw, instantiateTemplateInput),
+    ), 201);
   });
 
   // --- triggers: webhook-configured templates, their ledger, and manual fire --
@@ -2197,22 +2144,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (unresolved.length > 0) {
       return context.json({ error: `Unresolved template variables: ${unresolved.join(", ")}`, unresolved }, 400);
     }
-    try {
-      const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
-        repoId: trigger.webhookRepoId!, variables, autoStart: true,
-      }, {
-        actorType: "operator",
-        activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
-        source: TaskSource.MANUAL,
-        fire: { source: TriggerFireSource.MANUAL },
-      });
-      return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
-    } catch (error: unknown) {
-      if (isTemplateInputError(error)) {
-        return context.json({ error: error.message }, 400);
-      }
-      throw error;
-    }
+    const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
+      repoId: trigger.webhookRepoId!, variables, autoStart: true,
+    }, {
+      actorType: "operator",
+      activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
+      source: TaskSource.MANUAL,
+      fire: { source: TriggerFireSource.MANUAL },
+    });
+    return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
   });
 
   app.get("/tasks", async (context) => {
