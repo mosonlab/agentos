@@ -220,19 +220,52 @@ test("production host requires every deploy phase", () => {
   }
 });
 
-test("release artifact inventory includes deploy runtime and workspace dependencies", () => {
+test("release artifact inventory copies and verifies deploy runtime and workspace dependencies", () => {
   const root = mkdtempSync(join(tmpdir(), "anneal-artifact-inventory-"));
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-inventory-release-"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["apps/*", "packages/*"] }));
   for (const workspace of ["apps/web", "packages/api"]) {
     mkdirSync(join(root, workspace), { recursive: true });
     writeFileSync(join(root, workspace, "package.json"), "{}\n");
   }
-  assert.deepEqual(workspaceDependencyPaths(root), ["apps/web/node_modules", "packages/api/node_modules"]);
-  const paths = deployReleaseArtifactPaths(root);
-  assert.ok(paths.includes("scripts/deploy"));
-  assert.ok(paths.includes("packages/db/src"));
-  for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) assert.ok(paths.includes(path), path);
-  rmSync(root, { recursive: true, force: true });
+  const adapterPath = "scripts/merge-lease-adapter.mjs";
+  const adapterContents = "export const fixture = true;\n";
+  minimalBuildTree(root, revisions.to);
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  writeFileSync(join(root, adapterPath), adapterContents);
+  try {
+    assert.deepEqual(workspaceDependencyPaths(root), ["apps/web/node_modules", "packages/api/node_modules"]);
+    const paths = deployReleaseArtifactPaths(root);
+    assert.ok(paths.includes("scripts/deploy"));
+    assert.ok(paths.includes(adapterPath));
+    assert.ok(paths.includes("packages/db/src"));
+    for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) assert.ok(paths.includes(path), path);
+    const assembled = assembleReleaseDirectory({
+      stageRoot: root,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: paths.filter((path) => [
+        "packages/api/dist",
+        "packages/db/prisma",
+        "packages/db/src",
+        adapterPath,
+      ].includes(path)),
+      optionalArtifactPaths: [],
+    });
+    const verified = verifyReleaseArtifact({
+      deployRoot,
+      revision: revisions.to,
+      releaseName: assembled.releaseName,
+    });
+    assert.equal(readFileSync(join(verified.releaseDirectory, adapterPath), "utf8"), adapterContents);
+    const adapterEvidence = verified.files.find(({ path }) => path === adapterPath);
+    assert.equal(adapterEvidence?.type, "file");
+    assert.equal(adapterEvidence?.size, Buffer.byteLength(adapterContents));
+    assert.match(adapterEvidence?.sha256 ?? "", /^[0-9a-f]{64}$/u);
+  } finally {
+    removeTree(root);
+    removeTree(deployRoot);
+  }
 });
 
 test("fixture executes the whole deploy sequence with explicit attempt facts", async () => {

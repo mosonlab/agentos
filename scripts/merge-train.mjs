@@ -6,6 +6,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  acquireMergeLease,
+  isMergeLeaseReleaseAnomaly,
+  releaseMergeLease,
+} from "./merge-lease-adapter.mjs";
+
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const MAX_CANDIDATES = 3;
 
@@ -98,17 +104,18 @@ const defaultGate = async (_repoRoot, prefix, checkout) => {
   return { status, code: result.code, output };
 };
 
-const defaultAcquireLease = (repoRoot, task, count) =>
-  checkedProcess(
-    "bash",
-    [path.join(repoRoot, "scripts", "merge-lease.sh"), "acquire", "--reason", `Publish ${count}-entry merge train`, "--task", task],
-    { cwd: repoRoot },
-  );
-
-const defaultReleaseLease = (repoRoot, task) =>
-  checkedProcess("bash", [path.join(repoRoot, "scripts", "merge-lease.sh"), "release", "--task", task], {
-    cwd: repoRoot,
+export const acquireMergeTrainLease = (repoRoot, task, count, { environment = process.env, runner } = {}) =>
+  acquireMergeLease({
+    repoRoot,
+    environment,
+    runner,
+    task,
+    reason: `Publish ${count}-entry merge train`,
+    timeoutMinutes: 0,
   });
+
+export const releaseMergeTrainLease = (repoRoot, task, { environment = process.env, runner } = {}) =>
+  releaseMergeLease({ repoRoot, environment, runner, task });
 
 const defaultPush = async (repoRoot, prefix) => {
   const result = await gitResult(repoRoot, ["push", "--porcelain", "origin", `${prefix.oid}:refs/heads/main`]);
@@ -126,13 +133,13 @@ const defaultPush = async (repoRoot, prefix) => {
 };
 
 const realAdapters = {
-  acquireLease: defaultAcquireLease,
+  acquireLease: acquireMergeTrainLease,
   fetchCandidate: defaultFetchCandidate,
   gate: defaultGate,
   push: defaultPush,
   readMain,
   readPullRequest: defaultReadPullRequest,
-  releaseLease: defaultReleaseLease,
+  releaseLease: releaseMergeTrainLease,
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
@@ -312,7 +319,21 @@ export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapter
       };
     }
 
-    await adapters.acquireLease(repoRoot, task, passingCount);
+    const acquisition = await adapters.acquireLease(repoRoot, task, passingCount);
+    if (acquisition.outcome === "contended") {
+      return {
+        status: "lease-contended",
+        baseSha,
+        alreadyDelivered,
+        prefixes: built.prefixes,
+        blocked: built.blocked,
+        gateResults,
+        published: [],
+      };
+    }
+    if (acquisition.outcome === "unreachable") {
+      throw new Error(`merge Lease acquisition was unreachable: ${acquisition.detail}`);
+    }
     leaseHeld = true;
     safeToRelease = true;
     let liveMain = await adapters.readMain(repoRoot);
@@ -372,7 +393,11 @@ export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapter
     if (leaseHeld) {
       if (safeToRelease) {
         try {
-          await adapters.releaseLease(repoRoot, task);
+          const release = await adapters.releaseLease(repoRoot, task);
+          if (isMergeLeaseReleaseAnomaly(release)) {
+            const detail = release.detail ?? release.heldFor ?? release.heldBy ?? "no detail";
+            cleanupError = new Error(`merge Lease release ${release.outcome}: ${detail}`);
+          }
         } catch (error) {
           cleanupError = error;
         }

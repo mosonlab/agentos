@@ -4,12 +4,12 @@ import test from "node:test";
 import { type Prisma, type PrismaClient } from "@anneal/db";
 
 import {
+  acquireMergeLeaseAdapter,
   commitWithLeaseOutcome,
   commitWithLeaseOutcomes,
   LeaseReleaseDeferralRecordError,
   leaseHolderFor,
-  mergeLeaseScriptPath,
-  readMergeLeaseRelease,
+  releaseMergeLeaseAdapter,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
@@ -112,18 +112,38 @@ const holderTx = (input: {
   },
 } as unknown as Prisma.TransactionClient);
 
-test("release runtime executes the current release's helper while keeping the Git checkout separate", () => {
-  assert.equal(
-    mergeLeaseScriptPath({
-      AGENTOS_RELEASE_ROOT: "/srv/agentos/current",
-      AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source",
-    }),
-    "/srv/agentos/current/scripts/merge-lease.sh",
-  );
-  assert.match(
-    mergeLeaseScriptPath({ AGENTOS_REPOSITORY_ROOT: "/srv/agentos/source" }),
-    /\/scripts\/merge-lease\.sh$/u,
-  );
+test("API lease caller keeps zero-wait acquisition and bounded process timeouts", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const environment = { AGENTOS_RELEASE_ROOT: "/srv/agentos/current" };
+  const calls: unknown[][] = [];
+  const runner = async (...args: Parameters<import("../../../scripts/merge-lease-adapter.mjs").LeaseRunner>) => {
+    calls.push(args);
+    return calls.length === 1
+      ? { code: 75, stderr: "merge-lease: timed out\n" }
+      : { code: 0, stdout: "MERGE LEASE: not-held\n" };
+  };
+
+  assert.equal((await acquireMergeLeaseAdapter("chain-42", { environment, runner })).outcome, "contended");
+  assert.equal((await releaseMergeLeaseAdapter("chain-42", { environment, runner })).outcome, "not-held");
+  assert.deepEqual(calls[0], [
+    "bash",
+    [
+      "/srv/agentos/current/scripts/merge-lease.sh",
+      "acquire",
+      "--task",
+      "chain-42",
+      "--reason",
+      "chain merge tail chain-42",
+      "--timeout-minutes",
+      "0",
+    ],
+    { cwd: undefined, environment, processTimeoutMs: 30_000 },
+  ]);
+  assert.deepEqual(calls[1], [
+    "bash",
+    ["/srv/agentos/current/scripts/merge-lease.sh", "release", "--task", "chain-42"],
+    { cwd: undefined, environment, processTimeoutMs: 90_000 },
+  ]);
 });
 
 test("leaseHolderFor owns every merge-tail Task shape, including a failed auxiliary", async () => {
@@ -157,28 +177,6 @@ test("leaseHolderFor owns every merge-tail Task shape, including a failed auxili
   for (const entry of cases) {
     assert.deepEqual(await leaseHolderFor(entry.tx, "task-1"), entry.expected, entry.name);
   }
-});
-
-test("release parsing requires the timestamp while leaving duration validation to the calculator", () => {
-  assert.deepEqual(
-    readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha 2026-08-27T12:00:00.000Z"),
-    {
-      outcome: "released",
-      ref: "refs/merge-lease/holder",
-      sha: "lease-sha",
-      acquiredAt: "2026-08-27T12:00:00.000Z",
-    },
-  );
-  assert.deepEqual(
-    readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha malformed-timestamp"),
-    {
-      outcome: "released",
-      ref: "refs/merge-lease/holder",
-      sha: "lease-sha",
-      acquiredAt: "malformed-timestamp",
-    },
-  );
-  assert.equal(readMergeLeaseRelease("MERGE LEASE: released refs/merge-lease/holder lease-sha"), null);
 });
 
 test("mergeLeaseHold calculates whole elapsed seconds and clamps invalid or skewed timestamps", () => {
