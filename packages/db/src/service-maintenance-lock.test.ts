@@ -14,8 +14,10 @@ import { describe, it } from "node:test";
 import type { HeldMaintenanceLock, MaintenanceLockAcquisition, MaintenanceLockRole } from "./maintenance-lock.js";
 import {
   holdSharedServiceMaintenanceLock,
+  resolveServiceLockRetentionIntervalMs,
   resolveServiceLockTarget,
   ServiceMaintenanceLockError,
+  SERVICE_LOCK_RETENTION_INTERVAL_ENV,
   SERVICE_LOCK_CONFIGURATION_EXIT_CODE,
   SERVICE_LOCK_CONTENTION_EXIT_CODE,
   SERVICE_LOCK_LOST_REASON,
@@ -124,6 +126,50 @@ describe("resolveServiceLockTarget", () => {
       ok: false,
       reason: "database-url-schema-unnamed",
     });
+  });
+});
+
+describe("resolveServiceLockRetentionIntervalMs", () => {
+  it("leaves the shipped interval alone when nothing is set", () => {
+    assert.equal(resolveServiceLockRetentionIntervalMs(undefined), SERVICE_LOCK_RETENTION_INTERVAL_MS);
+    // Unset and set-to-nothing are the same intent, and a shell that exports an
+    // empty value is the ordinary way to reach the second one.
+    assert.equal(resolveServiceLockRetentionIntervalMs(""), SERVICE_LOCK_RETENTION_INTERVAL_MS);
+  });
+
+  it("accepts a shorter interval, which is the only direction a test needs", () => {
+    assert.equal(resolveServiceLockRetentionIntervalMs("250"), 250);
+    assert.equal(
+      resolveServiceLockRetentionIntervalMs(String(SERVICE_LOCK_RETENTION_INTERVAL_MS)),
+      SERVICE_LOCK_RETENTION_INTERVAL_MS,
+    );
+  });
+
+  it("refuses a longer interval instead of clamping it", () => {
+    // Clamping would honour the variable's presence while ignoring its value,
+    // and the operator would never learn the window they asked for was denied.
+    assert.throws(
+      () => resolveServiceLockRetentionIntervalMs(String(SERVICE_LOCK_RETENTION_INTERVAL_MS + 1)),
+      /may only shorten the retention check/u,
+    );
+  });
+
+  it("refuses anything that is not a positive integer, rather than scheduling NaN", () => {
+    for (const raw of ["0", "-1", "1.5", "10s", "abc", " 250"]) {
+      assert.throws(
+        () => resolveServiceLockRetentionIntervalMs(raw),
+        /must be a positive integer of milliseconds/u,
+        `'${raw}' must be refused`,
+      );
+    }
+  });
+
+  it("names itself, so a refusal tells the operator which variable to fix", () => {
+    assert.equal(SERVICE_LOCK_RETENTION_INTERVAL_ENV, "SERVICE_LOCK_RETENTION_INTERVAL_MS");
+    assert.throws(
+      () => resolveServiceLockRetentionIntervalMs("nope"),
+      new RegExp(SERVICE_LOCK_RETENTION_INTERVAL_ENV, "u"),
+    );
   });
 });
 
