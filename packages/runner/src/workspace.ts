@@ -10,7 +10,9 @@ import type { SessionConfigOptions } from "./adapters/session-config.js";
 import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
-import { configureWorkspaceGit, resolveRunnerGitIdentity } from "./git-provenance.js";
+import {
+  configureWorkspaceGit, resolveRunnerGitIdentity, type GitProvenanceClaim,
+} from "./git-provenance.js";
 import { type RetryOptions } from "./network-retry.js";
 import {
   ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
@@ -54,12 +56,11 @@ const assertMaterializationPathIsPlain = async (workspace: string, path: string)
 
 const materializePreparedSpecification = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  prepared: ClaimedTask["specificationMaterialization"],
   workspace: Workspace,
   execute: WorkspaceCommandExecutor,
   env: NodeJS.ProcessEnv,
 ): Promise<Workspace> => {
-  const prepared = claim.specificationMaterialization;
   if (!prepared) return workspace;
   if (workspace.pinnedBaseSha) throw new Error("Pinned review workspace cannot materialize a direct implementation specification");
   const expectedPath = `.chain/${workspace.branch}/spec.md`;
@@ -99,6 +100,35 @@ export type WorkspaceCommandExecutor = (
   env: NodeJS.ProcessEnv,
   options?: CommandOptions,
 ) => Promise<string>;
+
+export type WorkspaceProvisionClaim = GitProvenanceClaim & Pick<ClaimedTask, "specificationMaterialization"> & {
+  task: GitProvenanceClaim["task"] & Pick<ClaimedTask["task"], "id">;
+  repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch">;
+  run: GitProvenanceClaim["run"] & Pick<
+    ClaimedTask["run"],
+    | "runNumber"
+    | "targetBranch"
+    | "targetBranchPublished"
+    | "pinnedBaseSha"
+    | "implementationBaseSha"
+    | "implementationHeadSha"
+    | "branch"
+  >;
+};
+
+export type WorkspaceReuseClaim = GitProvenanceClaim & {
+  run: GitProvenanceClaim["run"] & Pick<
+    ClaimedTask["run"],
+    "workspacePath" | "branch" | "baseSha" | "pinnedBaseSha"
+  >;
+};
+
+export type ProvisionWorkspaceDependencies = {
+  execute?: WorkspaceCommandExecutor;
+  retryOptions?: RetryOptions;
+  dependencyCacheOptions?: DependencyCacheOptions;
+  mirrorOptions?: RepoMirrorOptions;
+};
 
 /**
  * Every workspace mutation runs through here so that, when RUNNER_RUN_AS_PREFIX
@@ -250,12 +280,13 @@ export const provisionSessionConfig = async (
 
 export const provisionWorkspace = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
-  execute: WorkspaceCommandExecutor = command,
-  retryOptions: RetryOptions = {},
-  dependencyCacheOptions: DependencyCacheOptions = {},
-  mirrorOptions: RepoMirrorOptions = {},
+  claim: WorkspaceProvisionClaim,
+  dependencies: ProvisionWorkspaceDependencies = {},
 ): Promise<Workspace> => {
+  const execute = dependencies.execute ?? command;
+  const retryOptions = dependencies.retryOptions ?? {};
+  const dependencyCacheOptions = dependencies.dependencyCacheOptions ?? {};
+  const mirrorOptions = dependencies.mirrorOptions ?? {};
   const root = resolve(config.workspaceRoot);
   const workspace = resolve(root, claim.run.id);
   if (!inside(root, workspace)) throw new Error("Resolved workspace escaped the controlled root");
@@ -377,7 +408,13 @@ export const provisionWorkspace = async (
         return { path: workspace, branch, baseSha, ...(commitHooksPath ? { commitHooksPath } : {}) };
       },
     );
-    const materialized = await materializePreparedSpecification(config, claim, provisioned, execute, env);
+    const materialized = await materializePreparedSpecification(
+      config,
+      claim.specificationMaterialization,
+      provisioned,
+      execute,
+      env,
+    );
     await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
     return materialized;
   } catch (error: unknown) {
@@ -386,7 +423,7 @@ export const provisionWorkspace = async (
   }
 };
 
-export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): Promise<Workspace> => {
+export const reuseWorkspace = async (config: RunnerConfig, claim: WorkspaceReuseClaim): Promise<Workspace> => {
   if (!claim.run.workspacePath || !claim.run.branch || !claim.run.baseSha) throw new Error("Resumed Run is missing workspace metadata");
   const root = resolve(config.workspaceRoot);
   const workspace = resolve(claim.run.workspacePath);
@@ -416,7 +453,7 @@ export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): 
  */
 export const writeSessionCredentials = async (
   config: Pick<RunnerConfig, "apiUrl" | "path" | "home" | "runAsPrefix">,
-  claim: ClaimedTask,
+  claim: Pick<ClaimedTask, "sessionToken" | "fencingToken"> & { run: Pick<ClaimedTask["run"], "id"> },
   workspace: Workspace,
 ): Promise<string> => {
   const directory = join(workspace.path, ".agentos");

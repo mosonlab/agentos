@@ -142,14 +142,16 @@ test("a transient mirror fetch failure escapes provisioning as a transient error
   const escaped = await provisionWorkspace(
     config(root),
     claim("https://example.test/repo.git"),
-    async (executorConfig, executable, args, cwd, env) => {
-      // Only git is faked: the mirror's own filesystem bookkeeping is real work
-      // in a temporary directory, and the retry under test rides on the fetch.
-      if (executable === "/bin/sh") return runCommand(executorConfig.runAsPrefix, executable, args, cwd, env, {});
-      if (args[0] === "fetch") throw new Error(message);
-      return "";
+    {
+      execute: async (executorConfig, executable, args, cwd, env) => {
+        // Only git is faked: the mirror's own filesystem bookkeeping is real work
+        // in a temporary directory, and the retry under test rides on the fetch.
+        if (executable === "/bin/sh") return runCommand(executorConfig.runAsPrefix, executable, args, cwd, env, {});
+        if (args[0] === "fetch") throw new Error(message);
+        return "";
+      },
+      retryOptions: { attempts: 1 },
     },
-    { attempts: 1 },
   ).then(() => null, (error: unknown) => error);
   assert.ok(escaped instanceof Error, "the fetch failure must escape provisioning, not be swallowed");
 

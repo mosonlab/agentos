@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ControlPlaneError, type ClaimedTask } from "./api.js";
+import { ControlPlaneError } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { deliverUnderLease, openDeliveryLease, type LeaseHeartbeat } from "./lease.js";
+import {
+  deliverUnderLease, openDeliveryLease, type DeliveryLeaseClaim, type LeaseHeartbeat,
+} from "./lease.js";
 import { DELIVERY_LEASE_RESERVE_MS, MIN_DELIVERY_BUDGET_MS } from "./network-retry.js";
 
 const config = { leaseSeconds: 60, heartbeatIntervalMs: 30_000 } as unknown as RunnerConfig;
-const claim = { run: { id: "run-1" } } as ClaimedTask;
+const claim = { run: { id: "run-1" }, fencingToken: "fence-1" } satisfies DeliveryLeaseClaim;
 
 const rejection = (status: number, code?: string): Error => new ControlPlaneError(status, "rejected", code);
 

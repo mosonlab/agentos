@@ -20,6 +20,12 @@ export type RegressionOutputHandoff = {
   commitSha: string;
 };
 
+/** The exact Run and output contract used to qualify a Regression handoff. */
+export type RegressionHandoffClaim = {
+  task: { templateStep: Pick<NonNullable<ClaimedTask["task"]["templateStep"]>, "outputKind"> | null };
+  run: Pick<ClaimedTask["run"], "id">;
+};
+
 const handoffPath = (workspace: Workspace): string =>
   join(workspace.path, ".agentos", "regression-output.json");
 
@@ -72,7 +78,7 @@ cat -- "$path"
  */
 export const readRegressionOutputHandoff = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: RegressionHandoffClaim,
   workspace: Workspace,
 ): Promise<RegressionOutputHandoff | null> => {
   if (claim.task.templateStep?.outputKind !== REGRESSION_VERIFICATION_OUTPUT_KIND) return null;

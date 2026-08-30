@@ -5,6 +5,12 @@ import type { ClaimedTask } from "./api.js";
 import type { GitIdentity, RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
 
+/** The run and Chain identity used to author commit provenance. */
+export type GitProvenanceClaim = Pick<ClaimedTask, "executionMode" | "runner"> & {
+  task: Pick<ClaimedTask["task"], "chainId" | "chainIndex" | "templateStep">;
+  run: Pick<ClaimedTask["run"], "id">;
+};
+
 export type GitCommandExecutor = (
   config: RunnerConfig,
   executable: string,
@@ -46,7 +52,7 @@ export const resolveRunnerGitIdentity = async (
 
 const safeTrailerValue = (value: string): boolean => value.trim().length > 0 && !/[\0\r\n]/u.test(value);
 
-const provenanceFor = (claim: ClaimedTask): { step: string; provider: "codex" | "claude" | "pi" } | null => {
+const provenanceFor = (claim: GitProvenanceClaim): { step: string; provider: "codex" | "claude" | "pi" } | null => {
   const stepName = claim.task.templateStep?.name;
   const provider = claim.runner === "CODEX" ? "codex"
     : claim.runner === "CLAUDE" ? "claude"
@@ -67,7 +73,7 @@ const provenanceFor = (claim: ClaimedTask): { step: string; provider: "codex" | 
 const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 const hookBody = (
-  claim: ClaimedTask,
+  claim: GitProvenanceClaim,
   workspacePath: string,
   commonDir: string,
   provenance: NonNullable<ReturnType<typeof provenanceFor>>,
@@ -143,7 +149,7 @@ ANNEAL_PROVENANCE
  * so a retained workspace cannot mislabel a later human commit. */
 export const configureWorkspaceGit = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: GitProvenanceClaim,
   workspacePath: string,
   identity: GitIdentity,
   env: NodeJS.ProcessEnv,

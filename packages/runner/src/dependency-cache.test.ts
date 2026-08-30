@@ -8,7 +8,6 @@ import { platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
   DEPENDENCY_CACHE_ENTRY_LIMIT, DependencyCacheInputMissError, deriveDependencyCacheKey,
@@ -16,7 +15,7 @@ import {
   type DependencyCacheProgress, type DependencyCacheToolchain, type DependencyCommandExecutor,
 } from "./dependency-cache.js";
 import { CommandTimeoutError, runCommand } from "./exec.js";
-import { provisionWorkspace, workspaceEnvironment } from "./workspace.js";
+import { provisionWorkspace, workspaceEnvironment, type WorkspaceProvisionClaim } from "./workspace.js";
 
 const TOOLCHAIN: DependencyCacheToolchain = {
   node: "v24.0.0",
@@ -838,12 +837,30 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
       return realExecutor(runnerConfig, executable, args, cwd, env, options);
     };
     const branchClaim = {
-      task: { id: "cache-task" },
+      executionMode: "agent",
+      runner: "CODEX",
+      specificationMaterialization: null,
+      task: { id: "cache-task", chainId: null, chainIndex: null, templateStep: null },
       repo: { remoteUrl: remote, defaultBranch: "main" },
-      run: { id: "branch-run", runNumber: 1, targetBranch: "main", branch: "cache-feature" },
-    } as ClaimedTask;
+      run: {
+        id: "branch-run",
+        runNumber: 1,
+        targetBranch: "main",
+        targetBranchPublished: false,
+        branch: "cache-feature",
+        pinnedBaseSha: null,
+        implementationBaseSha: null,
+        implementationHeadSha: null,
+      },
+    } satisfies WorkspaceProvisionClaim;
     const branchWorkspace = await provisionWorkspace(
-      configured, branchClaim, execute, { attempts: 1 }, { report: () => undefined },
+      configured,
+      branchClaim,
+      {
+        execute,
+        retryOptions: { attempts: 1 },
+        dependencyCacheOptions: { report: () => undefined },
+      },
     );
     assert.equal(installs, 1);
     assert.equal(
@@ -856,20 +873,30 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
     const cachedPackageLock = join(root, "cache/entries", cacheEntries[0]!, "trees/node_modules/.package-lock.json");
     const cachedBefore = digest(await readFile(cachedPackageLock, "utf8"));
     const pinnedClaim = {
-      task: { id: "cache-review" },
+      executionMode: "agent",
+      runner: "CODEX",
+      specificationMaterialization: null,
+      task: { id: "cache-review", chainId: null, chainIndex: null, templateStep: null },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "pinned-run",
         runNumber: 1,
         targetBranch: head,
+        targetBranchPublished: false,
         branch: "cache-feature",
         pinnedBaseSha: head,
         implementationBaseSha: head,
         implementationHeadSha: head,
       },
-    } as ClaimedTask;
+    } satisfies WorkspaceProvisionClaim;
     const pinnedWorkspace = await provisionWorkspace(
-      configured, pinnedClaim, execute, { attempts: 1 }, { report: () => undefined },
+      configured,
+      pinnedClaim,
+      {
+        execute,
+        retryOptions: { attempts: 1 },
+        dependencyCacheOptions: { report: () => undefined },
+      },
     );
     assert.equal(installs, 1, "pinned provisioning must restore instead of invoking npm");
     assert.equal(await git(pinnedWorkspace.path, "branch", "--show-current"), "");

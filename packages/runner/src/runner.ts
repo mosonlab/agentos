@@ -703,9 +703,10 @@ export const executeClaim = async (
           config,
           claim,
           delivered,
-          undefined,
-          (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
-          retryOptions,
+          {
+            recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
+            retryOptions,
+          },
         ));
     }
     const primaryDelivery = delivery;
