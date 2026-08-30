@@ -46,6 +46,7 @@ const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
   chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
   latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null }, taskCost: null,
+  blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null,
   ...overrides,
 });
 

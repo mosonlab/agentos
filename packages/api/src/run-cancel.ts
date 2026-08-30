@@ -6,7 +6,7 @@ import {
   TaskStatus,
 } from "@anneal/db";
 
-import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { commitWithLeaseOutcome, type ReleaseMergeLease } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { terminalizeRun } from "./run-terminal.js";
@@ -38,7 +38,6 @@ export type RunCancellation = {
   cancellationState: CancellationState;
   requestId: string;
   reason?: string | null;
-  releaseMergeLeaseTask: MergeLeaseTarget | null;
 };
 
 export type CancellationAcknowledgement = {
@@ -47,7 +46,6 @@ export type CancellationAcknowledgement = {
   status: RunStatus;
   cancellationState: CancellationState;
   requestId: string;
-  releaseMergeLeaseTask: MergeLeaseTarget | null;
 };
 
 const refused = (reason: "not-found" | "conflict", message: string): Refusal => ({ reason, message });
@@ -56,8 +54,9 @@ export const cancelRun = async (
   db: PrismaClient,
   runId: string,
   body: CancelRunInput,
+  releaseMergeLease: ReleaseMergeLease,
 ): Promise<RunCancellation | Refusal> => {
-  const result = await db.$transaction(async (tx) => {
+  const result = await commitWithLeaseOutcome<RunCancellation | Refusal>(db, async (tx) => {
     // Run owns cancellation and terminalization. Take that mutex before Task,
     // matching completion so the two actions cannot enter the rows backwards.
     await lockRunRow(tx, runId);
@@ -84,14 +83,20 @@ export const cancelRun = async (
         } } } },
       },
     });
-    if (!run) return refused("not-found", "Run not found");
-    if (body.parkTask && !run.taskId) return refused("conflict", "Run has no Task to park");
-    const parkTarget = body.parkTask && run.taskId ? await lockTaskMutationRows(tx, run.taskId) : null;
-    if (body.parkTask && run.taskId && !parkTarget) return refused("not-found", "Task not found");
-    if (parkTarget?.archivedAt !== null && parkTarget !== null) {
-      return refused("conflict", "Cannot park an archived task");
+    if (!run) return { value: refused("not-found", "Run not found"), leaseOutcome: { kind: "continue" } };
+    if (body.parkTask && !run.taskId) {
+      return { value: refused("conflict", "Run has no Task to park"), leaseOutcome: { kind: "continue" } };
     }
-    if (parkTarget?.status === TaskStatus.DONE) return refused("conflict", "Cannot park a completed task");
+    const parkTarget = body.parkTask && run.taskId ? await lockTaskMutationRows(tx, run.taskId) : null;
+    if (body.parkTask && run.taskId && !parkTarget) {
+      return { value: refused("not-found", "Task not found"), leaseOutcome: { kind: "continue" } };
+    }
+    if (parkTarget?.archivedAt !== null && parkTarget !== null) {
+      return { value: refused("conflict", "Cannot park an archived task"), leaseOutcome: { kind: "continue" } };
+    }
+    if (parkTarget?.status === TaskStatus.DONE) {
+      return { value: refused("conflict", "Cannot park a completed task"), leaseOutcome: { kind: "continue" } };
+    }
 
     const parkRequestedTask = async () => {
       if (!parkTarget || parkTarget.status === TaskStatus.BACKLOG) return;
@@ -108,33 +113,43 @@ export const cancelRun = async (
 
     if (run.cancelRequestId) {
       if (run.cancelRequestId !== body.requestId) {
-        return refused("conflict", `Run already has cancellation request ${run.cancelRequestId}`);
+        return {
+          value: refused("conflict", `Run already has cancellation request ${run.cancelRequestId}`),
+          leaseOutcome: { kind: "continue" },
+        };
       }
       await parkRequestedTask();
       return {
-        runId: run.id,
-        taskId: run.taskId,
-        status: run.status,
-        cancellationState: run.cancelAcknowledgedAt
-          ? "acknowledged" as const
-          : run.status === RunStatus.CANCELLED ? "unconfirmed" as const : "requested" as const,
-        requestId: run.cancelRequestId,
-        reason: run.cancelReason,
-        releaseMergeLeaseTask: null,
+        value: {
+          runId: run.id,
+          taskId: run.taskId,
+          status: run.status,
+          cancellationState: run.cancelAcknowledgedAt
+            ? "acknowledged" as const
+            : run.status === RunStatus.CANCELLED ? "unconfirmed" as const : "requested" as const,
+          requestId: run.cancelRequestId,
+          reason: run.cancelReason,
+        },
+        leaseOutcome: { kind: "continue" },
       };
     }
     if (executionModeFor(run.task?.templateStep ?? null) === "mechanical") {
-      return refused("conflict", "Mechanical merge Runs cannot be cancelled after authorization");
+      return {
+        value: refused("conflict", "Mechanical merge Runs cannot be cancelled after authorization"),
+        leaseOutcome: { kind: "continue" },
+      };
     }
     if (!([RunStatus.QUEUED, ...activeRunStatuses] as RunStatus[]).includes(run.status)) {
       return {
-        runId: run.id,
-        taskId: run.taskId,
-        status: run.status,
-        cancellationState: "terminal" as const,
-        requestId: body.requestId,
-        reason: null,
-        releaseMergeLeaseTask: null,
+        value: {
+          runId: run.id,
+          taskId: run.taskId,
+          status: run.status,
+          cancellationState: "terminal" as const,
+          requestId: body.requestId,
+          reason: null,
+        },
+        leaseOutcome: { kind: "continue" },
       };
     }
 
@@ -148,7 +163,12 @@ export const cancelRun = async (
         sessionTokenRevokedAt: now,
       },
     });
-    if (requested.count !== 1) return refused("conflict", "Run changed while cancellation was being requested");
+    if (requested.count !== 1) {
+      return {
+        value: refused("conflict", "Run changed while cancellation was being requested"),
+        leaseOutcome: { kind: "continue" },
+      };
+    }
     await parkRequestedTask();
     if (run.taskId) await tx.taskActivity.create({ data: {
       taskId: run.taskId,
@@ -171,28 +191,33 @@ export const cancelRun = async (
           activity: "acknowledged",
         },
       });
-      if (terminal === null || "message" in terminal) return terminal;
+      if (terminal === null) return null;
+      if ("message" in terminal) return { value: terminal, leaseOutcome: { kind: "continue" } };
       return {
-        runId: terminal.runId,
-        taskId: terminal.taskId,
-        status: terminal.status,
-        cancellationState: "acknowledged" as const,
-        requestId: body.requestId,
-        releaseMergeLeaseTask: terminal.leaseToRelease,
+        value: {
+          runId: terminal.runId,
+          taskId: terminal.taskId,
+          status: terminal.status,
+          cancellationState: "acknowledged" as const,
+          requestId: body.requestId,
+        },
+        leaseOutcome: terminal.leaseOutcome,
       };
     }
     return {
-      runId: run.id,
-      taskId: run.taskId,
-      status: run.status,
-      cancellationState: "requested" as const,
-      requestId: body.requestId,
-      reason: body.reason,
+      value: {
+        runId: run.id,
+        taskId: run.taskId,
+        status: run.status,
+        cancellationState: "requested" as const,
+        requestId: body.requestId,
+        reason: body.reason,
+      },
       // Terminalization is still owed by the runner acknowledgement or by
       // reconciliation, and only a terminal writer may free the lease.
-      releaseMergeLeaseTask: null,
+      leaseOutcome: { kind: "continue" },
     };
-  });
+  }, { release: releaseMergeLease });
 
   return result ?? refused("conflict", "Run changed while cancellation was being settled");
 };
@@ -201,34 +226,42 @@ export const acknowledgeCancellation = async (
   db: PrismaClient,
   runId: string,
   body: CancellationAcknowledgementInput,
+  releaseMergeLease: ReleaseMergeLease,
 ): Promise<CancellationAcknowledgement | Refusal> => {
-  const result = await db.$transaction((tx) => terminalizeRun(tx, {
-    runId,
-    at: new Date(),
-    outcome: {
-      kind: "cancelled",
-      requestId: body.requestId,
-      runnerId: body.runnerId,
-      fencingToken: body.fencingToken,
-      actorId: body.runnerId,
-      cleanupConfirmed: true,
-      activity: "acknowledged",
-      ...(body.workspacePath === undefined ? {} : { workspacePath: body.workspacePath }),
-      ...(body.branch === undefined ? {} : { branch: body.branch }),
-      ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
-      ...(body.worktreeContainmentViolations === undefined
-        ? {}
-        : { worktreeContainmentViolations: body.worktreeContainmentViolations }),
-    },
-  }));
+  const result = await commitWithLeaseOutcome<CancellationAcknowledgement | Refusal>(db, async (tx) => {
+    const terminal = await terminalizeRun(tx, {
+      runId,
+      at: new Date(),
+      outcome: {
+        kind: "cancelled",
+        requestId: body.requestId,
+        runnerId: body.runnerId,
+        fencingToken: body.fencingToken,
+        actorId: body.runnerId,
+        cleanupConfirmed: true,
+        activity: "acknowledged",
+        ...(body.workspacePath === undefined ? {} : { workspacePath: body.workspacePath }),
+        ...(body.branch === undefined ? {} : { branch: body.branch }),
+        ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
+        ...(body.worktreeContainmentViolations === undefined
+          ? {}
+          : { worktreeContainmentViolations: body.worktreeContainmentViolations }),
+      },
+    });
+    if (terminal === null) return null;
+    if ("message" in terminal) return { value: terminal, leaseOutcome: { kind: "continue" } };
+    return {
+      value: {
+        runId: terminal.runId,
+        taskId: terminal.taskId,
+        status: terminal.status,
+        cancellationState: "acknowledged" as const,
+        requestId: body.requestId,
+      },
+      leaseOutcome: terminal.leaseOutcome,
+    };
+  }, { release: releaseMergeLease });
   if (result === null) return refused("conflict", "Run changed while cancellation was being acknowledged");
   if ("message" in result) return result;
-  return {
-    runId: result.runId,
-    taskId: result.taskId,
-    status: result.status,
-    cancellationState: "acknowledged",
-    requestId: body.requestId,
-    releaseMergeLeaseTask: result.leaseToRelease,
-  };
+  return result;
 };

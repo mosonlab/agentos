@@ -6,6 +6,7 @@ import {
   type ChangedFile,
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TAIL_KIND,
+  Prisma,
   PrismaClient,
   RunStatus,
   TaskStatus,
@@ -13,6 +14,9 @@ import {
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
+  deferredLeaseReleases,
+  deferredLeaseReleasesStatement,
+  LeaseReleaseDeferralRecordError,
   withMergeLease,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
@@ -21,6 +25,7 @@ import {
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -62,6 +67,17 @@ const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
   });
 };
 const runWithMergeLease = leaseRunner(acquireChainLease);
+const unreachableReleaseRunner = (attempts: { count: number }): WithMergeLease => (
+  target,
+  fn,
+  database,
+) => withMergeLease(target, fn, database, {
+  acquire: acquireChainLease,
+  release: async () => {
+    attempts.count += 1;
+    return { outcome: "unreachable", detail: "release helper timed out" };
+  },
+});
 const leaseHoldMarkers = (projectId: string) => db.taskActivity.findMany({
   where: {
     task: { projectId },
@@ -90,7 +106,8 @@ after(async () => { await db.$disconnect(); });
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const BRANCH = "agentos/merge-tail-test";
-const NEWER_CLAIM = "merge-readiness-claim:new-worker|2099-01-01T00:00:00.000Z";
+const NEWER_CLAIM_TOKEN = "new-worker-token";
+const NEWER_CLAIM_EXPIRY = new Date("2099-01-01T00:00:00.000Z");
 const CONFIRMED_RELEASED_AT = new Date("2026-08-27T12:01:02.999Z");
 
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
@@ -214,6 +231,77 @@ const seedReadiness = async () => {
   } });
   return { project, repo, regression, readiness, integrator };
 };
+
+const assertDeferredReleaseAndRetry = async (
+  seeded: Awaited<ReturnType<typeof seedReadiness>>,
+  now: Date,
+): Promise<void> => {
+  const pending = await db.taskActivity.findMany({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseRelease },
+  }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+  assert.equal(pending.length, 1, "the failed release writes exactly one durable record");
+  const metadata = pending[0]!.metadata as Record<string, unknown>;
+  assert.equal(metadata.state, "release-deferred");
+  assert.equal(metadata.projectId, seeded.project.id);
+  assert.equal(metadata.chainId, seeded.regression.chainId);
+  assert.equal(metadata.taskId, seeded.regression.id);
+  assert.equal(metadata.failureDetail, "release helper timed out");
+
+  const retried: MergeLeaseTarget[] = [];
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), async (target) => {
+    if (target) retried.push(target);
+  }), 1);
+  assert.deepEqual(retried, [{ projectId: seeded.project.id, chainId: seeded.regression.chainId }]);
+  const terminal = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    AND: [
+      { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseRelease } },
+      { metadata: { path: ["state"], equals: "released" } },
+    ],
+  } });
+  assert.equal((terminal.metadata as Record<string, unknown>).deferredActivityId, pending[0]!.id);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 2_000), async () => {
+    throw new Error("a terminal deferred release must not retry");
+  }), 0);
+};
+
+test("the no-deferral sweep uses its partial index without a TaskActivity scan or sort", async () => {
+  const seeded = await seedReadiness();
+  const noise = Array.from({ length: 5_000 }, (_, index) => ({
+    taskId: seeded.regression.id,
+    actorType: "control-plane",
+    body: `Unrelated activity ${index}`,
+    metadata: { kind: "test.noise", schemaVersion: 1, index },
+  }));
+  await db.taskActivity.createMany({ data: noise });
+  await db.$executeRawUnsafe('ANALYZE "TaskActivity"');
+
+  type PlanNode = {
+    "Node Type"?: string;
+    "Relation Name"?: string;
+    "Index Name"?: string;
+    Plans?: PlanNode[];
+  };
+  const rows = await db.$transaction(async (tx) => {
+    assert.deepEqual(await deferredLeaseReleases(tx), []);
+    return tx.$queryRaw<Array<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>>(
+      Prisma.sql`EXPLAIN (FORMAT JSON, COSTS OFF) ${deferredLeaseReleasesStatement}`,
+    );
+  });
+
+  const root = rows[0]?.["QUERY PLAN"]?.[0]?.Plan;
+  assert.ok(root, "PostgreSQL returned an EXPLAIN plan");
+  const nodes: PlanNode[] = [];
+  const collect = (node: PlanNode): void => {
+    nodes.push(node);
+    node.Plans?.forEach(collect);
+  };
+  collect(root);
+  assert.ok(nodes.some((node) => node["Index Name"] === "TaskActivity_release_deferred_createdAt_id_idx"));
+  assert.equal(nodes.some((node) => node["Node Type"] === "Seq Scan" && node["Relation Name"] === "TaskActivity"), false);
+  assert.equal(nodes.some((node) => node["Node Type"] === "Sort"), false);
+});
 
 test("clean exact-head readiness authorizes and queues mechanical merge", async () => {
   const seeded = await seedReadiness();
@@ -346,7 +434,7 @@ test("a post-acquire release or hold-recording failure remains observable", asyn
   const failingFinalRelease: WithMergeLease = async (target, fn) => {
     if (target) leasedTargets.push(target);
     const result = await fn();
-    if (result.disposition.kind === "release") throw releaseFailure;
+    if (result.leaseOutcome.kind === "stop") throw releaseFailure;
     return { outcome: "ran", value: result.value };
   };
 
@@ -402,7 +490,8 @@ test("an expired orphaned DOING readiness claim is reclaimed after restart", asy
   const seeded = await seedReadiness();
   await db.task.update({ where: { id: seeded.readiness.id }, data: {
     status: TaskStatus.DOING,
-    failureReason: "merge-readiness-claim:dead-worker|2000-01-01T00:00:00.000Z",
+    readinessClaimToken: "dead-worker-token",
+    readinessClaimExpiresAt: new Date("2000-01-01T00:00:00.000Z"),
   } });
   assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
 });
@@ -515,7 +604,11 @@ test("a stale worker cannot stop readiness after a newer worker owns the claim",
   await readStarted;
   await db.task.update({
     where: { id: seeded.readiness.id },
-    data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+    data: {
+      status: TaskStatus.DOING,
+      readinessClaimToken: NEWER_CLAIM_TOKEN,
+      readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+    },
   });
   finishRead();
 
@@ -525,7 +618,7 @@ test("a stale worker cannot stop readiness after a newer worker owns the claim",
     db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
   ]);
   assert.equal(readiness.status, TaskStatus.DOING);
-  assert.equal(readiness.failureReason, NEWER_CLAIM);
+  assert.equal(readiness.readinessClaimToken, NEWER_CLAIM_TOKEN);
   assert.equal(regression.status, TaskStatus.DONE);
   assert.deepEqual(releasedChainLeases, []);
 });
@@ -548,7 +641,11 @@ test("a stale worker cannot requeue regression after a newer worker owns the cla
   await readStarted;
   await db.task.update({
     where: { id: seeded.readiness.id },
-    data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+    data: {
+      status: TaskStatus.DOING,
+      readinessClaimToken: NEWER_CLAIM_TOKEN,
+      readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+    },
   });
   finishRead();
 
@@ -567,9 +664,11 @@ test("an unreachable merge lease acquire defers mechanically without spending re
   );
   const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
   assert.equal(readiness.status, TaskStatus.DOING);
-  assert.match(readiness.failureReason ?? "", /^merge-readiness-claim:/u);
+  assert.notEqual(readiness.readinessClaimToken, null);
+  assert.notEqual(readiness.readinessClaimExpiresAt, null);
+  assert.equal(readiness.failureReason, null);
   const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.readiness.id } });
-  assert.match(activity.body, /lease acquisition deferred.*ENOENT/ui);
+  assert.match(activity.body, /lease transport deferred.*ENOENT/ui);
   assert.deepEqual(releasedChainLeases, []);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
 
@@ -586,6 +685,153 @@ test("an unreachable merge lease acquire defers mechanically without spending re
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("authorize without a handoff durably defers an unreachable finished-claim release for reconciliation", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.integrator.id }, data: { status: TaskStatus.DONE } });
+  const now = new Date();
+  const attempts = { count: 0 };
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), now, 5, releaseChainLease, unreachableReleaseRunner(attempts)),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal(attempts.count, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  await assertDeferredReleaseAndRetry(seeded, now);
+  assert.equal(attempts.count, 1, "readiness does not immediately retry the unreachable release");
+});
+
+test("a semantic stop durably defers an unreachable finished-claim release for reconciliation", async () => {
+  const seeded = await seedReadiness();
+  const now = new Date();
+  const attempts = { count: 0 };
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : null });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, movingReader, now, 5, releaseChainLease, unreachableReleaseRunner(attempts)),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+  );
+  assert.equal(attempts.count, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.REVIEW);
+  await assertDeferredReleaseAndRetry(seeded, now);
+  assert.equal(attempts.count, 1);
+});
+
+test("a base requeue durably defers an unreachable finished-claim release for reconciliation", async () => {
+  const seeded = await seedReadiness();
+  const now = new Date();
+  const attempts = { count: 0 };
+  const movedBase = "d".repeat(40);
+  let reads = 0;
+  const movingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot({ baseSha: reads === 1 ? BASE : movedBase });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, movingReader, now, 5, releaseChainLease, unreachableReleaseRunner(attempts)),
+    { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+  );
+  assert.equal(attempts.count, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
+  await assertDeferredReleaseAndRetry(seeded, now);
+  assert.equal(attempts.count, 1);
+});
+
+test("a deferred-release record failure surfaces without a readiness REVIEW or second release", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.integrator.id }, data: { status: TaskStatus.DONE } });
+  const target = { projectId: seeded.project.id, chainId: seeded.regression.chainId! };
+  const recordFailure = new Error("release-deferred activity write failed");
+  let callbackRan = false;
+  const failedWriter: WithMergeLease = async (_target, fn) => {
+    await fn();
+    callbackRan = true;
+    throw new LeaseReleaseDeferralRecordError(target, seeded.regression.id, recordFailure);
+  };
+
+  await assert.rejects(
+    readinessTick(db, reader(), new Date(), 5, releaseChainLease, failedWriter),
+    (error: unknown) => error instanceof LeaseReleaseDeferralRecordError && error.cause === recordFailure,
+  );
+  assert.equal(callbackRan, true);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  assert.deepEqual(releasedLeaseTargets, []);
+});
+
+test("reconciliation invalidates a deferred release whose validated holder later changes", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.integrator.id }, data: { status: TaskStatus.DONE } });
+  const now = new Date();
+  const attempts = { count: 0 };
+  await readinessTick(db, reader(), now, 5, releaseChainLease, unreachableReleaseRunner(attempts));
+  const deferred = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "release-deferred" },
+  } });
+  await db.task.update({
+    where: { id: seeded.regression.id },
+    data: { chainId: `${seeded.regression.chainId}-changed` },
+  });
+
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), async () => {
+    throw new Error("an invalid deferred target must not be released");
+  }), 1);
+  const invalid = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "invalid" },
+  } });
+  const metadata = invalid.metadata as Record<string, unknown>;
+  assert.equal(metadata.deferredActivityId, deferred.id);
+  assert.match(String(metadata.reason), /no longer matches/u);
+  assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 2_000), async () => {
+    throw new Error("an invalid deferred target must remain terminal");
+  }), 0);
+});
+
+test("an unreachable post-acquire release durably defers without review or a second release", async () => {
+  const seeded = await seedReadiness();
+  let releaseAttempts = 0;
+  const unreachableRelease: WithMergeLease = (target, _fn, database) => withMergeLease(target, async () => {
+    throw new Error("authorization transaction failed before settlement");
+  }, database, {
+    acquire: acquireChainLease,
+    release: async () => {
+      releaseAttempts += 1;
+      return { outcome: "unreachable", detail: "release helper timed out" };
+    },
+  });
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, unreachableRelease),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal(releaseAttempts, 1);
+  assert.deepEqual(releasedLeaseTargets, []);
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  assert.equal(readiness.status, TaskStatus.DOING);
+  assert.equal(readiness.failureReason, null);
+  assert.notEqual(readiness.readinessClaimToken, null);
+  const activity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: seeded.readiness.id, metadata: { path: ["state"], equals: "lease-transport-deferred" } },
+  });
+  assert.match(activity.body, /authorization transaction failed before settlement/u);
+  assert.match(activity.body, /release helper timed out/u);
 });
 
 test("a worker that acquired then lost its claim releases without a concrete successor Run", async () => {
@@ -609,7 +855,11 @@ test("a worker that acquired then lost its claim releases without a concrete suc
   const loseToWorker: MergeLeaseAcquirer = async () => {
     await db.task.update({
       where: { id: succeeded.readiness.id },
-      data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+      data: {
+        status: TaskStatus.DOING,
+        readinessClaimToken: NEWER_CLAIM_TOKEN,
+        readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+      },
     });
     return { outcome: "acquired" };
   };
@@ -618,7 +868,10 @@ test("a worker that acquired then lost its claim releases without a concrete suc
     { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
   );
   assert.deepEqual(releasedChainLeases, [succeeded.readiness.chainId]);
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).failureReason, NEWER_CLAIM);
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).readinessClaimToken,
+    NEWER_CLAIM_TOKEN,
+  );
 });
 
 test("a foreign project's active successor cannot receive a claim-loss lease handoff", async () => {

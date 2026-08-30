@@ -9,7 +9,6 @@ import {
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MERGE_TAIL_KIND,
   MERGE_TAIL_SCHEMA_VERSION,
-  mergeRecoveryTransitionAllowed,
   MergeRecoveryStatus,
   type Marker,
   parseResolverResult,
@@ -25,8 +24,8 @@ import {
 
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
-import { settleLease, type LeaseSettlementOutcome } from "./merge-lease.js";
-import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import type { LeaseOutcome } from "./merge-lease.js";
+import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,
@@ -217,7 +216,7 @@ export const baseDriftRecoveryContext = async (
   return recoveryContext(row);
 };
 
-type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateInput;
+type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateManyMutationInput;
 
 export type StopMergeTailInput =
   | {
@@ -262,30 +261,10 @@ export type StopMergeTailInput =
     sessionId?: string;
   };
 
-export type StopMergeTailResult = { leaseToRelease: MergeLeaseTarget | null };
+export type StopMergeTailResult = { leaseOutcome: LeaseOutcome };
 
 type ReadinessStopMergeTailInput = Extract<StopMergeTailInput, { phase: "readiness" }>;
 type CompletionOwnedStopMergeTailInput = Exclude<StopMergeTailInput, ReadinessStopMergeTailInput>;
-
-const transitionRecovery = async (
-  tx: DbTx,
-  aggregateId: string,
-  target: MergeRecoveryStatus,
-  data: RecoveryStopData,
-): Promise<void> => {
-  const aggregate = await tx.mergeRecoveryAttempt.findUnique({
-    where: { id: aggregateId },
-    select: { status: true },
-  });
-  if (!aggregate) throw new Error(`Merge recovery aggregate ${aggregateId} is absent`);
-  if (!mergeRecoveryTransitionAllowed(aggregate.status, target)) {
-    throw new Error(`Illegal merge recovery transition ${aggregate.status} -> ${target} for ${aggregateId}`);
-  }
-  await tx.mergeRecoveryAttempt.update({
-    where: { id: aggregateId },
-    data: { ...data, status: target },
-  });
-};
 
 const stopNotice = async (
   tx: DbTx,
@@ -327,31 +306,7 @@ export async function stopMergeTail(
         ? `Autonomous merge readiness stopped: ${input.reason}`
         : `Autonomous merge tail stopped: ${input.reason}`;
     if (recovery) {
-      await transitionRecovery(tx, recovery.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
-        failureReason: input.reason,
-        endedAt: input.at,
-      });
-      if (input.phase === "regression") {
-        await tx.task.updateMany({
-          where: { id: { in: [recovery.regressionTaskId, recovery.readinessTaskId, recovery.integratorTaskId] } },
-          data: { status: TaskStatus.REVIEW, failureReason: body },
-        });
-      } else {
-        await tx.task.updateMany({
-          where: { id: { in: [input.readinessTaskId, input.regressionTaskId] } },
-          data: { status: TaskStatus.REVIEW, failureReason: input.reason },
-        });
-        await tx.task.update({
-          where: { id: recovery.integratorTaskId },
-          data: { status: TaskStatus.REVIEW, failureReason: body },
-        });
-      }
-      const dedupeKey = `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:${input.phase}`;
-      const metadata = { ...recovery, state: "tail-stopped", phase: input.phase, reason: input.reason, dedupeKey };
-      for (const taskId of [recovery.integratorTaskId, recovery.regressionTaskId]) {
-        await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
-      }
-      await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey });
+      await blockDownstream(tx, { recovery, phase: input.phase, reason: input.reason, at: input.at });
     } else if (input.phase === "readiness") {
       await tx.task.updateMany({
         where: { id: { in: [input.readinessTaskId, input.regressionTaskId] } },
@@ -388,8 +343,7 @@ export async function stopMergeTail(
       }
     }
     if (input.phase === "readiness") {
-      const lease = await settleLease(tx, { taskId: input.regressionTaskId, outcome: "stop" });
-      return { leaseToRelease: lease.leaseToRelease };
+      return { leaseOutcome: { kind: "stop", taskId: input.regressionTaskId } };
     }
     return;
   }
@@ -420,38 +374,18 @@ export async function stopMergeTail(
     return;
   }
 
-  await transitionRecovery(tx, input.aggregateId, MergeRecoveryStatus.FAILED, {
-    ...input.recoveryData,
-    failureReason: input.reason,
-    endedAt: input.at,
-  });
   const state = input.phase === "recovery-validation" ? "ineligible" : "exhausted";
-  const body = input.phase === "recovery-validation"
-    ? `Automatic pre-merge base-drift recovery refused: ${input.reason}`
-    : `Automatic pre-merge base-drift recovery exhausted at attempt ${input.attempt}`;
-  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
-    actorType: "control-plane",
-    body,
-    metadata: {
-      state,
-      ...input.markerMetadata,
-      integratorTaskId: input.integratorTaskId,
-      sourceStopId: input.sourceStopId,
-      reason: input.reason,
-    },
+  await exhaust(tx, {
+    aggregateId: input.aggregateId,
+    integratorTaskId: input.integratorTaskId,
+    sourceStopId: input.sourceStopId,
+    reason: input.reason,
+    at: input.at,
+    attempt: input.attempt,
+    state,
+    recoveryData: input.recoveryData,
+    markerMetadata: input.markerMetadata,
   });
-  const dedupeKey = `merge-base-drift-recovery:${state}:${input.sourceStopId}`;
-  await stopNotice(tx, {
-    taskId: input.integratorTaskId,
-    body: `Automatic pre-merge base-drift recovery ${state} for stop ${input.sourceStopId}: ${input.reason}. No regression run or re-authorization was created.`,
-    dedupeKey,
-  });
-  await tx.task.update({ where: { id: input.integratorTaskId }, data: {
-    status: TaskStatus.REVIEW,
-    failureReason: input.phase === "recovery-validation"
-      ? `Automatic base-drift recovery refused: ${input.reason}`
-      : input.reason,
-  } });
 }
 
 type MergeTailCompletionTask = {
@@ -466,7 +400,7 @@ type MergeTailCompletionTask = {
 
 export type MergeTailCompletionResult = {
   handled: boolean;
-  leaseOutcome: LeaseSettlementOutcome;
+  leaseOutcome: "continue" | "stop";
 };
 
 /**
@@ -769,10 +703,7 @@ export const handleRegressionCompletion = async (
   if (verdict.outcome === "pass") {
     await recordVerdict();
     if (recovery) {
-      await tx.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
-        status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
-        failureReason: null,
-      } });
+      await awaitAuthorization(tx, recovery);
     }
     return "advance";
   }

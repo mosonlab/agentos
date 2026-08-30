@@ -70,6 +70,7 @@ import {
   holdChain,
   resumeChain,
 } from "@anneal/db";
+import type { ChainStep as ChainStepContract } from "@anneal/db/board-contract";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -129,7 +130,12 @@ import {
   jsonValue,
   normalizeSessionEventValue,
 } from "./execution.js";
-import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
+import {
+  createArchivedRunNoticeScheduler,
+  noteArchivedQueuedRuns,
+  reconcileDatabaseRuns,
+  ReconciliationMaintenanceError,
+} from "./reconcile.js";
 import {
   type Refusal,
   type RefusalDetail,
@@ -2435,7 +2441,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           ? { taskId: dispatchAfter.id, name: dispatchAfter.name, status: dispatchAfter.status }
           : null,
         mergeRecovery,
-      })),
+      } satisfies ChainStepContract<Date>)),
     });
   });
   app.post("/tasks/:taskId/chain/hold", async (context) => {
@@ -3172,7 +3178,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const now = new Date();
     runners.note(body.runnerId, body, now);
     await options.ownership.assertHeld();
-    await reconcileDatabaseRuns(db, now, releaseChainLease);
+    try {
+      await reconcileDatabaseRuns(db, now, releaseChainLease);
+    } catch (error: unknown) {
+      if (!(error instanceof ReconciliationMaintenanceError)) throw error;
+      console.error("Runner claim reconciliation maintenance failed after commit", {
+        reconciledAt: error.reconciledAt.toISOString(),
+        failures: error.failures.map((failure) => ({
+          target: failure.target,
+          phase: failure.phase,
+          error: failure.error instanceof Error ? failure.error.message : String(failure.error),
+        })),
+      });
+    }
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await claimRun(db, {
       body,
@@ -3305,14 +3323,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, cancelAcknowledgeInput);
-    const result = await acknowledgeCancellation(db, runId, body);
+    const result = await acknowledgeCancellation(db, runId, body, releaseChainLease);
     if ("message" in result) return refusalJson(context, result);
-    const { releaseMergeLeaseTask, ...settlement } = result;
-    // Cancellation is a terminal write. The lease target is deliberately
-    // released only after that transaction commits, when the release adapter
-    // can also record the confirmed deletion and its hold window.
-    await releaseChainLease(releaseMergeLeaseTask, db);
-    return context.json(settlement);
+    return context.json(result);
   });
 
   // Publication is a separate durable fact from terminal completion. Persist
@@ -3953,14 +3966,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runs/:runId/cancel", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, cancelRunInput);
-    const result = await cancelRun(db, runId, body);
+    const result = await cancelRun(db, runId, body, releaseChainLease);
     if ("message" in result) return refusalJson(context, result);
-    const { releaseMergeLeaseTask, ...cancellation } = result;
-    // A queued cancellation is the final consumer when no runner ever claims
-    // the Run. Keep the release post-commit so a rollback cannot free a lease
-    // whose cancellation state was not durably written.
-    await releaseChainLease(releaseMergeLeaseTask, db);
-    return context.json(cancellation);
+    return context.json(result);
   });
 
   app.get("/runs/:runId/events", async (context) => {

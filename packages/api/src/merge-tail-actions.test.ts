@@ -295,7 +295,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
     markerStates: string[];
     noticeKey: RegExp;
     recoveryTarget: MergeRecoveryStatus | null;
-    result: { leaseToRelease: { chainId: string; projectId: string } | null } | undefined;
+    result: { leaseOutcome: { kind: "stop"; taskId: string | null } } | undefined;
   }> = [
     {
       name: "regression without recovery",
@@ -322,7 +322,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["stopped"],
       noticeKey: /^merge-readiness-stop:readiness-1:/u,
       recoveryTarget: null,
-      result: { leaseToRelease: { chainId: "chain-1", projectId: "project-1" } },
+      result: { leaseOutcome: { kind: "stop", taskId: "regression-1" } },
     },
     {
       name: "readiness during recovery",
@@ -331,7 +331,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       markerStates: ["tail-stopped", "tail-stopped", "stopped"],
       noticeKey: /:stop-1:readiness$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      result: { leaseToRelease: { chainId: "chain-1", projectId: "project-1" } },
+      result: { leaseOutcome: { kind: "stop", taskId: "regression-1" } },
     },
     {
       name: "recovery validation",

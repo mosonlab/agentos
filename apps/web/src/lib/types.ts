@@ -1,18 +1,50 @@
 /** Wire shapes as serialised by the control plane (packages/db/prisma/schema.prisma).
  *  Decimal columns arrive as strings, DateTime as ISO strings. */
 
-export type TaskStatus = "BACKLOG" | "TODO" | "DOING" | "REVIEW" | "DONE";
-export type TaskMoveTarget = { status: TaskStatus; via: "patch" | "start" };
-/** How a task came to exist. A recurring definition stays MANUAL; only its
- *  fired copies are CRON. */
-export type TaskSource = "MANUAL" | "CRON" | "WEBHOOK";
-export type AssigneeType = "AGENT" | "HUMAN";
+import type {
+  AssigneeType,
+  ChainControl,
+  ChainProgress,
+  ChainStep,
+  ExecutionOwner,
+  MergeOutcome,
+  MergeRecovery,
+  RunStatus,
+  TaskMoveTarget,
+  TaskSource,
+  TaskStatus,
+  UsageCost,
+} from "@anneal/db/board-contract";
+
+export type {
+  AssigneeType,
+  BoardCard,
+  BoardChainActivationState,
+  BoardChainAggregate,
+  BoardChainFrontier,
+  BoardLatestRun,
+  BoardMoveTarget,
+  BoardTask,
+  ChainAggregate,
+  ChainAggregateState,
+  ChainControl,
+  ChainFrontier,
+  ChainProgress,
+  ChainStep,
+  ExecutionOwner,
+  MergeOutcome,
+  MergeRecovery,
+  RunStatus,
+  ScheduleKind,
+  TaskMoveTarget,
+  TaskSource,
+  TaskStatus,
+  UsageCost,
+} from "@anneal/db/board-contract";
+
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 export type RunnerPreference = RunnerKind | "AUTO" | "INHERIT";
 export type CodexServiceTier = "DEFAULT" | "FAST";
-export type RunStatus =
-  | "QUEUED" | "CLAIMED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
-  | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
 export type SessionExecutionStatus =
   | "REQUESTED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
   | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
@@ -192,32 +224,6 @@ export type Session = {
   } | null;
 };
 
-/**
- * §SF-1. The server's parse of a task's persisted `merge-result` output; the
- * client never reads the fenced body itself, so the run row, the sessions pill
- * and the board card cannot disagree about what a mechanical merge did.
- *
- * `incident` marks the two conditions that are discovered *after* the merge
- * landed — those read as a red Incident rather than an amber Stopped.
- */
-export type MergeOutcome = {
-  outcome: "merged" | "stopped" | "malformed";
-  condition: string | null;
-  incident: boolean;
-};
-
-export type MergeRecovery = {
-  id: string;
-  attempt: number;
-  status: "VALIDATING" | "REPAIRING" | "AWAITING_AUTHORIZATION" | "BLOCKED_DOWNSTREAM" | "SUCCEEDED" | "FAILED";
-  phase: "validation" | "repair" | "authorization-wait" | "downstream-stop" | "succeeded" | "actual-failure";
-  sourceStopId: string;
-  boundSourceRunId: string | null;
-  recoveryRunId: string | null;
-  failureReason: string | null;
-  updatedAt: string;
-};
-
 export type Run = {
   id: string;
   projectId: string;
@@ -334,109 +340,6 @@ export type Task = {
   recurringFireCount: number;
 };
 
-/**
- * One Tasks board card, as `GET /tasks?view=board` serialises it
- * (packages/api/src/board.ts).
- *
- * A projection of `Task`, not a subset type of it: the board reads one run and
- * the agent identity and model, so the wire shape says exactly that rather than shipping the
- * whole `Run`, its `Session` and the `Repo` for every card. Measured on the live
- * board, the full shape is 1,581,550 bytes for 112 tasks and this one is 76,947.
- *
- * `failureReason` is *not* truncated here: the card clamps it to three lines,
- * and the card menu's `Copy error` hands over the whole thing.
- */
-export type BoardTask = {
-  id: string;
-  name: string;
-  displayName: string;
-  status: TaskStatus;
-  moveTargets: TaskMoveTarget[];
-  assigneeType: AssigneeType;
-  failureReason: string | null;
-  scheduleKind: "NOW" | "AT" | "CRON";
-  runAt: string | null;
-  cron: string | null;
-  timezone: string | null;
-  approvalGate: boolean;
-  templateId: string | null;
-  source: TaskSource;
-  chainId: string | null;
-  chainIndex: number | null;
-  chainName: string | null;
-  createdAt: string;
-  updatedAt: string;
-  assigneeAgent: { id: string; title: string; model: string } | null;
-  chainProgress: ChainProgress | null;
-  /** API-computed predecessor binding state; absent for older board responses. */
-  blockedOn?: { taskId: string; taskName: string } | null;
-  latestRun: {
-    id: string;
-    runNumber: number;
-    status: RunStatus;
-    /** The model the run was claimed with, which is what the card labels the run
-     *  with; the assignee's current model is a different, later fact. */
-    model: string;
-    costUsd: string | null;
-    startedAt: string | null;
-    endedAt: string | null;
-  } | null;
-  taskCost: UsageCost | null;
-  /** §SF-1, bound to `latestRun`: null whenever the newest run is not the run
-   *  that recorded the outcome. */
-  mergeOutcome?: MergeOutcome | null;
-  /** The chain an autonomous merge-tail repair task repairs. A repair task is
-   *  chain-detached by design, so this is the only thing that puts its card with
-   *  the chain it belongs to. Null on every other card, absent for older board
-   *  responses. */
-  repairOf?: { chainId: string; chainName: string | null; repairKind: string } | null;
-  /** API-computed board projection for the chain this task belongs to. Every
-   * member carries the same aggregate so the web can collapse a chain without
-   * fetching a second resource. Null on standalone tasks. */
-  chainAggregate?: ChainAggregate | null;
-};
-
-export type UsageCost = {
-  costUsd: string | null;
-  estimated: boolean;
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  outputTokens: number | null;
-};
-
-export type ChainAggregateState = "parked-unactivated" | "waiting-on-predecessor" | "running" | "idle" | "settled";
-
-/** One chain as it appears on the board. This is a projection, not a Task row:
- * the server owns the frontier and status derivation so the board never
- * invents a state between polls. */
-export type ChainAggregate = {
-  chainId: string;
-  chainName: string | null;
-  stepCount: number;
-  statusCounts: Partial<Record<TaskStatus, number>>;
-  detailTaskId: string;
-  status: TaskStatus;
-  frontier: {
-    taskId: string;
-    title: string;
-    status: TaskStatus;
-    latestRun: BoardTask["latestRun"];
-    failureReason: string | null;
-    /** The API may include the dense one-based step ordinal. Older projections
-     * can leave it out; the renderer falls back to the member's chain columns. */
-    position?: number | null;
-  } | null;
-  activation: {
-    state: ChainAggregateState;
-    predecessor?: { taskId: string; taskName: string } | null;
-    taskId: string | null;
-  };
-  /** Aggregate usage keeps the same shape as a task's usage projection. */
-  totalCost: UsageCost | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
 /** `GET /projects/:projectId/costs`. Every amount is a decimal string, as every
  *  other money field on the wire is. */
 export type CostsReport = {
@@ -505,59 +408,6 @@ export type TaskStartability = {
     repo: { id: string; name: string } | null;
     targetBranch: string | null;
   };
-};
-
-export type ChainProgress = {
-  chainId: string;
-  done: number;
-  total: number;
-  activeStepName: string;
-  activeStatus: string;
-  /** Dense one-based ordinal of the active stored execution layer. */
-  currentLayer: number;
-  /** Number of distinct execution layers in the chain. */
-  layerCount: number;
-  /** This task's 1-based ordinal within its chain. */
-  position: number | null;
-};
-
-export type ExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
-
-export type ChainStep = {
-  taskId: string;
-  position: number;
-  chainIndex: number | null;
-  /** Stored execution layer; null is tolerated while an older control plane is migrating. */
-  layer: number | null;
-  name: string;
-  stepName: string;
-  status: TaskStatus;
-  approvalGate: boolean;
-  assigneeType: AssigneeType;
-  executionOwner: ExecutionOwner;
-  agent: { id: string; title: string } | null;
-  archivedAt: string | null;
-  failureReason: string | null;
-  latestRun: { id: string; status: RunStatus; runNumber: number } | null;
-  /** The API's own answer, not a second derivation: the button's enabled state
-   *  and the route's guard must not be able to disagree. */
-  startable: boolean;
-  startAction: "start" | "recover" | null;
-  /** Server-owned Chain hold refusal; null when the hold does not bar this Step. */
-  holdRefusal: string | null;
-  /** API-computed predecessor binding state; absent for older chain responses. */
-  blockedOn?: { taskId: string; name: string; status: TaskStatus } | null;
-  currentExecution: boolean;
-  mergeRecovery?: MergeRecovery | null;
-};
-
-export type ChainControl = {
-  state: "held" | "released";
-  heldLayer: number | null;
-  heldAt: string | null;
-  holdRequestId: string | null;
-  holdReason: string | null;
-  releasedAt: string | null;
 };
 
 export type Chain = {

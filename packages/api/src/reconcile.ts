@@ -9,21 +9,35 @@ import {
 } from "@anneal/db";
 
 import {
+  commitWithLeaseOutcomes,
+  deferredLeaseReleases,
+  LeaseOutcomePostCommitError,
   leaseHandoffsWithoutConsumer,
-  noteLeaseHandoffReleased,
   releaseMergeLease,
-  settleLease,
+  type LeaseOutcome,
+  type LeaseOutcomePostCommitFailure,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
-import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { handleRegressionCompletion, regressionVerdictForRun } from "./merge-tail-actions.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 import { terminalizeRun } from "./run-terminal.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
 const archivedNoticePageSize = 100;
-const mergeLeaseTargetKey = (target: MergeLeaseTarget): string => JSON.stringify([target.projectId, target.chainId]);
 export const archivedNoticeSweepIntervalMs = 60_000;
+
+export class ReconciliationMaintenanceError extends Error {
+  readonly reconciledAt: Date;
+  readonly failures: LeaseOutcomePostCommitFailure[];
+
+  constructor(reconciledAt: Date, cause: LeaseOutcomePostCommitError) {
+    super("Run reconciliation committed, but Merge Lease maintenance failed");
+    this.name = "ReconciliationMaintenanceError";
+    this.reconciledAt = reconciledAt;
+    this.failures = cause.failures;
+    this.cause = cause;
+  }
+}
 
 export const noteArchivedQueuedRuns = async (
   db: PrismaClient,
@@ -159,19 +173,14 @@ export const reconcileDatabaseRuns = async (
   const orphans = candidates.filter((run) => run.cancelRequestedAt !== null || !(
     run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
   ));
-  const reconciliation = await db.$transaction(async (tx) => {
+  const reconciliation = await commitWithLeaseOutcomes(db, async (tx) => {
     const strandedHandoffs = await leaseHandoffsWithoutConsumer(tx, now);
-    if (orphans.length === 0 && expiredInboxRuns.length === 0 && strandedHandoffs.length === 0) {
-      return { strandedChainLeases: [] as MergeLeaseTarget[], strandedHandoffs, count: 0 };
+    const deferredReleases = await deferredLeaseReleases(tx);
+    if (orphans.length === 0 && expiredInboxRuns.length === 0
+      && strandedHandoffs.length === 0 && deferredReleases.length === 0) {
+      return { value: { count: 0 }, leaseOutcomes: [] };
     }
-    // Chains whose tail run this sweep terminalizes without a successor. Held
-    // until the sweep commits, because a lease released against a transaction
-    // that then rolls back would free a window the chain still owns.
-    // A Chain id is only unique within a project. Keep the project in the
-    // release target and dedupe by both fields, otherwise one project's
-    // reconciliation can suppress the other project's confirmed release and
-    // its hold evidence.
-    const stranded = new Map<string, MergeLeaseTarget>();
+    const leaseOutcomes: LeaseOutcome[] = [];
     for (const run of orphans) {
       const leaseLossReason = !run.leaseExpiresAt
         ? "Platform lease missing during startup reconciliation; runner heartbeat authority was lost"
@@ -209,9 +218,7 @@ export const reconcileDatabaseRuns = async (
           },
         });
         if (terminal === null || "message" in terminal) continue;
-        if (terminal.leaseToRelease) {
-          stranded.set(mergeLeaseTargetKey(terminal.leaseToRelease), terminal.leaseToRelease);
-        }
+        leaseOutcomes.push(terminal.leaseOutcome);
         continue;
       }
       // Order PATCH and retry creation through the same Task-row mutex. The
@@ -269,10 +276,7 @@ export const reconcileDatabaseRuns = async (
           qualifiedVerdict: durableNegativeRegressionVerdict,
           now,
         });
-        const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
-        if (lease.leaseToRelease) {
-          stranded.set(mergeLeaseTargetKey(lease.leaseToRelease), lease.leaseToRelease);
-        }
+        leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
         await tx.taskActivity.create({
           data: {
             taskId: run.taskId,
@@ -296,10 +300,7 @@ export const reconcileDatabaseRuns = async (
             data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
           });
         } else {
-          const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
-          if (lease.leaseToRelease) {
-            stranded.set(mergeLeaseTargetKey(lease.leaseToRelease), lease.leaseToRelease);
-          }
+          leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
           await tx.task.update({
             where: { id: run.taskId },
             data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
@@ -319,10 +320,7 @@ export const reconcileDatabaseRuns = async (
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.
-        const lease = await settleLease(tx, { taskId: run.taskId, outcome: "stop" });
-        if (lease.leaseToRelease) {
-          stranded.set(mergeLeaseTargetKey(lease.leaseToRelease), lease.leaseToRelease);
-        }
+        leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
         await tx.task.update({
           where: { id: run.taskId },
           data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
@@ -352,37 +350,31 @@ export const reconcileDatabaseRuns = async (
       if (expired === null || "message" in expired) continue;
     }
     for (const handoff of strandedHandoffs) {
-      const target = { chainId: handoff.chainId, projectId: handoff.projectId };
-      stranded.set(mergeLeaseTargetKey(target), target);
+      leaseOutcomes.push({
+        kind: "stop",
+        taskId: handoff.taskId,
+        releasedHandoff: { toRunId: handoff.toRunId, at: now },
+      });
+    }
+    for (const deferred of deferredReleases) {
+      leaseOutcomes.push({
+        kind: "stop",
+        taskId: deferred.taskId,
+        deferredRelease: { activityId: deferred.activityId, target: deferred.target, at: now },
+      });
     }
     return {
-      strandedChainLeases: [...stranded.values()],
-      strandedHandoffs,
-      count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length,
+      value: {
+        count: orphans.length + expiredInboxRuns.length + strandedHandoffs.length + deferredReleases.length,
+      },
+      leaseOutcomes,
     };
+  }, { release: releaseChainLease }).catch((error: unknown) => {
+    if (error instanceof LeaseOutcomePostCommitError) {
+      throw new ReconciliationMaintenanceError(now, error);
+    }
+    throw error;
   });
-  const releaseFailures: unknown[] = [];
-  for (const target of reconciliation.strandedChainLeases) {
-    try {
-      await releaseChainLease(target, db);
-    } catch (error: unknown) {
-      releaseFailures.push(error);
-    }
-  }
-  if (reconciliation.strandedHandoffs.length > 0) {
-    try {
-      await db.$transaction(async (tx) => {
-        for (const handoff of reconciliation.strandedHandoffs) {
-          await noteLeaseHandoffReleased(tx, { ...handoff, at: now });
-        }
-      });
-    } catch (error: unknown) {
-      releaseFailures.push(error);
-    }
-  }
-  if (releaseFailures.length > 0) {
-    throw new AggregateError(releaseFailures, "One or more stranded merge lease releases or settlements failed");
-  }
   return reconciliation.count;
 };
 

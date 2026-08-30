@@ -68,6 +68,8 @@ const makeDatabase = (
     $queryRaw: async (query: unknown) => {
       const sql = Array.isArray(query) ? query.join("") : JSON.stringify(query);
       if (sql.includes("pg_try_advisory_xact_lock_shared")) return [{ granted: barrierGranted }];
+      if (sql.includes('FROM \\"TaskActivity\\" AS activity') || sql.includes('FROM "TaskActivity" AS activity')) return [];
+      if (sql.includes('FROM \\"TaskActivity\\" AS deferred') || sql.includes('FROM "TaskActivity" AS deferred')) return [];
       if (sql.includes('FROM "Run" AS candidate')) {
         onCandidateRead();
         return candidates.map(({ id }) => ({ id }));

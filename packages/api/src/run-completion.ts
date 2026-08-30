@@ -61,9 +61,7 @@ import {
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
 import { terminalizeRun } from "./run-terminal.js";
 import {
-  commitWithLeaseDisposition,
-  settleLease,
-  type LeaseSettlementOutcome,
+  commitWithLeaseOutcome,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
@@ -244,7 +242,7 @@ export const completeRun = async (
     );
     if (refusal) return { reason: "forbidden", message: refusal };
   }
-  const result = await commitWithLeaseDisposition(db, async (tx) => {
+  const result = await commitWithLeaseOutcome<RunCompletion>(db, async (tx) => {
     // Run owns fencing, cancellation, and terminalization. Take that mutex
     // before Task so completion, cancellation, and canonical output writes
     // cannot deadlock by entering the same two rows in opposite orders.
@@ -448,7 +446,7 @@ export const completeRun = async (
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
     const budgetGrants = run.budgetGrants + refunded;
-    let leaseOutcome: LeaseSettlementOutcome = "continue";
+    let leaseOutcome: "continue" | "stop" = "continue";
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
     // for every outcome rather than only the branches that may retry or
@@ -810,15 +808,19 @@ export const completeRun = async (
         update: { consecutiveAuthFailures: 0 },
       });
     }
-    const lease = await settleLease(tx, { taskId: run.taskId, outcome: leaseOutcome });
     return {
       value: { taskId: run.taskId, succeeded, retryCreated, failureClass },
-      lease,
+      leaseOutcome: leaseOutcome === "stop"
+        ? { kind: "stop", taskId: run.taskId }
+        : { kind: "continue" },
     };
   // ReadCommitted lets successor CAS losers observe count=0 instead of
   // surfacing a serialization failure to runners. Every task status write
   // above has its own status CAS so concurrent operator decisions win.
-  }, releaseMergeLease, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  }, {
+    release: releaseMergeLease,
+    isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+  });
   // Why the transaction refused, answered here rather than by the caller: a
   // caller that had to re-query the run to tell "suspended for Inbox" from
   // "stale fence" would be re-deriving a distinction this action already made.

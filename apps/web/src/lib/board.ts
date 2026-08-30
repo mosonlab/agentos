@@ -66,7 +66,7 @@ export type ChainBinding = { id: string; name: string | null };
  */
 export const chainBinding = (task: Pick<BoardTask, "chainId" | "chainName" | "repairOf">): ChainBinding | null => {
   if (task.chainId !== null) return { id: task.chainId, name: task.chainName };
-  const repair = task.repairOf ?? null;
+  const repair = task.repairOf;
   return repair === null ? null : { id: repair.chainId, name: repair.chainName };
 };
 
@@ -101,7 +101,7 @@ export const isBoardEntry = (value: BoardEntry | BoardTask): value is BoardEntry
  * chain even though they have no chain columns of their own. */
 export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
   const order: Array<TaskBoardEntry | { kind: "chain-group"; id: string }> = [];
-  const groups = new Map<string, { binding: ChainBinding; members: BoardTask[] }>();
+  const groups = new Map<string, { members: BoardTask[] }>();
   for (const task of tasks) {
     const binding = chainBinding(task);
     if (binding === null) {
@@ -111,18 +111,17 @@ export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
     const group = groups.get(binding.id);
     if (group) group.members.push(task);
     else {
-      groups.set(binding.id, { binding, members: [task] });
+      groups.set(binding.id, { members: [task] });
       order.push({ kind: "chain-group", id: binding.id });
     }
   }
   return order.map((item): BoardEntry => {
     if (item.kind !== "chain-group") return item;
     const group = groups.get(item.id)!;
-    const { binding, members } = group;
-    const aggregate = members.find((member) => member.chainAggregate !== null && member.chainAggregate !== undefined)?.chainAggregate;
-    if (aggregate === null || aggregate === undefined) {
-      throw new Error(`Board response omitted the aggregate for chain ${binding.id}`);
-    }
+    const { members } = group;
+    const aggregate = members.find((member): member is BoardTask & { chainAggregate: ChainAggregate } => (
+      member.chainAggregate !== null
+    ))!.chainAggregate;
     const representativeTaskId = aggregate.detailTaskId;
     return {
       kind: "chain",

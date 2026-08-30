@@ -17,7 +17,8 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   assigneeType: "AGENT", createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false, templateId: null,
   source: "MANUAL", chainId: null, chainIndex: null, chainName: null, assigneeAgent: null,
-  chainProgress: null, latestRun: null, taskCost: null, blockedOn: null, repairOf: null, ...overrides,
+  chainProgress: null, latestRun: null, taskCost: null, blockedOn: null, mergeOutcome: null,
+  repairOf: null, chainAggregate: null, ...overrides,
 });
 
 const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => ({
@@ -32,8 +33,8 @@ const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => (
 const chainStep = (id: string, position: number, status: TaskStatus, projection: ChainAggregate, overrides: Partial<BoardTask> = {}): BoardTask => task({
   id, name: `Release: ${id}`, displayName: id, chainId: projection.chainId, chainIndex: position - 1, chainName: projection.chainName,
   status, chainAggregate: projection, chainProgress: {
-    chainId: projection.chainId, done: projection.statusCounts.DONE ?? 0, total: projection.stepCount,
-    activeStepName: projection.frontier?.title ?? "", activeStatus: projection.frontier?.status ?? "done",
+    chainId: projection.chainId, done: projection.statusCounts.DONE, total: projection.stepCount,
+    activeStepName: projection.frontier.title, activeStatus: projection.frontier.status,
     currentLayer: position, layerCount: projection.stepCount, position,
   }, ...overrides,
 });
@@ -66,8 +67,8 @@ test("aggregate placement follows API-derived frontier status and counts entries
   ] as const) {
     const projection = aggregate({
       status,
-      statusCounts: { TODO: status === "TODO" ? 12 : 0, DOING: status === "DOING" ? 1 : 0, REVIEW: status === "REVIEW" ? 1 : 0, DONE: status === "DONE" ? 12 : 0 },
-      frontier: status === "DONE" ? null : { taskId: "frontier", title: "Frontier", status, latestRun: null, failureReason: null, position: 3 },
+      statusCounts: { BACKLOG: 0, TODO: status === "TODO" ? 12 : 0, DOING: status === "DOING" ? 1 : 0, REVIEW: status === "REVIEW" ? 1 : 0, DONE: status === "DONE" ? 12 : 0 },
+      frontier: { taskId: "frontier", title: "Frontier", status, latestRun: null, failureReason: null, position: 3 },
     });
     const rows = Array.from({ length: 12 }, (_, index) => chainStep(`step-${index}`, index + 1, status === "DONE" ? "DONE" : index === 2 ? status : "TODO", projection));
     const grouped = boardEntriesByStatus(boardEntries(rows));

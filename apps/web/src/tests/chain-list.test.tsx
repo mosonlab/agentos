@@ -21,6 +21,7 @@ const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep =
   executionOwner: "agent",
   agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
   startable: false, startAction: null, holdRefusal: null, blockedOn: null, currentExecution: false,
+  mergeRecovery: null,
   ...overrides,
 });
 
