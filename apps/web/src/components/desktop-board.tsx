@@ -6,7 +6,7 @@ import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { type ChainAggregateActions } from "./chain-aggregate-card";
-import { PaginatedBoardEntries } from "./paginated-board-entries";
+import { PaginatedBoardEntries, boardEntryPage } from "./paginated-board-entries";
 import { type CardActions } from "./task-card";
 import { COUNT } from "./ui";
 import { Button } from "./ui/button";
@@ -75,22 +75,24 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   onDragLeave: (status: TaskStatus) => void;
   onDrop: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
-  onActivateAll?: ((chains: readonly ParkedChain[]) => void) | undefined;
+  onActivateAll: (chains: readonly ParkedChain[]) => void;
   actions: CardActions;
   aggregateActions?: ChainAggregateActions | undefined;
 }): ReactNode => {
   const t = useT();
   const entries = normalizeBoardEntries(tasks);
+  const [page, setPage] = useState(0);
+  const { visibleEntries } = boardEntryPage(entries, page);
   // Todo's counterpart to Done's `Archive All`, under the same rule: a wave of
   // parked chains is started from the column head instead of card by card, and
   // a button that would activate nothing is not offered.
-  const parked = column.status === "TODO" ? parkedChains(entries) : [];
+  const parked = column.status === "TODO" ? parkedChains(visibleEntries) : [];
   const headAction = column.status === "DONE" && entries.length > 0
     ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
         {t("tasks.archiveAll")}
       </Button>
     : parked.length > 0
-      ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => onActivateAll?.(parked)}>
+      ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => onActivateAll(parked)}>
           {t("tasks.activateAll")}
         </Button>
       : null;
@@ -110,7 +112,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
         onDrop(event.dataTransfer.getData("text/plain"), column.status);
       }}
     >
-      <PaginatedBoardEntries entries={entries} actions={actions} aggregateActions={aggregateActions} draggable />
+      <PaginatedBoardEntries entries={entries} page={page} onPageChange={setPage} actions={actions} aggregateActions={aggregateActions} draggable />
       {/* Every column gets the same invitation, Backlog included (E16). */}
       {entries.length === 0 ? <div className={COLUMN_EMPTY}>{t(loading ? "common.loading" : "tasks.column.drop")}</div> : null}
     </div>
@@ -222,7 +224,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
   setDragOver: (status: TaskStatus | null) => void;
   onMove: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
-  onActivateAll?: ((chains: readonly ParkedChain[]) => void) | undefined;
+  onActivateAll: (chains: readonly ParkedChain[]) => void;
   actions: CardActions;
   aggregateActions?: ChainAggregateActions | undefined;
   boardRef: React.RefObject<HTMLDivElement | null>;

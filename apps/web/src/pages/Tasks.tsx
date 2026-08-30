@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { type BoardEntry, type Counts, type ParkedChain, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
@@ -145,26 +145,26 @@ export type ChainRefusal = { name: string; reason: string };
  * activation task. There is no bulk route on the server and this does not
  * invent one.
  *
- * Sequential, and it never stops early. A chain the server refuses — an
+ * Each chain keeps that request order, while chains run concurrently so one
+ * request timeout cannot multiply across the whole wave. A refusal — an
  * exhausted budget, an unbound repo, a predecessor that is not done — is
- * collected by name and the rest of the wave still starts, because an operator
- * who parked ten chains meant the nine that can go to go.
+ * collected by name and does not stop the rest, because an operator who parked
+ * ten chains meant the nine that can go to go.
  */
 export const activateParkedChains = async (chains: readonly ParkedChain[]): Promise<ChainRefusal[]> => {
-  const refused: ChainRefusal[] = [];
-  for (const chain of chains) {
+  const outcomes = await Promise.all(chains.map(async (chain): Promise<ChainRefusal | null> => {
     try {
       const verdict = await api.get<TaskStartability>(`/tasks/${chain.taskId}/startability`);
       if (!verdict.startable) {
-        refused.push({ name: chain.name, reason: startabilityRefusal(verdict) });
-        continue;
+        return { name: chain.name, reason: startabilityRefusal(verdict) };
       }
       await api.post(`/tasks/${chain.taskId}/start`, {});
+      return null;
     } catch (reason: unknown) {
-      refused.push({ name: chain.name, reason: reason instanceof Error ? reason.message : String(reason) });
+      return { name: chain.name, reason: errorMessage(reason) };
     }
-  }
-  return refused;
+  }));
+  return outcomes.filter((outcome): outcome is ChainRefusal => outcome !== null);
 };
 
 /* Pure and exported for the same reason `archiveDoneNotice` is: the counts the
@@ -196,14 +196,16 @@ export const ActivateAllDialog = ({ chains, refusals, pending, settled, onClose,
         )}
       </>
     )}>
-      <div className="text-[13px] text-foreground">{t("tasks.activateAll.what")}</div>
-      <ul data-activate-chains="" className="flex flex-col gap-[4px] text-[13px] text-muted-foreground">
-        {chains.map((chain) => (
-          <li key={chain.chainId} data-activate-chain={chain.chainId}>
-            {t("tasks.activateAll.chain", { name: chain.name, steps: chain.stepCount })}
-          </li>
-        ))}
-      </ul>
+      {settled ? null : <>
+        <div className="text-[13px] text-foreground">{t("tasks.activateAll.what")}</div>
+        <ul data-activate-chains="" className="flex flex-col gap-[4px] text-[13px] text-muted-foreground">
+          {chains.map((chain) => (
+            <li key={chain.chainId} data-activate-chain={chain.chainId}>
+              {t("tasks.activateAll.chain", { name: chain.name, steps: chain.stepCount })}
+            </li>
+          ))}
+        </ul>
+      </>}
       {/* The refusals stay in the dialog that offered the wave, so the chains
           that did not start are read beside the ones that did. */}
       {refusals.length === 0 ? null : <ErrorNotice message={[
@@ -472,9 +474,9 @@ export const TasksPage = (): ReactNode => {
     if (ok && result !== null) setNotice(archiveDoneNotice(result));
   }, [projectId, run, reload, t]);
 
-  /** The whole wave, confirmed once. `run` carries a transport failure to the
-   *  page's one error surface; a chain the server refuses is not that — it is
-   *  reported by name in the dialog while the rest of the wave still starts. */
+  /** The whole wave, confirmed once. Per-chain refusals and request failures
+   *  stay named in the dialog while the rest of the wave starts; `run` carries
+   *  a reload failure to the page's shared error surface. */
   const activateAll = useCallback(async (): Promise<void> => {
     if (wave === null || wave.settled) return;
     setNotice(null);
