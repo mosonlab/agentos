@@ -35,7 +35,7 @@ test("active Runs expose cancellation and an outstanding intent renders Cancelli
 });
 
 const output = (body: string): TaskStepOutput => ({
-  id: "o1", taskId: "t1", runId: "r1", kind: "review", body,
+  id: "o1", taskId: "t1", runId: "r1", kind: "review", body, metadata: null, commitSha: null,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
 });
 

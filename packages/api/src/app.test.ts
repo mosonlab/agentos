@@ -2160,6 +2160,10 @@ test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
       { id: "reported-run", usageCost: { costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, outputTokens: null } },
       { id: "unreported-run", usageCost: null },
     ]);
+    assert.equal("moveTargets" in body, true, "the detail shape keeps operator move targets");
+    for (const listOnly of ["chainProgress", "recurringLastFiredAt", "recurringFireCount"]) {
+      assert.equal(listOnly in body, false, `${listOnly} must remain list-only`);
+    }
   });
 });
 
@@ -2304,6 +2308,9 @@ test("the full shape is validated too, and its two shapes never share a tag", as
     const body = await full.json() as Array<Record<string, unknown>>;
     assert.equal("runs" in body[0]!, true, "the full shape keeps the Run rows");
     assert.equal(body[0]!.chainProgress, null);
+    assert.equal(body[0]!.recurringLastFiredAt, null);
+    assert.equal(body[0]!.recurringFireCount, 0);
+    assert.equal("moveTargets" in body[0]!, false, "operator move targets remain detail-only");
     const board = await getTasks(boardDatabase([taskRow()]), "?view=board");
     assert.notEqual(full.headers.get("etag"), board.headers.get("etag"));
   });
