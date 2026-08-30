@@ -1740,6 +1740,7 @@ test("successful completion commits output and parks an archived chain successor
         updatedAt: new Date(),
         runs: [],
         assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
+        repo: { id: "repo-1", name: "Repo", defaultBranch: "main" },
       };
       const predecessor = {
         id: "task-1",
@@ -1802,6 +1803,7 @@ test("successful completion commits output and parks an archived chain successor
             return {};
           },
         },
+        agent: { findUnique: async () => successor.assigneeAgent },
         chainControl: { findMany: async () => [] },
         runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }) },
       };
@@ -1828,9 +1830,14 @@ test("successful completion commits output and parks an archived chain successor
       assert.equal(closed, true);
       assert.equal(outputCreated, true);
       assert.equal(runCreates, 0);
-      assert.equal(successorUpdate?.status, "REVIEW");
-      assert.match(String(successorUpdate?.failureReason), /Archived Successor/);
-      assert.match(String(successorActivity?.body), /Archived Successor.*not queued/);
+      const refusalMessage = "Task Archived Successor assignee Archived Successor is archived; unarchive the agent to queue this step";
+      assert.deepEqual(successorUpdate, { status: "REVIEW", failureReason: refusalMessage });
+      assert.deepEqual(successorActivity, {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: `Predecessor layer completed but Run birth was refused: ${refusalMessage}`,
+        metadata: { refusal: "assignee-archived" },
+      });
     } finally {
       if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
       else process.env.RUNNER_WORKSPACE_ROOT = previousRoot;
