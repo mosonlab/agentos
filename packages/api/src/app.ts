@@ -8,7 +8,6 @@ import {
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
-  FailureClass,
   GoalStatus,
   enqueueTaskRun,
   openRun,
@@ -26,7 +25,6 @@ import {
   RepoPermission,
   RunStatus,
   ScheduleKind,
-  PushStatus,
   RunnerKind,
   RunnerPreference,
   recomputeSessionUsage,
@@ -179,7 +177,7 @@ import {
   lockTaskMutationRows,
   reactivationBlocked,
 } from "./task-write.js";
-import { patchTask } from "./task-patch.js";
+import { patchTask, taskInput, taskPatch } from "./task-patch.js";
 import {
   cancelBoundRevalidationRun,
   patchBoundImplementationDescription,
@@ -187,8 +185,8 @@ import {
   revalidationCancelRequestId,
   SPEC_REVALIDATOR_AGENT_NAME,
 } from "./revalidation.js";
-import { claimRun, OPERATOR_NOTE_METADATA_FIELD } from "./run-claim.js";
-import { completeRun } from "./run-completion.js";
+import { claimInput, claimRun, OPERATOR_NOTE_METADATA_FIELD, runnerTelemetryFields } from "./run-claim.js";
+import { completeRun, completionInput, worktreeContainmentViolationsInput } from "./run-completion.js";
 import { acknowledgeCancellation, cancelRun } from "./run-cancel.js";
 import { withoutUndefined } from "./without-undefined.js";
 import { versionPayload } from "./version.js";
@@ -519,64 +517,6 @@ const progressInput = z.object({
   sessionId: id.nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
-const taskFields = {
-  name: z.string().trim().min(1).max(200),
-  description: z.string(),
-  workingDirectory: z.string().trim().min(1).nullable(),
-  repoId: id.nullable(),
-  targetBranch: z.string().trim().min(1).nullable(),
-  assigneeType: z.nativeEnum(AssigneeType),
-  assigneeAgentId: id.nullable(),
-  approvalGate: z.boolean(),
-  opensPullRequest: z.boolean(),
-  maxDurationMin: z.number().int().min(1).max(24 * 60),
-  stallTimeoutMin: z.number().int().min(1).max(24 * 60),
-  maxSessionsPerTask: z.number().int().min(1).max(100),
-  scheduleKind: z.nativeEnum(ScheduleKind),
-  runAt: z.coerce.date().nullable(),
-  cron: z.string().trim().min(9).max(100).nullable(),
-  timezone: z.string().trim().min(1).max(64).nullable(),
-};
-const taskCreateStatus = z.nativeEnum(TaskStatus).refine(
-  (status) => status === TaskStatus.BACKLOG || status === TaskStatus.TODO,
-  "Task creation status must be BACKLOG or TODO",
-);
-/** Exported for `smoke-fixture.test.ts`: the published release fixture and this
- *  schema have to agree about `opensPullRequest`, and the only way to assert
- *  that is to parse the fixture with the schema the route actually uses. */
-export const taskInput = z.object({
-  ...taskFields,
-  status: taskCreateStatus.default(TaskStatus.TODO),
-  description: taskFields.description.default(""),
-  workingDirectory: taskFields.workingDirectory.default(null),
-  repoId: taskFields.repoId.default(null),
-  targetBranch: taskFields.targetBranch.default(null),
-  assigneeType: taskFields.assigneeType.default(AssigneeType.AGENT),
-  assigneeAgentId: taskFields.assigneeAgentId.default(null),
-  approvalGate: taskFields.approvalGate.default(false),
-  opensPullRequest: taskFields.opensPullRequest.default(true),
-  maxDurationMin: taskFields.maxDurationMin.default(240),
-  stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
-  maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
-  scheduleKind: taskFields.scheduleKind.default(ScheduleKind.NOW),
-  runAt: taskFields.runAt.default(null),
-  cron: taskFields.cron.default(null),
-  timezone: taskFields.timezone.default(null),
-  chainId: z.string().trim().min(1).max(100).optional(),
-  chainIndex: z.number().int().min(0).optional(),
-}).strict().superRefine((value, context) => {
-  if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
-    context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
-  }
-});
-// `failureReason` is patchable but not creatable: a task is never born with a
-// failure, and an operator whose task carries a stale one needs a way to clear
-// it — an explicit null — without inventing a run.
-const taskPatch = z.object(taskFields).partial().extend({
-  status: z.nativeEnum(TaskStatus).optional(),
-  failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
-}).refine((value) => Object.keys(value).length > 0);
-export type TaskPatchInput = z.infer<typeof taskPatch>;
 const activityInput = z.object({
   actorType: z.string().trim().min(1).max(40).default("operator"),
   actorId: z.string().trim().min(1).nullable().optional(),
@@ -593,22 +533,6 @@ const revalidationPatchInput = z.object({
 }).strict();
 const revalidationCancelInput = z.object({ fencingToken: fence }).strict();
 const mergeTargetInput = z.object({ prNumber: z.number().int().positive() });
-const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
-  console.warn("Discarded runner telemetry", { input, issues: error.issues });
-  return undefined;
-});
-const runnerTelemetryFields = {
-  daemonVersion: telemetry(z.string().trim().max(40)),
-  diskFreeBytes: telemetry(z.number().int().nonnegative()),
-  pollIntervalMs: telemetry(z.number().int().positive().max(3_600_000)),
-  workspaceRoot: telemetry(z.string().trim().max(500)),
-};
-const claimInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  leaseSeconds: z.number().int().min(15).max(3600).default(60),
-  ...runnerTelemetryFields,
-});
-export type ClaimInput = z.infer<typeof claimInput>;
 // The runner's inventory of its own root. `directories` are bare names, never
 // paths: this API refuses to hold an opinion about a filesystem it does not
 // own, and a name is all the ownership predicate needs.
@@ -648,7 +572,6 @@ const cancelRunInput = z.object({
   reason: z.string().trim().min(1).pipe(failureReasonText(FAILURE_REASON_LIMIT)),
   parkTask: z.boolean().default(false),
 });
-const worktreeContainmentViolationsInput = z.array(z.string().min(1).max(4096)).max(5000);
 const cancelAcknowledgeInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
@@ -690,69 +613,6 @@ const startInput = mechanicalStartInput.extend({
   // Requiring it prevents a start write from leaving a queued or prior hash.
   promptHash: z.string().regex(/^[0-9a-f]{64}$/u),
 });
-// Envelopes are dispatched on `version` *before* any version's field schema is
-// applied. Only `version` itself is required to parse, and everything else is
-// carried through untouched.
-//
-// Validating v1's shape first would have made the fallback a lie: a v2 runner
-// that adds a phase or a failure class would be rejected at the schema, and its
-// completion — a terminal write that cannot simply be retried — would 400
-// instead of degrading to the legacy fields. The version is the only thing this
-// API can read from an envelope it does not know.
-const versionedEnvelopeInput = z.object({
-  version: z.number().int().positive(),
-}).catchall(z.unknown());
-
-// Mirrors packages/db/src/failure-envelope.ts, which is the canonical shape,
-// and packages/runner/src/envelope.ts, which is the runner's hand-kept copy of
-// it. This schema is the boundary that catches drift between the two, and it is
-// applied only to envelopes that announce themselves as v1.
-//
-// Every field is defaulted rather than required wherever a default is
-// unambiguous, and the free-text limits are 16x what the runner truncates to.
-// That is deliberate: a rejected completion is not a rejected envelope, it is a
-// run that never records a terminal state and is later reconciled as LOST. The
-// envelope must never be the reason a completion fails — which is also why the
-// route below treats a v1 envelope that fails this schema as no envelope at
-// all rather than as a bad request.
-
-const completionInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  exitCode: z.number().int().nullable(),
-  signal: z.string().nullable().optional(),
-  terminalEventSeen: z.boolean(),
-  terminalSuccess: z.boolean(),
-  terminationReason: z.string().nullable().optional(),
-  failureClass: z.nativeEnum(FailureClass).optional(),
-  failureReason: failureReasonText(FAILURE_REASON_LIMIT).optional(),
-  retryable: z.boolean().optional(),
-  externalFailure: z.boolean().default(false),
-  branch: z.string().nullable().optional(),
-  // The ref the runner actually handed to `git push`, which is not always
-  // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
-  // the workspace's. It is the only publication evidence resolveRunBranches
-  // trusts, so it must survive the trip verbatim.
-  pushedBranch: z.string().nullable().optional(),
-  baseSha: z.string().nullable().optional(),
-  headSha: z.string().nullable().optional(),
-  output: z.string().max(500_000).nullable().optional(),
-  pushStatus: z.nativeEnum(PushStatus).default(PushStatus.NOT_REQUESTED),
-  pushRemote: z.string().nullable().optional(),
-  pushError: z.string().max(4000).nullable().optional(),
-  pullRequestUrl: z.string().nullable().optional(),
-  pullRequestNumber: z.number().int().positive().nullable().optional(),
-  deliveryInstructions: z.string().max(8000).nullable().optional(),
-  cleanupStatus: z.nativeEnum(CleanupStatus),
-  cleanupFailureReason: z.string().max(4000).nullable().optional(),
-  workspaceRetained: z.boolean().default(false),
-  // Report-only completion evidence. An omitted or empty list means that the
-  // runner observed no worktree outside its run workspace; it never changes
-  // terminal outcome classification.
-  worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
-  failureEnvelope: versionedEnvelopeInput.optional(),
-});
-export type CompletionInput = z.infer<typeof completionInput>;
 const eventInput = z.object({
   seq: z.number().int().nonnegative(),
   at: z.coerce.date().optional(),

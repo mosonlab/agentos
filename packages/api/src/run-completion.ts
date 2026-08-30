@@ -5,6 +5,7 @@ import {
   advanceTemplateTask,
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
+  CleanupStatus,
   enqueueTaskRun,
   executionModeFor,
   FAILURE_ENVELOPE_VERSION,
@@ -27,6 +28,7 @@ import {
   parseMergeResult,
   Prisma,
   type PrismaClient,
+  PushStatus,
   readMarkers,
   recordIntegratorStop,
   runBudgetCeiling,
@@ -36,7 +38,6 @@ import {
 } from "@anneal/db";
 import { z } from "zod";
 
-import type { CompletionInput } from "./app.js";
 import {
   canonicalOutputRefusal,
   isCanonicalAgentStep,
@@ -65,11 +66,78 @@ import {
   type ReleaseMergeLease,
 } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
+import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import { lockTask, lockTaskMutationRows } from "./task-write.js";
+
+export const worktreeContainmentViolationsInput = z.array(z.string().min(1).max(4096)).max(5000);
+
+// Envelopes are dispatched on `version` before any version's field schema is
+// applied. Only `version` itself is required to parse, and everything else is
+// carried through untouched.
+//
+// Validating v1's shape first would have made the fallback a lie: a v2 runner
+// that adds a phase or a failure class would be rejected at the schema, and its
+// completion — a terminal write that cannot simply be retried — would 400
+// instead of degrading to the legacy fields. The version is the only thing this
+// API can read from an envelope it does not know.
+const versionedEnvelopeInput = z.object({
+  version: z.number().int().positive(),
+}).catchall(z.unknown());
+
+export const completionInput = z.object({
+  runnerId: z.string().trim().min(1).max(120),
+  fencingToken: z.string().min(1),
+  exitCode: z.number().int().nullable(),
+  signal: z.string().nullable().optional(),
+  terminalEventSeen: z.boolean(),
+  terminalSuccess: z.boolean(),
+  terminationReason: z.string().nullable().optional(),
+  failureClass: z.nativeEnum(FailureClass).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).optional(),
+  retryable: z.boolean().optional(),
+  externalFailure: z.boolean().default(false),
+  branch: z.string().nullable().optional(),
+  // The ref the runner actually handed to `git push`, which is not always
+  // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
+  // the workspace's. It is the only publication evidence resolveRunBranches
+  // trusts, so it must survive the trip verbatim.
+  pushedBranch: z.string().nullable().optional(),
+  baseSha: z.string().nullable().optional(),
+  headSha: z.string().nullable().optional(),
+  output: z.string().max(500_000).nullable().optional(),
+  pushStatus: z.nativeEnum(PushStatus).default(PushStatus.NOT_REQUESTED),
+  pushRemote: z.string().nullable().optional(),
+  pushError: z.string().max(4000).nullable().optional(),
+  pullRequestUrl: z.string().nullable().optional(),
+  pullRequestNumber: z.number().int().positive().nullable().optional(),
+  deliveryInstructions: z.string().max(8000).nullable().optional(),
+  cleanupStatus: z.nativeEnum(CleanupStatus),
+  cleanupFailureReason: z.string().max(4000).nullable().optional(),
+  workspaceRetained: z.boolean().default(false),
+  // Report-only completion evidence. An omitted or empty list means that the
+  // runner observed no worktree outside its run workspace; it never changes
+  // terminal outcome classification.
+  worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
+  failureEnvelope: versionedEnvelopeInput.optional(),
+});
+
+export type CompletionInput = z.infer<typeof completionInput>;
 
 const isDocumentationStep = (step: { outputKind: string } | null | undefined): boolean =>
   Boolean(step && stepRole(step) === "documentation");
 
+// Mirrors packages/db/src/failure-envelope.ts, which is the canonical shape,
+// and packages/runner/src/envelope.ts, which is the runner's hand-kept copy of
+// it. This schema is the seam that catches drift between the two, and it is
+// applied only to envelopes that announce themselves as v1.
+//
+// Every field is defaulted rather than required wherever a default is
+// unambiguous, and the free-text limits are 16x what the runner truncates to.
+// That is deliberate: a rejected completion is not a rejected envelope, it is a
+// run that never records a terminal state and is later reconciled as LOST. The
+// envelope must never be the reason a completion fails — which is also why the
+// route treats a v1 envelope that fails this schema as no envelope at all rather
+// than as a bad request.
 const failureEnvelopeV1Input = z.object({
   version: z.number().int().positive(),
   phase: z.enum(failurePhases),
