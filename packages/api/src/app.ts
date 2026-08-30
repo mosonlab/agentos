@@ -112,11 +112,9 @@ import {
 } from "./merge-lease.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
-  nextStoredCliAvailability,
-  preserveCliAvailability,
-  readStoredCliAvailability,
-  storeCliAvailability,
-} from "./runner-cli-availability.js";
+  projectRunnerBackend,
+  recordRunnerBackendReport,
+} from "./runner-backend-health.js";
 import {
   chainKey,
   readChainDetail,
@@ -1064,24 +1062,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         const activeRuns = activeByRunner.get(daemon.runnerId) ?? 0;
         return { ...daemon, lastSeenAt: daemon.lastSeenAt.toISOString(), busy: activeRuns > 0, activeRuns };
       }),
-      backends: Object.values(RunnerKind).map((runner) => {
-        const backend = backendsByRunner.get(runner);
-        const availability = readStoredCliAvailability(backend?.capabilities);
-        return {
-          runner,
-          cliVersion: backend?.cliVersion ?? null,
-          cliAvailable: availability?.available ?? null,
-          cliResolvedPath: availability?.resolvedPath ?? null,
-          cliAvailabilityReason: availability?.reason ?? null,
-          cliUnavailableSince: availability?.unavailableSince ?? null,
-          lastAvailabilityAt: availability?.lastCheckedAt ?? null,
-          authMode: backend?.authMode ?? null,
-          lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
-          lastPreflightOk: backend?.lastPreflightOk ?? null,
-          circuitOpen: backend?.circuitOpen ?? null,
-          circuitReason: backend?.circuitReason ?? null,
-        };
-      }),
+      backends: Object.values(RunnerKind).map((runner) =>
+        projectRunnerBackend(runner, backendsByRunner.get(runner) ?? null)),
     });
   });
 
@@ -2932,72 +2914,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
     const now = new Date();
-    // Runner availability is global backend state written by every daemon.
-    // Keep its Serializable guarantee and absorb two short write conflicts.
-    const state = await serializable(db, async (tx) => {
-      const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
-      const previousAvailability = readStoredCliAvailability(previous?.capabilities);
-      const availability = nextStoredCliAvailability(body, previousAvailability, now);
-      if (!body.available) {
-        const outageStarted = previousAvailability?.available !== false;
-        const unavailable = await tx.runnerBackendState.upsert({
-          where: { runner: body.runner },
-          create: {
-            runner: body.runner,
-            capabilities: storeCliAvailability(null, availability),
-          },
-          update: {
-            capabilities: storeCliAvailability(previous?.capabilities, availability),
-          },
-        });
-        await tx.task.updateMany({
-          where: {
-            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
-            runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
-          },
-          data: { failureReason: availability.reason },
-        });
-        if (outageStarted) {
-          const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-          const thread = chatId ? (
-            await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-            ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
-          ) : null;
-          await tx.inboxMessage.create({ data: {
-            from: "AGENT",
-            kind: "TEXT",
-            body: `${body.runner.toLowerCase()} runner CLI is unavailable: ${body.binary} was not found in configured runner PATH.`,
-            dedupeKey: availability.outageKey,
-            ...(thread ? { threadId: thread.id } : {}),
-          } });
-        }
-        return unavailable;
-      }
-
-      const available = await tx.runnerBackendState.upsert({
-        where: { runner: body.runner },
-        create: {
-          runner: body.runner,
-          capabilities: storeCliAvailability(null, availability),
-        },
-        update: {
-          capabilities: storeCliAvailability(previous?.capabilities, availability),
-        },
-      });
-      if (previousAvailability?.reason) {
-        await tx.task.updateMany({
-          where: { failureReason: previousAvailability.reason },
-          data: { failureReason: null },
-        });
-      }
-      if (previousAvailability?.outageKey) {
-        await tx.inboxMessage.updateMany({
-          where: { dedupeKey: previousAvailability.outageKey, status: InboxStatus.OPEN },
-          data: { status: InboxStatus.CLOSED, answeredAt: now },
-        });
-      }
-      return available;
-    }, { attempts: 3 });
+    const state = await recordRunnerBackendReport(db, { kind: "availability", ...body }, now);
     const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
     const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
     const revalidatePreflight = body.available
@@ -3013,67 +2930,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.post("/runner/preflight", async (context) => {
     const body = await readJson(context.req.raw, preflightInput);
-    const now = new Date();
-    const previous = await db.runnerBackendState.findUnique({ where: { runner: body.runner } });
-    const state = await db.runnerBackendState.upsert({
-      where: { runner: body.runner },
-      create: {
-        runner: body.runner,
-        cliVersion: body.cliVersion ?? null,
-        authMode: body.authMode ?? null,
-        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
-        lastPreflightAt: now,
-        lastPreflightOk: body.ok,
-        circuitOpen: !body.ok,
-        circuitReason: body.ok ? null : body.error ?? "Preflight failed",
-        circuitOpenedAt: body.ok ? null : now,
-      },
-      update: {
-        cliVersion: body.cliVersion ?? null,
-        authMode: body.authMode ?? null,
-        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
-        lastPreflightAt: now,
-        lastPreflightOk: body.ok,
-        ...(body.ok
-          ? { circuitOpen: false, circuitReason: null, circuitOpenedAt: null, consecutiveAuthFailures: 0 }
-          : { circuitOpen: true, circuitReason: body.error ?? "Preflight failed", circuitOpenedAt: now }),
-      },
-    });
+    const state = await recordRunnerBackendReport(db, { kind: "preflight", ...body });
     preflightRecoveryLeases.delete(body.runner);
-    const blockedReason = body.error ?? "Preflight failed";
-    if (body.ok) {
-      if (previous?.circuitReason) {
-        await db.task.updateMany({
-          where: { failureReason: previous.circuitReason },
-          data: { failureReason: null },
-        });
-      }
-    } else {
-      await db.task.updateMany({
-        where: {
-          status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
-          runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
-        },
-        data: { failureReason: blockedReason },
-      });
-    }
-    if (!body.ok && !previous?.circuitOpen) {
-      // Attach the operator chat so the alert can actually leave the web Inbox;
-      // threadless messages are skipped by the Feishu outbox forever.
-      const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-      const thread = chatId ? (
-        await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-        ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
-      ) : null;
-      await db.inboxMessage.create({
-        data: {
-          from: "AGENT",
-          kind: "TEXT",
-          body: `${body.runner.toLowerCase()} runner preflight failed and its circuit is open: ${body.error ?? "unknown error"}`,
-          ...(thread ? { threadId: thread.id } : {}),
-        },
-      });
-    }
     return context.json(state);
   });
 
