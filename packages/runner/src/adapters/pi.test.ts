@@ -19,17 +19,8 @@ const finalOutputOf = (events: Array<{ type: string; payload: Record<string, unk
 
 test("PI harvests one fresh openai-codex Luna message despite provisional and repeated usage", async () => {
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-  const state = parsePiTranscript(await capturedTranscript(), (event) => { events.push(event); });
+  parsePiTranscript(await capturedTranscript(), (event) => { events.push(event); });
 
-  assert.deepEqual(state.piUsage, {
-    messages: 1,
-    reported: 1,
-    input: 2197,
-    output: 5,
-    cacheRead: 0,
-    cacheWrite: 0,
-    costNanoUsd: 445400,
-  });
   assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
     messages: 1,
     reported: 1,

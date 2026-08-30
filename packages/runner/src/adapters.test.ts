@@ -12,9 +12,9 @@ import {
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
   PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
-import { parseClaudeTranscript } from "./adapters/claude.js";
-import { CODEX_STARTER_MODEL, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
-import { parsePiTranscript } from "./adapters/pi.js";
+import { claudeDeclaration, parseClaudeTranscript } from "./adapters/claude.js";
+import { CODEX_STARTER_MODEL, codexDeclaration, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
+import { parsePiTranscript, piDeclaration } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
@@ -374,6 +374,7 @@ test("Claude excludes host settings and auto-memory with the versioned platform 
     "/work",
   );
   assert.equal(env.CLAUDE_CONFIG_DIR, undefined);
+  assert.equal(env.AGENTOS_CODEX_SERVICE_TIER, undefined);
   assert.equal(env.HOME, "/runner", "Claude keeps the runner's existing HOME/authentication path");
 });
 
@@ -540,6 +541,13 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
     assert.ok(args.includes('model_reasoning_effort="max"'));
     assert.ok(args.includes("gpt-5.6-luna"));
   }
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    fast.claim,
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_CODEX_SERVICE_TIER, "fast");
 });
 
 test("Codex fresh and resume launches preserve non-interactive tool authorization", () => {
@@ -658,6 +666,7 @@ test("PI runtime preflight rejects an openai-codex Run whose explicit service ti
     "/work",
   );
   assert.equal(env.AGENTOS_PI_EXPECTS_OPENAI_CODEX, "1");
+  assert.equal(env.AGENTOS_CODEX_SERVICE_TIER, "default");
   const result = await adapters.PI.preflight({
     config: {} as RunnerConfig,
     runner: "PI",
@@ -1666,16 +1675,27 @@ test("an adapter is substituted by injection, never by writing over the exported
   assert.notEqual(adapters.CODEX.classifyError, adapters.PI.classifyError);
 });
 
-test("the runner registry owns session isolation and startup preflight model identity", () => {
+test("the runner registry derives session policy from provider declarations", () => {
+  const declarations = { CLAUDE: claudeDeclaration, CODEX: codexDeclaration, PI: piDeclaration } as const;
   assert.deepEqual(
     Object.fromEntries(RUNNER_KINDS.map((runner) => [runner, {
       isolatesSessionConfig: RUNNER_DEFINITIONS[runner].isolatesSessionConfig,
       startupPreflightModel: RUNNER_DEFINITIONS[runner].startupPreflightModel,
+      binaryEnvironment: RUNNER_DEFINITIONS[runner].binaryEnvironment,
     }])),
     {
-      CLAUDE: { isolatesSessionConfig: false, startupPreflightModel: null },
-      CODEX: { isolatesSessionConfig: true, startupPreflightModel: CODEX_STARTER_MODEL },
-      PI: { isolatesSessionConfig: true, startupPreflightModel: "openai-codex/gpt-5.6-luna" },
+      CLAUDE: { isolatesSessionConfig: false, startupPreflightModel: null, binaryEnvironment: "CLAUDE_BINARY" },
+      CODEX: { isolatesSessionConfig: true, startupPreflightModel: CODEX_STARTER_MODEL, binaryEnvironment: "CODEX_BINARY" },
+      PI: { isolatesSessionConfig: true, startupPreflightModel: "openai-codex/gpt-5.6-luna", binaryEnvironment: "PI_BINARY" },
     },
   );
+  for (const runner of RUNNER_KINDS) {
+    assert.equal(RUNNER_DEFINITIONS[runner].args, declarations[runner].args);
+    assert.equal(RUNNER_DEFINITIONS[runner].childEnvironment, declarations[runner].childEnvironment);
+    assert.equal(RUNNER_DEFINITIONS[runner].provisionSessionConfig, declarations[runner].provisionSessionConfig);
+  }
+  assert.deepEqual(piDeclaration.protectedEnvironmentVariables, [
+    "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
+  ]);
+  assert.equal(piDeclaration.launcherEnvironmentVariables.includes("PI_CODING_AGENT_SESSION_DIR"), false);
 });
