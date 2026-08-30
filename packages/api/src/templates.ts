@@ -15,6 +15,7 @@ import {
   TaskStatus,
   type TriggerFireSource,
 } from "@anneal/db";
+import { layerOf } from "@anneal/db/chain-order";
 
 import { isValidBranchName } from "./branch-name.js";
 import { composeBrief } from "./task-brief.js";
@@ -107,9 +108,10 @@ const templateRefusal = (
   message: string,
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
 
-const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => (
-  task.chainLayer ?? task.chainIndex
-);
+const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => layerOf({
+  layer: task.chainLayer,
+  index: task.chainIndex,
+});
 
 const dispatchBindingUniqueConflict = (error: unknown): boolean => {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") return false;

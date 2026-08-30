@@ -34,6 +34,7 @@ import type {
   RunStatus as BoardRunStatus,
   UsageCost as BoardUsageCost,
 } from "@anneal/db/board-contract";
+import { compare } from "@anneal/db/chain-order";
 
 import { chainExecutionOwner, type ChainExecutionOwner } from "./chain-execution-owner.js";
 import {
@@ -238,13 +239,9 @@ const chainStatuses = (): Record<TaskStatusType, number> => ({
   [TaskStatus.DONE]: 0,
 });
 
-const chainMemberLayer = (member: Pick<BoardChainMember, "chainLayer" | "chainIndex">): number =>
-  member.chainLayer ?? member.chainIndex ?? Number.MAX_SAFE_INTEGER;
-
-const chainMemberOrder = (left: BoardChainMember, right: BoardChainMember): number => (
-  chainMemberLayer(left) - chainMemberLayer(right)
-    || (left.chainIndex ?? Number.MAX_SAFE_INTEGER) - (right.chainIndex ?? Number.MAX_SAFE_INTEGER)
-    || left.id.localeCompare(right.id)
+const chainMemberOrder = (left: BoardChainMember, right: BoardChainMember): number => compare(
+  { layer: left.chainLayer, index: left.chainIndex, id: left.id },
+  { layer: right.chainLayer, index: right.chainIndex, id: right.id },
 );
 
 const memberTitle = (member: BoardChainMember): string => member.displayName

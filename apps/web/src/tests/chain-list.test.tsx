@@ -4,7 +4,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { CHAIN_PAGE, ChainList, GATE_TITLE_KEY } from "../components/chain-list";
+import { CHAIN_PAGE, ChainList, GATE_TITLE_KEY, chainLayerGroups } from "../components/chain-list";
 import { translate } from "../lib/i18n-core";
 import { LocaleProvider } from "../lib/i18n";
 import type { Chain, ChainStep, TaskActivity } from "../lib/types";
@@ -236,6 +236,22 @@ test("sparse stored layers use dense one-based layer ordinals", () => {
     [...markup.matchAll(/aria-label="Layer (\d+)"/g)].map((match) => match[1]),
     ["1", "2", "3"],
   );
+});
+
+test("missing execution metadata forms one final layer independent of display position", () => {
+  const groups = chainLayerGroups([
+    step(30, { taskId: "unknown-b", layer: null, chainIndex: null }),
+    step(1, { taskId: "known", layer: 4, chainIndex: 9 }),
+    step(2, { taskId: "unknown-a", layer: null, chainIndex: null }),
+  ]);
+
+  assert.deepEqual(groups.map((group) => ({
+    ordinal: group.ordinal,
+    taskIds: group.steps.map((item) => item.taskId),
+  })), [
+    { ordinal: 1, taskIds: ["known"] },
+    { ordinal: 2, taskIds: ["unknown-a", "unknown-b"] },
+  ]);
 });
 
 test("a long chain shows the first fifty rows behind a Show all press", () => {

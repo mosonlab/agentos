@@ -23,6 +23,7 @@ import {
   taskIsIntegratorStep,
   TaskStatus,
 } from "@anneal/db";
+import { layerOf } from "@anneal/db/chain-order";
 import { z } from "zod";
 
 import { issueSessionToken } from "./auth.js";
@@ -763,7 +764,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           } },
           select: { state: true, heldLayer: true },
         });
-        const taskLayer = candidate.task.chainLayer ?? candidate.task.chainIndex;
+        const taskLayer = layerOf({ layer: candidate.task.chainLayer, index: candidate.task.chainIndex });
         if (control?.state === ChainControlState.HELD
           && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
           // The Chain mutex was acquired after the candidate scan. Hold may
