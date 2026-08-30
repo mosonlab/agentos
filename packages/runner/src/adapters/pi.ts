@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask } from "../api.js";
 import type { RunnerConfig } from "../config.js";
@@ -6,32 +7,30 @@ import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
-  classifyRuntimeError,
   createAdapterState,
   emitAdapterEvent,
-  heartbeatRuntime,
-  killRuntime,
   modelSpec,
   PI_TOOL_NAMES,
-  piExtensionPath,
   PREFLIGHT_REASONS,
   preflightFailure,
   processProviderEvent,
-  spawnAdapterRuntime,
   stringField,
   TOOL_ORDER,
-  type AdapterImplementation,
+  type AdapterDeclaration,
   type AdapterState,
-  type CliAdapter,
-  type PiUsageTotals,
   type PreflightResult,
   type PreflightSpec,
   type ResumeSpec,
   type RunSpec,
   type SessionEventSink,
   type ToolKey,
-} from "../adapters.js";
+} from "./runtime.js";
 import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./session-config.js";
+
+const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+
+export const piExtensionPath = (): string =>
+  process.env.RUNNER_PI_EXTENSION_PATH ?? join(packageRoot, "assets", "pi-agentos-extension.ts");
 
 const denyArgs = (disabledTools: string[]): string[] => {
   const denied = new Set(disabledTools);
@@ -62,6 +61,30 @@ export const piArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
 
 /** PI prices per message in USD; the accumulator carries integer nano-USD. */
 const NANOS_PER_USD = 1_000_000_000;
+
+export type PiUsageTotals = {
+  messages: number;
+  reported: number;
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  costNanoUsd: number | null;
+};
+
+type PiState = {
+  turnCompleted: boolean;
+  finalAttemptFailed: boolean;
+  usage: PiUsageTotals;
+};
+
+const initialPiState = (): PiState => ({
+  turnCompleted: false,
+  finalAttemptFailed: false,
+  usage: { messages: 0, reported: 0, input: null, output: null, cacheRead: null, cacheWrite: null, costNanoUsd: null },
+});
+
+const piState = (state: AdapterState): PiState => state.providerState as PiState;
 
 const piNumber = (value: unknown, field: string, integral: boolean): number | null => {
   if (value === undefined || value === null) return null;
@@ -130,6 +153,7 @@ export const parsePiEvent = (
   event: Record<string, unknown>,
   sink: SessionEventSink,
 ): void => {
+  const provider = piState(state);
   const type = stringField(event, "type");
   if (type === "session") {
     state.providerConversationId = stringField(event, "id") ?? state.providerConversationId;
@@ -146,10 +170,10 @@ export const parsePiEvent = (
     state.inFlightTool = null;
     emitAdapterEvent(state, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
   } else if (type === "turn_end" || type === "message_end") {
-    state.piTurnCompleted = true;
+    provider.turnCompleted = true;
     const message = asRecord(event.message);
     if (type === "message_end" && message && stringField(message, "role") === "assistant") {
-      harvestUsage(state.piUsage, message);
+      harvestUsage(provider.usage, message);
     }
     if (message && stringField(message, "role") === "assistant" && Array.isArray(message.content)) {
       const text = message.content
@@ -164,23 +188,23 @@ export const parsePiEvent = (
     const finalMessage = asRecord(messages.at(-1));
     const stopReason = stringField(finalMessage, "stopReason");
     const errorMessage = stringField(finalMessage, "errorMessage");
-    state.piFinalAttemptFailed = event.willRetry === true || stopReason === "error" || errorMessage !== null;
-    state.providerError = state.piFinalAttemptFailed
+    provider.finalAttemptFailed = event.willRetry === true || stopReason === "error" || errorMessage !== null;
+    state.providerError = provider.finalAttemptFailed
       ? errorMessage ?? (stopReason ? `PI stopped with ${stopReason}` : "PI provider retry failed")
       : null;
     emitAdapterEvent(state, sink, "PROVIDER_STATUS", event);
   } else if (type === "agent_settled") {
     state.terminalEventSeen = true;
-    state.terminalSuccess = state.piTurnCompleted && !state.piFinalAttemptFailed && !state.sawError;
-    const gaps = usageGaps(state.piUsage);
+    state.terminalSuccess = provider.turnCompleted && !provider.finalAttemptFailed && !state.sawError;
+    const gaps = usageGaps(provider.usage);
     if (gaps.length > 0) {
       const reason = gaps.join("; ");
       console.warn(JSON.stringify({ audit: "pi-usage", event: "incomplete", runId: state.runId, reason }));
-      emitAdapterEvent(state, sink, "ADAPTER_ERROR", { error: `Session cost is incomplete: ${reason}`, ...usagePayload(state.piUsage) });
+      emitAdapterEvent(state, sink, "ADAPTER_ERROR", { error: `Session cost is incomplete: ${reason}`, ...usagePayload(provider.usage) });
     }
-    emitAdapterEvent(state, sink, "FINAL_OUTPUT", state.piUsage.reported === 0
+    emitAdapterEvent(state, sink, "FINAL_OUTPUT", provider.usage.reported === 0
       ? event
-      : { ...event, agentosPiUsage: usagePayload(state.piUsage) });
+      : { ...event, agentosPiUsage: usagePayload(provider.usage) });
   } else {
     if (type?.includes("error")) state.sawError = true;
     emitAdapterEvent(state, sink, type?.includes("message") ? "MODEL_DELTA" : "PROVIDER_STATUS", event);
@@ -191,7 +215,7 @@ export const parsePiTranscript = (
   transcript: readonly unknown[],
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
-  const state = createAdapterState("PI", "transcript");
+  const state = createAdapterState("PI", "transcript", initialPiState());
   for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parsePiEvent);
   return state;
 };
@@ -219,11 +243,11 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
       error: "PI openai-codex runs require an explicit Anneal Codex service tier",
     };
   }
-  const version = await capturePreflight(spec.config, "PI", ["--version"], spec.env);
+  const version = await capturePreflight(spec.config, piDeclaration, ["--version"], spec.env);
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
   }
-  const help = await capturePreflight(spec.config, "PI", ["--help"], spec.env);
+  const help = await capturePreflight(spec.config, piDeclaration, ["--help"], spec.env);
   if (help.code !== 0 || !helpIsCompatible(`${help.stdout}\n${help.stderr}`)) {
     return {
       ok: false,
@@ -235,7 +259,7 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   }
   Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "json-stdin-resume-isolated" });
   const provider = spec.model.split("/")[0] ?? "openai-codex";
-  const auth = await capturePreflight(spec.config, "PI", ["auth", "check", "--provider", provider], spec.env);
+  const auth = await capturePreflight(spec.config, piDeclaration, ["auth", "check", "--provider", provider], spec.env);
   const ok = auth.code === 0;
   return {
     ok,
@@ -256,7 +280,10 @@ export const piChildEnvironment = (
   // the existing auth channel.
   HOME: scratch.configRoot,
   PI_CODING_AGENT_DIR: scratch.configRoot,
-  ...(claim.run.model.startsWith("openai-codex/") ? { AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1" } : {}),
+  ...(claim.run.model.startsWith("openai-codex/") ? {
+    AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
+    AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1",
+  } : {}),
 });
 
 export const provisionPiSessionConfig = (
@@ -268,17 +295,33 @@ export const provisionPiSessionConfig = (
   authFile: join(config.home, ".pi", "agent", "auth.json"),
 }, options);
 
-const implementation: AdapterImplementation = {
-  runner: "PI",
-  args: piArgs,
-  parseEvent: parsePiEvent,
+const promptSections = (claim: ClaimedTask): string[] => {
+  if (claim.run.subagentModel !== null || claim.run.subagentMaxConcurrent !== null) {
+    throw new Error("Native implementation subagents require a Codex root Run");
+  }
+  return [];
 };
 
-export const createPiAdapter = (): CliAdapter => Object.freeze<CliAdapter>({
-  preflight: (spec) => preflight({ ...spec, runner: "PI" }),
-  start: async (spec, sink) => spawnAdapterRuntime(implementation, spec, sink),
-  resume: async (spec, sink) => spawnAdapterRuntime(implementation, spec, sink, spec),
-  kill: (handle, reason) => killRuntime(handle, reason),
-  heartbeat: (handle) => heartbeatRuntime(handle),
-  classifyError: (evidence) => classifyRuntimeError(evidence),
+export const piDeclaration: AdapterDeclaration = Object.freeze({
+  runner: "PI",
+  binaryEnvironment: "PI_BINARY",
+  defaultBinary: "pi",
+  toolIntroduction: "Anneal tools attached to this session (pi extension tools):",
+  toolTransport: "pi-extension",
+  toolEntrypoint: piExtensionPath,
+  isolatesSessionConfig: true,
+  startupPreflightModel: "openai-codex/gpt-5.6-luna",
+  // PI_CODING_AGENT_SESSION_DIR is real, but --session-dir is authoritative.
+  // Deny task overrides without pretending the adapter depends on the variable.
+  protectedEnvironmentVariables: [
+    "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
+  ],
+  launcherEnvironmentVariables: ["PI_CODING_AGENT_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX"],
+  promptSections,
+  args: piArgs,
+  childEnvironment: piChildEnvironment,
+  provisionSessionConfig: provisionPiSessionConfig,
+  initialProviderState: initialPiState,
+  parseEvent: parsePiEvent,
+  preflight,
 });
