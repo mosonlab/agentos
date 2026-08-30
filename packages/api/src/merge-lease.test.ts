@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MERGE_TAIL_KIND, type Prisma, type PrismaClient } from "@anneal/db";
+import { type Prisma, type PrismaClient } from "@anneal/db";
 
 import {
   commitWithLeaseOutcome,
   commitWithLeaseOutcomes,
-  deferredLeaseReleases,
   LeaseReleaseDeferralRecordError,
-  leaseHandoffsWithoutConsumer,
   leaseHolderFor,
   mergeLeaseScriptPath,
   readMergeLeaseRelease,
@@ -30,11 +28,32 @@ const released: MergeLeaseRelease = {
 };
 
 const leaseTarget = (chainId: string) => ({ projectId: "project-1", chainId });
+const releasedLedgerEvent = (chainId: string) => ({
+  id: "lease-event-1",
+  projectId: "project-1",
+  chainId,
+  leaseRef: released.ref,
+  leaseSha: released.sha,
+  state: "RELEASED",
+  owningTaskId: "tail-task",
+  handedOffRunId: null,
+  handedOffAt: null,
+  deferredAt: null,
+  settledAt: new Date("2026-08-27T12:01:00.000Z"),
+  acquiredAt: new Date(released.acquiredAt),
+  failureDetail: null,
+  createdAt: new Date("2026-08-27T12:01:00.000Z"),
+  updatedAt: new Date("2026-08-27T12:01:00.000Z"),
+});
 const holdDb = {
-  task: { findFirst: async () => ({ id: "tail-task" }) },
-  taskActivity: { createMany: async () => ({ count: 1 }) },
   $transaction: async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn({
-    run: { findUnique: async () => ({ taskId: "tail-task" }) },
+    task: { findFirst: async () => ({ id: "tail-task" }) },
+    mergeLeaseEvent: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      createMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => releasedLedgerEvent("chain-1"),
+    },
     taskActivity: { create: async () => ({}) },
   } as unknown as Prisma.TransactionClient),
 } as unknown as PrismaClient;
@@ -54,6 +73,20 @@ const releaseDeferralDb = (
         taskTemplate: { name: "direct-engineer-workflow" },
       },
     }) },
+    mergeLeaseEvent: {
+      createMany: async () => ({ count: 1 }),
+      findFirst: async () => ({
+        ...releasedLedgerEvent(chainId),
+        leaseRef: null,
+        leaseSha: null,
+        state: "RELEASE_DEFERRED",
+        owningTaskId: "task-1",
+        deferredAt: new Date("2026-08-27T12:00:00.000Z"),
+        settledAt: null,
+        acquiredAt: null,
+        failureDetail: "release helper timed out",
+      }),
+    },
     taskActivity: {
       create: async ({ data }: { data: Record<string, unknown> }) => {
         if (recordFailure) throw recordFailure;
@@ -160,61 +193,6 @@ test("mergeLeaseHold calculates whole elapsed seconds and clamps invalid or skew
   assert.equal(mergeLeaseHold(acquiredAt, new Date("not-a-date")), null);
 });
 
-test("leaseHandoffsWithoutConsumer returns only stale Runs that never claimed", async () => {
-  const now = new Date("2026-08-27T12:02:00.000Z");
-  let sql = "";
-  let parameters: unknown[] = [];
-  const tx = {
-    $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      sql = strings.join("?");
-      parameters = values;
-      return [{ toRunId: "run-stale", taskId: "task-stale" }];
-    },
-  } as unknown as Prisma.TransactionClient;
-
-  assert.deepEqual(await leaseHandoffsWithoutConsumer(tx, now), [
-    { toRunId: "run-stale", taskId: "task-stale" },
-  ]);
-  assert.match(sql, /FROM "Run" AS consumer/u);
-  assert.match(sql, /WITH consumers AS/u);
-  assert.match(sql, /AND EXISTS \(/u);
-  assert.match(sql, /JOIN LATERAL/u);
-  assert.match(sql, /activity\."taskId" = consumer\."taskId"/u);
-  assert.match(sql, /activity\."createdAt" >= LEAST\(consumer\."createdAt", consumer\."readyAt"\)/u);
-  assert.match(sql, /GREATEST\(consumer\."createdAt", consumer\."readyAt"\)/u);
-  assert.match(sql, /ORDER BY "staleAt" ASC, "toRunId" ASC/u);
-  assert.match(sql, /LIMIT/u);
-  assert.ok(parameters.some((value) => value instanceof Date), "the query has a time floor");
-  assert.ok(parameters.includes(100), "the query has an explicit row limit");
-});
-
-test("the lease-release marker constant matches the indexed SQL literal", () => {
-  assert.equal(MERGE_TAIL_KIND.leaseRelease, "mergeTail.leaseRelease");
-});
-
-test("deferredLeaseReleases returns one bounded unresolved page", async () => {
-  let sql = "";
-  let parameters: unknown[] = [];
-  const tx = {
-    $queryRaw: async (statement: Prisma.Sql) => {
-      sql = statement.sql;
-      parameters = statement.values;
-      return [{ activityId: "deferred-1", taskId: "task-1", projectId: "project-1", chainId: "chain-1" }];
-    },
-  } as unknown as Prisma.TransactionClient;
-
-  assert.deepEqual(await deferredLeaseReleases(tx), [{
-    activityId: "deferred-1",
-    taskId: "task-1",
-    target: { projectId: "project-1", chainId: "chain-1" },
-  }]);
-  assert.match(sql, /kind' = 'mergeTail\.leaseRelease'/u);
-  assert.match(sql, /state' = 'release-deferred'/u);
-  assert.match(sql, /deferredActivityId/u);
-  assert.doesNotMatch(sql, /kind' = \?/u, "the partial-index predicate stays a SQL literal");
-  assert.deepEqual(parameters, [100], "only the bounded page limit is parameterized");
-});
-
 const transactionDb = (tx: Prisma.TransactionClient, events: string[] = []) => ({
   $transaction: async (fn: (client: Prisma.TransactionClient) => Promise<unknown>) => {
     const result = await fn(tx);
@@ -295,9 +273,25 @@ test("commitWithLeaseOutcomes surfaces release failure", async () => {
 
 test("commitWithLeaseOutcome records handoff without release and surfaces record failure", async () => {
   const activities: unknown[] = [];
+  const handoffEvent = {
+    ...releasedLedgerEvent("chain-1"),
+    id: "handoff-1",
+    leaseRef: null,
+    leaseSha: null,
+    state: "HANDOFF_PENDING",
+    owningTaskId: "task-2",
+    handedOffRunId: "run-2",
+    handedOffAt: new Date("2026-08-27T12:00:00.000Z"),
+    settledAt: null,
+    acquiredAt: null,
+  };
   const tx = {
     ...holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }),
-    run: { findUnique: async () => ({ taskId: "task-2" }) },
+    run: { findUnique: async () => ({ projectId: "project-1", taskId: "task-2" }) },
+    mergeLeaseEvent: {
+      createMany: async () => ({ count: 1 }),
+      findUnique: async () => handoffEvent,
+    },
     taskActivity: { create: async (input: unknown) => { activities.push(input); } },
   } as unknown as Prisma.TransactionClient;
   let releases = 0;
@@ -346,6 +340,19 @@ test("commitWithLeaseOutcome durably invalidates a handoff without a holder", as
   });
   const tx = {
     ...base,
+    mergeLeaseEvent: {
+      updateMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => ({
+        ...releasedLedgerEvent("ordinary-chain"),
+        id: "handoff-invalid",
+        state: "INVALID",
+        owningTaskId: "task-1",
+        handedOffRunId: "run-orphan",
+        handedOffAt: new Date("2026-08-27T11:59:00.000Z"),
+        settledAt: new Date("2026-08-27T12:00:00.000Z"),
+        failureDetail: "the handoff Task does not resolve to a Merge Lease holder",
+      }),
+    },
     taskActivity: {
       findMany: async () => [],
       create: async (input: { data: { metadata: Record<string, unknown> } }) => {
@@ -359,7 +366,12 @@ test("commitWithLeaseOutcome durably invalidates a handoff without a holder", as
     leaseOutcome: {
       kind: "stop",
       taskId: "task-1",
-      releasedHandoff: { toRunId: "run-orphan", at: new Date("2026-08-27T12:00:00.000Z") },
+      releasedHandoff: {
+        eventId: "handoff-invalid",
+        toRunId: "run-orphan",
+        target: leaseTarget("ordinary-chain"),
+        at: new Date("2026-08-27T12:00:00.000Z"),
+      },
     },
   }), { release: async () => { releases += 1; } });
   assert.equal(releases, 0);
@@ -428,8 +440,7 @@ test("a release-recording failure preserves the callback exception", async () =>
   const callbackFailure = new Error("authorization failed first");
   const recordingFailure = new Error("hold recording failed second");
   const failingDb = {
-    task: { findFirst: async () => ({ id: "tail-task" }) },
-    taskActivity: { createMany: async () => { throw recordingFailure; } },
+    $transaction: async () => { throw recordingFailure; },
   } as unknown as PrismaClient;
 
   await assert.rejects(
@@ -518,6 +529,7 @@ test("an unreachable release outcome is retryable", async () => {
   assert.deepEqual((deferred[0]!.metadata as Record<string, unknown>), {
     kind: "mergeTail.leaseRelease",
     schemaVersion: 1,
+    ledgerId: "lease-event-1",
     state: "release-deferred",
     projectId: "project-1",
     chainId: "chain-unreachable-release",

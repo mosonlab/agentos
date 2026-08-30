@@ -160,6 +160,13 @@ enum MergeRecoveryRefusalCode {
   HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
 }
 
+enum MergeLeaseEventState {
+  HANDOFF_PENDING  @map("handoff-pending")
+  RELEASE_DEFERRED @map("release-deferred")
+  RELEASED         @map("released")
+  INVALID          @map("invalid")
+}
+
 enum SessionExecutionStatus {
   REQUESTED     @map("requested")
   PROVISIONING  @map("provisioning")
@@ -255,45 +262,45 @@ model Environment {
 }
 
 model Agent {
-  id                 String               @id @default(cuid())
-  projectId          String
-  environmentId      String
-  name               String
-  title              String
-  model              String
+  id                                  String               @id @default(cuid())
+  projectId                           String
+  environmentId                       String
+  name                                String
+  title                               String
+  model                               String
   /// Set when the operator changes model or runner in the console. Canonical
   /// seed and prompt sync preserve this runtime choice.
-  runtimeConfigCustomized Boolean          @default(false)
+  runtimeConfigCustomized             Boolean              @default(false)
   /// The customized canonical/production comparison most recently reported
   /// to Inbox. Cleared when that drift is no longer present.
   runtimeConfigDriftNoticeFingerprint String?
-  codexServiceTier   CodexServiceTier     @default(DEFAULT)
-  foundationalPrompt String
-  rolePrompt         String
-  runnerPreference   RunnerPreference     @default(INHERIT)
-  inboxAccess        Boolean              @default(false)
+  codexServiceTier                    CodexServiceTier     @default(DEFAULT)
+  foundationalPrompt                  String
+  rolePrompt                          String
+  runnerPreference                    RunnerPreference     @default(INHERIT)
+  inboxAccess                         Boolean              @default(false)
   /// Denied tools, not allowed ones: empty means "every tool the CLI offers",
   /// which is what every agent had before this column existed. Keys are the eight
   /// canonical names in apps/web/src/lib/tools.ts; the runner maps them per CLI in
   /// packages/runner/src/adapters.ts.
-  disabledTools      String[]             @default([])
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  archivedAt         DateTime?
-  project            Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  environment        Environment          @relation(fields: [environmentId, projectId], references: [id, projectId], onDelete: Restrict)
-  skills             AgentSkill[]
-  mcpConnections     AgentMCPConnection[]
-  repoAccess         AgentRepoAccess[]
-  filesystemGrants   FilesystemGrant[]
-  collaborators      AgentCollaboration[] @relation("AgentCollaborators")
-  collaboratorFor    AgentCollaboration[] @relation("AllowedCollaborator")
-  secretGrants       AgentSecretGrant[]
-  assignedTasks      Task[]
-  templateSteps      TaskTemplateStep[]
-  sessions           Session[]
-  runs               Run[]
-  inboxMessages      InboxMessage[]
+  disabledTools                       String[]             @default([])
+  createdAt                           DateTime             @default(now())
+  updatedAt                           DateTime             @updatedAt
+  archivedAt                          DateTime?
+  project                             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  environment                         Environment          @relation(fields: [environmentId, projectId], references: [id, projectId], onDelete: Restrict)
+  skills                              AgentSkill[]
+  mcpConnections                      AgentMCPConnection[]
+  repoAccess                          AgentRepoAccess[]
+  filesystemGrants                    FilesystemGrant[]
+  collaborators                       AgentCollaboration[] @relation("AgentCollaborators")
+  collaboratorFor                     AgentCollaboration[] @relation("AllowedCollaborator")
+  secretGrants                        AgentSecretGrant[]
+  assignedTasks                       Task[]
+  templateSteps                       TaskTemplateStep[]
+  sessions                            Session[]
+  runs                                Run[]
+  inboxMessages                       InboxMessage[]
 
   @@unique([projectId, name])
   @@unique([id, projectId])
@@ -517,92 +524,93 @@ model TaskTemplateStep {
 }
 
 model Task {
-  id                      String               @id @default(cuid())
-  projectId               String
-  assigneeAgentId         String?
-  repoId                  String?
-  templateId              String?
-  templateStepId          String?
-  name                    String
-  description             String
-  workingDirectory        String?
-  targetBranch            String?
-  failureReason           String?
-  readinessClaimToken     String?
-  readinessClaimExpiresAt DateTime?
-  status                  TaskStatus           @default(TODO)
-  source                  TaskSource           @default(MANUAL)
-  archivedAt              DateTime?
-  schedulePausedAt        DateTime?
-  recurringSourceTaskId   String?
-  assigneeType            AssigneeType         @default(AGENT)
-  approvalGate            Boolean              @default(false)
+  id                       String                 @id @default(cuid())
+  projectId                String
+  assigneeAgentId          String?
+  repoId                   String?
+  templateId               String?
+  templateStepId           String?
+  name                     String
+  description              String
+  workingDirectory         String?
+  targetBranch             String?
+  failureReason            String?
+  readinessClaimToken      String?
+  readinessClaimExpiresAt  DateTime?
+  status                   TaskStatus             @default(TODO)
+  source                   TaskSource             @default(MANUAL)
+  archivedAt               DateTime?
+  schedulePausedAt         DateTime?
+  recurringSourceTaskId    String?
+  assigneeType             AssigneeType           @default(AGENT)
+  approvalGate             Boolean                @default(false)
   /// Whether a run of this task may open a pull request. Copied onto each Run at
   /// creation so a PATCH cannot change a run that is already queued.
-  opensPullRequest        Boolean              @default(true)
-  chainId                 String?
-  chainIndex              Int?
-  chainLayer              Int?
-  scheduleKind            ScheduleKind         @default(NOW)
-  runAt                   DateTime?
-  cron                    String?
-  timezone                String?
-  maxDurationMin          Int                  @default(240)
-  stallTimeoutMin         Int                  @default(10)
-  maxSessionsPerTask      Int                  @default(5)
-  spendCap                Decimal?             @db.Decimal(12, 2)
-  spendCapApplicable      Boolean              @default(false)
+  opensPullRequest         Boolean                @default(true)
+  chainId                  String?
+  chainIndex               Int?
+  chainLayer               Int?
+  scheduleKind             ScheduleKind           @default(NOW)
+  runAt                    DateTime?
+  cron                     String?
+  timezone                 String?
+  maxDurationMin           Int                    @default(240)
+  stallTimeoutMin          Int                    @default(10)
+  maxSessionsPerTask       Int                    @default(5)
+  spendCap                 Decimal?               @db.Decimal(12, 2)
+  spendCapApplicable       Boolean                @default(false)
   /// Goal 5a0 lineage. All eleven columns are all-null on a manual/chain/template/
   /// CRON/AT Task and all-non-null-where-required on a Goal-linked Task; the
   /// database checks installed by 20260818000000_goal_execution_safety_kernel are
   /// the backstop, and only the Goal safety kernel writes them.
-  goalId                  String?
-  goalGeneration          Int?
-  goalIteration           Int?
-  goalDispatchKey         String?
-  goalDispatchRequestHash String?
-  goalDispatchState       GoalDispatchState?
-  goalDecisionKey         String?
-  goalDecisionRequestHash String?
-  goalDecisionRunId       String?
-  goalDecisionAt          DateTime?
-  goalPredecessorTaskId   String?              @unique
-  dispatchAfterTaskId     String?              @unique
-  createdAt               DateTime             @default(now())
+  goalId                   String?
+  goalGeneration           Int?
+  goalIteration            Int?
+  goalDispatchKey          String?
+  goalDispatchRequestHash  String?
+  goalDispatchState        GoalDispatchState?
+  goalDecisionKey          String?
+  goalDecisionRequestHash  String?
+  goalDecisionRunId        String?
+  goalDecisionAt           DateTime?
+  goalPredecessorTaskId    String?                @unique
+  dispatchAfterTaskId      String?                @unique
+  createdAt                DateTime               @default(now())
   /// Stable completion clock for age-based retention. A database trigger sets
   /// it on every transition into DONE and clears it on every transition out.
-  doneAt                  DateTime?
-  updatedAt               DateTime             @updatedAt
-  project                 Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  assigneeAgent           Agent?               @relation(fields: [assigneeAgentId, projectId], references: [id, projectId], onDelete: Restrict)
-  repo                    Repo?                @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
-  template                TaskTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  templateStep            TaskTemplateStep?    @relation(fields: [templateStepId], references: [id], onDelete: SetNull)
-  recurringSource         Task?                @relation("TaskRecurringSource", fields: [recurringSourceTaskId], references: [id], onDelete: SetNull)
-  recurringCopies         Task[]               @relation("TaskRecurringSource")
-  activity                TaskActivity[]
-  sessions                Session[]
-  runs                    Run[]
-  inboxMessages           InboxMessage[]
-  gateMessages            InboxMessage[]       @relation("InboxGateTask")
-  inboxThreads            InboxThread[]
-  stepOutput              TaskStepOutput?
-  goal                    Goal?                @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
-  goalDecisionRun         Run?                 @relation("TaskGoalDecisionRun", fields: [goalDecisionRunId], references: [id], onDelete: Restrict)
-  goalPredecessorTask     Task?                @relation("TaskGoalPredecessor", fields: [goalPredecessorTaskId], references: [id], onDelete: Restrict)
-  goalSuccessorTask       Task?                @relation("TaskGoalPredecessor")
-  dispatchAfter           Task?                @relation("TaskDispatchBinding", fields: [dispatchAfterTaskId, projectId], references: [id, projectId], onDelete: Restrict)
-  dispatchedChainFirstTask Task?               @relation("TaskDispatchBinding")
+  doneAt                   DateTime?
+  updatedAt                DateTime               @updatedAt
+  project                  Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assigneeAgent            Agent?                 @relation(fields: [assigneeAgentId, projectId], references: [id, projectId], onDelete: Restrict)
+  repo                     Repo?                  @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
+  template                 TaskTemplate?          @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateStep             TaskTemplateStep?      @relation(fields: [templateStepId], references: [id], onDelete: SetNull)
+  recurringSource          Task?                  @relation("TaskRecurringSource", fields: [recurringSourceTaskId], references: [id], onDelete: SetNull)
+  recurringCopies          Task[]                 @relation("TaskRecurringSource")
+  activity                 TaskActivity[]
+  sessions                 Session[]
+  runs                     Run[]
+  inboxMessages            InboxMessage[]
+  gateMessages             InboxMessage[]         @relation("InboxGateTask")
+  inboxThreads             InboxThread[]
+  stepOutput               TaskStepOutput?
+  goal                     Goal?                  @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
+  goalDecisionRun          Run?                   @relation("TaskGoalDecisionRun", fields: [goalDecisionRunId], references: [id], onDelete: Restrict)
+  goalPredecessorTask      Task?                  @relation("TaskGoalPredecessor", fields: [goalPredecessorTaskId], references: [id], onDelete: Restrict)
+  goalSuccessorTask        Task?                  @relation("TaskGoalPredecessor")
+  dispatchAfter            Task?                  @relation("TaskDispatchBinding", fields: [dispatchAfterTaskId, projectId], references: [id, projectId], onDelete: Restrict)
+  dispatchedChainFirstTask Task?                  @relation("TaskDispatchBinding")
   /// Step 2.7 identity backstops. The single-column relations stay as the
   /// delete restrictions the spec names; these composite ones are what stop a
   /// predecessor, Run, or event from crossing a Goal, generation, or iteration.
-  goalPredecessorIdentity Task?                @relation("TaskGoalPredecessorIdentity", fields: [goalPredecessorTaskId, goalId, goalGeneration], references: [id, goalId, goalGeneration], onDelete: Restrict)
-  goalSuccessorIdentities Task[]               @relation("TaskGoalPredecessorIdentity")
-  goalLineageRuns         Run[]                @relation("RunGoalLineageIdentity")
-  goalEventIdentities     GoalExecutionEvent[] @relation("GoalEventTaskIdentity")
-  goalExecutionEvents     GoalExecutionEvent[]
-  mergeRecoveryAttempts   MergeRecoveryAttempt[]
-  gateAttestations        MergeGateAttestation[]
+  goalPredecessorIdentity  Task?                  @relation("TaskGoalPredecessorIdentity", fields: [goalPredecessorTaskId, goalId, goalGeneration], references: [id, goalId, goalGeneration], onDelete: Restrict)
+  goalSuccessorIdentities  Task[]                 @relation("TaskGoalPredecessorIdentity")
+  goalLineageRuns          Run[]                  @relation("RunGoalLineageIdentity")
+  goalEventIdentities      GoalExecutionEvent[]   @relation("GoalEventTaskIdentity")
+  goalExecutionEvents      GoalExecutionEvent[]
+  mergeRecoveryAttempts    MergeRecoveryAttempt[]
+  gateAttestations         MergeGateAttestation[]
+  ownedMergeLeaseEvents    MergeLeaseEvent[]      @relation("MergeLeaseOwningTask")
 
   @@unique([chainId, chainIndex])
   @@unique([id, projectId])
@@ -631,20 +639,20 @@ model Task {
 /// keeps the last hold facts and release facts; a missing row is the initial
 /// not-held state.
 model ChainControl {
-  id               String            @id @default(cuid())
+  id               String              @id @default(cuid())
   projectId        String
   chainId          String
-  state            ChainControlState @default(HELD)
+  state            ChainControlState   @default(HELD)
   heldLayer        Int?
   heldAt           DateTime?
   holdRequestId    String?
   holdReason       String?
   releasedAt       DateTime?
   releaseRequestId String?
-  holdGeneration   Int               @default(0)
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  holdGeneration   Int                 @default(0)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  project          Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events           ChainControlEvent[]
 
   @@unique([projectId, chainId])
@@ -666,7 +674,7 @@ model ChainControlEvent {
   reason         String?
   createdAt      DateTime          @default(now())
   holdGeneration Int
-  chainControl   ChainControl       @relation(fields: [chainControlId], references: [id], onDelete: Cascade)
+  chainControl   ChainControl      @relation(fields: [chainControlId], references: [id], onDelete: Cascade)
 
   @@unique([chainControlId, kind, requestId])
   @@index([chainControlId, createdAt])
@@ -676,12 +684,12 @@ model ChainControlEvent {
 /// TaskActivity and Inbox rows derived from this record are audit and
 /// notification projections only; they are never read back as authority.
 model MergeRecoveryAttempt {
-  id                      String              @id @default(cuid())
+  id                      String                    @id @default(cuid())
   integratorTaskId        String
   sourceStopId            String
   attempt                 Int
-  status                  MergeRecoveryStatus @default(VALIDATING)
-  validationAttempts      Int                 @default(0)
+  status                  MergeRecoveryStatus       @default(VALIDATING)
+  validationAttempts      Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
   recoveryRunId           String?
@@ -696,10 +704,10 @@ model MergeRecoveryAttempt {
   currentBaseSha          String?
   failureReason           String?
   refusalCode             MergeRecoveryRefusalCode?
-  startedAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
+  startedAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
   endedAt                 DateTime?
-  integratorTask          Task                @relation(fields: [integratorTaskId], references: [id], onDelete: Cascade)
+  integratorTask          Task                      @relation(fields: [integratorTaskId], references: [id], onDelete: Cascade)
 
   @@unique([sourceStopId, attempt])
   @@index([integratorTaskId, status])
@@ -766,6 +774,35 @@ model MergeGateAttestation {
   @@unique([chainId, headSha])
   @@index([taskId])
   @@index([runId])
+}
+
+/// Durable authority for one merge Lease event. TaskActivity rows are derived
+/// operator projections; reconciliation reads this ledger instead of parsing
+/// their metadata.
+model MergeLeaseEvent {
+  id             String               @id @default(cuid())
+  projectId      String
+  chainId        String
+  leaseRef       String?
+  leaseSha       String?
+  state          MergeLeaseEventState
+  owningTaskId   String
+  handedOffRunId String?
+  handedOffAt    DateTime?
+  deferredAt     DateTime?
+  settledAt      DateTime?
+  acquiredAt     DateTime?
+  failureDetail  String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  owningTask     Task                 @relation("MergeLeaseOwningTask", fields: [owningTaskId], references: [id], onDelete: Cascade)
+  handedOffRun   Run?                 @relation("MergeLeaseHandoffRun", fields: [handedOffRunId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, chainId, leaseSha])
+  @@unique([projectId, chainId, handedOffRunId])
+  @@index([state, handedOffAt, id])
+  @@index([state, deferredAt, id])
+  @@index([owningTaskId])
 }
 
 model TaskActivity {
@@ -844,59 +881,59 @@ model GoalProgressEntry {
 }
 
 model Run {
-  id                    String               @id @default(cuid())
-  projectId             String
-  taskId                String?
-  goalId                String?
-  goalGeneration        Int?
-  goalIteration         Int?
+  id                            String                 @id @default(cuid())
+  projectId                     String
+  taskId                        String?
+  goalId                        String?
+  goalGeneration                Int?
+  goalIteration                 Int?
   /// The immediate source Run this Run retries. Null on a first Run. Unique, so a
   /// source Run can have at most one retry child — the database backstop behind
   /// the kernel's single-flight retry.
-  retryOfRunId          String?              @unique
-  agentId               String
-  repoId                String?
-  blockedByRunId        String?
-  runNumber             Int
-  dedupeKey             String               @unique
-  status                RunStatus            @default(QUEUED)
-  readyAt               DateTime             @default(now())
-  runner                RunnerKind
-  runnerId              String?
-  leaseGeneration       Int                  @default(0)
-  fencingToken          String?              @unique
-  leaseExpiresAt        DateTime?
-  heartbeatAt           DateTime?
-  lastProcessAliveAt    DateTime?
-  lastProgressEventAt   DateTime?
-  inFlightTool          Json?
-  sessionTokenHash      String?              @unique
-  sessionTokenExpiresAt DateTime?
-  sessionTokenRevokedAt DateTime?
+  retryOfRunId                  String?                @unique
+  agentId                       String
+  repoId                        String?
+  blockedByRunId                String?
+  runNumber                     Int
+  dedupeKey                     String                 @unique
+  status                        RunStatus              @default(QUEUED)
+  readyAt                       DateTime               @default(now())
+  runner                        RunnerKind
+  runnerId                      String?
+  leaseGeneration               Int                    @default(0)
+  fencingToken                  String?                @unique
+  leaseExpiresAt                DateTime?
+  heartbeatAt                   DateTime?
+  lastProcessAliveAt            DateTime?
+  lastProgressEventAt           DateTime?
+  inFlightTool                  Json?
+  sessionTokenHash              String?                @unique
+  sessionTokenExpiresAt         DateTime?
+  sessionTokenRevokedAt         DateTime?
   /// Operator cancellation is a durable intent before it is a terminal state.
   /// The owning runner observes this through heartbeat, kills its provider
   /// process group, then acknowledges the same request id. While intent is
   /// present every ordinary lease-authorized write is fenced out.
-  cancelRequestId       String?              @unique
-  cancelReason          String?
-  cancelRequestedAt     DateTime?
-  cancelAcknowledgedAt  DateTime?
-  workspacePath         String?
-  workspaceRetained     Boolean              @default(false)
+  cancelRequestId               String?                @unique
+  cancelReason                  String?
+  cancelRequestedAt             DateTime?
+  cancelAcknowledgedAt          DateTime?
+  workspacePath                 String?
+  workspaceRetained             Boolean                @default(false)
   /// Control-plane *intent*, not an action: "the runner that owns this run's
   /// workspace root may reclaim its directory". The API publishes it and never
   /// deletes anything itself (issue #115); disposal belongs to the runner,
   /// which is the only process that owns the root it provisioned into.
-  workspaceReclaimAt    DateTime?
+  workspaceReclaimAt            DateTime?
   /// Set when the owning runner reports back what it did with the intent —
   /// removed or refused. A closed intent is never re-offered, and no later
   /// report may reopen it or change what it settled on.
-  workspaceReclaimedAt  DateTime?
+  workspaceReclaimedAt          DateTime?
   /// Reclaim attempts that failed. It is what lets a failure report take the
   /// same compare-and-set as a closing one — a `FAILED` that arrives after the
   /// intent closed must not roll a succeeded cleanup back — and it is what an
   /// operator reads to find a workspace nobody can remove.
-  workspaceReclaimAttempts Int               @default(0)
+  workspaceReclaimAttempts      Int                    @default(0)
   /// Report-only observation from terminal completion. Each entry is an
   /// absolute worktree path registered by this Run's checkout that was found
   /// outside the Run workspace. NULL means the runner reported no observation
@@ -906,42 +943,42 @@ model Run {
   /// The PR decision snapshotted when this run was created, so an operator's
   /// PATCH of the task cannot change a run already queued. The runner reads this
   /// and never the live task row.
-  opensPullRequest      Boolean              @default(true)
-  targetBranch          String?
-  branch                String?
+  opensPullRequest              Boolean                @default(true)
+  targetBranch                  String?
+  branch                        String?
   /// The ref this run actually handed to `git push`, written only after the push
   /// returned. It is not the derived chain branch — `sharedChainBranch` remains
   /// the only thing that computes that — it is the record of what was published,
   /// and it is the only signal `resolveRunBranches` trusts as evidence that a
   /// chain branch exists on a remote. `branch` and `pushStatus` cannot answer
   /// that question: see the comment in workflow.ts.
-  pushedBranch          String?
-  baseSha               String?
-  headSha               String?
-  pushStatus            PushStatus           @default(NOT_REQUESTED)
-  pushRemote            String?
-  pushError             String?
-  pullRequestUrl        String?
-  pullRequestNumber     Int?
-  deliveryInstructions  String?
-  adapterVersion        String?
-  cliVersion            String?
-  model                 String
+  pushedBranch                  String?
+  baseSha                       String?
+  headSha                       String?
+  pushStatus                    PushStatus             @default(NOT_REQUESTED)
+  pushRemote                    String?
+  pushError                     String?
+  pullRequestUrl                String?
+  pullRequestNumber             Int?
+  deliveryInstructions          String?
+  adapterVersion                String?
+  cliVersion                    String?
+  model                         String
   /// Immutable launch snapshot. DEFAULT is explicit rather than an omitted
   /// provider value, so Anneal never delegates this choice to `auto`.
-  codexServiceTier      CodexServiceTier     @default(DEFAULT)
+  codexServiceTier              CodexServiceTier       @default(DEFAULT)
   /// Immutable native-child capability snapshot. Null outside Codex
   /// implementation steps; fixed by the platform rather than Agent setup.
-  subagentModel         String?
-  subagentMaxConcurrent Int?
-  authMode              String?
-  manifest              Json?
+  subagentModel                 String?
+  subagentMaxConcurrent         Int?
+  authMode                      String?
+  manifest                      Json?
   /// SHA-256 of the exact prompt bytes most recently dispatched for this Run.
   /// Null before the first successful runner start write.
-  promptHash            String?
-  maxDurationMin        Int                  @default(240)
-  stallTimeoutMin       Int                  @default(10)
-  maxRunsPerTask        Int                  @default(5)
+  promptHash                    String?
+  maxDurationMin                Int                    @default(240)
+  stallTimeoutMin               Int                    @default(10)
+  maxRunsPerTask                Int                    @default(5)
   // How many extra attempts this task has been *granted* on top of whatever
   // `Task.maxSessionsPerTask` says right now: one per attempt refunded as an
   // external failure, plus any a human re-authorized. `maxRunsPerTask` is the
@@ -950,21 +987,21 @@ model Run {
   // lowering a task's budget used to leave the old, higher number in force.
   // Carried forward onto every run a task creates, so the newest row is the
   // running total.
-  budgetGrants          Int                  @default(0)
-  spendCap              Decimal?             @db.Decimal(12, 2)
-  spendCapApplicable    Boolean              @default(false)
-  failureClass          FailureClass?
-  failureReason         String?
-  retryable             Boolean?
-  retryAt               DateTime?
-  terminationReason     String?
+  budgetGrants                  Int                    @default(0)
+  spendCap                      Decimal?               @db.Decimal(12, 2)
+  spendCapApplicable            Boolean                @default(false)
+  failureClass                  FailureClass?
+  failureReason                 String?
+  retryable                     Boolean?
+  retryAt                       DateTime?
+  terminationReason             String?
   /// The structured account the runner gave of this failure: phase, exit facts,
   /// channel-separated evidence and typed timeout/transient markers. The API
   /// classifies from this and stores it verbatim, so a disputed verdict can be
   /// re-decided against what was actually observed instead of re-run. NULL on
   /// every successful run, and on every run reported by a runner too old to
   /// send one. See packages/db/src/failure-envelope.ts.
-  failureEnvelope       Json?
+  failureEnvelope               Json?
   /// The raw tail of what this run produced: the agent's final output when it
   /// emitted one, otherwise the run's stdout, capped at 500k by the runner that
   /// sent it. Written on every completion a runner reports, succeeded or
@@ -978,31 +1015,32 @@ model Run {
   /// question belongs to TaskStepOutput (issue #121). Kept out of the run rows
   /// the task read routes serialize, because a task's five tails would dwarf
   /// everything else in the response.
-  output                String?
-  queuedAt              DateTime             @default(now())
-  claimedAt             DateTime?
-  startedAt             DateTime?
-  endedAt               DateTime?
-  createdAt             DateTime             @default(now())
-  updatedAt             DateTime             @updatedAt
-  project               Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  task                  Task?                @relation(fields: [taskId, projectId], references: [id, projectId], onDelete: Restrict)
-  goal                  Goal?                @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
-  agent                 Agent                @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Restrict)
-  repo                  Repo?                @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
-  blockedBy             Run?                 @relation("RunDependency", fields: [blockedByRunId], references: [id], onDelete: SetNull)
-  dependents            Run[]                @relation("RunDependency")
-  session               Session?
-  events                SessionEvent[]
-  inboxDecisions        InboxDecision[]
-  stepOutputs           TaskStepOutput[]
-  retryOfRun            Run?                 @relation("RunRetryParent", fields: [retryOfRunId], references: [id], onDelete: Restrict)
-  retryChildRun         Run?                 @relation("RunRetryParent")
-  goalDecisionTasks     Task[]               @relation("TaskGoalDecisionRun")
-  goalLineageTask       Task?                @relation("RunGoalLineageIdentity", fields: [taskId, goalId, goalGeneration, goalIteration], references: [id, goalId, goalGeneration, goalIteration], onDelete: Restrict)
-  goalEventIdentities   GoalExecutionEvent[] @relation("GoalEventRunIdentity")
-  goalExecutionEvents   GoalExecutionEvent[]
-  gateAttestations      MergeGateAttestation[]
+  output                        String?
+  queuedAt                      DateTime               @default(now())
+  claimedAt                     DateTime?
+  startedAt                     DateTime?
+  endedAt                       DateTime?
+  createdAt                     DateTime               @default(now())
+  updatedAt                     DateTime               @updatedAt
+  project                       Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task                          Task?                  @relation(fields: [taskId, projectId], references: [id, projectId], onDelete: Restrict)
+  goal                          Goal?                  @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
+  agent                         Agent                  @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Restrict)
+  repo                          Repo?                  @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
+  blockedBy                     Run?                   @relation("RunDependency", fields: [blockedByRunId], references: [id], onDelete: SetNull)
+  dependents                    Run[]                  @relation("RunDependency")
+  session                       Session?
+  events                        SessionEvent[]
+  inboxDecisions                InboxDecision[]
+  stepOutputs                   TaskStepOutput[]
+  retryOfRun                    Run?                   @relation("RunRetryParent", fields: [retryOfRunId], references: [id], onDelete: Restrict)
+  retryChildRun                 Run?                   @relation("RunRetryParent")
+  goalDecisionTasks             Task[]                 @relation("TaskGoalDecisionRun")
+  goalLineageTask               Task?                  @relation("RunGoalLineageIdentity", fields: [taskId, goalId, goalGeneration, goalIteration], references: [id, goalId, goalGeneration, goalIteration], onDelete: Restrict)
+  goalEventIdentities           GoalExecutionEvent[]   @relation("GoalEventRunIdentity")
+  goalExecutionEvents           GoalExecutionEvent[]
+  gateAttestations              MergeGateAttestation[]
+  handedOffLeaseEvents          MergeLeaseEvent[]      @relation("MergeLeaseHandoffRun")
 
   @@unique([taskId, runNumber])
   @@unique([id, projectId])
