@@ -3,6 +3,9 @@
 
 import type {
   AssigneeType,
+  BoardCard as BoardContractCard,
+  BoardChainAggregate as BoardContractChainAggregate,
+  BoardChainFrontier as BoardContractChainFrontier,
   ChainControl,
   ChainProgress,
   ChainStep,
@@ -18,17 +21,11 @@ import type {
 
 export type {
   AssigneeType,
-  BoardCard,
   BoardChainActivationState,
-  BoardChainAggregate,
-  BoardChainFrontier,
   BoardLatestRun,
   BoardMoveTarget,
-  BoardTask,
-  ChainAggregate,
   ChainAggregateState,
   ChainControl,
-  ChainFrontier,
   ChainProgress,
   ChainStep,
   ExecutionOwner,
@@ -41,6 +38,19 @@ export type {
   TaskStatus,
   UsageCost,
 } from "@anneal/db/board-contract";
+
+export type ChainFrontier<DateTime = string> = BoardContractChainFrontier<DateTime> & {
+  mergeOutcome: MergeOutcome | null;
+};
+export type BoardChainFrontier<DateTime = string> = ChainFrontier<DateTime>;
+export type ChainAggregate<DateTime = string> = Omit<BoardContractChainAggregate<DateTime>, "frontier"> & {
+  frontier: ChainFrontier<DateTime>;
+};
+export type BoardChainAggregate<DateTime = string> = ChainAggregate<DateTime>;
+export type BoardCard<DateTime = string> = Omit<BoardContractCard<DateTime>, "chainAggregate"> & {
+  chainAggregate: ChainAggregate<DateTime> | null;
+};
+export type BoardTask = BoardCard<string>;
 
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 export type RunnerPreference = RunnerKind | "AUTO" | "INHERIT";

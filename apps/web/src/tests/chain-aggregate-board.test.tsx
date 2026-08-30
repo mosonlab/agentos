@@ -25,7 +25,7 @@ const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => (
   chainId: "chain-1", chainName: "Release", stepCount: 12,
   detailTaskId: "step-1",
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
-  frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, failureReason: null, position: 3 },
+  frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
   activation: { state: "running", predecessor: null, taskId: "step-1" }, totalCost: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z", ...overrides,
 });
@@ -68,7 +68,7 @@ test("aggregate placement follows API-derived frontier status and counts entries
     const projection = aggregate({
       status,
       statusCounts: { BACKLOG: 0, TODO: status === "TODO" ? 12 : 0, DOING: status === "DOING" ? 1 : 0, REVIEW: status === "REVIEW" ? 1 : 0, DONE: status === "DONE" ? 12 : 0 },
-      frontier: { taskId: "frontier", title: "Frontier", status, latestRun: null, failureReason: null, position: 3 },
+      frontier: { taskId: "frontier", title: "Frontier", status, latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
     });
     const rows = Array.from({ length: 12 }, (_, index) => chainStep(`step-${index}`, index + 1, status === "DONE" ? "DONE" : index === 2 ? status : "TODO", projection));
     const grouped = boardEntriesByStatus(boardEntries(rows));
@@ -92,8 +92,33 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
 });
 
+test("the shared card shell does not navigate a Chain card while text is selected", async () => {
+  const { dom, container } = installDom();
+  let selection = "Release";
+  Object.defineProperty(dom.window, "getSelection", {
+    configurable: true,
+    value: () => ({ toString: () => selection }),
+  });
+  const root = (await reactDom()).createRoot(container);
+  try {
+    dom.window.location.hash = "#/tasks/origin";
+    await act(async () => root.render(<ChainAggregateCard aggregate={aggregate()} />));
+    const progress = container.querySelector("[data-chain-progress]");
+    assert.ok(progress);
+    await act(async () => progress.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.equal(dom.window.location.hash, "#/tasks/origin");
+
+    selection = "";
+    await act(async () => progress.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.equal(dom.window.location.hash, "#/tasks/step-3");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
 test("mobile and desktop receive the same aggregate entry list", () => {
-  const projection = aggregate({ status: "DOING", frontier: { taskId: "step-1", title: "Implement release", status: "DOING", latestRun: null, failureReason: null, position: 1 } });
+  const projection = aggregate({ status: "DOING", frontier: { taskId: "step-1", title: "Implement release", status: "DOING", latestRun: null, mergeOutcome: null, failureReason: null, position: 1 } });
   const entries = boardEntries([chainStep("step-1", 1, "DOING", projection), chainStep("step-2", 2, "TODO", projection)]);
   assert.equal(entries.length, 1);
   const grouped = boardEntriesByStatus(entries);

@@ -1,13 +1,14 @@
-import { type ReactNode, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
-import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Counts, normalizeBoardEntries } from "../lib/board";
+import { COLUMNS, type BoardEntry, type Counts, normalizeBoardEntries } from "../lib/board";
 import { useT } from "../lib/i18n";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
+import { type ChainAggregateActions } from "./chain-aggregate-card";
+import { PaginatedBoardEntries } from "./paginated-board-entries";
+import { type CardActions } from "./task-card";
 import { COUNT } from "./ui";
 import { Button } from "./ui/button";
-import { ChainAggregateCard, type ChainAggregateActions } from "./chain-aggregate-card";
-import { type CardActions, TaskCard } from "./task-card";
 
 /**
  * The board below 901px: status tabs and one column of cards.
@@ -29,7 +30,6 @@ const TAB_ON = "border-border bg-accent text-foreground";
 const LIST = "mt-[14px] grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 const LIST_EMPTY = "px-0 py-[40px] text-center text-[12.5px] text-[color:var(--faint)]";
 const LIST_TOOLBAR = "mt-[14px] flex items-center gap-[10px]";
-const LIST_PAGER = "flex items-center justify-center gap-[8px]";
 
 export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArchiveDone, actions, aggregateActions, listRef }: {
   tab: TaskStatus;
@@ -44,17 +44,6 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
 }): ReactNode => {
   const t = useT();
   const entries = normalizeBoardEntries(tasks);
-  const [page, setPage] = useState(0);
-  const lastPage = Math.max(0, Math.ceil(entries.length / CARD_PAGE_SIZE) - 1);
-  const visiblePage = Math.min(page, lastPage);
-  const start = visiblePage * CARD_PAGE_SIZE;
-  const visibleTasks = entries.slice(start, start + CARD_PAGE_SIZE);
-  const nextCount = Math.min(CARD_PAGE_SIZE, Math.max(0, entries.length - start - CARD_PAGE_SIZE));
-  const previousCount = Math.min(CARD_PAGE_SIZE, start);
-  useEffect(() => { setPage(0); }, [tab]);
-  useEffect(() => {
-    if (page > lastPage) setPage(lastPage);
-  }, [lastPage, page]);
   return <>
     {/* A tablist, not five buttons: it is the page's primary navigation and the
         arrow keys are what a screen reader user reaches for. */}
@@ -105,23 +94,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
     >
       {/* No `draggable`: HTML5 drag does not fire on touch, and a card that
           looks draggable and is not is worse than one that does not (K15). */}
-      {visibleTasks.map((entry) => entry.kind === "chain"
-        ? <ChainAggregateCard key={entry.id} aggregate={entry.aggregate} members={entry.members} representativeTaskId={entry.representativeTaskId} actions={aggregateActions} />
-        : <TaskCard key={entry.id} task={entry.task} actions={actions} />)}
-      {previousCount > 0 || nextCount > 0 ? (
-        <div className={LIST_PAGER}>
-          {previousCount > 0 ? (
-            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage - 1)}>
-              {t("tasks.column.previous", { n: previousCount })}
-            </Button>
-          ) : null}
-          {nextCount > 0 ? (
-            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setPage(visiblePage + 1)}>
-              {t("tasks.column.more", { n: nextCount })}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
+      <PaginatedBoardEntries key={tab} entries={entries} actions={actions} aggregateActions={aggregateActions} />
       {entries.length === 0 ? <div className={LIST_EMPTY}>{t(loading ? "common.loading" : "tasks.column.nothing")}</div> : null}
     </div>
   </>;
