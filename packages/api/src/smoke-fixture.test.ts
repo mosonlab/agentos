@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { taskInput } from "./app.js";
+import { taskInput } from "./task-patch.js";
 
 /**
  * The other half of the fixture-parity check.

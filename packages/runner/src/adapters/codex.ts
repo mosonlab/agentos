@@ -7,30 +7,26 @@ import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
-  classifyRuntimeError,
   createAdapterState,
   emitAdapterEvent,
   eventErrorMessage,
-  heartbeatRuntime,
-  killRuntime,
   markInFlightToolProgress,
   mcpServerArgs,
+  mcpServerPath,
   modelSpec,
   nodeBinaryPath,
   PREFLIGHT_REASONS,
   preflightFailure,
   processProviderEvent,
-  spawnAdapterRuntime,
   stringField,
-  type AdapterImplementation,
+  type AdapterDeclaration,
   type AdapterState,
-  type CliAdapter,
   type PreflightResult,
   type PreflightSpec,
   type ResumeSpec,
   type RunSpec,
   type SessionEventSink,
-} from "../adapters.js";
+} from "./runtime.js";
 import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./session-config.js";
 
 export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
@@ -75,6 +71,22 @@ const nativeSubagentArgs = (run: ClaimedTask["run"]): string[] => {
     "-c", `agents.default_subagent_model=${JSON.stringify(profile.model)}`,
     "-c", `agents.default_subagent_reasoning_effort=${JSON.stringify(profile.effort)}`,
     "-c", `agents.max_concurrent_threads_per_session=${profile.maxConcurrent}`,
+  ];
+};
+
+const codexPromptSections = (claim: ClaimedTask): string[] => {
+  const profile = codexNativeSubagentProfile(claim.run, "CODEX");
+  if (!profile) return [];
+  return [
+    "",
+    "Platform-pinned native implementation subagents:",
+    `- model: ${profile.model}`,
+    `- reasoning effort: ${profile.effort}`,
+    `- maximum concurrent child threads: ${profile.maxConcurrent} (root excluded)`,
+    "- multi_agent_v2 is enabled by the runner. Spawn, message, wait for, and close native children through the session collaboration tools; do not launch nested Codex CLI processes.",
+    "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
+    "- Implementation proof is limited to each assignment's focused tests, one affected-workspace compile or typecheck after integration, and tests for seams crossed by multiple assignments.",
+    "- Do not run repository-wide suites or the repository Merge Gate in Implementation; the later Regression step owns the formal Gate.",
   ];
 };
 
@@ -197,12 +209,12 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   if (spec.model === null) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: PREFLIGHT_REASONS.unsupportedModel };
   }
-  const version = await capturePreflight(spec.config, "CODEX", ["--version"], spec.env);
+  const version = await capturePreflight(spec.config, codexDeclaration, ["--version"], spec.env);
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
   }
-  const help = await capturePreflight(spec.config, "CODEX", ["exec", "--help"], spec.env);
-  const resumeHelp = await capturePreflight(spec.config, "CODEX", ["exec", "resume", "--help"], spec.env);
+  const help = await capturePreflight(spec.config, codexDeclaration, ["exec", "--help"], spec.env);
+  const resumeHelp = await capturePreflight(spec.config, codexDeclaration, ["exec", "resume", "--help"], spec.env);
   if (help.code !== 0 || resumeHelp.code !== 0 || !execHelpIsCompatible(help.stdout, resumeHelp.stdout)) {
     return {
       ok: false,
@@ -213,7 +225,7 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
     };
   }
   Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "exec-json-stdin-resume" });
-  const auth = await capturePreflight(spec.config, "CODEX", ["login", "status"], spec.env);
+  const auth = await capturePreflight(spec.config, codexDeclaration, ["login", "status"], spec.env);
   const text = `${auth.stdout}\n${auth.stderr}`;
   const ok = auth.code === 0;
   return {
@@ -235,6 +247,7 @@ export const codexChildEnvironment = (
   // there, so relocating HOME does not change the authentication channel.
   HOME: scratch.configRoot,
   CODEX_HOME: scratch.configRoot,
+  AGENTOS_CODEX_SERVICE_TIER: _claim.run.codexServiceTier.toLowerCase(),
 });
 
 export const provisionCodexSessionConfig = (
@@ -247,17 +260,23 @@ export const provisionCodexSessionConfig = (
   baselineFile: join(config.sessionConfigBaselineRoot ?? codexSessionConfigBaselineRoot(), "codex", "config.toml"),
 }, options);
 
-const implementation: AdapterImplementation = {
+export const codexDeclaration: AdapterDeclaration = Object.freeze({
   runner: "CODEX",
+  binaryEnvironment: "CODEX_BINARY",
+  defaultBinary: "codex",
+  toolIntroduction: "Anneal tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+  toolTransport: "mcp-stdio",
+  toolEntrypoint: mcpServerPath,
+  enforcedTools: [],
+  isolatesSessionConfig: true,
+  startupPreflightModel: CODEX_STARTER_MODEL,
+  protectedEnvironmentVariables: ["CODEX_HOME", "AGENTOS_CODEX_SERVICE_TIER"],
+  launcherEnvironmentVariables: ["CODEX_HOME", "AGENTOS_CODEX_SERVICE_TIER"],
+  promptSections: codexPromptSections,
   args: codexArgs,
+  childEnvironment: codexChildEnvironment,
+  provisionSessionConfig: provisionCodexSessionConfig,
+  initialProviderState: () => undefined,
   parseEvent: parseCodexEvent,
-};
-
-export const createCodexAdapter = (): CliAdapter => Object.freeze<CliAdapter>({
-  preflight: (spec) => preflight({ ...spec, runner: "CODEX" }),
-  start: async (spec, sink) => spawnAdapterRuntime(implementation, spec, sink),
-  resume: async (spec, sink) => spawnAdapterRuntime(implementation, spec, sink, spec),
-  kill: (handle, reason) => killRuntime(handle, reason),
-  heartbeat: (handle) => heartbeatRuntime(handle),
-  classifyError: (evidence) => classifyRuntimeError(evidence),
+  preflight,
 });
