@@ -94,6 +94,7 @@ export type ChainFrontier<DateTime = string> = {
   title: string;
   status: TaskStatus;
   latestRun: BoardLatestRun<DateTime> | null;
+  mergeOutcome: MergeOutcome | null;
   failureReason: string | null;
   /** Dense one-based position among primary Steps; omitted for a repair. */
   position?: number | null;
