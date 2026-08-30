@@ -18,6 +18,20 @@ import type {
   TaskStatus,
   UsageCost,
 } from "@anneal/db/board-contract";
+import type {
+  Agent,
+  CodexServiceTier,
+  FailureClass,
+  GoalStatus,
+  InboxDeliveryStatus,
+  InboxKind,
+  InboxStatus,
+  Repo,
+  RepoPermission,
+  RunnerKind,
+  RunnerPreference,
+  SessionExecutionStatus,
+} from "@anneal/db/wire-contract";
 
 export type {
   AssigneeType,
@@ -38,6 +52,28 @@ export type {
   TaskStatus,
   UsageCost,
 } from "@anneal/db/board-contract";
+export type {
+  Agent,
+  AgentRepoAccess,
+  CodexServiceTier,
+  Environment,
+  FailureClass,
+  FilesystemGrant,
+  GoalStatus,
+  InboxDeliveryStatus,
+  InboxKind,
+  InboxStatus,
+  MCPConnection,
+  Project,
+  Repo,
+  RepoPermission,
+  RunnerKind,
+  RunnerPreference,
+  Secret,
+  SecretPurpose,
+  SessionExecutionStatus,
+  Skill,
+} from "@anneal/db/wire-contract";
 
 export type ChainFrontier<DateTime = string> = BoardContractChainFrontier<DateTime> & {
   mergeOutcome: MergeOutcome | null;
@@ -51,144 +87,6 @@ export type BoardCard<DateTime = string> = Omit<BoardContractCard<DateTime>, "ch
   chainAggregate: ChainAggregate<DateTime> | null;
 };
 export type BoardTask = BoardCard<string>;
-
-export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
-export type RunnerPreference = RunnerKind | "AUTO" | "INHERIT";
-export type CodexServiceTier = "DEFAULT" | "FAST";
-export type SessionExecutionStatus =
-  | "REQUESTED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
-  | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
-export type FailureClass =
-  | "BINARY_NOT_FOUND" | "AUTH_REQUIRED" | "RATE_LIMITED" | "CANCELLED_OR_TIMED_OUT"
-  | "TOOL_FAILED" | "TRANSIENT_PROVIDER" | "PROTOCOL_ERROR" | "TASK_FAILED" | "BUDGET_EXCEEDED";
-export type InboxStatus = "OPEN" | "ANSWERED" | "CLOSED";
-export type InboxKind = "TEXT" | "MULTIPLE_CHOICE";
-export type InboxDeliveryStatus = "PENDING" | "SENDING" | "DELIVERED" | "FAILED";
-/* Three of the six `GoalStatus` values in `schema.prisma` are missing on purpose.
- * `STOPPED_SPEND`, `STOPPED_TIME` and `STOPPED_STUCK` are the stops an execution
- * model would set, and no such model is wired: the API writes only ACTIVE (or
- * COMPLETED) on approve-dod and PAUSED on pause, and nothing else in this
- * repository writes `Goal.status` at all. Naming them here would put a tone, a
- * label and a legend in the console for a state the server cannot produce. When
- * the stops are wired, adding them back is a type error at every render site,
- * which is the point of narrowing rather than hiding. */
-export type GoalStatus = "ACTIVE" | "PAUSED" | "COMPLETED";
-export type SecretPurpose = "MCP" | "REPO" | "ENV" | "WEBHOOK";
-export type RepoPermission = "GIT_READ" | "GIT_WRITE";
-
-export type Project = {
-  id: string;
-  name: string;
-  slug: string;
-  yamlDocument: string;
-  maxDurationMin: number;
-  stallTimeoutMin: number;
-  maxSessionsPerTask: number;
-  spendCap: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type Agent = {
-  id: string;
-  projectId: string;
-  environmentId: string;
-  name: string;
-  title: string;
-  model: string;
-  codexServiceTier: CodexServiceTier;
-  foundationalPrompt: string;
-  rolePrompt: string;
-  runnerPreference: RunnerPreference;
-  inboxAccess: boolean;
-  /** Denied tools, not allowed ones. Empty is the default and means "no restriction". */
-  disabledTools: string[];
-  createdAt: string;
-  updatedAt: string;
-  archivedAt: string | null;
-  /** Present only when the control plane starts including binding tables. */
-  skills?: Array<{ skillId: string; skill?: Skill }>;
-  mcpConnections?: Array<{ mcpConnectionId: string; mcpConnection?: MCPConnection }>;
-  repoAccess?: AgentRepoAccess[];
-  secretGrants?: Array<{ secretId: string; envVar: string; secret?: Secret }>;
-  filesystemGrants?: FilesystemGrant[];
-  collaborators?: Array<{ allowedAgentId: string }>;
-};
-
-export type AgentRepoAccess = {
-  agentId: string;
-  repoId: string;
-  projectId: string;
-  mountPath: string;
-  permissions: RepoPermission;
-};
-
-export type FilesystemGrant = {
-  id: string;
-  agentId: string;
-  folderPath: string;
-  canRead: boolean;
-  canWrite: boolean;
-  canDelete: boolean;
-};
-
-export type Skill = {
-  id: string;
-  projectId: string;
-  name: string;
-  slug: string;
-  kind: "PROMPT" | "FILE";
-  body: string | null;
-  filePath: string | null;
-  updatedAt: string;
-};
-
-export type MCPConnection = {
-  id: string;
-  projectId: string;
-  credentialSecretId: string | null;
-  name: string;
-  transport: string;
-  config: unknown;
-  allowedOperations: string[];
-  createdAt: string;
-  updatedAt: string;
-  agents?: Array<{ agentId: string }>;
-};
-
-export type Environment = {
-  id: string;
-  projectId: string;
-  name: string;
-  networking: "OPEN" | "LIMITED";
-  allowedHosts: string[];
-};
-
-export type Repo = {
-  id: string;
-  projectId: string;
-  credentialSecretId: string | null;
-  name: string;
-  remoteUrl: string;
-  mountPath: string;
-  defaultBranch: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type Secret = {
-  id: string;
-  name: string;
-  purpose: SecretPurpose;
-  description: string | null;
-  ciphertextVersion: number;
-  keyId: string;
-  rotatedAt: string | null;
-  disabledAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-  agentGrants?: Array<{ agentId: string; envVar: string; agent?: { id: string; name: string } }>;
-};
 
 export type Session = {
   id: string;
