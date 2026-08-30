@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { COLUMNS, type BoardEntry, type Counts, normalizeBoardEntries } from "../lib/board";
 import { useT } from "../lib/i18n";
@@ -44,6 +44,8 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
 }): ReactNode => {
   const t = useT();
   const entries = normalizeBoardEntries(tasks);
+  const [page, setPage] = useState(0);
+  useEffect(() => setPage(0), [tab]);
   return <>
     {/* A tablist, not five buttons: it is the page's primary navigation and the
         arrow keys are what a screen reader user reaches for. */}
@@ -94,7 +96,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
     >
       {/* No `draggable`: HTML5 drag does not fire on touch, and a card that
           looks draggable and is not is worse than one that does not (K15). */}
-      <PaginatedBoardEntries key={tab} entries={entries} actions={actions} aggregateActions={aggregateActions} />
+      <PaginatedBoardEntries entries={entries} page={page} onPageChange={setPage} actions={actions} aggregateActions={aggregateActions} />
       {entries.length === 0 ? <div className={LIST_EMPTY}>{t(loading ? "common.loading" : "tasks.column.nothing")}</div> : null}
     </div>
   </>;

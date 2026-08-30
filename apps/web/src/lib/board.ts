@@ -146,6 +146,27 @@ export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskSt
   return groups;
 };
 
+/** One parked chain, as the Todo column's head action needs it: the name it is
+ *  listed under, how many steps go with it, and the activation task the start
+ *  request is sent to. */
+export type ParkedChain = { chainId: string; name: string; stepCount: number; taskId: string };
+
+/**
+ * The chains a column would activate, in the order they are read.
+ *
+ * Only `parked-unactivated` aggregates: a `waiting-on-predecessor` chain
+ * dispatches itself when its predecessor completes, so offering to start it
+ * would be offering to do something the control plane already owns. Single-task
+ * cards are not chains and are not included either.
+ */
+export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): ParkedChain[] =>
+  normalizeBoardEntries(entries).flatMap((entry) => {
+    if (entry.kind !== "chain") return [];
+    const { activation, chainId, chainName, stepCount } = entry.aggregate;
+    if (activation.state !== "parked-unactivated" || activation.taskId === null) return [];
+    return [{ chainId, name: chainBindingLabel({ id: chainId, name: chainName }), stepCount, taskId: activation.taskId }];
+  });
+
 /* ------------------------------------------------------------- the schedule */
 
 export type ScheduleSubject = Pick<

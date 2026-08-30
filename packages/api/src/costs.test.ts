@@ -82,7 +82,10 @@ test("aggregateCosts preserves model identity, isolates mixed runs, and reconcil
     "UTC",
   );
 
-  assert.deepEqual(report.byModel, [
+  assert.ok(report.since instanceof Date);
+  assert.deepEqual(report.byModel.map(({ model, usd, runs, costUnavailableRuns }) => ({
+    model, usd: usd.toString(), runs, costUnavailableRuns,
+  })), [
     { model: "openai-codex/gpt-5.6-luna:max", usd: "5", runs: 2, costUnavailableRuns: 1 },
     { model: "mixed", usd: "3", runs: 1, costUnavailableRuns: 0 },
     { model: "claude-opus-5:high", usd: "2", runs: 1, costUnavailableRuns: 0 },
@@ -94,9 +97,9 @@ test("aggregateCosts preserves model identity, isolates mixed runs, and reconcil
   const reviewer = report.byAgent.find((entry) => entry.agent === "reviewer");
   assert.equal(dev?.cachePct, 25);
   assert.equal(reviewer?.cachePct, null);
-  assert.equal(dev?.wastedUsd, "5");
-  assert.equal(reviewer?.wastedUsd, "0");
-  assert.equal(report.wastedUsd, "5");
+  assert.equal(dev?.wastedUsd.toString(), "5");
+  assert.equal(reviewer?.wastedUsd.toString(), "0");
+  assert.equal(report.wastedUsd.toString(), "5");
 });
 
 test("aggregateCosts reconciles by-model rounding with the serialized total", () => {
@@ -125,13 +128,13 @@ test("aggregateCosts reconciles by-model rounding with the serialized total", ()
     "UTC",
   );
 
-  assert.equal(report.totalUsd, "0.000013");
-  assert.deepEqual(report.byModel.map(({ model, usd }) => ({ model, usd })), [
+  assert.equal(report.totalUsd.toString(), "0.000013");
+  assert.deepEqual(report.byModel.map(({ model, usd }) => ({ model, usd: usd.toString() })), [
     { model: "gpt-5.6-sol:high", usd: "0.000007" },
     { model: "gpt-5.6-sol:max", usd: "0.000006" },
   ]);
   assert.equal(
     report.byModel.reduce((sum, entry) => sum.plus(entry.usd), new Prisma.Decimal(0)).toString(),
-    report.totalUsd,
+    report.totalUsd.toString(),
   );
 });

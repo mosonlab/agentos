@@ -5,13 +5,13 @@ import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApiError } from "../lib/api";
-import type { Chain, Run, Task, TaskStepOutput } from "../lib/types";
+import type { Chain, Run, TaskDetail, TaskStepOutput } from "../lib/types";
 import { RunRow, TaskDetailPage, TaskOutput } from "../pages/TaskDetail";
 import { mountPage } from "./dom-harness";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
-const task = (id: string, name: string, promptIndex: number, chainId: string | null = null): Task => ({
+const task = (id: string, name: string, promptIndex: number, chainId: string | null = null): TaskDetail => ({
   id, projectId: "project-1", assigneeAgentId: "agent-1", repoId: "repo-1",
   templateId: null, templateStepId: null, name,
   description: prompts[promptIndex]!.prompt,
@@ -24,12 +24,12 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   maxSessionsPerTask: 3, createdAt: now, updatedAt: now, assigneeAgent: null,
   repo: null, runs: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
   archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null,
-  templateStep: null, chainProgress: null, recurringLastFiredAt: null, recurringFireCount: 0,
+  templateStep: null, taskCost: null, mergeOutcome: null, mergeRecovery: null,
 });
 
 const output = (taskId: string, body: string): TaskStepOutput => ({
   id: `output-${taskId}`, taskId, runId: `run-${taskId}`, kind: "revised-plan", body,
-  createdAt: now, updatedAt: now,
+  metadata: null, commitSha: null, createdAt: now, updatedAt: now,
 });
 
 const sourceRun = (taskId: string): Run => ({
@@ -44,7 +44,7 @@ const sourceRun = (taskId: string): Run => ({
   terminationReason: null, queuedAt: now, claimedAt: now, startedAt: now, endedAt: now, session: null,
 });
 
-const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, steps: [] });
+const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, control: null, steps: [] });
 const chainFor = (taskId: string): Chain => ({
   chainId: "chain-c", total: 1, done: 0, steps: [{
     taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
@@ -52,7 +52,7 @@ const chainFor = (taskId: string): Chain => ({
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
     failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
     blockedOn: null, currentExecution: false, mergeRecovery: null,
-  }],
+  }], control: null,
 });
 
 test("a resumed run identifies Duration as wall-clock time that includes Inbox wait", () => {
