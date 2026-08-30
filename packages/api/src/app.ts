@@ -6,7 +6,6 @@ import {
   agentArchiveBlocker,
   applyInboxDecision,
   catalogRunnerForModel,
-  CleanupStatus,
   CodexServiceTier,
   GoalStatus,
   enqueueTaskRun,
@@ -18,23 +17,18 @@ import {
   lockAgentRow,
   lockChainRows,
   lockChainStructure,
-  lockRunRow,
   NetworkingMode,
   Prisma,
   type PrismaClient,
   RepoPermission,
-  RunStatus,
   ScheduleKind,
   RunnerKind,
   RunnerPreference,
-  recomputeSessionUsage,
   runnerFor,
   runSessionUsageCost,
   sumUsageCosts,
   SecretPurpose,
   SkillKind,
-  SessionEventSource,
-  SessionExecutionStatus,
   TaskSource,
   TaskStatus,
   TriggerFireSource,
@@ -135,7 +129,6 @@ import {
 } from "./chain.js";
 import {
   jsonValue,
-  normalizeSessionEventValue,
 } from "./execution.js";
 import {
   createArchivedRunNoticeScheduler,
@@ -150,17 +143,13 @@ import {
   refusalFor,
   refusalResponse,
 } from "./refusal.js";
-import {
-  acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
-} from "./workspace-reclaim.js";
+import { acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
 import {
   activeRunStatuses,
-  explainFenceRefusal,
   fenceRefusalResponse,
-  fencedRunWhere,
   isFenceRefusalResponse,
-  type FenceRefusalResponse,
+  runFenceRefusal as fenceRefusal,
   type RunFence,
   withFencedRun,
 } from "./run-fence.js";
@@ -194,9 +183,25 @@ import {
   revalidationCancelRequestId,
   SPEC_REVALIDATOR_AGENT_NAME,
 } from "./revalidation.js";
-import { claimInput, claimRun, OPERATOR_NOTE_METADATA_FIELD, runnerTelemetryFields } from "./run-claim.js";
+import { claimInput, claimRun, OPERATOR_NOTE_METADATA_FIELD } from "./run-claim.js";
 import { completeRun, completionInput, worktreeContainmentViolationsInput } from "./run-completion.js";
 import { acknowledgeCancellation, cancelRun } from "./run-cancel.js";
+import {
+  activityInput,
+  appendRunActivity,
+  appendRunEvents,
+  eventsInput,
+  fencedActivityInput,
+  heartbeatInput,
+  heartbeatRun,
+  leaseIndependentCleanupInput,
+  mechanicalStartInput,
+  publicationInput,
+  publishRun,
+  recordRunCleanup,
+  startInput,
+  startRun,
+} from "./run-lifecycle.js";
 import { withoutUndefined } from "./without-undefined.js";
 import { versionPayload } from "./version.js";
 
@@ -210,10 +215,6 @@ const refusalJson = (context: Context, refused: Refusal): Response => {
   const response = refusalResponse(refused);
   return context.json(response.body, response.status);
 };
-
-const runFenceRefusal = (refused: FenceRefusalResponse): Refusal => (
-  refusal("conflict", refused.error, { reason: refused.reason })
-);
 
 type TaskChainResolution = {
   task: { id: string; projectId: string };
@@ -526,13 +527,6 @@ const progressInput = z.object({
   sessionId: id.nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
-const activityInput = z.object({
-  actorType: z.string().trim().min(1).max(40).default("operator"),
-  actorId: z.string().trim().min(1).nullable().optional(),
-  body: z.string().min(1),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
-const fencedActivityInput = activityInput.extend({ fencingToken: fence });
 /** Revalidation is intentionally narrower than the operator task PATCH: the
  * session names only the replacement brief and the server derives the one
  * same-chain implementation task from the fenced Run. */
@@ -567,15 +561,6 @@ const reclaimSalvageInput = z.object({
   runId: id,
   pushedBranch: z.string().trim().min(1).max(255),
 });
-const heartbeatInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  leaseSeconds: z.number().int().min(15).max(3600).default(60),
-  processAlive: z.boolean(),
-  lastProgressEventAt: z.coerce.date().nullable().optional(),
-  inFlightTool: z.record(z.string(), z.unknown()).nullable().optional(),
-  ...runnerTelemetryFields,
-});
 const cancelRunInput = z.object({
   requestId: z.string().trim().min(1).max(160),
   reason: z.string().trim().min(1).pipe(failureReasonText(FAILURE_REASON_LIMIT)),
@@ -589,53 +574,6 @@ const cancelAcknowledgeInput = z.object({
   branch: z.string().min(1).optional(),
   baseSha: z.string().min(1).optional(),
   worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
-});
-const publicationInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  pushedBranch: z.string().trim().min(1).max(255),
-});
-const leaseIndependentCleanupInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  cleanupStatus: z.nativeEnum(CleanupStatus),
-  cleanupFailureReason: z.string().max(4000).optional(),
-  workspaceRetained: z.boolean(),
-});
-const mechanicalStartInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  adapterVersion: z.string().min(1),
-  cliVersion: z.string().min(1),
-  authMode: z.string().nullable().optional(),
-  manifest: z.record(z.string(), z.unknown()),
-  // Nullable for the mechanical executor only, which provisions no workspace at
-  // all — the column is already `String?`. An ordinary runner still sends a
-  // path; nothing downstream reads this field as a guarantee that one exists.
-  workspacePath: z.string().min(1).nullable(),
-  branch: z.string().nullable().optional(),
-  baseSha: z.string().nullable().optional(),
-  runtimeHandle: z.string().nullable().optional(),
-});
-const startInput = mechanicalStartInput.extend({
-  // The runner computes this from the exact bytes handed to the provider.
-  // Requiring it prevents a start write from leaving a queued or prior hash.
-  promptHash: z.string().regex(/^[0-9a-f]{64}$/u),
-});
-const eventInput = z.object({
-  seq: z.number().int().nonnegative(),
-  at: z.coerce.date().optional(),
-  source: z.nativeEnum(SessionEventSource),
-  type: z.string().min(1).max(100),
-  providerEventId: z.string().nullable().optional(),
-  toolCallId: z.string().nullable().optional(),
-  payload: z.record(z.string(), z.unknown()),
-});
-const eventsInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  providerConversationId: z.string().nullable().optional(),
-  events: z.array(eventInput).min(1).max(250),
 });
 const preflightInput = z.object({
   runner: z.nativeEnum(RunnerKind),
@@ -2886,114 +2824,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/start", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const principal = context.get("principal");
-    // A mechanical run hands no bytes to a provider, so it has no dispatched
-    // prompt to hash. The independently authenticated executor alone receives
-    // that exemption; ordinary runner starts still require an exact hash.
     const body = principal.kind === "merge-executor"
       ? { ...await readJson(context.req.raw, mechanicalStartInput), promptHash: null }
       : await readJson(context.req.raw, startInput);
-    const now = new Date();
-    // A run that has already started is not startable again, so this fence is
-    // narrower than the live-lease set every other route uses.
-    const fence: RunFence = {
-      runId,
-      runnerId: body.runnerId,
-      fencingToken: body.fencingToken,
-      at: now,
-      statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING],
-    };
-    const started = await db.$transaction(async (tx) => {
-      const locked = await lockRunRow(tx, runId);
-      // Inbox resume reuses the same Run and Session. Keep the original
-      // lifecycle anchor when the resumed provider calls /start again; only a
-      // run that has never started gets this request's timestamp.
-      const existing = locked === null ? null : await tx.run.findUnique({
-        where: { id: runId },
-        select: { startedAt: true },
-      });
-      const startedAt = existing?.startedAt ?? now;
-      const updated = await tx.run.updateMany({
-        where: fencedRunWhere(fence),
-        data: {
-          status: RunStatus.RUNNING,
-          startedAt,
-          adapterVersion: body.adapterVersion,
-          cliVersion: body.cliVersion,
-          authMode: body.authMode ?? null,
-          promptHash: body.promptHash,
-          manifest: jsonValue(body.manifest),
-          workspacePath: body.workspacePath,
-          branch: body.branch ?? null,
-          baseSha: body.baseSha ?? null,
-        },
-      });
-      if (updated.count !== 1) return explainFenceRefusal(tx, fence);
-      const session = await tx.session.updateMany({
-        where: { runId, executionStatus: SessionExecutionStatus.PROVISIONING },
-        data: {
-          executionStatus: SessionExecutionStatus.RUNNING,
-          runtimeHandle: body.runtimeHandle ?? null,
-          resumeInput: null,
-          provisionedAt: now,
-          startedAt,
-        },
-      });
-      if (session.count !== 1) throw new Error(`Run ${runId} has no startable Session`);
-      return null;
-    });
-    return started === null
-      ? context.json({ ok: true })
-      : refusalJson(context, runFenceRefusal(fenceRefusalResponse(started)));
+    const result = await startRun(db, { runId, body });
+    return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
   app.post("/runner/runs/:runId/heartbeat", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, heartbeatInput);
-    const now = new Date();
-    runners.note(body.runnerId, body, now);
-    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: now };
-    const updated = await db.run.updateMany({
-      where: fencedRunWhere(fence),
-      data: {
-        heartbeatAt: now,
-        ...(body.processAlive ? {
-          lastProcessAliveAt: now,
-          leaseExpiresAt: new Date(now.getTime() + body.leaseSeconds * 1000),
-        } : {}),
-        ...(body.lastProgressEventAt !== undefined ? { lastProgressEventAt: body.lastProgressEventAt } : {}),
-        ...(body.inFlightTool !== undefined ? { inFlightTool: body.inFlightTool ? jsonValue(body.inFlightTool) : Prisma.JsonNull } : {}),
-      },
-    });
-    if (updated.count === 1) return context.json({
-      ok: true,
-      cancellation: null,
-      mechanicalCancellationPolicy: "refused",
-    });
-    const cancelling = await db.run.findFirst({
-      where: {
-        id: runId,
-        runnerId: body.runnerId,
-        fencingToken: body.fencingToken,
-        status: { in: activeRunStatuses },
-        cancelRequestedAt: { not: null },
-      },
-      select: { cancelRequestId: true, cancelReason: true, cancelRequestedAt: true },
-    });
-    if (cancelling?.cancelRequestId && cancelling.cancelReason && cancelling.cancelRequestedAt) {
-      return context.json({
-        ok: false,
-        mechanicalCancellationPolicy: "refused",
-        cancellation: {
-          requestId: cancelling.cancelRequestId,
-          reason: cancelling.cancelReason,
-          requestedAt: cancelling.cancelRequestedAt,
-        },
-      });
-    }
-    const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
-    return waiting
-      ? refusalJson(context, refusal("conflict", "Run suspended for Inbox", { code: "WAITING_INBOX" }))
-      : refusalJson(context, runFenceRefusal(fenceRefusalResponse(await explainFenceRefusal(db, fence))));
+    const result = await heartbeatRun(db, { runId, body, noteRunner: runners.note });
+    return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
@@ -3004,207 +2846,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(result);
   });
 
-  // Publication is a separate durable fact from terminal completion. Persist
-  // it immediately after git push, before GitHub work and cleanup, so a lost
-  // runner does not make the reconciler forget a branch that already exists.
   app.post("/runner/runs/:runId/publication", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, publicationInput);
-    const now = new Date();
-    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: now };
-    const run = await db.run.findUnique({
-      where: { id: runId },
-      select: {
-        runnerId: true, fencingToken: true, leaseExpiresAt: true, status: true,
-        taskId: true, repoId: true, runNumber: true, pushedBranch: true, branch: true,
-        cancelRequestedAt: true,
-      },
-    });
-    const owned = run?.runnerId === body.runnerId && run.fencingToken === body.fencingToken;
-    const live = owned && run.cancelRequestedAt === null && run.leaseExpiresAt !== null && run.leaseExpiresAt > now
-      && activeRunStatuses.includes(run.status);
-    // Salvage is the one publication allowed after lease loss. It is confined
-    // to this run's deterministic per-run ref, requires the same runner and
-    // fencing token that owned the workspace, and cannot replace a different
-    // publication already acknowledged for the run. Git durability does not
-    // depend on a live platform lease; making its ACK depend on one used to
-    // leave a pushed recovery ref invisible to the resolver.
-    const salvageBranch = run?.taskId
-      ? `agentos/${run.taskId}/run-${run.runNumber}`
-      : null;
-    const salvage = owned && run?.repoId !== null
-      && body.pushedBranch === salvageBranch
-      && (run?.pushedBranch === null || run?.pushedBranch === body.pushedBranch);
-    if (!live && !salvage) {
-      return refusalJson(context, runFenceRefusal(fenceRefusalResponse(await explainFenceRefusal(db, fence))));
-    }
-    const updated = await db.$transaction(async (tx) => {
-      const ack = await tx.run.updateMany({
-        where: live
-          ? fencedRunWhere(fence)
-          : {
-              id: runId,
-              runnerId: body.runnerId,
-              fencingToken: body.fencingToken,
-              OR: [{ pushedBranch: null }, { pushedBranch: body.pushedBranch }],
-            },
-        data: { pushedBranch: body.pushedBranch },
-      });
-      if (ack.count !== 1 || !salvage || !run?.taskId) return { count: ack.count, repair: "none" as const };
-      const repair = await repairReplacementAfterSalvage(tx, {
-        taskId: run.taskId,
-        runNumber: run.runNumber,
-        branch: run.branch,
-      });
-      return { count: ack.count, repair };
-    });
-    return updated.count === 1 && updated.repair !== "already-started"
-      ? context.json({ ok: true, replacementRepair: updated.repair })
-      : updated.count === 1
-        ? refusalJson(context, refusal("conflict", "Salvage is durable, but the replacement already started from its prior base"))
-        : refusalJson(context, runFenceRefusal(fenceRefusalResponse(await explainFenceRefusal(db, fence))));
+    const result = await publishRun(db, { runId, body });
+    return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
-  // Cleanup is still runner-owned after the live lease is gone. This endpoint
-  // can update only cleanup bookkeeping for the exact runner/fence that owned
-  // an expired or terminal run; it cannot change the run outcome or publish a
-  // branch.
   app.post("/runner/runs/:runId/cleanup", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, leaseIndependentCleanupInput);
-    const now = new Date();
-    const run = await db.run.findUnique({
-      where: { id: runId },
-      select: { runnerId: true, fencingToken: true, leaseExpiresAt: true, status: true },
-    });
-    const expiredOrTerminal = run && (
-      run.leaseExpiresAt === null || run.leaseExpiresAt <= now
-      || !activeRunStatuses.includes(run.status)
-    );
-    if (!run || run.runnerId !== body.runnerId || run.fencingToken !== body.fencingToken || !expiredOrTerminal) {
-      return context.json({ error: "Cleanup outcome is not authorized for a live or foreign run" }, 409);
-    }
-    await db.$transaction(async (tx) => {
-      await tx.run.update({
-        where: { id: runId },
-        data: { workspaceRetained: body.workspaceRetained },
-      });
-      await tx.session.updateMany({
-        where: { runId },
-        data: {
-          cleanupStatus: body.cleanupStatus,
-          cleanupEndedAt: now,
-          cleanupFailureReason: body.cleanupFailureReason ?? null,
-        },
-      });
-    });
-    return context.json({ ok: true });
+    const result = await recordRunCleanup(db, { runId, body });
+    return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
   app.post("/runner/runs/:runId/events", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, eventsInput);
-    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: new Date() };
-    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
-      session: { select: { id: true, providerConversationId: true } },
-    }, async (run) => {
-      if (!run.session) return fenceRefusalResponse("stale-fence");
-      await tx.sessionEvent.createMany({
-        data: body.events.map((event) => ({
-          sessionId: run.session!.id,
-          runId,
-          seq: event.seq,
-          at: event.at ?? new Date(),
-          source: event.source,
-          type: normalizeSessionEventValue(event.type) as string,
-          providerEventId: event.providerEventId === undefined || event.providerEventId === null
-            ? null
-            : normalizeSessionEventValue(event.providerEventId) as string,
-          toolCallId: event.toolCallId === undefined || event.toolCallId === null
-            ? null
-            : normalizeSessionEventValue(event.toolCallId) as string,
-          payload: jsonValue(normalizeSessionEventValue(event.payload)),
-        })),
-        skipDuplicates: true,
-      });
-      if (body.events.some((event) => event.type === "NATIVE_CHILD_STARTED")) {
-        await tx.session.update({ where: { id: run.session.id }, data: { nativeChildUsed: true } });
-      }
-      if (body.providerConversationId && !run.session.providerConversationId) {
-        await tx.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
-      }
-      return { sessionId: run.session.id };
-    }));
-    if (isFenceRefusalResponse(result)) {
-      const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
-      return waiting
-        ? refusalJson(context, refusal("conflict", "Run suspended for Inbox", { code: "WAITING_INBOX" }))
-        : refusalJson(context, runFenceRefusal(result));
-    }
-    // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
-    // whose event was already stored still recomputes, which is what self-heals a
-    // write lost between createMany and here. The guard reads the request body
-    // already in memory, so a batch without one costs zero extra queries.
-    // Never fatal to the ingest. A throw here would 500 the route, and
-    // `appendEvents` has no retry (runner/src/api.ts:79), so the terminal flush
-    // would reject, `deliverWorkspace`/`completeRun` would be skipped, and the
-    // runner's outer catch would record a successful run as failed and delete
-    // its workspace unpushed. These columns are a derived cache that the next
-    // FINAL_OUTPUT or `db:backfill-session-usage` repairs (db/src/usage.ts).
-    // `recomputeSessionUsage` now waits on a per-session advisory lock, so a
-    // lock-wait timeout is one more throw this catch absorbs — same repair path.
-    if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
-      try {
-        await recomputeSessionUsage(db, result.sessionId);
-      } catch (error) {
-        console.error(`Session usage recompute failed for ${result.sessionId}`, error);
-      }
-    }
-    return context.json({ accepted: body.events.length });
+    const result = await appendRunEvents(db, { runId, body });
+    return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
   const appendFencedActivity = async (context: Context<AppEnvironment, string>) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, fencedActivityInput);
     const principal = context.get("principal");
-    const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
-    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
-      taskId: true,
-      leaseGeneration: true,
-      task: { select: { templateStep: { select: {
-        stepIndex: true,
-        outputKind: true,
-        taskTemplate: { select: { name: true } },
-      } } } },
-    }, async (run) => {
-      // A session principal carries its own generation of the same fence.
-      const leaseGeneration = principal.kind === "session" ? principal.leaseGeneration : null;
-      if (!run.taskId || leaseGeneration !== null && run.leaseGeneration !== leaseGeneration) {
-        return fenceRefusalResponse("stale-fence");
-      }
-      const metadata = body.metadata
-        ? {
-            ...body.metadata,
-            ...(((body.metadata.kind === MERGE_INTEGRATOR_KIND.intent
-              || body.metadata.kind === MERGE_INTEGRATOR_KIND.result)
-              && executionModeFor(run.task?.templateStep ?? null) === "mechanical")
-              ? { sourceRunId: runId }
-              : {}),
-          }
-        : undefined;
-      return tx.taskActivity.create({
-        data: {
-          taskId: run.taskId,
-          actorType: principal.kind,
-          actorId: body.actorId ?? null,
-          body: body.body,
-          ...(metadata ? { metadata: jsonValue(metadata) } : {}),
-        },
-      });
-    }));
-    return isFenceRefusalResponse(result)
-      ? refusalJson(context, runFenceRefusal(result))
-      : context.json(result, 201);
+    const result = await appendRunActivity(db, { runId, body, principal });
+    return "message" in result ? refusalJson(context, result) : context.json(result, 201);
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
   app.post("/session/runs/:runId/activity", appendFencedActivity);
@@ -3371,7 +3039,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, revalidationPatchInput);
     const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
     const result = await patchBoundImplementationDescription(db, fence, body.description, principal.leaseGeneration);
-    if (isFenceRefusalResponse(result)) return refusalJson(context, runFenceRefusal(result));
+    if (isFenceRefusalResponse(result)) return refusalJson(context, fenceRefusal(result.reason));
     if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });
@@ -3384,7 +3052,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, revalidationCancelInput);
     const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
     const result = await cancelBoundRevalidationRun(db, fence, new Date(), principal.leaseGeneration);
-    if (isFenceRefusalResponse(result)) return refusalJson(context, runFenceRefusal(result));
+    if (isFenceRefusalResponse(result)) return refusalJson(context, fenceRefusal(result.reason));
     if ("message" in result) return refusalJson(context, result);
     return context.json(result);
   });
@@ -3437,10 +3105,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
       }) };
     }));
-    if (isFenceRefusalResponse(result)) return refusalJson(context, runFenceRefusal(result));
+    if (isFenceRefusalResponse(result)) return refusalJson(context, fenceRefusal(result.reason));
     if ("requestError" in result) return context.json({ error: result.requestError }, result.status);
     const { persisted } = result;
-    if (isFenceRefusalResponse(persisted)) return refusalJson(context, runFenceRefusal(persisted));
+    if (isFenceRefusalResponse(persisted)) return refusalJson(context, fenceRefusal(persisted.reason));
     if (!persisted.ok) return refusalJson(context, refusal("conflict", persisted.reason));
     return context.json({ ...persisted.output, predecessorOutputs: persisted.predecessorOutputs });
   });
