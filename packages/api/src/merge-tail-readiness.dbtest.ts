@@ -532,6 +532,36 @@ test("an expired orphaned DOING readiness claim is reclaimed after restart", asy
   assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
 });
 
+test("a pre-migration readiness claim waits through its expiry and is then recovered", async () => {
+  const seeded = await seedReadiness();
+  const expiresAt = new Date("2026-08-29T12:01:00.000Z");
+  await db.task.update({ where: { id: seeded.readiness.id }, data: {
+    status: TaskStatus.DOING,
+    failureReason: `merge-readiness-claim:legacy|${expiresAt.toISOString()}`,
+    readinessClaimToken: null,
+    readinessClaimExpiresAt: null,
+  } });
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(expiresAt.getTime() - 1), 5, releaseChainLease, runWithMergeLease),
+    { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  const waiting = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  assert.match(waiting.failureReason ?? "", /^merge-readiness-claim:/u);
+  assert.equal(waiting.readinessClaimToken, null);
+  assert.equal(waiting.readinessClaimExpiresAt, null);
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), expiresAt, 5, releaseChainLease, runWithMergeLease),
+    { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
+  );
+  const recovered = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  assert.equal(recovered.status, TaskStatus.DONE);
+  assert.equal(recovered.failureReason, null);
+  assert.equal(recovered.readinessClaimToken, null);
+  assert.equal(recovered.readinessClaimExpiresAt, null);
+});
+
 test("an incomplete compare response and a behind head fail closed", async () => {
   const incomplete = await seedReadiness();
   const maxFiles = Array.from({ length: 300 }, (_, index) => ({
