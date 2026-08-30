@@ -22,6 +22,7 @@ import {
 import {
   ArchivedAssigneeError,
   CompoundImplementationAssigneeError,
+  errorForOpenRunRefusal,
   type IntegratorStopBypass,
   WorkflowRefusalError,
   enqueueTaskRunInternal,
@@ -818,7 +819,7 @@ const activateChainSuccessorInternal = async (
               );
               continue;
             }
-            break;
+            throw errorForOpenRunRefusal(refusal);
           }
           case "assignee-archived":
             if (options.archivedAssignee === "throw") {
