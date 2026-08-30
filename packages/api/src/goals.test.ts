@@ -68,7 +68,7 @@ test("approved Goals advance ACTIVE → COMPLETED and reopen when a DoD item is 
     };
     const items = [{ id: "item-1", goalId: goal.id, itemIndex: 0, text: "Tests pass", done: false }];
     const goalDelegate = {
-      findFirst: async () => ({ ...goal, definitionOfDone: items.map((item) => ({ ...item })) }),
+      findUnique: async () => ({ ...goal, definitionOfDone: items.map((item) => ({ ...item })) }),
       findUniqueOrThrow: async () => ({ ...goal }),
       update: async ({ data }: { data: Partial<typeof goal> }) => {
         Object.assign(goal, data);

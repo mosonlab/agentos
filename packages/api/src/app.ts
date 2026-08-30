@@ -1645,9 +1645,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   const approveGoalDod = async (context: Context<AppEnvironment, string>) => {
     const goalId = id.parse(context.req.param("goalId"));
-    const projectId = context.req.param("projectId");
-    const goal = await db.goal.findFirst({
-      where: { id: goalId, ...(projectId ? { projectId: id.parse(projectId) } : {}) },
+    const goal = await db.goal.findUnique({
+      where: { id: goalId },
       include: { definitionOfDone: true },
     });
     if (!goal) return context.json({ error: "Goal not found" }, 404);
@@ -1669,9 +1668,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   const pauseGoal = async (context: Context<AppEnvironment, string>) => {
     const goalId = id.parse(context.req.param("goalId"));
-    const projectId = context.req.param("projectId");
     const updated = await db.goal.updateMany({
-      where: { id: goalId, ...(projectId ? { projectId: id.parse(projectId) } : {}), status: GoalStatus.ACTIVE },
+      where: { id: goalId, status: GoalStatus.ACTIVE },
       data: { status: GoalStatus.PAUSED },
     });
     if (updated.count !== 1) return context.json({ error: "Only an active Goal can be paused" }, 409);
