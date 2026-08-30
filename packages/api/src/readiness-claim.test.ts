@@ -160,6 +160,25 @@ test("only an expired readiness claim can be reclaimed", async () => {
   assert.equal(await successor.renew(), true);
 });
 
+test("an expired legacy readiness claim can be reclaimed after migration", async () => {
+  const expiresAt = new Date(NOW.getTime() + READINESS_CLAIM_LEASE_MS);
+  const fake = fakeDatabase({
+    status: TaskStatus.DOING,
+    failureReason: `merge-readiness-claim:legacy|${expiresAt.toISOString()}`,
+  });
+
+  assert.equal(await claimReadinessStep(fake.db, fake.task.id, NOW), null);
+  const successor = await claimReadinessStep(
+    fake.db,
+    fake.task.id,
+    new Date(expiresAt.getTime() + 1),
+  );
+
+  assert.ok(successor);
+  assert.equal(fake.task.failureReason, null);
+  assert.notEqual(fake.task.readinessClaimToken, null);
+});
+
 test("claim loss classifies a concrete active successor as retained ownership", async () => {
   const fake = fakeDatabase({ chainId: "chain-1" });
   const handle = await claimReadinessStep(fake.db, fake.task.id, NOW);

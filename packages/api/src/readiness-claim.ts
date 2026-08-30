@@ -60,6 +60,12 @@ const newClaimState = (now: Date): ClaimState => ({
   expiresAt: new Date(now.getTime() + READINESS_CLAIM_LEASE_MS),
 });
 
+const expiredLegacyClaim = (reason: string | null, now: Date): boolean => {
+  if (!reason?.startsWith(READINESS_CLAIM_PREFIX)) return false;
+  const expiry = Date.parse(reason.slice(reason.lastIndexOf("|") + 1));
+  return Number.isFinite(expiry) && expiry <= now.getTime();
+};
+
 const ownershipAfterLoss = async (
   client: PrismaClient | Prisma.TransactionClient,
   taskId: string,
@@ -172,15 +178,21 @@ export const claimReadinessStep = async (
       where: { id: taskId },
       select: {
         status: true,
+        failureReason: true,
         readinessClaimToken: true,
         readinessClaimExpiresAt: true,
       },
     });
+    const legacyClaimAvailable = current?.status === TaskStatus.DOING
+      && current.readinessClaimToken === null
+      && current.readinessClaimExpiresAt === null
+      && expiredLegacyClaim(current.failureReason, now);
     const available = current?.status === TaskStatus.TODO
       || (current?.status === TaskStatus.DOING
         && current.readinessClaimToken !== null
         && current.readinessClaimExpiresAt !== null
-        && current.readinessClaimExpiresAt.getTime() <= now.getTime());
+        && current.readinessClaimExpiresAt.getTime() <= now.getTime())
+      || legacyClaimAvailable;
     if (!available) return false;
 
     const acquired = await tx.task.updateMany({
@@ -191,6 +203,7 @@ export const claimReadinessStep = async (
           status: TaskStatus.DOING,
           readinessClaimToken: current.readinessClaimToken,
           readinessClaimExpiresAt: current.readinessClaimExpiresAt,
+          ...(legacyClaimAvailable ? { failureReason: current.failureReason } : {}),
         },
       data: {
         status: TaskStatus.DOING,
