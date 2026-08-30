@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
   RunStatus,
@@ -853,6 +854,13 @@ export const activateChainSuccessor = async (
 ): Promise<{ nextTaskId: string | null; gated: boolean }> =>
   activateChainSuccessorInternal(tx, task, options, now, null);
 
+export type RecoveryIntegratorActivationResult =
+  | { outcome: "activated"; nextTaskId: string | null; gated: boolean }
+  | {
+    outcome: "refused";
+    refusalCode: typeof MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE;
+  };
+
 /**
  * The only automatic exit through an unresolved integrator stop. The caller is
  * the server-owned readiness worker, but authority comes from durable rows: an
@@ -870,10 +878,11 @@ export const activateRecoveryIntegratorSuccessor = async (
     authorizationActivityId: string;
   },
   now = new Date(),
-): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+): Promise<RecoveryIntegratorActivationResult> => {
   // Every failure below checks authority written by control-plane workers after
-  // their candidate was selected. A mismatch is an internal recovery invariant,
-  // not an operator input error, and therefore deliberately remains a 500.
+  // their candidate was selected. The recoverable exact-head mismatch is a
+  // typed refusal; every other mismatch is an internal invariant and remains a
+  // deliberate 500 rather than an operator input error.
   const identity = await tx.task.findUnique({
     where: { id: input.readinessTaskId },
     select: { projectId: true, chainId: true },
@@ -937,7 +946,10 @@ export const activateRecoveryIntegratorSuccessor = async (
     || payload.headSha !== recovery.authorizedHeadSha
     || payload.baseSha !== recovery.currentBaseSha
     || payload.decision.channel !== "mechanical") {
-    throw new Error("Recovery activation authorization is not fresh for the recovered exact head and current base");
+    return {
+      outcome: "refused",
+      refusalCode: MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
+    };
   }
 
   let outputBinding: Record<string, unknown> | null = null;
@@ -978,9 +990,10 @@ export const activateRecoveryIntegratorSuccessor = async (
   await transitionMergeRecovery(tx, recovery.id, MergeRecoveryStatus.SUCCEEDED, {
     authorizationActivityId: authorization.id,
     failureReason: null,
+    refusalCode: null,
     endedAt: now,
   });
-  return activated;
+  return { outcome: "activated", ...activated };
 };
 
 /** Marks a completed template task done and activates exactly one successor or gate. */

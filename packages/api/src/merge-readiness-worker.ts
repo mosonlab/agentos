@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   AUTHORIZED_MERGE_METHOD,
+  MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
   RunStatus,
@@ -73,10 +74,50 @@ const READINESS_REGRESSION_INCLUDE = {
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
 
-const LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE =
-  "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
-const CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE =
-  "readiness evaluation failed: Recovery authorization could not adopt the verified regression head";
+const RECOVERY_REFUSAL_MESSAGES: Record<MergeRecoveryRefusalCode, string> = {
+  [MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE]:
+    "Recovery activation authorization is not fresh for the recovered exact head and current base",
+  [MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT]:
+    "Recovery authorization could not adopt the verified regression head",
+};
+
+class MergeRecoveryRefusalError extends Error {
+  readonly refusalCode: MergeRecoveryRefusalCode;
+
+  constructor(refusalCode: MergeRecoveryRefusalCode, cause?: unknown) {
+    super(
+      cause instanceof Error ? cause.message : RECOVERY_REFUSAL_MESSAGES[refusalCode],
+      cause === undefined ? undefined : { cause },
+    );
+    this.name = "MergeRecoveryRefusalError";
+    this.refusalCode = refusalCode;
+  }
+}
+
+const HEAD_ADOPTION_REFUSAL_CODES = [
+  MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
+  MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT,
+] as const;
+
+const recoveryHeadAdoptionSnapshotChanged = async (
+  tx: Prisma.TransactionClient,
+  recovery: RecoveryContext,
+): Promise<boolean> => {
+  const current = await tx.mergeRecoveryAttempt.findUnique({
+    where: { id: recovery.aggregateId },
+    select: {
+      status: true,
+      recoveryRunId: true,
+      currentBaseSha: true,
+      authorizedHeadSha: true,
+    },
+  });
+  return !current
+    || current.status !== MergeRecoveryStatus.AWAITING_AUTHORIZATION
+    || current.recoveryRunId !== recovery.recoveryRunId
+    || current.currentBaseSha !== recovery.currentBaseSha
+    || current.authorizedHeadSha !== recovery.authorizedHeadSha;
+};
 
 export const reopenRecoveryHeadAdoptionFailures = async (
   db: PrismaClient,
@@ -85,7 +126,7 @@ export const reopenRecoveryHeadAdoptionFailures = async (
   const candidates = await db.mergeRecoveryAttempt.findMany({
     where: {
       status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      failureReason: { in: [LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE, CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE] },
+      refusalCode: { in: [...HEAD_ADOPTION_REFUSAL_CODES] },
     },
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     take: limit,
@@ -106,16 +147,17 @@ export const reopenRecoveryHeadAdoptionFailures = async (
       ]);
       const verdict = parseRegressionVerdict(output?.body ?? "", output?.kind ?? "");
       const context = recoveryContext(attempt);
-      const baseBindingMatchesFailure = attempt?.failureReason === LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
-        ? verdict.status === "ok" && verdict.verdict.baseHeadSha === attempt.currentBaseSha
-        : attempt?.failureReason === CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE
-          ? verdict.status === "ok" && verdict.verdict.baseHeadSha !== attempt.currentBaseSha
-          : false;
+      const baseBindingMatchesRefusal = verdict.status === "ok" && (
+        (attempt?.refusalCode === MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE
+          && verdict.verdict.baseHeadSha === attempt.currentBaseSha)
+        || (attempt?.refusalCode === MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT
+          && verdict.verdict.baseHeadSha !== attempt.currentBaseSha)
+      );
       if (!attempt
         || !context
         || attempt.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
-        || (attempt.failureReason !== LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
-          && attempt.failureReason !== CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE)
+        || !HEAD_ADOPTION_REFUSAL_CODES.some((code) => code === attempt.refusalCode)
+        || !attempt.failureReason
         || attempt.readinessTaskId !== candidate.readinessTaskId
         || attempt.regressionTaskId !== candidate.regressionTaskId
         || attempt.recoveryRunId !== candidate.recoveryRunId
@@ -129,14 +171,28 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         || output?.runId !== run.id
         || output?.commitSha !== verdict.verdict.headSha
         || run.headSha !== verdict.verdict.headSha
-        || !baseBindingMatchesFailure
+        || !baseBindingMatchesRefusal
         || stop?.stopId !== attempt.sourceStopId
         || stop.sourceRunId !== context.sourceRunId) return false;
 
-      return reopenAfterHeadAdoption(tx, {
+      const reopened = await reopenAfterHeadAdoption(tx, {
         recovery: context,
         expectedFailureReason: attempt.failureReason,
       });
+      if (!reopened) return false;
+      const cleared = await tx.mergeRecoveryAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          status: MergeRecoveryStatus.REPAIRING,
+          refusalCode: attempt.refusalCode,
+          failureReason: null,
+        },
+        data: { refusalCode: null },
+      });
+      if (cleared.count !== 1) {
+        throw new Error(`Recovery refusal code was not cleared after reopening ${attempt.id}`);
+      }
+      return true;
     });
     if (applied) reopened += 1;
   }
@@ -190,6 +246,7 @@ const stopReadiness = async (
     regressionTaskId: string;
     reason: string;
     recovery: RecoveryContext | null;
+    refusalCode: MergeRecoveryRefusalCode | null;
   },
   claim: ReadinessClaimHandle,
   releaseChainLease: ReleaseMergeLease,
@@ -210,6 +267,7 @@ const settleReadinessStop = async (
     regressionTaskId: string;
     reason: string;
     recovery: RecoveryContext | null;
+    refusalCode: MergeRecoveryRefusalCode | null;
   },
   claim: ReadinessClaimHandle,
 ): Promise<{
@@ -228,6 +286,19 @@ const settleReadinessStop = async (
         recovery: input.recovery,
         at: new Date(),
       });
+      if (input.recovery && input.refusalCode) {
+        const coded = await client.mergeRecoveryAttempt.updateMany({
+          where: {
+            id: input.recovery.aggregateId,
+            status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+            failureReason: input.reason,
+          },
+          data: { refusalCode: input.refusalCode },
+        });
+        if (coded.count !== 1) {
+          throw new Error(`Recovery refusal code was not recorded for ${input.recovery.aggregateId}`);
+        }
+      }
       return { value: stopped, ownership: "released" as const };
     },
   });
@@ -522,6 +593,7 @@ const applyReadinessDecision = async (
         regressionTaskId: regression.id,
         reason: decision.evidence,
         recovery,
+        refusalCode: null,
       };
       const stopped = lease.position === "held"
         ? (await db.$transaction((tx) => settleReadinessStop(tx, input, claim))).value
@@ -626,11 +698,16 @@ const runReadinessDecision = async (
           // candidate, so its gated head may legitimately replace the head that
           // first stopped on base drift. Adopt only the head re-read under the
           // merge Lease and bind the CAS to the pre-Lease recovery snapshot.
-          await adoptRecoveryHead(client, {
-            recovery,
-            currentBaseSha: leasedDecision.evidence.baseSha,
-            authorizedHeadSha: leasedDecision.evidence.headSha,
-          });
+          try {
+            await adoptRecoveryHead(client, {
+              recovery,
+              currentBaseSha: leasedDecision.evidence.baseSha,
+              authorizedHeadSha: leasedDecision.evidence.headSha,
+            });
+          } catch (error: unknown) {
+            if (!await recoveryHeadAdoptionSnapshotChanged(client, recovery)) throw error;
+            throw new MergeRecoveryRefusalError(MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT, error);
+          }
         }
         const activity = await client.taskActivity.create({ data: {
           taskId: readiness.id,
@@ -680,15 +757,22 @@ const runReadinessDecision = async (
             recoverySourceStopId: recovery?.sourceStopId ?? null,
           },
         });
-        const activated = recovery
-          ? await activateRecoveryIntegratorSuccessor(client, {
+        let activated: { nextTaskId: string | null; gated: boolean };
+        if (recovery) {
+          const recoveryActivation = await activateRecoveryIntegratorSuccessor(client, {
             readinessTaskId: readiness.id,
             integratorTaskId: recovery.integratorTaskId,
             sourceStopId: recovery.sourceStopId,
             recoveryRunId: recovery.recoveryRunId,
             authorizationActivityId: activity.id,
-          }, read.input.now)
-          : await activateChainSuccessor(client, readiness, {}, read.input.now);
+          }, read.input.now);
+          if (recoveryActivation.outcome === "refused") {
+            throw new MergeRecoveryRefusalError(recoveryActivation.refusalCode);
+          }
+          activated = recoveryActivation;
+        } else {
+          activated = await activateChainSuccessor(client, readiness, {}, read.input.now);
+        }
         const handoff = activated.nextTaskId
           ? await client.run.findFirst({
             where: { taskId: activated.nextTaskId, status: RunStatus.QUEUED },
@@ -777,12 +861,14 @@ export const readinessTick = async (
       );
     } catch (error: unknown) {
       if (error instanceof LeaseReleaseDeferralRecordError) throw error;
+      const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
       const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
       const stopped = await stopReadiness(db, {
         readinessTaskId: readiness.id,
         regressionTaskId: read.regression.id,
         reason,
         recovery: read.recovery,
+        refusalCode,
       }, read.claim, releaseChainLease);
       if (stopped.applied) {
         result.stopped += 1;

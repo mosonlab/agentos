@@ -4,32 +4,52 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AUTHORIZED_MERGE_METHOD,
+  activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   MERGE_INTEGRATOR_KIND,
+  MergeRecoveryRefusalCode,
   Prisma,
   PrismaClient,
   recordIntegratorStop,
+  TaskStatus,
 } from "@anneal/db";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
 import { baseDriftRecoveryTick, readCandidateFacts } from "./merge-base-drift-worker.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import {
+  withMergeLease,
+  type MergeLeaseAcquirer,
+  type MergeLeaseReleaser,
+  type ReleaseMergeLease,
+  type WithMergeLease,
+} from "./merge-lease.js";
+import { readinessTick, reopenRecoveryHeadAdoptionFailures } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const HEAD = "a".repeat(40);
+const HEAD_2 = "f".repeat(40);
 const BASE = "b".repeat(40);
 const BASE_2 = "c".repeat(40);
+const BASE_3 = "d".repeat(40);
+const BASE_4 = "e".repeat(40);
 const OPERATOR = "base-drift-recovery-operator";
+const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
+const releaseLeaseAdapter: MergeLeaseReleaser = async () => ({ outcome: "not-held" });
+const releaseChainLease: ReleaseMergeLease = async () => {};
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 beforeEach(async () => { await resetTestDb(db); });
 after(async () => { await db.$disconnect(); });
 
-const snapshot = (baseSha: string): PullRequestSnapshot => ({
+const snapshot = (
+  baseSha: string,
+  overrides: Partial<PullRequestSnapshot> = {},
+): PullRequestSnapshot => ({
   repository: "acme/widgets",
   number: 123,
   state: "OPEN",
@@ -49,6 +69,7 @@ const snapshot = (baseSha: string): PullRequestSnapshot => ({
   requiredCheckNames: [],
   checkContexts: [],
   readAt: new Date("2026-08-22T01:00:00.000Z").toISOString(),
+  ...overrides,
 });
 
 const reader = (current: PullRequestSnapshot): PullRequestReader => ({
@@ -174,6 +195,50 @@ const seedStopped = async (
   return { ...seeded, authorization, sourceRun };
 };
 
+const recordRecoveryPass = async (
+  seeded: Awaited<ReturnType<typeof seedStopped>>,
+  baseSha: string,
+  headSha: string,
+) => {
+  const run = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id },
+    orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: run.id }, data: { status: "SUCCEEDED", headSha } });
+  await db.taskStepOutput.upsert({
+    where: { taskId: seeded.gateTask.id },
+    create: {
+      taskId: seeded.gateTask.id,
+      runId: run.id,
+      kind: "regression-verification",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        outcome: "pass",
+        headSha,
+        baseHeadSha: baseSha,
+        gateVerdict: "PASS",
+      }),
+      commitSha: headSha,
+    },
+    update: {
+      runId: run.id,
+      kind: "regression-verification",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        outcome: "pass",
+        headSha,
+        baseHeadSha: baseSha,
+        gateVerdict: "PASS",
+      }),
+      commitSha: headSha,
+    },
+  });
+  await db.task.update({
+    where: { id: seeded.gateTask.id },
+    data: { status: TaskStatus.DONE },
+  });
+};
+
 test("the durable reader selects the direct and compound recovery facts", async () => {
   for (const shape of ["canonical-direct", "canonical-compound-readiness"] as const) {
     const seeded = await seedStopped(shape, `reader-${shape}`);
@@ -222,6 +287,119 @@ test("the durable reader selects the direct and compound recovery facts", async 
     });
     await resetTestDb(db);
   }
+});
+
+test("recovery activation returns a typed stale-authorization refusal", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "typed-activation-refusal");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  assert.ok(aggregate.recoveryRunId);
+  await db.mergeRecoveryAttempt.update({
+    where: { id: aggregate.id },
+    data: { status: "AWAITING_AUTHORIZATION" },
+  });
+  await db.task.update({
+    where: { id: seeded.readinessTask!.id },
+    data: { status: TaskStatus.DONE },
+  });
+  const binding = `mechanical:${seeded.readinessTask!.id}:${randomUUID()}`;
+  const activity = await db.taskActivity.create({ data: {
+    taskId: seeded.readinessTask!.id,
+    actorType: "control-plane",
+    body: "stale recovery authorization",
+    metadata: {
+      ...authorizationMetadata({
+        schemaVersion: 1,
+        nonce: randomUUID(),
+        repository: aggregate.repository!,
+        prNumber: aggregate.prNumber!,
+        headSha: HEAD_2,
+        baseRef: aggregate.targetBranch!,
+        baseSha: aggregate.currentBaseSha!,
+        mergeMethod: AUTHORIZED_MERGE_METHOD,
+        requiredChecks: [],
+        readAt: new Date().toISOString(),
+        issuedAt: new Date().toISOString(),
+        decision: { channel: "mechanical", inboxDecisionId: binding, inboxMessageId: binding },
+      }),
+      recoverySourceStopId: aggregate.sourceStopId,
+    } as Prisma.InputJsonObject,
+  } });
+  await db.taskStepOutput.upsert({
+    where: { taskId: seeded.readinessTask!.id },
+    create: {
+      taskId: seeded.readinessTask!.id,
+      kind: "merge-authorization",
+      body: JSON.stringify({ authorizationActivityId: activity.id, headSha: HEAD_2 }),
+      commitSha: HEAD_2,
+    },
+    update: {
+      kind: "merge-authorization",
+      body: JSON.stringify({ authorizationActivityId: activity.id, headSha: HEAD_2 }),
+      commitSha: HEAD_2,
+    },
+  });
+
+  assert.deepEqual(await db.$transaction((tx) => activateRecoveryIntegratorSuccessor(tx, {
+    readinessTaskId: seeded.readinessTask!.id,
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: aggregate.sourceStopId,
+    recoveryRunId: aggregate.recoveryRunId!,
+    authorizationActivityId: activity.id,
+  })), {
+    outcome: "refused",
+    refusalCode: MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
+  });
+  assert.equal(await db.run.count({
+    where: { taskId: seeded.integratorTask!.id, status: "QUEUED" },
+  }), 0);
+});
+
+test("readiness records and reopens a head-adoption refusal by code, independent of its text", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "typed-head-adoption-refusal");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await recordRecoveryPass(seeded, BASE_3, HEAD_2);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const mutateBeforeLeaseCallback: WithMergeLease = async (target, fn, leaseDb) => {
+    await leaseDb.mergeRecoveryAttempt.update({
+      where: { id: aggregate.id },
+      data: { currentBaseSha: BASE_4 },
+    });
+    return withMergeLease(target, fn, leaseDb, {
+      acquire: acquireChainLease,
+      release: releaseLeaseAdapter,
+    });
+  };
+
+  assert.deepEqual(await readinessTick(
+    db,
+    reader(snapshot(BASE_3, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })),
+    new Date(),
+    5,
+    releaseChainLease,
+    mutateBeforeLeaseCallback,
+  ), { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
+  const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");
+  assert.equal(stopped.refusalCode, MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT);
+  assert.equal(
+    stopped.failureReason,
+    "readiness evaluation failed: Recovery authorization could not adopt the verified regression head",
+  );
+
+  await db.mergeRecoveryAttempt.update({
+    where: { id: aggregate.id },
+    data: { failureReason: "operator-facing recovery detail changed" },
+  });
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 1);
+  assert.equal(await reopenRecoveryHeadAdoptionFailures(db), 0);
+  const reopened = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(reopened.status, "REPAIRING");
+  assert.equal(reopened.refusalCode, null);
 });
 
 test("recovery holds the full chain mutex before mutation and a concurrent chain writer completes without deadlock or lost recovery", { timeout: 20_000 }, async () => {
