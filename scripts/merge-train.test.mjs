@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -80,6 +80,62 @@ const passGate = async (_repoRoot, prefix) => ({
 const noLease = (events = []) => ({
   acquireLease: async () => events.push("lease-acquire"),
   releaseLease: async () => events.push("lease-release"),
+});
+
+test("the default adapter locally dispatches from a clean exact-prefix checkout", async () => {
+  const fixture = await makeFixture();
+  try {
+    const dispatcher = await readFile(new URL("./gate-worker/gate-dispatch.sh", import.meta.url), "utf8");
+    const gateLibrary = await readFile(new URL("./gate-worker/lib.sh", import.meta.url), "utf8");
+    const wrapper = `#!/usr/bin/env bash
+set -eu
+unset AGENTOS_GATE_SERVER AGENTOS_GATE_PRIMARY_SERVER AGENTOS_GATE_FALLBACK_SERVER
+export AGENTOS_GATE_ALLOW_LOCAL=1
+export XDG_CACHE_HOME=${JSON.stringify(path.join(fixture.root, "gate-cache"))}
+exec bash "$(dirname "$0")/gate-dispatch-real.sh" "$@"
+`;
+    const mergeGate = `#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = "--expect-head" ]
+expected="$2"
+[ "$3" = "--master" ]
+head="$(git rev-parse HEAD)"
+status="$(git status --porcelain)"
+[ "$head" = "$expected" ]
+[ -z "$status" ]
+printf 'FIXTURE GATE: cwd=%s head=%s clean=yes\\n' "$PWD" "$head"
+printf 'MERGE GATE: PASS %s\\n' "$head"
+`;
+    const candidate = await fixture.candidate(300, {
+      "scripts/gate-worker/gate-dispatch.sh": wrapper,
+      "scripts/gate-worker/gate-dispatch-real.sh": dispatcher,
+      "scripts/gate-worker/lib.sh": gateLibrary,
+      "scripts/merge-gate.sh": mergeGate,
+    });
+    const result = await coordinateMergeTrain({
+      repoRoot: fixture.repo,
+      task: "local-dispatch",
+      candidates: [candidate],
+      adapters: {
+        ...noLease(),
+        readPullRequest: fixture.readPullRequest([candidate]),
+        sleep: async () => {},
+      },
+    });
+
+    assert.equal(result.status, "published-all");
+    assert.equal(result.gateResults[0].status, "pass");
+    const evidence = /FIXTURE GATE: cwd=(.+) head=([0-9a-f]{40}) clean=yes/u.exec(
+      result.gateResults[0].output,
+    );
+    assert.ok(evidence, result.gateResults[0].output);
+    assert.notEqual(path.resolve(evidence[1]), path.resolve(fixture.repo));
+    assert.equal(evidence[2], result.prefixes[0].oid);
+    const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain");
+    assert.equal(worktrees.match(/^worktree /gmu)?.length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("three cumulative prefixes gate concurrently and publish in FIFO order", async () => {
