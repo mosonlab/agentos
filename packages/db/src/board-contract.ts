@@ -15,6 +15,7 @@ export type ScheduleKind = "NOW" | "AT" | "CRON";
 export type RunStatus =
   | "QUEUED" | "CLAIMED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
   | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
+export type CodexServiceTier = "DEFAULT" | "FAST";
 export type ExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
 
 export type BoardMoveTarget = { status: TaskStatus; via: "patch" | "start" };
@@ -69,6 +70,8 @@ export type BoardLatestRun<DateTime = string> = {
   status: RunStatus;
   /** The model snapshot taken when the Run was claimed. */
   model: string;
+  /** The Codex service tier snapshot taken when the Run was claimed. */
+  codexServiceTier: CodexServiceTier;
   /** A serialized Decimal, or null when cost is unavailable. */
   costUsd: string | null;
   startedAt: DateTime | null;
@@ -101,6 +104,11 @@ export type ChainFrontier<DateTime = string> = {
 };
 export type BoardChainFrontier<DateTime = string> = ChainFrontier<DateTime>;
 
+export type ChainActiveRepair<DateTime = string> = {
+  repairKind: string;
+  latestRun: BoardLatestRun<DateTime>;
+};
+
 export type ChainAggregate<DateTime = string> = {
   chainId: string;
   chainName: string | null;
@@ -112,6 +120,7 @@ export type ChainAggregate<DateTime = string> = {
   /** Derived board column; this is not a persisted Task status. */
   status: TaskStatus;
   frontier: ChainFrontier<DateTime>;
+  activeRepair: ChainActiveRepair<DateTime> | null;
   activation: {
     state: ChainAggregateState;
     predecessor: { taskId: string; taskName: string } | null;

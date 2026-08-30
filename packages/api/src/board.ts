@@ -138,6 +138,7 @@ export type BoardRow = {
     runNumber: number;
     status: BoardRunStatus;
     model: string;
+    codexServiceTier: BoardContractLatestRun["codexServiceTier"];
     subagentModel?: string | null;
     budgetGrants: number;
     session: {
@@ -256,6 +257,8 @@ export type BoardChainMember = {
   createdAt: Date;
   updatedAt: Date;
   templateStep: { name: string } | null;
+  /** Present only for detached merge-tail repairs; primary steps omit it. */
+  repairKind?: string;
   runs: BoardRow["runs"];
   stepOutput?: BoardRow["stepOutput"];
 };
@@ -269,6 +272,7 @@ const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | 
         runNumber: run.runNumber,
         status: run.status,
         model: run.model,
+        codexServiceTier: run.codexServiceTier,
         costUsd: decimal(run.session?.costUsd),
         startedAt: run.session?.startedAt ?? null,
         endedAt: run.session?.endedAt ?? null,
@@ -403,6 +407,17 @@ export const chainAggregate = (
       failureReason: frontierMember.failureReason,
       ...(frontierPosition >= 0 ? { position: frontierPosition + 1 } : {}),
     },
+    activeRepair: (() => {
+      const activeRepair = repairs.find((member) => (
+        member.repairKind !== undefined && isActiveLatestRun(member)
+      ));
+      if (activeRepair === undefined) return null;
+      const latestRun = latestRunProjection(activeRepair.runs);
+      return latestRun === null ? null : {
+        repairKind: activeRepair.repairKind!,
+        latestRun,
+      };
+    })(),
     activation: {
       state: activationState,
       predecessor: predecessor === null || predecessor.status === TaskStatus.DONE
@@ -785,6 +800,7 @@ const boardChainRows = async (
           runNumber: true,
           status: true,
           model: true,
+          codexServiceTier: true,
           subagentModel: true,
           budgetGrants: true,
           session: {
@@ -829,6 +845,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         orderBy: { runNumber: "desc" },
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
+          codexServiceTier: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true,
@@ -953,7 +970,8 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     const key = repairChainKeyByTask.get(row.id);
     if (key === undefined) continue;
     const group = addChain(key, repairByTask.get(row.id)?.chainName ?? null);
-    group.repairs.push(memberWithDisplay(row));
+    const repair = repairByTask.get(row.id);
+    group.repairs.push(memberWithDisplay(repair === undefined ? row : { ...row, repairKind: repair.repairKind }));
   }
   const aggregateByChain = new Map<string, BoardContractChainAggregate<Date>>();
   for (const [key, group] of membersByChain) {
