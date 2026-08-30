@@ -1346,7 +1346,7 @@ test("GET /tasks/:id/chain returns an empty envelope for a task with no chain", 
   const loner = await db.task.create({ data: { projectId: project.id, name: "Loner", description: "d" } });
   const { status, body } = await operatorGet(`/tasks/${loner.id}/chain`);
   assert.equal(status, 200);
-  assert.deepEqual(body, { chainId: null, total: 0, done: 0, steps: [] });
+  assert.deepEqual(body, { chainId: null, total: 0, done: 0, control: null, steps: [] });
 });
 
 test("GET /tasks/:id/chain is 404 for a task that does not exist", async () => {

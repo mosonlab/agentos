@@ -8,7 +8,7 @@ import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import { isRegressionStep } from "../lib/repair-subtimeline";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
+import type { Chain, ChainStep, Run, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList } from "../components/chain-list";
@@ -251,7 +251,7 @@ export const TaskPrompt = ({ description }: { description: string }): ReactNode 
 };
 
 const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
-  const { data: task, error, reload } = usePoll<Task>(`/tasks/${taskId}`);
+  const { data: task, error, reload } = usePoll<TaskDetail>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
   const startability = usePoll<TaskStartability>(`/tasks/${taskId}/startability`);
   const activity = usePoll<TaskActivity[]>(`/tasks/${taskId}/activity`);
