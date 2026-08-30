@@ -1,6 +1,6 @@
 import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, clampScroll, columnStep, edgeState, normalizeBoardEntries, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, type ParkedChain, clampScroll, columnStep, edgeState, normalizeBoardEntries, parkedChains, sameEdges, scrollKey, storedScroll } from "../lib/board";
 import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
@@ -63,10 +63,10 @@ const COLUMN_EMPTY = "px-0 py-[26px] text-center text-[12px] text-[color:var(--f
 
 export { CARD_PAGE_SIZE };
 
-/** One board column, extracted so its three rules — the head, the `Archive All`
- *  presence rule and the empty-state drop invitation — can be asserted from
- *  rendered markup rather than from the page's source text. */
-export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, actions, aggregateActions }: {
+/** One board column, extracted so its rules — the head, the `Archive All` and
+ *  `Activate all` presence rules and the empty-state drop invitation — can be
+ *  asserted from rendered markup rather than from the page's source text. */
+export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, onActivateAll, actions, aggregateActions }: {
   column: { status: TaskStatus; labelKey: string };
   tasks: readonly (BoardEntry | BoardTask)[];
   loading: boolean;
@@ -75,24 +75,32 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   onDragLeave: (status: TaskStatus) => void;
   onDrop: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
+  onActivateAll: (chains: readonly ParkedChain[]) => void;
   actions: CardActions;
   aggregateActions?: ChainAggregateActions | undefined;
 }): ReactNode => {
   const t = useT();
   const entries = normalizeBoardEntries(tasks);
+  const parked = column.status === "TODO" ? parkedChains(entries) : [];
+  // A head offers at most one action, and only where it would do something: the
+  // Done column archives what it holds, and the Todo column activates the
+  // chains that are parked in it (A2).
+  const action = column.status === "DONE" && entries.length > 0
+    ? { label: t("tasks.archiveAll"), press: onArchiveDone }
+    : parked.length > 0
+      ? { label: t("tasks.activateAll.action"), press: () => onActivateAll(parked) }
+      : null;
   return <div className={COLUMN}>
     <div className={COLUMN_HEAD}>
       {t(column.labelKey)}<span className={COUNT}>{entries.length}</span>
-      {/* Only on a non-empty Done column: a button that would archive nothing
-          is not offered (A2). */}
-      {column.status === "DONE" && entries.length > 0 ? (
+      {action === null ? null : (
         <>
           <span className="flex-1" />
-          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
-            {t("tasks.archiveAll")}
+          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={action.press}>
+            {action.label}
           </Button>
         </>
-      ) : null}
+      )}
     </div>
     <div
       className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
@@ -208,13 +216,14 @@ export const dragEdgeStep = (clientX: number, box: { left: number; right: number
     : box.right - clientX < DRAG_EDGE_PX ? DRAG_STEP_PX
       : 0);
 
-export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove, onArchiveDone, actions, aggregateActions, boardRef, projectId }: {
+export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove, onArchiveDone, onActivateAll, actions, aggregateActions, boardRef, projectId }: {
   byStatus: Map<TaskStatus, BoardEntry[]>;
   loading: boolean;
   dragOver: TaskStatus | null;
   setDragOver: (status: TaskStatus | null) => void;
   onMove: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
+  onActivateAll: (chains: readonly ParkedChain[]) => void;
   actions: CardActions;
   aggregateActions?: ChainAggregateActions | undefined;
   boardRef: React.RefObject<HTMLDivElement | null>;
@@ -347,6 +356,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
                 onDragLeave={(status) => setDragOver(dragOver === status ? null : dragOver)}
                 onDrop={(taskId, status) => { setDragOver(null); stopEdgeScroll(); onMove(taskId, status); }}
                 onArchiveDone={onArchiveDone}
+                onActivateAll={onActivateAll}
                 actions={actions}
                 aggregateActions={aggregateActions}
               />

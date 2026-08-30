@@ -139,6 +139,28 @@ export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
 export const normalizeBoardEntries = (entries: readonly (BoardEntry | BoardTask)[]): BoardEntry[] =>
   entries.map((entry) => isBoardEntry(entry) ? entry : taskBoardEntry(entry));
 
+/** A parked chain the Todo column head can offer to activate: the chain, what
+ * it is called, how long it is, and the Task the existing per-task start path
+ * acts on. `waiting-on-predecessor` is deliberately excluded — those chains
+ * dispatch themselves when their predecessor completes. */
+export type ParkedChain = { chainId: string; name: string; stepCount: number; taskId: string };
+
+/** The parked chains among a column's entries, in the order they are rendered.
+ * Single-task cards are never parked chains: only an aggregate carries an
+ * activation Task. */
+export const parkedChains = (entries: readonly BoardEntry[]): ParkedChain[] =>
+  entries.flatMap((entry) => {
+    if (entry.kind !== "chain") return [];
+    const { activation } = entry.aggregate;
+    if (activation.state !== "parked-unactivated" || activation.taskId === null) return [];
+    return [{
+      chainId: entry.aggregate.chainId,
+      name: chainBindingLabel({ id: entry.aggregate.chainId, name: entry.aggregate.chainName }),
+      stepCount: entry.aggregate.stepCount,
+      taskId: activation.taskId,
+    }];
+  });
+
 export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskStatus, BoardEntry[]> => {
   const groups = new Map<TaskStatus, BoardEntry[]>(COLUMNS.map((column) => [column.status, []]));
   for (const entry of entries) groups.get(entry.status)?.push(entry);

@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { type BoardEntry, type Counts, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
+import { type BoardEntry, type Counts, type ParkedChain, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -135,6 +135,79 @@ export const StartTaskDialog = ({ request, pending, error, onCancel, onConfirm }
   );
 };
 
+/** One chain the batch would not start, named so the operator can act on it.
+ *  Collected rather than thrown: a refusal is about that chain alone. */
+export type ChainRefusal = { name: string; reason: string };
+
+/**
+ * Activate a wave of parked chains through the existing per-task path.
+ *
+ * Startability first, then `POST /tasks/:id/start`, one chain at a time and in
+ * the order the column showed them — the same two calls `onActivate` makes for
+ * a single card, so there is no bulk route and no second activation semantics
+ * to keep in step with this one. A refusal, or a start the control plane
+ * rejects, ends that chain's attempt and nothing else: the batch continues and
+ * every refusal comes back named.
+ */
+export const activateChains = async (chains: readonly ParkedChain[]): Promise<ChainRefusal[]> => {
+  const refused: ChainRefusal[] = [];
+  for (const chain of chains) {
+    try {
+      const verdict = await api.get<TaskStartability>(`/tasks/${chain.taskId}/startability`);
+      if (!verdict.startable) {
+        refused.push({ name: chain.name, reason: startabilityRefusal(verdict) });
+        continue;
+      }
+      await api.post(`/tasks/${chain.taskId}/start`, {});
+    } catch (reason: unknown) {
+      refused.push({ name: chain.name, reason: reason instanceof Error ? reason.message : String(reason) });
+    }
+  }
+  return refused;
+};
+
+/** One dialog for the whole wave, not one per chain: it names every chain it is
+ *  about to start, and after a partial run it names the ones that did not. */
+export const ActivateAllDialog = ({ chains, refusals, pending, onClose, onConfirm }: {
+  chains: readonly ParkedChain[];
+  refusals: readonly ChainRefusal[];
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}): ReactNode => {
+  const t = useT();
+  const reported = refusals.length > 0;
+  return (
+    <Modal title={t("tasks.activateAll.title")} onClose={onClose} footer={reported ? (
+      <Button type="button" variant="legacy" size="legacy" onClick={onClose}>{t("common.close")}</Button>
+    ) : (
+      <>
+        <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={onClose}>{t("common.cancel")}</Button>
+        <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={onConfirm}>
+          {t("tasks.activateAll.confirm", { n: chains.length })}
+        </Button>
+      </>
+    )}>
+      <div className="text-[13px] text-secondary-foreground">{t("tasks.activateAll.what", { n: chains.length })}</div>
+      <ul data-activate-all-chains="" className="mt-[10px] flex flex-col gap-[6px] text-[13px]">
+        {chains.map((chain) => (
+          <li key={chain.chainId} className="[overflow-wrap:anywhere]">
+            {t("tasks.activateAll.chain", { name: chain.name, n: chain.stepCount })}
+          </li>
+        ))}
+      </ul>
+      {reported ? (
+        <div data-activate-all-refusals="" className="mt-[12px] flex flex-col gap-[6px]">
+          <div className="text-[12px] text-muted-foreground">{t("tasks.activateAll.refusedTitle")}</div>
+          {refusals.map((refusal) => (
+            <ErrorNotice key={refusal.name} message={t("tasks.activateAll.refused", { name: refusal.name, reason: refusal.reason })} />
+          ))}
+        </div>
+      ) : null}
+    </Modal>
+  );
+};
+
 export const useTaskStartConfirmation = (reload: () => void): {
   request: TaskStartability | null;
   pending: boolean;
@@ -190,6 +263,8 @@ export const TasksPage = (): ReactNode => {
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [chainFilter, setChainFilter] = useState<{ id: string; name: string } | null>(null);
+  const [activateAll, setActivateAll] = useState<{ chains: readonly ParkedChain[]; refusals: ChainRefusal[] } | null>(null);
+  const [activatePending, setActivatePending] = useState(false);
   const { error: actionError, run } = useAction();
   const t = useT();
   const allTasks = useStableRows(useMemo(() => data ?? [], [data]));
@@ -376,6 +451,25 @@ export const TasksPage = (): ReactNode => {
     },
   }), [run, reload, start]);
 
+  /** The column head opens the dialog; the dialog is what starts anything. The
+   *  batch runs inside `run`, so a transport failure lands in the page's one
+   *  error surface, while a per-chain refusal stays in the dialog beside the
+   *  chain it belongs to. */
+  const confirmActivateAll = useCallback(async (): Promise<void> => {
+    const chains = activateAll?.chains;
+    if (chains === undefined) return;
+    setActivatePending(true);
+    setNotice(null);
+    let refusals: ChainRefusal[] = [];
+    const ok = await run(async () => { refusals = await activateChains(chains); });
+    setActivatePending(false);
+    reload();
+    if (!ok) return;
+    setNotice(t("tasks.activateAll.started", { n: chains.length - refusals.length, total: chains.length }));
+    if (refusals.length === 0) setActivateAll(null);
+    else setActivateAll({ chains, refusals });
+  }, [activateAll, run, reload, t]);
+
   /** `api.post` is called for its payload, which `useAction.run` discards — but
    *  the call still runs *inside* `run`, so failures land in the same
    *  `ErrorNotice` as everything else on the page. One error surface, one
@@ -403,6 +497,15 @@ export const TasksPage = (): ReactNode => {
           error={start.error}
           onCancel={start.cancel}
           onConfirm={() => void start.confirm()}
+        />
+      )}
+      {activateAll === null ? null : (
+        <ActivateAllDialog
+          chains={activateAll.chains}
+          refusals={activateAll.refusals}
+          pending={activatePending}
+          onClose={() => { if (!activatePending) setActivateAll(null); }}
+          onConfirm={() => void confirmActivateAll()}
         />
       )}
       <TasksPageHead active="tasks" onCreated={reload} />
@@ -437,6 +540,7 @@ export const TasksPage = (): ReactNode => {
             setDragOver={setDragOver}
             onMove={drop}
             onArchiveDone={() => void archiveDone()}
+            onActivateAll={(chains) => setActivateAll({ chains, refusals: [] })}
             actions={actions}
             aggregateActions={aggregateActions}
             boardRef={boardRef}

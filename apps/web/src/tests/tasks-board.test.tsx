@@ -1,3 +1,8 @@
+// First, and before any component import: the Modal this page opens is a Radix
+// dialog, and Radix binds its portal to whether a document existed when its
+// module loaded.
+import "./dom-preload";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, type ReactNode } from "react";
@@ -8,12 +13,12 @@ import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavig
 import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, columnStep, countByStatus, taskBoardEntry } from "../lib/board";
+import { COLUMNS, type BoardEntry, boardEntries, columnStep, countByStatus, parkedChains, taskBoardEntry } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
-import type { BoardTask, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
+import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
 import { installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
@@ -73,13 +78,13 @@ const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
 /** Renders one real column. Everything the board decides per column — the head,
  *  the count, `Archive All`, the drop invitation — is decided in here, so these
  *  assertions read markup rather than the page's source text. */
-const column = (status: TaskStatus, tasks: BoardTask[] = [], loading = false): string => {
+const column = (status: TaskStatus, tasks: readonly (BoardEntry | BoardTask)[] = [], loading = false): string => {
   const found = COLUMNS.find((candidate) => candidate.status === status);
   assert.ok(found, `no ${status} column`);
   return renderToStaticMarkup(
     <BoardColumn
       column={found} tasks={tasks} loading={loading} dragOver={null}
-      onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} actions={ACTIONS}
+      onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} onActivateAll={noop} actions={ACTIONS}
     />,
   );
 };
@@ -206,6 +211,131 @@ test("Archive All is offered only on a non-empty Done column", () => {
   assert.match(column("DONE", [task({ status: "DONE" })]), new RegExp(en("tasks.archiveAll")));
   assert.doesNotMatch(column("DONE", []), new RegExp(en("tasks.archiveAll")));
   assert.doesNotMatch(column("TODO", [task()]), new RegExp(en("tasks.archiveAll")));
+});
+
+/* ------------------------------------------- activating a wave of chains */
+
+/** A whole parked chain as the board receives it: one visible member carrying
+ *  the aggregate, which is what `boardEntries` groups on. */
+const chainRow = (chainId: string, chainName: string, stepCount: number, state: ChainAggregateState = "parked-unactivated"): BoardTask => {
+  const taskId = `${chainId}-step-1`;
+  const chainAggregate: ChainAggregate = {
+    chainId, chainName, stepCount, detailTaskId: taskId, status: "TODO",
+    statusCounts: { BACKLOG: 0, TODO: stepCount, DOING: 0, REVIEW: 0, DONE: 0 },
+    frontier: { taskId, title: `${chainName}: Specification`, status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 1 },
+    activation: {
+      state, taskId,
+      predecessor: state === "waiting-on-predecessor" ? { taskId: "release-merge", taskName: "Merge release" } : null,
+    },
+    totalCost: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
+  };
+  return task({
+    id: taskId, name: `${chainName}: Specification`, displayName: "Specification", status: "TODO",
+    chainId, chainName, chainIndex: 0,
+    chainProgress: progress({ chainId, done: 0, total: stepCount, position: 1 }),
+    chainAggregate,
+  });
+};
+
+const ACTIVATE_ALL = en("tasks.activateAll.action");
+
+test("Activate all is offered only where the Todo column holds a parked chain", () => {
+  const parked = boardEntries([chainRow("alpha", "Alpha", 3)]);
+  assert.match(column("TODO", parked), new RegExp(ACTIVATE_ALL));
+  // A plain Todo card is not a chain, and a chain waiting on its predecessor
+  // dispatches itself — neither is something this button could act on.
+  assert.doesNotMatch(column("TODO", [task()]), new RegExp(ACTIVATE_ALL));
+  assert.doesNotMatch(column("TODO", []), new RegExp(ACTIVATE_ALL));
+  assert.doesNotMatch(
+    column("TODO", boardEntries([chainRow("beta", "Beta", 4, "waiting-on-predecessor")])),
+    new RegExp(ACTIVATE_ALL),
+  );
+  // And nowhere but Todo: Done keeps its own head action.
+  assert.doesNotMatch(column("DONE", [task({ status: "DONE" })]), new RegExp(ACTIVATE_ALL));
+});
+
+test("the head acts on exactly the parked chains, named and counted", () => {
+  const entries = boardEntries([
+    chainRow("alpha", "Alpha", 3),
+    chainRow("beta", "Beta", 4, "waiting-on-predecessor"),
+    chainRow("gamma", "Gamma", 5),
+    task({ id: "solo" }),
+  ]);
+  assert.deepEqual(parkedChains(entries), [
+    { chainId: "alpha", name: "Alpha", stepCount: 3, taskId: "alpha-step-1" },
+    { chainId: "gamma", name: "Gamma", stepCount: 5, taskId: "gamma-step-1" },
+  ]);
+});
+
+const startability = (taskId: string, name: string, startable: boolean): TaskStartability => ({
+  startable,
+  checklist: {
+    repoBound: true, agentAssignee: true, repoAccessGrant: true,
+    budgetRemaining: true, noActiveRun: startable, predecessorsDone: true,
+  },
+  task: {
+    id: taskId, name, agent: { id: "a1", title: "Senior dev" },
+    repo: { id: "r1", name: "product" }, targetBranch: "main",
+  },
+});
+
+test("one dialog activates the parked wave, and a refusal names its chain without stopping the rest", async () => {
+  storage.set("agentos.projectId", "p1");
+  const rows = [
+    chainRow("alpha", "Alpha", 3),
+    chainRow("beta", "Beta", 4, "waiting-on-predecessor"),
+    chainRow("gamma", "Gamma", 5),
+  ];
+  const calls: string[] = [];
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "*": ({ input, method }) => {
+      const path = String(input);
+      calls.push(`${method} ${path}`);
+      if (path === "/api/tasks/alpha-step-1/startability") return startability("alpha-step-1", "Alpha", true);
+      // Gamma was started by another operator between the board read and this
+      // press, which is exactly the stale view the per-task path already reports.
+      if (path === "/api/tasks/gamma-step-1/startability") return startability("gamma-step-1", "Gamma", false);
+      if (method === "POST") return Response.json({ runId: "run-1", runNumber: 1 }, { status: 201 });
+      return [];
+    },
+  });
+  // Modal renders through the Radix portal, so the dialog is in the document
+  // rather than under the page's own root.
+  const inDocument = (selector: string): Element | null => page.dom.window.document.querySelector(selector);
+  const pressInDialog = async (label: string): Promise<void> => {
+    const button = [...page.dom.window.document.querySelectorAll("button")]
+      .find((node) => node.textContent?.trim() === label);
+    assert.ok(button, `missing button ${label}`);
+    await act(async () => button.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
+    await page.settle();
+  };
+  try {
+    await page.press(ACTIVATE_ALL);
+    const dialog = inDocument("[data-activate-all-chains]");
+    assert.ok(dialog);
+    // Exactly the parked chains, with their step counts, and one dialog for all
+    // of them rather than one per chain.
+    assert.deepEqual(
+      [...dialog.querySelectorAll("li")].map((node) => node.textContent),
+      ["Alpha — 3 steps", "Gamma — 5 steps"],
+    );
+    assert.doesNotMatch(dialog.textContent ?? "", /Beta/u);
+
+    await pressInDialog(en("tasks.activateAll.confirm", { n: 2 }));
+    assert.equal(calls.filter((call) => call === "POST /api/tasks/alpha-step-1/start").length, 1);
+    assert.equal(calls.some((call) => call.startsWith("POST /api/tasks/gamma-step-1/start")), false);
+    assert.equal(calls.some((call) => call.includes("beta-step-1")), false);
+    const refusals = inDocument("[data-activate-all-refusals]");
+    assert.ok(refusals);
+    assert.match(refusals.textContent ?? "", /Gamma: Task cannot start: No active run/u);
+    assert.doesNotMatch(refusals.textContent ?? "", /Alpha/u);
+    assert.match(page.container.textContent ?? "", new RegExp(en("tasks.activateAll.started", { n: 1, total: 2 })));
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
 });
 
 test("every column head is the same height, whatever it offers", () => {
