@@ -1,32 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JSDOM } from "jsdom";
 import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { contentRevision } from "../lib/format";
 import type { Agent } from "../lib/types";
 import { AgentDetailPage, NewAgent } from "../pages/Agents";
+import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
 const value: Agent = {
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
   model: "claude-opus-5:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
   foundationalPrompt: "the canonical foundation", rolePrompt: "role", createdAt: "2026-08-16T00:00:00.000Z",
   updatedAt: "2026-08-16T00:00:00.000Z", archivedAt: null,
-};
-
-const installDom = (): { dom: JSDOM; container: Element } => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true, url: "http://localhost/agents/a" });
-  for (const [key, item] of Object.entries({
-    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLFormElement: dom.window.HTMLFormElement,
-    Element: dom.window.Element, Node: dom.window.Node, MutationObserver: dom.window.MutationObserver,
-  })) Object.defineProperty(globalThis, key, { configurable: true, value: item });
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
-  const container = dom.window.document.querySelector("#root");
-  assert.ok(container);
-  return { dom, container };
 };
 
 test("foundation content revisions are stable, distinct and exactly seven hex characters", () => {
@@ -41,14 +27,13 @@ test("the create form has no Foundation field or request key", async () => {
   assert.equal((staticMarkup.match(/<textarea/gu) ?? []).length, 1, "only the role prompt remains");
   assert.doesNotMatch(staticMarkup, /Anneal foundation/iu);
 
-  const { dom, container } = installDom();
-  const root = createRoot(container);
-  const originalFetch = globalThis.fetch;
+  const { dom, container } = installDom("http://localhost/agents/a");
+  const root = (await reactDom()).createRoot(container);
   const requests: RequestInit[] = [];
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (_input: string | URL | Request, init?: RequestInit) => {
+  const fetchHarness = installFetchFunction(async (_input, init) => {
     requests.push(init ?? {});
     return new Response(JSON.stringify(init?.method === "POST" ? value : []), { status: init?.method === "POST" ? 201 : 200 });
-  } });
+  });
   try {
     await act(async () => {
       root.render(<NewAgent projectId="p" onClose={() => undefined} onCreated={() => undefined}
@@ -66,22 +51,21 @@ test("the create form has no Foundation field or request key", async () => {
     const body = JSON.parse(String(post.body)) as Record<string, unknown>;
     assert.equal("foundationalPrompt" in body, false);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }
 });
 
 test("edit mode keeps Foundation read-only and the save payload omits it", async () => {
-  const { dom, container } = installDom();
-  const root = createRoot(container);
-  const originalFetch = globalThis.fetch;
+  const { dom, container } = installDom("http://localhost/agents/a");
+  const root = (await reactDom()).createRoot(container);
   const requests: RequestInit[] = [];
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string | URL | Request, init?: RequestInit) => {
+  const fetchHarness = installFetchFunction(async (input, init) => {
     requests.push(init ?? {});
     const body = String(input).endsWith("/agents/a") ? value : [];
     return new Response(JSON.stringify(body), { status: 200 });
-  } });
+  });
   const button = (text: string): HTMLButtonElement => {
     const match = [...dom.window.document.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === text);
     assert.ok(match, text);
@@ -111,7 +95,7 @@ test("edit mode keeps Foundation read-only and the save payload omits it", async
     assert.deepEqual(Object.keys(body).sort(), ["codexServiceTier", "inboxAccess", "model", "name", "rolePrompt", "runnerPreference", "title"]);
     assert.equal("foundationalPrompt" in body, false);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }

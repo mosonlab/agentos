@@ -24,9 +24,7 @@ test("the Runs section is rendered before the Chain section", () => {
 });
 
 test("active Runs expose cancellation and an outstanding intent renders Cancelling", () => {
-  for (const status of ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"]) {
-    assert.match(source, new RegExp(`"${status}"`, "u"));
-  }
+  assert.match(source, /isActiveRunStatus\(newest\.status\)/u);
   assert.match(source, /newest\.cancelRequestedAt !== null/u);
   assert.match(source, /newest\.cancelAcknowledgedAt === null/u);
   assert.match(source, /taskDetail\.cancel\.cancelling/u);

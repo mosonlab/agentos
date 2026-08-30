@@ -15,10 +15,14 @@ import {
   TaskStatus,
   type TriggerFireSource,
 } from "@anneal/db";
+import { layerOf } from "@anneal/db/chain-order";
 
 import { isValidBranchName } from "./branch-name.js";
 import { composeBrief } from "./task-brief.js";
-import { TemplateInstantiationRefusal } from "./template-errors.js";
+import {
+  TemplateInstantiationRefusal,
+  type TemplateInstantiationRefusalCode,
+} from "./template-errors.js";
 import { serializable } from "./transaction.js";
 
 export type InstantiateTemplateInput = {
@@ -99,19 +103,15 @@ type DispatchChainRow = {
   name: string;
 };
 
-const overrideRefusal = (
-  code: string,
+const templateRefusal = (
+  code: TemplateInstantiationRefusalCode,
   message: string,
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
 
-const bindingRefusal = (
-  code: string,
-  message: string,
-): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
-
-const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => (
-  task.chainLayer ?? task.chainIndex
-);
+const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => layerOf({
+  layer: task.chainLayer,
+  index: task.chainIndex,
+});
 
 const dispatchBindingUniqueConflict = (error: unknown): boolean => {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") return false;
@@ -157,10 +157,16 @@ const assertValidBaseReferences = (
   for (const step of steps) {
     if (step.baseFromStepIndex == null) continue;
     if (!indexes.has(step.baseFromStepIndex)) {
-      throw new Error(`Template step ${step.name} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`);
+      throw templateRefusal(
+        "template_base_reference_missing",
+        `Template step ${step.name} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`,
+      );
     }
     if (step.baseFromStepIndex >= step.stepIndex) {
-      throw new Error(`Template step ${step.name} baseFromStepIndex must reference a strictly earlier stepIndex`);
+      throw templateRefusal(
+        "template_base_reference_not_earlier",
+        `Template step ${step.name} baseFromStepIndex must reference a strictly earlier stepIndex`,
+      );
     }
   }
 };
@@ -181,7 +187,7 @@ export const instantiateTemplate = async (
   } = {},
 ) => {
   if (input.afterTaskId && input.autoStart) {
-    throw bindingRefusal(
+    throw templateRefusal(
       "dispatch_conflicts_with_auto_start",
       `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
     );
@@ -191,14 +197,14 @@ export const instantiateTemplate = async (
   };
   let overrideEntries = Object.entries(effectiveStepOverrides);
   if (overrideEntries.length > 64) {
-    throw overrideRefusal(
+    throw templateRefusal(
       "step_override_too_many",
       `stepOverrides contains ${overrideEntries.length} entries; at most 64 step overrides are allowed`,
     );
   }
   for (const [stepIndex] of overrideEntries) {
     if (!stepOverrideKey.test(stepIndex)) {
-      throw overrideRefusal(
+      throw templateRefusal(
         "step_override_invalid_key",
         `Step override key ${stepIndex} must be a positive decimal step index without leading zeros`,
       );
@@ -211,24 +217,28 @@ export const instantiateTemplate = async (
     }),
     db.repo.findFirst({ where: { id: input.repoId, projectId } }),
   ]);
-  if (!template) throw new Error("Template not found in project");
-  if (!repo) throw new Error("Repo not found in project");
-  if (template.steps.length === 0) throw new Error("Template has no steps");
+  if (!template) throw templateRefusal("template_not_found", "Template not found in project");
+  if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
+  if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
   const implementationRoute = template.name === "direct-engineer-workflow"
     ? parseImplementationRoute(input.description)
     : null;
   if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
-    throw overrideRefusal(
+    throw templateRefusal(
       "implementation_route_unknown_agent",
       `Unknown implementation route agent ${implementationRoute}; expected one of senior-dev-luna, senior-dev, frontend-dev`,
     );
   }
   const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
-  if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
-  if (unknown.length > 0) throw new Error(`Unknown template variables: ${unknown.join(", ")}`);
+  if (missing.length > 0) {
+    throw templateRefusal("template_variables_missing", `Missing template variables: ${missing.join(", ")}`);
+  }
+  if (unknown.length > 0) {
+    throw templateRefusal("template_variables_unknown", `Unknown template variables: ${unknown.join(", ")}`);
+  }
   if (input.variables.branchName !== undefined && !isValidBranchName(input.variables.branchName)) {
-    throw new Error("Invalid template branch name");
+    throw templateRefusal("template_branch_invalid", "Invalid template branch name");
   }
   assertValidBaseReferences(template.steps);
 
@@ -239,7 +249,9 @@ export const instantiateTemplate = async (
   const instantiatedTemplateSteps = omitRevalidation
     ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
     : template.steps;
-  if (instantiatedTemplateSteps.length === 0) throw new Error("Template has no instantiable steps");
+  if (instantiatedTemplateSteps.length === 0) {
+    throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
+  }
 
   let routedImplementationStepIndex: number | null = null;
   if (implementationRoute !== null) {
@@ -250,7 +262,7 @@ export const instantiateTemplate = async (
     if (implementationStep) {
       const stepKey = String(implementationStep.stepIndex);
       if (effectiveStepOverrides[stepKey]) {
-        throw overrideRefusal(
+        throw templateRefusal(
           "implementation_route_conflicts_with_step_override",
           `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
         );
@@ -260,7 +272,7 @@ export const instantiateTemplate = async (
         select: { id: true, name: true, projectId: true, archivedAt: true },
       });
       if (!routeAgent) {
-        throw overrideRefusal(
+        throw templateRefusal(
           "step_override_agent_not_found",
           `Implementation route agent ${implementationRoute} was not found in this project`,
         );
@@ -272,7 +284,7 @@ export const instantiateTemplate = async (
       routedImplementationStepIndex = implementationStep.stepIndex;
       overrideEntries = Object.entries(effectiveStepOverrides);
       if (overrideEntries.length > 64) {
-        throw overrideRefusal(
+        throw templateRefusal(
           "step_override_too_many",
           `stepOverrides contains ${overrideEntries.length} entries; at most 64 step overrides are allowed`,
         );
@@ -283,7 +295,7 @@ export const instantiateTemplate = async (
   const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
   for (const [stepIndex] of overrideEntries) {
     if (!templateStepsByIndex.has(stepIndex)) {
-      throw overrideRefusal(
+      throw templateRefusal(
         "step_override_unknown_step",
         `Step override names unknown template step ${stepIndex}`,
       );
@@ -314,13 +326,13 @@ export const instantiateTemplate = async (
   for (const effective of effectiveSteps) {
     const { step, override, assigneeAgent } = effective;
     if (override && step.assigneeType !== AssigneeType.AGENT) {
-      throw overrideRefusal(
+      throw templateRefusal(
         "step_override_step_not_agent",
         `Step override ${step.stepIndex} targets ${step.name}, whose assigneeType is ${step.assigneeType}; only AGENT steps may be overridden`,
       );
     }
     if (override && (!assigneeAgent || assigneeAgent.projectId !== projectId)) {
-      throw overrideRefusal(
+      throw templateRefusal(
         "step_override_agent_not_found",
         `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
       );
@@ -335,26 +347,29 @@ export const instantiateTemplate = async (
       taskTemplateName: template.name,
     });
     if (bindingRefusal) {
-      if (override) throw overrideRefusal("step_override_integrator_binding", `Template step ${step.name}: ${bindingRefusal}`);
-      throw new Error(`Template step ${step.name}: ${bindingRefusal}`);
+      if (override) throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${bindingRefusal}`);
+      throw templateRefusal("template_integrator_binding_invalid", `Template step ${step.name}: ${bindingRefusal}`);
     }
     if (step.assigneeType === AssigneeType.AGENT && !assigneeAgent) {
       if (override) {
-        throw overrideRefusal(
+        throw templateRefusal(
           "step_override_agent_not_found",
           `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
         );
       }
-      throw new Error(`Template step ${step.name} has no agent`);
+      throw templateRefusal("template_step_agent_missing", `Template step ${step.name} has no agent`);
     }
     if (assigneeAgent?.archivedAt) {
       if (override) {
-        throw overrideRefusal(
+        throw templateRefusal(
           "step_override_agent_archived",
           `Override agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} is archived`,
         );
       }
-      throw new Error(`Template step ${step.name} agent ${assigneeAgent.name} is archived`);
+      throw templateRefusal(
+        "template_step_agent_archived",
+        `Template step ${step.name} agent ${assigneeAgent.name} is archived`,
+      );
     }
     if (override && !compoundImplementationAssigneeValid(
       projectId,
@@ -362,7 +377,7 @@ export const instantiateTemplate = async (
       assigneeAgent,
       { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
     )) {
-      throw overrideRefusal(
+      throw templateRefusal(
         "step_override_compound_implementation",
         `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`,
       );
@@ -373,12 +388,15 @@ export const instantiateTemplate = async (
       });
       if (!access) {
         if (override) {
-          throw overrideRefusal(
+          throw templateRefusal(
             "step_override_missing_repo_grant",
             `Override agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} has no grant for Repo ${repo.name}`,
           );
         }
-        throw new Error(`Agent ${assigneeAgent.name} has no grant for Repo ${repo.name}`);
+        throw templateRefusal(
+          "template_agent_repo_grant_missing",
+          `Agent ${assigneeAgent.name} has no grant for Repo ${repo.name}`,
+        );
       }
     }
   }
@@ -397,13 +415,13 @@ export const instantiateTemplate = async (
             select: { id: true, chainId: true },
           });
           if (!predecessorIdentity) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_not_found",
               `Predecessor task ${input.afterTaskId} was not found in this project`,
             );
           }
           if (!predecessorIdentity.chainId) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_not_chained",
               `Predecessor task ${input.afterTaskId} is not a chained task`,
             );
@@ -423,7 +441,7 @@ export const instantiateTemplate = async (
           });
           const lockedPredecessor = chainRows.find((row) => row.id === input.afterTaskId);
           if (!lockedPredecessor || !lockedPredecessor.chainId) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_not_found",
               `Predecessor task ${input.afterTaskId} was not found in this project`,
             );
@@ -436,19 +454,19 @@ export const instantiateTemplate = async (
             select: { id: true },
           });
           if (occupied) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_already_bound",
               `Predecessor task ${input.afterTaskId} is already bound to another chain`,
             );
           }
           if (lockedPredecessor.archivedAt) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_archived",
               `Predecessor task ${lockedPredecessor.name} (${lockedPredecessor.id}) is archived`,
             );
           }
           if (lockedPredecessor.status === TaskStatus.DONE) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_already_done",
               `Predecessor task ${lockedPredecessor.name} (${lockedPredecessor.id}) is already DONE`,
             );
@@ -462,7 +480,7 @@ export const instantiateTemplate = async (
             ? []
             : chainRows.filter((row) => executionLayer(row) === terminalLayer);
           if (predecessorLayer === null || terminalRows.length !== 1 || terminalRows[0]!.id !== lockedPredecessor.id) {
-            throw bindingRefusal(
+            throw templateRefusal(
               "after_task_not_terminal",
               `Predecessor task ${lockedPredecessor.name} (${lockedPredecessor.id}) is not the sole terminal task of its chain`,
             );
@@ -495,26 +513,29 @@ export const instantiateTemplate = async (
           const lockedAgent = lockedAgents.get(assigneeAgentId);
           if (!lockedAgent || lockedAgent.projectId !== projectId) {
             if (override) {
-              throw overrideRefusal(
+              throw templateRefusal(
                 "step_override_agent_not_found",
                 `Override agent ${assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
               );
             }
-            throw new Error(`Template step ${step.name} agent was not found`);
+            throw templateRefusal("template_step_agent_missing", `Template step ${step.name} agent was not found`);
           }
           if (lockedAgent.archivedAt) {
             if (override) {
-              throw overrideRefusal(
+              throw templateRefusal(
                 "step_override_agent_archived",
                 `Override agent ${lockedAgent.name} (${assigneeAgentId}) for step ${step.stepIndex} is archived`,
               );
             }
-            throw new Error(`Template step ${step.name} agent ${lockedAgent.name} is archived`);
+            throw templateRefusal(
+              "template_step_agent_archived",
+              `Template step ${step.name} agent ${lockedAgent.name} is archived`,
+            );
           }
           if (implementationRoute !== null
             && step.stepIndex === routedImplementationStepIndex
             && lockedAgent.name !== implementationRoute) {
-            throw overrideRefusal(
+            throw templateRefusal(
               "implementation_route_agent_renamed",
               `Implementation route agent ${implementationRoute} changed identity before the chain was created`,
             );
@@ -526,9 +547,12 @@ export const instantiateTemplate = async (
           });
           if (lockedBindingRefusal) {
             if (override) {
-              throw overrideRefusal("step_override_integrator_binding", `Template step ${step.name}: ${lockedBindingRefusal}`);
+              throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${lockedBindingRefusal}`);
             }
-            throw new Error(`Template step ${step.name}: ${lockedBindingRefusal}`);
+            throw templateRefusal(
+              "template_integrator_binding_invalid",
+              `Template step ${step.name}: ${lockedBindingRefusal}`,
+            );
           }
           if (!compoundImplementationAssigneeValid(
             projectId,
@@ -537,8 +561,8 @@ export const instantiateTemplate = async (
             { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
           )) {
             const message = `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`;
-            if (override) throw overrideRefusal("step_override_compound_implementation", message);
-            throw new Error(message);
+            if (override) throw templateRefusal("step_override_compound_implementation", message);
+            throw templateRefusal("template_compound_implementation_assignee_invalid", message);
           }
         }
         const grantedAgentIds = [...new Set(effectiveSteps.flatMap((effective) => (
@@ -550,12 +574,15 @@ export const instantiateTemplate = async (
             const effective = effectiveSteps.find((candidate) => candidate.assigneeAgentId === agentId);
             const agentName = effective?.assigneeAgent?.name ?? agentId;
             if (effective?.override) {
-              throw overrideRefusal(
+              throw templateRefusal(
                 "step_override_missing_repo_grant",
                 `Override agent ${agentName} (${agentId}) for step ${effective.step.stepIndex} has no grant for Repo ${repo.name}`,
               );
             }
-            throw new Error(`Agent ${agentName} has no grant for Repo ${repo.name}`);
+            throw templateRefusal(
+              "template_agent_repo_grant_missing",
+              `Agent ${agentName} has no grant for Repo ${repo.name}`,
+            );
           }
         }
         const tasks = [];
@@ -590,7 +617,9 @@ export const instantiateTemplate = async (
           } }));
         }
         const first = tasks[0]!;
-        if (first.assigneeType !== AssigneeType.AGENT) throw new Error("The first template step must be agent-executable");
+        if (first.assigneeType !== AssigneeType.AGENT) {
+          throw templateRefusal("template_first_step_not_agent", "The first template step must be agent-executable");
+        }
         if (input.autoStart ?? false) {
           await enqueueTaskRun(tx, first.id);
         }
@@ -650,7 +679,7 @@ export const instantiateTemplate = async (
     });
   } catch (error: unknown) {
     if (dispatchBindingUniqueConflict(error)) {
-      throw bindingRefusal(
+      throw templateRefusal(
         "after_task_already_bound",
         `Predecessor task ${input.afterTaskId} is already bound to another chain`,
       );

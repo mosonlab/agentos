@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   AUTHORIZED_MERGE_METHOD,
+  MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
   RunStatus,
@@ -38,12 +39,10 @@ import {
   type ReadinessInput,
 } from "./readiness-decision.js";
 import {
-  commitWithLeaseOutcome,
   LeaseReleaseDeferralRecordError,
   releaseMergeLease,
   withMergeLease,
   type HeldLeaseOutcome,
-  type LeaseOutcome,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
@@ -54,6 +53,13 @@ import {
   type ReadinessClaimHandle,
   type ReadinessLeaseOwnership,
 } from "./readiness-claim.js";
+import {
+  createReadinessSettlementRunner,
+  readinessSettlement,
+  type ReadinessSettlement,
+  type ReadinessSettlementApplication,
+  type ReadinessSettlementRunner,
+} from "./readiness-settlement.js";
 
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
@@ -73,10 +79,50 @@ const READINESS_REGRESSION_INCLUDE = {
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
 
-const LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE =
-  "readiness evaluation failed: Recovery activation authorization is not fresh for the recovered exact head and current base";
-const CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE =
-  "readiness evaluation failed: Recovery authorization could not adopt the verified regression head";
+const RECOVERY_REFUSAL_MESSAGES: Record<MergeRecoveryRefusalCode, string> = {
+  [MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE]:
+    "Recovery activation authorization is not fresh for the recovered exact head and current base",
+  [MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT]:
+    "Recovery authorization could not adopt the verified regression head",
+};
+
+class MergeRecoveryRefusalError extends Error {
+  readonly refusalCode: MergeRecoveryRefusalCode;
+
+  constructor(refusalCode: MergeRecoveryRefusalCode, cause?: unknown) {
+    super(
+      cause instanceof Error ? cause.message : RECOVERY_REFUSAL_MESSAGES[refusalCode],
+      cause === undefined ? undefined : { cause },
+    );
+    this.name = "MergeRecoveryRefusalError";
+    this.refusalCode = refusalCode;
+  }
+}
+
+const HEAD_ADOPTION_REFUSAL_CODES = [
+  MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
+  MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT,
+] as const;
+
+const recoveryHeadAdoptionSnapshotChanged = async (
+  tx: Prisma.TransactionClient,
+  recovery: RecoveryContext,
+): Promise<boolean> => {
+  const current = await tx.mergeRecoveryAttempt.findUnique({
+    where: { id: recovery.aggregateId },
+    select: {
+      status: true,
+      recoveryRunId: true,
+      currentBaseSha: true,
+      authorizedHeadSha: true,
+    },
+  });
+  return !current
+    || current.status !== MergeRecoveryStatus.AWAITING_AUTHORIZATION
+    || current.recoveryRunId !== recovery.recoveryRunId
+    || current.currentBaseSha !== recovery.currentBaseSha
+    || current.authorizedHeadSha !== recovery.authorizedHeadSha;
+};
 
 export const reopenRecoveryHeadAdoptionFailures = async (
   db: PrismaClient,
@@ -85,7 +131,7 @@ export const reopenRecoveryHeadAdoptionFailures = async (
   const candidates = await db.mergeRecoveryAttempt.findMany({
     where: {
       status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
-      failureReason: { in: [LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE, CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE] },
+      refusalCode: { in: [...HEAD_ADOPTION_REFUSAL_CODES] },
     },
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     take: limit,
@@ -106,16 +152,17 @@ export const reopenRecoveryHeadAdoptionFailures = async (
       ]);
       const verdict = parseRegressionVerdict(output?.body ?? "", output?.kind ?? "");
       const context = recoveryContext(attempt);
-      const baseBindingMatchesFailure = attempt?.failureReason === LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
-        ? verdict.status === "ok" && verdict.verdict.baseHeadSha === attempt.currentBaseSha
-        : attempt?.failureReason === CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE
-          ? verdict.status === "ok" && verdict.verdict.baseHeadSha !== attempt.currentBaseSha
-          : false;
+      const baseBindingMatchesRefusal = verdict.status === "ok" && (
+        (attempt?.refusalCode === MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE
+          && verdict.verdict.baseHeadSha === attempt.currentBaseSha)
+        || (attempt?.refusalCode === MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT
+          && verdict.verdict.baseHeadSha !== attempt.currentBaseSha)
+      );
       if (!attempt
         || !context
         || attempt.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
-        || (attempt.failureReason !== LEGACY_RECOVERY_HEAD_ADOPTION_FAILURE
-          && attempt.failureReason !== CURRENT_RECOVERY_HEAD_ADOPTION_FAILURE)
+        || !HEAD_ADOPTION_REFUSAL_CODES.some((code) => code === attempt.refusalCode)
+        || !attempt.failureReason
         || attempt.readinessTaskId !== candidate.readinessTaskId
         || attempt.regressionTaskId !== candidate.regressionTaskId
         || attempt.recoveryRunId !== candidate.recoveryRunId
@@ -129,14 +176,28 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         || output?.runId !== run.id
         || output?.commitSha !== verdict.verdict.headSha
         || run.headSha !== verdict.verdict.headSha
-        || !baseBindingMatchesFailure
+        || !baseBindingMatchesRefusal
         || stop?.stopId !== attempt.sourceStopId
         || stop.sourceRunId !== context.sourceRunId) return false;
 
-      return reopenAfterHeadAdoption(tx, {
+      const reopened = await reopenAfterHeadAdoption(tx, {
         recovery: context,
         expectedFailureReason: attempt.failureReason,
       });
+      if (!reopened) return false;
+      const cleared = await tx.mergeRecoveryAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          status: MergeRecoveryStatus.REPAIRING,
+          refusalCode: attempt.refusalCode,
+          failureReason: null,
+        },
+        data: { refusalCode: null },
+      });
+      if (cleared.count !== 1) {
+        throw new Error(`Recovery refusal code was not cleared after reopening ${attempt.id}`);
+      }
+      return true;
     });
     if (applied) reopened += 1;
   }
@@ -183,71 +244,47 @@ const recoveryContextFor = async (
   return row && context ? { context, status: row.status } : null;
 };
 
-const stopReadiness = async (
-  db: PrismaClient,
+const stopReadinessSettlement = (
   input: {
     readinessTaskId: string;
     regressionTaskId: string;
     reason: string;
     recovery: RecoveryContext | null;
+    refusalCode: MergeRecoveryRefusalCode | null;
+    now: Date;
   },
-  claim: ReadinessClaimHandle,
-  releaseChainLease: ReleaseMergeLease,
-): Promise<{
-  applied: boolean;
-  ownership: ReadinessLeaseOwnership;
-}> => commitWithLeaseOutcome(db, (tx) => settleReadinessStop(tx, input, claim), {
-  release: releaseChainLease,
-}).then((settlement) => {
-  if (!settlement) throw new Error("Readiness stop transaction returned no settlement");
-  return settlement;
-});
-
-const settleReadinessStop = async (
-  tx: Prisma.TransactionClient,
-  input: {
-    readinessTaskId: string;
-    regressionTaskId: string;
-    reason: string;
-    recovery: RecoveryContext | null;
-  },
-  claim: ReadinessClaimHandle,
-): Promise<{
-  value: { applied: boolean; ownership: ReadinessLeaseOwnership };
-  leaseOutcome: LeaseOutcome;
-}> => {
-  const settlement = await claim.settle(tx, {
-    kind: "finish",
-    at: new Date(),
-    apply: async (client) => {
-      const stopped = await stopMergeTail(client, {
-        phase: "readiness",
-        readinessTaskId: input.readinessTaskId,
-        regressionTaskId: input.regressionTaskId,
-        reason: input.reason,
-        recovery: input.recovery,
-        at: new Date(),
+): ReadinessSettlement => readinessSettlement("stop", {
+  taskId: input.regressionTaskId,
+  at: input.now,
+  apply: async (tx) => {
+    const stopped = await stopMergeTail(tx, {
+      phase: "readiness",
+      readinessTaskId: input.readinessTaskId,
+      regressionTaskId: input.regressionTaskId,
+      reason: input.reason,
+      recovery: input.recovery,
+      at: input.now,
+    });
+    if (input.recovery && input.refusalCode) {
+      const coded = await tx.mergeRecoveryAttempt.updateMany({
+        where: {
+          id: input.recovery.aggregateId,
+          status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+          failureReason: input.reason,
+        },
+        data: { refusalCode: input.refusalCode },
       });
-      return { value: stopped, ownership: "released" as const };
-    },
-  });
-  if (!settlement.settled) {
-    return {
-      value: { applied: false, ownership: settlement.ownership },
-      leaseOutcome: { kind: "continue" },
-    };
-  }
-  if (settlement.claim !== "released") throw new Error("Readiness stop retained a finished claim");
-  return {
-    value: { applied: true, ownership: settlement.ownership },
-    leaseOutcome: settlement.value.leaseOutcome,
-  };
-};
+      if (coded.count !== 1) {
+        throw new Error(`Recovery refusal code was not recorded for ${input.recovery.aggregateId}`);
+      }
+    }
+    return { ownership: "released", leaseOutcome: stopped.leaseOutcome };
+  },
+});
 
 export type ReadinessTickResult = { claimed: number; authorized: number; requeued: number; stopped: number };
 
-const requeueRegression = async (
-  db: PrismaClient,
+const requeueRegressionSettlement = (
   input: {
     readinessTaskId: string;
     regressionTaskId: string;
@@ -257,83 +294,50 @@ const requeueRegression = async (
     now: Date;
     recovery: RecoveryContext | null;
   },
-  claim: ReadinessClaimHandle,
-  releaseChainLease: ReleaseMergeLease,
-): Promise<{ applied: boolean; ownership: ReadinessLeaseOwnership }> => commitWithLeaseOutcome(
-  db,
-  (tx) => settleRegressionRequeue(tx, input, claim),
-  { release: releaseChainLease },
-).then((settlement) => {
-  if (!settlement) throw new Error("Regression requeue transaction returned no settlement");
-  return settlement;
-});
-
-const settleRegressionRequeue = async (
-  tx: Prisma.TransactionClient,
-  input: {
-    readinessTaskId: string;
-    regressionTaskId: string;
-    staleBaseSha: string;
-    currentBaseSha: string;
-    reason: string;
-    now: Date;
-    recovery: RecoveryContext | null;
-  },
-  claim: ReadinessClaimHandle,
-): Promise<{
-  value: { applied: boolean; ownership: ReadinessLeaseOwnership };
-  leaseOutcome: LeaseOutcome;
-}> => {
-  const settlement = await claim.settle(tx, {
-    kind: "finish",
-    at: input.now,
-    apply: async (client) => {
-      // The prior Regression run succeeded; the control plane invalidated its
-      // exact-base evidence after a remote read. This retry is therefore external
-      // compensation, not another attempt charged to the agent. Without the
-      // grant, a requeue at the configured ceiling creates run N+1 with ceiling N
-      // and the runner rejects it before launch -- exactly the stuck state the
-      // readiness transition was supposed to recover.
-      if (input.recovery) {
-        await enterRepair(client, {
-          aggregateId: input.recovery.aggregateId,
+): ReadinessSettlement => readinessSettlement("requeue", {
+  taskId: input.regressionTaskId,
+  at: input.now,
+  apply: async (tx) => {
+    // The prior Regression run succeeded; the control plane invalidated its
+    // exact-base evidence after a remote read. This retry is therefore external
+    // compensation, not another attempt charged to the agent. Without the
+    // grant, a requeue at the configured ceiling creates run N+1 with ceiling N
+    // and the runner rejects it before launch -- exactly the stuck state the
+    // readiness transition was supposed to recover.
+    if (input.recovery) {
+      await enterRepair(tx, {
+        aggregateId: input.recovery.aggregateId,
+        currentBaseSha: input.currentBaseSha,
+        now: input.now,
+        readinessRequeue: { staleBaseSha: input.staleBaseSha, reason: input.reason },
+      });
+    } else {
+      await tx.task.update({
+        where: { id: input.readinessTaskId },
+        data: { status: TaskStatus.TODO, failureReason: null },
+      });
+      await tx.task.update({
+        where: { id: input.regressionTaskId },
+        data: { status: TaskStatus.TODO, failureReason: null },
+      });
+      await enqueueTaskRun(tx, input.regressionTaskId, input.now, { budgetGrant: 1 });
+      await writeMarker(tx, input.regressionTaskId, "readiness", {
+        actorType: "control-plane",
+        body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
+        metadata: {
+          state: "requeued-regression",
+          reason: input.reason,
+          staleBaseSha: input.staleBaseSha,
           currentBaseSha: input.currentBaseSha,
-          now: input.now,
-          readinessRequeue: { staleBaseSha: input.staleBaseSha, reason: input.reason },
-        });
-      } else {
-        await client.task.update({
-          where: { id: input.readinessTaskId },
-          data: { status: TaskStatus.TODO, failureReason: null },
-        });
-        await client.task.update({
-          where: { id: input.regressionTaskId },
-          data: { status: TaskStatus.TODO, failureReason: null },
-        });
-        await enqueueTaskRun(client, input.regressionTaskId, input.now, { budgetGrant: 1 });
-        await writeMarker(client, input.regressionTaskId, "readiness", {
-          actorType: "control-plane",
-          body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
-          metadata: {
-            state: "requeued-regression",
-            reason: input.reason,
-            staleBaseSha: input.staleBaseSha,
-            currentBaseSha: input.currentBaseSha,
-          },
-        });
-      }
-      return { value: undefined, ownership: "released" as const };
-    },
-  });
-  if (!settlement.settled) {
-    return { value: { applied: false, ownership: settlement.ownership }, leaseOutcome: { kind: "continue" } };
-  }
-  if (settlement.claim !== "released") throw new Error("Regression requeue retained a finished claim");
-  return {
-    value: { applied: true, ownership: settlement.ownership },
-    leaseOutcome: { kind: "stop", taskId: input.regressionTaskId },
-  };
-};
+        },
+      });
+    }
+    return {
+      ownership: "released",
+      leaseOutcome: { kind: "stop", taskId: input.regressionTaskId },
+    };
+  },
+});
 
 type ClaimedReadiness = {
   claimed: true;
@@ -431,25 +435,23 @@ const readReadiness = async (
   }
 };
 
-const deferReadiness = async (
-  db: PrismaClient,
+const deferReadinessSettlement = (
   readinessTaskId: string,
-  claim: ReadinessClaimHandle,
-): Promise<{ applied: boolean; ownership: ReadinessLeaseOwnership }> => db.$transaction(async (tx) => {
-  const settlement = await claim.settle(tx, {
-    kind: "finish",
-    at: new Date(),
-    apply: async (client) => {
-      await client.task.update({
-        where: { id: readinessTaskId },
-        data: { status: TaskStatus.TODO, failureReason: null },
-      });
-      return { value: undefined, ownership: "released" as const };
-    },
-  });
-  if (!settlement.settled) return { applied: false, ownership: settlement.ownership };
-  if (settlement.claim !== "released") throw new Error("Readiness defer retained a finished claim");
-  return { applied: true, ownership: settlement.ownership };
+  regressionTaskId: string,
+  now: Date,
+): ReadinessSettlement => readinessSettlement("defer", {
+  taskId: regressionTaskId,
+  at: now,
+  apply: async (tx) => {
+    await tx.task.update({
+      where: { id: readinessTaskId },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    return {
+      ownership: "released",
+      leaseOutcome: { kind: "stop", taskId: regressionTaskId },
+    };
+  },
 });
 
 const recordLeaseDeferral = async (
@@ -484,7 +486,198 @@ const heldLeaseOutcome = (ownership: ReadinessLeaseOwnership, taskId: string): H
   ? { kind: "stop", taskId }
   : { kind: "continue" };
 
+const authorizeReadinessSettlement = (
+  read: ClaimedReadiness,
+  decision: Extract<ReadinessDecision, { kind: "authorize" }>,
+): ReadinessSettlement => {
+  const { readiness, regression, recovery } = read;
+  return readinessSettlement("authorize", {
+    taskId: regression.id,
+    at: read.input.now,
+    apply: async (tx) => {
+      await tx.task.update({
+        where: { id: readiness.id },
+        data: { status: TaskStatus.DONE, failureReason: null },
+      });
+      const binding = `mechanical:${readiness.id}:${randomUUID()}`;
+      const payload = {
+        ...decision.evidence,
+        mergeMethod: AUTHORIZED_MERGE_METHOD,
+        issuedAt: decision.issuedAt,
+        decision: {
+          channel: "mechanical" as const,
+          inboxDecisionId: binding,
+          inboxMessageId: binding,
+        },
+      };
+      if (recovery) {
+        // Recovery regression merges the current base before it proves the
+        // candidate, so its gated head may legitimately replace the head that
+        // first stopped on base drift. Adopt only the head re-read under the
+        // merge Lease and bind the CAS to the pre-Lease recovery snapshot.
+        try {
+          await adoptRecoveryHead(tx, {
+            recovery,
+            currentBaseSha: decision.evidence.baseSha,
+            authorizedHeadSha: decision.evidence.headSha,
+          });
+        } catch (error: unknown) {
+          if (!await recoveryHeadAdoptionSnapshotChanged(tx, recovery)) throw error;
+          throw new MergeRecoveryRefusalError(MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT, error);
+        }
+      }
+      const activity = await tx.taskActivity.create({ data: {
+        taskId: readiness.id,
+        actorType: "control-plane",
+        body: `Mechanical merge authorized for PR #${decision.prNumber} at ${decision.evidence.headSha}`,
+        metadata: {
+          ...authorizationMetadata(payload),
+          recoverySourceStopId: recovery?.sourceStopId ?? null,
+        } as Prisma.InputJsonObject,
+      } });
+      await tx.taskStepOutput.upsert({
+        where: { taskId: readiness.id },
+        create: {
+          taskId: readiness.id,
+          kind: "merge-authorization",
+          body: JSON.stringify({
+            authorizationActivityId: activity.id,
+            headSha: decision.evidence.headSha,
+          }),
+          commitSha: decision.evidence.headSha,
+        },
+        update: {
+          kind: "merge-authorization",
+          body: JSON.stringify({
+            authorizationActivityId: activity.id,
+            headSha: decision.evidence.headSha,
+          }),
+          commitSha: decision.evidence.headSha,
+        },
+      });
+      await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
+      if (decision.auditTriggers.length > 0) {
+        await openDefenseAuditNotice(tx, {
+          readinessTaskId: readiness.id,
+          headSha: decision.headSha,
+          baseSha: decision.baseSha,
+          triggers: decision.auditTriggers,
+        });
+      }
+      await writeMarker(tx, readiness.id, "readiness", {
+        actorType: "control-plane",
+        body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
+        metadata: {
+          state: "authorized",
+          headSha: decision.evidence.headSha,
+          authorizationActivityId: activity.id,
+          recoverySourceStopId: recovery?.sourceStopId ?? null,
+        },
+      });
+      let activated: { nextTaskId: string | null; gated: boolean };
+      if (recovery) {
+        const recoveryActivation = await activateRecoveryIntegratorSuccessor(tx, {
+          readinessTaskId: readiness.id,
+          integratorTaskId: recovery.integratorTaskId,
+          sourceStopId: recovery.sourceStopId,
+          recoveryRunId: recovery.recoveryRunId,
+          authorizationActivityId: activity.id,
+        }, read.input.now);
+        if (recoveryActivation.outcome === "refused") {
+          throw new MergeRecoveryRefusalError(recoveryActivation.refusalCode);
+        }
+        activated = recoveryActivation;
+      } else {
+        activated = await activateChainSuccessor(tx, readiness, {}, read.input.now);
+      }
+      const handoff = activated.nextTaskId
+        ? await tx.run.findFirst({
+          where: { taskId: activated.nextTaskId, status: RunStatus.QUEUED },
+          select: { id: true },
+          orderBy: { runNumber: "desc" },
+        })
+        : null;
+      return handoff
+        ? {
+          ownership: { retainFor: handoff.id },
+          leaseOutcome: {
+            kind: "hand-off",
+            taskId: regression.id,
+            handoffRunId: handoff.id,
+            at: read.input.now,
+          },
+        }
+        : { ownership: "released", leaseOutcome: { kind: "continue" } };
+    },
+  });
+};
+
+type ReadinessDecisionHandlers<T> = {
+  [Kind in ReadinessDecision["kind"]]: (
+    decision: Extract<ReadinessDecision, { kind: Kind }>,
+  ) => T;
+};
+
+const dispatchReadinessDecision = <T>(
+  decision: ReadinessDecision,
+  handlers: ReadinessDecisionHandlers<T>,
+): T => {
+  const handler = handlers[decision.kind] as unknown as (
+    selected: ReadinessDecision,
+  ) => T;
+  return handler(decision);
+};
+
 const applyReadinessDecision = async (
+  read: ClaimedReadiness,
+  decision: ReadinessDecision,
+  result: ReadinessTickResult,
+  runner: ReadinessSettlementRunner,
+): Promise<ReadinessSettlementApplication> => {
+  const { readiness, regression, recovery, claim } = read;
+  return dispatchReadinessDecision(decision, {
+    skip: () => Promise.resolve(runner.skip(regression.id)),
+    defer: () => runner.apply(
+      deferReadinessSettlement(readiness.id, regression.id, new Date()),
+      claim,
+    ),
+    stop: async (stopping) => {
+      const application = await runner.apply(stopReadinessSettlement({
+        readinessTaskId: readiness.id,
+        regressionTaskId: regression.id,
+        reason: stopping.evidence,
+        recovery,
+        refusalCode: null,
+        now: new Date(),
+      }), claim);
+      if (application.kind === "settled" && application.outcome.value.applied) {
+        result.stopped += 1;
+      }
+      return application;
+    },
+    "requeue-regression": async (requeue) => {
+      const application = await runner.apply(requeueRegressionSettlement({
+        readinessTaskId: readiness.id,
+        regressionTaskId: regression.id,
+        ...requeue,
+        now: read.input.now,
+        recovery,
+      }), claim);
+      if (application.kind === "settled" && application.outcome.value.applied) {
+        result.requeued += 1;
+      }
+      return application;
+    },
+    authorize: async (authorization) => {
+      return runner.apply(
+        authorizeReadinessSettlement(read, authorization),
+        claim,
+      );
+    },
+  });
+};
+
+const runReadinessDecision = async (
   db: PrismaClient,
   read: ClaimedReadiness,
   decision: ReadinessDecision,
@@ -493,53 +686,22 @@ const applyReadinessDecision = async (
   runWithMergeLease: WithMergeLease,
   reader: PullRequestReader | null,
 ): Promise<void> => {
-  const { readiness, regression, recovery, claim } = read;
+  const { readiness, regression, claim } = read;
+  const preAcquireRunner = createReadinessSettlementRunner(db, {
+    kind: "pre-acquire",
+    release: releaseChainLease,
+  });
+  const application = await applyReadinessDecision(
+    read,
+    decision,
+    result,
+    preAcquireRunner,
+  );
+  if (application.kind === "settled") return;
+
   const target: MergeLeaseTarget | null = readiness.chainId
     ? { projectId: readiness.projectId, chainId: readiness.chainId }
     : null;
-  const stop = async (reason: string): Promise<boolean> => {
-    const stopped = await stopReadiness(db, {
-      readinessTaskId: readiness.id,
-      regressionTaskId: regression.id,
-      reason,
-      recovery,
-    }, claim, releaseChainLease);
-    if (!stopped.applied) return false;
-    result.stopped += 1;
-    return true;
-  };
-  const requeue = async (input: {
-    staleBaseSha: string;
-    currentBaseSha: string;
-    reason: string;
-  }): Promise<boolean> => {
-    const requeued = await requeueRegression(db, {
-      readinessTaskId: readiness.id,
-      regressionTaskId: regression.id,
-      ...input,
-      now: read.input.now,
-      recovery,
-    }, claim, releaseChainLease);
-    if (!requeued.applied) return false;
-    result.requeued += 1;
-    return true;
-  };
-
-  switch (decision.kind) {
-    case "skip":
-      return;
-    case "defer":
-      await deferReadiness(db, readiness.id, claim);
-      return;
-    case "stop":
-      await stop(decision.evidence);
-      return;
-    case "requeue-regression":
-      await requeue(decision);
-      return;
-    case "authorize":
-      break;
-  }
 
   // From the base this authorization pins to the merge that consumes it,
   // `main` must not move. The Handle records the successor Run before its
@@ -553,186 +715,26 @@ const applyReadinessDecision = async (
     // Regression evidence is durable before this short Lease window. Repeat
     // the remote decision after acquisition so a base move between the first
     // read and the Lease cannot authorize stale evidence.
+    const heldRunner = createReadinessSettlementRunner(db, {
+      kind: "held",
+      release: releaseChainLease,
+    });
     const leasedDecision = await evaluateReadiness(reader, read.input);
-    switch (leasedDecision.kind) {
-      case "skip":
-        return {
-          leaseOutcome: { kind: "stop" as const, taskId: regression.id },
-          value: "lease-recheck-skipped" as const,
-        };
-      case "defer": {
-        const deferred = await deferReadiness(db, readiness.id, claim);
-        return {
-          leaseOutcome: heldLeaseOutcome(deferred.ownership, regression.id),
-          value: "lease-recheck-deferred" as const,
-        };
-      }
-      case "stop": {
-        const stoppedResult = await db.$transaction((tx) => settleReadinessStop(tx, {
-          readinessTaskId: readiness.id,
-          regressionTaskId: regression.id,
-          reason: leasedDecision.evidence,
-          recovery,
-        }, claim));
-        const stopped = stoppedResult.value;
-        if (stopped.applied) result.stopped += 1;
-        return {
-          leaseOutcome: stopped.applied
-            ? { kind: "stop" as const, taskId: regression.id }
-            : heldLeaseOutcome(stopped.ownership, regression.id),
-          value: "lease-recheck-stopped" as const,
-        };
-      }
-      case "requeue-regression": {
-        const requeuedResult = await db.$transaction((tx) => settleRegressionRequeue(tx, {
-          readinessTaskId: readiness.id,
-          regressionTaskId: regression.id,
-          ...leasedDecision,
-          now: read.input.now,
-          recovery,
-        }, claim));
-        const requeued = requeuedResult.value;
-        if (requeued.applied) result.requeued += 1;
-        return {
-          leaseOutcome: requeued.applied
-            ? { kind: "stop" as const, taskId: regression.id }
-            : heldLeaseOutcome(requeued.ownership, regression.id),
-          value: "lease-recheck-requeued" as const,
-        };
-      }
-      case "authorize":
-        break;
+    const leasedApplication = await applyReadinessDecision(
+      read,
+      leasedDecision,
+      result,
+      heldRunner,
+    );
+    if (leasedApplication.kind === "acquire-lease") {
+      throw new Error("Held readiness settlement requested another Merge Lease");
     }
-
-    const authorization = await commitWithLeaseOutcome(db, async (tx) => {
-      const settlement = await claim.settle(tx, {
-        kind: "finish",
-        at: read.input.now,
-        apply: async (client) => {
-        await client.task.update({
-          where: { id: readiness.id },
-          data: { status: TaskStatus.DONE, failureReason: null },
-        });
-        const binding = `mechanical:${readiness.id}:${randomUUID()}`;
-        const payload = {
-          ...leasedDecision.evidence,
-          mergeMethod: AUTHORIZED_MERGE_METHOD,
-          issuedAt: leasedDecision.issuedAt,
-          decision: {
-            channel: "mechanical" as const,
-            inboxDecisionId: binding,
-            inboxMessageId: binding,
-          },
-        };
-        if (recovery) {
-          // Recovery regression merges the current base before it proves the
-          // candidate, so its gated head may legitimately replace the head that
-          // first stopped on base drift. Adopt only the head re-read under the
-          // merge Lease and bind the CAS to the pre-Lease recovery snapshot.
-          await adoptRecoveryHead(client, {
-            recovery,
-            currentBaseSha: leasedDecision.evidence.baseSha,
-            authorizedHeadSha: leasedDecision.evidence.headSha,
-          });
-        }
-        const activity = await client.taskActivity.create({ data: {
-          taskId: readiness.id,
-          actorType: "control-plane",
-          body: `Mechanical merge authorized for PR #${leasedDecision.prNumber} at ${leasedDecision.evidence.headSha}`,
-          metadata: {
-            ...authorizationMetadata(payload),
-            recoverySourceStopId: recovery?.sourceStopId ?? null,
-          } as Prisma.InputJsonObject,
-        } });
-        await client.taskStepOutput.upsert({
-          where: { taskId: readiness.id },
-          create: {
-            taskId: readiness.id,
-            kind: "merge-authorization",
-            body: JSON.stringify({
-              authorizationActivityId: activity.id,
-              headSha: leasedDecision.evidence.headSha,
-            }),
-            commitSha: leasedDecision.evidence.headSha,
-          },
-          update: {
-            kind: "merge-authorization",
-            body: JSON.stringify({
-              authorizationActivityId: activity.id,
-              headSha: leasedDecision.evidence.headSha,
-            }),
-            commitSha: leasedDecision.evidence.headSha,
-          },
-        });
-        await client.task.update({ where: { id: regression.id }, data: { failureReason: null } });
-        if (leasedDecision.auditTriggers.length > 0) {
-          await openDefenseAuditNotice(client, {
-            readinessTaskId: readiness.id,
-            headSha: leasedDecision.headSha,
-            baseSha: leasedDecision.baseSha,
-            triggers: leasedDecision.auditTriggers,
-          });
-        }
-        await writeMarker(client, readiness.id, "readiness", {
-          actorType: "control-plane",
-          body: `Merge readiness authorized exact head ${leasedDecision.evidence.headSha}; merge execution queued`,
-          metadata: {
-            state: "authorized",
-            headSha: leasedDecision.evidence.headSha,
-            authorizationActivityId: activity.id,
-            recoverySourceStopId: recovery?.sourceStopId ?? null,
-          },
-        });
-        const activated = recovery
-          ? await activateRecoveryIntegratorSuccessor(client, {
-            readinessTaskId: readiness.id,
-            integratorTaskId: recovery.integratorTaskId,
-            sourceStopId: recovery.sourceStopId,
-            recoveryRunId: recovery.recoveryRunId,
-            authorizationActivityId: activity.id,
-          }, read.input.now)
-          : await activateChainSuccessor(client, readiness, {}, read.input.now);
-        const handoff = activated.nextTaskId
-          ? await client.run.findFirst({
-            where: { taskId: activated.nextTaskId, status: RunStatus.QUEUED },
-            select: { id: true },
-            orderBy: { runNumber: "desc" },
-          })
-          : null;
-        return {
-          value: "authorized" as const,
-          ownership: handoff ? { retainFor: handoff.id } : "released" as const,
-        };
-        },
-      });
-      return {
-        value: settlement,
-        leaseOutcome: settlement.settled
-          && settlement.claim === "released"
-          && settlement.ownership !== "released"
-          ? {
-            kind: "hand-off",
-            taskId: regression.id,
-            handoffRunId: settlement.ownership.retainFor,
-            at: read.input.now,
-          }
-          : { kind: "continue" },
-      };
-    }, { release: releaseChainLease });
-    if (!authorization) throw new Error("Readiness authorization transaction returned no settlement");
-    if (!authorization.settled) {
-      return {
-        leaseOutcome: heldLeaseOutcome(authorization.ownership, regression.id),
-        value: "claim-lost" as const,
-      };
-    }
-    if (authorization.claim !== "released") throw new Error("Authorization retained a finished claim");
+    const value = leasedDecision.kind === "authorize" && leasedApplication.outcome.value.applied
+      ? "authorized" as const
+      : "settled" as const;
     return {
-      // A retained ownership was recorded atomically with authorization by
-      // commitWithLeaseOutcome. Continue leaves that Lease for its consumer;
-      // a missing successor still releases through this outer owner.
-      leaseOutcome: heldLeaseOutcome(authorization.ownership, regression.id),
-      value: authorization.value,
+      leaseOutcome: leasedApplication.outcome.leaseOutcome,
+      value,
     };
   }, db);
   if (leased.outcome === "contended") return;
@@ -765,11 +767,11 @@ export const readinessTick = async (
     if (!isMergeReadinessStep(readiness.templateStep)) continue;
 
     const read = await readReadiness(db, readiness, now);
-    const decision = await evaluateReadiness(reader, read.input);
     if (!read.claimed) continue;
+    const decision = await evaluateReadiness(reader, read.input);
     result.claimed += 1;
     try {
-      await applyReadinessDecision(
+      await runReadinessDecision(
         db,
         read,
         decision,
@@ -780,21 +782,31 @@ export const readinessTick = async (
       );
     } catch (error: unknown) {
       if (error instanceof LeaseReleaseDeferralRecordError) throw error;
+      const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
       const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
-      const stopped = await stopReadiness(db, {
+      const runner = createReadinessSettlementRunner(db, {
+        kind: "pre-acquire",
+        release: releaseChainLease,
+      });
+      const stopped = await runner.apply(stopReadinessSettlement({
         readinessTaskId: readiness.id,
         regressionTaskId: read.regression.id,
         reason,
         recovery: read.recovery,
-      }, read.claim, releaseChainLease);
-      if (stopped.applied) {
+        refusalCode,
+        now: new Date(),
+      }), read.claim);
+      if (stopped.kind === "acquire-lease") {
+        throw new Error("Readiness stop requested a Merge Lease");
+      }
+      if (stopped.outcome.value.applied) {
         result.stopped += 1;
       }
       // A failed release/hold recording can happen after stopMergeTail has
       // already committed its state transition. A second stop then returns
       // false and must not turn that failure into a successful-looking tick.
       // Surface it to the worker caller so the missing evidence is observable.
-      if (!stopped.applied) throw error;
+      if (!stopped.outcome.value.applied) throw error;
     }
   }
   return result;

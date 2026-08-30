@@ -44,15 +44,13 @@ for arg in "$@"; do
   esac
 done
 
-# The exact interpreter the local machine runs, not a floor. package.json's
-# engines field says ">=20.19.0", which is a compatibility floor and would let
-# this box drift onto a different major than the one a PASS was observed under;
-# a verdict produced on a different Node than the merge will be built with is
-# weaker evidence than it looks. There is no .nvmrc in the repository (checked
-# 2026-08-18), so the pin is written out here: v26.5.0 is what the local machine
-# ran on 2026-08-18. If a .nvmrc is ever added it becomes the source of truth,
-# and updating this default to match it is a step in the runbook.
-GATE_NODE_VERSION="${GATE_NODE_VERSION:-v26.5.0}"
+# The exact interpreter .nvmrc names, not the wider compatibility range in
+# package.json. This script is copied to and run on a worker before that worker
+# has a repository checkout, so the default is repeated here and a repository
+# test requires it to equal `v$(cat .nvmrc)`. An explicit override is for a
+# deliberate comparison run; its verdict is evidence from a different
+# toolchain and must be reported as such.
+GATE_NODE_VERSION="${GATE_NODE_VERSION:-v22.17.0}"
 GATE_HOME="${GATE_HOME:-$HOME/gate}"
 NODE_PREFIX="${NODE_PREFIX:-/opt/node}"
 # The gate starts its own throwaway PostgreSQL; pre-pulling it here means the

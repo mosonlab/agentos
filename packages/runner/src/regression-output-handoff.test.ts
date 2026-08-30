@@ -7,9 +7,10 @@ import test from "node:test";
 
 import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
 
-import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
+import {
+  readRegressionOutputHandoff, type RegressionHandoffClaim,
+} from "./regression-output-handoff.js";
 import type { Workspace } from "./workspace.js";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, {
@@ -44,12 +45,12 @@ const runnerConfig = (root: string): RunnerConfig => ({
   binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
 });
 
-const claim = (runId = "run-1"): ClaimedTask => ({
+const claim = (runId = "run-1"): RegressionHandoffClaim => ({
   task: {
-    templateStep: { name: "Regression verification", outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
+    templateStep: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
   },
   run: { id: runId },
-} as ClaimedTask);
+});
 
 const setup = async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-regression-handoff-"));

@@ -30,5 +30,5 @@ this prose:
 
 The work itself is performed by `@anneal/merge-executor`, a separate package,
 process, and OS principal that holds the merge credential and speaks GitHub's
-REST and GraphQL APIs directly. See
-the merge-integrator runbook the operator maintains outside this repository.
+REST and GraphQL APIs directly. See the public
+[`merge-executor` operator runbook](../../docs/runbooks/merge-executor.md).

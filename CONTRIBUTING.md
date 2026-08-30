@@ -53,16 +53,26 @@ It holds a lock, so run one gate per worktree. A verdict belongs to the exact
 commit it names — not to an earlier one on the same branch, and not to "the
 branch".
 
+This local command is the public path available to every clone and fork. Remote
+gate workers are optional operator-provided infrastructure: the repository
+ships their provisioning code, but no worker, hostname or credential. Use the
+dispatcher only after configuring that capacity explicitly.
+
 Some checks are deliberately outside the gate and belong to the list a developer
 runs: `npm run test:dependency-gate` and `npm run verify:compose-binding`.
 
 ### Delivering to main
 
+This section is for a repository maintainer with write authority to the target
+`origin`. It does not grant an outside contributor authority to advance the
+upstream repository.
+
 A merge requires `MERGE GATE: PASS <oid>` for the exact integrated head being
 merged (`scripts/merge-gate.sh --expect-head <oid>`). When another gate might
-be running, dispatch through `scripts/gate-worker/gate-dispatch.sh <oid>`; read
+be running and remote capacity has been configured explicitly, dispatch through
+`scripts/gate-worker/gate-dispatch.sh <oid>`; otherwise run the local gate. Read
 [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
-a remote worker.
+any remote worker.
 
 For one candidate, acquire `scripts/merge-lease.sh` before running the merge
 gate for the final integrated head and hold it until the merge consumes that

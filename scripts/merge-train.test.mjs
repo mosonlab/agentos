@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { coordinateMergeTrain } from "./merge-train.mjs";
+import "./merge-lease-adapter.test.mjs";
+
+import {
+  acquireMergeTrainLease,
+  coordinateMergeTrain,
+  releaseMergeTrainLease,
+} from "./merge-train.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -78,8 +84,199 @@ const passGate = async (_repoRoot, prefix) => ({
 });
 
 const noLease = (events = []) => ({
-  acquireLease: async () => events.push("lease-acquire"),
-  releaseLease: async () => events.push("lease-release"),
+  acquireLease: async () => {
+    events.push("lease-acquire");
+    return { outcome: "acquired" };
+  },
+  releaseLease: async () => {
+    events.push("lease-release");
+    return { outcome: "not-held" };
+  },
+});
+
+test("merge train lease caller uses the release root and zero-wait acquisition policy", async () => {
+  const calls = [];
+  const environment = { AGENTOS_RELEASE_ROOT: "/srv/agentos/current" };
+  const runner = async (...args) => {
+    calls.push(args);
+    return calls.length === 1
+      ? { code: 75, stderr: "merge-lease: timed out\n" }
+      : { code: 0, stdout: "MERGE LEASE: not-held\n" };
+  };
+
+  assert.equal((await acquireMergeTrainLease("/checkout", "train-42", 2, { environment, runner })).outcome, "contended");
+  assert.equal((await releaseMergeTrainLease("/checkout", "train-42", { environment, runner })).outcome, "not-held");
+  assert.deepEqual(calls[0], [
+    "bash",
+    [
+      "/srv/agentos/current/scripts/merge-lease.sh",
+      "acquire",
+      "--task",
+      "train-42",
+      "--reason",
+      "Publish 2-entry merge train",
+      "--timeout-minutes",
+      "0",
+    ],
+    { cwd: "/checkout", environment, processTimeoutMs: undefined },
+  ]);
+  assert.deepEqual(calls[1], [
+    "bash",
+    ["/srv/agentos/current/scripts/merge-lease.sh", "release", "--task", "train-42"],
+    { cwd: "/checkout", environment, processTimeoutMs: undefined },
+  ]);
+});
+
+test("lease contention is a structured no-publication result", async () => {
+  const fixture = await makeFixture();
+  try {
+    const candidate = await fixture.candidate(290, { "candidate.txt": "candidate\n" });
+    let releaseCalled = false;
+    const result = await coordinateMergeTrain({
+      repoRoot: fixture.repo,
+      task: "contended-train",
+      candidates: [candidate],
+      adapters: {
+        acquireLease: async () => ({ outcome: "contended" }),
+        releaseLease: async () => {
+          releaseCalled = true;
+          return { outcome: "not-held" };
+        },
+        gate: passGate,
+        readPullRequest: fixture.readPullRequest([candidate]),
+        sleep: async () => {},
+      },
+    });
+
+    assert.equal(result.status, "lease-contended");
+    assert.deepEqual(result.published, []);
+    assert.equal(releaseCalled, false);
+    assert.equal(await fixture.remoteMain(), fixture.baseSha);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("release anomalies prevent a clean merge train finish after safe read-back", async () => {
+  const anomalies = [
+    { outcome: "skipped", heldFor: "another-task" },
+    { outcome: "refused", heldBy: "another@host" },
+    { outcome: "unreachable", detail: "release transport failed" },
+  ];
+
+  for (const [index, release] of anomalies.entries()) {
+    const fixture = await makeFixture();
+    try {
+      const candidate = await fixture.candidate(291 + index, { [`candidate-${index}.txt`]: "candidate\n" });
+      await assert.rejects(coordinateMergeTrain({
+        repoRoot: fixture.repo,
+        task: `release-${release.outcome}`,
+        candidates: [candidate],
+        adapters: {
+          acquireLease: async () => ({ outcome: "acquired" }),
+          releaseLease: async () => release,
+          gate: passGate,
+          readPullRequest: fixture.readPullRequest([candidate]),
+          sleep: async () => {},
+        },
+      }), new RegExp(`merge Lease release ${release.outcome}`, "u"));
+      assert.equal(await fixture.remoteContains(candidate.headSha), true);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("an unknown publication read-back retains the lease", async (t) => {
+  const fixture = await makeFixture();
+  const stderr = [];
+  t.mock.method(process.stderr, "write", (chunk) => {
+    stderr.push(String(chunk));
+    return true;
+  });
+  try {
+    const candidate = await fixture.candidate(294, { "candidate.txt": "candidate\n" });
+    let releaseCalled = false;
+    await assert.rejects(coordinateMergeTrain({
+      repoRoot: fixture.repo,
+      task: "unknown-read-back",
+      candidates: [candidate],
+      adapters: {
+        acquireLease: async () => ({ outcome: "acquired" }),
+        releaseLease: async () => {
+          releaseCalled = true;
+          return { outcome: "released" };
+        },
+        gate: passGate,
+        push: async () => {
+          throw new Error("main read-back unavailable");
+        },
+        readPullRequest: fixture.readPullRequest([candidate]),
+        sleep: async () => {},
+      },
+    }), /main read-back unavailable/u);
+    assert.equal(releaseCalled, false);
+    assert.match(stderr.join(""), /lease for task unknown-read-back was retained/u);
+    assert.equal(await fixture.remoteMain(), fixture.baseSha);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the default adapter locally dispatches from a clean exact-prefix checkout", async () => {
+  const fixture = await makeFixture();
+  try {
+    const dispatcher = await readFile(new URL("./gate-worker/gate-dispatch.sh", import.meta.url), "utf8");
+    const gateLibrary = await readFile(new URL("./gate-worker/lib.sh", import.meta.url), "utf8");
+    const wrapper = `#!/usr/bin/env bash
+set -eu
+unset AGENTOS_GATE_SERVER AGENTOS_GATE_PRIMARY_SERVER AGENTOS_GATE_FALLBACK_SERVER
+export AGENTOS_GATE_ALLOW_LOCAL=1
+export XDG_CACHE_HOME=${JSON.stringify(path.join(fixture.root, "gate-cache"))}
+exec bash "$(dirname "$0")/gate-dispatch-real.sh" "$@"
+`;
+    const mergeGate = `#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = "--expect-head" ]
+expected="$2"
+[ "$3" = "--master" ]
+head="$(git rev-parse HEAD)"
+status="$(git status --porcelain)"
+[ "$head" = "$expected" ]
+[ -z "$status" ]
+printf 'FIXTURE GATE: cwd=%s head=%s clean=yes\\n' "$PWD" "$head"
+printf 'MERGE GATE: PASS %s\\n' "$head"
+`;
+    const candidate = await fixture.candidate(300, {
+      "scripts/gate-worker/gate-dispatch.sh": wrapper,
+      "scripts/gate-worker/gate-dispatch-real.sh": dispatcher,
+      "scripts/gate-worker/lib.sh": gateLibrary,
+      "scripts/merge-gate.sh": mergeGate,
+    });
+    const result = await coordinateMergeTrain({
+      repoRoot: fixture.repo,
+      task: "local-dispatch",
+      candidates: [candidate],
+      adapters: {
+        ...noLease(),
+        readPullRequest: fixture.readPullRequest([candidate]),
+        sleep: async () => {},
+      },
+    });
+
+    assert.equal(result.status, "published-all");
+    assert.equal(result.gateResults[0].status, "pass");
+    const evidence = /FIXTURE GATE: cwd=(.+) head=([0-9a-f]{40}) clean=yes/u.exec(
+      result.gateResults[0].output,
+    );
+    assert.ok(evidence, result.gateResults[0].output);
+    assert.notEqual(path.resolve(evidence[1]), path.resolve(fixture.repo));
+    assert.equal(evidence[2], result.prefixes[0].oid);
+    const worktrees = await git(fixture.repo, "worktree", "list", "--porcelain");
+    assert.equal(worktrees.match(/^worktree /gmu)?.length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("three cumulative prefixes gate concurrently and publish in FIFO order", async () => {

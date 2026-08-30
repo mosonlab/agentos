@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import {
   acquireControlPlaneOwnership,
@@ -406,7 +406,7 @@ test("RP-OWN-FILES-ALIAS production entrypoint refuses Files/state alias before 
   t.after(() => rm(paths.container, { recursive: true, force: true }));
   await rm(paths.files, { recursive: true });
   await symlink(paths.state, paths.files);
-  const child = spawn(process.execPath, ["--import", "tsx", "index.ts"], {
+  const child = trackChild(t, "Files/state alias entrypoint", spawn(process.execPath, ["--import", "tsx", "index.ts"], {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: {
       ...process.env,
@@ -417,34 +417,172 @@ test("RP-OWN-FILES-ALIAS production entrypoint refuses Files/state alias before 
       SCHEDULER_POLL_INTERVAL_MS: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
-  });
+  }));
   assert.deepEqual(await readdir(paths.state), []);
-  let output = "";
-  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-  child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-  assert.equal((await waitForExit(child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE, output);
-  assert.match(output, /CONTROL_PLANE_OWNERSHIP_REFUSED.*control-state-overlaps-files-root/u);
-  assert.doesNotMatch(output, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening|PrismaClient/u);
+  assert.equal((await waitForExit(child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE, child.output);
+  assert.match(child.output, /CONTROL_PLANE_OWNERSHIP_REFUSED.*control-state-overlaps-files-root/u);
+  assert.doesNotMatch(child.output, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening|PrismaClient/u);
   assert.deepEqual(await readdir(paths.state), []);
 });
 
-const waitForLine = (child: ChildProcess, pattern: RegExp, timeoutMs = 10_000): Promise<string> => new Promise((resolve, reject) => {
-  let output = "";
-  const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${pattern}: ${output}`)), timeoutMs);
-  child.stdout?.on("data", (chunk: Buffer) => {
-    output += chunk.toString("utf8");
-    if (pattern.test(output)) {
+type ChildExit = { code: number | null; signal: NodeJS.Signals | null };
+type TrackedChild = {
+  child: ChildProcess;
+  label: string;
+  output: string;
+  descendantPids: Set<number>;
+  cleanup: () => Promise<void>;
+};
+
+const childDiagnostic = (tracked: TrackedChild): string => [
+  `${tracked.label} pid=${tracked.child.pid ?? "unknown"}`,
+  `exitCode=${tracked.child.exitCode ?? "null"}`,
+  `signalCode=${tracked.child.signalCode ?? "null"}`,
+  `descendantPids=${[...tracked.descendantPids].join(",") || "none"}`,
+  `output=${JSON.stringify(tracked.output)}`,
+].join(" ");
+
+const isRunning = (child: ChildProcess): boolean => child.exitCode === null && child.signalCode === null;
+
+const processExists = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+};
+
+const waitForProcessExit = async (pid: number, label: string, timeoutMs = 5_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label} pid=${pid} to exit`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+};
+
+const waitForExit = (tracked: TrackedChild, timeoutMs = 10_000): Promise<ChildExit> => {
+  const { child } = tracked;
+  if (!isRunning(child)) return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
       clearTimeout(timer);
-      resolve(output);
-    }
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(new Error(`Failed while waiting for child exit: ${childDiagnostic(tracked)}`, { cause: error }));
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup();
+      resolve({ code, signal });
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out after ${timeoutMs}ms waiting for child exit: ${childDiagnostic(tracked)}`));
+    }, timeoutMs);
+    child.once("error", onError);
+    child.once("exit", onExit);
   });
-  child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+};
+
+const waitForLine = (tracked: TrackedChild, pattern: RegExp, timeoutMs = 10_000): Promise<string> => new Promise((resolve, reject) => {
+  const { child } = tracked;
+  const cleanup = (): void => {
+    clearTimeout(timer);
+    child.stdout?.removeListener("data", onData);
+    child.stderr?.removeListener("data", onData);
+    child.removeListener("error", onError);
+    child.removeListener("exit", onExit);
+  };
+  const checkOutput = (): void => {
+    pattern.lastIndex = 0;
+    if (!pattern.test(tracked.output)) return;
+    cleanup();
+    resolve(tracked.output);
+  };
+  const onData = (): void => { checkOutput(); };
+  const onError = (error: Error): void => {
+    cleanup();
+    reject(new Error(`Child failed before ${pattern} appeared: ${childDiagnostic(tracked)}`, { cause: error }));
+  };
+  const onExit = (): void => {
+    cleanup();
+    reject(new Error(`Child exited before ${pattern} appeared: ${childDiagnostic(tracked)}`));
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    reject(new Error(`Timed out after ${timeoutMs}ms waiting for ${pattern}: ${childDiagnostic(tracked)}`));
+  }, timeoutMs);
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
+  child.once("error", onError);
+  child.once("exit", onExit);
+  checkOutput();
 });
 
-const waitForExit = (child: ChildProcess): Promise<{ code: number | null; signal: NodeJS.Signals | null }> => new Promise((resolve, reject) => {
-  child.once("error", reject);
-  child.once("exit", (code, signal) => resolve({ code, signal }));
-});
+const terminateChild = async (tracked: TrackedChild, signal: NodeJS.Signals = "SIGTERM"): Promise<ChildExit> => {
+  if (!isRunning(tracked.child)) return waitForExit(tracked);
+  tracked.child.kill(signal);
+  try {
+    return await waitForExit(tracked, 5_000);
+  } catch (error) {
+    if (signal === "SIGKILL" || !isRunning(tracked.child)) throw error;
+    tracked.child.kill("SIGKILL");
+    return waitForExit(tracked, 5_000).catch((killError: unknown) => {
+      throw new AggregateError([error, killError], `Failed to terminate child: ${childDiagnostic(tracked)}`);
+    });
+  }
+};
+
+const terminateProcess = async (pid: number, label: string): Promise<void> => {
+  if (!processExists(pid)) return;
+  process.kill(pid, "SIGTERM");
+  try {
+    await waitForProcessExit(pid, label);
+  } catch (error) {
+    if (!processExists(pid)) return;
+    process.kill(pid, "SIGKILL");
+    await waitForProcessExit(pid, label).catch((killError: unknown) => {
+      throw new AggregateError([error, killError], `Failed to terminate ${label} pid=${pid}`);
+    });
+  }
+};
+
+const cleanupTrackedChild = async (tracked: TrackedChild): Promise<void> => {
+  const failures: unknown[] = [];
+  if (isRunning(tracked.child)) {
+    await terminateChild(tracked).catch((error: unknown) => { failures.push(error); });
+  }
+  for (const pid of tracked.descendantPids) {
+    await terminateProcess(pid, `${tracked.label} descendant`).catch((error: unknown) => { failures.push(error); });
+  }
+  if (failures.length > 0) throw new AggregateError(failures, `Cleanup failed: ${childDiagnostic(tracked)}`);
+};
+
+const trackChild = (t: TestContext, label: string, child: ChildProcess, trackDescendants = false): TrackedChild => {
+  let cleanupPromise: Promise<void> | undefined;
+  const tracked: TrackedChild = {
+    child,
+    label,
+    output: "",
+    descendantPids: new Set<number>(),
+    cleanup: () => cleanupPromise ??= cleanupTrackedChild(tracked),
+  };
+  const append = (chunk: Buffer): void => {
+    tracked.output += chunk.toString("utf8");
+    if (!trackDescendants) return;
+    for (const match of tracked.output.matchAll(/OWNERSHIP_PROBE_DESCENDANT_PID (\d+)/gu)) {
+      tracked.descendantPids.add(Number(match[1]));
+    }
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  t.after(tracked.cleanup);
+  return tracked;
+};
 
 test("RP-OWN-SAME-ALIAS production loser exits 75 before database import, reconciliation, or listen", async (t) => {
   const paths = await fixture();
@@ -458,12 +596,11 @@ test("RP-OWN-SAME-ALIAS production loser exits 75 before database import, reconc
     FILES_ROOT: paths.files,
     CONTROL_PLANE_STATE_DIR: paths.state,
   };
-  const owner = spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const owner = trackChild(t, "same-alias owner probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
     cwd: dirname(new URL(import.meta.url).pathname), env, stdio: ["ignore", "pipe", "pipe"],
-  });
-  t.after(() => { if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGTERM"); });
+  }), true);
   await waitForLine(owner, /OWNERSHIP_PROBE_READY/u);
-  const loser = spawn(process.execPath, ["--import", "tsx", "index.ts"], {
+  const loser = trackChild(t, "same-alias loser entrypoint", spawn(process.execPath, ["--import", "tsx", "index.ts"], {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: {
       ...env,
@@ -472,16 +609,12 @@ test("RP-OWN-SAME-ALIAS production loser exits 75 before database import, reconc
       SCHEDULER_POLL_INTERVAL_MS: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
-  });
-  let loserOutput = "";
-  loser.stdout?.on("data", (chunk: Buffer) => { loserOutput += chunk.toString("utf8"); });
-  loser.stderr?.on("data", (chunk: Buffer) => { loserOutput += chunk.toString("utf8"); });
+  }));
   const result = await waitForExit(loser);
-  assert.equal(result.code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE, loserOutput);
-  assert.match(loserOutput, /CONTROL_PLANE_OWNERSHIP_CONFLICT/u);
-  assert.doesNotMatch(loserOutput, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening/u);
-  owner.kill("SIGTERM");
-  await waitForExit(owner);
+  assert.equal(result.code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE, loser.output);
+  assert.match(loser.output, /CONTROL_PLANE_OWNERSHIP_CONFLICT/u);
+  assert.doesNotMatch(loser.output, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening/u);
+  assert.deepEqual(await terminateChild(owner), { code: 0, signal: null }, owner.output);
 });
 
 test("RP-OWN-RECOVERY-DESCENDANT recovers after SIGKILL while execed descendant remains alive", async (t) => {
@@ -494,26 +627,52 @@ test("RP-OWN-RECOVERY-DESCENDANT recovers after SIGKILL while execed descendant 
     CONTROL_PLANE_STATE_DIR: paths.state,
     OWNERSHIP_PROBE_DESCENDANT: "1",
   };
-  const owner = spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const owner = trackChild(t, "recovery owner probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
     cwd: dirname(new URL(import.meta.url).pathname), env, stdio: ["ignore", "pipe", "pipe"],
-  });
+  }), true);
   const ready = await waitForLine(owner, /OWNERSHIP_PROBE_READY/u);
   const descendantPid = Number(ready.match(/OWNERSHIP_PROBE_DESCENDANT_PID (\d+)/u)?.[1]);
   assert.ok(descendantPid > 0);
-  t.after(() => { try { process.kill(descendantPid, "SIGTERM"); } catch { /* already gone */ } });
-  owner.kill("SIGKILL");
-  assert.equal((await waitForExit(owner)).signal, "SIGKILL");
+  assert.equal((await terminateChild(owner, "SIGKILL")).signal, "SIGKILL", owner.output);
   assert.doesNotThrow(() => process.kill(descendantPid, 0));
 
-  const successor = spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const successor = trackChild(t, "recovery successor probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: { ...env, OWNERSHIP_PROBE_DESCENDANT: "0" },
     stdio: ["ignore", "pipe", "pipe"],
-  });
-  t.after(() => { if (successor.exitCode === null && successor.signalCode === null) successor.kill("SIGTERM"); });
+  }), true);
   const output = await waitForLine(successor, /OWNERSHIP_PROBE_READY/u);
   assert.match(output, /CONTROL_PLANE_OWNERSHIP_RECOVERED/u);
-  successor.kill("SIGTERM");
-  await waitForExit(successor);
-  process.kill(descendantPid, "SIGTERM");
+  assert.deepEqual(await terminateChild(successor), { code: 0, signal: null }, successor.output);
+  await terminateProcess(descendantPid, "recovery descendant");
+  assert.equal(processExists(descendantPid), false);
+});
+
+test("RP-OWN-RECOVERY-CLEANUP readiness timeout removes the owner and unknown descendant", async (t) => {
+  const paths = await fixture();
+  t.after(() => rm(paths.container, { recursive: true, force: true }));
+  const owner = trackChild(t, "readiness-timeout owner probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+    cwd: dirname(new URL(import.meta.url).pathname),
+    env: {
+      ...process.env,
+      RUNNER_WORKSPACE_ROOT: paths.workspace,
+      FILES_ROOT: paths.files,
+      CONTROL_PLANE_STATE_DIR: paths.state,
+      OWNERSHIP_PROBE_DESCENDANT: "1",
+      OWNERSHIP_PROBE_SUPPRESS_READY: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  }), true);
+
+  await waitForLine(owner, /OWNERSHIP_PROBE_DESCENDANT_PID \d+/u);
+  await assert.rejects(waitForLine(owner, /OWNERSHIP_PROBE_READY/u, 500), (error: unknown) => {
+    assert.match(String(error), /Timed out after 500ms.*readiness-timeout owner probe/u);
+    assert.match(String(error), /OWNERSHIP_PROBE_DESCENDANT_PID \d+/u);
+    return true;
+  });
+  const [descendantPid] = owner.descendantPids;
+  assert.ok(descendantPid && processExists(descendantPid));
+  await owner.cleanup();
+  assert.equal(owner.child.exitCode, 0, owner.output);
+  assert.equal(processExists(descendantPid), false);
 });

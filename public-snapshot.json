@@ -10,7 +10,6 @@
     { "glob": ".github/ISSUE_TEMPLATE/bug-report.yml", "purpose": "bug report issue form carrying the fields CONTRIBUTING.md requires" },
     { "glob": ".github/ISSUE_TEMPLATE/documentation-correction.yml", "purpose": "documentation correction issue form" },
     { "glob": ".github/ISSUE_TEMPLATE/config.yml", "purpose": "issue chooser routing security reports to the private channel and questions to Discussions" },
-    { "glob": ".github/workflows/ci.yml", "purpose": "continuous integration definition" },
     { "glob": ".gitignore", "purpose": "source hygiene" },
     { "glob": ".nvmrc", "purpose": "pinned Node.js major version" },
     { "glob": ".npmrc", "purpose": "npm engine enforcement" },
@@ -140,6 +139,8 @@
     { "glob": "scripts/merge-gate-profile.mjs", "purpose": "fail-closed exact-diff classifier for the merge gate's docs-only profile" },
     { "glob": "scripts/merge-gate-profile.test.mjs", "purpose": "merge-gate profile classifier fixtures" },
     { "glob": "scripts/merge-gate-parallel.test.mjs", "purpose": "merge-gate concurrent-group failure reporting fixtures" },
+    { "glob": "scripts/merge-lease-adapter.mjs", "purpose": "shared merge lease script path, argv, exit, machine-line and anomaly adapter" },
+    { "glob": "scripts/merge-lease-adapter.test.mjs", "purpose": "merge lease adapter recorded-output, path, argv and classification fixtures" },
     { "glob": "scripts/merge-lease.sh", "purpose": "global exact-head merge delivery lease backed by an atomic origin ref" },
     { "glob": "scripts/merge-lease.test.mjs", "purpose": "merge lease: mutual exclusion, release outcomes, status and the machine and human steal boundaries against a real origin ref" },
     { "glob": "scripts/merge-train.mjs", "purpose": "fixed-width cumulative-prefix coordinator for concurrent host delivery" },
@@ -304,11 +305,6 @@
       "category": "credential-placeholder",
       "glob": ".env.example",
       "reason": "documented empty or non-secret development placeholders"
-    },
-    {
-      "category": "credential-placeholder",
-      "glob": ".github/workflows/ci.yml",
-      "reason": "localhost-only CI database connection fixtures"
     },
     {
       "category": "credential-placeholder",

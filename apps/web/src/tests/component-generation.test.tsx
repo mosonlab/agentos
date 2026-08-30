@@ -6,10 +6,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
+import { Card } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
-import { Table, TableBody, TableCaption, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
 
 const read = (file: string): string =>
@@ -34,25 +34,22 @@ const code = (file: string): string =>
 const PARTS: Record<string, string[]> = {
   "badge.tsx": ["Badge"],
   "button.tsx": ["Button"],
-  "card.tsx": ["Card", "CardHeader", "CardFooter", "CardTitle", "CardDescription", "CardContent"],
+  "card.tsx": ["Card"],
   "checkbox.tsx": ["Checkbox"],
   "dialog.tsx": [
-    "Dialog", "DialogPortal", "DialogOverlay", "DialogTrigger", "DialogClose",
-    "DialogContent", "DialogHeader", "DialogFooter", "DialogTitle", "DialogDescription",
+    "Dialog", "DialogPortal", "DialogOverlay", "DialogContent", "DialogHeader",
+    "DialogFooter", "DialogTitle",
   ],
   "dropdown-menu.tsx": [
     "DropdownMenu", "DropdownMenuTrigger", "DropdownMenuContent", "DropdownMenuItem",
-    "DropdownMenuCheckboxItem", "DropdownMenuRadioItem", "DropdownMenuLabel",
-    "DropdownMenuSeparator", "DropdownMenuShortcut", "DropdownMenuGroup",
-    "DropdownMenuPortal", "DropdownMenuSub", "DropdownMenuSubContent",
-    "DropdownMenuSubTrigger", "DropdownMenuRadioGroup",
+    "DropdownMenuLabel", "DropdownMenuSeparator",
   ],
   "hover-card.tsx": ["HoverCard", "HoverCardTrigger", "HoverCardContent"],
   "input.tsx": ["Input"],
   "progress.tsx": ["Progress"],
   "select.tsx": ["Select"],
   "switch.tsx": ["Switch"],
-  "table.tsx": ["Table", "TableHeader", "TableBody", "TableFooter", "TableHead", "TableRow", "TableCell", "TableCaption"],
+  "table.tsx": ["Table", "TableHeader", "TableBody", "TableHead", "TableRow", "TableCell"],
   "textarea.tsx": ["Textarea"],
 };
 
@@ -61,10 +58,10 @@ const NOT_A_PART = ["badgeVariants", "buttonVariants"];
 const kebab = (name: string): string =>
   name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
-test("the 12 migrated files plus hover-card carry 50 parts, and the plan's count is pinned", () => {
+test("the 12 migrated files plus hover-card carry 31 parts, and the plan's count is pinned", () => {
   const migrated = Object.entries(PARTS).filter(([file]) => file !== "hover-card.tsx");
   assert.equal(migrated.length, 12);
-  assert.equal(migrated.reduce((total, [, parts]) => total + parts.length, 0), 47);
+  assert.equal(migrated.reduce((total, [, parts]) => total + parts.length, 0), 28);
   assert.equal(PARTS["hover-card.tsx"]!.length, 3);
 });
 
@@ -123,22 +120,15 @@ test("the DOM-rendering parts emit the attribute, not just declare it", () => {
     ["badge", <Badge />],
     ["button", <Button />],
     ["card", <Card />],
-    ["card-header", <CardHeader />],
-    ["card-title", <CardTitle />],
-    ["card-description", <CardDescription />],
-    ["card-content", <CardContent />],
-    ["card-footer", <CardFooter />],
     ["input", <Input />],
     ["select", <Select />],
     ["textarea", <Textarea />],
     ["table", <Table />],
     ["table-header", <table><TableHeader /></table>],
     ["table-body", <table><TableBody /></table>],
-    ["table-footer", <table><TableFooter /></table>],
     ["table-row", <table><tbody><TableRow /></tbody></table>],
     ["table-head", <table><thead><tr><TableHead /></tr></thead></table>],
     ["table-cell", <table><tbody><tr><TableCell /></tr></tbody></table>],
-    ["table-caption", <table><TableCaption /></table>],
   ];
   const missing = cases
     .filter(([slot, element]) => !renderToStaticMarkup(element).includes(`data-slot="${slot}"`))

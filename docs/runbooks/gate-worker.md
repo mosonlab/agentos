@@ -1,5 +1,12 @@
 # Runbook — merge-gate workers and the gate dispatcher
 
+> **Audience and support status.** Remote gate workers are optional,
+> operator-provided infrastructure. They are not created by the Quickstart or
+> bundled with an Anneal installation. Public operators may provision their own
+> SSH-reachable Ubuntu workers and configure them explicitly. The local
+> `scripts/merge-gate.sh` path requires no remote worker. The remote-worker
+> profile is documented but unverified as a public self-hosting path.
+
 A merge gate selects its own profile from the exact baseline-to-candidate diff.
 Content-only modifications to the gate's explicit prose allowlist use the
 install-free `docs-only` profile; callers cannot request it. Every structural,
@@ -93,16 +100,19 @@ ships.
 A full gate can consume a host. The dispatcher cannot know the
 candidate-selected profile before running it, so it rations fixed, measured
 host capacity rather than trying to resize from live CPU or memory readings.
-The default topology is two slots on the primary desktop worker and one on the
-fallback worker. The explicit `--server` form contributes one dispatcher slot.
-The local machine contributes no automatic capacity; it adds one slot only for
-an invocation that passes `--allow-local` or sets `AGENTOS_GATE_ALLOW_LOCAL=1`.
+An explicitly configured primary worker contributes two slots and an explicitly
+configured fallback contributes one. The explicit `--server` form contributes
+one dispatcher slot. The local machine contributes no automatic capacity; it
+adds one slot only for an invocation that passes `--allow-local` or sets
+`AGENTOS_GATE_ALLOW_LOCAL=1`. With no remote configured, that explicit opt-in
+selects a local-only dispatch; with neither remote capacity nor local opt-in the
+dispatcher returns `76` instead of guessing a host.
 
 `gate-dispatch.sh` is the way to run a gate when anything else might also be
 running one:
 
 ```sh
-scripts/gate-worker/gate-dispatch.sh <oid>
+AGENTOS_GATE_SERVER=primary-worker scripts/gate-worker/gate-dispatch.sh <oid>
 ```
 
 - The candidate is the exact requested `<oid>`. Unless `--master <oid>` is
@@ -283,26 +293,28 @@ Three properties keep the evidence honest even when the worker is trusted:
 ## First deployment
 
 Each worker needs an SSH-reachable Ubuntu account that can `sudo`, plus a
-`Host` entry in `~/.ssh/config` on the local machine. The dispatcher defaults
-to `ci-desktop-worker` as primary and `agentos-gate` as fallback;
-`AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` override them.
-`--server <alias>` remains the explicit one-worker form.
+`Host` entry in `~/.ssh/config` on the local machine. The repository provides no
+default destination. Configure `AGENTOS_GATE_SERVER` for one worker, configure
+`AGENTOS_GATE_PRIMARY_SERVER` and optionally
+`AGENTOS_GATE_FALLBACK_SERVER` for a two-host topology, or pass
+`--server <alias>` for one invocation.
 
 Agent sessions receive a single operator-selected worker only when their runner
 daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
 that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
 puts `gate-dispatch.sh` into its existing single-server mode. Task secrets cannot
-override this runner-owned choice. Leave `RUNNER_GATE_SERVER` unset when the
-normal primary/fallback topology is intended.
+override this runner-owned choice. An unset `RUNNER_GATE_SERVER` provides no
+remote capacity to a canonical regression step; the operator must configure a
+worker before using that path.
 
 ```
-Host ci-desktop-worker
+Host primary-worker
   HostName <ip>
   User <user>
   Port <port>
   IdentityFile ~/.ssh/<key>
 
-Host agentos-gate
+Host fallback-worker
   HostName <ip>
   User <user>
   Port <port>
@@ -313,15 +325,15 @@ Host agentos-gate
 plan.
 
 ```sh
-scp scripts/gate-worker/provision.sh ci-desktop-worker:/tmp/
-ssh ci-desktop-worker 'bash /tmp/provision.sh'
-ssh ci-desktop-worker 'bash /tmp/provision.sh --apply'
+scp scripts/gate-worker/provision.sh primary-worker:/tmp/
+ssh primary-worker 'bash /tmp/provision.sh'
+ssh primary-worker 'bash /tmp/provision.sh --apply'
 ```
 
-It pins Node to the version in the script (`v26.5.0` — the local machine's
-version on 2026-08-18; `package.json` engines only sets a floor), installs
-Docker with registry mirrors, the native Node build dependencies, and a Git
-fixture identity when the account has none; it points npm at
+It pins Node to the version in `.nvmrc` (`v22.17.0`; a repository test keeps the
+standalone script's repeated default synchronized), installs Docker with
+registry mirrors, the native Node build dependencies, and a Git fixture
+identity when the account has none; it points npm at
 `registry.npmmirror.com`, pre-pulls `postgres:16-alpine`, and creates `~/gate/`.
 On a VMware guest it also disables VMware's time synchronization and enables
 Ubuntu NTP. Two independent time disciplines caused the guest wall clock to
@@ -346,8 +358,8 @@ Removing the file returns the worker to one slot.
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
 
 ```sh
-scripts/gate-worker/mirror-push.sh ci-desktop-worker --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
-scripts/gate-worker/mirror-push.sh ci-desktop-worker --candidate <candidate-oid> --baseline <baseline-oid>
+scripts/gate-worker/mirror-push.sh primary-worker --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
+scripts/gate-worker/mirror-push.sh primary-worker --candidate <candidate-oid> --baseline <baseline-oid>
 ```
 
 Both oids must resolve in the local object database. Routine use does not ask an
@@ -357,12 +369,15 @@ origin baseline before it calls `mirror-push.sh`.
 **3. Gate a commit (local).**
 
 ```sh
-scripts/gate-worker/gate-dispatch.sh <oid>                                # primary, then fallback
-scripts/gate-worker/gate-dispatch.sh <oid> --allow-local                  # opt in to Mac last
-scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid>                # one worker explicitly
-scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> --verbose      # stream it
-scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> --fetch-log    # copy the log back
-scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> --master <oid> # state the baseline
+AGENTOS_GATE_PRIMARY_SERVER=primary-worker \
+  AGENTOS_GATE_FALLBACK_SERVER=fallback-worker \
+  scripts/gate-worker/gate-dispatch.sh <oid>                          # primary, then fallback
+scripts/gate-worker/gate-dispatch.sh <oid> --server primary-worker    # one worker
+scripts/gate-worker/gate-dispatch.sh <oid> --allow-local              # local only with no remote configured
+scripts/gate-worker/remote-gate.sh primary-worker <oid>                # one worker directly
+scripts/gate-worker/remote-gate.sh primary-worker <oid> --verbose      # stream it
+scripts/gate-worker/remote-gate.sh primary-worker <oid> --fetch-log    # copy the log back
+scripts/gate-worker/remote-gate.sh primary-worker <oid> --master <oid> # state the baseline
 ```
 
 `--master` is only needed when origin cannot be read (no network, expired
@@ -379,7 +394,7 @@ and compare the two verdict lines.
 ```sh
 git rev-parse HEAD                                       # <oid>
 bash scripts/merge-gate.sh --expect-head <oid>           # local
-scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> # remote
+scripts/gate-worker/remote-gate.sh primary-worker <oid>    # remote
 ```
 
 Both must end in `MERGE GATE: PASS <oid>` naming the same oid. Record both
@@ -410,7 +425,7 @@ at its default capacity of one.
 ## Routine use
 
 ```sh
-scripts/gate-worker/gate-dispatch.sh <oid>
+AGENTOS_GATE_SERVER=primary-worker scripts/gate-worker/gate-dispatch.sh <oid>
 ```
 
 That is the whole routine: the dispatcher refreshes the baseline and pushes the
@@ -459,8 +474,8 @@ infrastructure problem into somebody else's FAIL. Intervene only if you need the
 disk back sooner:
 
 ```sh
-ssh agentos-gate 'ls -la ~/gate/<repo>/worktrees'
-ssh agentos-gate 'rm -rf ~/gate/<repo>/worktrees/gate-<oid>-<stamp>-<pid> && git -C ~/gate/<repo>/mirror.git worktree prune'
+ssh fallback-worker 'ls -la ~/gate/<repo>/worktrees'
+ssh fallback-worker 'rm -rf ~/gate/<repo>/worktrees/gate-<oid>-<stamp>-<pid> && git -C ~/gate/<repo>/mirror.git worktree prune'
 ```
 
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the configured slots are
@@ -499,14 +514,14 @@ To find a mirror that actually serves, pull through a fully-qualified one,
 which bypasses the daemon's mirror list entirely:
 
 ```sh
-ssh agentos-gate 'timeout 150 docker pull dockerproxy.net/library/postgres:16-alpine'
+ssh fallback-worker 'timeout 150 docker pull dockerproxy.net/library/postgres:16-alpine'
 ```
 
 Then either point `daemon.json` at the one that worked and restart docker, or
 retag what you pulled under the canonical name the gate asks for:
 
 ```sh
-ssh agentos-gate 'docker tag dockerproxy.net/library/postgres:16-alpine postgres:16-alpine'
+ssh fallback-worker 'docker tag dockerproxy.net/library/postgres:16-alpine postgres:16-alpine'
 ```
 
 `docker info | grep -A3 "Registry Mirrors"` confirms what the daemon is
@@ -531,16 +546,18 @@ automatically — a log is small and the reason a verdict happened is worth
 keeping. Trim them by hand when the disk asks:
 
 ```sh
-ssh agentos-gate 'ls -lt ~/gate/<repo>/logs | head'
-ssh agentos-gate 'find ~/gate/*/logs -name "*.log" -mtime +30 -delete'
+ssh fallback-worker 'ls -lt ~/gate/<repo>/logs | head'
+ssh fallback-worker 'find ~/gate/*/logs -name "*.log" -mtime +30 -delete'
 ```
 
 ## Changing the pinned Node version
 
-The pin lives in `provision.sh` (`GATE_NODE_VERSION`) because the repository
-has no `.nvmrc` with a full version. Bump it there, re-run `provision.sh
---apply`, and re-do the double-run from step 4 — a verdict from a different
-interpreter than the local one is weaker evidence than it looks.
+The source of truth is `.nvmrc`; `provision.sh` repeats it because that
+standalone script reaches a new worker before any repository checkout does. A
+test requires the two values to match. Bump both in one change, re-run
+`provision.sh --apply`, and re-do the double-run from step 4. An explicit
+`GATE_NODE_VERSION` override is a comparison run whose different interpreter
+must be reported with its verdict.
 
 ## Undoing it
 

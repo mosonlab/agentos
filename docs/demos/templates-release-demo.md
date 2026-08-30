@@ -1,21 +1,18 @@
 # Templates release demo
 
-This page describes the retained OSS-C **legacy release demo**, not the current
-canonical workflow. Its harness and evidence schema expect the former
-twelve-node Full Assurance shape: agent steps 1-10, server-side mechanical
-readiness at step 11, and the mechanical `merge-integrator` at step 12.
-
-Current canonical workflows are an eight-node/seven-layer Direct chain and a
-twelve-node/eleven-layer Full Assurance chain. Full Assurance has parallel Sol
-and blind Opus review siblings whose findings the fix node adjudicates itself;
-its readiness and integrator are nodes 11 and 12. Do not use the OSS-C harness
-as current-template acceptance evidence until its implementation is migrated to
-that graph. The canonical source of the current workflow is
+This page describes the retained OSS-C release demo. Its harness loads the
+current canonical `compound-engineer-workflow` and requires its twelve-node Full
+Assurance shape: agent steps 1-10, server-side mechanical readiness at step 11,
+and the mechanical `merge-integrator` at step 12. The canonical Direct and Full
+Assurance graphs are documented in
 [`agents/README.md`](../../agents/README.md).
 
-The harness proves one serial template execution against exact Anneal and
-synthetic-target commits. It does not prove fresh installation, universal
-provider compatibility, production readiness, or general template authoring.
+The harness records one template execution against exact Anneal and
+synthetic-target commits. It verifies task completion and output kinds, the two
+mechanical tail positions, and automatic pull-request delivery in public mode.
+It does not inspect the target diff or command output independently, and it does
+not prove fresh installation, universal provider compatibility, production
+readiness, or general template authoring.
 An approved OSS-B artifact separately authorizes fresh-install wording. An
 approved CP-A artifact separately authorizes the named provider path.
 
@@ -36,9 +33,11 @@ approved CP-A artifact separately authorizes the named provider path.
   artifact, a human-created public GitHub repository, working `gh` auth, no
   existing demo branch, and no open pull request from that branch.
 
-The synthetic target baseline and authorized change are fixed in the harness.
-The only changed files may be `src/cli.mjs`, `test/cli.test.mjs`, and
-`README.md`; the example must print `{"lines":3,"words":5}` followed by LF.
+The synthetic target baseline and requested change are fixed in the harness.
+The task description tells the chain to change only `src/cli.mjs`,
+`test/cli.test.mjs`, and `README.md`, and to print
+`{"lines":3,"words":5}` followed by LF for the example. Those are task
+instructions, not assertions repeated by the evidence verifier.
 
 ## Commands
 

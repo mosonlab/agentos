@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
   RunStatus,
@@ -7,6 +8,8 @@ import {
 } from "@prisma/client";
 
 import { readChainControl } from "./chain-control.js";
+import { heldPredicate } from "./chain-hold.js";
+import { compare, layerOf } from "./chain-order.js";
 import { lockAgentRepoGrant, lockAgentRow, lockChainRows } from "./locks.js";
 import { parseAuthorizationMetadata } from "./merge-integrator.js";
 import { isIntegratorBindingError, stopStateFor } from "./merge-integrator-db.js";
@@ -559,17 +562,17 @@ const parkStoppedIntegratorSuccessor = async (
   return { nextTaskId: successor.id, gated: false };
 };
 
-const layerOf = (task: { chainLayer?: number | null; chainIndex: number | null }): number | null => (
-  task.chainLayer ?? task.chainIndex
-);
+const chainLayerOf = (task: { chainLayer?: number | null; chainIndex: number | null }): number | null => layerOf({
+  layer: task.chainLayer === undefined ? null : task.chainLayer,
+  index: task.chainIndex,
+});
 
 const layerOrder = (
   left: { chainLayer?: number | null; chainIndex: number | null; id: string },
   right: { chainLayer?: number | null; chainIndex: number | null; id: string },
-): number => (
-  (layerOf(left) ?? 0) - (layerOf(right) ?? 0)
-    || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
-    || left.id.localeCompare(right.id)
+): number => compare(
+  { layer: left.chainLayer === undefined ? null : left.chainLayer, index: left.chainIndex, id: left.id },
+  { layer: right.chainLayer === undefined ? null : right.chainLayer, index: right.chainIndex, id: right.id },
 );
 
 /**
@@ -608,7 +611,7 @@ const activateChainSuccessorInternal = async (
   });
   chainRows.sort(layerOrder);
   const current = chainRows.find((row) => row.id === task.id);
-  const currentLayer = current ? layerOf(current) : layerOf(task);
+  const currentLayer = current ? chainLayerOf(current) : chainLayerOf(task);
   if (!current || currentLayer === null) {
     await tx.taskActivity.create({ data: {
       taskId: task.id,
@@ -618,7 +621,7 @@ const activateChainSuccessorInternal = async (
     return { nextTaskId: null, gated: false };
   }
 
-  const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  const currentRows = chainRows.filter((row) => chainLayerOf(row) === currentLayer);
   // The full-chain lock is already held here. Read the persisted control only
   // after taking it so a completion and an operator Hold have one defined
   // winner, rather than allowing a stale pre-lock read to leak activation.
@@ -645,10 +648,39 @@ const activateChainSuccessorInternal = async (
   // history and select the first higher layer that still has work. This keeps
   // the one-node-per-layer migration linear without recursively re-entering the
   // activation routine.
-  const nextLayer = [...new Set(chainRows.map(layerOf).filter((value): value is number => value !== null))]
+  const nextLayer = [...new Set(chainRows.map(chainLayerOf).filter((value): value is number => value !== null))]
     .filter((value) => value > currentLayer)
     .sort((left, right) => left - right)
-    .find((value) => chainRows.some((row) => layerOf(row) === value && row.status !== TaskStatus.DONE));
+    .find((value) => chainRows.some((row) => chainLayerOf(row) === value && row.status !== TaskStatus.DONE));
+  const missingSuccessorLayer = nextLayer === undefined
+    && chainRows.some((row) => chainLayerOf(row) === null && row.status !== TaskStatus.DONE);
+  const withholdSuccessorActivation = async (withheldLayer: number | null) => {
+    await tx.taskActivity.create({ data: {
+      taskId: current.id,
+      actorType: "control-plane",
+      body: chainControl.heldLayer === null
+        ? "Predecessor layer completed; successor activation withheld because Chain is held"
+        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
+      metadata: {
+        kind: "chainControl.activationWithheld",
+        schemaVersion: 1,
+        heldLayer: chainControl.heldLayer,
+        nextLayer: withheldLayer,
+      },
+    } });
+    return { nextTaskId: null, gated: false };
+  };
+  if (missingSuccessorLayer && heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: null,
+    index: null,
+  }, chainControl)) {
+    if (boundSuccessor && current.archivedAt === null) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+    }
+    return withholdSuccessorActivation(null);
+  }
   if (nextLayer === undefined) {
     const predecessorComplete = chainRows.every((row) => row.status === TaskStatus.DONE);
     if (!boundSuccessor || predecessorComplete) {
@@ -672,24 +704,16 @@ const activateChainSuccessorInternal = async (
     await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
   }
 
-  if (chainControl.held && (chainControl.heldLayer === null || nextLayer > chainControl.heldLayer)) {
-    await tx.taskActivity.create({ data: {
-      taskId: current.id,
-      actorType: "control-plane",
-      body: chainControl.heldLayer === null
-        ? "Predecessor layer completed; successor activation withheld because Chain is held"
-        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
-      metadata: {
-        kind: "chainControl.activationWithheld",
-        schemaVersion: 1,
-        heldLayer: chainControl.heldLayer,
-        nextLayer,
-      },
-    } });
-    return { nextTaskId: null, gated: false };
+  if (heldPredicate({
+    projectId: task.projectId,
+    chainId: task.chainId,
+    layer: nextLayer,
+    index: null,
+  }, chainControl)) {
+    return withholdSuccessorActivation(nextLayer);
   }
 
-  const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
+  const nextRows = chainRows.filter((row) => chainLayerOf(row) === nextLayer).sort(layerOrder);
   if (nextRows.some((row) => row.approvalGate) && nextRows.length > 1) {
     throw new WorkflowRefusalError("invalid-request", `Approval gate is not allowed in multi-node chain layer ${nextLayer}`);
   }
@@ -853,6 +877,13 @@ export const activateChainSuccessor = async (
 ): Promise<{ nextTaskId: string | null; gated: boolean }> =>
   activateChainSuccessorInternal(tx, task, options, now, null);
 
+export type RecoveryIntegratorActivationResult =
+  | { outcome: "activated"; nextTaskId: string | null; gated: boolean }
+  | {
+    outcome: "refused";
+    refusalCode: typeof MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE;
+  };
+
 /**
  * The only automatic exit through an unresolved integrator stop. The caller is
  * the server-owned readiness worker, but authority comes from durable rows: an
@@ -870,10 +901,11 @@ export const activateRecoveryIntegratorSuccessor = async (
     authorizationActivityId: string;
   },
   now = new Date(),
-): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+): Promise<RecoveryIntegratorActivationResult> => {
   // Every failure below checks authority written by control-plane workers after
-  // their candidate was selected. A mismatch is an internal recovery invariant,
-  // not an operator input error, and therefore deliberately remains a 500.
+  // their candidate was selected. The recoverable exact-head mismatch is a
+  // typed refusal; every other mismatch is an internal invariant and remains a
+  // deliberate 500 rather than an operator input error.
   const identity = await tx.task.findUnique({
     where: { id: input.readinessTaskId },
     select: { projectId: true, chainId: true },
@@ -937,7 +969,10 @@ export const activateRecoveryIntegratorSuccessor = async (
     || payload.headSha !== recovery.authorizedHeadSha
     || payload.baseSha !== recovery.currentBaseSha
     || payload.decision.channel !== "mechanical") {
-    throw new Error("Recovery activation authorization is not fresh for the recovered exact head and current base");
+    return {
+      outcome: "refused",
+      refusalCode: MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE,
+    };
   }
 
   let outputBinding: Record<string, unknown> | null = null;
@@ -978,9 +1013,10 @@ export const activateRecoveryIntegratorSuccessor = async (
   await transitionMergeRecovery(tx, recovery.id, MergeRecoveryStatus.SUCCEEDED, {
     authorizationActivityId: authorization.id,
     failureReason: null,
+    refusalCode: null,
     endedAt: now,
   });
-  return activated;
+  return { outcome: "activated", ...activated };
 };
 
 /** Marks a completed template task done and activates exactly one successor or gate. */
@@ -1006,7 +1042,7 @@ export const advanceTemplateTask = async (
   }
   if (task.approvalGate) {
     if (task.chainId) {
-      const layer = layerOf(task);
+      const layer = chainLayerOf(task);
       const siblingCount = layer === null ? 0 : await tx.task.count({
         where: {
           projectId: task.projectId,

@@ -5,14 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import test from "node:test";
 
-import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import { runCommand } from "./exec.js";
 import {
   cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
-  type WorkspaceCommandExecutor,
+  type WorkspaceCommandExecutor, type WorkspaceProvisionClaim,
 } from "./workspace.js";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -28,6 +27,32 @@ const realShell = async (
 ): Promise<string | null> => (executable === "/bin/sh"
   ? runCommand(config.runAsPrefix, executable, args, cwd, env, {})
   : null);
+
+type WorkspaceClaimFixture = {
+  task: Pick<WorkspaceProvisionClaim["task"], "id">;
+  repo: WorkspaceProvisionClaim["repo"];
+  run: Pick<WorkspaceProvisionClaim["run"], "id" | "runNumber" | "targetBranch" | "branch">
+    & Partial<Pick<
+      WorkspaceProvisionClaim["run"],
+      "targetBranchPublished" | "pinnedBaseSha" | "implementationBaseSha" | "implementationHeadSha"
+    >>;
+  specificationMaterialization?: WorkspaceProvisionClaim["specificationMaterialization"];
+};
+
+const workspaceClaim = (fixture: WorkspaceClaimFixture): WorkspaceProvisionClaim => ({
+  executionMode: "agent",
+  runner: "CODEX",
+  specificationMaterialization: fixture.specificationMaterialization ?? null,
+  task: { ...fixture.task, chainId: null, chainIndex: null, templateStep: null },
+  repo: fixture.repo,
+  run: {
+    targetBranchPublished: false,
+    pinnedBaseSha: null,
+    implementationBaseSha: null,
+    implementationHeadSha: null,
+    ...fixture.run,
+  },
+});
 
 test("provisioning trusts an already-published intended head after its database ACK was lost", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-publication-"));
@@ -57,7 +82,7 @@ test("provisioning trusts an already-published intended head after its database 
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-1" },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
@@ -68,7 +93,7 @@ test("provisioning trusts an already-published intended head after its database 
         targetBranch: "main",
         branch: "agentos/chain/demo-deadbeef",
       },
-    } as ClaimedTask;
+    });
 
     const workspace = await provisionWorkspace(config, claim);
     assert.equal(workspace.branch, "agentos/chain/demo-deadbeef");
@@ -104,7 +129,7 @@ test("provisioning commits the server-prepared direct specification before the a
     } as unknown as RunnerConfig;
     const branch = "feature/platform-spec";
     const specificationPath = `.chain/${branch}/spec.md`;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-specification" },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
@@ -118,7 +143,7 @@ test("provisioning commits the server-prepared direct specification before the a
         path: specificationPath,
         body: "authoritative brief",
       },
-    } as ClaimedTask;
+    });
 
     const workspace = await provisionWorkspace(config, claim);
     assert.equal(await readFile(join(workspace.path, specificationPath), "utf8"), "authoritative brief");
@@ -154,7 +179,7 @@ test("prepared specification refuses a repository symlink that would escape the 
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
     const branch = "feature/platform-spec";
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-specification-symlink" },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-specification-symlink", runNumber: 1, targetBranch: "main", branch },
@@ -163,7 +188,7 @@ test("prepared specification refuses a repository symlink that would escape the 
         path: `.chain/${branch}/spec.md`,
         body: "must stay inside",
       },
-    } as ClaimedTask;
+    });
 
     await assert.rejects(provisionWorkspace(config, claim), /Prepared specification parent .* is a symlink/u);
     await assert.rejects(readFile(join(escaped, branch, "spec.md")), /ENOENT/u);
@@ -201,14 +226,14 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
       path: process.env.PATH ?? "/usr/bin:/bin", home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-1" },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "run-3", runNumber: 3, targetBranch: salvage,
         targetBranchPublished: true, branch: declared,
       },
-    } as ClaimedTask;
+    });
     const workspace = await provisionWorkspace(config, claim);
     assert.equal(workspace.branch, declared);
     assert.equal(workspace.baseSha, salvageSha);
@@ -253,7 +278,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-blind" },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
@@ -265,7 +290,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
         implementationHeadSha: pinnedBaseSha,
         branch: chainBranch,
       },
-    } as ClaimedTask;
+    });
 
     const workspace = await provisionWorkspace(config, claim);
     assert.equal(workspace.baseSha, pinnedBaseSha);
@@ -297,11 +322,11 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-retry" },
       repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
-    } as ClaimedTask;
+    });
     const fake = async (config: RunnerConfig, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> => {
       const shell = await realShell(config, executable, args, cwd, env);
       if (shell !== null) return shell;
@@ -314,7 +339,10 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       if (executable === "git" && args[0] === "rev-parse") return "base-sha";
       return "";
     };
-    const workspace = await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
+    const workspace = await provisionWorkspace(config, claim, {
+      execute: fake,
+      retryOptions: { wait: async () => undefined },
+    });
     // The retried operation is now the mirror's fetch. The clone that follows
     // reads local disk, so retrying it would only repeat a failure that no
     // amount of waiting can change.
@@ -348,11 +376,11 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-timeout" },
       repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
       run: { id: "run-timeout", runNumber: 1, targetBranch: "main", branch: "agentos/task-timeout/run-1" },
-    } as ClaimedTask;
+    });
     const calls: RecordedCommand[] = [];
     // Only main is published: the intended head's probe finds nothing, exactly
     // as the `ls-remote` round trip it replaced used to report.
@@ -361,7 +389,10 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       if (args[0] === "rev-parse") return "base-sha";
       return "";
     });
-    await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
+    await provisionWorkspace(config, claim, {
+      execute: fake,
+      retryOptions: { wait: async () => undefined },
+    });
     const ceiling = (name: string): number | undefined => calls.find(({ args }) => args[0] === name)?.timeoutMs;
     // The only command still talking to GitHub is the mirror's fetch, and a
     // hung one is what nothing else bounds before the agent starts.
@@ -397,7 +428,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-pinned-timeout" },
       repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
       run: {
@@ -409,14 +440,17 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
         implementationBaseSha: "impl-base-sha",
         implementationHeadSha: "pinned-sha",
       },
-    } as ClaimedTask;
+    });
     const calls: RecordedCommand[] = [];
     const fake = recordingExecutor(calls, (args) => {
       if (args[0] === "cat-file") return "impl-base-sha commit\npinned-sha commit";
       if (args[0] === "rev-parse") return "pinned-sha";
       return "";
     });
-    await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
+    await provisionWorkspace(config, claim, {
+      execute: fake,
+      retryOptions: { wait: async () => undefined },
+    });
     const remoteFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("origin"));
     const rangeFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("pinned-sha"));
     assert.equal(remoteFetch?.timeoutMs, CLONE_COMMAND_TIMEOUT_MS);
@@ -456,7 +490,7 @@ test("session credentials are created through the run-as prefix, with the token 
       run: { id: "run-1" },
       sessionToken: "session-token-never-in-argv",
       fencingToken: "fencing-token-never-in-argv",
-    } as ClaimedTask;
+    };
 
     const path = await writeSessionCredentials(config, claim, { path: workspacePath, branch: "topic", baseSha: "base" });
 
@@ -533,11 +567,11 @@ test("a run-as workspace is provisioned by the launched account and cannot be en
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const claim = {
+    const claim = workspaceClaim({
       task: { id: "task-prefix" },
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-prefix", runNumber: 1, targetBranch: "main", branch: "main" },
-    } as ClaimedTask;
+    });
 
     const workspace = await provisionWorkspace(config, claim);
 

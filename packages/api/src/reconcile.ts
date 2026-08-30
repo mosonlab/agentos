@@ -175,7 +175,7 @@ export const reconcileDatabaseRuns = async (
   ));
   const reconciliation = await commitWithLeaseOutcomes(db, async (tx) => {
     const strandedHandoffs = await leaseHandoffsWithoutConsumer(tx, now);
-    const deferredReleases = await deferredLeaseReleases(tx);
+    const deferredReleases = await deferredLeaseReleases(tx, now);
     if (orphans.length === 0 && expiredInboxRuns.length === 0
       && strandedHandoffs.length === 0 && deferredReleases.length === 0) {
       return { value: { count: 0 }, leaseOutcomes: [] };
@@ -353,14 +353,19 @@ export const reconcileDatabaseRuns = async (
       leaseOutcomes.push({
         kind: "stop",
         taskId: handoff.taskId,
-        releasedHandoff: { toRunId: handoff.toRunId, at: now },
+        releasedHandoff: {
+          eventId: handoff.eventId,
+          toRunId: handoff.toRunId,
+          target: handoff.target,
+          at: now,
+        },
       });
     }
     for (const deferred of deferredReleases) {
       leaseOutcomes.push({
         kind: "stop",
         taskId: deferred.taskId,
-        deferredRelease: { activityId: deferred.activityId, target: deferred.target, at: now },
+        deferredRelease: { eventId: deferred.eventId, target: deferred.target, at: now },
       });
     }
     return {

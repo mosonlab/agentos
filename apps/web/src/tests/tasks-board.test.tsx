@@ -6,14 +6,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { InfoNotice } from "../components/ui";
 import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
+import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, columnStep, countByStatus } from "../lib/board";
+import { COLUMNS, columnStep, countByStatus, taskBoardEntry } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
-import { installDom, reactDom } from "./dom-harness";
+import { installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
 
@@ -140,9 +141,7 @@ const withStartFlow = async (walk: (flow: {
   requests: BoardRequest[];
   press: (label: string) => Promise<void>;
 }) => Promise<void>, startStatus = 201): Promise<void> => {
-  const { dom, container } = installDom();
   const requests: BoardRequest[] = [];
-  const originalFetch = globalThis.fetch;
   const startability = {
     startable: true,
     checklist: {
@@ -154,11 +153,10 @@ const withStartFlow = async (walk: (flow: {
       repo: { id: "r1", name: "product" }, targetBranch: "main",
     },
   };
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init?: RequestInit) => {
-    const path = String(url);
-    const method = init?.method ?? "GET";
-    requests.push({ method, path, body: init?.body === undefined ? null : JSON.parse(String(init.body)) });
-    if (path === "/api/tasks/t1/startability") return Response.json(startability);
+  const page = await mountPage(<StartFlowHarness />, { "*": ({ input, init, method }) => {
+    const path = String(input);
+    requests.push({ method, path, body: init.body === undefined ? null : JSON.parse(String(init.body)) });
+    if (path === "/api/tasks/t1/startability") return startability;
     if (path === "/api/tasks/t1/start" && method === "POST") {
       return startStatus === 201
         ? Response.json({ runId: "run-1", runNumber: 1 }, { status: 201 })
@@ -166,27 +164,10 @@ const withStartFlow = async (walk: (flow: {
     }
     return Response.json([], { status: 404 });
   } });
-  const root = (await reactDom()).createRoot(container);
-  const settle = async (): Promise<void> => {
-    for (let round = 0; round < 3; round += 1) {
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    }
-  };
-  const press = async (label: string): Promise<void> => {
-    const found = [...dom.window.document.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent?.trim() === label || candidate.getAttribute("aria-label") === label);
-    assert.ok(found, `no button labelled ${label}`);
-    await act(async () => found.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await settle();
-  };
   try {
-    await act(async () => root.render(<StartFlowHarness />));
-    await settle();
-    await walk({ dom, requests, press });
+    await walk({ dom: page.dom, requests, press: page.press });
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 };
 
@@ -344,12 +325,11 @@ test("a non-template chain uses the API-derived badge and short card title", () 
 });
 
 test("Archive All confirms the project-wide Done scope even while one chain is visible", async () => {
-  const { dom, container } = installDom();
   storage.set("agentos.projectId", "p1");
   const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
     statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
-    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, failureReason: null, position: 1 },
+    frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 },
     activation: { state: "settled" as const, predecessor: null, taskId }, totalCost: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   });
@@ -357,51 +337,39 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
     task({ id: "visible", name: "Alpha: Review", displayName: "Review", status: "DONE", chainId: "alpha", chainName: "Alpha", chainProgress: progress({ chainId: "alpha" }), chainAggregate: settledAggregate("alpha", "Alpha", "visible") }),
     task({ id: "hidden", name: "Beta: Review", displayName: "Review", status: "DONE", chainId: "beta", chainName: "Beta", chainProgress: progress({ chainId: "beta" }), chainAggregate: settledAggregate("beta", "Beta", "hidden") }),
   ];
-  const originalFetch = globalThis.fetch;
   const confirmations: string[] = [];
   const mutations: string[] = [];
-  Object.defineProperty(dom.window, "confirm", { configurable: true, value: (message: string) => { confirmations.push(message); return true; } });
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
-    const path = String(input);
-    if ((init?.method ?? "GET") === "POST") {
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "POST /projects/p1/tasks/archive-done": ({ input }) => {
+      mutations.push(String(input));
+      return { archived: 2, skipped: 0 };
+    },
+    "*": ({ input, method }) => {
+      const path = String(input);
+      if (method === "POST") {
       mutations.push(path);
-      return Response.json({ archived: 2, skipped: 0 });
+        return { archived: 2, skipped: 0 };
+      }
+      return [];
     }
-    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
-    if (path.includes("/api/tasks?")) return Response.json(rows);
-    return Response.json([]);
-  } });
-  const root = (await reactDom()).createRoot(container);
-  const flush = async (): Promise<void> => {
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-  };
-  const press = async (label: string): Promise<void> => {
-    const button = [...dom.window.document.querySelectorAll("button")].find((node) => (
-      node.textContent?.trim() === label || node.getAttribute("aria-label") === label
-    ));
-    assert.ok(button, `missing button ${label}: ${container.innerHTML}`);
-    await act(async () => button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    await flush();
-  };
+  });
+  Object.defineProperty(page.dom.window, "confirm", { configurable: true, value: (message: string) => { confirmations.push(message); return true; } });
   try {
-    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
-    await flush();
-    await press("Show only chain Alpha");
-    assert.ok(container.querySelector('[data-card="visible"]'));
-    assert.equal(container.querySelector('[data-card="hidden"]'), null);
-    await press("Archive All");
+    await page.press("Show only chain Alpha");
+    assert.ok(page.container.querySelector('[data-card="visible"]'));
+    assert.equal(page.container.querySelector('[data-card="hidden"]'), null);
+    await page.press("Archive All");
     assert.deepEqual(confirmations, ["Archive all 2 done tasks in this project?"]);
     assert.deepEqual(mutations, ["/api/projects/p1/tasks/archive-done"]);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
     storage.remove("agentos.projectId");
   }
 });
 
 test("the board renders Backlog oldest first and leaves every other column in the API's order", async () => {
-  const { dom, container } = installDom();
   storage.set("agentos.projectId", "p1");
   // As `GET /tasks` answers: newest first, for every column.
   const rows = [
@@ -411,25 +379,18 @@ test("the board renders Backlog oldest first and leaves every other column in th
     task({ id: "done-new", status: "DONE" }),
     task({ id: "done-old", status: "DONE" }),
   ];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string) => {
-    const path = String(input);
-    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
-    if (path.includes("/api/tasks?")) return Response.json(rows);
-    return Response.json([]);
-  } });
-  const root = (await reactDom()).createRoot(container);
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "*": [],
+  });
   try {
-    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
-    const rendered = [...container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
+    const rendered = [...page.container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
     // Backlog is a queue dispatched from the top, so a numbered queue has to
     // read top-to-bottom in dispatch order; Done reports what just happened.
     assert.deepEqual(rendered, ["backlog-old", "backlog-mid", "backlog-new", "done-new", "done-old"]);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
     storage.remove("agentos.projectId");
   }
 });
@@ -792,22 +753,28 @@ test("TaskCard is memoized", () => {
   assert.equal((TaskCard as unknown as { $$typeof: symbol }).$$typeof, Symbol.for("react.memo"));
 });
 
-test("desktop columns mount one fixed page as completed history grows", () => {
-  for (const total of [CARD_PAGE_SIZE + 1, CARD_PAGE_SIZE * 20]) {
-    const rows = Array.from({ length: total }, (_, index) => task({ id: `done-${index}`, status: "DONE" }));
-    const markup = column("DONE", rows);
-    assert.equal((markup.match(/data-card=/gu) ?? []).length, CARD_PAGE_SIZE);
-    assert.match(markup, new RegExp(`Done<span[^>]*>${total}</span>`));
-    assert.match(markup, new RegExp(`Show ${Math.min(CARD_PAGE_SIZE, total - CARD_PAGE_SIZE)} more`));
-  }
-});
+test("the shared paginated entry list owns page controls and clamps after shrink", async () => {
+  const { dom, container } = installDom();
+  const rows = Array.from({ length: CARD_PAGE_SIZE * 2 + 1 }, (_, index) => (
+    taskBoardEntry(task({ id: `done-${index}`, status: "DONE" }))
+  ));
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<PaginatedBoardEntries entries={rows} actions={ACTIONS} />));
+    assert.equal(container.querySelectorAll("[data-card]").length, CARD_PAGE_SIZE);
+    const more = [...container.querySelectorAll("button")].find((button) => button.textContent === `Show ${CARD_PAGE_SIZE} more`);
+    assert.ok(more);
+    await act(async () => more.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.equal(container.querySelectorAll("[data-card]").length, CARD_PAGE_SIZE);
+    assert.match(container.textContent ?? "", new RegExp(en("tasks.column.previous", { n: CARD_PAGE_SIZE })));
 
-test("mobile task lists mount one fixed page as completed history grows", () => {
-  const total = CARD_PAGE_SIZE * 20;
-  const rows = Array.from({ length: total }, (_, index) => task({ id: `done-${index}`, status: "DONE" }));
-  const markup = mobile("DONE", rows, rows);
-  assert.equal((markup.match(/data-card=/gu) ?? []).length, CARD_PAGE_SIZE);
-  assert.match(markup, new RegExp(`Show ${CARD_PAGE_SIZE} more`));
+    await act(async () => root.render(<PaginatedBoardEntries entries={rows.slice(0, 1)} actions={ACTIONS} />));
+    assert.equal(container.querySelector("[data-card]")?.getAttribute("data-card"), "done-0");
+    assert.equal(container.querySelectorAll("button").length, 1, "only the card menu remains after pagination clamps");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
 });
 
 /* -------------------------------------------------------------- the notice */

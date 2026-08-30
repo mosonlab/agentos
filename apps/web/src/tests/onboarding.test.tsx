@@ -13,7 +13,7 @@ import { ThemeProvider } from "../lib/theme";
 import { isValidBranchName, isValidSlug, remoteRejection, slugify, STARTER_MOUNT_PATH } from "../lib/onboarding";
 import { storage } from "../lib/storage";
 import { OnboardingPage, stepProblem } from "../pages/Onboarding";
-import { installDom, reactDom } from "./dom-harness";
+import { mountPage } from "./dom-harness";
 
 /**
  * The first-run wizard (plan Step 5; evidence rows E9/E10 on the browser side).
@@ -131,15 +131,8 @@ const withWizard = async (
   },
   walk: (wizard: Wizard) => Promise<void>,
 ): Promise<{ posts: Array<Record<string, unknown>>; paths: string[]; markup: string; hash: string }> => {
-  const { dom, container } = installDom(script.url);
-  if (script.freezeClock) {
-    let frozen = 0;
-    Object.defineProperty(dom.window, "setTimeout", { configurable: true, value: () => { frozen += 1; return frozen; } });
-    Object.defineProperty(dom.window, "clearTimeout", { configurable: true, value: () => undefined });
-  }
   const posts: Array<Record<string, unknown>> = [];
   const paths: string[] = [];
-  const original = globalThis.fetch;
   let projectIndex = 0;
   let postIndex = 0;
   const answer = (scripted: Scripted | undefined, fallback: Scripted): Response => {
@@ -147,10 +140,12 @@ const withWizard = async (
     if ("throws" in chosen) throw new TypeError("Failed to fetch");
     return new Response(chosen.body ?? "", { status: chosen.status, headers: { "Content-Type": "application/json" } });
   };
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init?: RequestInit) => {
-    const path = String(url);
+  const page = await mountPage(
+    <ThemeProvider><LocaleProvider initialLocale="en">{subject()}</LocaleProvider></ThemeProvider>,
+    { "*": ({ input, init, method }) => {
+    const path = String(input);
     paths.push(path);
-    if (path === "/api/onboarding" && init?.method === "POST") {
+    if (path === "/api/onboarding" && method === "POST") {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return answer(script.post?.[Math.min(postIndex++, (script.post?.length ?? 1) - 1)], { status: 201, body: INSTALLATION_BODY });
     }
@@ -161,19 +156,19 @@ const withWizard = async (
       // script: after the gate succeeds the provider is polling the same
       // control plane.
       const length = script.projects?.length ?? 1;
-      const at = init?.cache === "no-store" ? Math.max(0, projectIndex - 1) : projectIndex++;
+      const at = init.cache === "no-store" ? Math.max(0, projectIndex - 1) : projectIndex++;
       return answer(script.projects?.[Math.min(at, length - 1)], { status: 200, body: "[]" });
     }
     return new Response("[]", { status: 404 });
-  } });
-  const root = (await reactDom()).createRoot(container);
-  const settle = async (): Promise<void> => {
-    // Twice: one tick lets the request resolve, the next lets whatever mounted
-    // because of it run its own first effect.
-    for (let round = 0; round < 2; round += 1) {
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    }
-  };
+    } },
+    script.url,
+    script.freezeClock ? (dom) => {
+      let frozen = 0;
+      Object.defineProperty(dom.window, "setTimeout", { configurable: true, value: () => { frozen += 1; return frozen; } });
+      Object.defineProperty(dom.window, "clearTimeout", { configurable: true, value: () => undefined });
+    } : undefined,
+  );
+  const { dom } = page;
   const button = (label: string): HTMLButtonElement => {
     const found = [...dom.window.document.querySelectorAll("button")]
       .find((candidate) => candidate.textContent?.trim() === label || candidate.getAttribute("aria-label") === label);
@@ -181,10 +176,8 @@ const withWizard = async (
     return found as HTMLButtonElement;
   };
   try {
-    await act(async () => root.render(<ThemeProvider><LocaleProvider initialLocale="en">{subject()}</LocaleProvider></ThemeProvider>));
-    await settle();
     await walk({
-      dom, posts, paths, settle,
+      dom, posts, paths, settle: page.settle,
       markup: () => dom.window.document.body.innerHTML,
       disabled: (label) => button(label).hasAttribute("disabled"),
       fill: async (label, value) => {
@@ -200,27 +193,25 @@ const withWizard = async (
       },
       press: async (label) => {
         await act(async () => button(label).dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-        await settle();
+        await page.settle();
       },
       check: async (label) => {
         await act(async () => button(label).dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-        await settle();
+        await page.settle();
       },
       wait: async (ms) => {
         await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); });
-        await settle();
+        await page.settle();
       },
       visible: async (value) => {
         Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: !value });
         await act(async () => { dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")); });
-        await settle();
+        await page.settle();
       },
     });
     return { posts, paths, markup: dom.window.document.body.innerHTML, hash: dom.window.location.hash };
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: original });
-    await act(async () => root.unmount());
-    dom.window.close();
+    await page.dispose();
   }
 };
 

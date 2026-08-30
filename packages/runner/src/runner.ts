@@ -22,7 +22,6 @@ import {
 import {
   controlPlane as defaultControlPlane,
   type ClaimedTask,
-  type CancellationRequest,
   type ControlPlane,
   type SessionEventPayload,
   type SessionTaskOutputStatus,
@@ -44,7 +43,7 @@ import {
   runnerExceptionEnvelope,
   summarizeEvidence,
 } from "./envelope.js";
-import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
+import { createRunLease, deliverUnderLease, type RunLease } from "./run-lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import {
@@ -166,38 +165,7 @@ export const executeClaim = async (
   let workspace: Workspace | null = null;
   let scratch: AgentScratch | null = null;
   let handle: RuntimeHandle | null = null;
-  let heartbeatTimer: NodeJS.Timeout | undefined;
-  let lease: DeliveryLease | null = null;
   let sessionConfigLease: SessionConfigLease | null = null;
-  let heartbeatBusy = false;
-  let fencingRejected = false;
-  let waitingInbox = false;
-  let cancellation: CancellationRequest | null = null;
-  let cancellationPromise: Promise<void> | null = null;
-  let providerLaunchSettled = Promise.resolve();
-  let closeProviderLaunch = (): void => undefined;
-  const openProviderLaunch = (): void => {
-    let closed = false;
-    let resolveLaunch!: () => void;
-    providerLaunchSettled = new Promise<void>((resolve) => { resolveLaunch = resolve; });
-    closeProviderLaunch = () => {
-      if (closed) return;
-      closed = true;
-      resolveLaunch();
-    };
-  };
-  // Cancellation may arrive at any provisioning point before the first start.
-  openProviderLaunch();
-  const providerKillPromises = new WeakMap<RuntimeHandle, Promise<void>>();
-  const drainProviderHandle = (target: RuntimeHandle, reason: string): Promise<void> => {
-    const active = providerKillPromises.get(target);
-    if (active) return active;
-    const draining = adapter.kill(target, reason).then((killed) => {
-      if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
-    });
-    providerKillPromises.set(target, draining);
-    return draining;
-  };
   let budgetReason: string | null = null;
   let remediationFailureReason: string | null = null;
   let workspacePublicationForbidden = false;
@@ -239,10 +207,27 @@ export const executeClaim = async (
     }
     return worktreeContainmentViolations.length > 0 ? { worktreeContainmentViolations } : {};
   };
-  // The lease the claim granted; every successful heartbeat below moves it.
-  // Delivery derives its deadline from this, not from "now", because by the
-  // time the agent exits the last renewal can already be half a lease old.
-  let leaseRenewedAt = Date.now();
+  const claimStartedAt = new Date();
+  const runLease = createRunLease<RuntimeHandle>({
+    heartbeatIntervalMs: config.heartbeatIntervalMs,
+    leaseSeconds: config.leaseSeconds,
+    initialPhase: { name: "provision", startedAt: claimStartedAt },
+    send: (evidence) => controlPlane.heartbeat(config, claim, evidence),
+    authorityFor: controlPlane.authorityFor,
+    authorityAfterHeartbeat: controlPlane.authorityAfterHeartbeat,
+    stopProvider: (target, reason) => adapter.kill(target, reason),
+    acknowledgeCancellation: async (request) => controlPlane.acknowledgeCancellation(
+      config,
+      claim,
+      request,
+      workspace,
+      await worktreeContainmentReport(),
+    ),
+    onRevocationStopError: (error) => {
+      console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(error)}`);
+    },
+    onRenewalError: (error) => { console.error("Run Lease renewal failed", error); },
+  });
   let seq = claim.nextEventSeq;
   let pendingEvents: SessionEventPayload[] = [];
   let eventFlushPromise: Promise<void> | null = null;
@@ -260,7 +245,7 @@ export const executeClaim = async (
   const flushEvents = (): Promise<void> => {
     if (eventFlushPromise) return eventFlushPromise;
     eventFlushPromise = (async () => {
-      while (pendingEvents.length > 0 && !fencingRejected) {
+      while (pendingEvents.length > 0 && runLease.held) {
         // Keep the batch in the queue until the API accepts it. A failed append
         // therefore remains the head of the queue for the next flush attempt,
         // while the single worker prevents a later batch overtaking it.
@@ -272,56 +257,17 @@ export const executeClaim = async (
     return eventFlushPromise;
   };
 
-  const noteFencingError = async (error: unknown): Promise<void> => {
-    const authority = controlPlane.authorityFor(error);
-    if (authority.held) return;
-    waitingInbox = authority.reason === "waiting-inbox";
-    fencingRejected = true;
-    if (handle) {
-      try {
-        await drainProviderHandle(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
-      } catch (killError: unknown) {
-        console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(killError)}`);
-      }
-    }
+  const adoptAuthorityError = async (error: unknown): Promise<boolean> => {
+    return runLease.adoptError(error);
   };
-
-  const acceptCancellation = async (request: CancellationRequest | null): Promise<void> => {
-    if (!request) return;
-    cancellation = request;
-    fencingRejected = true;
-    cancellationPromise ??= (async () => {
-      // ACK is proof that no provider group can still appear. Cancellation
-      // during credential preparation or adapter startup waits until launch is
-      // either abandoned or has produced the handle that must be killed.
-      await providerLaunchSettled;
-      if (handle) {
-        await drainProviderHandle(handle, request.reason);
-      }
-      await controlPlane.acknowledgeCancellation(
-        config,
-        claim,
-        request,
-        workspace,
-        await worktreeContainmentReport(),
-      );
-    })();
-    await cancellationPromise;
-  };
-
-  // Cancellation and fencing are mutated by heartbeat continuations, which
-  // TypeScript cannot observe across the awaited provider launch.
-  const providerStopReason = (): string => cancellation?.reason
-    ?? (waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
 
   const observeEventFlush = async (error: unknown): Promise<void> => {
-    await noteFencingError(error);
-    if (controlPlane.authorityFor(error).held) console.error("Event flush failed", error);
+    if (await adoptAuthorityError(error)) console.error("Event flush failed", error);
   };
 
-  const drainEventsUnderLease = async (openLease: DeliveryLease): Promise<void> => {
+  const drainEventsUnderLease = async (openLease: RunLease<RuntimeHandle>): Promise<void> => {
     let lastError: unknown = null;
-    while (pendingEvents.length > 0 && !fencingRejected && !openLease.rejected) {
+    while (pendingEvents.length > 0 && openLease.held) {
       try {
         // This may first await an active-run flush. Recheck the retained queue
         // after it settles so its rejection can never become the terminal
@@ -332,7 +278,7 @@ export const executeClaim = async (
         lastError = error;
         await observeEventFlush(error);
       }
-      if (pendingEvents.length === 0 || fencingRejected || openLease.rejected) break;
+      if (pendingEvents.length === 0 || !openLease.held) break;
       const remainingMs = openLease.deadline - Date.now();
       if (remainingMs <= 0) throw lastError ?? new Error("Event delivery lease expired with events still pending");
       // Reuse the lease's heartbeat cadence instead of introducing a separate
@@ -387,30 +333,6 @@ export const executeClaim = async (
       return;
     }
 
-    const provisionStartedAt = new Date();
-    heartbeatTimer = setInterval(() => {
-      void controlPlane.heartbeat(config, claim, {
-        processAlive: true,
-        lastProgressEventAt: provisionStartedAt,
-        inFlightTool: {
-          id: "workspace-provision",
-          name: "workspace-provision",
-          startedAt: provisionStartedAt.toISOString(),
-          lastProgressAt: provisionStartedAt.toISOString(),
-        },
-      }).then(async (result) => {
-        const authority = controlPlane.authorityAfterHeartbeat(result);
-        if (!authority.held && authority.reason === "cancelled") await acceptCancellation(authority.request);
-        else leaseRenewedAt = Date.now();
-      }).catch((error: unknown) => {
-        const authority = controlPlane.authorityFor(error);
-        if (!authority.held) {
-          waitingInbox = authority.reason === "waiting-inbox";
-          fencingRejected = true;
-        }
-        else console.error("Provisioning heartbeat failed", error);
-      });
-    }, config.heartbeatIntervalMs);
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
@@ -420,13 +342,10 @@ export const executeClaim = async (
     });
     const env = buildChildEnvironment(config, claim, scratch, workspace.path, workspace.commitHooksPath);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
-    if (fencingRejected) {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      closeProviderLaunch();
-      if (cancellation) {
-        await cancellationPromise;
-        return;
-      }
+    if (!runLease.held) {
+      runLease.abandonProviderLaunch();
+      const authority = await runLease.checkpoint();
+      if (!authority.held && authority.reason === "cancelled") return;
       const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
       await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
@@ -435,7 +354,7 @@ export const executeClaim = async (
       return;
     }
     if (!preflight.ok) {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      runLease.abandonProviderLaunch();
       const evidence = preflightEvidence(preflight.error ?? "Preflight failed");
       const classified = adapter.classifyError(evidence);
       const worktreeReport = await worktreeContainmentReport();
@@ -463,27 +382,51 @@ export const executeClaim = async (
     }
 
     const credentialsPath = await (dependencies.writeSessionCredentials ?? writeSessionCredentials)(config, claim, workspace);
-    if (fencingRejected) {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      closeProviderLaunch();
-      if (cancellation) await cancellationPromise;
+    if (!runLease.held) {
+      runLease.abandonProviderLaunch();
+      await runLease.checkpoint();
       return;
     }
     const spec = { config, claim, workingDirectory: workspace.path, env, prompt, credentialsPath };
-    try {
-      handle = claim.resume
-        ? await adapter.resume({ ...spec, ...claim.resume }, sink)
-        : await adapter.start(spec, sink);
-    } finally {
-      closeProviderLaunch();
-    }
-    if (fencingRejected) {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (cancellation) await cancellationPromise;
-      return;
-    }
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    const launchedHandle = await runLease.launch(() => claim.resume
+      ? adapter.resume({ ...spec, ...claim.resume }, sink)
+      : adapter.start(spec, sink));
+    if (!launchedHandle) return;
+    handle = launchedHandle;
     phase = "EXECUTE";
+    const executionStartedAt = handle.startedAt;
+    await runLease.enterPhase({
+      name: "execute",
+      evidence: async () => {
+        if (!handle) throw new Error("Execute heartbeat requires a provider handle");
+        const heartbeatHandle = handle;
+        const snapshot = await adapter.heartbeat(heartbeatHandle);
+        const decision = evaluateBudget({
+          now: new Date(),
+          startedAt: executionStartedAt,
+          maxDurationMs: claim.run.maxDurationMin * 60_000,
+          currentRunNumber: claim.run.runNumber,
+          maxRuns: claim.run.maxRunsPerTask,
+          processAlive: snapshot.processAlive,
+          lastProgressEventAt: snapshot.lastProgressEventAt,
+          stallTimeoutMs: claim.run.stallTimeoutMin * 60_000,
+          toolDeadlineMs: config.toolDeadlineMs,
+          inFlightTool: snapshot.inFlightTool,
+        });
+        if (!decision.allowed && snapshot.processAlive) {
+          budgetReason = `${decision.gate}: ${decision.reason}`;
+          await runLease.stopProvider(heartbeatHandle, budgetReason);
+        }
+        return {
+          processAlive: snapshot.processAlive,
+          lastProgressEventAt: snapshot.lastProgressEventAt,
+          inFlightTool: serializeTool(snapshot.inFlightTool),
+        };
+      },
+      // Event delivery remains detached from renewal: a failed or slow append
+      // cannot occupy the run Lease renewal loop, and the queue stays ordered.
+      afterRenewal: () => { if (runLease.held) void flushEvents().catch(observeEventFlush); },
+    });
     // A resume dispatches its continuation input rather than the fresh prompt.
     // Keep the launch manifest and durable Run hash tied to the bytes that this
     // invocation actually handed to the provider.
@@ -502,60 +445,14 @@ export const executeClaim = async (
     });
     // The first append is also best-effort from the heartbeat loop's point of
     // view. If the endpoint is down, keep the batch queued and let the active
-    // heartbeat timer renew the lease while later flushes retry it.
+    // renewal loop keeps the run Lease live while later flushes retry it.
     void flushEvents().catch(observeEventFlush);
-
-    const executionStartedAt = handle.startedAt;
-    heartbeatTimer = setInterval(() => {
-      if (!handle || heartbeatBusy || fencingRejected) return;
-      const heartbeatHandle = handle;
-      heartbeatBusy = true;
-      void (async () => {
-        const snapshot = await adapter.heartbeat(heartbeatHandle);
-        const decision = evaluateBudget({
-          now: new Date(),
-          startedAt: executionStartedAt,
-          maxDurationMs: claim.run.maxDurationMin * 60_000,
-          currentRunNumber: claim.run.runNumber,
-          maxRuns: claim.run.maxRunsPerTask,
-          processAlive: snapshot.processAlive,
-          lastProgressEventAt: snapshot.lastProgressEventAt,
-          stallTimeoutMs: claim.run.stallTimeoutMin * 60_000,
-          toolDeadlineMs: config.toolDeadlineMs,
-          inFlightTool: snapshot.inFlightTool,
-        });
-        if (!decision.allowed && snapshot.processAlive) {
-          budgetReason = `${decision.gate}: ${decision.reason}`;
-          await drainProviderHandle(heartbeatHandle, budgetReason);
-        }
-        try {
-          const result = await controlPlane.heartbeat(config, claim, {
-            processAlive: snapshot.processAlive,
-            lastProgressEventAt: snapshot.lastProgressEventAt,
-            inFlightTool: serializeTool(snapshot.inFlightTool),
-          });
-          const authority = controlPlane.authorityAfterHeartbeat(result);
-          if (!authority.held && authority.reason === "cancelled") await acceptCancellation(authority.request);
-          else if (snapshot.processAlive) leaseRenewedAt = Date.now();
-        } catch (error: unknown) {
-          await noteFencingError(error);
-          if (controlPlane.authorityFor(error).held) console.error("Run heartbeat failed", error);
-        }
-        // Event delivery is deliberately detached from the heartbeat attempt:
-        // a failed or slow append must not occupy heartbeatBusy or suppress the
-        // next lease renewal. The queue itself remains ordered and retryable.
-        if (!fencingRejected) void flushEvents().catch(observeEventFlush);
-      })().catch(async (error: unknown) => {
-        await noteFencingError(error);
-        if (controlPlane.authorityFor(error).held) console.error("Run heartbeat failed", error);
-      }).finally(() => { heartbeatBusy = false; });
-    }, config.heartbeatIntervalMs);
 
     const completedHandle = handle;
     const evidence = await completedHandle.exit;
     producedOutput = outputTail(evidence);
     let regressionHandoffPersisted = false;
-    if (!fencingRejected) {
+    if (runLease.held) {
       try {
         const handoff = await readRegressionOutputHandoff(config, claim, workspace);
         if (handoff) {
@@ -578,7 +475,7 @@ export const executeClaim = async (
     }
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
-      && !fencingRejected
+      && runLease.held
       && remediationFailureReason === null) {
       let outputStatus: SessionTaskOutputStatus | null = null;
       try {
@@ -614,40 +511,24 @@ export const executeClaim = async (
         } else if (outputStatus.outputRemediationAllowed
           && outputKind
           && providerConversationId
-          && !fencingRejected) {
+          && runLease.held) {
           const beforeRemediation = await captureWorkspaceSnapshot(config, workspace);
           // Snapshotting is asynchronous. Cancellation may have been ACKed
           // against the already-closed first launch while it ran, so no second
           // provider launch may be opened without this fresh fence check.
-          if (!fencingRejected) {
+          if (runLease.held) {
             sink({
               source: "RUNNER",
               type: "TASK_OUTPUT_REMEDIATION_STARTED",
               payload: { outputKind, workspace: workspaceSnapshotEvidence(beforeRemediation) },
             });
-            let remediationHandle: RuntimeHandle | null = null;
-            openProviderLaunch();
-            try {
-              remediationHandle = await adapter.resume({
-                ...spec,
-                providerConversationId,
-                input: missingOutputRemediationInput(outputKind),
-              }, sink);
+            const remediationHandle = await runLease.launch(() => adapter.resume({
+              ...spec,
+              providerConversationId,
+              input: missingOutputRemediationInput(outputKind),
+            }, sink));
+            if (remediationHandle) {
               handle = remediationHandle;
-            } finally {
-              closeProviderLaunch();
-            }
-            // A cancellation can win while adapter.resume is constructing the
-            // process group. Recheck before awaiting its exit and drain the newly
-            // returned handle; the ACK waits on this same deduplicated kill.
-            if (fencingRejected && remediationHandle) {
-              await drainProviderHandle(
-                remediationHandle,
-                providerStopReason(),
-              );
-              if (cancellation) await cancellationPromise;
-            }
-            if (!fencingRejected && remediationHandle) {
               const remediationEvidence = await remediationHandle.exit;
               const afterRemediation = await captureWorkspaceSnapshot(config, workspace);
               const workspaceChanged = !sameWorkspaceSnapshot(beforeRemediation, afterRemediation);
@@ -711,41 +592,19 @@ export const executeClaim = async (
         }
       }
     }
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (cancellation) {
-      await cancellationPromise;
+    if (!runLease.authority.held && runLease.authority.reason === "cancelled") {
+      await runLease.checkpoint();
       return;
     }
     phase = "DELIVER";
-    // The agent process is gone, but the runner is not done: it still has to
-    // flush events, snapshot git, push, talk to GitHub, clean up the workspace
-    // and record terminal completion — and the API requires a live lease for
-    // the publication and completion writes. lease.ts owns that phase: it
-    // renews the lease across it, refuses to let the phase outlive the lease,
-    // and — the part a bare heartbeat loop would miss — reports when the
-    // control plane has revoked this runner's authority.
-    lease = await openDeliveryLease(config, claim, leaseRenewedAt, {
-      send: controlPlane.heartbeat,
-      authorityFor: controlPlane.authorityFor,
-      authorityAfterHeartbeat: controlPlane.authorityAfterHeartbeat,
-    });
-    const adoptLeaseVerdict = (openLease: DeliveryLease): void => {
-      if (!openLease.rejected) return;
-      fencingRejected = true;
-      waitingInbox = openLease.waitingInbox;
-      if (openLease.cancellation) cancellation = openLease.cancellation;
-    };
-    adoptLeaseVerdict(lease);
-    await drainEventsUnderLease(lease);
-    // Re-read: a periodic renewal may have been rejected while the events above
-    // were still draining, and everything past this point writes to a remote.
-    adoptLeaseVerdict(lease);
-    if (fencingRejected) {
-      if (cancellation) {
-        await acceptCancellation(cancellation);
-        return;
-      }
-      if (waitingInbox) return;
+    // The same renewal loop remains live while delivery evidence replaces
+    // execute evidence. The opening delivery renewal fixes the deadline from
+    // the last attempt known to have landed.
+    await runLease.enterPhase({ name: "deliver", startedAt: new Date() });
+    await drainEventsUnderLease(runLease);
+    if (!runLease.held) {
+      const authority = await runLease.checkpoint();
+      if (!authority.held && (authority.reason === "cancelled" || authority.reason === "waiting-inbox")) return;
       const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
       await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
@@ -781,13 +640,14 @@ export const executeClaim = async (
           pushRemote: claim.repo.remoteUrl,
           deliveryInstructions: `Pinned checkout ${workspace.pinnedBaseSha} completed without branch publication.`,
         }
-        : await deliverUnderLease(lease, (retryOptions) => deliverWorkspace(
+        : await deliverUnderLease(runLease, (retryOptions) => deliverWorkspace(
           config,
           claim,
           delivered,
-          undefined,
-          (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
-          retryOptions,
+          {
+            recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
+            retryOptions,
+          },
         ));
     }
     const primaryDelivery = delivery;
@@ -845,7 +705,7 @@ export const executeClaim = async (
     // run is a guaranteed 409 and pure log noise. The last renewal is at most
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
-    lease.close();
+    await runLease.close();
     const acceptedEvidence = regressionMechanicallySettled
       ? {
         ...evidence,
@@ -902,23 +762,17 @@ export const executeClaim = async (
     });
     scratch = null;
   } catch (error: unknown) {
-    closeProviderLaunch();
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    const authority = controlPlane.authorityFor(error);
-    if (!authority.held) {
-      waitingInbox = authority.reason === "waiting-inbox";
-      fencingRejected = true;
-      if (handle) await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
-      if (waitingInbox) return;
-    }
+    runLease.abandonProviderLaunch();
+    await runLease.adoptError(error);
+    const authority = await runLease.checkpoint();
+    if (!authority.held && (authority.reason === "waiting-inbox" || authority.reason === "cancelled")) return;
     const message = errorMessage(error);
-    if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
-    if (fencingRejected) {
-      if (cancellation) {
-        await acceptCancellation(cancellation);
-        return;
-      }
-      if (waitingInbox) return;
+    if (handle && authority.held) {
+      await runLease.stopProvider(handle, RUNNER_EXCEPTION_REASON).catch((stopError: unknown) => {
+        console.error(`Unable to drain failed Run ${claim.run.id}: ${errorMessage(stopError)}`);
+      });
+    }
+    if (!authority.held && authority.reason === "revoked") {
       if (workspace) {
         const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
         const { salvage: _salvage, ...cleanupOutcome } = cleaned;
@@ -968,9 +822,8 @@ export const executeClaim = async (
       } : {}),
     });
   } finally {
-    closeProviderLaunch();
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    lease?.close();
+    runLease.abandonProviderLaunch();
+    await runLease.close();
     // Throwaway by construction, so losing it costs nothing and leaving it
     // behind would leak a directory per run.
     if (scratch) {

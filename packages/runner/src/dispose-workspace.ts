@@ -1,13 +1,19 @@
 import {
-  controlPlane as defaultControlPlane,
-  type ClaimedTask, type CleanupStatus, type ControlPlane,
+  controlPlane as defaultControlPlane, type ClaimedTask, type CleanupStatus,
+  type ControlPlane, type ControlPlaneRunClaim,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { salvageWorkspace, type DeliveryResult } from "./delivery.js";
 import { captureWorkspaceResult, cleanupWorkspace, type Workspace } from "./workspace.js";
 
+export type WorkspaceDisposalClaim = ControlPlaneRunClaim & {
+  task: Pick<ClaimedTask["task"], "id">;
+  run: ControlPlaneRunClaim["run"] & Pick<ClaimedTask["run"], "runNumber">;
+  repo: Pick<ClaimedTask["repo"], "remoteUrl">;
+};
+
 export type WorkspaceDisposalIdentity =
-  | { source: "runner"; claim: ClaimedTask }
+  | { source: "runner"; claim: WorkspaceDisposalClaim }
   | { source: "reclaim"; runId: string; taskId: string | null; runNumber: number | undefined };
 
 export type DisposableWorkspace = {

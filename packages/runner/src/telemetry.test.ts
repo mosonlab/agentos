@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 
-import { claimRequestBody, heartbeat, runnerTelemetryBody, type ClaimedTask } from "./api.js";
+import { claimRequestBody, heartbeat, runnerTelemetryBody, type ControlPlaneRunClaim } from "./api.js";
 import { loadRunnerConfig } from "./config.js";
 
 const require = createRequire(import.meta.url);
@@ -58,7 +58,7 @@ test("a control-plane call that connects but never answers fails instead of hold
     apiUrl: `http://127.0.0.1:${address.port}`,
     apiTimeoutMs: 300,
   };
-  const claim = { run: { id: "run-1" }, fencingToken: 1 } as unknown as ClaimedTask;
+  const claim = { run: { id: "run-1" }, fencingToken: "fence-1" } satisfies ControlPlaneRunClaim;
   try {
     const started = Date.now();
     await assert.rejects(

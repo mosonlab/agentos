@@ -1,5 +1,6 @@
 import {
   activateChainSuccessor,
+  AssigneeType,
   CompoundImplementationAssigneeError,
   compoundImplementationAssigneeValid,
   InboxStatus,
@@ -13,12 +14,14 @@ import {
   type Task,
   TaskStatus,
 } from "@anneal/db";
+import { z } from "zod";
 
-import type { TaskPatchInput } from "./app.js";
 import { blockingPredecessor } from "./chain.js";
+import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import { type Refusal, refusalFor } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
 import { rewriteBrief, stepHasTaskBrief } from "./task-brief.js";
+import { taskMoveAuthority } from "./task-move-authority.js";
 import {
   hasActiveRun,
   isLiveStatus,
@@ -28,6 +31,69 @@ import {
   type TaskWriteRefusal,
 } from "./task-write.js";
 import { withoutUndefined } from "./without-undefined.js";
+
+const id = z.string().min(1);
+const taskFields = {
+  name: z.string().trim().min(1).max(200),
+  description: z.string(),
+  workingDirectory: z.string().trim().min(1).nullable(),
+  repoId: id.nullable(),
+  targetBranch: z.string().trim().min(1).nullable(),
+  assigneeType: z.nativeEnum(AssigneeType),
+  assigneeAgentId: id.nullable(),
+  approvalGate: z.boolean(),
+  opensPullRequest: z.boolean(),
+  maxDurationMin: z.number().int().min(1).max(24 * 60),
+  stallTimeoutMin: z.number().int().min(1).max(24 * 60),
+  maxSessionsPerTask: z.number().int().min(1).max(100),
+  scheduleKind: z.nativeEnum(ScheduleKind),
+  runAt: z.coerce.date().nullable(),
+  cron: z.string().trim().min(9).max(100).nullable(),
+  timezone: z.string().trim().min(1).max(64).nullable(),
+};
+const taskCreateStatus = z.nativeEnum(TaskStatus).refine(
+  (status) => status === TaskStatus.BACKLOG || status === TaskStatus.TODO,
+  "Task creation status must be BACKLOG or TODO",
+);
+
+/** Exported for `smoke-fixture.test.ts`: the published release fixture and this
+ *  schema have to agree about `opensPullRequest`, and the only way to assert
+ *  that is to parse the fixture with the schema the route actually uses. */
+export const taskInput = z.object({
+  ...taskFields,
+  status: taskCreateStatus.default(TaskStatus.TODO),
+  description: taskFields.description.default(""),
+  workingDirectory: taskFields.workingDirectory.default(null),
+  repoId: taskFields.repoId.default(null),
+  targetBranch: taskFields.targetBranch.default(null),
+  assigneeType: taskFields.assigneeType.default(AssigneeType.AGENT),
+  assigneeAgentId: taskFields.assigneeAgentId.default(null),
+  approvalGate: taskFields.approvalGate.default(false),
+  opensPullRequest: taskFields.opensPullRequest.default(true),
+  maxDurationMin: taskFields.maxDurationMin.default(240),
+  stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
+  maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
+  scheduleKind: taskFields.scheduleKind.default(ScheduleKind.NOW),
+  runAt: taskFields.runAt.default(null),
+  cron: taskFields.cron.default(null),
+  timezone: taskFields.timezone.default(null),
+  chainId: z.string().trim().min(1).max(100).optional(),
+  chainIndex: z.number().int().min(0).optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
+    context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
+  }
+});
+
+// `failureReason` is patchable but not creatable: a task is never born with a
+// failure, and an operator whose task carries a stale one needs a way to clear
+// it — an explicit null — without inventing a run.
+export const taskPatch = z.object(taskFields).partial().extend({
+  status: z.nativeEnum(TaskStatus).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
+
+export type TaskPatchInput = z.infer<typeof taskPatch>;
 
 export type TaskPatchRefusal = Refusal;
 
@@ -52,33 +118,6 @@ type GateWinner = {
   card: { id: string; body: string; gateTaskId: string | null; sessionId: string | null };
   runId: string;
 } | null;
-
-/**
- * The status transitions owned by the board operator.
- *
- * Execution code does not call this action: runners and the chain control
- * plane write their machine-owned states through their own fenced paths.  A
- * board PATCH may therefore only move standalone work between its two queue
- * states, or record the one terminal decision a Human owns.  Chain state is a
- * projection of chain execution, with that Human completion as its sole
- * operator-owned exception.
- */
-export const operatorStatusTransitionRefusal = (
-  task: Pick<Task, "assigneeType" | "chainId" | "status">,
-  next: TaskStatus,
-): string | null => {
-  if (next === task.status) return null;
-  if (task.assigneeType === "HUMAN" && next === TaskStatus.DONE) return null;
-  if (task.chainId !== null) return "Chain task statuses are controlled by chain execution";
-  const queueTransition = (
-    (task.status === TaskStatus.BACKLOG && next === TaskStatus.TODO)
-    || (task.status === TaskStatus.TODO && next === TaskStatus.BACKLOG)
-  );
-  if (queueTransition) return null;
-  return task.assigneeType === "AGENT"
-    ? "Doing, Review, and Done for agent tasks are controlled by execution"
-    : "Human tasks may move between Backlog and Todo or be marked Done";
-};
 
 /** A refusal from `writeTask` in this action's terms: the task is gone, or the
  *  assignee the request named may not be written onto it. */
@@ -237,6 +276,7 @@ export const patchTask = async (
   // on a row another writer has since parked or archived — and outside the
   // transaction it wrote that TODO back with no lock and no guard at all.
   if (body.status !== undefined) {
+    const nextStatus = body.status;
     const written = await db.$transaction(async (tx) => {
       const result = await writeTask<StatusWritePlan>(tx, taskId, async (locked) => {
         const refuse = (message: string) => ({
@@ -244,75 +284,54 @@ export const patchTask = async (
           activity: null,
           value: { reason: "conflict" as const, message },
         });
-        if (locked.archivedAt !== null) {
-          return refuse("Cannot change the status of an archived task; unarchive it first");
-        }
-        if (typeof locked.dispatchAfterTaskId === "string"
-          && locked.dispatchAfter?.status !== TaskStatus.DONE
-          && body.status !== locked.status) {
-          const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
-          return refuse(`Cannot change bound task status before predecessor ${predecessorName} is done`);
-        }
-        // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
-        // task back to whoever it is *already* assigned to, and that assignee is
-        // in no request field for the module's assignment guard to have checked.
-        // So the stored one joins the same protocol here, read under the
-        // Agent-row mutex the locked Task row already ordered us into. `locked`
-        // is the authority on it, not the pre-transaction `before` read.
-        //
-        // 409, not the 400 the module answers with: nothing in the request is
-        // malformed — the conflict is in the state of the assignee, which the
-        // operator can fix and retry, exactly like Retry's archived-assignee
-        // refusal.
-        if (body.assigneeAgentId === undefined
+        // These reads stay inside the Task/Chain mutex. Board projection can
+        // answer from its snapshot, but PATCH revalidates the two dynamic
+        // residues (`active-run`, `stop-state`) at the write's serialization
+        // point before the shared move authority accepts a target.
+        const statusChanged = nextStatus !== locked.status;
+        const reactivationRefusal = body.assigneeAgentId === undefined
           && !isLiveStatus(locked.status)
-          && body.status !== undefined
-          && isLiveStatus(body.status)) {
-          const blockedReactivation = await reactivationBlocked(tx, locked);
-          if (blockedReactivation) return refuse(blockedReactivation);
+          && isLiveStatus(nextStatus)
+          ? await reactivationBlocked(tx, locked)
+          : null;
+        const activeRun = (nextStatus === TaskStatus.BACKLOG && statusChanged)
+          || nextStatus === TaskStatus.DONE
+          ? await hasActiveRun(tx, taskId)
+          : false;
+        const stopped = statusChanged ? await stopStateFor(tx, taskId) : null;
+        let chainPredecessor: { name: string } | null = null;
+        if (nextStatus === TaskStatus.DONE && locked.chainId) {
+          const chainRows = await tx.task.findMany({
+            where: {
+              projectId: locked.projectId,
+              chainId: locked.chainId,
+            },
+            orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
+            select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
+          });
+          chainPredecessor = blockingPredecessor(chainRows, taskId);
         }
-        // Against `locked`, not `before`: a park is a park whenever the row this
-        // transaction holds is not already in Backlog.
-        if (body.status === TaskStatus.BACKLOG
-          && locked.status !== TaskStatus.BACKLOG
-          && await hasActiveRun(tx, taskId)) {
-          return refuse("Cannot move a task with an active run to Backlog");
+        const authority = taskMoveAuthority({
+          name: before.name,
+          status: locked.status,
+          assigneeType: locked.assigneeType,
+          chainId: locked.chainId,
+          archivedAt: locked.archivedAt,
+          dispatchAfterTaskId: locked.dispatchAfterTaskId,
+          dispatchAfter: locked.dispatchAfter,
+          reactivationRefusal,
+          activeRun,
+          stopStateRefusal: stopped === null ? null : stopStateRefusal(stopped),
+          chainPredecessor,
+        });
+        const moveRefusal = authority.refusals.find(({ status }) => status === nextStatus);
+        if (moveRefusal) return refuse(moveRefusal.message);
+        const unresolved = authority.deferred.find(({ status }) => status === nextStatus);
+        if (unresolved) {
+          throw new Error(`PATCH move authority left ${unresolved.residue} unresolved under the Task mutex`);
         }
-        // §D-P7 / Step 5. The exclusivity guard, composed rather than
-        // duplicated: while a recorded stop has no terminal-disposition answer,
-        // this task does not move. Keyed on the disposition, not on an answer
-        // existing, because `flag-incident` writes an answer and must still
-        // hold the chain.
-        const stopped = await stopStateFor(tx, taskId);
-        if (stopped && body.status !== undefined && body.status !== locked.status) {
-          return refuse(stopStateRefusal(stopped));
-        }
-        // Ownership is the generic boundary. A forbidden board move must not
-        // hide the more actionable reason that this same write is impossible
-        // anyway. The shared guards are above; DONE's active-run and chain-
-        // predecessor guards run below before its ownership refusal.
-        const operatorRefusal = operatorStatusTransitionRefusal(locked, body.status!);
-        if (body.status !== TaskStatus.DONE && operatorRefusal !== null) return refuse(operatorRefusal);
         let gate: GateWinner = null;
-        if (body.status === TaskStatus.DONE) {
-          if (await hasActiveRun(tx, taskId)) {
-            return refuse("Cannot mark a task done while it has an active run");
-          }
-          if (locked.chainId) {
-            const chainRows = await tx.task.findMany({
-              where: {
-                projectId: locked.projectId,
-                chainId: locked.chainId,
-              },
-              orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-              select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
-            });
-            const blocker = blockingPredecessor(chainRows, taskId);
-            if (blocker) {
-              return refuse(`Cannot complete ${before.name}; predecessor ${blocker.name} is not done`);
-            }
-          }
-          if (operatorRefusal !== null) return refuse(operatorRefusal);
+        if (nextStatus === TaskStatus.DONE) {
           // A Human approval has one durable decision identity on both API
           // channels. The earliest OPEN card is the deterministic winner; the
           // gate Task lock the module took makes this selection and the Inbox
@@ -352,11 +371,10 @@ export const patchTask = async (
             }
           }
         }
-        const statusChanged = body.status !== undefined && body.status !== locked.status;
         return {
           update: updateData,
           activity: statusChanged
-            ? taskStatusChangedActivity(locked.status, body.status!)
+            ? taskStatusChangedActivity(locked.status, nextStatus)
             : null,
           value: { gate, previousStatus: locked.status },
         };
@@ -371,7 +389,7 @@ export const patchTask = async (
       // This OPEN row is the gate-decision CAS. It deliberately depends on
       // neither templateId nor approvalGate: gate creation records the
       // relationship in gateTaskId, and that is the only authority here.
-      if (body.status === TaskStatus.DONE) {
+      if (nextStatus === TaskStatus.DONE) {
         if (plan.gate) {
           await tx.inboxMessage.update({
             where: { id: plan.gate.card.id },
@@ -399,7 +417,7 @@ export const patchTask = async (
         }, new Date());
       }
       if (plan.previousStatus !== TaskStatus.DONE
-        && body.status === TaskStatus.DONE
+        && nextStatus === TaskStatus.DONE
         && Boolean(updated.chainId)
         && authorization?.purpose !== "confirmation") {
         await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());

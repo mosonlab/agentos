@@ -5,6 +5,7 @@ import {
   AssigneeType,
   type ChangedFile,
   INTEGRATOR_SENTINEL_MODEL,
+  MergeLeaseEventState,
   MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
@@ -247,6 +248,10 @@ const assertDeferredReleaseAndRetry = async (
   assert.equal(metadata.chainId, seeded.regression.chainId);
   assert.equal(metadata.taskId, seeded.regression.id);
   assert.equal(metadata.failureDetail, "release helper timed out");
+  assert.equal(typeof metadata.ledgerId, "string");
+  const ledgerId = String(metadata.ledgerId);
+  const pendingLedger = await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: ledgerId } });
+  assert.equal(pendingLedger.state, MergeLeaseEventState.RELEASE_DEFERRED);
 
   const retried: MergeLeaseTarget[] = [];
   assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 1_000), async (target) => {
@@ -260,22 +265,41 @@ const assertDeferredReleaseAndRetry = async (
       { metadata: { path: ["state"], equals: "released" } },
     ],
   } });
-  assert.equal((terminal.metadata as Record<string, unknown>).deferredActivityId, pending[0]!.id);
+  assert.equal((terminal.metadata as Record<string, unknown>).ledgerId, ledgerId);
+  assert.equal(
+    (await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: ledgerId } })).state,
+    MergeLeaseEventState.RELEASED,
+  );
   assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 2_000), async () => {
     throw new Error("a terminal deferred release must not retry");
   }), 0);
 };
 
-test("the no-deferral sweep uses its partial index without a TaskActivity scan or sort", async () => {
+test("the no-deferral sweep uses its ledger index without a MergeLeaseEvent scan or sort", async () => {
   const seeded = await seedReadiness();
+  const settledAt = new Date("2026-08-29T12:00:00.000Z");
   const noise = Array.from({ length: 5_000 }, (_, index) => ({
-    taskId: seeded.regression.id,
-    actorType: "control-plane",
-    body: `Unrelated activity ${index}`,
-    metadata: { kind: "test.noise", schemaVersion: 1, index },
+    projectId: seeded.project.id,
+    chainId: `${seeded.regression.chainId}-terminal-${index}`,
+    leaseRef: "refs/merge-lease/holder",
+    leaseSha: `terminal-lease-${index}`,
+    state: MergeLeaseEventState.RELEASED,
+    owningTaskId: seeded.regression.id,
+    settledAt,
+    acquiredAt: settledAt,
   }));
-  await db.taskActivity.createMany({ data: noise });
-  await db.$executeRawUnsafe('ANALYZE "TaskActivity"');
+  const handoffRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  const openHandoffNoise = Array.from({ length: 5_000 }, (_, index) => ({
+    projectId: seeded.project.id,
+    chainId: `${seeded.regression.chainId}-handoff-${index}`,
+    state: MergeLeaseEventState.HANDOFF_PENDING,
+    owningTaskId: seeded.regression.id,
+    handedOffRunId: handoffRun.id,
+    handedOffAt: settledAt,
+  }));
+  await db.mergeLeaseEvent.createMany({ data: noise });
+  await db.mergeLeaseEvent.createMany({ data: openHandoffNoise });
+  await db.$executeRawUnsafe('ANALYZE "MergeLeaseEvent"');
 
   type PlanNode = {
     "Node Type"?: string;
@@ -298,8 +322,11 @@ test("the no-deferral sweep uses its partial index without a TaskActivity scan o
     node.Plans?.forEach(collect);
   };
   collect(root);
-  assert.ok(nodes.some((node) => node["Index Name"] === "TaskActivity_release_deferred_createdAt_id_idx"));
-  assert.equal(nodes.some((node) => node["Node Type"] === "Seq Scan" && node["Relation Name"] === "TaskActivity"), false);
+  assert.ok(
+    nodes.some((node) => node["Index Name"] === "MergeLeaseEvent_state_deferredAt_id_idx"),
+    `unexpected deferred-release plan: ${JSON.stringify(root)}`,
+  );
+  assert.equal(nodes.some((node) => node["Node Type"] === "Seq Scan" && node["Relation Name"] === "MergeLeaseEvent"), false);
   assert.equal(nodes.some((node) => node["Node Type"] === "Sort"), false);
 });
 
@@ -345,6 +372,15 @@ test("a re-evaluated head writes the audit message once rather than raising P200
   // Same readiness task, same exact head: the second authorization leaves the
   // existing digest row alone instead of failing inside its own transaction.
   await db.task.update({ where: { id: seeded.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+  const mergeRuns = await db.run.findMany({
+    where: { taskId: seeded.integrator.id },
+    select: { id: true },
+  });
+  assert.equal((await db.mergeLeaseEvent.deleteMany({ where: {
+    projectId: seeded.project.id,
+    chainId: seeded.integrator.chainId!,
+    handedOffRunId: { in: mergeRuns.map((run) => run.id) },
+  } })).count, 1);
   await db.run.deleteMany({ where: { taskId: seeded.integrator.id } });
   assert.equal((await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease)).authorized, 1);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.readiness.id } }), 1);
@@ -784,6 +820,13 @@ test("reconciliation invalidates a deferred release whose validated holder later
     taskId: seeded.regression.id,
     metadata: { path: ["state"], equals: "release-deferred" },
   } });
+  const deferredMetadata = deferred.metadata as Record<string, unknown>;
+  assert.equal(typeof deferredMetadata.ledgerId, "string");
+  const ledgerId = String(deferredMetadata.ledgerId);
+  assert.equal(
+    (await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: ledgerId } })).state,
+    MergeLeaseEventState.RELEASE_DEFERRED,
+  );
   await db.task.update({
     where: { id: seeded.regression.id },
     data: { chainId: `${seeded.regression.chainId}-changed` },
@@ -797,7 +840,11 @@ test("reconciliation invalidates a deferred release whose validated holder later
     metadata: { path: ["state"], equals: "invalid" },
   } });
   const metadata = invalid.metadata as Record<string, unknown>;
-  assert.equal(metadata.deferredActivityId, deferred.id);
+  assert.equal(metadata.ledgerId, ledgerId);
+  assert.equal(
+    (await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: ledgerId } })).state,
+    MergeLeaseEventState.INVALID,
+  );
   assert.match(String(metadata.reason), /no longer matches/u);
   assert.equal(await reconcileDatabaseRuns(db, new Date(now.getTime() + 2_000), async () => {
     throw new Error("an invalid deferred target must remain terminal");

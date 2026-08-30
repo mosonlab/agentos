@@ -1,39 +1,49 @@
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { ClaimedTask } from "../api.js";
 import type { RunnerConfig } from "../config.js";
 import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
-  CLAUDE_TOOL_NAMES,
   capturePreflight,
-  claudePlatformSettingsPath,
-  classifyRuntimeError,
   createAdapterState,
   emitAdapterEvent,
-  heartbeatRuntime,
-  killRuntime,
   mcpConfig,
+  mcpServerPath,
   modelSpec,
   PREFLIGHT_REASONS,
   preflightFailure,
   processProviderEvent,
-  spawnAdapterRuntime,
   stringField,
-  TOOL_ORDER,
-  type AdapterImplementation,
+  type AdapterDeclaration,
   type AdapterState,
-  type CliAdapter,
   type PreflightResult,
   type PreflightSpec,
   type ResumeSpec,
   type RunSpec,
   type SessionEventSink,
   type ToolKey,
-} from "../adapters.js";
+} from "./runtime.js";
 import type { SessionConfigOptions } from "./session-config.js";
+
+const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+
+export const claudePlatformSettingsPath = (): string =>
+  process.env.RUNNER_CLAUDE_SETTINGS_PATH ?? join(packageRoot, "assets", "claude-platform-settings.json");
+
+const CLAUDE_ENFORCED_TOOLS = Object.freeze([
+  "BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH",
+] as const);
+
+const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
+  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
+  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
+};
 
 const denyArgs = (disabledTools: string[]): string[] => {
   const denied = new Set(disabledTools);
-  const names = TOOL_ORDER.flatMap((tool: ToolKey) => denied.has(tool) ? [CLAUDE_TOOL_NAMES[tool]] : []);
+  const names = CLAUDE_ENFORCED_TOOLS.flatMap((tool) => denied.has(tool) ? [CLAUDE_TOOL_NAMES[tool]] : []);
   return names.length === 0 ? [] : ["--disallowedTools", names.join(",")];
 };
 
@@ -115,11 +125,11 @@ export const parseClaudeTranscript = (
 
 const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
-  const version = await capturePreflight(spec.config, "CLAUDE", ["--version"], spec.env);
+  const version = await capturePreflight(spec.config, claudeDeclaration, ["--version"], spec.env);
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
   }
-  const help = await capturePreflight(spec.config, "CLAUDE", ["--help"], spec.env);
+  const help = await capturePreflight(spec.config, claudeDeclaration, ["--help"], spec.env);
   if (help.code !== 0 || !`${help.stdout}\n${help.stderr}`.includes("--setting-sources")) {
     return {
       ok: false,
@@ -133,7 +143,7 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
     ...(spec.model === null ? {} : { verifiedModel: spec.model }),
     cliProtocol: "print-stream-json-user-source-isolated",
   });
-  const auth = await capturePreflight(spec.config, "CLAUDE", ["auth", "status"], spec.env);
+  const auth = await capturePreflight(spec.config, claudeDeclaration, ["auth", "status"], spec.env);
   const text = `${auth.stdout}\n${auth.stderr}`;
   const ok = auth.code === 0 && /"loggedIn"\s*:\s*true/u.test(text);
   return {
@@ -157,17 +167,30 @@ export const provisionClaudeSessionConfig = async (
   _options: SessionConfigOptions = {},
 ): Promise<void> => undefined;
 
-const implementation: AdapterImplementation = {
-  runner: "CLAUDE",
-  args: claudeArgs,
-  parseEvent: parseClaudeEvent,
+const promptSections = (claim: ClaimedTask): string[] => {
+  if (claim.run.subagentModel !== null || claim.run.subagentMaxConcurrent !== null) {
+    throw new Error("Native implementation subagents require a Codex root Run");
+  }
+  return [];
 };
 
-export const createClaudeAdapter = (): CliAdapter => Object.freeze<CliAdapter>({
-  preflight: (spec) => preflight({ ...spec, runner: "CLAUDE" }),
-  start: async (spec, sink) => spawnAdapterRuntime(implementation, spec, sink),
-  resume: async (spec, sink) => spawnAdapterRuntime(implementation, spec, sink, spec),
-  kill: (handle, reason) => killRuntime(handle, reason),
-  heartbeat: (handle) => heartbeatRuntime(handle),
-  classifyError: (evidence) => classifyRuntimeError(evidence),
+export const claudeDeclaration: AdapterDeclaration = Object.freeze({
+  runner: "CLAUDE",
+  binaryEnvironment: "CLAUDE_BINARY",
+  defaultBinary: "claude",
+  toolIntroduction: "Anneal tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+  toolTransport: "mcp-stdio",
+  toolEntrypoint: mcpServerPath,
+  enforcedTools: CLAUDE_ENFORCED_TOOLS,
+  isolatesSessionConfig: false,
+  startupPreflightModel: null,
+  protectedEnvironmentVariables: ["CLAUDE_CONFIG_DIR"],
+  launcherEnvironmentVariables: [],
+  promptSections,
+  args: claudeArgs,
+  childEnvironment: claudeChildEnvironment,
+  provisionSessionConfig: provisionClaudeSessionConfig,
+  initialProviderState: () => undefined,
+  parseEvent: parseClaudeEvent,
+  preflight,
 });

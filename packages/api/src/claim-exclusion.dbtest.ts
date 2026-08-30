@@ -12,6 +12,7 @@ import {
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
+import { heldPredicate } from "@anneal/db/chain-hold";
 
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";
@@ -23,6 +24,14 @@ const EXECUTOR_RUNNER = "claim-exclusion-merge-executor";
 const RUNNER_ID = "claim-exclusion-runner";
 const EARLIER = new Date("2026-08-01T00:00:00.000Z");
 const LATER = new Date("2026-08-02T00:00:00.000Z");
+
+const HOLD_FIXTURES = [
+  { name: "stored layer below hold", chainLayer: 1, chainIndex: 99, heldLayer: 2, held: false },
+  { name: "stored layer above hold", chainLayer: 3, chainIndex: 0, heldLayer: 2, held: true },
+  { name: "legacy index below hold", chainLayer: null, chainIndex: 1, heldLayer: 2, held: false },
+  { name: "legacy index above hold", chainLayer: null, chainIndex: 3, heldLayer: 2, held: true },
+  { name: "missing layer and index", chainLayer: null, chainIndex: null, heldLayer: 2, held: true },
+] as const;
 
 let db: PrismaClient;
 const previousEnvironment = {
@@ -281,6 +290,72 @@ test("merge-executor claims apply the same held-layer exclusion and see release 
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.CLAIMED);
 });
 
+test("shared fixtures agree across the TypeScript, Prisma, and raw SQL hold expressions", async () => {
+  await db.$executeRawUnsafe('ALTER TABLE "Task" DROP CONSTRAINT "Task_chain_identity_all_or_none_check"');
+  try {
+    for (const fixture of HOLD_FIXTURES) {
+      await resetTestDb(db);
+      const ordinaryOwner = await seedRunner();
+      const ordinaryChain = await seedChain(ordinaryOwner, [1]);
+      const ordinaryTask = ordinaryChain.tasks[0]!;
+      const ordinaryRun = await queue(ordinaryTask.id);
+      await db.task.update({
+        where: { id: ordinaryTask.id },
+        data: { chainLayer: fixture.chainLayer, chainIndex: fixture.chainIndex },
+      });
+      await hold(ordinaryOwner.project.id, ordinaryChain.chainId, fixture.heldLayer);
+
+      assert.equal(heldPredicate({
+        projectId: ordinaryOwner.project.id,
+        chainId: ordinaryChain.chainId,
+        layer: fixture.chainLayer,
+        index: fixture.chainIndex,
+      }, {
+        projectId: ordinaryOwner.project.id,
+        chainId: ordinaryChain.chainId,
+        state: ChainControlState.HELD,
+        heldLayer: fixture.heldLayer,
+      }), fixture.held, `${fixture.name}: TypeScript`);
+
+      const ordinaryClaim = await claim(`raw-${fixture.name.replaceAll(" ", "-")}`);
+      assert.equal(ordinaryClaim.status, fixture.held ? 204 : 200, `${fixture.name}: raw SQL`);
+      if (!fixture.held) assert.equal(ordinaryClaim.body.run.id, ordinaryRun.id, `${fixture.name}: raw SQL run`);
+      assert.equal(
+        (await db.run.findUniqueOrThrow({ where: { id: ordinaryRun.id } })).status,
+        fixture.held ? RunStatus.QUEUED : RunStatus.CLAIMED,
+        `${fixture.name}: raw SQL state`,
+      );
+
+      await resetTestDb(db);
+      const executorChain = await seedIntegratorChain(db, { label: `fixture-${fixture.name.replaceAll(" ", "-")}` });
+      assert.ok(executorChain.integratorTask);
+      const executorRun = await queue(executorChain.integratorTask.id);
+      await db.task.update({
+        where: { id: executorChain.integratorTask.id },
+        data: { chainLayer: fixture.chainLayer, chainIndex: fixture.chainIndex },
+      });
+      await hold(executorChain.project.id, executorChain.chainId, fixture.heldLayer);
+
+      const executorClaim = await claim(EXECUTOR_RUNNER, EXECUTOR_TOKEN);
+      assert.equal(executorClaim.status, fixture.held ? 204 : 200, `${fixture.name}: Prisma`);
+      if (!fixture.held) assert.equal(executorClaim.body.run.id, executorRun.id, `${fixture.name}: Prisma run`);
+      assert.equal(
+        (await db.run.findUniqueOrThrow({ where: { id: executorRun.id } })).status,
+        fixture.held ? RunStatus.QUEUED : RunStatus.CLAIMED,
+        `${fixture.name}: Prisma state`,
+      );
+    }
+  } finally {
+    await resetTestDb(db);
+    await db.$executeRawUnsafe(`ALTER TABLE "Task"
+      ADD CONSTRAINT "Task_chain_identity_all_or_none_check" CHECK (
+        ("chainId" IS NULL AND "chainIndex" IS NULL AND "chainLayer" IS NULL)
+        OR
+        ("chainId" IS NOT NULL AND "chainIndex" IS NOT NULL AND "chainLayer" IS NOT NULL)
+      )`);
+  }
+});
+
 test("a Hold that wins the Chain mutex bars an ordinary claim selected from a stale candidate scan", async () => {
   const owner = await seedRunner();
   const chain = await seedChain(owner, [1, 2]);
@@ -293,6 +368,38 @@ test("a Hold that wins the Chain mutex bars an ordinary claim selected from a st
     runnerId: "claim-race-ordinary",
     token: RUNNER_TOKEN,
   });
+});
+
+test("the live claim loop fails closed when a racing Hold finds null Chain execution fields", async () => {
+  const owner = await seedRunner();
+  const chain = await seedChain(owner, [1]);
+  const run = await queue(chain.tasks[0]!.id);
+  await db.$executeRawUnsafe('ALTER TABLE "Task" DROP CONSTRAINT "Task_chain_identity_all_or_none_check"');
+  try {
+    await db.task.update({
+      where: { id: chain.tasks[0]!.id },
+      data: { chainLayer: null, chainIndex: null },
+    });
+    await holdWinsClaimRace({
+      projectId: owner.project.id,
+      chainId: chain.chainId,
+      heldLayer: 1,
+      runId: run.id,
+      runnerId: "claim-race-null-layer",
+      token: RUNNER_TOKEN,
+    });
+  } finally {
+    await db.task.update({
+      where: { id: chain.tasks[0]!.id },
+      data: { chainLayer: 1, chainIndex: 0 },
+    });
+    await db.$executeRawUnsafe(`ALTER TABLE "Task"
+      ADD CONSTRAINT "Task_chain_identity_all_or_none_check" CHECK (
+        ("chainId" IS NULL AND "chainIndex" IS NULL AND "chainLayer" IS NULL)
+        OR
+        ("chainId" IS NOT NULL AND "chainIndex" IS NOT NULL AND "chainLayer" IS NOT NULL)
+      )`);
+  }
 });
 
 test("a Hold that wins the Chain mutex bars a merge-executor claim selected from a stale candidate scan", async () => {

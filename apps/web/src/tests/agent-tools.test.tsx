@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
@@ -9,6 +8,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentToolsCard, BindingToggle } from "../pages/Agents";
 import { ENFORCED_BY, TOOL_KEYS } from "../lib/tools";
 import type { Agent, RunnerPreference } from "../lib/types";
+import { claudeDeclaration } from "../../../../packages/runner/src/adapters/claude.js";
+import { codexDeclaration } from "../../../../packages/runner/src/adapters/codex.js";
+import { piDeclaration } from "../../../../packages/runner/src/adapters/pi.js";
+import { installFetchFunction } from "./dom-harness";
 
 const agent = (overrides: Partial<Agent> = {}): Agent => ({
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
@@ -61,16 +64,12 @@ test("Custom model preferences always resolve to a concrete honesty answer", () 
   }
 });
 
-test("the web honesty map stays aligned with the two adapter maps", () => {
-  // Hand-copied intentionally: this fails review visibly if either side changes.
+test("the web honesty map stays aligned with the provider declarations", () => {
   assert.deepEqual(ENFORCED_BY, {
-    CLAUDE: ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"],
-    CODEX: [],
-    PI: ["BASH", "READ", "WRITE", "EDIT"],
+    CLAUDE: claudeDeclaration.enforcedTools,
+    CODEX: codexDeclaration.enforcedTools,
+    PI: piDeclaration.enforcedTools,
   });
-  const source = readFileSync(new URL("../../../../packages/runner/src/adapters.ts", import.meta.url), "utf8");
-  assert.match(source, /const TOOL_ORDER: ToolKey\[\] = \["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"\]/u);
-  assert.match(source, /const PI_TOOL_NAMES:[\s\S]*?BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit"/u);
 });
 
 test("BindingToggle keeps its switch in a flex wrapper to prevent the 3px baseline drift", () => {
@@ -92,11 +91,10 @@ test("rapid tool toggles serialize union writes and ignore a stale poll in fligh
   const root = createRoot(container);
   const calls: RequestInit[] = [];
   const releases: Array<(response: Response) => void> = [];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (_input: string | URL | Request, init?: RequestInit) => {
+  const fetchHarness = installFetchFunction(async (_input, init) => {
     calls.push(init ?? {});
     return await new Promise<Response>((resolve) => releases.push(resolve));
-  } });
+  });
   let saved = 0;
   const stale = agent();
   const state = (label: string): string | null => dom.window.document.querySelector(`[aria-label="${label}"]`)?.getAttribute("data-state") ?? null;
@@ -131,7 +129,7 @@ test("rapid tool toggles serialize union writes and ignore a stale poll in fligh
     });
     assert.equal(saved, 1);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }
@@ -150,11 +148,10 @@ test("a failed tool write rolls back while a later queued intent converges from 
   const root = createRoot(container);
   const calls: RequestInit[] = [];
   const releases: Array<(response: Response) => void> = [];
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (_input: string | URL | Request, init?: RequestInit) => {
+  const fetchHarness = installFetchFunction(async (_input, init) => {
     calls.push(init ?? {});
     return await new Promise<Response>((resolve) => releases.push(resolve));
-  } });
+  });
   let saved = 0;
   const state = (label: string): string | null => dom.window.document.querySelector(`[aria-label="${label}"]`)?.getAttribute("data-state") ?? null;
   const click = async (label: string): Promise<void> => {
@@ -188,7 +185,7 @@ test("a failed tool write rolls back while a later queued intent converges from 
     assert.equal(state("Enable Bash"), "checked");
     assert.equal(state("Enable Web search"), "unchecked");
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }

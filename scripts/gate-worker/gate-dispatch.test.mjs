@@ -345,6 +345,8 @@ const runDispatch = (repo, cache, args, env = {}) =>
       XDG_CACHE_HOME: cache,
       GATE_DISPATCH_POLL_SECONDS: "1",
       GATE_DISPATCH_TIMEOUT_MINUTES: "1",
+      AGENTOS_GATE_PRIMARY_SERVER: "primary",
+      AGENTOS_GATE_FALLBACK_SERVER: "fallback",
       ...env,
     },
   });
@@ -361,6 +363,38 @@ const busyCache = (t, busySlots = []) => {
 
 const dispatch = (t, repo, args, env = {}, busySlots = []) =>
   runDispatch(repo, busyCache(t, busySlots), args, env);
+
+test("an unconfigured dispatcher refuses instead of guessing a private topology", (t) => {
+  const repo = fixtureRepo(t, {});
+  const result = dispatch(t, repo, [repo.head], {
+    AGENTOS_GATE_PRIMARY_SERVER: "",
+    AGENTOS_GATE_FALLBACK_SERVER: "",
+  });
+  assert.equal(result.status, 76, result.stderr);
+  assert.match(result.stderr, /no gate capacity configured/u);
+  assert.doesNotMatch(result.stdout + result.stderr, /ci-desktop-worker|agentos-gate/u);
+});
+
+test("an unconfigured dispatcher runs local-only after explicit opt-in", (t) => {
+  const repo = fixtureRepo(t, { mergeGate: 'printf "MERGE GATE: PASS local-only\\n"; exit 0' });
+  const result = dispatch(t, repo, [repo.head, "--allow-local"], {
+    AGENTOS_GATE_PRIMARY_SERVER: "",
+    AGENTOS_GATE_FALLBACK_SERVER: "",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS local-only/u);
+  assert.match(result.stderr, /no remote worker, local\(1, explicit\)/u);
+});
+
+test("a fallback without a primary is a usage error", (t) => {
+  const repo = fixtureRepo(t, {});
+  const result = dispatch(t, repo, [repo.head], {
+    AGENTOS_GATE_PRIMARY_SERVER: "",
+    AGENTOS_GATE_FALLBACK_SERVER: "fallback",
+  });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /fallback worker requires a primary worker/u);
+});
 
 test("an explicitly enabled local PASS comes back as 0 with the gate's own verdict line", (t) => {
   const repo = fixtureRepo(t, {});
@@ -506,20 +540,20 @@ exec "$REAL_GIT" "$@"
 
 test("a configured single server is consumed by the dispatcher before child tools", (t) => {
   const repo = fixtureRepo(t, {
-    mirrorPush: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = agentos-gate; printf "MIRROR PUSH: OK\\n"',
-    remoteGate: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = agentos-gate; printf "MERGE GATE: PASS single-server\\n"',
+    mirrorPush: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = single-worker; printf "MIRROR PUSH: OK\\n"',
+    remoteGate: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = single-worker; printf "MERGE GATE: PASS single-server\\n"',
   });
-  const result = dispatch(t, repo, [repo.head], { AGENTOS_GATE_SERVER: "agentos-gate" });
+  const result = dispatch(t, repo, [repo.head], { AGENTOS_GATE_SERVER: "single-worker" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS single-server/u);
-  assert.match(result.stderr, /primary agentos-gate\(1\)/u);
+  assert.match(result.stderr, /primary single-worker\(1\)/u);
   assert.doesNotMatch(result.stderr, /fallback/u);
 });
 
 test("an ssh transport failure retries the exact gate on the fallback", (t) => {
   const repo = fixtureRepo(t, {
     remoteGate:
-      'if [ "$1" = ci-desktop-worker ]; then printf "GATE NOT RUN: ssh dropped\\n"; exit 255; fi; printf "MERGE GATE: PASS fallback\\n"',
+      'if [ "$1" = primary ]; then printf "GATE NOT RUN: ssh dropped\\n"; exit 255; fi; printf "MERGE GATE: PASS fallback\\n"',
   });
   writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
   const result = dispatch(t, repo, [repo.head]);
@@ -533,7 +567,7 @@ test("an ssh transport failure retries the exact gate on the fallback", (t) => {
 test("a primary FAIL is final and never falls back", (t) => {
   const repo = fixtureRepo(t, {
     remoteGate:
-      'if [ "$1" = ci-desktop-worker ]; then printf "MERGE GATE: FAIL (candidate)\\n"; exit 1; fi; printf "FALLBACK SHOULD NOT RUN\\n"',
+      'if [ "$1" = primary ]; then printf "MERGE GATE: FAIL (candidate)\\n"; exit 1; fi; printf "FALLBACK SHOULD NOT RUN\\n"',
   });
   const result = dispatch(t, repo, [repo.head]);
   assert.equal(result.status, 1, result.stdout + result.stderr);

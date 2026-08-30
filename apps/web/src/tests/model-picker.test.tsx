@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JSDOM } from "jsdom";
 import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
@@ -10,19 +8,7 @@ import { LocaleProvider } from "../lib/i18n";
 import type { Agent } from "../lib/types";
 import { AgentDetailPage, NewAgent } from "../pages/Agents";
 import { NewGoal } from "../pages/Goals";
-
-const installDom = (url = "http://localhost/agents/a"): { dom: JSDOM; container: Element } => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true, url });
-  for (const [key, value] of Object.entries({
-    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement, HTMLSelectElement: dom.window.HTMLSelectElement, HTMLFormElement: dom.window.HTMLFormElement,
-    Element: dom.window.Element, Node: dom.window.Node, MutationObserver: dom.window.MutationObserver,
-  })) Object.defineProperty(globalThis, key, { configurable: true, value });
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
-  const container = dom.window.document.querySelector("#root");
-  assert.ok(container);
-  return { dom, container };
-};
+import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
 test("catalog models render a default effort without rewriting a bare stored value", () => {
   let changes = 0;
@@ -39,7 +25,7 @@ test("catalog models render a default effort without rewriting a bare stored val
 
 test("catalog selection retains a supported effort, falls back otherwise, and writes a concrete runner", async () => {
   const { dom, container } = installDom();
-  const root = createRoot(container);
+  const root = (await reactDom()).createRoot(container);
   const seen: Array<{ model: string; runnerPreference: string }> = [];
   try {
     await act(async () => root.render(
@@ -115,19 +101,18 @@ test("the real Create button blocks a contradictory model and runner pair", () =
 
 test("the real detail Save button blocks a stored contradiction until the picker repairs it", async () => {
   const { dom, container } = installDom();
-  const root = createRoot(container);
+  const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
     model: "gpt-5.6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string | URL | Request) => {
+  const fetchHarness = installFetchFunction(async (input) => {
     const path = String(input);
     const body = path.endsWith("/agents/a") ? agent : [];
     return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
-  } });
+  });
   try {
     await act(async () => {
       root.render(<AgentDetailPage agentId="a" />);
@@ -146,7 +131,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
     await act(async () => model.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
     assert.equal(save.disabled, false);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }
@@ -154,20 +139,19 @@ test("the real detail Save button blocks a stored contradiction until the picker
 
 test("the executioner Setup page has no legacy subprocess profile controls", async () => {
   const { dom, container } = installDom();
-  const root = createRoot(container);
+  const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "implementation-plan-executioner", title: "Implementation Plan Executioner",
     model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };
-  const originalFetch = globalThis.fetch;
-  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string | URL | Request) => {
+  const fetchHarness = installFetchFunction(async (input) => {
     const path = String(input);
     return new Response(JSON.stringify(path.endsWith("/agents/a") ? agent : [agent]), {
       status: 200, headers: { "Content-Type": "application/json" },
     });
-  } });
+  });
   try {
     await act(async () => {
       root.render(<AgentDetailPage agentId="a" />);
@@ -183,7 +167,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
     assert.ok(canonicalName);
     assert.equal(canonicalName.disabled, true);
   } finally {
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    fetchHarness.dispose();
     await act(async () => root.unmount());
     dom.window.close();
   }

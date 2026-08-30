@@ -8,7 +8,6 @@ import {
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
-  FailureClass,
   GoalStatus,
   enqueueTaskRun,
   openRun,
@@ -26,7 +25,6 @@ import {
   RepoPermission,
   RunStatus,
   ScheduleKind,
-  PushStatus,
   RunnerKind,
   RunnerPreference,
   recomputeSessionUsage,
@@ -71,6 +69,17 @@ import {
   resumeChain,
 } from "@anneal/db";
 import type { ChainStep as ChainStepContract } from "@anneal/db/board-contract";
+import type {
+  Agent as AgentContract,
+  AgentRepoAccess as AgentRepoAccessContract,
+  Environment as EnvironmentContract,
+  FilesystemGrant as FilesystemGrantContract,
+  MCPConnection as MCPConnectionContract,
+  Project as ProjectContract,
+  Repo as RepoContract,
+  Secret as SecretContract,
+  Skill as SkillContract,
+} from "@anneal/db/wire-contract";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -112,11 +121,9 @@ import {
 } from "./merge-lease.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
-  nextStoredCliAvailability,
-  preserveCliAvailability,
-  readStoredCliAvailability,
-  storeCliAvailability,
-} from "./runner-cli-availability.js";
+  projectRunnerBackend,
+  recordRunnerBackendReport,
+} from "./runner-backend-health.js";
 import {
   chainKey,
   readChainDetail,
@@ -161,7 +168,6 @@ import { InboxRunFenceRefusal, supersedeTaskInboxMessage, suspendForInbox } from
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
-import { isTemplateInstantiationRefusal } from "./template-errors.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
 import {
   readCommitted,
@@ -180,7 +186,7 @@ import {
   lockTaskMutationRows,
   reactivationBlocked,
 } from "./task-write.js";
-import { patchTask } from "./task-patch.js";
+import { patchTask, taskInput, taskPatch } from "./task-patch.js";
 import {
   cancelBoundRevalidationRun,
   patchBoundImplementationDescription,
@@ -188,8 +194,8 @@ import {
   revalidationCancelRequestId,
   SPEC_REVALIDATOR_AGENT_NAME,
 } from "./revalidation.js";
-import { claimRun, OPERATOR_NOTE_METADATA_FIELD } from "./run-claim.js";
-import { completeRun } from "./run-completion.js";
+import { claimInput, claimRun, OPERATOR_NOTE_METADATA_FIELD, runnerTelemetryFields } from "./run-claim.js";
+import { completeRun, completionInput, worktreeContainmentViolationsInput } from "./run-completion.js";
 import { acknowledgeCancellation, cancelRun } from "./run-cancel.js";
 import { withoutUndefined } from "./without-undefined.js";
 import { versionPayload } from "./version.js";
@@ -520,64 +526,6 @@ const progressInput = z.object({
   sessionId: id.nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
-const taskFields = {
-  name: z.string().trim().min(1).max(200),
-  description: z.string(),
-  workingDirectory: z.string().trim().min(1).nullable(),
-  repoId: id.nullable(),
-  targetBranch: z.string().trim().min(1).nullable(),
-  assigneeType: z.nativeEnum(AssigneeType),
-  assigneeAgentId: id.nullable(),
-  approvalGate: z.boolean(),
-  opensPullRequest: z.boolean(),
-  maxDurationMin: z.number().int().min(1).max(24 * 60),
-  stallTimeoutMin: z.number().int().min(1).max(24 * 60),
-  maxSessionsPerTask: z.number().int().min(1).max(100),
-  scheduleKind: z.nativeEnum(ScheduleKind),
-  runAt: z.coerce.date().nullable(),
-  cron: z.string().trim().min(9).max(100).nullable(),
-  timezone: z.string().trim().min(1).max(64).nullable(),
-};
-const taskCreateStatus = z.nativeEnum(TaskStatus).refine(
-  (status) => status === TaskStatus.BACKLOG || status === TaskStatus.TODO,
-  "Task creation status must be BACKLOG or TODO",
-);
-/** Exported for `smoke-fixture.test.ts`: the published release fixture and this
- *  schema have to agree about `opensPullRequest`, and the only way to assert
- *  that is to parse the fixture with the schema the route actually uses. */
-export const taskInput = z.object({
-  ...taskFields,
-  status: taskCreateStatus.default(TaskStatus.TODO),
-  description: taskFields.description.default(""),
-  workingDirectory: taskFields.workingDirectory.default(null),
-  repoId: taskFields.repoId.default(null),
-  targetBranch: taskFields.targetBranch.default(null),
-  assigneeType: taskFields.assigneeType.default(AssigneeType.AGENT),
-  assigneeAgentId: taskFields.assigneeAgentId.default(null),
-  approvalGate: taskFields.approvalGate.default(false),
-  opensPullRequest: taskFields.opensPullRequest.default(true),
-  maxDurationMin: taskFields.maxDurationMin.default(240),
-  stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
-  maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
-  scheduleKind: taskFields.scheduleKind.default(ScheduleKind.NOW),
-  runAt: taskFields.runAt.default(null),
-  cron: taskFields.cron.default(null),
-  timezone: taskFields.timezone.default(null),
-  chainId: z.string().trim().min(1).max(100).optional(),
-  chainIndex: z.number().int().min(0).optional(),
-}).strict().superRefine((value, context) => {
-  if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
-    context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
-  }
-});
-// `failureReason` is patchable but not creatable: a task is never born with a
-// failure, and an operator whose task carries a stale one needs a way to clear
-// it — an explicit null — without inventing a run.
-const taskPatch = z.object(taskFields).partial().extend({
-  status: z.nativeEnum(TaskStatus).optional(),
-  failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
-}).refine((value) => Object.keys(value).length > 0);
-export type TaskPatchInput = z.infer<typeof taskPatch>;
 const activityInput = z.object({
   actorType: z.string().trim().min(1).max(40).default("operator"),
   actorId: z.string().trim().min(1).nullable().optional(),
@@ -594,22 +542,6 @@ const revalidationPatchInput = z.object({
 }).strict();
 const revalidationCancelInput = z.object({ fencingToken: fence }).strict();
 const mergeTargetInput = z.object({ prNumber: z.number().int().positive() });
-const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
-  console.warn("Discarded runner telemetry", { input, issues: error.issues });
-  return undefined;
-});
-const runnerTelemetryFields = {
-  daemonVersion: telemetry(z.string().trim().max(40)),
-  diskFreeBytes: telemetry(z.number().int().nonnegative()),
-  pollIntervalMs: telemetry(z.number().int().positive().max(3_600_000)),
-  workspaceRoot: telemetry(z.string().trim().max(500)),
-};
-const claimInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  leaseSeconds: z.number().int().min(15).max(3600).default(60),
-  ...runnerTelemetryFields,
-});
-export type ClaimInput = z.infer<typeof claimInput>;
 // The runner's inventory of its own root. `directories` are bare names, never
 // paths: this API refuses to hold an opinion about a filesystem it does not
 // own, and a name is all the ownership predicate needs.
@@ -649,7 +581,6 @@ const cancelRunInput = z.object({
   reason: z.string().trim().min(1).pipe(failureReasonText(FAILURE_REASON_LIMIT)),
   parkTask: z.boolean().default(false),
 });
-const worktreeContainmentViolationsInput = z.array(z.string().min(1).max(4096)).max(5000);
 const cancelAcknowledgeInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
@@ -691,69 +622,6 @@ const startInput = mechanicalStartInput.extend({
   // Requiring it prevents a start write from leaving a queued or prior hash.
   promptHash: z.string().regex(/^[0-9a-f]{64}$/u),
 });
-// Envelopes are dispatched on `version` *before* any version's field schema is
-// applied. Only `version` itself is required to parse, and everything else is
-// carried through untouched.
-//
-// Validating v1's shape first would have made the fallback a lie: a v2 runner
-// that adds a phase or a failure class would be rejected at the schema, and its
-// completion — a terminal write that cannot simply be retried — would 400
-// instead of degrading to the legacy fields. The version is the only thing this
-// API can read from an envelope it does not know.
-const versionedEnvelopeInput = z.object({
-  version: z.number().int().positive(),
-}).catchall(z.unknown());
-
-// Mirrors packages/db/src/failure-envelope.ts, which is the canonical shape,
-// and packages/runner/src/envelope.ts, which is the runner's hand-kept copy of
-// it. This schema is the boundary that catches drift between the two, and it is
-// applied only to envelopes that announce themselves as v1.
-//
-// Every field is defaulted rather than required wherever a default is
-// unambiguous, and the free-text limits are 16x what the runner truncates to.
-// That is deliberate: a rejected completion is not a rejected envelope, it is a
-// run that never records a terminal state and is later reconciled as LOST. The
-// envelope must never be the reason a completion fails — which is also why the
-// route below treats a v1 envelope that fails this schema as no envelope at
-// all rather than as a bad request.
-
-const completionInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
-  fencingToken: fence,
-  exitCode: z.number().int().nullable(),
-  signal: z.string().nullable().optional(),
-  terminalEventSeen: z.boolean(),
-  terminalSuccess: z.boolean(),
-  terminationReason: z.string().nullable().optional(),
-  failureClass: z.nativeEnum(FailureClass).optional(),
-  failureReason: failureReasonText(FAILURE_REASON_LIMIT).optional(),
-  retryable: z.boolean().optional(),
-  externalFailure: z.boolean().default(false),
-  branch: z.string().nullable().optional(),
-  // The ref the runner actually handed to `git push`, which is not always
-  // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
-  // the workspace's. It is the only publication evidence resolveRunBranches
-  // trusts, so it must survive the trip verbatim.
-  pushedBranch: z.string().nullable().optional(),
-  baseSha: z.string().nullable().optional(),
-  headSha: z.string().nullable().optional(),
-  output: z.string().max(500_000).nullable().optional(),
-  pushStatus: z.nativeEnum(PushStatus).default(PushStatus.NOT_REQUESTED),
-  pushRemote: z.string().nullable().optional(),
-  pushError: z.string().max(4000).nullable().optional(),
-  pullRequestUrl: z.string().nullable().optional(),
-  pullRequestNumber: z.number().int().positive().nullable().optional(),
-  deliveryInstructions: z.string().max(8000).nullable().optional(),
-  cleanupStatus: z.nativeEnum(CleanupStatus),
-  cleanupFailureReason: z.string().max(4000).nullable().optional(),
-  workspaceRetained: z.boolean().default(false),
-  // Report-only completion evidence. An omitted or empty list means that the
-  // runner observed no worktree outside its run workspace; it never changes
-  // terminal outcome classification.
-  worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
-  failureEnvelope: versionedEnvelopeInput.optional(),
-});
-export type CompletionInput = z.infer<typeof completionInput>;
 const eventInput = z.object({
   seq: z.number().int().nonnegative(),
   at: z.coerce.date().optional(),
@@ -803,18 +671,7 @@ const inboxQuestionInput = z.object({
   resumableUntil: z.coerce.date().nullable().optional(),
 });
 const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
-const stepOverridesInput = z.record(z.string(), stepOverrideInput).superRefine((overrides, context) => {
-  for (const stepIndex of Object.keys(overrides)) {
-    if (!/^[1-9]\d*$/u.test(stepIndex)) {
-      context.addIssue({
-        code: "custom",
-        path: [stepIndex],
-        message: `Step override key ${stepIndex} must be a positive decimal step index without leading zeros`,
-        params: { templateRefusalCode: "step_override_invalid_key" },
-      });
-    }
-  }
-});
+const stepOverridesInput = z.record(z.string(), stepOverrideInput);
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
@@ -828,31 +685,7 @@ const instantiateTemplateInput = z.object({
   if (branchName !== undefined && !isValidBranchName(branchName)) {
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
   }
-  if (value.afterTaskId && value.autoStart) {
-    context.addIssue({
-      code: "custom",
-      path: ["afterTaskId"],
-      message: `afterTaskId ${value.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
-      params: { templateRefusalCode: "dispatch_conflicts_with_auto_start" },
-    });
-  }
 });
-const isTemplateInputError = (error: unknown): error is Error => (
-  error instanceof Error
-  && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
-);
-const templateSchemaRefusal = (error: unknown): Refusal | null => {
-  if (!(error instanceof z.ZodError)) return null;
-  const issue = error.issues.find((candidate) => {
-    const params = (candidate as unknown as { params?: Record<string, unknown> }).params;
-    return typeof params?.templateRefusalCode === "string";
-  });
-  if (!issue) return null;
-  const params = (issue as unknown as { params?: Record<string, unknown> }).params;
-  return typeof params?.templateRefusalCode === "string"
-    ? refusal("invalid-request", issue.message, { code: params.templateRefusalCode })
-    : null;
-};
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -1004,6 +837,13 @@ const goalInclude = {
   progressLog: { orderBy: { createdAt: "asc" as const } },
 };
 
+type ProjectResponse = ProjectContract<Date, Prisma.Decimal>;
+type AgentResponse = AgentContract<Date>;
+type SecretResponse = SecretContract<Date>;
+type SkillResponse = SkillContract<Date>;
+type MCPConnectionResponse = MCPConnectionContract<Date>;
+type RepoResponse = RepoContract<Date>;
+
 export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const releaseChainLease = options.releaseMergeLease ?? releaseMergeLease;
@@ -1100,24 +940,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         const activeRuns = activeByRunner.get(daemon.runnerId) ?? 0;
         return { ...daemon, lastSeenAt: daemon.lastSeenAt.toISOString(), busy: activeRuns > 0, activeRuns };
       }),
-      backends: Object.values(RunnerKind).map((runner) => {
-        const backend = backendsByRunner.get(runner);
-        const availability = readStoredCliAvailability(backend?.capabilities);
-        return {
-          runner,
-          cliVersion: backend?.cliVersion ?? null,
-          cliAvailable: availability?.available ?? null,
-          cliResolvedPath: availability?.resolvedPath ?? null,
-          cliAvailabilityReason: availability?.reason ?? null,
-          cliUnavailableSince: availability?.unavailableSince ?? null,
-          lastAvailabilityAt: availability?.lastCheckedAt ?? null,
-          authMode: backend?.authMode ?? null,
-          lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
-          lastPreflightOk: backend?.lastPreflightOk ?? null,
-          circuitOpen: backend?.circuitOpen ?? null,
-          circuitReason: backend?.circuitReason ?? null,
-        };
-      }),
+      backends: Object.values(RunnerKind).map((runner) =>
+        projectRunnerBackend(runner, backendsByRunner.get(runner) ?? null)),
     });
   });
 
@@ -1159,20 +983,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     const resolved = resolvePayloadVariables(template, payload as Record<string, unknown>);
     if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
-    try {
-      const result = await instantiateTemplate(db, template.projectId, template.id, {
-        repoId: template.webhookRepoId!, variables: resolved.variables, autoStart: true,
-      }, {
-        actorType: "webhook",
-        activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
-        source: TaskSource.WEBHOOK,
-        fire: { source: TriggerFireSource.WEBHOOK, dedupeKey },
-      });
-      return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
-    } catch (error: unknown) {
-      if (isTemplateInputError(error)) return context.json({ error: error.message }, 400);
-      throw error;
-    }
+    const result = await instantiateTemplate(db, template.projectId, template.id, {
+      repoId: template.webhookRepoId!, variables: resolved.variables, autoStart: true,
+    }, {
+      actorType: "webhook",
+      activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
+      source: TaskSource.WEBHOOK,
+      fire: { source: TriggerFireSource.WEBHOOK, dedupeKey },
+    });
+    return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
   });
 
   app.get("/files", async (context) => {
@@ -1275,16 +1094,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(result.installation, 201);
   });
 
-  app.get("/projects", async (context) => validated(context, await db.project.findMany({ orderBy: { createdAt: "asc" } })));
-  app.post("/projects", async (context) => context.json(await db.project.create({ data: await readJson(context.req.raw, projectInput) }), 201));
+  app.get("/projects", async (context) => validated(context,
+    (await db.project.findMany({ orderBy: { createdAt: "asc" } })) satisfies ProjectResponse[]));
+  app.post("/projects", async (context) => context.json(
+    (await db.project.create({ data: await readJson(context.req.raw, projectInput) })) satisfies ProjectResponse, 201));
   app.get("/projects/:projectId", async (context) => {
     const project = await db.project.findUnique({ where: { id: id.parse(context.req.param("projectId")) } });
-    return project ? context.json(project) : context.json({ error: "Project not found" }, 404);
+    return project ? context.json(project satisfies ProjectResponse) : context.json({ error: "Project not found" }, 404);
   });
-  app.patch("/projects/:projectId", async (context) => context.json(await db.project.update({
+  app.patch("/projects/:projectId", async (context) => context.json((await db.project.update({
     where: { id: id.parse(context.req.param("projectId")) },
     data: withoutUndefined(await readJson(context.req.raw, projectPatch)) as Prisma.ProjectUpdateInput,
-  })));
+  })) satisfies ProjectResponse));
   app.delete("/projects/:projectId", async (context) => {
     await db.project.delete({ where: { id: id.parse(context.req.param("projectId")) } });
     return context.body(null, 204);
@@ -1307,36 +1128,36 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days, timeZone));
   });
 
-  app.get("/projects/:projectId/environments", async (context) => context.json(await db.environment.findMany({
+  app.get("/projects/:projectId/environments", async (context) => context.json((await db.environment.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
-  })));
-  app.post("/projects/:projectId/environments", async (context) => context.json(await db.environment.create({
+  })) satisfies EnvironmentContract[]));
+  app.post("/projects/:projectId/environments", async (context) => context.json((await db.environment.create({
     data: { projectId: id.parse(context.req.param("projectId")), ...await readJson(context.req.raw, environmentInput) },
-  }), 201));
+  })) satisfies EnvironmentContract, 201));
   app.get("/environments/:environmentId", async (context) => {
     const environment = await db.environment.findUnique({
       where: { id: id.parse(context.req.param("environmentId")) },
       include: { secrets: { include: { secret: { select: secretPublicSelect } } } },
     });
-    return environment ? context.json(environment) : context.json({ error: "Environment not found" }, 404);
+    return environment ? context.json(environment satisfies EnvironmentContract) : context.json({ error: "Environment not found" }, 404);
   });
-  app.patch("/environments/:environmentId", async (context) => context.json(await db.environment.update({
+  app.patch("/environments/:environmentId", async (context) => context.json((await db.environment.update({
     where: { id: id.parse(context.req.param("environmentId")) },
     data: withoutUndefined(await readJson(context.req.raw, environmentPatch)),
-  })));
+  })) satisfies EnvironmentContract));
   app.delete("/environments/:environmentId", async (context) => {
     await db.environment.delete({ where: { id: id.parse(context.req.param("environmentId")) } });
     return context.body(null, 204);
   });
 
-  app.get("/secrets", async (context) => context.json(await db.secret.findMany({
+  app.get("/secrets", async (context) => context.json((await db.secret.findMany({
     select: {
       ...secretPublicSelect,
       agentGrants: { include: { agent: { select: { id: true, name: true, title: true, projectId: true } } } },
     },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies SecretResponse[]));
   app.post("/secrets", async (context) => {
     const body = await readJson(context.req.raw, secretInput);
     const secret = await db.secret.create({
@@ -1348,7 +1169,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       },
       select: secretPublicSelect,
     });
-    return context.json(secret, 201);
+    return context.json(secret satisfies SecretResponse, 201);
   });
   app.get("/secrets/:secretId", async (context) => {
     const secret = await db.secret.findUnique({
@@ -1358,19 +1179,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         agentGrants: { include: { agent: { select: { id: true, name: true, title: true, projectId: true } } } },
       },
     });
-    return secret ? context.json(secret) : context.json({ error: "Secret not found" }, 404);
+    return secret ? context.json(secret satisfies SecretResponse) : context.json({ error: "Secret not found" }, 404);
   });
   app.patch("/secrets/:secretId", async (context) => {
     const body = await readJson(context.req.raw, secretPatch);
     const { value, ...fields } = body;
-    return context.json(await db.secret.update({
+    return context.json((await db.secret.update({
       where: { id: id.parse(context.req.param("secretId")) },
       data: {
         ...withoutUndefined(fields),
         ...(value === undefined ? {} : { encryptedValue: encryptSecret(value), rotatedAt: new Date() }),
       },
       select: secretPublicSelect,
-    }));
+    })) satisfies SecretResponse);
   });
   app.delete("/secrets/:secretId", async (context) => {
     await db.secret.delete({ where: { id: id.parse(context.req.param("secretId")) } });
@@ -1388,7 +1209,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   })).map((agent) => {
     const mechanical = agent.name === INTEGRATOR_AGENT_NAME;
     return { ...agent, mechanical, assignable: !mechanical };
-  })));
+  }) satisfies AgentResponse[]));
   app.post("/projects/:projectId/agents", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, agentInput);
@@ -1404,7 +1225,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (foundationalPrompt === undefined) {
       return context.json({ error: "This project has no foundation yet. Run npm run db:seed." }, 400);
     }
-    return context.json(await db.agent.create({ data: { ...body, foundationalPrompt, projectId } }), 201);
+    return context.json((await db.agent.create({
+      data: { ...body, foundationalPrompt, projectId },
+    })) satisfies AgentResponse, 201);
   });
   app.get("/agents/:agentId", async (context) => {
     const agent = await db.agent.findUnique({
@@ -1419,7 +1242,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         collaborators: { include: { allowedAgent: true } },
       },
     });
-    return agent ? context.json(agent) : context.json({ error: "Agent not found" }, 404);
+    return agent ? context.json(agent satisfies AgentResponse) : context.json({ error: "Agent not found" }, 404);
   });
   app.patch("/agents/:agentId", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1450,7 +1273,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.agent);
+    return context.json(result.agent satisfies AgentResponse);
   });
   app.post("/agents/:agentId/reset-runtime-config", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1483,7 +1306,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.agent);
+    return context.json(result.agent satisfies AgentResponse);
   });
   app.delete("/agents/:agentId", async (context) => {
     try {
@@ -1517,17 +1340,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
     await noteArchivedQueuedRuns(db, { agentId });
-    return context.json(result.agent);
+    return context.json(result.agent satisfies AgentResponse);
   });
   app.post("/agents/:agentId/unarchive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const agent = await db.agent.findUnique({ where: { id: agentId } });
     if (!agent) return context.json({ error: "Agent not found" }, 404);
-    if (!agent.archivedAt) return context.json(agent);
-    return context.json(await db.agent.update({
+    if (!agent.archivedAt) return context.json(agent satisfies AgentResponse);
+    return context.json((await db.agent.update({
       where: { id: agentId },
       data: { archivedAt: null },
-    }));
+    })) satisfies AgentResponse);
   });
 
   app.get("/agents/:agentId/secret-grants", async (context) => context.json(await db.agentSecretGrant.findMany({
@@ -1561,9 +1384,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.body(null, 204);
   });
 
-  app.get("/agents/:agentId/filesystem-grants", async (context) => context.json(await db.filesystemGrant.findMany({
+  app.get("/agents/:agentId/filesystem-grants", async (context) => context.json((await db.filesystemGrant.findMany({
     where: { agentId: id.parse(context.req.param("agentId")) }, orderBy: { folderPath: "asc" },
-  })));
+  })) satisfies FilesystemGrantContract[]));
   /**
    * Two spellings of one physical folder must not become two grants. On a case- and
    * normalization-insensitive volume `protected` and `Protected` are the same directory,
@@ -1595,11 +1418,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, filesystemGrantInput);
     const aliased = await aliasingGrant(agentId, body.folderPath);
     if (aliased !== null) return aliasConflict(context, body.folderPath, aliased);
-    return context.json(await db.filesystemGrant.upsert({
+    return context.json((await db.filesystemGrant.upsert({
       where: { agentId_folderPath: { agentId, folderPath: body.folderPath } },
       create: { agentId, ...body },
       update: body,
-    }), 201);
+    })) satisfies FilesystemGrantContract, 201);
   });
   app.patch("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1611,10 +1434,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const aliased = await aliasingGrant(agentId, patch.folderPath, grantId);
       if (aliased !== null) return aliasConflict(context, patch.folderPath, aliased);
     }
-    return context.json(await db.filesystemGrant.update({
+    return context.json((await db.filesystemGrant.update({
       where: { id: grantId },
       data: withoutUndefined(patch) as Prisma.FilesystemGrantUncheckedUpdateInput,
-    }));
+    })) satisfies FilesystemGrantContract);
   });
   app.delete("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
     const deleted = await db.filesystemGrant.deleteMany({ where: {
@@ -1642,16 +1465,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Collaboration binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/skills", async (context) => context.json(await db.skill.findMany({
+  app.get("/projects/:projectId/skills", async (context) => context.json((await db.skill.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     include: { agents: true },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies SkillResponse[]));
   app.post("/projects/:projectId/skills", async (context) => {
     const body = await readJson(context.req.raw, skillInput);
-    return context.json(await db.skill.create({
+    return context.json((await db.skill.create({
       data: { projectId: id.parse(context.req.param("projectId")), ...body },
-    }), 201);
+    })) satisfies SkillResponse, 201);
   });
   app.post("/agents/:agentId/skills", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1674,11 +1497,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Skill binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/mcp-connections", async (context) => context.json(await db.mCPConnection.findMany({
+  app.get("/projects/:projectId/mcp-connections", async (context) => context.json((await db.mCPConnection.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     include: { agents: true },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies MCPConnectionResponse[]));
   app.post("/projects/:projectId/mcp-connections", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, mcpConnectionInput);
@@ -1686,9 +1509,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "MCP credential secret is unavailable" }, 400);
     }
-    return context.json(await db.mCPConnection.create({
+    return context.json((await db.mCPConnection.create({
       data: { ...body, config: jsonValue(body.config), projectId },
-    }), 201);
+    })) satisfies MCPConnectionResponse, 201);
   });
   app.post("/agents/:agentId/mcp-connections", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1711,10 +1534,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "MCP binding not found" }, 404);
   });
 
-  app.get("/projects/:projectId/repos", async (context) => validated(context, await db.repo.findMany({
+  app.get("/projects/:projectId/repos", async (context) => validated(context, (await db.repo.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies RepoResponse[]));
   app.post("/projects/:projectId/repos", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, repoInput);
@@ -1722,7 +1545,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
-    return context.json(await db.repo.create({ data: { ...body, projectId } }), 201);
+    return context.json((await db.repo.create({ data: { ...body, projectId } })) satisfies RepoResponse, 201);
   });
   app.patch("/repos/:repoId", async (context) => {
     const body = await readJson(context.req.raw, repoPatch);
@@ -1730,9 +1553,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
-    return context.json(await db.repo.update({
+    return context.json((await db.repo.update({
       where: { id: id.parse(context.req.param("repoId")) }, data: withoutUndefined(body),
-    }));
+    })) satisfies RepoResponse);
   });
   app.delete("/repos/:repoId", async (context) => {
     await db.repo.delete({ where: { id: id.parse(context.req.param("repoId")) } });
@@ -1748,11 +1571,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     ]);
     if (!agent || !repo) return context.json({ error: "Agent or Repo not found" }, 404);
     if (agent.projectId !== repo.projectId) return context.json({ error: "Agent and Repo belong to different projects" }, 400);
-    return context.json(await db.agentRepoAccess.upsert({
+    return context.json((await db.agentRepoAccess.upsert({
       where: { agentId_repoId: { agentId, repoId } },
       create: { agentId, repoId, projectId: agent.projectId, ...body },
       update: body,
-    }), 201);
+    })) satisfies AgentRepoAccessContract, 201);
   });
   app.delete("/agents/:agentId/repos/:repoId/access", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1822,9 +1645,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   const approveGoalDod = async (context: Context<AppEnvironment, string>) => {
     const goalId = id.parse(context.req.param("goalId"));
-    const projectId = context.req.param("projectId");
-    const goal = await db.goal.findFirst({
-      where: { id: goalId, ...(projectId ? { projectId: id.parse(projectId) } : {}) },
+    const goal = await db.goal.findUnique({
+      where: { id: goalId },
       include: { definitionOfDone: true },
     });
     if (!goal) return context.json({ error: "Goal not found" }, 404);
@@ -1843,20 +1665,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }));
   };
   app.post("/goals/:goalId/approve-dod", approveGoalDod);
-  app.post("/projects/:projectId/goals/:goalId/approve-dod", approveGoalDod);
 
   const pauseGoal = async (context: Context<AppEnvironment, string>) => {
     const goalId = id.parse(context.req.param("goalId"));
-    const projectId = context.req.param("projectId");
     const updated = await db.goal.updateMany({
-      where: { id: goalId, ...(projectId ? { projectId: id.parse(projectId) } : {}), status: GoalStatus.ACTIVE },
+      where: { id: goalId, status: GoalStatus.ACTIVE },
       data: { status: GoalStatus.PAUSED },
     });
     if (updated.count !== 1) return context.json({ error: "Only an active Goal can be paused" }, 409);
     return context.json(await db.goal.findUniqueOrThrow({ where: { id: goalId }, include: goalInclude }));
   };
   app.post("/goals/:goalId/pause", pauseGoal);
-  app.post("/projects/:projectId/goals/:goalId/pause", pauseGoal);
 
   app.get("/goals/:goalId/definition-of-done", async (context) => context.json(await db.goalDefinitionItem.findMany({
     where: { goalId: id.parse(context.req.param("goalId")) }, orderBy: { itemIndex: "asc" },
@@ -1984,24 +1803,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }));
   });
   app.post("/projects/:projectId/task-templates/:templateId/instantiate", async (context) => {
-    try {
-      return context.json(await instantiateTemplate(
-        db,
-        id.parse(context.req.param("projectId")),
-        id.parse(context.req.param("templateId")),
-        await readJson(context.req.raw, instantiateTemplateInput),
-      ), 201);
-    } catch (error: unknown) {
-      if (isTemplateInstantiationRefusal(error)) {
-        return refusalJson(context, refusal("invalid-request", error.message, { code: error.code }));
-      }
-      const schemaRefusal = templateSchemaRefusal(error);
-      if (schemaRefusal) return refusalJson(context, schemaRefusal);
-      if (isTemplateInputError(error)) {
-        return context.json({ error: error.message }, 400);
-      }
-      throw error;
-    }
+    return context.json(await instantiateTemplate(
+      db,
+      id.parse(context.req.param("projectId")),
+      id.parse(context.req.param("templateId")),
+      await readJson(context.req.raw, instantiateTemplateInput),
+    ), 201);
   });
 
   // --- triggers: webhook-configured templates, their ledger, and manual fire --
@@ -2197,22 +2004,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (unresolved.length > 0) {
       return context.json({ error: `Unresolved template variables: ${unresolved.join(", ")}`, unresolved }, 400);
     }
-    try {
-      const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
-        repoId: trigger.webhookRepoId!, variables, autoStart: true,
-      }, {
-        actorType: "operator",
-        activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
-        source: TaskSource.MANUAL,
-        fire: { source: TriggerFireSource.MANUAL },
-      });
-      return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
-    } catch (error: unknown) {
-      if (isTemplateInputError(error)) {
-        return context.json({ error: error.message }, 400);
-      }
-      throw error;
-    }
+    const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
+      repoId: trigger.webhookRepoId!, variables, autoStart: true,
+    }, {
+      actorType: "operator",
+      activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
+      source: TaskSource.MANUAL,
+      fire: { source: TriggerFireSource.MANUAL },
+    });
+    return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
   });
 
   app.get("/tasks", async (context) => {
@@ -2992,72 +2792,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
     const now = new Date();
-    // Runner availability is global backend state written by every daemon.
-    // Keep its Serializable guarantee and absorb two short write conflicts.
-    const state = await serializable(db, async (tx) => {
-      const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
-      const previousAvailability = readStoredCliAvailability(previous?.capabilities);
-      const availability = nextStoredCliAvailability(body, previousAvailability, now);
-      if (!body.available) {
-        const outageStarted = previousAvailability?.available !== false;
-        const unavailable = await tx.runnerBackendState.upsert({
-          where: { runner: body.runner },
-          create: {
-            runner: body.runner,
-            capabilities: storeCliAvailability(null, availability),
-          },
-          update: {
-            capabilities: storeCliAvailability(previous?.capabilities, availability),
-          },
-        });
-        await tx.task.updateMany({
-          where: {
-            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
-            runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
-          },
-          data: { failureReason: availability.reason },
-        });
-        if (outageStarted) {
-          const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-          const thread = chatId ? (
-            await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-            ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
-          ) : null;
-          await tx.inboxMessage.create({ data: {
-            from: "AGENT",
-            kind: "TEXT",
-            body: `${body.runner.toLowerCase()} runner CLI is unavailable: ${body.binary} was not found in configured runner PATH.`,
-            dedupeKey: availability.outageKey,
-            ...(thread ? { threadId: thread.id } : {}),
-          } });
-        }
-        return unavailable;
-      }
-
-      const available = await tx.runnerBackendState.upsert({
-        where: { runner: body.runner },
-        create: {
-          runner: body.runner,
-          capabilities: storeCliAvailability(null, availability),
-        },
-        update: {
-          capabilities: storeCliAvailability(previous?.capabilities, availability),
-        },
-      });
-      if (previousAvailability?.reason) {
-        await tx.task.updateMany({
-          where: { failureReason: previousAvailability.reason },
-          data: { failureReason: null },
-        });
-      }
-      if (previousAvailability?.outageKey) {
-        await tx.inboxMessage.updateMany({
-          where: { dedupeKey: previousAvailability.outageKey, status: InboxStatus.OPEN },
-          data: { status: InboxStatus.CLOSED, answeredAt: now },
-        });
-      }
-      return available;
-    }, { attempts: 3 });
+    const state = await recordRunnerBackendReport(db, { kind: "availability", ...body }, now);
     const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
     const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
     const revalidatePreflight = body.available
@@ -3073,67 +2808,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.post("/runner/preflight", async (context) => {
     const body = await readJson(context.req.raw, preflightInput);
-    const now = new Date();
-    const previous = await db.runnerBackendState.findUnique({ where: { runner: body.runner } });
-    const state = await db.runnerBackendState.upsert({
-      where: { runner: body.runner },
-      create: {
-        runner: body.runner,
-        cliVersion: body.cliVersion ?? null,
-        authMode: body.authMode ?? null,
-        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
-        lastPreflightAt: now,
-        lastPreflightOk: body.ok,
-        circuitOpen: !body.ok,
-        circuitReason: body.ok ? null : body.error ?? "Preflight failed",
-        circuitOpenedAt: body.ok ? null : now,
-      },
-      update: {
-        cliVersion: body.cliVersion ?? null,
-        authMode: body.authMode ?? null,
-        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
-        lastPreflightAt: now,
-        lastPreflightOk: body.ok,
-        ...(body.ok
-          ? { circuitOpen: false, circuitReason: null, circuitOpenedAt: null, consecutiveAuthFailures: 0 }
-          : { circuitOpen: true, circuitReason: body.error ?? "Preflight failed", circuitOpenedAt: now }),
-      },
-    });
+    const state = await recordRunnerBackendReport(db, { kind: "preflight", ...body });
     preflightRecoveryLeases.delete(body.runner);
-    const blockedReason = body.error ?? "Preflight failed";
-    if (body.ok) {
-      if (previous?.circuitReason) {
-        await db.task.updateMany({
-          where: { failureReason: previous.circuitReason },
-          data: { failureReason: null },
-        });
-      }
-    } else {
-      await db.task.updateMany({
-        where: {
-          status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
-          runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
-        },
-        data: { failureReason: blockedReason },
-      });
-    }
-    if (!body.ok && !previous?.circuitOpen) {
-      // Attach the operator chat so the alert can actually leave the web Inbox;
-      // threadless messages are skipped by the Feishu outbox forever.
-      const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-      const thread = chatId ? (
-        await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-        ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
-      ) : null;
-      await db.inboxMessage.create({
-        data: {
-          from: "AGENT",
-          kind: "TEXT",
-          body: `${body.runner.toLowerCase()} runner preflight failed and its circuit is open: ${body.error ?? "unknown error"}`,
-          ...(thread ? { threadId: thread.id } : {}),
-        },
-      });
-    }
     return context.json(state);
   });
 
