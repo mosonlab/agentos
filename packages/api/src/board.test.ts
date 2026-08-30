@@ -15,6 +15,7 @@ import {
   repairBinding,
   taskChainName,
 } from "./board.js";
+import { chainProgress, type ChainRow } from "./chain.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
   nativeChildUsed: false, costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
@@ -259,6 +260,31 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.equal(done.status, "DONE");
   assert.equal(done.activation.state, "settled");
   assert.equal(done.frontier.taskId, "step-2");
+});
+
+test("board aggregate and Chain detail choose the same first unfinished execution layer", () => {
+  const shared = [
+    { id: "done", name: "Completed layer", chainIndex: 1, chainLayer: 10, status: "DONE" as const },
+    { id: "later", name: "Later layer", chainIndex: 2, chainLayer: 90, status: "TODO" as const },
+    { id: "parallel-done", name: "Finished sibling", chainIndex: 3, chainLayer: 40, status: "DONE" as const },
+    { id: "frontier", name: "First unfinished layer", chainIndex: 4, chainLayer: 40, status: "TODO" as const },
+  ];
+  const aggregate = chainAggregate("c1", "Release", shared.map((item) => member({
+    ...item,
+    displayName: item.name,
+    templateStep: { name: item.name },
+  })), []);
+  const detail = chainProgress(shared.map((item): ChainRow => ({
+    ...item,
+    projectId: "p1",
+    chainId: "c1",
+    archivedAt: null,
+    templateStep: { name: item.name },
+  })));
+
+  assert.equal(aggregate.frontier.taskId, "frontier");
+  assert.equal(aggregate.frontier.title, detail?.activeStepName);
+  assert.equal(detail?.currentLayer, 2);
 });
 
 test("chainAggregate reports a predecessor-bound chain and never offers parked activation", () => {

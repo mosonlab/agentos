@@ -10,6 +10,7 @@ import {
   ACTIVE_RUN_STATUSES,
   activateChainSuccessor,
 } from "./chain-activation.js";
+import { compare, layerOf } from "./chain-order.js";
 import { lockChainRows, lockChainStructure } from "./locks.js";
 import { markerFromMetadata } from "./merge-tail-markers.js";
 
@@ -53,9 +54,14 @@ export type ChainResumeRow = {
   repoId: string | null;
 };
 
-export const executionLayer = (
-  task: { chainLayer?: number | null; chainIndex: number | null },
-): number | null => task.chainLayer ?? task.chainIndex;
+const chainLayerOf = (
+  task: Pick<ChainResumeRow, "chainLayer" | "chainIndex">,
+): number | null => layerOf({ layer: task.chainLayer, index: task.chainIndex });
+
+const chainOrder = (left: ChainResumeRow, right: ChainResumeRow): number => compare(
+  { layer: left.chainLayer, index: left.chainIndex, id: left.id },
+  { layer: right.chainLayer, index: right.chainIndex, id: right.id },
+);
 
 /**
  * Resume anchors ordinary successor activation at the highest complete layer,
@@ -66,36 +72,33 @@ export const resumeActivationAnchor = (
   heldLayer: number | null,
 ): ChainResumeRow | null => {
   if (heldLayer === null) return null;
-  const layers = [...new Set(rows.map(executionLayer).filter((layer): layer is number => layer !== null))];
-  const heldRows = rows.filter((row) => executionLayer(row) === heldLayer);
+  const layers = [...new Set(rows.map(chainLayerOf).filter((layer): layer is number => layer !== null))];
+  const heldRows = rows.filter((row) => chainLayerOf(row) === heldLayer);
   if (heldRows.length === 0 || !heldRows.every((row) => row.status === TaskStatus.DONE)) return null;
   const completeLayer = layers
-    .filter((layer) => rows.some((row) => executionLayer(row) === layer)
-      && rows.filter((row) => executionLayer(row) === layer).every((row) => row.status === TaskStatus.DONE))
+    .filter((layer) => rows.some((row) => chainLayerOf(row) === layer)
+      && rows.filter((row) => chainLayerOf(row) === layer).every((row) => row.status === TaskStatus.DONE))
     .sort((left, right) => right - left)[0];
   if (completeLayer === undefined) return null;
   return rows
-    .filter((row) => executionLayer(row) === completeLayer)
-    .sort((left, right) => (
-      (left.chainIndex ?? Number.MAX_SAFE_INTEGER) - (right.chainIndex ?? Number.MAX_SAFE_INTEGER)
-        || left.id.localeCompare(right.id)
-    ))[0] ?? null;
+    .filter((row) => chainLayerOf(row) === completeLayer)
+    .sort(chainOrder)[0] ?? null;
 };
 
 export const resumeActivationNeedsSourceRun = (
   rows: readonly ChainResumeRow[],
   anchor: ChainResumeRow,
 ): boolean => {
-  const anchorLayer = executionLayer(anchor);
+  const anchorLayer = chainLayerOf(anchor);
   if (anchorLayer === null) return false;
-  const nextLayer = [...new Set(rows.map(executionLayer).filter((layer): layer is number => layer !== null))]
+  const nextLayer = [...new Set(rows.map(chainLayerOf).filter((layer): layer is number => layer !== null))]
     .filter((layer) => layer > anchorLayer
-      && rows.some((row) => executionLayer(row) === layer && row.status !== TaskStatus.DONE))
+      && rows.some((row) => chainLayerOf(row) === layer && row.status !== TaskStatus.DONE))
     .sort((left, right) => left - right)[0];
   if (nextLayer === undefined) return false;
   return rows
     // Activation handles an operator-parked successor before assignee shape.
-    .filter((row) => executionLayer(row) === nextLayer
+    .filter((row) => chainLayerOf(row) === nextLayer
       && row.status !== TaskStatus.DONE
       && row.status !== TaskStatus.BACKLOG)
     .some((row) => row.assigneeType !== AssigneeType.AGENT
@@ -290,7 +293,7 @@ export const holdChain = async (
 
   const heldLayer = chainRows
     .filter((row) => row.status !== TaskStatus.DONE)
-    .map(executionLayer)
+    .map(chainLayerOf)
     .filter((layer): layer is number => layer !== null)
     .sort((left, right) => left - right)[0];
   if (heldLayer === undefined) {
@@ -397,12 +400,12 @@ export const resumeChain = async (
   if (existing.heldLayer === null) throw new Error("Held Chain control is missing its held layer");
 
   const anchor = resumeActivationAnchor(chainRows, existing.heldLayer);
-  const anchorLayer = anchor === null ? null : executionLayer(anchor);
+  const anchorLayer = anchor === null ? null : chainLayerOf(anchor);
   const sourceRun = anchorLayer === null
     ? null
     : await tx.run.findFirst({
       where: {
-        taskId: { in: chainRows.filter((row) => executionLayer(row) === anchorLayer).map((row) => row.id) },
+        taskId: { in: chainRows.filter((row) => chainLayerOf(row) === anchorLayer).map((row) => row.id) },
         status: RunStatus.SUCCEEDED,
         session: { isNot: null },
       },
