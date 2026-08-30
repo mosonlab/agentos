@@ -454,19 +454,13 @@ export type RecurringFire<DateTime = string> = {
 };
 
 /**
- * A serialized Task as returned by the full task/detail routes.
+ * Fields shared by the serialized full-list and detail Task projections.
  *
  * `DateTime` and `DecimalValue` let API projections keep their native Prisma
- * values until Hono serializes them. Relations deliberately use the shared
- * operator contracts and the Run contract rather than importing Prisma into
- * this browser-safe module.
- *
- * The task list and detail routes are intentionally not identical: the list
- * carries chain/recurring enrichment while the detail carries cost and merge
- * projections. Fields that are absent from one current route therefore stay
- * optional instead of making either route invent data.
+ * values until Hono serializes them. Relations use the shared operator
+ * contracts so their wire shape has one authoritative definition.
  */
-export type Task<DateTime = string, DecimalValue = string> = {
+type TaskBase<DateTime, DecimalValue> = {
   id: string;
   projectId: string;
   assigneeAgentId: string | null;
@@ -479,7 +473,6 @@ export type Task<DateTime = string, DecimalValue = string> = {
   targetBranch: string | null;
   failureReason: string | null;
   status: TaskStatus;
-  moveTargets: TaskMoveTarget[];
   assigneeType: AssigneeType;
   executionOwner: ExecutionOwner;
   approvalGate: boolean;
@@ -497,7 +490,6 @@ export type Task<DateTime = string, DecimalValue = string> = {
   assigneeAgent: Agent<DateTime> | null;
   repo: Repo<DateTime> | null;
   runs: Run<DateTime, DecimalValue>[];
-  taskCost?: UsageCost | null;
   chainId: string | null;
   chainIndex: number | null;
   source: TaskSource;
@@ -510,13 +502,22 @@ export type Task<DateTime = string, DecimalValue = string> = {
     outputKind: string;
     taskTemplate: { name: string };
   } | null;
-  /** The task's own latest merge-result projection, when this route includes it. */
-  mergeOutcome?: MergeOutcome | null;
-  mergeRecovery?: MergeRecovery<DateTime> | null;
-  /** Enrichment is carried by the full list; detail callers may not receive it. */
+};
+
+/** `GET /tasks` full-list projection, including list-only enrichment. */
+export type TaskList<DateTime = string, DecimalValue = string> = TaskBase<DateTime, DecimalValue> & {
   chainProgress: ChainProgress | null;
   recurringLastFiredAt: DateTime | null;
   recurringFireCount: number;
+};
+
+/** `GET /tasks/:taskId` projection, including detail-only operator fields. */
+export type TaskDetail<DateTime = string, DecimalValue = string> = TaskBase<DateTime, DecimalValue> & {
+  moveTargets: TaskMoveTarget[];
+  taskCost: UsageCost | null;
+  /** The task's own latest merge-result projection. */
+  mergeOutcome: MergeOutcome | null;
+  mergeRecovery: MergeRecovery<DateTime> | null;
 };
 
 /** HTTP envelope for `GET /tasks/:taskId/startability`. */
@@ -546,7 +547,7 @@ export type TaskActivity<DateTime = string> = {
   actorType: string;
   actorId: string | null;
   body: string;
-  metadata: unknown | null;
+  metadata: unknown;
   createdAt: DateTime;
 };
 
@@ -557,7 +558,7 @@ export type TaskStepOutput<DateTime = string> = {
   runId: string | null;
   kind: string;
   body: string;
-  metadata: unknown | null;
+  metadata: unknown;
   commitSha: string | null;
   createdAt: DateTime;
   updatedAt: DateTime;

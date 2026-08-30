@@ -72,6 +72,7 @@ import type {
   Run as RunContract,
   Session as SessionContract,
   TaskActivity as TaskActivityContract,
+  TaskDetail as TaskDetailContract,
   TaskStartability as TaskStartabilityContract,
   TaskStepOutput as TaskStepOutputContract,
 } from "@anneal/db/board-contract";
@@ -800,6 +801,7 @@ type RecurringFireResponse = RecurringFireContract<Date>;
 type RunResponse = RunContract<Date, Prisma.Decimal>;
 type SessionResponse = SessionContract<Date, Prisma.Decimal>;
 type TaskActivityResponse = TaskActivityContract<Date>;
+type TaskDetailResponse = TaskDetailContract<Date, Prisma.Decimal>;
 type TaskStartabilityResponse = TaskStartabilityContract;
 type TaskStepOutputResponse = TaskStepOutputContract<Date>;
 
@@ -2138,7 +2140,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       mergeOutcome,
       mergeRecovery,
       runs,
-    });
+    } satisfies TaskDetailResponse);
   });
   app.get("/tasks/:taskId/startability", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));

@@ -5,13 +5,13 @@ import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApiError } from "../lib/api";
-import type { Chain, Run, Task, TaskStepOutput } from "../lib/types";
+import type { Chain, Run, TaskDetail, TaskStepOutput } from "../lib/types";
 import { RunRow, TaskDetailPage, TaskOutput } from "../pages/TaskDetail";
 import { mountPage } from "./dom-harness";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
-const task = (id: string, name: string, promptIndex: number, chainId: string | null = null): Task => ({
+const task = (id: string, name: string, promptIndex: number, chainId: string | null = null): TaskDetail => ({
   id, projectId: "project-1", assigneeAgentId: "agent-1", repoId: "repo-1",
   templateId: null, templateStepId: null, name,
   description: prompts[promptIndex]!.prompt,
@@ -24,7 +24,7 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   maxSessionsPerTask: 3, createdAt: now, updatedAt: now, assigneeAgent: null,
   repo: null, runs: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
   archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null,
-  templateStep: null, chainProgress: null, recurringLastFiredAt: null, recurringFireCount: 0,
+  templateStep: null, taskCost: null, mergeOutcome: null, mergeRecovery: null,
 });
 
 const output = (taskId: string, body: string): TaskStepOutput => ({

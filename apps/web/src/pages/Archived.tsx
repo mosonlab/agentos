@@ -8,7 +8,7 @@ import { useT } from "../lib/i18n";
 import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { navigate } from "../lib/router";
-import type { Task } from "../lib/types";
+import type { TaskList } from "../lib/types";
 import { TasksPageHead } from "../components/tasks-tabs";
 import {
   HINT, STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
@@ -20,7 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
  *  than pretending to show everything. */
 export const ARCHIVED_LIMIT = 200;
 
-export const ArchivedRow = ({ task, onUnarchive }: { task: Task; onUnarchive: (task: Task) => void }): ReactNode => {
+export const ArchivedRow = ({ task, onUnarchive }: { task: TaskList; onUnarchive: (task: TaskList) => void }): ReactNode => {
   const t = useT();
   return (
     <TableRow
@@ -47,7 +47,7 @@ export const ArchivedRow = ({ task, onUnarchive }: { task: Task; onUnarchive: (t
 export const ArchivedPage = (): ReactNode => {
   const { projectId } = useProjectScope();
   const path = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}&archived=true`;
-  const { data, loading, error, reload } = usePoll<Task[]>(path);
+  const { data, loading, error, reload } = usePoll<TaskList[]>(path);
   const { error: actionError, run } = useAction();
   const t = useT();
 
@@ -56,7 +56,7 @@ export const ArchivedPage = (): ReactNode => {
   ), [data]);
   const shown = tasks.slice(0, ARCHIVED_LIMIT);
 
-  const unarchive = (task: Task): void => {
+  const unarchive = (task: TaskList): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/unarchive`, {}); reload(); });
   };
 

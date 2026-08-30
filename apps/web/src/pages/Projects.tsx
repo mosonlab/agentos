@@ -8,7 +8,7 @@ import { slugify } from "../lib/onboarding";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { cn } from "../lib/utils";
-import type { Agent, Project, Repo, Task } from "../lib/types";
+import type { Agent, Project, Repo, TaskList } from "../lib/types";
 import { IconArrowLeft, IconPlus } from "../components/icons";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, METRICS, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1,
@@ -75,7 +75,7 @@ export const ProjectsPage = (): ReactNode => {
   // with the response is count rows per project. Chain progress, positions and
   // recurring-fire summaries would cost two extra whole-table queries per tick
   // for fields this page never renders.
-  const { data: tasks } = usePoll<Task[]>("/tasks?enrich=false");
+  const { data: tasks } = usePoll<TaskList[]>("/tasks?enrich=false");
   const [creating, setCreating] = useState(false);
   const { error: actionError, run } = useAction();
   const t = useT();
@@ -137,7 +137,7 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
   const { data: agents } = usePoll<Agent[]>(`/projects/${projectId}/agents`, 5_000);
   const { data: repos } = usePoll<Repo[]>(`/projects/${projectId}/repos`, 5_000);
   // Same as above: this page counts tasks per status and renders no chain data.
-  const { data: tasks } = usePoll<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}&enrich=false`);
+  const { data: tasks } = usePoll<TaskList[]>(`/tasks?projectId=${encodeURIComponent(projectId)}&enrich=false`);
   const [editingYaml, setEditingYaml] = useState<string | null>(null);
   const { pending, error: actionError, run } = useAction();
   const t = useT();

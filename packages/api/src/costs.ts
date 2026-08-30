@@ -1,11 +1,5 @@
 import { Prisma, type PrismaClient, RunStatus, runSessionUsageCost, type UsageCost } from "@anneal/db";
-import type {
-  CostsAgentTotal as CostsAgentTotalContract,
-  CostsDailyBucket as CostsDailyBucketContract,
-  CostsModelTotal as CostsModelTotalContract,
-  CostsReport as CostsReportContract,
-  CostsTopRun as CostsTopRunContract,
-} from "@anneal/db/board-contract";
+import type { CostsReport as CostsReportContract } from "@anneal/db/board-contract";
 
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 
@@ -54,14 +48,7 @@ export type CostsRunRow = {
   } | null;
 };
 
-export type CostsDailyBucket<DecimalValue = string> = CostsDailyBucketContract<DecimalValue>;
-export type CostsAgentTotal<DecimalValue = string> = CostsAgentTotalContract<DecimalValue>;
-export type CostsModelTotal<DecimalValue = string> = CostsModelTotalContract<DecimalValue>;
-export type CostsTopRun<DateTime = string, DecimalValue = string> = CostsTopRunContract<DateTime, DecimalValue>;
-
-export type CostsReport<DateTime = string, DecimalValue = string> = CostsReportContract<DateTime, DecimalValue>;
-
-type NativeCostsReport = CostsReport<Date, Prisma.Decimal>;
+type NativeCostsReport = CostsReportContract<Date, Prisma.Decimal>;
 
 const ZERO = new Prisma.Decimal(0);
 
