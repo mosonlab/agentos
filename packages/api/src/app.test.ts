@@ -271,7 +271,7 @@ test("task status patch does not apply create defaults to other fields", async (
     const tx = {
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId, status: "REVIEW", archivedAt: null }],
       task: {
-        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null }),
+        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null, dispatchAfterTaskId: null, dispatchAfter: null }),
         // §D-P7's stop-state guard loads the task with its template step before
         // any status write. An ordinary task has no step, and the guard is then
         // a no-op — but it still asks.
@@ -403,7 +403,7 @@ test("operator DONE on an AGENT chain task is refused without closing its gate",
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
       repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
-    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null, dispatchAfterTaskId: null, dispatchAfter: null };
     const tx = {
       // The status write takes the Task-row mutex before advancing the chain.
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
@@ -453,6 +453,7 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
       id: "task-1", projectId: "project-1", name: "Human final", status: "REVIEW", templateId: "template-1",
       approvalGate: false, chainId: "chain-1", chainIndex: 2,
       assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
+      dispatchAfterTaskId: null, dispatchAfter: null,
     };
     const tx = {
       $queryRaw: async () => [{ id: before.id }],
