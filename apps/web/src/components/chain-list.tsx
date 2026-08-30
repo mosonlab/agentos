@@ -1,5 +1,7 @@
 import { type ReactNode, useState } from "react";
 
+import { compare, denseOrdinals, layerOf } from "@anneal/db/chain-order";
+
 import { sha, titleCase } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { parseRepairCycles, type RepairCycleViewModel } from "../lib/repair-subtimeline";
@@ -78,7 +80,12 @@ export type ChainLayerGroup = {
 };
 
 const executionLayer = (step: Pick<ChainStep, "layer" | "chainIndex">): number | null => (
-  step.layer ?? step.chainIndex
+  layerOf({ layer: step.layer, index: step.chainIndex })
+);
+
+const chainStepOrder = (left: ChainStep, right: ChainStep): number => compare(
+  { layer: left.layer, index: left.chainIndex, id: left.taskId },
+  { layer: right.layer, index: right.chainIndex, id: right.taskId },
 );
 
 /** The held layer is stored in the same coordinate system as each Step's
@@ -99,28 +106,23 @@ export const heldChainWaitingOnOperator = (chain: Chain): boolean => {
 };
 
 /**
- * Render order is a node concern (`position`), while execution order is a
- * layer concern. The API normally supplies a stored layer, but falling back to
- * the node ordinal keeps a legacy/expand-migration response visibly linear.
+ * Render order follows the same total execution order as the server surfaces.
  * The returned ordinal is dense so sparse, zero-based, and one-based storage
- * all have the same operator-facing numbering.
+ * all have the same operator-facing numbering; missing execution metadata is
+ * one final unknown layer rather than a layer invented from display position.
  */
 export const chainLayerGroups = (steps: readonly ChainStep[]): ChainLayerGroup[] => {
-  const effectiveLayer = (step: ChainStep): number => step.layer ?? step.chainIndex ?? step.position;
-  const values = [...new Set(steps.map(effectiveLayer))].sort((left, right) => left - right);
-  const ordinals = new Map(values.map((value, index) => [value, index + 1]));
+  const ordinals = denseOrdinals(steps.map((step) => ({ layer: step.layer, index: step.chainIndex })));
   const byLayer = new Map<number, ChainStep[]>();
   for (const step of steps) {
-    const layer = effectiveLayer(step);
+    const layer = layerOf({ layer: step.layer, index: step.chainIndex }, { missing: "last" });
     const group = byLayer.get(layer);
     if (group) group.push(step); else byLayer.set(layer, [step]);
   }
-  const groups = values.map((storedLayer) => ({
+  const groups = [...ordinals].map(([storedLayer, ordinal]) => ({
     storedLayer,
-    ordinal: ordinals.get(storedLayer) ?? 1,
-    steps: [...(byLayer.get(storedLayer) ?? [])].sort((left, right) => (
-      left.position - right.position || (left.chainIndex ?? 0) - (right.chainIndex ?? 0) || left.taskId.localeCompare(right.taskId)
-    )),
+    ordinal,
+    steps: [...(byLayer.get(storedLayer) ?? [])].sort(chainStepOrder),
     blockers: [] as ChainStep[],
   }));
   for (const [index, group] of groups.entries()) {

@@ -13,6 +13,7 @@ import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js
 import { canonicalTemplateIdentity } from "./canonical-template-transition.js";
 import { sharedChainBranch } from "./chain-branch.js";
 import { readChainControl } from "./chain-control.js";
+import { layerOf } from "./chain-order.js";
 import { lockAgentRow } from "./locks.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
@@ -734,7 +735,7 @@ export const openRun = async (
   // transaction and before any Run-birth work so a held successor produces no
   // Run or queue activity. The database prevents a HELD control without a
   // layer; malformed legacy Task rows still fail closed at this seam.
-  const taskLayer = task.chainLayer ?? task.chainIndex;
+  const taskLayer = layerOf({ layer: task.chainLayer, index: task.chainIndex });
   if (task.chainId) {
     const control = await readChainControl(tx, { projectId: task.projectId, chainId: task.chainId });
     if (control.held && (control.heldLayer === null || taskLayer === null || taskLayer > control.heldLayer)) {
