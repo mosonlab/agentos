@@ -122,7 +122,7 @@ type PreflightReport = {
 
 export type RunnerBackendReport = CliAvailabilityReport | PreflightReport;
 
-type RunnerBackendClaimState = Pick<RunnerBackendState, "capabilities" | "circuitOpen"> | null | undefined;
+type RunnerBackendClaimState = Pick<RunnerBackendState, "capabilities" | "circuitOpen"> | null;
 
 /** Whether an agent run may be offered to this backend at claim time. */
 export const runnerBackendAllowsClaim = (backend: RunnerBackendClaimState): boolean =>
