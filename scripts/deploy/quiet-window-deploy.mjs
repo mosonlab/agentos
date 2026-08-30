@@ -49,13 +49,13 @@ import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 import { runDeployCommand } from "./quiet-window-command.mjs";
+import { writeEscalationRecord } from "./quiet-window-escalation-record.mjs";
 import {
   BARRIER_TIMEOUT_REASON,
   createBarrierWatchdog,
   DEPLOY_BARRIER_TIMEOUT_MS,
   DEPLOY_STEP_TIMEOUT_MS,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
-  retainBarrierOnMigrationTimeout,
   waitForEscalationClear,
 } from "./quiet-window-deadlines.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
@@ -93,6 +93,7 @@ const interruption = createDeployInterruption();
 const interruptController = { signal: interruption.signal };
 const interruptFailure = interruption.failure;
 const throwIfInterrupted = interruption.throwIfInterrupted;
+let migrationBarrierRetentionActive = false;
 const trackResource = (resource) => {
   const release = resource.release.bind(resource);
   resource.release = async () => {
@@ -109,6 +110,7 @@ const command = (program, args, {
   timeoutMs,
   timeoutReason,
   allowAfterInterrupt = false,
+  onTermination,
 } = {}) => runDeployCommand(program, args, {
   cwd,
   env,
@@ -119,6 +121,7 @@ const command = (program, args, {
   abortFailure: interruptFailure,
   abortSignal: () => interruption.receivedSignal() === "SIGINT" ? "SIGINT" : "SIGTERM",
   allowAfterAbort: allowAfterInterrupt,
+  onTermination,
 });
 
 const checkedResult = async (reason, run) => {
@@ -331,6 +334,11 @@ const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/la
   ...options,
 });
 const domain = () => `gui/${process.getuid()}`;
+const launchctlPrint = (label) => command("/bin/launchctl", ["print", `${domain()}/${label}`], {
+  capture: true,
+  timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+  timeoutReason: "service-inspection-timeout",
+});
 
 const acquireDeployBarrier = async () => {
   throwIfInterrupted();
@@ -353,32 +361,41 @@ const acquireDeployBarrier = async () => {
     const pid = Number(rows[0].pid);
     let released = false;
     let retainUntilCleared = false;
+    const verifyBarrier = async () => {
+      if (released) return false;
+      const checks = await session.$queryRawUnsafe(
+        `SELECT pg_backend_pid() AS pid, EXISTS (
+           SELECT 1 FROM pg_locks
+           WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+             AND classid = $1::oid AND objid = $2::oid AND objsubid = 2
+             AND granted AND mode = 'ExclusiveLock'
+         ) AS held`,
+        DEPLOY_BARRIER_CLASS,
+        DEPLOY_BARRIER_KEY,
+      ).catch(() => []);
+      return checks.length === 1 && Number(checks[0]?.pid) === pid && checks[0]?.held === true;
+    };
     return trackResource({
-      retainUntilEscalationCleared: () => { retainUntilCleared = true; },
-      verify: async () => {
-        if (released) return false;
-        const checks = await session.$queryRawUnsafe(
-          `SELECT pg_backend_pid() AS pid, EXISTS (
-             SELECT 1 FROM pg_locks
-             WHERE locktype = 'advisory' AND pid = pg_backend_pid()
-               AND classid = $1::oid AND objid = $2::oid AND objsubid = 2
-               AND granted AND mode = 'ExclusiveLock'
-           ) AS held`,
-          DEPLOY_BARRIER_CLASS,
-          DEPLOY_BARRIER_KEY,
-        ).catch(() => []);
-        // The backend identity and pg_locks row prove the pinned session still
-        // owns the exact exclusive key; either becoming unreadable is loss.
-        return checks.length === 1 && Number(checks[0]?.pid) === pid && checks[0]?.held === true;
+      retainUntilEscalationCleared: () => {
+        retainUntilCleared = true;
+        migrationBarrierRetentionActive = true;
       },
+      // The backend identity and pg_locks row prove the pinned session still
+      // owns the exact exclusive key; either becoming unreadable is loss.
+      verify: verifyBarrier,
       release: async () => {
         if (released) return;
         if (retainUntilCleared) {
           await waitForEscalationClear({
             escalationExists: () => existsSync(ESCALATION_PATH),
+            verifyBarrier,
             wait: () => new Promise((resolveWait) => setTimeout(resolveWait, 1_000)),
-            onHold: () => log(`HOLD deploy-barrier migration-timeout escalation=${ESCALATION_PATH}`),
-            onCleared: () => log("PASS deploy-barrier operator-cleared-migration-timeout"),
+            onHold: () => log(`HOLD deploy-barrier migration-timeout escalation=${ESCALATION_PATH}; clear-escalation-required`),
+            onPersistencePending: () => log(`STOP escalation-persistence-unobserved path=${ESCALATION_PATH}; deploy-barrier-retained`),
+            onCleared: () => {
+              migrationBarrierRetentionActive = false;
+              log("PASS deploy-barrier operator-cleared-migration-timeout");
+            },
           });
         }
         released = true;
@@ -431,14 +448,7 @@ const acquireLock = async () => {
 };
 
 const writeEscalation = async (record) => {
-  if (existsSync(ESCALATION_PATH)) {
-    log(`ESCALATION already-active path=${ESCALATION_PATH}`);
-    return;
-  }
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  const temporary = `${ESCALATION_PATH}.${process.pid}.${randomUUID()}`;
-  writeFileSync(temporary, `${JSON.stringify({ notificationDelivered: false, ...record, escalatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, ESCALATION_PATH);
+  writeEscalationRecord({ path: ESCALATION_PATH, record });
   log(`ESCALATED reason=${record.reason} from=${record.from} to=${record.to}`);
 };
 
@@ -503,11 +513,7 @@ const pruneHistory = () => {
 const serviceState = async () => {
   const unavailable = [];
   for (const label of SERVICE_LABELS) {
-    const result = await command("/bin/launchctl", ["print", `${domain()}/${label}`], {
-      capture: true,
-      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
-      timeoutReason: "service-inspection-timeout",
-    });
+    const result = await launchctlPrint(label);
     if (result.code !== 0 || !/^\s*state = running\s*$/mu.test(result.stdout)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
@@ -523,11 +529,7 @@ const verifyStableServicePaths = async () => {
     return await verifyServiceInventory({
       repositoryRoot: REPOSITORY_ROOT,
       start: async (invocation) => {
-        const result = await command("/bin/launchctl", ["print", `${domain()}/${invocation.label}`], {
-          capture: true,
-          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
-          timeoutReason: "service-inspection-timeout",
-        });
+        const result = await launchctlPrint(invocation.label);
         const running = result.code === 0 && /^\s*state = running\s*$/mu.test(result.stdout);
         const wrapped = result.stdout.includes(wrapper) && result.stdout.includes(invocation.label);
         return { ok: running && wrapped, targetReleaseId: invocation.releaseIdentity };
@@ -669,8 +671,16 @@ const createDeployHost = () => createProductionHost({
   waitForQuiet: async (attempt) => {
     const barrier = await waitForQuiet();
     const revisions = attempt.requireFact("revisions");
-    const watchdog = createBarrierWatchdog({
+    const watchdog = await createBarrierWatchdog({
       timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
+      escalationPath: ESCALATION_PATH,
+      escalationRecord: {
+        outcome: "failure",
+        reason: BARRIER_TIMEOUT_REASON,
+        detail: `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+        from: revisions.from,
+        to: revisions.to,
+      },
       onTimeout: async () => {
         const failure = new DeployFailure(
           BARRIER_TIMEOUT_REASON,
@@ -678,9 +688,14 @@ const createDeployHost = () => createProductionHost({
         );
         if (!interruption.interruptWithFailure(failure)) return;
         log(`STOP ${failure.reason} detail=${failure.detail}`);
-        await persistAndNotifyFailure(failure, revisions.from, revisions.to);
       },
-      onError: (error) => log(`STOP barrier-watchdog-alert-failed detail=${error instanceof Error ? error.name : "unknown"}`),
+      onError: (error) => {
+        const failure = error instanceof DeployFailure
+          ? error
+          : new DeployFailure("deploy-barrier-watchdog-alert-failed", error instanceof Error ? error.name : "unknown");
+        log(`STOP ${failure.reason} detail=${failure.detail}`);
+        interruption.interruptWithFailure(failure);
+      },
     });
     return { barrier, resources: [barrier, watchdog] };
   },
@@ -722,9 +737,13 @@ const createDeployHost = () => createProductionHost({
         databaseUrl: process.env.DATABASE_URL,
         output,
         signal: interruptController.signal,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.databaseBackup,
       });
     } catch (error) {
       throwIfInterrupted();
+      if (error instanceof Error && error.message === "pg_dump-timeout") {
+        fail("database-backup-timeout", `budget-${DEPLOY_STEP_TIMEOUT_MS.databaseBackup}ms`);
+      }
       fail("database-backup-failed", error instanceof Error ? error.message : String(error));
     }
     return { backup: { backupIdentity: basename(output) } };
@@ -737,7 +756,8 @@ const createDeployHost = () => createProductionHost({
       timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
       timeoutReason: "migration-preflight-timeout",
     });
-    await retainBarrierOnMigrationTimeout(attempt.requireFact("barrier"), () => checked(
+    const barrier = attempt.requireFact("barrier");
+    await checked(
       "guarded-migration-refused",
       loadBinaries().node,
       [
@@ -751,8 +771,9 @@ const createDeployHost = () => createProductionHost({
         cwd: operationWorkspace,
         timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
         timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
+        onTermination: () => barrier.retainUntilEscalationCleared(),
       },
-    ));
+    );
     const migrationTailAfter = await migrationTail();
     return { migration: { migrationTailBefore, migrationTailAfter } };
   },
@@ -914,7 +935,11 @@ const main = async () => {
 };
 
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
-  process.once(signal, () => {
+  process.on(signal, () => {
+    if (migrationBarrierRetentionActive) {
+      log(`HOLD deploy-barrier signal=${signal}-refused clear-escalation-required`);
+      return;
+    }
     if (!interruption.interrupt(signal)) return;
     log(`STOP deploy-interrupted detail=${signal}; rolling-back-before-exit-${code}`);
   });
@@ -927,7 +952,7 @@ try {
   const failure = failureOf(error);
   log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
   const dryRunMode = process.argv.includes("--dry-run");
-  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && !existsSync(ESCALATION_PATH)) {
+  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason })) {
     await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
       .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));
   }

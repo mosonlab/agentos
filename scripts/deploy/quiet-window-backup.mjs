@@ -189,8 +189,27 @@ export const writePgDumpBackup = async ({
   env = process.env,
   spawnImpl = spawn,
   signal,
+  timeoutMs,
 }) => {
   const invocation = pgDumpInvocation({ configuration, databaseUrl, env });
-  await runToFile({ invocation, output, spawnImpl, signal });
-  return { output, program: invocation.program, args: invocation.args };
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  const timer = Number.isSafeInteger(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, timeoutMs)
+    : null;
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
+  try {
+    await runToFile({ invocation, output, spawnImpl, signal: combinedSignal });
+    return { output, program: invocation.program, args: invocation.args };
+  } catch (error) {
+    if (timedOut) throw new Error("pg_dump-timeout");
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 };

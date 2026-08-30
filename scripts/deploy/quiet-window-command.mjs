@@ -4,7 +4,6 @@ import { basename } from "node:path";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 
 export const COMMAND_KILL_GRACE_MS = 2_000;
-export const COMMAND_KILL_OVERHEAD_MS = 2 * COMMAND_KILL_GRACE_MS;
 
 const timeoutFailure = (program, timeoutMs, reason) => new DeployFailure(
   reason,
@@ -24,6 +23,7 @@ export const runDeployCommand = (program, args, {
   abortSignal = () => "SIGTERM",
   allowAfterAbort = false,
   killGraceMs = COMMAND_KILL_GRACE_MS,
+  onTermination = () => undefined,
 } = {}) => {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new TypeError("deploy-command-timeout-required");
@@ -67,6 +67,7 @@ export const runDeployCommand = (program, args, {
     const terminateGroup = (failure, initialSignal) => {
       if (terminationFailure !== null) return;
       terminationFailure = failure;
+      onTermination(failure, initialSignal);
       signalGroup(initialSignal);
       // The group kill deliberately happens even if the leader closes during
       // the grace. A pipe-detached descendant may still be alive.

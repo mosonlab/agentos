@@ -44,12 +44,14 @@ test("deploy command requires an explicit step budget and timeout reason", () =>
 
 test("timeout sends TERM then KILL and rejects with the step-specific DeployFailure", async () => {
   const started = performance.now();
+  const terminations = [];
   const error = await runDeployCommand("/bin/sh", ["-c", "trap '' TERM; exec sleep 30"], {
     cwd: process.cwd(),
     env,
     timeoutMs: 40,
     timeoutReason: "fixture-step-timeout",
     killGraceMs: 50,
+    onTermination: (failure, signal) => { terminations.push({ reason: failure.reason, signal }); },
   }).then(() => null, (reason) => reason);
   const elapsed = performance.now() - started;
   assert.ok(error instanceof DeployFailure);
@@ -57,6 +59,7 @@ test("timeout sends TERM then KILL and rejects with the step-specific DeployFail
   assert.equal(error.detail, "program-sh-timeout-40ms");
   assert.ok(elapsed >= 80, `expected the TERM grace to elapse, took ${elapsed}ms`);
   assert.ok(elapsed < 500, `expected KILL to settle promptly, took ${elapsed}ms`);
+  assert.deepEqual(terminations, [{ reason: "fixture-step-timeout", signal: "SIGTERM" }]);
 });
 
 test("timeout kills descendants even when the process-group leader exits first", async () => {

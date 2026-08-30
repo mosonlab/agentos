@@ -29,7 +29,7 @@
     "test:operator-api-docs": "node --test scripts/operator-api-docs.test.mjs",
     "test:gate-worker": "node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs",
     "test:merge-train": "node --test scripts/merge-train.test.mjs",
-    "test:auto-deploy": "node --test scripts/deploy/quiet-window-command.test.mjs scripts/deploy/quiet-window-deadlines.test.mjs scripts/deploy/quiet-window-deploy.test.mjs scripts/deploy/quiet-window-escalation.test.mjs scripts/deploy/remote-main-read.test.mjs scripts/deploy/launchd-service-wrapper.test.mjs scripts/deploy/release-directory.test.mjs scripts/deploy/release-pointer.test.mjs",
+    "test:auto-deploy": "node --test scripts/deploy/quiet-window-backup.test.mjs scripts/deploy/quiet-window-command.test.mjs scripts/deploy/quiet-window-deadlines.test.mjs scripts/deploy/quiet-window-deploy.test.mjs scripts/deploy/quiet-window-escalation.test.mjs scripts/deploy/remote-main-read.test.mjs scripts/deploy/launchd-service-wrapper.test.mjs scripts/deploy/release-directory.test.mjs scripts/deploy/release-pointer.test.mjs",
     "snapshot:scan": "node scripts/public-snapshot-scan.mjs",
     "test:snapshot-scan": "node --test scripts/public-snapshot-scan.test.mjs",
     "test:release-docs": "node --test scripts/release-docs.test.mjs scripts/setup-merge-executor.test.mjs",

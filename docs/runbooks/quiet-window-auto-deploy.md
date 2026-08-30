@@ -223,6 +223,39 @@ operation. The held deploy process observes the cleared marker, releases its
 barrier, and exits non-zero. Only after that normal exit should the scheduled
 job be kicked again using the retry procedure below.
 
+While the log says `HOLD deploy-barrier migration-timeout`, do not boot out,
+kickstart, or kill `com.agentos.auto-deploy`, and do not log out or reboot the
+host. `SIGTERM` is deliberately refused during this hold, but launchd can
+eventually escalate to `SIGKILL`, which would drop the session-scoped barrier.
+The existing `--clear-escalation` operation is the only safe way to end the
+hold after an operator has established that the schema is safe.
+
+#### Timeout or hang evidence
+
+Start with `~/Library/Logs/Anneal/auto-deploy.log` and identify the stalled
+auto-deploy child PID. Before changing process state, capture its stack on the
+affected host:
+
+```sh
+sample <pid> 10 -file ~/Library/Logs/Anneal/auto-deploy-<pid>.sample.txt
+```
+
+At the same time, record machine load and the competing process inventory,
+including merge-gate workers and `packages/db` test processes. For example:
+
+```sh
+uptime
+top -l 1 -stats pid,ppid,command,cpu,mem,state,time,threads
+ps -axo pid,ppid,lstart,state,%cpu,%mem,command
+iostat -w 1 -c 3
+```
+
+Preserve these outputs with the auto-deploy log timestamps. The observed slow
+incident had no database connection from the stalled Prisma parent, and a
+later real migration completed normally, so do not restart diagnosis at
+PostgreSQL locks or connection counts; collect the process stack, host load,
+I/O state, and concurrent-task evidence first.
+
 If restart or health verification fails after pointer activation, the job
 atomically points `current` back at `previous`, records the rollback outcome,
 and restarts the prior release. Database migration rollback is not attempted.
