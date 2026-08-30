@@ -69,6 +69,8 @@ import type {
   Trigger as TriggerContract,
   TriggerDetail as TriggerDetailContract,
   TriggerFire as TriggerFireContract,
+  Run as RunContract,
+  Session as SessionContract,
 } from "@anneal/db/board-contract";
 import type {
   Agent as AgentContract,
@@ -792,6 +794,8 @@ type TriggerResponse = TriggerContract<Date>;
 type TriggerDetailResponse = TriggerDetailContract<Date>;
 type TriggerFireResponse = TriggerFireContract<Date>;
 type RecurringFireResponse = RecurringFireContract<Date>;
+type RunResponse = RunContract<Date, Prisma.Decimal>;
+type SessionResponse = SessionContract<Date, Prisma.Decimal>;
 
 export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
@@ -2108,6 +2112,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const latestRunId = task.runs[0]?.id ?? null;
     const mergeOutcome = projectMergeOutcome(task.stepOutput);
     const usageCosts = task.runs.map(runSessionUsageCost);
+    const runs = task.runs.map((run, index) => ({
+      ...run,
+      session: run.session === null ? null : {
+        ...run.session,
+        usageCost: serializeUsageCost(usageCosts[index] ?? null),
+      },
+      mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
+      mergeRecovery: recoveryRow
+        && (run.id === recoveryRow.boundSourceRunId || run.id === recoveryRow.recoveryRunId)
+        ? mergeRecovery
+        : null,
+    })) satisfies RunResponse[];
     return context.json({
       ...task,
       executionOwner: chainExecutionOwner(task),
@@ -2115,18 +2131,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       taskCost: serializeUsageCost(sumUsageCosts(usageCosts.filter((cost) => cost !== null))),
       mergeOutcome,
       mergeRecovery,
-      runs: task.runs.map((run, index) => ({
-        ...run,
-        session: run.session === null ? null : {
-          ...run.session,
-          usageCost: serializeUsageCost(usageCosts[index] ?? null),
-        },
-        mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
-        mergeRecovery: recoveryRow
-          && (run.id === recoveryRow.boundSourceRunId || run.id === recoveryRow.recoveryRunId)
-          ? mergeRecovery
-          : null,
-      })),
+      runs,
     });
   });
   app.get("/tasks/:taskId/startability", async (context) => {
@@ -3302,7 +3307,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "50", 10) || 50, 1), 200);
     const before = context.req.query("before");
     const beforeDate = before ? new Date(before) : null;
-    return context.json((await db.session.findMany({
+    const sessions = (await db.session.findMany({
       where: {
         ...(projectId ? { projectId } : {}),
         // An unparseable cursor drops the filter rather than reaching Prisma as
@@ -3312,7 +3317,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: sessionInclude,
       orderBy: { requestedAt: "desc" },
       take: limit,
-    })).map(withMergeOutcome));
+    })).map(withMergeOutcome) satisfies SessionResponse[];
+    return context.json(sessions);
   });
 
   app.get("/sessions/:sessionId", async (context) => {
@@ -3320,7 +3326,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       where: { id: id.parse(context.req.param("sessionId")) },
       include: sessionInclude,
     });
-    return session ? context.json(withMergeOutcome(session)) : context.json({ error: "Session not found" }, 404);
+    return session
+      ? context.json(withMergeOutcome(session) satisfies SessionResponse)
+      : context.json({ error: "Session not found" }, 404);
   });
 
   app.post("/runs/:runId/cancel", async (context) => {
