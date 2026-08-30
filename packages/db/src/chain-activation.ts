@@ -10,7 +10,7 @@ import {
 import { readChainControl } from "./chain-control.js";
 import { heldPredicate } from "./chain-hold.js";
 import { compare, layerOf } from "./chain-order.js";
-import { lockAgentRepoGrant, lockAgentRow, lockChainRows } from "./locks.js";
+import { lockAgentRepoGrant, lockChainRows } from "./locks.js";
 import { parseAuthorizationMetadata } from "./merge-integrator.js";
 import { stopStateFor } from "./merge-integrator-db.js";
 import {
@@ -24,7 +24,6 @@ import {
   CompoundImplementationAssigneeError,
   type IntegratorStopBypass,
   WorkflowRefusalError,
-  compoundImplementationAssigneeValid,
   enqueueTaskRunInternal,
   gateQuestion,
   isCompoundImplementationStep,
@@ -744,22 +743,7 @@ const activateChainSuccessorInternal = async (
         select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
       })
       : null;
-    if (isCompoundImplementationStep(successorStep)) {
-      const lockedAgent = successor.assigneeAgentId
-        ? await lockAgentRow(tx, successor.assigneeAgentId)
-        : null;
-      if (lockedAgent?.archivedAt) {
-        throw new ArchivedAssigneeError(successor.id, successor.name, lockedAgent.name);
-      }
-      if (!compoundImplementationAssigneeValid(
-        successor.projectId,
-        successor.assigneeType,
-        lockedAgent,
-        successorStep,
-      )) {
-        throw new CompoundImplementationAssigneeError();
-      }
-    }
+    const compoundImplementation = isCompoundImplementationStep(successorStep);
     if (isMergeReadinessStep(successorStep)) {
       await tx.taskActivity.create({ data: {
         taskId: successor.id,
@@ -775,7 +759,8 @@ const activateChainSuccessorInternal = async (
       continue;
     }
 
-    if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {
+    if (!compoundImplementation
+      && (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId)) {
       if (options.sourceRunId) {
         await tx.task.update({ where: { id: successor.id }, data: { status: TaskStatus.REVIEW } });
         await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
@@ -787,30 +772,6 @@ const activateChainSuccessorInternal = async (
           body: "Predecessor layer completed; successor awaits operator",
         } });
       }
-      continue;
-    }
-
-    const stopped = await stopStateFor(tx, successor.id);
-    if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
-      await parkStoppedIntegratorSuccessor(tx, current, successor, stopped, options.sourceRunId ?? null);
-      continue;
-    }
-    if (successor.assigneeAgent?.archivedAt) {
-      if (options.archivedAssignee === "throw") {
-        throw new ArchivedAssigneeError(successor.id, successor.name, successor.assigneeAgent.name);
-      }
-      await tx.task.update({
-        where: { id: successor.id },
-        data: {
-          status: TaskStatus.REVIEW,
-          failureReason: `Assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
-        },
-      });
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: `Predecessor layer completed but assignee ${successor.assigneeAgent.name} is archived; step not queued`,
-      } });
       continue;
     }
 
@@ -860,7 +821,19 @@ const activateChainSuccessorInternal = async (
             break;
           }
           case "assignee-archived":
+            if (options.archivedAssignee === "throw") {
+              throw new ArchivedAssigneeError(
+                String(refusal.context?.taskId ?? successor.id),
+                String(refusal.context?.taskName ?? successor.name),
+                String(refusal.context?.agentName ?? successor.assigneeAgent?.name ?? "unknown"),
+              );
+            }
+            break;
           case "compound-implementation-assignee":
+            if (options.archivedAssignee === "throw") {
+              throw new CompoundImplementationAssigneeError();
+            }
+            break;
           case "initial-run-already-exists":
           case "integrator-binding-invalid":
           case "prior-run-required":
@@ -870,6 +843,10 @@ const activateChainSuccessorInternal = async (
           case "task-archived":
           case "task-assignee-missing":
           case "task-assignee-type-invalid":
+            if (options.archivedAssignee === "throw" && compoundImplementation) {
+              throw new CompoundImplementationAssigneeError();
+            }
+            break;
           case "task-not-found":
           case "task-not-integrator":
             break;

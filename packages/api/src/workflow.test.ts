@@ -517,12 +517,21 @@ test("chain advancement parks an archived successor without throwing or enqueuei
   const updates: Array<Record<string, unknown>> = [];
   const activities: Array<Record<string, unknown>> = [];
   let creates = 0;
+  const archivedAgent = runAgent({
+    id: "agent-2",
+    name: "Archived Successor",
+    archivedAt: new Date(),
+  });
   const next = {
     id: "task-2", projectId: "project-1", chainId: "chain-1", chainIndex: 2, chainLayer: 2,
-    name: "Archived Successor", status: TaskStatus.TODO, templateStepId: null,
+    name: "Archived Successor", description: "archived successor", status: TaskStatus.TODO, templateStepId: null,
     assigneeType: AssigneeType.AGENT, assigneeAgentId: "agent-2", approvalGate: false,
-    repoId: "repo-1", updatedAt: new Date(), runs: [],
-    assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
+    repoId: "repo-1", templateId: null, targetBranch: "main", opensPullRequest: true,
+    maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
+    archivedAt: null, updatedAt: new Date(), runs: [],
+    assigneeAgent: archivedAgent,
+    repo: { id: "repo-1", defaultBranch: "main" },
+    templateStep: null,
   };
   const predecessor = {
     id: "task-1", projectId: "project-1", chainId: "chain-1", chainIndex: 1, chainLayer: 1,
@@ -535,14 +544,20 @@ test("chain advancement parks an archived successor without throwing or enqueuei
     task: {
       findUniqueOrThrow: async () => ({ ...predecessor, templateId: "template-1" }),
       findMany: async () => [predecessor, next],
-      findUnique: async () => null,
+      findUnique: async ({ where }: { where: { id?: string } }) => where.id === next.id ? next : null,
+      findFirst: async () => null,
       updateMany: async () => ({ count: 1 }),
       update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         updates.push({ id: where.id, ...data });
         return {};
       },
     },
-    run: { create: async () => { creates += 1; return {}; } },
+    agent: { findUnique: async () => archivedAgent },
+    taskTemplateStep: { findUnique: async () => null },
+    run: {
+      findFirst: async () => null,
+      create: async () => { creates += 1; return {}; },
+    },
     taskActivity: {
       create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
     },
@@ -555,7 +570,8 @@ test("chain advancement parks an archived successor without throwing or enqueuei
   assert.equal(creates, 0);
   assert.equal(updates[1]?.status, "REVIEW");
   assert.match(String(updates[1]?.failureReason), /Archived Successor/);
-  assert.match(String(activities[0]?.body), /Archived Successor.*not queued/);
+  assert.match(String(activities[0]?.body), /Run birth was refused:.*Archived Successor/);
+  assert.deepEqual(activities[0]?.metadata, { refusal: "assignee-archived" });
 });
 
 test("an Inbox-resumed queued run for an archived agent is surfaced by the sweep", async () => {
