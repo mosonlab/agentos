@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
@@ -9,6 +8,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentToolsCard, BindingToggle } from "../pages/Agents";
 import { ENFORCED_BY, TOOL_KEYS } from "../lib/tools";
 import type { Agent, RunnerPreference } from "../lib/types";
+import { claudeDeclaration } from "../../../../packages/runner/src/adapters/claude.js";
+import { codexDeclaration } from "../../../../packages/runner/src/adapters/codex.js";
+import { piDeclaration } from "../../../../packages/runner/src/adapters/pi.js";
 
 const agent = (overrides: Partial<Agent> = {}): Agent => ({
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
@@ -61,16 +63,12 @@ test("Custom model preferences always resolve to a concrete honesty answer", () 
   }
 });
 
-test("the web honesty map stays aligned with the two adapter maps", () => {
-  // Hand-copied intentionally: this fails review visibly if either side changes.
+test("the web honesty map stays aligned with the provider declarations", () => {
   assert.deepEqual(ENFORCED_BY, {
-    CLAUDE: ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"],
-    CODEX: [],
-    PI: ["BASH", "READ", "WRITE", "EDIT"],
+    CLAUDE: claudeDeclaration.enforcedTools,
+    CODEX: codexDeclaration.enforcedTools,
+    PI: piDeclaration.enforcedTools,
   });
-  const source = readFileSync(new URL("../../../../packages/runner/src/adapters.ts", import.meta.url), "utf8");
-  assert.match(source, /const TOOL_ORDER: ToolKey\[\] = \["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"\]/u);
-  assert.match(source, /const PI_TOOL_NAMES:[\s\S]*?BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit"/u);
 });
 
 test("BindingToggle keeps its switch in a flex wrapper to prevent the 3px baseline drift", () => {

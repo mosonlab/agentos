@@ -12,14 +12,6 @@ import type { AgentScratch } from "../workspace.js";
 import type { SessionConfigOptions } from "./session-config.js";
 
 export type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
-export const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
-export const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
-  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
-  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
-};
-export const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
-  BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit",
-};
 
 export type AdapterEvent = {
   source: "RUNNER" | "CLAUDE" | "CODEX" | "PI";
@@ -137,6 +129,8 @@ export type AdapterDeclaration = {
   toolIntroduction: string;
   toolTransport: SessionToolTransport;
   toolEntrypoint(): string;
+  /** Tool policy keys this CLI can actually deny in argv. */
+  enforcedTools: readonly ToolKey[];
   isolatesSessionConfig: boolean;
   startupPreflightModel: string | null;
   /** Task secrets with these names may not override provider policy. */

@@ -267,6 +267,7 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   toolIntroduction: "Anneal tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
   toolTransport: "mcp-stdio",
   toolEntrypoint: mcpServerPath,
+  enforcedTools: [],
   isolatesSessionConfig: true,
   startupPreflightModel: CODEX_STARTER_MODEL,
   protectedEnvironmentVariables: ["CODEX_HOME", "AGENTOS_CODEX_SERVICE_TIER"],

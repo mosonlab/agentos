@@ -6,7 +6,6 @@ import type { RunnerConfig } from "../config.js";
 import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
-  CLAUDE_TOOL_NAMES,
   capturePreflight,
   createAdapterState,
   emitAdapterEvent,
@@ -17,7 +16,6 @@ import {
   preflightFailure,
   processProviderEvent,
   stringField,
-  TOOL_ORDER,
   type AdapterDeclaration,
   type AdapterState,
   type PreflightResult,
@@ -34,9 +32,18 @@ const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
 export const claudePlatformSettingsPath = (): string =>
   process.env.RUNNER_CLAUDE_SETTINGS_PATH ?? join(packageRoot, "assets", "claude-platform-settings.json");
 
+const CLAUDE_ENFORCED_TOOLS = Object.freeze([
+  "BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH",
+] as const);
+
+const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
+  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
+  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
+};
+
 const denyArgs = (disabledTools: string[]): string[] => {
   const denied = new Set(disabledTools);
-  const names = TOOL_ORDER.flatMap((tool: ToolKey) => denied.has(tool) ? [CLAUDE_TOOL_NAMES[tool]] : []);
+  const names = CLAUDE_ENFORCED_TOOLS.flatMap((tool) => denied.has(tool) ? [CLAUDE_TOOL_NAMES[tool]] : []);
   return names.length === 0 ? [] : ["--disallowedTools", names.join(",")];
 };
 
@@ -174,6 +181,7 @@ export const claudeDeclaration: AdapterDeclaration = Object.freeze({
   toolIntroduction: "Anneal tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
   toolTransport: "mcp-stdio",
   toolEntrypoint: mcpServerPath,
+  enforcedTools: CLAUDE_ENFORCED_TOOLS,
   isolatesSessionConfig: false,
   startupPreflightModel: null,
   protectedEnvironmentVariables: ["CLAUDE_CONFIG_DIR"],
