@@ -68,7 +68,6 @@ const repairActivity = (
   actorType: "control-plane",
   actorId: null,
   body: "",
-  commitSha: null,
   metadata: { schemaVersion: 1, kind, repairTaskId, repairKind, startHeadSha, targetHeadSha, ...extra },
   createdAt: `2026-08-28T00:0${id.slice(-1)}:00.000Z`,
 });

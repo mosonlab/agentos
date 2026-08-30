@@ -1,37 +1,16 @@
 /** Wire shapes as serialised by the control plane (packages/db/prisma/schema.prisma).
  *  Decimal columns arrive as strings, DateTime as ISO strings. */
 
-import type {
-  AssigneeType,
-  ChainProgress,
-  ExecutionOwner,
-  MergeOutcome,
-  MergeRecovery,
-  RecurringFire,
-  Run,
-  RunStatus,
-  Session,
-  TaskMoveTarget,
-  TaskSource,
-  TaskStatus,
-  Trigger,
-  TriggerDetail,
-  TriggerFire,
-  UsageCost,
-} from "@anneal/db/board-contract";
+import type { AssigneeType } from "@anneal/db/board-contract";
 import type {
   Agent,
-  CodexServiceTier,
-  FailureClass,
   GoalStatus,
   InboxDeliveryStatus,
   InboxKind,
   InboxStatus,
-  Repo,
   RepoPermission,
   RunnerKind,
   RunnerPreference,
-  SessionExecutionStatus,
 } from "@anneal/db/wire-contract";
 
 export type {
@@ -55,8 +34,12 @@ export type {
   RecurringFire,
   Run,
   RunStatus,
+  Task,
+  TaskActivity,
   ScheduleKind,
   Session,
+  TaskStartability,
+  TaskStepOutput,
   TaskMoveTarget,
   TaskSource,
   TaskStatus,
@@ -98,103 +81,6 @@ export type SessionEvent = {
   type: string;
   toolCallId: string | null;
   payload: unknown;
-};
-
-export type Task = {
-  id: string;
-  projectId: string;
-  assigneeAgentId: string | null;
-  repoId: string | null;
-  templateId: string | null;
-  templateStepId: string | null;
-  name: string;
-  description: string;
-  workingDirectory: string | null;
-  targetBranch: string | null;
-  failureReason: string | null;
-  status: TaskStatus;
-  moveTargets: TaskMoveTarget[];
-  assigneeType: AssigneeType;
-  executionOwner: ExecutionOwner;
-  approvalGate: boolean;
-  scheduleKind: "NOW" | "AT" | "CRON";
-  // The scheduler's own columns. `runAt === null` on a live CRON definition is
-  // the quarantine marker, not an absence — see lib/schedule.ts.
-  runAt: string | null;
-  cron: string | null;
-  timezone: string | null;
-  maxDurationMin: number;
-  stallTimeoutMin: number;
-  maxSessionsPerTask: number;
-  createdAt: string;
-  updatedAt: string;
-  assigneeAgent: Agent | null;
-  repo: Repo | null;
-  runs: Run[];
-  taskCost?: UsageCost | null;
-  chainId: string | null;
-  chainIndex: number | null;
-  source: TaskSource;
-  archivedAt: string | null;
-  schedulePausedAt: string | null;
-  recurringSourceTaskId: string | null;
-  templateStep: {
-    name: string;
-    stepIndex: number;
-    outputKind: string;
-    taskTemplate: { name: string };
-  } | null;
-  /** §SF-1, the task's own latest merge outcome; the run rows carry the same
-   *  projection bound to the run that recorded it. */
-  mergeOutcome?: MergeOutcome | null;
-  mergeRecovery?: MergeRecovery | null;
-  /** Assembled by the API, never recomputed here: a second implementation could
-   *  disagree with the board's own numbers. Null when the task is not in a chain. */
-  chainProgress: ChainProgress | null;
-  /** Present only on recurring definitions, so a collapsed Automations row can
-   *  render `Last run` without opening a second poll per row. */
-  recurringLastFiredAt: string | null;
-  recurringFireCount: number;
-};
-
-export type TaskStartability = {
-  startable: boolean;
-  checklist: {
-    repoBound: boolean;
-    agentAssignee: boolean;
-    repoAccessGrant: boolean;
-    budgetRemaining: boolean;
-    noActiveRun: boolean;
-    predecessorsDone: boolean;
-  };
-  task: {
-    id: string;
-    name: string;
-    agent: { id: string; title: string } | null;
-    repo: { id: string; name: string } | null;
-    targetBranch: string | null;
-  };
-};
-
-export type TaskActivity = {
-  id: string;
-  taskId: string;
-  actorType: string;
-  actorId: string | null;
-  body: string;
-  commitSha: string | null;
-  metadata: unknown;
-  createdAt: string;
-};
-
-export type TaskStepOutput = {
-  id: string;
-  taskId: string;
-  runId: string | null;
-  kind: string;
-  body: string;
-  createdAt: string;
-  updatedAt: string;
 };
 
 export type TaskTemplateStep = {

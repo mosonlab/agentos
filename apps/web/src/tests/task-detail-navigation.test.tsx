@@ -29,7 +29,7 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
 
 const output = (taskId: string, body: string): TaskStepOutput => ({
   id: `output-${taskId}`, taskId, runId: `run-${taskId}`, kind: "revised-plan", body,
-  createdAt: now, updatedAt: now,
+  metadata: null, commitSha: null, createdAt: now, updatedAt: now,
 });
 
 const sourceRun = (taskId: string): Run => ({

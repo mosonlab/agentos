@@ -27,6 +27,8 @@ import type {
   TriggerFireSource as PrismaTriggerFireSource,
 } from "@prisma/client";
 
+import type { Agent, Repo } from "./wire-contract.js";
+
 export type TaskStatus = PrismaTaskStatus;
 export type TaskSource = PrismaTaskSource;
 export type AssigneeType = PrismaAssigneeType;
@@ -42,6 +44,7 @@ export type PushStatus = PrismaPushStatus;
 export type ChainControlState = PrismaChainControlState;
 export type MergeRecoveryStatus = PrismaMergeRecoveryStatus;
 export type TriggerFireSource = PrismaTriggerFireSource;
+
 export type ExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
 
 export type BoardMoveTarget = { status: TaskStatus; via: "patch" | "start" };
@@ -437,4 +440,114 @@ export type RecurringFire<DateTime = string> = {
     runNumber: number;
     session: { id: string; costUsd: string | null } | null;
   } | null;
+};
+
+/**
+ * A serialized Task as returned by the full task/detail routes.
+ *
+ * `DateTime` and `DecimalValue` let API projections keep their native Prisma
+ * values until Hono serializes them. Relations deliberately use the shared
+ * operator contracts and the Run contract rather than importing Prisma into
+ * this browser-safe module.
+ *
+ * The task list and detail routes are intentionally not identical: the list
+ * carries chain/recurring enrichment while the detail carries cost and merge
+ * projections. Fields that are absent from one current route therefore stay
+ * optional instead of making either route invent data.
+ */
+export type Task<DateTime = string, DecimalValue = string> = {
+  id: string;
+  projectId: string;
+  assigneeAgentId: string | null;
+  repoId: string | null;
+  templateId: string | null;
+  templateStepId: string | null;
+  name: string;
+  description: string;
+  workingDirectory: string | null;
+  targetBranch: string | null;
+  failureReason: string | null;
+  status: TaskStatus;
+  moveTargets: TaskMoveTarget[];
+  assigneeType: AssigneeType;
+  executionOwner: ExecutionOwner;
+  approvalGate: boolean;
+  scheduleKind: ScheduleKind;
+  // `runAt === null` on a live CRON definition is the scheduler quarantine
+  // marker, not an absence.
+  runAt: DateTime | null;
+  cron: string | null;
+  timezone: string | null;
+  maxDurationMin: number;
+  stallTimeoutMin: number;
+  maxSessionsPerTask: number;
+  createdAt: DateTime;
+  updatedAt: DateTime;
+  assigneeAgent: Agent<DateTime> | null;
+  repo: Repo<DateTime> | null;
+  runs: Run<DateTime, DecimalValue>[];
+  taskCost?: UsageCost | null;
+  chainId: string | null;
+  chainIndex: number | null;
+  source: TaskSource;
+  archivedAt: DateTime | null;
+  schedulePausedAt: DateTime | null;
+  recurringSourceTaskId: string | null;
+  templateStep: {
+    name: string;
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate: { name: string };
+  } | null;
+  /** The task's own latest merge-result projection, when this route includes it. */
+  mergeOutcome?: MergeOutcome | null;
+  mergeRecovery?: MergeRecovery<DateTime> | null;
+  /** Enrichment is carried by the full list; detail callers may not receive it. */
+  chainProgress: ChainProgress | null;
+  recurringLastFiredAt: DateTime | null;
+  recurringFireCount: number;
+};
+
+/** HTTP envelope for `GET /tasks/:taskId/startability`. */
+export type TaskStartability = {
+  startable: boolean;
+  checklist: {
+    repoBound: boolean;
+    agentAssignee: boolean;
+    repoAccessGrant: boolean;
+    budgetRemaining: boolean;
+    noActiveRun: boolean;
+    predecessorsDone: boolean;
+  };
+  task: {
+    id: string;
+    name: string;
+    agent: { id: string; title: string } | null;
+    repo: { id: string; name: string } | null;
+    targetBranch: string | null;
+  };
+};
+
+/** A TaskActivity row; commitSha was never a persisted/API activity field. */
+export type TaskActivity<DateTime = string> = {
+  id: string;
+  taskId: string;
+  actorType: string;
+  actorId: string | null;
+  body: string;
+  metadata: unknown | null;
+  createdAt: DateTime;
+};
+
+/** A TaskStepOutput row as emitted by GET/PUT output routes. */
+export type TaskStepOutput<DateTime = string> = {
+  id: string;
+  taskId: string;
+  runId: string | null;
+  kind: string;
+  body: string;
+  metadata: unknown | null;
+  commitSha: string | null;
+  createdAt: DateTime;
+  updatedAt: DateTime;
 };

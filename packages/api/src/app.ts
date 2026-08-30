@@ -71,6 +71,9 @@ import type {
   TriggerFire as TriggerFireContract,
   Run as RunContract,
   Session as SessionContract,
+  TaskActivity as TaskActivityContract,
+  TaskStartability as TaskStartabilityContract,
+  TaskStepOutput as TaskStepOutputContract,
 } from "@anneal/db/board-contract";
 import type {
   Agent as AgentContract,
@@ -796,6 +799,9 @@ type TriggerFireResponse = TriggerFireContract<Date>;
 type RecurringFireResponse = RecurringFireContract<Date>;
 type RunResponse = RunContract<Date, Prisma.Decimal>;
 type SessionResponse = SessionContract<Date, Prisma.Decimal>;
+type TaskActivityResponse = TaskActivityContract<Date>;
+type TaskStartabilityResponse = TaskStartabilityContract;
+type TaskStepOutputResponse = TaskStepOutputContract<Date>;
 
 export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
@@ -2148,7 +2154,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         repo: task.repo ? { id: task.repo.id, name: task.repo.name } : null,
         targetBranch: task.targetBranch ?? task.repo?.defaultBranch ?? null,
       },
-    });
+    } satisfies TaskStartabilityResponse);
   });
   app.get("/tasks/:taskId/chain", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
@@ -2500,13 +2506,40 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       } : null,
     })) satisfies RecurringFireResponse[]);
   });
-  app.get("/tasks/:taskId/activity", async (context) => context.json(await db.taskActivity.findMany({
-    where: { taskId: id.parse(context.req.param("taskId")) },
-    orderBy: { createdAt: "asc" },
-  })));
+  app.get("/tasks/:taskId/activity", async (context) => {
+    const activities = await db.taskActivity.findMany({
+      where: { taskId: id.parse(context.req.param("taskId")) },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        taskId: true,
+        actorType: true,
+        actorId: true,
+        body: true,
+        metadata: true,
+        createdAt: true,
+      },
+    });
+    return context.json(activities satisfies TaskActivityResponse[]);
+  });
   app.get("/tasks/:taskId/output", async (context) => {
-    const output = await db.taskStepOutput.findUnique({ where: { taskId: id.parse(context.req.param("taskId")) } });
-    return output ? context.json(output) : context.json({ error: "Task output not found" }, 404);
+    const output = await db.taskStepOutput.findUnique({
+      where: { taskId: id.parse(context.req.param("taskId")) },
+      select: {
+        id: true,
+        taskId: true,
+        runId: true,
+        kind: true,
+        body: true,
+        metadata: true,
+        commitSha: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    return output
+      ? context.json(output satisfies TaskStepOutputResponse)
+      : context.json({ error: "Task output not found" }, 404);
   });
   app.put("/tasks/:taskId/output", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
@@ -2536,7 +2569,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       return { output };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.output);
+    return context.json(result.output satisfies TaskStepOutputResponse);
   });
   /**
    * §D-P8 — the only mutation that can change a `target-unresolvable` outcome.
@@ -2609,7 +2642,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.post("/tasks/:taskId/activity", async (context) => {
     const body = await readJson(context.req.raw, activityInput);
-    return context.json(await db.taskActivity.create({
+    const activity = await db.taskActivity.create({
       data: {
         taskId: id.parse(context.req.param("taskId")),
         actorType: "operator",
@@ -2620,7 +2653,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           [OPERATOR_NOTE_METADATA_FIELD]: true,
         }),
       },
-    }), 201);
+    });
+    return context.json(activity satisfies TaskActivityResponse, 201);
   });
 
   app.get("/inbox/messages/summary", async (context) => {
