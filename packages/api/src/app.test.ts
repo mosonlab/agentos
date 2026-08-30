@@ -939,6 +939,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
         findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
+      mergeLeaseEvent: { findMany: async () => [] },
       inboxMessage: { create: async () => ({}) },
     }),
   } as unknown as PrismaClient;
@@ -1765,6 +1766,7 @@ test("claim query filters archived agents before take so active work cannot star
         update: async () => ({}),
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
+      mergeLeaseEvent: { findMany: async () => [] },
       taskStepOutput: { findMany: async () => [{
         kind: "spec", body: completePriorOutput,
         task: { name: "Approved specification", chainIndex: 0 },
@@ -1814,6 +1816,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
         },
         run: { findMany: async () => [] },
         taskActivity: { findMany: async () => [] },
+        mergeLeaseEvent: { findMany: async () => [] },
       }),
     } as unknown as PrismaClient;
     const app = createApp(database);
