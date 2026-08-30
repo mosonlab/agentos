@@ -9,7 +9,6 @@ import {
   IntegratorStoppedError,
   MergeConfirmationError,
   MergeEvidenceError,
-  type OpenRunRefusal,
   PinnedBaseCommitError,
   WorkflowRefusalError,
   type WorkflowRefusalReason,
@@ -19,47 +18,8 @@ import {
   type Refusal,
   type RefusalReason,
   refusalFor,
-  refusalForRunBirth,
   refusalResponse,
 } from "./refusal.js";
-
-const runBirthRefusalByCode = {
-  "task-not-found": { code: "task-not-found", reason: "not-found", message: "Task not found" },
-  "task-assignee-type-invalid": {
-    code: "task-assignee-type-invalid", reason: "invalid-request", message: "invalid assignee type",
-  },
-  "task-assignee-missing": { code: "task-assignee-missing", reason: "conflict", message: "assignee missing" },
-  "repo-required": { code: "repo-required", reason: "invalid-request", message: "Repo required" },
-  "task-archived": { code: "task-archived", reason: "archived-task", message: "task archived" },
-  "integrator-stopped": { code: "integrator-stopped", reason: "integrator-stopped", message: "integrator stopped" },
-  "assignee-archived": { code: "assignee-archived", reason: "archived-assignee", message: "assignee archived" },
-  "compound-implementation-assignee": {
-    code: "compound-implementation-assignee",
-    reason: "compound-implementation-assignee",
-    message: "compound assignee invalid",
-    detail: { code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID" },
-  },
-  "integrator-binding-invalid": {
-    code: "integrator-binding-invalid", reason: "invalid-request", message: "integrator binding invalid",
-  },
-  "initial-run-already-exists": {
-    code: "initial-run-already-exists", reason: "conflict", message: "initial Run already exists",
-  },
-  "prior-run-required": { code: "prior-run-required", reason: "conflict", message: "prior Run required" },
-  "source-run-stale": { code: "source-run-stale", reason: "conflict", message: "source Run stale" },
-  "task-not-integrator": {
-    code: "task-not-integrator", reason: "invalid-request", message: "Task is not an integrator",
-  },
-  "run-budget-exhausted": {
-    code: "run-budget-exhausted", reason: "conflict", message: "Run budget exhausted",
-  },
-  "chain-held": {
-    code: "chain-held",
-    reason: "chain-held",
-    message: "Chain held",
-    detail: { chainId: "chain-1", taskLayer: 2, heldLayer: 1 },
-  },
-} as const satisfies Record<OpenRunRefusal["code"], OpenRunRefusal>;
 
 const refusalByReason = {
   "invalid-request": { reason: "invalid-request", message: "invalid" },
@@ -107,22 +67,6 @@ test("every refusal reason has one exhaustive HTTP status", () => {
     "inbox-run-not-waiting": 409,
     "approval-gate-rejection-target-missing": 409,
   });
-});
-
-test("every Run-birth refusal code crosses the result seam without an Error adapter", () => {
-  const mapped = Object.values(runBirthRefusalByCode).map((refusal) => refusalForRunBirth(refusal));
-  assert.deepEqual(
-    Object.values(runBirthRefusalByCode).map(({ code }) => code).sort(),
-    Object.keys(runBirthRefusalByCode).sort(),
-  );
-  assert.deepEqual(
-    mapped.map(({ reason }) => reason),
-    Object.values(runBirthRefusalByCode).map(({ reason }) => reason),
-  );
-  assert.deepEqual(
-    refusalForRunBirth(runBirthRefusalByCode["chain-held"]).detail,
-    { chainId: "chain-1", taskLayer: 2, heldLayer: 1 },
-  );
 });
 
 test("all seven refusal error families map through the same module", () => {

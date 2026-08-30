@@ -8,7 +8,6 @@ import {
   isMergeEvidenceError,
   isPinnedBaseCommitError,
   isWorkflowRefusalError,
-  type OpenRunRefusal,
   type WorkflowRefusalReason,
 } from "@anneal/db";
 
@@ -124,37 +123,6 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
       : { error: refusal.message, ...refusal.detail },
     status,
   };
-};
-
-/** Maps the Run-birth module's one refusal result onto the HTTP refusal
- * interface without recovering domain meaning from an exception. */
-export const refusalForRunBirth = (refusal: OpenRunRefusal): Refusal => {
-  switch (refusal.code) {
-    case "assignee-archived":
-    case "chain-held":
-    case "compound-implementation-assignee":
-    case "initial-run-already-exists":
-    case "integrator-binding-invalid":
-    case "integrator-stopped":
-    case "prior-run-required":
-    case "repo-required":
-    case "run-budget-exhausted":
-    case "source-run-stale":
-    case "task-archived":
-    case "task-assignee-missing":
-    case "task-assignee-type-invalid":
-    case "task-not-found":
-    case "task-not-integrator":
-      return {
-        reason: refusal.reason,
-        message: refusal.message,
-        ...(refusal.detail ? { detail: refusal.detail } : {}),
-      };
-    default: {
-      const unhandled: never = refusal;
-      return unhandled;
-    }
-  }
 };
 
 export const refusalFor = (error: unknown): Refusal | null => {
