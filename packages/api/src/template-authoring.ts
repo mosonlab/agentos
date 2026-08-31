@@ -1,5 +1,7 @@
 import {
   canonicalTemplateIdentity,
+  lockTemplateRow,
+  lockTemplateStepRows,
   Prisma,
   type PrismaClient,
 } from "@anneal/db";
@@ -15,6 +17,57 @@ export type CloneTemplateInput = {
   description?: string | undefined;
 };
 
+/** The fields an operator may submit for one replacement Step. */
+export type ReplaceTemplateStepInput = {
+  name: string;
+  assigneeType: "AGENT" | "HUMAN";
+  assigneeAgentId: string | null;
+  prompt: string;
+  approvalGate: boolean;
+  attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
+  spawnPolicy: unknown | null;
+  runner: "CLAUDE" | "CODEX" | "PI" | null;
+  outputKind: string;
+  opensPullRequest: boolean;
+  requiresCommit: boolean;
+  baseFromStepIndex: number | null;
+  layer: number;
+};
+
+/** A normalized graph Step, after the server assigns its dense index. */
+export type TemplateAuthoringStep = Omit<ReplaceTemplateStepInput, "spawnPolicy"> & {
+  stepIndex: number;
+  spawnPolicy: Prisma.JsonValue;
+};
+
+export type ReplaceTemplateStepsInput = {
+  steps: ReplaceTemplateStepInput[];
+};
+
+export type TemplateAuthoringAgent = {
+  id: string;
+  name: string;
+  projectId: string;
+  archivedAt: Date | null;
+};
+
+export type TemplateAuthoringWarningCode =
+  | "no_review_step"
+  | "same_agent_implements_and_reviews"
+  | "pull_request_without_regression";
+
+export type TemplateAuthoringWarning = {
+  code: TemplateAuthoringWarningCode;
+  message: string;
+  stepIndex?: number;
+};
+
+export type TemplateGraphValidation = {
+  refusal: TemplateAuthoringRefusal | null;
+  warnings: TemplateAuthoringWarning[];
+};
+
 const authoringRefusal = (
   code: TemplateAuthoringRefusalCode,
   message: string,
@@ -28,6 +81,27 @@ const isUniqueConstraintError = (error: unknown): boolean => (
 const cloneJson = (value: Prisma.JsonValue | null): Prisma.InputJsonValue | typeof Prisma.JsonNull => (
   value === null ? Prisma.JsonNull : value as Prisma.InputJsonValue
 );
+
+/**
+ * Pure graph validation frame. The order is part of the authoring contract:
+ * later validator slices append checks after `graph_empty`, and the first
+ * refusal remains the only refusal returned for a graph. Agent facts are read
+ * by the transaction caller so this function never opens a transaction.
+ */
+export const validateTemplateGraph = (
+  steps: readonly TemplateAuthoringStep[],
+  _agents: ReadonlyMap<string, TemplateAuthoringAgent>,
+): TemplateGraphValidation => {
+  // 1. graph_empty. The remaining fixed positions are intentionally empty in
+  // this slice; later slices own their checks and warning computation.
+  if (steps.length === 0) {
+    return {
+      refusal: authoringRefusal("graph_empty", "Template graph must contain at least one step"),
+      warnings: [],
+    };
+  }
+  return { refusal: null, warnings: [] };
+};
 
 /**
  * Clone one project template without copying runtime state.
@@ -131,3 +205,105 @@ export const cloneTemplate = async (
     throw error;
   }
 };
+
+/**
+ * Replace one project's complete editable Step graph atomically.
+ *
+ * The template row is the first lock in this protocol. Existing Step rows are
+ * then locked in deterministic order before the Task reference check, so a
+ * concurrent writer cannot observe a graph halfway through deletion. The
+ * validator runs on the dense graph before any row mutation.
+ */
+export const replaceTemplateSteps = async (
+  db: PrismaClient,
+  projectId: string,
+  templateId: string,
+  input: ReplaceTemplateStepsInput,
+) => serializable(db, async (tx) => {
+  const template = await lockTemplateRow(tx, templateId);
+  if (!template || template.projectId !== projectId) {
+    throw authoringRefusal(
+      "template_not_in_project",
+      `Template ${templateId} is not in project ${projectId}`,
+    );
+  }
+
+  // Canonical and registered-legacy names are owned by repository prompt
+  // sync. This identity is checked while the row mutex is held so a rollover
+  // cannot change the answer between the guard and the mutation.
+  if (canonicalTemplateIdentity(template.name)) {
+    throw authoringRefusal(
+      "template_canonical",
+      `Template ${template.name} is canonical and cannot be edited; clone it again to author a replacement`,
+    );
+  }
+
+  const existingStepIds = await lockTemplateStepRows(tx, templateId);
+  const referencedTaskCount = await tx.task.count({
+    where: existingStepIds.length === 0
+      ? { templateId }
+      : { OR: [{ templateId }, { templateStepId: { in: existingStepIds } }] },
+  });
+  if (referencedTaskCount > 0) {
+    throw authoringRefusal(
+      "template_in_use",
+      `Template ${template.name} is already in use by a Task; clone it again before editing`,
+    );
+  }
+
+  const normalizedSteps: TemplateAuthoringStep[] = input.steps.map((step, index) => ({
+    ...step,
+    stepIndex: index + 1,
+    spawnPolicy: step.spawnPolicy as Prisma.JsonValue,
+  }));
+  const assigneeIds = [...new Set(normalizedSteps.flatMap((step) => (
+    step.assigneeAgentId === null ? [] : [step.assigneeAgentId]
+  )))];
+  // Authoring has no Repo context and therefore does not lock or validate
+  // Agent rows. It still supplies the pure validator with every referenced
+  // fact, including rows outside this project, for its later assignee checks.
+  const agentRows = assigneeIds.length === 0
+    ? []
+    : await tx.agent.findMany({
+      where: { id: { in: assigneeIds } },
+      select: { id: true, name: true, projectId: true, archivedAt: true },
+    });
+  const agents = new Map(agentRows.map((agent) => [agent.id, agent]));
+  const validation = validateTemplateGraph(normalizedSteps, agents);
+  if (validation.refusal) throw validation.refusal;
+
+  await tx.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId } });
+  if (normalizedSteps.length > 0) {
+    await tx.taskTemplateStep.createMany({
+      data: normalizedSteps.map((step) => ({
+        taskTemplateId: templateId,
+        stepIndex: step.stepIndex,
+        name: step.name,
+        assigneeType: step.assigneeType,
+        assigneeAgentId: step.assigneeAgentId,
+        prompt: step.prompt,
+        approvalGate: step.approvalGate,
+        attachmentsFromPrevious: step.attachmentsFromPrevious,
+        priorOutputKinds: step.priorOutputKinds,
+        spawnPolicy: cloneJson(step.spawnPolicy),
+        runner: step.runner,
+        outputKind: step.outputKind,
+        opensPullRequest: step.opensPullRequest,
+        requiresCommit: step.requiresCommit,
+        baseFromStepIndex: step.baseFromStepIndex,
+        layer: step.layer,
+      })),
+    });
+  }
+
+  const savedTemplate = await tx.taskTemplate.findUniqueOrThrow({
+    where: { id: templateId },
+    include: {
+      steps: {
+        include: { assigneeAgent: true },
+        orderBy: { stepIndex: "asc" },
+      },
+    },
+  });
+  return { template: savedTemplate, warnings: validation.warnings };
+});

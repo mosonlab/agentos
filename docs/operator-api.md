@@ -776,6 +776,47 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   -d '{"name":"custom-review-workflow","description":"A project-specific workflow"}'
 ```
 
+### PUT `/projects/:projectId/task-templates/:templateId/steps`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON field: `steps`, an array of at most 64 Steps. Each Step
+  requires `name`, `assigneeType`, `assigneeAgentId`, `prompt`,
+  `approvalGate`, `attachmentsFromPrevious`, `priorOutputKinds`,
+  `spawnPolicy`, `runner`, `outputKind`, `opensPullRequest`,
+  `requiresCommit`, `baseFromStepIndex`, and `layer`; `stepIndex` is
+  assigned densely from array order. `baseFromStepIndex` is a 1-based
+  position in the submitted array and may be `null`.
+- The request and every nested Step are strict: unknown fields, including a
+  caller-supplied `stepIndex`, are rejected with `400 Bad Request`.
+- Returns `200 OK` with `{ template, warnings }`. `template` is the
+  resulting template read projection and `warnings` is the complete warning
+  array for that graph. Warnings are not persisted.
+- Refusals: `404 Not Found` with `template_not_in_project` when the
+  addressed template is absent from the project; `409 Conflict` with
+  `template_canonical` for current or registered-legacy canonical identity,
+  or `template_in_use` when any Task references the template or one of its
+  Steps. The `template_in_use` recovery is to clone again.
+- An empty array answers `422 Unprocessable Entity` with
+  `graph_empty`. Other graph validator refusals use `422` with their stable
+  code and optional `stepIndex`. Warning codes are
+  `no_review_step`, `same_agent_implements_and_reviews`, and
+  `pull_request_without_regression`.
+
+curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
+- An empty array answers `422 Unprocessable Entity` with
+  `graph_empty`. Other graph validator refusals use `422` with their stable
+  code and optional `stepIndex`. Warning codes are
+  `no_review_step`, `same_agent_implements_and_reviews`, and
+  `pull_request_without_regression`.
+
+```sh
+curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
+```
+
 ### GET `/task-templates/:templateId`
 
 - Required path parameter: `templateId`.
