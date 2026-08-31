@@ -28,9 +28,10 @@
 #
 # Shape: check the requested oid out of the mirror into a private throwaway
 # worktree, run scripts/merge-gate.sh --expect-head <oid> inside it, keep the full
-# log on this host, and print exactly one verdict line on stdout. Everything else
-# — progress, npm noise, docker noise — goes to the log. The caller reads one line
-# and an exit code; anyone debugging scp's the log.
+# log on this host, and print the verdict on stdout. Everything else — progress,
+# npm noise, docker noise — goes to the log. A FAIL also forwards a bounded tail
+# of that log so the local dispatcher can record the first useful test evidence;
+# anyone debugging can still scp the full log.
 #
 # Exit codes are merge-gate.sh's, passed through unchanged, plus one this
 # harness adds for everything that stops it before merge-gate.sh forms a verdict.
@@ -367,6 +368,20 @@ if [ -z "$verdict" ]; then
   verdict="GATE NOT RUN: the gate produced no verdict line (exit ${status}); read the log"
   status="$GATE_EXIT_NO_VERDICT"
 fi
+
+# The default path above keeps the gate's noisy output on the worker, which is
+# why a remote FAIL used to carry only its stage name back to the dispatcher.
+# Forward only the tail needed for a repair description. The line cap preserves
+# the useful last part of a step, and the byte cap keeps one pathological line
+# from turning the worker's stdout into an unbounded transport. Emit the final
+# verdict after the excerpt so every consumer still sees the proof line last.
+case "$verdict" in
+  'MERGE GATE: FAIL ('*')')
+    printf 'run-gate: failure excerpt (last 200 lines of worker log)\n'
+    tail -n 200 "$LOG" 2>/dev/null | head -c 65536 || true
+    printf '\n'
+    ;;
+esac
 
 printf '%s\n' "$verdict"
 printf 'run-gate: log %s\n' "$LOG"

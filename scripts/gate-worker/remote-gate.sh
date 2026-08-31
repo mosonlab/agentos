@@ -29,8 +29,9 @@
 # side. `docs/runbooks/gate-worker.md` carries the measured numbers.
 #
 # What comes back on stdout is merge-gate.sh's own verdict line — MERGE GATE:
-# PASS <oid> / FAIL (<step>) / NOT AUTHORITATIVE — and the path of the full log
-# on the worker. The exit code is the worker's, unchanged:
+# PASS <oid> / FAIL (<step>) / NOT AUTHORITATIVE — the bounded failure excerpt
+# emitted by run-gate.sh for FAILs, and the path of the full log on the worker.
+# The exit code is the worker's, unchanged:
 #
 #   0  PASS                 2  usage error
 #   1  FAIL                 3  NOT AUTHORITATIVE
