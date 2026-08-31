@@ -71,7 +71,8 @@ export type TemplateGraphValidation = {
 const authoringRefusal = (
   code: TemplateAuthoringRefusalCode,
   message: string,
-): TemplateAuthoringRefusal => new TemplateAuthoringRefusal(code, message);
+  stepIndex?: number,
+): TemplateAuthoringRefusal => new TemplateAuthoringRefusal(code, message, stepIndex);
 
 const isUniqueConstraintError = (error: unknown): boolean => (
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
@@ -92,14 +93,77 @@ export const validateTemplateGraph = (
   steps: readonly TemplateAuthoringStep[],
   _agents: ReadonlyMap<string, TemplateAuthoringAgent>,
 ): TemplateGraphValidation => {
-  // 1. graph_empty. The remaining fixed positions are intentionally empty in
-  // this slice; later slices own their checks and warning computation.
+  // 1. graph_empty.
   if (steps.length === 0) {
     return {
       refusal: authoringRefusal("graph_empty", "Template graph must contain at least one step"),
       warnings: [],
     };
   }
+
+  // 2. first_step_not_agent. The first Step is the only one that can be
+  // started without a predecessor, so it must be executable by an Agent.
+  const first = steps[0]!;
+  if (first.assigneeType !== "AGENT") {
+    return {
+      refusal: authoringRefusal(
+        "first_step_not_agent",
+        "The first template step must be agent-executable",
+        first.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 3. first_layer_not_single. A parallel first layer has no unique starting
+  // Step and therefore cannot be materialized as a runnable graph.
+  const firstLayerSteps = steps.filter((step) => step.layer === first.layer);
+  if (firstLayerSteps.length > 1) {
+    return {
+      refusal: authoringRefusal(
+        "first_layer_not_single",
+        "The first template layer must contain exactly one step",
+        firstLayerSteps[1]!.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 4. layer_order_invalid. Step indexes are assigned from array order, so a
+  // lower layer after a higher one is the first offending position.
+  for (let index = 1; index < steps.length; index += 1) {
+    const previous = steps[index - 1]!;
+    const current = steps[index]!;
+    if (current.layer < previous.layer) {
+      return {
+        refusal: authoringRefusal(
+          "layer_order_invalid",
+          `Template step ${current.stepIndex} layer ${current.layer} must not precede layer ${previous.layer}`,
+          current.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 5. base_step_invalid. A base is a positional reference, but its semantic
+  // contract is stricter: it must point to an earlier Step in a lower layer.
+  const stepsByIndex = new Map(steps.map((step) => [step.stepIndex, step]));
+  for (const step of steps) {
+    if (step.baseFromStepIndex === null) continue;
+    const base = stepsByIndex.get(step.baseFromStepIndex);
+    if (!base || base.stepIndex >= step.stepIndex || base.layer >= step.layer) {
+      return {
+        refusal: authoringRefusal(
+          "base_step_invalid",
+          `Template step ${step.stepIndex} baseFromStepIndex must reference an earlier step in a strictly lower layer`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
   return { refusal: null, warnings: [] };
 };
 

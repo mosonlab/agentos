@@ -46,6 +46,14 @@ test("the template step replace route documents its contract, refusals, warnings
   assert.match(text, /409[\s\S]*`template_canonical`/u);
   assert.match(text, /409[\s\S]*`template_in_use`/u);
   assert.match(text, /422[\s\S]*`graph_empty`/u);
+  for (const code of [
+    "first_step_not_agent",
+    "first_layer_not_single",
+    "layer_order_invalid",
+    "base_step_invalid",
+  ]) {
+    assert.match(text, new RegExp("422[\\s\\S]*`" + code + "`", "u"));
+  }
   assert.match(text, /`no_review_step`/u);
   assert.match(text, /`same_agent_implements_and_reviews`/u);
   assert.match(text, /`pull_request_without_regression`/u);
