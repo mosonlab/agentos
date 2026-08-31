@@ -505,15 +505,20 @@ describe("confirmLocalReleaseTarget", () => {
 // ---------------------------------------------------------------------------
 
 describe("migration tail", () => {
-  it("records the tail that is actually on disk", () => {
+  it("records a release-candidate tail that is a prefix of the tail on disk", () => {
     const onDisk = readdirSync(`${packageRoot}/prisma/migrations`, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name);
     const tail = readMigrationTail(onDisk);
-    assert.deepEqual({ count: tail.count, terminal: tail.terminal }, {
-      count: RELEASE_CANDIDATE_MIGRATIONS.count,
-      terminal: RELEASE_CANDIDATE_MIGRATIONS.terminal,
-    }, "adding a migration means recording the new release-candidate tail in RELEASE_CANDIDATE_MIGRATIONS");
+    assert.ok(
+      RELEASE_CANDIDATE_MIGRATIONS.count <= tail.count,
+      "the recorded release-candidate tail cannot be longer than the migration tail on disk",
+    );
+    assert.equal(
+      tail.names[RELEASE_CANDIDATE_MIGRATIONS.count - 1],
+      RELEASE_CANDIDATE_MIGRATIONS.terminal,
+      "the recorded terminal migration must be at its recorded position on disk",
+    );
     // The complete set, not only its ends: existing mode subtracts the applied
     // history from this list to state what is still pending.
     assert.equal(tail.names.length, tail.count);
@@ -1011,18 +1016,22 @@ describe("releaseMigrate --existing", () => {
     ), host.out.join("\n"));
   });
 
-  it("asserts the recorded release-candidate tail in existing mode too", async () => {
+  it("rejects a shorter or longer checkout tail in existing mode too", async () => {
     // Plan Step 3 line 139's seventh case, on the side that already has a
-    // history: a checkout whose terminal migration is not the recorded one is
-    // not the release candidate the authority evidence describes.
-    const short = recordedMigrations().slice(0, -1);
-    const host = fakeHost({ lock: true, migrations: short });
-    assert.equal(await releaseMigrate(bundle, host), 1);
-    assert.deepEqual(host.err, [
-      "STOP release-migrate migration-tail: checkout-tail-is-not-the-recorded-release-candidate-tail",
-    ]);
-    assertNoMutation(host);
-    assert.equal(host.lockReleases, 1);
+    // history: a checkout whose tail differs in either direction is not the
+    // release candidate the authority evidence describes.
+    for (const migrations of [
+      recordedMigrations().slice(0, -1),
+      [...recordedMigrations(), "20260901000000_unreleased"],
+    ]) {
+      const host = fakeHost({ lock: true, migrations });
+      assert.equal(await releaseMigrate(bundle, host), 1);
+      assert.deepEqual(host.err, [
+        "STOP release-migrate migration-tail: checkout-tail-is-not-the-recorded-release-candidate-tail",
+      ]);
+      assertNoMutation(host);
+      assert.equal(host.lockReleases, 1);
+    }
   });
 
   it("refuses an unproven target before it opens the bundle at all", async () => {

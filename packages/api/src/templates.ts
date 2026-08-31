@@ -53,6 +53,19 @@ export const parseImplementationRoute = (description: string | undefined): strin
   return name.length <= 80 && name.trim() === name ? name : null;
 };
 
+/**
+ * Finds the first line that claims to be a machine-readable route but does not
+ * match the full grammar. A near-miss must refuse loudly: silently ignoring it
+ * dispatches the implementation step on the template default agent while the
+ * brief author believes their route was applied.
+ */
+export const findMalformedRouteLine = (description: string | undefined): string | null => {
+  for (const line of (description ?? "").split("\n")) {
+    if (line.startsWith("Route:") && parseImplementationRoute(line) === null) return line;
+  }
+  return null;
+};
+
 type OverrideAgent = {
   id: string;
   name: string;
@@ -238,6 +251,15 @@ export const instantiateTemplate = async (
       const repo = await tx.repo.findFirst({ where: { id: input.repoId, projectId } });
       if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
       if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
+      if (template.name === "direct-engineer-workflow") {
+        const malformedRouteLine = findMalformedRouteLine(input.description);
+        if (malformedRouteLine !== null) {
+          throw templateRefusal(
+            "implementation_route_malformed",
+            `Malformed Route line ${JSON.stringify(malformedRouteLine)}; expected "Route: implementation=<agent> - <reason>"`,
+          );
+        }
+      }
       const implementationRoute = template.name === "direct-engineer-workflow"
         ? requestedImplementationRoute
         : null;

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { type AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -14,6 +17,7 @@ import {
   type SessionToolName,
   type SessionToolRequest,
 } from "./session-tool-contract.js";
+import { taskOutputReceiptPath } from "./task-output-receipt.js";
 
 const piExtension = fileURLToPath(new URL("../assets/pi-agentos-extension.ts", import.meta.url));
 
@@ -94,7 +98,9 @@ type RegisteredPiTool = {
   label: string;
   description: string;
   parameters: Record<string, unknown>;
-  execute(toolCallId: string, params: Record<string, unknown>): Promise<unknown>;
+  execute(toolCallId: string, params: Record<string, unknown>): Promise<{
+    content: Array<{ type: string; text: string }>;
+  }>;
 };
 
 type Received = { method: string; path: string; query: Record<string, string>; body?: Record<string, unknown> };
@@ -140,12 +146,19 @@ test("the dependency-free PI adapter inlines the canonical definitions and reque
   const runId = "run-pi-contract";
   const fencingToken = "fence-pi";
   const registered: RegisteredPiTool[] = [];
+  const workspace = await mkdtemp(join(tmpdir(), "agentos-pi-workspace-"));
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: workspace });
+  execFileSync("git", ["config", "user.name", "Anneal Test"], { cwd: workspace });
+  execFileSync("git", ["config", "user.email", "runner@agentos.local"], { cwd: workspace });
+  await writeFile(join(workspace, "fixture.txt"), "fixture\n");
+  execFileSync("git", ["add", "fixture.txt"], { cwd: workspace });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: workspace });
   try {
     process.env.AGENTOS_API_URL = `http://127.0.0.1:${port}`;
     process.env.AGENTOS_RUN_ID = runId;
     process.env.AGENTOS_SESSION_TOKEN = "session-pi";
     process.env.AGENTOS_FENCING_TOKEN = fencingToken;
-    process.env.AGENTOS_WORKSPACE_PATH = process.cwd();
+    process.env.AGENTOS_WORKSPACE_PATH = workspace;
     const loaded = await import(pathToFileURL(piExtension).href) as {
       default(pi: { registerTool(tool: RegisteredPiTool): void; on(): void }): void;
     };
@@ -173,14 +186,33 @@ test("the dependency-free PI adapter inlines the canonical definitions and reque
     for (const [name, params] of cases) {
       await registered.find((tool) => tool.name === name)!.execute("call-1", params);
     }
-    const commitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const commitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim();
     assert.deepEqual(received, cases.map(([name, params]) => normalizedRequest(runId, requestFor(name, params, {
       fencingToken,
       ...(name === "task_output" ? { commitSha } : {}),
       ...(name === "inbox_ask" ? { requestIdPrefix: `pi:${runId}` } : {}),
     }))));
+    assert.deepEqual(JSON.parse(readFileSync(taskOutputReceiptPath(workspace), "utf8")), {
+      runId,
+      kind: "result",
+      commitSha,
+    });
+    await rm(taskOutputReceiptPath(workspace), { force: true });
+    await mkdir(taskOutputReceiptPath(workspace));
+    const diagnostics: string[] = [];
+    const originalError = console.error;
+    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+    try {
+      const result = await registered.find((tool) => tool.name === "task_output")!
+        .execute("call-receipt-failure", { kind: "result", body: "Already durable" });
+      assert.match(result.content[0]!.text, /Output persisted as 'result'/u);
+    } finally {
+      console.error = originalError;
+    }
+    assert.match(diagnostics.join("\n"), /Unable to write task output receipt/u);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(workspace, { recursive: true, force: true });
     for (const [name, value] of Object.entries(environment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;

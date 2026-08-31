@@ -19,6 +19,7 @@ import {
 
 import {
   composeTemplateTaskDescription,
+  findMalformedRouteLine,
   instantiateTemplate,
   parseImplementationRoute,
 } from "./templates.js";
@@ -69,6 +70,13 @@ test("implementation route parsing accepts the machine-readable name before an o
   assert.equal(parseImplementationRoute("Route: implementation=senior-dev "), null);
   assert.equal(parseImplementationRoute("Route: implementation=unknown"), "unknown");
   assert.equal(parseImplementationRoute(undefined), null);
+  assert.equal(findMalformedRouteLine("Build it\nRoute: implementation=senior-dev\n"), null);
+  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev - reason given"), null);
+  assert.equal(findMalformedRouteLine("Route: implementation=unknown"), null);
+  assert.equal(findMalformedRouteLine("Route: senior-dev - missing the implementation= key"), "Route: senior-dev - missing the implementation= key");
+  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev "), "Route: implementation=senior-dev ");
+  assert.equal(findMalformedRouteLine("Build it\nRoute:implementation=senior-dev"), "Route:implementation=senior-dev");
+  assert.equal(findMalformedRouteLine(undefined), null);
 });
 
 test("a direct brief ending in the prior-output reminder round-trips without truncation", () => {
@@ -704,6 +712,15 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
   );
 
   lockedRouteAgentName = routed.name;
+  await assertTemplateRefusal(
+    () => instantiateTemplate(db, "project-1", "template-1", {
+      repoId: "repo-1",
+      variables: {},
+      description: "Build it\nRoute: senior-dev - missing the implementation= key\n",
+    }),
+    "implementation_route_malformed",
+  );
+
   for (const nonDirectName of ["custom-workflow", "compound-engineer-workflow"]) {
     templateName = nonDirectName;
     const originalOutputKind = steps[1]!.outputKind;
@@ -716,6 +733,12 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
       });
       assert.equal(nonDirect.tasks.length, 3, `${nonDirectName} must ignore ${route}`);
     }
+    const malformedTolerated = await instantiateTemplate(db, "project-1", "template-1", {
+      repoId: "repo-1",
+      variables: {},
+      description: "Route: senior-dev - Route-looking prose is not parsed here",
+    });
+    assert.equal(malformedTolerated.tasks.length, 3, `${nonDirectName} must ignore malformed Route prose`);
     steps[1]!.outputKind = originalOutputKind;
   }
 });

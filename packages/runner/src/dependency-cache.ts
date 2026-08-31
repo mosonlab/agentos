@@ -22,7 +22,7 @@ const NPM_PROBE_TIMEOUT_MS = 10_000;
 const CACHE_LOCK_FILE = "lock";
 const CACHE_USAGE_DIRECTORY = "usage";
 const CACHE_KEY = /^[a-f0-9]{64}$/u;
-export const DEPENDENCY_CACHE_ENTRY_LIMIT = 4;
+export const DEPENDENCY_CACHE_ENTRY_LIMIT = 12;
 
 export type DependencyCommandExecutor = (
   config: RunnerConfig,

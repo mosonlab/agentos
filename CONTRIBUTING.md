@@ -163,6 +163,8 @@ something outside the checkout.
 preflight and may create or rewrite development migration history. Use it only
 against a disposable developer database. It is never an installation or upgrade
 command; the release install path is `npm run db:migrate:release -- --fresh`.
+Adding a migration does not bump `RELEASE_CANDIDATE_MIGRATIONS`; the release-cut
+commit (the `chore(release): prepare` commit) does.
 
 ### The public surface is closed by default
 
