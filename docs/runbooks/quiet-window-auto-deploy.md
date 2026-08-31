@@ -204,8 +204,8 @@ followed by `SIGKILL` if it does not exit, and is reported as a
 
 The deploy barrier also has an independent duration watchdog. It starts with
 barrier acquisition and covers hangs outside a child command, so a process
-that is no longer making step progress cannot hold the API and runner services
-stopped without an escalation. A watchdog expiry is logged, written to
+that is no longer making step progress cannot keep new Run claims closed
+without an escalation. A watchdog expiry is logged, written to
 `.agentos-deploy/escalated.json`, and sent to the operator Inbox through the
 same escalation mechanism as other deployment failures.
 
@@ -215,8 +215,10 @@ and the services remain on (or return to) the current release. The
 `prisma migrate deploy` migration step is the deliberate exception. If it
 reaches its deadline, the child is terminated and the failure is written to
 `escalated.json` and notified, but the deploy process remains alive with the
-same database session and barrier held. Services stay stopped in that safe
-state; do not restart them onto a possibly half-applied schema.
+same database session and barrier held. The current release's service processes
+remain running, but no new Run may be claimed and activation and restart do not
+proceed. The barrier is not a service-process stop; do not restart services onto
+a possibly half-applied schema.
 
 After the cause has been repaired, use the existing `--clear-escalation`
 operation. The held deploy process observes the cleared marker, releases its

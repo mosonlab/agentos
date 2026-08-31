@@ -168,13 +168,18 @@ const outputOnlyStep = {
   taskTemplate: { name: "direct-engineer-workflow" },
 };
 
-test("Run birth defaults manual Tasks to requiring a commit and snapshots an output-only Step", async () => {
+test("Run birth derives a manual commit policy from delivery shape and snapshots a template Step", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const fixtures = [
     {
-      name: "manual Task",
+      name: "manual pull-request Task",
       task: taskRow({ repoId: repo.id, repo }),
       expected: true,
+    },
+    {
+      name: "manual branch-only Task",
+      task: taskRow({ repoId: repo.id, repo, opensPullRequest: false }),
+      expected: false,
     },
     {
       name: "output-only template Step",

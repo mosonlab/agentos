@@ -851,7 +851,11 @@ export const openRun = async (
     targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: intent.kind === "integrator-authorized" ? false : task.opensPullRequest,
-    requiresCommit: task.templateStep?.requiresCommit ?? true,
+    // Canonical Steps own an explicit commit contract. A manual Task retains
+    // the pre-contract delivery boundary: asking for a pull request requires a
+    // commit, while branch-only work may complete through an external action or
+    // durable prose without inventing a repository change.
+    requiresCommit: task.templateStep?.requiresCommit ?? task.opensPullRequest,
     maxDurationMin: preservesPriorTiming ? prior?.maxDurationMin ?? task.maxDurationMin : task.maxDurationMin,
     stallTimeoutMin: preservesPriorTiming ? prior?.stallTimeoutMin ?? task.stallTimeoutMin : task.stallTimeoutMin,
     // The configured budget plus the grants already earned, not the budget

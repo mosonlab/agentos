@@ -40,8 +40,10 @@ previews other than a fresh install. This release adds four migrations.
   delivery failure and does not raise the retry budget.
 - Canonical output-only Direct and Full Assurance Steps now snapshot an
   explicit `requiresCommit=false` contract onto each Run. They may publish an
-  unchanged shared branch for the next Step; implementation and planning Steps,
-  and manual Tasks, still require a commit by default.
+  unchanged shared branch for the next Step. The primary plan and implementation
+  Steps require a commit. A manual Task that requests a pull request also
+  requires one, while branch-only manual work retains its optional-commit
+  behaviour.
 - A negative Regression verdict from an older output-only Run rejected under
   the former commit requirement is audit-only evidence unless an exact repair
   attempt consumed it. Valid repair handoffs remain fail-closed.
@@ -64,9 +66,11 @@ previews other than a fresh install. This release adds four migrations.
   latched, and the Inbox record remains as historical evidence.
 - Artifact build, backup, migration, Prisma generation, prompt sync and service
   control have independent deadlines plus a deployment-barrier watchdog.
-  Ordinary timeouts roll back and release normally; a migration-deploy timeout
-  deliberately keeps services stopped and the PostgreSQL barrier held until an
-  operator safely runs `--clear-escalation`.
+  Ordinary timeouts follow the normal failure path and release the barrier; the
+  current release remains active or is restored after a post-activation
+  failure. A migration-deploy timeout instead prevents activation and restart
+  and keeps the PostgreSQL barrier blocking new Run claims until an operator
+  safely runs `--clear-escalation`.
 
 ### Gate and test structure
 
