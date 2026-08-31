@@ -9,7 +9,21 @@ import {
 } from "@anneal/db";
 
 import { createApp } from "../test-app.js";
-import { closeRequest, lockedAgent, stopReport, withTokens } from "./test-support.js";
+import { lockedAgent, withTokens } from "./test-support.js";
+
+/* A merge-tail stop report: agent-authored text, attached to the task it
+ * happened on, and nothing resumes on a reply. It is the shape the Inbox is
+ * full of, and the old "attached to nothing" rule refused to close it. */
+const stopReport = {
+  id: "message-1", status: "OPEN", from: "AGENT", kind: "TEXT", gateTaskId: null, replyToMessageId: null,
+};
+
+const closeRequest = async (app: ReturnType<typeof createApp>, messageId: string): Promise<Response> =>
+  await app.request(`/inbox/messages/${messageId}/close`, {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: `close-${messageId}` }),
+  });
 
 test("Inbox summary counts only open messages that need a reply and is not swallowed by the message-id route", async () => {
   await withTokens(async () => {

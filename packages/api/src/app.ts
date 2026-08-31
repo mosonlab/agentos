@@ -40,6 +40,7 @@ import { registerSystemRoutes } from "./routes/system.js";
 import { registerTasksRoutes } from "./routes/tasks.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
+  createAppendFencedActivityHandler,
   id,
   readJson,
   refusal,
@@ -75,6 +76,8 @@ const instantiateTemplateInput = z.object({
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
   }
 });
+// `Fire now` merges over the template's own defaults, so an all-defaulted
+// trigger fires from an empty body.
 const manualFireInput = z.object({
   variables: z.record(z.string(), z.string()).optional(),
 }).default({});
@@ -86,6 +89,8 @@ const webhookConfigPatch = z.object({
   webhookSecretId: id.nullable().optional(),
   webhookRepoId: id.nullable().optional(),
   webhookPayloadMapping: webhookPayloadMapping.nullable().optional(),
+  // 0 and null both mean "no replay window"; the write side normalises 0 to
+  // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
 
@@ -98,13 +103,34 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const releaseChainLease = options.releaseMergeLease ?? releaseMergeLease;
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
   const runners = createRunnerRegistry();
+  // Authentication circuits are global backend state, so only one daemon must
+  // perform a recovery check. This short in-process lease prevents every idle
+  // daemon from invoking the same provider login command on each heartbeat.
+  // `lastPreflightAt` remains the durable retry clock, so an API restart may
+  // reassign an overdue check without changing what that timestamp means.
   const preflightRecoveryLeases = new Map<RunnerKind, number>();
   const preflightRecoveryIntervalMs = 5 * 60_000;
+  const appendFencedActivity = createAppendFencedActivityHandler(db);
 
+  // The supported browser path is same-origin through the Vite proxy, so this
+  // allowlist is a boundary rather than a transport: it decides which *other*
+  // origin may read a control-plane response out of a browser. It was `*`, which
+  // is the one value that makes that boundary vacuous. Public `/` and `/health`
+  // and every authenticated route are unaffected — CORS decides what a browser
+  // may read, and the principal check below still decides what is served.
   app.use("*", cors({
     origin: [...LOOPBACK_BROWSER_ORIGINS],
     allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-Anneal-Webhook-Secret", "X-Anneal-Delivery-Id"],
   }));
+  // The second, independent half of that boundary (review S-2). CORS decides
+  // what a browser may *read*; it lets the request run and commit its side
+  // effect regardless. So a foreign `Origin` is refused here, before auth and
+  // before any handler, rather than leaving the dev server's proxy guard as the
+  // only barrier — which is the arrangement S-1 broke. The predicate is in
+  // `local-origin.ts`, with the reason it matches by shape rather than against
+  // the two-entry allowlist above.
+  //
+  // Preflights never reach this: `cors` answers OPTIONS above and returns.
   app.use("*", async (context, next) => {
     if (!originMayReachHandlers(context.req.header("Origin"))) return context.json({ error: "Forbidden origin" }, 403);
     await next();
@@ -137,9 +163,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     options,
     releaseChainLease,
     runners,
-    noteArchivedQueuedRunsOnClaim,
-    preflightRecoveryLeases,
-    preflightRecoveryIntervalMs,
+    appendFencedActivity,
   };
   const registerSystemTail = registerSystemRoutes(app, routeDeps);
 
@@ -455,7 +479,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   registerTasksRoutes(app, routeDeps);
   registerInboxRoutes(app, routeDeps);
-  const registerRunnerTail = registerRunnerRoutes(app, routeDeps);
+  const registerRunnerTail = registerRunnerRoutes(app, routeDeps, {
+    noteArchivedQueuedRunsOnClaim,
+    preflightRecoveryLeases,
+    preflightRecoveryIntervalMs,
+  });
   const registerSessionTail = registerSessionRoutes(app, routeDeps);
   registerRunnerTail();
   registerSessionTail();

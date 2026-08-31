@@ -14,8 +14,8 @@ import {
   SymlinkError,
 } from "../files/store.js";
 import type { SpecificationReader } from "../specification-fidelity.js";
-import { createArchivedRunNoticeScheduler } from "../reconcile.js";
 import { createRunnerRegistry } from "../runners.js";
+import { appendRunActivity, fencedActivityInput } from "../run-lifecycle.js";
 import type { Principal } from "../auth.js";
 import { refusalResponse, type Refusal, type RefusalDetail, type RefusalReason } from "../refusal.js";
 import type { preflightOnboardingRepository } from "../onboarding-preflight.js";
@@ -35,9 +35,7 @@ export type RouteDeps = {
   options: LiveAppOptions;
   releaseChainLease: ReleaseMergeLease;
   runners: ReturnType<typeof createRunnerRegistry>;
-  noteArchivedQueuedRunsOnClaim: ReturnType<typeof createArchivedRunNoticeScheduler>;
-  preflightRecoveryLeases: Map<import("@anneal/db").RunnerKind, number>;
-  preflightRecoveryIntervalMs: number;
+  appendFencedActivity: ReturnType<typeof createAppendFencedActivityHandler>;
 };
 
 export const refusal = (reason: RefusalReason, message: string, detail?: RefusalDetail): Refusal => (
@@ -57,6 +55,18 @@ export const fence = z.string().min(1);
 export const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
 
+/**
+ * A JSON response carrying a validator, so a poll that changed nothing costs a
+ * header exchange instead of a payload.
+ *
+ * `GET /tasks` is polled every 2.5s by an open board and answers with the same
+ * bytes almost every time; at 1.58 MB that was ~38 MB/min of unchanged data.
+ * The body is serialised here rather than by `context.json` because the ETag has
+ * to be a hash of the exact bytes that would be sent.
+ *
+ * `Cache-Control: no-cache` — store it, but never reuse it without asking. A
+ * bare ETag with no cache directive lets a shared cache serve a stale board.
+ */
 export const validated = (context: Context, payload: unknown): Response => {
   const body = JSON.stringify(payload);
   const tag = etagFor(body);
@@ -66,7 +76,7 @@ export const validated = (context: Context, payload: unknown): Response => {
 };
 
 export const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
-export class PayloadTooLargeError extends Error {}
+class PayloadTooLargeError extends Error {}
 
 export const readBoundedBody = async (request: Request, limit: number): Promise<Buffer> => {
   const length = request.headers.get("Content-Length");
@@ -98,6 +108,8 @@ export const fileErrorResponse = (context: Context, error: unknown): Response | 
     return context.json({ error: error.message }, 400);
   }
   if (error instanceof NotFoundError) return context.json({ error: error.message }, 404);
+  // 409, not 400: the request is well formed and the conflict is in the state of the
+  // target, so the client may retry it once that state changes.
   if (error instanceof DirectoryNotEmptyError || error instanceof IsADirectoryError) {
     return context.json({ error: error.message }, 409);
   }
@@ -124,6 +136,15 @@ export const taskOutputInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
   commitSha: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u).optional(),
 });
+
+export const createAppendFencedActivityHandler = (db: PrismaClient) =>
+  async (context: Context<AppEnvironment, string>): Promise<Response> => {
+    const runId = id.parse(context.req.param("runId"));
+    const body = await readJson(context.req.raw, fencedActivityInput);
+    const principal = context.get("principal");
+    const result = await appendRunActivity(db, { runId, body, principal });
+    return "message" in result ? refusalJson(context, result) : context.json(result, 201);
+  };
 
 // Hono's generic is intentionally kept here for route modules that need to
 // annotate a registration function without importing app.ts.

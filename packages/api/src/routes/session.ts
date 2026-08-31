@@ -16,7 +16,6 @@ import {
   Prisma,
 } from "@anneal/db";
 import type { Session as SessionContract } from "@anneal/db/board-contract";
-import { type Context } from "hono";
 import { z } from "zod";
 
 import {
@@ -39,10 +38,6 @@ import {
 } from "../revalidation.js";
 import { cancelRun } from "../run-cancel.js";
 import {
-  appendRunActivity,
-  fencedActivityInput,
-} from "../run-lifecycle.js";
-import {
   fenceRefusalResponse,
   isFenceRefusalResponse,
   runFenceRefusal as fenceRefusal,
@@ -51,7 +46,6 @@ import {
 } from "../run-fence.js";
 import {
   FILE_WRITE_LIMIT,
-  type AppEnvironment,
   fileErrorResponse,
   fence,
   id,
@@ -71,6 +65,9 @@ const sessionWriteInput = z.object({
   content: z.string(),
   encoding: z.enum(["utf8", "base64"]).default("utf8"),
 });
+/** Revalidation is intentionally narrower than the operator task PATCH: the
+ * session names only the replacement brief and the server derives the one
+ * same-chain implementation task from the fenced Run. */
 const revalidationPatchInput = z.object({
   fencingToken: fence,
   description: z.string(),
@@ -93,15 +90,8 @@ const cancelRunInput = z.object({
 type SessionResponse = SessionContract<Date, Prisma.Decimal>;
 
 export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => void {
-  const { db, releaseChainLease } = deps;
+  const { db, releaseChainLease, appendFencedActivity } = deps;
 
-  const appendFencedActivity = async (context: Context<AppEnvironment, string>) => {
-    const runId = id.parse(context.req.param("runId"));
-    const body = await readJson(context.req.raw, fencedActivityInput);
-    const principal = context.get("principal");
-    const result = await appendRunActivity(db, { runId, body, principal });
-    return "message" in result ? refusalJson(context, result) : context.json(result, 201);
-  };
   app.post("/session/runs/:runId/activity", appendFencedActivity);
 
   // The agent's own view of its run: what it is working on, what budget is left,
@@ -449,31 +439,33 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     }
   });
 
-  return () => {
+  // Main registered the plural /sessions* and /runs/* routes after deferred
+  // runner completion; app.ts invokes the runner tail before this session tail.
+  return (): void => {
     // Plural, and it must stay plural: principalMayAccess denies the operator any
     // path starting with "/session/" (auth.ts), which "/sessions" misses by one
     // character. A singular route here 403s with no useful message.
     const sessionInclude = {
-    agent: { select: { id: true, title: true } },
-    // §SF-1: the session's own task carries the `merge-result` output the
-    // sessions pill and the lifecycle stat are projected from.
-    task: {
-      select: {
-        id: true, name: true,
-        stepOutput: { select: { kind: true, body: true, runId: true } },
-        // §SF-1: an unauthored output row can only mean the task's newest run.
-        runs: { orderBy: { runNumber: "desc" }, take: 1, select: { id: true } },
+      agent: { select: { id: true, title: true } },
+      // §SF-1: the session's own task carries the `merge-result` output the
+      // sessions pill and the lifecycle stat are projected from.
+      task: {
+        select: {
+          id: true, name: true,
+          stepOutput: { select: { kind: true, body: true, runId: true } },
+          // §SF-1: an unauthored output row can only mean the task's newest run.
+          runs: { orderBy: { runNumber: "desc" }, take: 1, select: { id: true } },
+        },
       },
-    },
-    goal: { select: { id: true, title: true } },
-    run: {
-      select: {
-        id: true, runNumber: true, model: true, branch: true,
-        pullRequestUrl: true, workspacePath: true,
-        // remoteUrl is what turns the detail page's Branch field into a link.
-        repo: { select: { id: true, name: true, remoteUrl: true } },
+      goal: { select: { id: true, title: true } },
+      run: {
+        select: {
+          id: true, runNumber: true, model: true, branch: true,
+          pullRequestUrl: true, workspacePath: true,
+          // remoteUrl is what turns the detail page's Branch field into a link.
+          repo: { select: { id: true, name: true, remoteUrl: true } },
+        },
       },
-    },
     } as const;
 
     type MergeOutcomeSubject = {
@@ -490,55 +482,55 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     };
 
     app.get("/sessions", async (context) => {
-    const projectId = context.req.query("projectId");
-    const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "50", 10) || 50, 1), 200);
-    const before = context.req.query("before");
-    const beforeDate = before ? new Date(before) : null;
-    const sessions = (await db.session.findMany({
-      where: {
-        ...(projectId ? { projectId } : {}),
-        // An unparseable cursor drops the filter rather than reaching Prisma as
-        // an Invalid Date and surfacing as a 500.
-        ...(beforeDate && !Number.isNaN(beforeDate.getTime()) ? { requestedAt: { lt: beforeDate } } : {}),
-      },
-      include: sessionInclude,
-      orderBy: { requestedAt: "desc" },
-      take: limit,
-    })).map(withMergeOutcome) satisfies SessionResponse[];
-    return context.json(sessions);
+      const projectId = context.req.query("projectId");
+      const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "50", 10) || 50, 1), 200);
+      const before = context.req.query("before");
+      const beforeDate = before ? new Date(before) : null;
+      const sessions = (await db.session.findMany({
+        where: {
+          ...(projectId ? { projectId } : {}),
+          // An unparseable cursor drops the filter rather than reaching Prisma as
+          // an Invalid Date and surfacing as a 500.
+          ...(beforeDate && !Number.isNaN(beforeDate.getTime()) ? { requestedAt: { lt: beforeDate } } : {}),
+        },
+        include: sessionInclude,
+        orderBy: { requestedAt: "desc" },
+        take: limit,
+      })).map(withMergeOutcome) satisfies SessionResponse[];
+      return context.json(sessions);
     });
 
     app.get("/sessions/:sessionId", async (context) => {
-    const session = await db.session.findUnique({
-      where: { id: id.parse(context.req.param("sessionId")) },
-      include: sessionInclude,
-    });
-    return session
-      ? context.json(withMergeOutcome(session) satisfies SessionResponse)
-      : context.json({ error: "Session not found" }, 404);
+      const session = await db.session.findUnique({
+        where: { id: id.parse(context.req.param("sessionId")) },
+        include: sessionInclude,
+      });
+      return session
+        ? context.json(withMergeOutcome(session) satisfies SessionResponse)
+        : context.json({ error: "Session not found" }, 404);
     });
 
     app.post("/runs/:runId/cancel", async (context) => {
-    const runId = id.parse(context.req.param("runId"));
-    const body = await readJson(context.req.raw, cancelRunInput);
-    const result = await cancelRun(db, runId, body, releaseChainLease);
-    if ("message" in result) return refusalJson(context, result);
-    return context.json(result);
+      const runId = id.parse(context.req.param("runId"));
+      const body = await readJson(context.req.raw, cancelRunInput);
+      const result = await cancelRun(db, runId, body, releaseChainLease);
+      if ("message" in result) return refusalJson(context, result);
+      return context.json(result);
     });
 
     app.get("/runs/:runId/events", async (context) => {
-    const runId = id.parse(context.req.param("runId"));
-    const afterSeq = Number.parseInt(context.req.query("afterSeq") ?? "", 10);
-    const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "500", 10) || 500, 1), 2_000);
-    const where = { runId, ...(Number.isFinite(afterSeq) ? { seq: { gt: afterSeq } } : {}) };
-    const [events, total] = await Promise.all([
+      const runId = id.parse(context.req.param("runId"));
+      const afterSeq = Number.parseInt(context.req.query("afterSeq") ?? "", 10);
+      const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "500", 10) || 500, 1), 2_000);
+      const where = { runId, ...(Number.isFinite(afterSeq) ? { seq: { gt: afterSeq } } : {}) };
+      const [events, total] = await Promise.all([
       // One extra row decides hasMore without a second count on the filtered set.
-      db.sessionEvent.findMany({ where, orderBy: { seq: "asc" }, take: limit + 1 }),
-      db.sessionEvent.count({ where: { runId } }),
-    ]);
-    const hasMore = events.length > limit;
-    const page = hasMore ? events.slice(0, limit) : events;
-    return context.json({ events: page, nextAfterSeq: page.at(-1)?.seq ?? null, hasMore, total });
+        db.sessionEvent.findMany({ where, orderBy: { seq: "asc" }, take: limit + 1 }),
+        db.sessionEvent.count({ where: { runId } }),
+      ]);
+      const hasMore = events.length > limit;
+      const page = hasMore ? events.slice(0, limit) : events;
+      return context.json({ events: page, nextAfterSeq: page.at(-1)?.seq ?? null, hasMore, total });
     });
   };
 }

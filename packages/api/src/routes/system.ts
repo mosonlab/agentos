@@ -84,103 +84,103 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
   // preserving Hono's route matching order exactly.
   return (): void => {
     app.get("/files", async (context) => {
-    try {
-      return context.json(await (await getFileStore()).list(context.req.query("dir") ?? ""));
-    } catch (error: unknown) {
-      const response = fileErrorResponse(context, error);
-      if (response) return response;
-      throw error;
-    }
-  });
-  app.get("/files/content", async (context) => {
-    const path = context.req.query("path") ?? "";
-    try {
-      const content = await (await getFileStore()).read(path);
-      return context.body(new Uint8Array(content), 200, {
-        "Content-Type": getMimeType(path) ?? "application/octet-stream",
-        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.split("/").at(-1) ?? "file")}`,
-      });
-    } catch (error: unknown) {
-      const response = fileErrorResponse(context, error);
-      if (response) return response;
-      throw error;
-    }
-  });
-  app.put("/files/content", async (context) => {
-    try {
-      const content = await readBoundedBody(context.req.raw, FILE_WRITE_LIMIT);
-      return context.json(await (await getFileStore()).write(context.req.query("path") ?? "", content));
-    } catch (error: unknown) {
-      const response = fileErrorResponse(context, error);
-      if (response) return response;
-      throw error;
-    }
-  });
-  app.post("/files/mkdir", async (context) => {
-    try {
-      const { path } = await readJson(context.req.raw, z.object({ path: z.string() }));
-      await (await getFileStore()).mkdir(path);
-      return context.json({ ok: true });
-    } catch (error: unknown) {
-      const response = fileErrorResponse(context, error);
-      if (response) return response;
-      throw error;
-    }
-  });
-  app.post("/files/move", async (context) => {
-    try {
-      const { from, to } = await readJson(context.req.raw, z.object({ from: z.string(), to: z.string() }));
-      await (await getFileStore()).move(from, to);
-      return context.json({ ok: true });
-    } catch (error: unknown) {
-      const response = fileErrorResponse(context, error);
-      if (response) return response;
-      throw error;
-    }
-  });
-  app.delete("/files", async (context) => {
-    try {
-      const store = await getFileStore();
-      const path = context.req.query("path") ?? "";
-      if (context.req.query("recursive") === "true") await deleteRecursively(store, path);
-      else await store.delete(path);
-      return context.json({ ok: true });
-    } catch (error: unknown) {
-      const response = fileErrorResponse(context, error);
-      if (response) return response;
-      throw error;
-    }
-  });
-
-  // First-run onboarding (OSS-B0 Step 4). Two routes, both operator-only: the
-  // principal middleware already denies runner and session principals every path
-  // outside their own prefix, and the explicit check states the requirement at
-  // the route that depends on it rather than leaving it implied by a table in
-  // auth.ts. Everything these routes decide lives in onboarding.ts.
-  app.get("/onboarding", async (context) => {
-    if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
-    return context.json(await onboardingStatus(db));
-  });
-    app.post("/onboarding", async (context) => {
-    if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
-    const input = await readJson(context.req.raw, onboardingInput);
-    try {
-      await (options.onboardingRepositoryPreflight ?? preflightOnboardingRepository)(input);
-    } catch (error: unknown) {
-      if (error instanceof RepositoryPreflightError) {
-        return context.json({ error: "Repository preflight failed", code: "repository-preflight-failed", reason: error.reason }, 422);
+      try {
+        return context.json(await (await getFileStore()).list(context.req.query("dir") ?? ""));
+      } catch (error: unknown) {
+        const response = fileErrorResponse(context, error);
+        if (response) return response;
+        throw error;
       }
-      throw error;
-    }
-    const result = await createStarterInstallation(db, input);
-    // 409, not 400 or a silent success: the request was well formed, the state of
-    // the target is what refuses it, and the caller recovers by reading GET
-    // /onboarding rather than by editing anything. A committed-but-lost response
-    // lands here too, which is why the code is stable and the rows are untouched.
-    if (!result.ok) {
-      return refusalJson(context, refusal("conflict", "An installation already exists", { code: result.code }));
-    }
-    return context.json(result.installation, 201);
+    });
+    app.get("/files/content", async (context) => {
+      const path = context.req.query("path") ?? "";
+      try {
+        const content = await (await getFileStore()).read(path);
+        return context.body(new Uint8Array(content), 200, {
+          "Content-Type": getMimeType(path) ?? "application/octet-stream",
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.split("/").at(-1) ?? "file")}`,
+        });
+      } catch (error: unknown) {
+        const response = fileErrorResponse(context, error);
+        if (response) return response;
+        throw error;
+      }
+    });
+    app.put("/files/content", async (context) => {
+      try {
+        const content = await readBoundedBody(context.req.raw, FILE_WRITE_LIMIT);
+        return context.json(await (await getFileStore()).write(context.req.query("path") ?? "", content));
+      } catch (error: unknown) {
+        const response = fileErrorResponse(context, error);
+        if (response) return response;
+        throw error;
+      }
+    });
+    app.post("/files/mkdir", async (context) => {
+      try {
+        const { path } = await readJson(context.req.raw, z.object({ path: z.string() }));
+        await (await getFileStore()).mkdir(path);
+        return context.json({ ok: true });
+      } catch (error: unknown) {
+        const response = fileErrorResponse(context, error);
+        if (response) return response;
+        throw error;
+      }
+    });
+    app.post("/files/move", async (context) => {
+      try {
+        const { from, to } = await readJson(context.req.raw, z.object({ from: z.string(), to: z.string() }));
+        await (await getFileStore()).move(from, to);
+        return context.json({ ok: true });
+      } catch (error: unknown) {
+        const response = fileErrorResponse(context, error);
+        if (response) return response;
+        throw error;
+      }
+    });
+    app.delete("/files", async (context) => {
+      try {
+        const store = await getFileStore();
+        const path = context.req.query("path") ?? "";
+        if (context.req.query("recursive") === "true") await deleteRecursively(store, path);
+        else await store.delete(path);
+        return context.json({ ok: true });
+      } catch (error: unknown) {
+        const response = fileErrorResponse(context, error);
+        if (response) return response;
+        throw error;
+      }
+    });
+
+    // First-run onboarding (OSS-B0 Step 4). Two routes, both operator-only: the
+    // principal middleware already denies runner and session principals every path
+    // outside their own prefix, and the explicit check states the requirement at
+    // the route that depends on it rather than leaving it implied by a table in
+    // auth.ts. Everything these routes decide lives in onboarding.ts.
+    app.get("/onboarding", async (context) => {
+      if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
+      return context.json(await onboardingStatus(db));
+    });
+    app.post("/onboarding", async (context) => {
+      if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
+      const input = await readJson(context.req.raw, onboardingInput);
+      try {
+        await (options.onboardingRepositoryPreflight ?? preflightOnboardingRepository)(input);
+      } catch (error: unknown) {
+        if (error instanceof RepositoryPreflightError) {
+          return context.json({ error: "Repository preflight failed", code: "repository-preflight-failed", reason: error.reason }, 422);
+        }
+        throw error;
+      }
+      const result = await createStarterInstallation(db, input);
+      // 409, not 400 or a silent success: the request was well formed, the state of
+      // the target is what refuses it, and the caller recovers by reading GET
+      // /onboarding rather than by editing anything. A committed-but-lost response
+      // lands here too, which is why the code is stable and the rows are untouched.
+      if (!result.ok) {
+        return refusalJson(context, refusal("conflict", "An installation already exists", { code: result.code }));
+      }
+      return context.json(result.installation, 201);
     });
   };
 };

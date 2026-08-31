@@ -10,11 +10,23 @@ import { createApp } from "../test-app.js";
 import { isStarterMountPath, isValidBranchName, onboardingInput, parseRepoRemote, slugify } from "../onboarding.js";
 import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import {
-  onboardingBody,
-  postOnboarding,
   untouchableDatabase,
   withTokens,
 } from "./test-support.js";
+
+const onboardingBody = (overrides: Record<string, unknown> = {}): string => JSON.stringify({
+  project: { name: "My Project", slug: "my-project" },
+  repo: { name: "app", remoteUrl: "https://github.com/owner/name.git", defaultBranch: "main", mountPath: "repo" },
+  acknowledgedHostExecution: true,
+  ...overrides,
+});
+
+const postOnboarding = async (database: PrismaClient, body: string): Promise<Response> =>
+  createApp(database).request("/onboarding", {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+    body,
+  });
 
 test("a repo remote may be a location and may never be a credential", () => {
   for (const remote of [

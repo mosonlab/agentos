@@ -1,21 +1,18 @@
 import { RunnerKind } from "@anneal/db";
-import { type Context } from "hono";
 import { z } from "zod";
 
 import { fence, id, readJson, refusal, refusalJson } from "./support.js";
-import type { AppEnvironment, RouteApp, RouteDeps } from "./support.js";
+import type { RouteApp, RouteDeps } from "./support.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "../failure-reason.js";
 import { recordRunnerBackendReport } from "../runner-backend-health.js";
 import { publishReclaimIntents, recordReclaimOutcomes, acknowledgeReclaimSalvage } from "../workspace-reclaim.js";
-import { reconcileDatabaseRuns, ReconciliationMaintenanceError } from "../reconcile.js";
+import { createArchivedRunNoticeScheduler, reconcileDatabaseRuns, ReconciliationMaintenanceError } from "../reconcile.js";
 import { claimInput, claimRun } from "../run-claim.js";
 import { completeRun, completionInput, worktreeContainmentViolationsInput } from "../run-completion.js";
 import { acknowledgeCancellation } from "../run-cancel.js";
 import {
-  appendRunActivity,
   appendRunEvents,
   eventsInput,
-  fencedActivityInput,
   heartbeatInput,
   heartbeatRun,
   leaseIndependentCleanupInput,
@@ -87,16 +84,29 @@ const runnerAvailabilityInput = z.object({
   }
 });
 
-export const registerRunnerRoutes = (app: RouteApp, deps: RouteDeps): (() => void) => {
+type RunnerRouteDeps = {
+  noteArchivedQueuedRunsOnClaim: ReturnType<typeof createArchivedRunNoticeScheduler>;
+  preflightRecoveryLeases: Map<RunnerKind, number>;
+  preflightRecoveryIntervalMs: number;
+};
+
+export const registerRunnerRoutes = (
+  app: RouteApp,
+  deps: RouteDeps,
+  runnerDeps: RunnerRouteDeps,
+): (() => void) => {
   const {
     db,
     options,
     releaseChainLease,
     runners,
+    appendFencedActivity,
+  } = deps;
+  const {
     noteArchivedQueuedRunsOnClaim,
     preflightRecoveryLeases,
     preflightRecoveryIntervalMs,
-  } = deps;
+  } = runnerDeps;
 
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
@@ -238,16 +248,11 @@ export const registerRunnerRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
     return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
-  const appendFencedActivity = async (context: Context<AppEnvironment, string>) => {
-    const runId = id.parse(context.req.param("runId"));
-    const body = await readJson(context.req.raw, fencedActivityInput);
-    const principal = context.get("principal");
-    const result = await appendRunActivity(db, { runId, body, principal });
-    return "message" in result ? refusalJson(context, result) : context.json(result, 201);
-  };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
 
-  return () => {
+  // Main registered completion after every /session/* route. Defer it so app.ts
+  // can invoke the runner tail before the session tail and preserve that order.
+  return (): void => {
     app.post("/runner/runs/:runId/complete", async (context) => {
       const runId = id.parse(context.req.param("runId"));
       const body = await readJson(context.req.raw, completionInput);
