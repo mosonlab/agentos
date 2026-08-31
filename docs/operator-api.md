@@ -808,7 +808,9 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   are not checked while authoring; the instantiation route checks the grant
   against its selected Repo. Warning codes are
   `no_review_step`, `same_agent_implements_and_reviews`, and
-  `pull_request_without_regression`.
+  `pull_request_without_regression`; warnings are non-blocking, describe the
+  complete resulting graph, and are ephemeral (they are not persisted or
+  returned by template reads).
 
 ```sh
 curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \

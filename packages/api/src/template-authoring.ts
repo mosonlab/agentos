@@ -4,6 +4,7 @@ import {
   lockTemplateRow,
   lockTemplateStepRows,
   Prisma,
+  stepRole,
   type PrismaClient,
 } from "@anneal/db";
 
@@ -288,7 +289,50 @@ export const validateTemplateGraph = (
     }
   }
 
-  return { refusal: null, warnings: [] };
+  // Warnings are deliberately computed only after every blocking check has
+  // passed. They describe the graph being saved and are returned in a stable,
+  // complete order; the replace transaction never writes them anywhere.
+  const reviewSteps = steps.filter((step) => {
+    const role = stepRole({ outputKind: step.outputKind });
+    return role === "sol-findings" || role === "blind-findings";
+  });
+  const warnings: TemplateAuthoringWarning[] = [];
+  if (reviewSteps.length === 0) {
+    warnings.push({
+      code: "no_review_step",
+      message: "Template graph has no review step",
+    });
+  }
+
+  const implementationAgentIds = new Set(
+    steps
+      .filter((step) => {
+        const role = stepRole({ outputKind: step.outputKind });
+        return role === "implementation" || role === "fixed-implementation";
+      })
+      .flatMap((step) => step.assigneeAgentId === null ? [] : [step.assigneeAgentId]),
+  );
+  const selfReview = reviewSteps.some((step) => (
+    step.assigneeAgentId !== null && implementationAgentIds.has(step.assigneeAgentId)
+  ));
+  if (selfReview) {
+    warnings.push({
+      code: "same_agent_implements_and_reviews",
+      message: "One Agent implements and reviews the same template graph",
+    });
+  }
+
+  const regressionStep = steps.find((step) => stepRole({ outputKind: step.outputKind }) === "regression");
+  const pullRequestStep = steps.find((step) => step.opensPullRequest);
+  if (pullRequestStep && !regressionStep) {
+    warnings.push({
+      code: "pull_request_without_regression",
+      message: `Template step ${pullRequestStep.stepIndex} opens a pull request but the graph has no regression step`,
+      stepIndex: pullRequestStep.stepIndex,
+    });
+  }
+
+  return { refusal: null, warnings };
 };
 
 /**
