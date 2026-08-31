@@ -154,7 +154,7 @@ const editedGraph = (agents: Array<{ id: string }>) => [
     runner: RunnerKind.CODEX,
     outputKind: "e2e-first",
     opensPullRequest: false,
-    requiresCommit: true,
+    requiresCommit: false,
     baseFromStepIndex: null,
     layer: 1,
   },
