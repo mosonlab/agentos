@@ -1,10 +1,11 @@
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 
-import { formatDateTime, formatT, usageMoney } from "../lib/format";
+import { formatDateTime, formatT, titleCase, usageMoney } from "../lib/format";
 import { useLocalStorage, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import type { CostsReport } from "../lib/types";
+import { Link } from "../lib/router";
 import { IconRefresh } from "../components/icons";
 import {
   HINT, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP,
@@ -46,6 +47,90 @@ export const seriesColor = (rank: number): string =>
  */
 export const chartSeries = (byAgent: CostsReport["byAgent"]): string[] =>
   byAgent.map((entry) => entry.agent);
+
+/* ---------------------------------------------------------------- additive API view */
+
+/**
+ * The API contract grows additively with this page. Keeping this narrow view
+ * here lets the page remain consumable while an older generated db contract is
+ * present in a dev checkout; once the server contract is updated these fields
+ * are structurally identical to the wire response.
+ */
+export type CostsPageAgent = CostsReport["byAgent"][number] & {
+  cacheUnknownRuns?: number;
+  uncachedInputTokens?: number;
+  uncachedInputUsd?: string | null;
+};
+
+export type CostsPageWaste = {
+  totalUsd: string;
+  operatorCancelledUsd: string;
+  failedUsd: string;
+  byFailureClass: Array<{ failureClass: string; usd: string; runs: number }>;
+};
+
+export type CostsPageChain = {
+  chainId: string;
+  chainName: string | null;
+  taskCount: number;
+  leadMinutes: number;
+  busyMinutes: number;
+  busyPct: number;
+  repairs: { gateFix: number; refreshConflict: number; reviewFix: number };
+  costUsd: string | null;
+  costByRole: Record<string, string>;
+  costUnavailableRuns: number;
+  longestGap: { minutes: number; beforeTaskName: string | null };
+  /** Optional link target supplied by API projections that have a task view. */
+  taskId?: string | null;
+  detailTaskId?: string | null;
+};
+
+export type CostsPageReport = Omit<CostsReport, "byAgent"> & {
+  byAgent: CostsPageAgent[];
+  waste?: CostsPageWaste;
+  chains?: CostsPageChain[];
+};
+
+export type CostsChainSort = "lead" | "cost";
+
+const chainCostNumber = (value: string | null): number =>
+  value === null || !Number.isFinite(Number(value)) ? Number.NEGATIVE_INFINITY : Number(value);
+
+const descending = (left: number, right: number): number => {
+  if (left === right) return 0;
+  if (left === Number.NEGATIVE_INFINITY) return 1;
+  if (right === Number.NEGATIVE_INFINITY) return -1;
+  return right - left;
+};
+
+/** The default answers "which chains took longest?"; cost is an explicit sort. */
+export const sortCostChains = (
+  chains: readonly CostsPageChain[],
+  sort: CostsChainSort = "lead",
+): CostsPageChain[] => [...chains].sort((left, right) => {
+  const primary = sort === "cost"
+    ? descending(chainCostNumber(left.costUsd), chainCostNumber(right.costUsd))
+    : descending(left.leadMinutes, right.leadMinutes);
+  if (primary !== 0) return primary;
+  const secondary = sort === "cost"
+    ? descending(left.leadMinutes, right.leadMinutes)
+    : descending(chainCostNumber(left.costUsd), chainCostNumber(right.costUsd));
+  if (secondary !== 0) return secondary;
+  return (left.chainName ?? left.chainId).localeCompare(right.chainName ?? right.chainId)
+    || left.chainId.localeCompare(right.chainId);
+});
+
+/** Compatibility alias for callers that describe the operation generically. */
+export const sortChains = sortCostChains;
+
+const minutes = (value: number): string => {
+  if (!Number.isFinite(value)) return "—";
+  const rounded = Math.round(value * 10) / 10;
+  return `${rounded.toFixed(1).replace(/\.0$/u, "")}m`;
+};
+
+const busyPercentage = (value: number): string => Number.isFinite(value) ? `${value.toFixed(1)}%` : "—";
 
 /* ------------------------------------------------------------------- chart */
 
@@ -271,6 +356,157 @@ export const ModelBar = ({ byModel, totalUsd, colors }: {
   );
 };
 
+/* --------------------------------------------------------------- waste */
+
+/** The single waste number remains in the summary row; this card explains the
+ *  two populations underneath it without changing the existing headline. */
+export const WasteBreakdown = ({ waste }: { waste: CostsPageWaste }): ReactNode => {
+  const t = useT();
+  return (
+    <Card title={t("costs.waste.title")}>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-[16px]">
+        <MetricFigure label={t("costs.waste.operatorCancelled")} value={usageMoney(waste.operatorCancelledUsd)} />
+        <MetricFigure label={t("costs.waste.failed")} value={usageMoney(waste.failedUsd)} />
+      </div>
+      <details open={waste.byFailureClass.length > 0} className="mt-[16px] border-t border-[color:var(--border-soft)] pt-[12px]">
+        <summary className="cursor-pointer text-[12px] text-secondary-foreground">
+          {t("costs.waste.failedClasses", { n: waste.byFailureClass.length })}
+        </summary>
+        {waste.byFailureClass.length === 0
+          ? <div className={`${HINT} mt-[9px]`}>{t("costs.waste.noFailures")}</div>
+          : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("costs.waste.failureClass")}</TableHead>
+                    <TableHead className={TABLE_TIGHT}>{t("costs.waste.runs")}</TableHead>
+                    <TableHead className={TABLE_TIGHT}>{t("costs.waste.cost")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {waste.byFailureClass.map((failure) => (
+                    <TableRow key={failure.failureClass}>
+                      <TableCell className={TABLE_NAME}>{failure.failureClass}</TableCell>
+                      <TableCell className={TABLE_TIGHT}>{failure.runs}</TableCell>
+                      <TableCell className={TABLE_TIGHT}>{usageMoney(failure.usd)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+      </details>
+    </Card>
+  );
+};
+
+/* --------------------------------------------------------------- chains */
+
+const chainTaskHref = (chain: CostsPageChain): string | null => {
+  const taskId = chain.detailTaskId ?? chain.taskId ?? null;
+  return taskId === null ? null : `/tasks/${encodeURIComponent(taskId)}`;
+};
+
+const ChainName = ({ chain }: { chain: CostsPageChain }): ReactNode => {
+  const name = chain.chainName ?? chain.chainId.slice(0, 8);
+  const href = chainTaskHref(chain);
+  return href === null
+    ? <span>{name}</span>
+    : <Link to={href}>{name}</Link>;
+};
+
+/** Inline role chips keep the per-role spend visible without making each row
+ *  another interaction. Unknown cost runs are called out separately from the
+ *  priced role amounts, so a partial total is never presented as complete. */
+export const ChainRoleCosts = ({ chain }: { chain: CostsPageChain }): ReactNode => {
+  const t = useT();
+  const roles = Object.entries(chain.costByRole).sort(([left], [right]) => left.localeCompare(right));
+  return (
+    <div className="flex min-w-[180px] flex-wrap gap-x-[10px] gap-y-[4px]">
+      {roles.length === 0 ? <span className="text-muted-foreground">—</span> : null}
+      {roles.map(([role, usd]) => (
+        <span key={role} className="inline-flex gap-[4px] text-[11.5px]">
+          <span className="text-muted-foreground">{titleCase(role)}:</span>
+          <span>{usageMoney(usd)}</span>
+        </span>
+      ))}
+      {chain.costUnavailableRuns > 0 ? (
+        <span className={TABLE_SUB}>{t("costs.chains.unpriced", { n: chain.costUnavailableRuns })}</span>
+      ) : null}
+    </div>
+  );
+};
+
+const repairSummary = (chain: CostsPageChain, t: ReturnType<typeof useT>): ReactNode => {
+  const repairs = [
+    ["gate-fix", chain.repairs.gateFix],
+    ["refresh-conflict", chain.repairs.refreshConflict],
+    ["review-fix", chain.repairs.reviewFix],
+  ] as const;
+  const present = repairs.filter(([, count]) => count > 0);
+  return present.length === 0
+    ? <span className="text-muted-foreground">{t("costs.chains.noRepairs")}</span>
+    : <span className="flex flex-wrap gap-x-[7px] gap-y-[3px]">{present.map(([kind, count]) => <span key={kind}>{kind} ×{count}</span>)}</span>;
+};
+
+/** Costs rows are server-projected in one response; the browser only sorts and
+ *  renders them, keeping the selected window and refresh behavior unchanged. */
+export const ChainsTable = ({ chains }: { chains: readonly CostsPageChain[] }): ReactNode => {
+  const t = useT();
+  const [sort, setSort] = useState<CostsChainSort>("lead");
+  const ordered = useMemo(() => sortCostChains(chains, sort), [chains, sort]);
+  if (chains.length === 0) return <EmptyState>{t("costs.chains.empty")}</EmptyState>;
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>{t("costs.chains.chain")}</TableHead>
+          <TableHead className={TABLE_TIGHT}>{t("costs.chains.tasks")}</TableHead>
+          <TableHead className={TABLE_TIGHT} aria-sort={sort === "lead" ? "descending" : "none"}>
+            <button type="button" className="text-left hover:text-foreground" onClick={() => setSort("lead")}>
+              {t("costs.chains.lead")}
+            </button>
+          </TableHead>
+          <TableHead className={TABLE_TIGHT}>{t("costs.chains.busy")}</TableHead>
+          <TableHead className={TABLE_TIGHT}>{t("costs.chains.busyPct")}</TableHead>
+          <TableHead>{t("costs.chains.repairs")}</TableHead>
+          <TableHead className={TABLE_TIGHT} aria-sort={sort === "cost" ? "descending" : "none"}>
+            <button type="button" className="text-left hover:text-foreground" onClick={() => setSort("cost")}>
+              {t("costs.chains.cost")}
+            </button>
+          </TableHead>
+          <TableHead>{t("costs.chains.costByRole")}</TableHead>
+          <TableHead>{t("costs.chains.longestGap")}</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {ordered.map((chain) => (
+          <TableRow key={chain.chainId}>
+            <TableCell className={TABLE_NAME}><ChainName chain={chain} /></TableCell>
+            <TableCell className={TABLE_TIGHT}>{chain.taskCount}</TableCell>
+            <TableCell className={TABLE_TIGHT}>{minutes(chain.leadMinutes)}</TableCell>
+            <TableCell className={TABLE_TIGHT}>{minutes(chain.busyMinutes)}</TableCell>
+            <TableCell className={TABLE_TIGHT}>{busyPercentage(chain.busyPct)}</TableCell>
+            <TableCell>{repairSummary(chain, t)}</TableCell>
+            <TableCell className={TABLE_TIGHT}>
+              {chain.costUsd === null ? "—" : usageMoney(chain.costUsd)}
+              {chain.costUnavailableRuns > 0
+                ? <span className={TABLE_SUB}>{t("costs.chains.unpriced", { n: chain.costUnavailableRuns })}</span>
+                : null}
+            </TableCell>
+            <TableCell><ChainRoleCosts chain={chain} /></TableCell>
+            <TableCell>
+              {minutes(chain.longestGap.minutes)}
+              {chain.longestGap.beforeTaskName
+                ? <span className={TABLE_SUB}>{t("costs.chains.before", { task: chain.longestGap.beforeTaskName })}</span>
+                : null}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+};
+
 /* -------------------------------------------------------------------- page */
 
 const parseRange = (value: string): CostsRange =>
@@ -299,7 +535,7 @@ export const CostsPage = (): ReactNode => {
   // Settled spend over whole days does not move at the board's cadence, and a
   // 30-day aggregate is not free to compute. A minute is well inside the time an
   // operator would take to notice a run finished.
-  const costs = usePoll<CostsReport>(path, 60_000);
+  const costs = usePoll<CostsPageReport>(path, 60_000);
 
   const report = costs.data;
   /* Identity is assigned once, by total spend across the window, and every
@@ -378,11 +614,19 @@ export const CostsPage = (): ReactNode => {
                 : t("costs.hint.complete")}
             </div>
 
+            {report.waste === undefined ? null : <WasteBreakdown waste={report.waste} />}
+
             <div className={COSTS_COLUMNS}>
               <div className={STACK}>
                 <Card title={t("costs.chart.title")}>
                   <DailySpendChart daily={daily} order={order} colors={colors} />
                   {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
+                </Card>
+
+                <Card title={t("costs.chains.title")} flush>
+                  {report.chains === undefined
+                    ? <EmptyState>{t("costs.chains.empty")}</EmptyState>
+                    : <ChainsTable chains={report.chains} />}
                 </Card>
 
                 <Card title={t("costs.topRuns.title")} flush>
@@ -444,6 +688,7 @@ export const CostsPage = (): ReactNode => {
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.runs")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.avg")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.cache")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.uncached")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.waste")}</TableHead>
                             </TableRow>
                           </TableHeader>
@@ -470,7 +715,17 @@ export const CostsPage = (): ReactNode => {
                                     and a cache nobody hit look nothing alike,
                                     and neither does an agent with no priced
                                     spend to have wasted. */}
-                                <TableCell className={TABLE_TIGHT}>{percent(entry.cachePct)}</TableCell>
+                                <TableCell className={TABLE_TIGHT}>
+                                  {percent(entry.cachePct)}
+                                  {entry.cacheUnknownRuns === undefined || entry.cacheUnknownRuns === 0
+                                    ? null
+                                    : <span className={TABLE_SUB}>{t("costs.byAgent.cacheUnknown", { n: entry.cacheUnknownRuns })}</span>}
+                                </TableCell>
+                                <TableCell className={TABLE_TIGHT}>
+                                  {entry.uncachedInputUsd === undefined || entry.uncachedInputUsd === null
+                                    ? "—"
+                                    : usageMoney(entry.uncachedInputUsd)}
+                                </TableCell>
                                 <TableCell className={TABLE_TIGHT}>{percent(wasteShare(entry))}</TableCell>
                               </TableRow>
                             ))}
