@@ -89,6 +89,7 @@ const claim = (
     id: runId,
     runNumber: 1,
     opensPullRequest: true,
+    requiresCommit: true,
     pullRequestBase: "main",
     maxDurationMin: 30,
     stallTimeoutMin: 10,

@@ -158,6 +158,8 @@ enum MergeRecoveryStatus {
 enum MergeRecoveryRefusalCode {
   ACTIVATION_AUTHORIZATION_STALE @map("activation-authorization-stale")
   HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
+  PRE_INTENT                     @map("pre-intent")
+  TARGET_BRANCH_MISMATCH         @map("target-branch-mismatch")
 }
 
 enum MergeLeaseEventState {
@@ -195,6 +197,7 @@ enum FailureClass {
   TOOL_FAILED            @map("tool-failed")
   TRANSIENT_PROVIDER     @map("transient-provider")
   PROTOCOL_ERROR         @map("protocol-error")
+  NO_CHANGES_PRODUCED    @map("no-changes-produced")
   TASK_FAILED            @map("task-failed")
   BUDGET_EXCEEDED        @map("budget-exceeded")
 }
@@ -513,6 +516,9 @@ model TaskTemplateStep {
   runner                  RunnerKind?
   outputKind              String       @default("result")
   opensPullRequest        Boolean      @default(true)
+  /// Whether a successful Run must advance the workspace commit. False still
+  /// publishes the branch, because a later Chain Step may need to clone it.
+  requiresCommit          Boolean      @default(true)
   baseFromStepIndex       Int?
   layer                   Int
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
@@ -944,6 +950,9 @@ model Run {
   /// PATCH of the task cannot change a run already queued. The runner reads this
   /// and never the live task row.
   opensPullRequest              Boolean                @default(true)
+  /// Immutable delivery contract copied from the template Step at Run birth.
+  /// Manual Tasks default to requiring a commit.
+  requiresCommit                Boolean                @default(true)
   targetBranch                  String?
   branch                        String?
   /// The ref this run actually handed to `git push`, written only after the push

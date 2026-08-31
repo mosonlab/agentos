@@ -5,14 +5,20 @@ import test from "node:test";
 
 const source = readFileSync(fileURLToPath(new URL("./board-contract.ts", import.meta.url)), "utf8");
 
-test("the browser-safe board contract imports no runtime dependency", () => {
-  const specifiers = [
-    ...source.matchAll(/(?:^|\n)\s*(?:import|export)[^;]*?from\s+"([^"]+)"/gu),
+test("the browser-safe board contract imports only types", () => {
+  const runtimeSpecifiers = [
+    ...source.matchAll(/(?:^|\n)\s*import(?!\s+type\b)[^;]*?from\s+"([^"]+)"/gu),
     ...source.matchAll(/(?:^|\n)\s*import\s+"([^"]+)"/gu),
+    ...source.matchAll(/(?:^|\n)\s*export(?!\s+type\b)[^;]*?from\s+"([^"]+)"/gu),
     ...source.matchAll(/\brequire\s*\(\s*"([^"]+)"/gu),
     ...source.matchAll(/\bimport\s*\(\s*"([^"]+)"/gu),
   ].map((match) => match[1]);
-  assert.deepEqual(specifiers, []);
+  assert.deepEqual(runtimeSpecifiers, []);
+
+  const typeSpecifiers = [
+    ...source.matchAll(/(?:^|\n)\s*import\s+type\b[^;]*?from\s+"([^"]+)"/gu),
+  ].map((match) => match[1]);
+  assert.deepEqual(typeSpecifiers, ["@prisma/client", "./wire-contract.js"]);
 });
 
 test("the package publishes the board contract as an isolated subpath", () => {

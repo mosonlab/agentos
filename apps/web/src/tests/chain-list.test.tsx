@@ -26,7 +26,7 @@ const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep =
 });
 
 const chain = (steps: ChainStep[], overrides: Partial<Chain> = {}): Chain => ({
-  chainId: "c1", total: steps.length, done: steps.filter((row) => row.status === "DONE").length, steps, ...overrides,
+  chainId: "c1", total: steps.length, done: steps.filter((row) => row.status === "DONE").length, steps, control: null, ...overrides,
 });
 
 const heldControl = (overrides: Partial<NonNullable<Chain["control"]>> = {}): NonNullable<Chain["control"]> => ({
@@ -68,7 +68,6 @@ const repairActivity = (
   actorType: "control-plane",
   actorId: null,
   body: "",
-  commitSha: null,
   metadata: { schemaVersion: 1, kind, repairTaskId, repairKind, startHeadSha, targetHeadSha, ...extra },
   createdAt: `2026-08-28T00:0${id.slice(-1)}:00.000Z`,
 });

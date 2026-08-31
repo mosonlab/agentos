@@ -7,6 +7,7 @@ outputKind: blind-findings
 priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: 2
 spawnPolicy: null
 ---

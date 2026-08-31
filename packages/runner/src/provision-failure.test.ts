@@ -77,6 +77,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     id: "run-113",
     runNumber: 1,
     opensPullRequest: true,
+    requiresCommit: true,
     pullRequestBase: "master",
     maxDurationMin: 30,
     stallTimeoutMin: 10,

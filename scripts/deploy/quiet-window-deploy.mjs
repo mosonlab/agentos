@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -37,10 +37,28 @@ import {
 } from "./deploy-preflight.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
-import { runCommandWithRetry } from "./quiet-window-retry.mjs";
+import {
+  readRemoteMainRevision,
+  transientRemoteMainEscalationFields,
+} from "./remote-main-read.mjs";
+import {
+  checkExistingEscalation,
+  resolveRemoteMainTarget,
+} from "./quiet-window-escalation.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
+import { runDeployCommand } from "./quiet-window-command.mjs";
+import { writeEscalationRecord } from "./quiet-window-escalation-record.mjs";
+import {
+  BARRIER_TIMEOUT_REASON,
+  createBarrierWatchdog,
+  DEPLOY_BARRIER_TIMEOUT_MS,
+  DEPLOY_STEP_TIMEOUT_MS,
+  MIGRATION_DEPLOY_TIMEOUT_REASON,
+  waitForEscalationClear,
+  waitForQuietWithWatchdog,
+} from "./quiet-window-deadlines.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
 import {
   pruneReleaseDirectories,
@@ -62,7 +80,6 @@ const SHARED_PATH = join(REPOSITORY_ROOT, "shared");
 const POLL_SECONDS_TEXT = process.env.QUIET_WINDOW_POLL_SECONDS ?? "60";
 const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT) : Number.NaN;
 const POLL_MS = POLL_SECONDS * 1_000;
-const SHA = /^[0-9a-f]{40}$/u;
 const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @anneal/db deploy-barrier.ts ("AGDP").
 const DEPLOY_BARRIER_KEY = 1;
 
@@ -77,6 +94,7 @@ const interruption = createDeployInterruption();
 const interruptController = { signal: interruption.signal };
 const interruptFailure = interruption.failure;
 const throwIfInterrupted = interruption.throwIfInterrupted;
+let migrationBarrierRetentionActive = false;
 const trackResource = (resource) => {
   const release = resource.release.bind(resource);
   resource.release = async () => {
@@ -90,47 +108,22 @@ const command = (program, args, {
   cwd = REPOSITORY_ROOT,
   env = process.env,
   capture = false,
+  timeoutMs,
+  timeoutReason,
   allowAfterInterrupt = false,
-} = {}) => {
-  if (!allowAfterInterrupt) throwIfInterrupted();
-  return new Promise((accept, reject) => {
-    const child = spawn(program, args, {
-      cwd,
-      env,
-      shell: false,
-      stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    });
-    let settled = false;
-    let stdout = "";
-    let stderr = "";
-    if (capture) {
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => { stdout += chunk; });
-      child.stderr.on("data", (chunk) => { stderr += chunk; });
-    }
-    const cleanUp = () => interruptController.signal.removeEventListener("abort", onAbort);
-    const rejectOnce = (error) => {
-      if (settled) return;
-      settled = true;
-      cleanUp();
-      reject(error);
-    };
-    const acceptOnce = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanUp();
-      accept(result);
-    };
-    const onAbort = () => {
-      child.kill(interruption.receivedSignal() === "SIGINT" ? "SIGINT" : "SIGTERM");
-      rejectOnce(interruptFailure());
-    };
-    if (!allowAfterInterrupt) interruptController.signal.addEventListener("abort", onAbort, { once: true });
-    child.once("error", rejectOnce);
-    child.once("exit", (code, signal) => acceptOnce({ code: code ?? 1, signal, stdout, stderr }));
-  });
-};
+  onTermination,
+} = {}) => runDeployCommand(program, args, {
+  cwd,
+  env,
+  capture,
+  timeoutMs,
+  timeoutReason,
+  signal: interruptController.signal,
+  abortFailure: interruptFailure,
+  abortSignal: () => interruption.receivedSignal() === "SIGINT" ? "SIGINT" : "SIGTERM",
+  allowAfterAbort: allowAfterInterrupt,
+  onTermination,
+});
 
 const checkedResult = async (reason, run) => {
   log(`START ${reason}`);
@@ -151,24 +144,21 @@ const checked = (reason, program, args, options) => checkedResult(
   () => command(program, args, options),
 );
 
-const retryingGitCommand = (operation, args, options) => runCommandWithRetry(
-  () => command(loadBinaries().git, args, options).catch((error) => {
-    if (error instanceof DeployFailure) throw error;
-    return { code: 1, stderr: String(error), stdout: "" };
-  }),
-  {
-    onRetry: ({ attempt, nextAttempt, waitMs }) => log(
-      `RETRY git-network operation=${operation} attempt=${attempt} next-attempt=${nextAttempt} wait-ms=${waitMs}`,
-    ),
-  },
-);
-
-const readJson = (path, reason) => {
+const parseJson = (contents, reason) => {
   try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
+    const value = JSON.parse(contents);
     if (typeof value !== "object" || value === null || Array.isArray(value)) fail(reason, "json-root-is-not-an-object");
     return value;
   } catch {
+    fail(reason, "unreadable-or-invalid-json");
+  }
+};
+
+const readJson = (path, reason) => {
+  try {
+    return parseJson(readFileSync(path, "utf8"), reason);
+  } catch (error) {
+    if (error instanceof DeployFailure) throw error;
     fail(reason, "unreadable-or-invalid-json");
   }
 };
@@ -195,13 +185,24 @@ const environmentFilePath = () => join(SHARED_PATH, ".env");
 const remoteMainRevision = async () => {
   const sourceRemote = process.env.DEPLOY_SOURCE_REMOTE;
   if (!sourceRemote) fail("environment-unreadable", "DEPLOY_SOURCE_REMOTE-missing");
-  const result = await retryingGitCommand(
-    "ls-remote-main",
-    ["ls-remote", "--exit-code", sourceRemote, "refs/heads/main"],
-    { capture: true },
-  );
-  const revision = result.stdout.trim().split(/\s+/u)[0] ?? "";
-  if (result.code !== 0 || !SHA.test(revision)) fail("remote-main-unreadable", `exit-${result.code}`);
+  const revision = await readRemoteMainRevision({
+    run: () => command(
+      loadBinaries().git,
+      ["ls-remote", "--exit-code", sourceRemote, "refs/heads/main"],
+      {
+        capture: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.remoteMainRead,
+        timeoutReason: "remote-main-read-timeout",
+      },
+    ).catch((error) => {
+      if (error instanceof DeployFailure) throw error;
+      return { code: 1, stderr: String(error), stdout: "" };
+    }),
+    onRetry: ({ reason, attempt, nextAttempt, waitMs }) => log(
+      `RETRY ${reason} operation=ls-remote-main attempt=${attempt} next-attempt=${nextAttempt} wait-ms=${waitMs}`,
+    ),
+  });
+  log(`PASS remote-main-read revision=${revision}`);
   return revision;
 };
 
@@ -327,8 +328,18 @@ const sleep = (milliseconds) => {
   });
 };
 
-const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/launchctl", args, { capture: true, ...options });
+const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/launchctl", args, {
+  capture: true,
+  timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceRestart,
+  timeoutReason: `${reason}-timeout`,
+  ...options,
+});
 const domain = () => `gui/${process.getuid()}`;
+const launchctlPrint = (label) => command("/bin/launchctl", ["print", `${domain()}/${label}`], {
+  capture: true,
+  timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+  timeoutReason: "service-inspection-timeout",
+});
 
 const acquireDeployBarrier = async () => {
   throwIfInterrupted();
@@ -350,25 +361,44 @@ const acquireDeployBarrier = async () => {
     if (rows.length !== 1 || rows[0]?.granted !== true) { await session.$disconnect(); return null; }
     const pid = Number(rows[0].pid);
     let released = false;
+    let retainUntilCleared = false;
+    const verifyBarrier = async () => {
+      if (released) return false;
+      const checks = await session.$queryRawUnsafe(
+        `SELECT pg_backend_pid() AS pid, EXISTS (
+           SELECT 1 FROM pg_locks
+           WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+             AND classid = $1::oid AND objid = $2::oid AND objsubid = 2
+             AND granted AND mode = 'ExclusiveLock'
+         ) AS held`,
+        DEPLOY_BARRIER_CLASS,
+        DEPLOY_BARRIER_KEY,
+      ).catch(() => []);
+      return checks.length === 1 && Number(checks[0]?.pid) === pid && checks[0]?.held === true;
+    };
     return trackResource({
-      verify: async () => {
-        if (released) return false;
-        const checks = await session.$queryRawUnsafe(
-          `SELECT pg_backend_pid() AS pid, EXISTS (
-             SELECT 1 FROM pg_locks
-             WHERE locktype = 'advisory' AND pid = pg_backend_pid()
-               AND classid = $1::oid AND objid = $2::oid AND objsubid = 2
-               AND granted AND mode = 'ExclusiveLock'
-           ) AS held`,
-          DEPLOY_BARRIER_CLASS,
-          DEPLOY_BARRIER_KEY,
-        ).catch(() => []);
-        // The backend identity and pg_locks row prove the pinned session still
-        // owns the exact exclusive key; either becoming unreadable is loss.
-        return checks.length === 1 && Number(checks[0]?.pid) === pid && checks[0]?.held === true;
+      retainUntilEscalationCleared: () => {
+        retainUntilCleared = true;
+        migrationBarrierRetentionActive = true;
       },
+      // The backend identity and pg_locks row prove the pinned session still
+      // owns the exact exclusive key; either becoming unreadable is loss.
+      verify: verifyBarrier,
       release: async () => {
         if (released) return;
+        if (retainUntilCleared) {
+          await waitForEscalationClear({
+            escalationExists: () => existsSync(ESCALATION_PATH),
+            verifyBarrier,
+            wait: () => new Promise((resolveWait) => setTimeout(resolveWait, 1_000)),
+            onHold: () => log(`HOLD deploy-barrier migration-timeout escalation=${ESCALATION_PATH}; clear-escalation-required`),
+            onPersistencePending: () => log(`STOP escalation-persistence-unobserved path=${ESCALATION_PATH}; deploy-barrier-retained`),
+            onCleared: () => {
+              migrationBarrierRetentionActive = false;
+              log("PASS deploy-barrier operator-cleared-migration-timeout");
+            },
+          });
+        }
         released = true;
         try { await session.$queryRawUnsafe("SELECT pg_advisory_unlock($1::int4, $2::int4)", DEPLOY_BARRIER_CLASS, DEPLOY_BARRIER_KEY); }
         finally { await session.$disconnect(); }
@@ -381,37 +411,15 @@ const acquireDeployBarrier = async () => {
   }
 };
 
-const waitForQuiet = async () => {
-  while (true) {
-    throwIfInterrupted();
-    const before = await blockingRuns();
-    if (before.length > 0) {
-      log(`HOLD quiet-window blockers=${before.length} statuses=${[...new Set(before.map((run) => run.status))].join(",")}`);
-      await sleep(POLL_MS);
-      continue;
-    }
-    const barrier = await acquireDeployBarrier();
-    if (barrier === null) {
-      log("HOLD quiet-window deploy-barrier-contended");
-      await sleep(POLL_MS);
-      continue;
-    }
-    let after;
-    try {
-      after = await blockingRuns();
-    } catch (error) {
-      await barrier.release();
-      throw error;
-    }
-    if (after.length === 0) {
-      log("PASS quiet-window deploy-barrier-held blockers=0");
-      return barrier;
-    }
-    await barrier.release();
-    log(`HOLD quiet-window raced-blockers=${after.length}`);
-    await sleep(POLL_MS);
-  }
-};
+const waitForQuiet = (startWatchdog) => waitForQuietWithWatchdog({
+  blockingRuns,
+  acquireBarrier: acquireDeployBarrier,
+  startWatchdog,
+  wait: () => sleep(POLL_MS),
+  onBlockingRuns: (runs) => log(`HOLD quiet-window blockers=${runs.length} statuses=${[...new Set(runs.map((run) => run.status))].join(",")}`),
+  onBarrierContended: () => log("HOLD quiet-window deploy-barrier-contended"),
+  onRacedBlockingRuns: (runs) => log(`HOLD quiet-window raced-blockers=${runs.length}`),
+});
 
 const acquireLock = async () => {
   const lock = acquireProcessLock({ path: LOCK_PATH, stateDir: STATE_DIR });
@@ -419,10 +427,7 @@ const acquireLock = async () => {
 };
 
 const writeEscalation = async (record) => {
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  const temporary = `${ESCALATION_PATH}.${process.pid}.${randomUUID()}`;
-  writeFileSync(temporary, `${JSON.stringify({ notificationDelivered: false, ...record, escalatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, ESCALATION_PATH);
+  writeEscalationRecord({ path: ESCALATION_PATH, record });
   log(`ESCALATED reason=${record.reason} from=${record.from} to=${record.to}`);
 };
 
@@ -447,7 +452,14 @@ const retryEscalationNotification = async () => {
 };
 
 const persistAndNotifyFailure = async (failure, from, to) => {
-  await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from, to });
+  await writeEscalation({
+    outcome: "failure",
+    reason: failure.reason,
+    detail: failure.detail,
+    from,
+    to,
+    ...transientRemoteMainEscalationFields(failure),
+  });
   try {
     await retryEscalationNotification();
   } catch {
@@ -480,7 +492,7 @@ const pruneHistory = () => {
 const serviceState = async () => {
   const unavailable = [];
   for (const label of SERVICE_LABELS) {
-    const result = await command("/bin/launchctl", ["print", `${domain()}/${label}`], { capture: true });
+    const result = await launchctlPrint(label);
     if (result.code !== 0 || !/^\s*state = running\s*$/mu.test(result.stdout)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
@@ -496,7 +508,7 @@ const verifyStableServicePaths = async () => {
     return await verifyServiceInventory({
       repositoryRoot: REPOSITORY_ROOT,
       start: async (invocation) => {
-        const result = await command("/bin/launchctl", ["print", `${domain()}/${invocation.label}`], { capture: true });
+        const result = await launchctlPrint(invocation.label);
         const running = result.code === 0 && /^\s*state = running\s*$/mu.test(result.stdout);
         const wrapped = result.stdout.includes(wrapper) && result.stdout.includes(invocation.label);
         return { ok: running && wrapped, targetReleaseId: invocation.releaseIdentity };
@@ -609,7 +621,11 @@ const createDeployHost = () => createProductionHost({
       "release-artifact-build-failed",
       loadBinaries().node,
       [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
-      { capture: true },
+      {
+        capture: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
+        timeoutReason: "release-artifact-build-timeout",
+      },
     );
     const hasReceipt = built.stdout.trim().split("\n").some((line) => line.startsWith("RELEASE-ARTIFACT "));
     const receipt = parseReleaseArtifactReceipt(built.stdout);
@@ -631,9 +647,36 @@ const createDeployHost = () => createProductionHost({
       }),
     };
   },
-  waitForQuiet: async () => {
-    const barrier = await waitForQuiet();
-    return { barrier, resources: [barrier] };
+  waitForQuiet: async (attempt) => {
+    const revisions = attempt.requireFact("revisions");
+    const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
+        timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
+        escalationPath: ESCALATION_PATH,
+        escalationRecord: {
+          outcome: "failure",
+          reason: BARRIER_TIMEOUT_REASON,
+          detail: `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+          from: revisions.from,
+          to: revisions.to,
+        },
+        onTimeout: async () => {
+          const failure = new DeployFailure(
+            BARRIER_TIMEOUT_REASON,
+            `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+          );
+          if (!interruption.interruptWithFailure(failure)) return;
+          log(`STOP ${failure.reason} detail=${failure.detail}`);
+        },
+        onError: (error) => {
+          const failure = error instanceof DeployFailure
+            ? error
+            : new DeployFailure("deploy-barrier-watchdog-alert-failed", error instanceof Error ? error.name : "unknown");
+          log(`STOP ${failure.reason} detail=${failure.detail}`);
+          interruption.interruptWithFailure(failure);
+        },
+      }));
+    log("PASS quiet-window deploy-barrier-held blockers=0");
+    return { barrier, resources: [barrier, watchdog] };
   },
   prepareWorkspace: async (attempt) => {
     const release = attempt.requireFact("verifiedRelease");
@@ -673,9 +716,13 @@ const createDeployHost = () => createProductionHost({
         databaseUrl: process.env.DATABASE_URL,
         output,
         signal: interruptController.signal,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.databaseBackup,
       });
     } catch (error) {
       throwIfInterrupted();
+      if (error instanceof Error && error.message === "pg_dump-timeout") {
+        fail("database-backup-timeout", `budget-${DEPLOY_STEP_TIMEOUT_MS.databaseBackup}ms`);
+      }
       fail("database-backup-failed", error instanceof Error ? error.message : String(error));
     }
     return { backup: { backupIdentity: basename(output) } };
@@ -685,16 +732,27 @@ const createDeployHost = () => createProductionHost({
     const migrationTailBefore = await migrationTail();
     await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
       cwd: operationWorkspace,
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
+      timeoutReason: "migration-preflight-timeout",
     });
-    await checked("guarded-migration-refused", loadBinaries().node, [
-      "node_modules/prisma/build/index.js",
-      "migrate",
-      "deploy",
-      "--schema",
-      "packages/db/prisma/schema.prisma",
-    ], {
-      cwd: operationWorkspace,
-    });
+    const barrier = attempt.requireFact("barrier");
+    await checked(
+      "guarded-migration-refused",
+      loadBinaries().node,
+      [
+        "node_modules/prisma/build/index.js",
+        "migrate",
+        "deploy",
+        "--schema",
+        "packages/db/prisma/schema.prisma",
+      ],
+      {
+        cwd: operationWorkspace,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
+        timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
+        onTermination: () => barrier.retainUntilEscalationCleared(),
+      },
+    );
     const migrationTailAfter = await migrationTail();
     return { migration: { migrationTailBefore, migrationTailAfter } };
   },
@@ -703,11 +761,19 @@ const createDeployHost = () => createProductionHost({
     "generate",
     "--schema",
     "packages/db/prisma/schema.prisma",
-  ], { cwd: attempt.requireFact("operationWorkspace") }),
+  ], {
+    cwd: attempt.requireFact("operationWorkspace"),
+    timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
+    timeoutReason: "prisma-client-generation-timeout",
+  }),
   syncCanonicalPrompts: (attempt) => checked("canonical-prompt-sync-refused", loadBinaries().node, [
     "node_modules/tsx/dist/cli.mjs",
     "packages/db/prisma/sync-canonical-prompts.ts",
-  ], { cwd: attempt.requireFact("operationWorkspace") }),
+  ], {
+    cwd: attempt.requireFact("operationWorkspace"),
+    timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
+    timeoutReason: "canonical-prompt-sync-timeout",
+  }),
   verifyRuntimePrismaClient: async (attempt) => {
     if (!generatedPrismaClientIsComplete(attempt.requireFact("operationWorkspace"))) {
       fail("runtime-prisma-client-missing", "operation-generated-client-is-absent");
@@ -788,7 +854,11 @@ const createDeployHost = () => createProductionHost({
   },
   restorePreviousServices: async () => {
     for (const label of SERVICE_LABELS) {
-      await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], { allowAfterInterrupt: true });
+      await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], {
+        allowAfterInterrupt: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore,
+        timeoutReason: "previous-service-restore-timeout",
+      });
     }
   },
   escalate: writeEscalation,
@@ -817,20 +887,21 @@ const main = async () => {
 
   await loadEnvironment();
   loadBinaries();
-  if (existsSync(ESCALATION_PATH)) {
-    await retryEscalationNotification();
-    log(`STOP escalation-active path=${ESCALATION_PATH}`);
-    return 2;
-  }
-
-  let targetCommit = "unknown";
-  try {
-    targetCommit = await remoteMainRevision();
-  } catch (error) {
-    const failure = failureOf(error);
-    await persistAndNotifyFailure(failure, "unknown", targetCommit);
-    return 1;
-  }
+  const startup = await resolveRemoteMainTarget({
+    acquireLock,
+    log,
+    checkEscalation: () => checkExistingEscalation({
+      escalationPath: ESCALATION_PATH,
+      readRemoteMain: remoteMainRevision,
+      retryEscalationNotification,
+      log,
+    }),
+    readRemoteMain: remoteMainRevision,
+    persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
+  });
+  if (startup.skipped === "lock-held") return 0;
+  if (startup.exitCode) return startup.exitCode;
+  const targetCommit = startup.targetCommit;
 
   const attempt = openDeploymentAttempt({
     deployRoot: REPOSITORY_ROOT,
@@ -843,7 +914,11 @@ const main = async () => {
 };
 
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
-  process.once(signal, () => {
+  process.on(signal, () => {
+    if (migrationBarrierRetentionActive) {
+      log(`HOLD deploy-barrier signal=${signal}-refused clear-escalation-required`);
+      return;
+    }
     if (!interruption.interrupt(signal)) return;
     log(`STOP deploy-interrupted detail=${signal}; rolling-back-before-exit-${code}`);
   });
@@ -856,7 +931,7 @@ try {
   const failure = failureOf(error);
   log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
   const dryRunMode = process.argv.includes("--dry-run");
-  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && !existsSync(ESCALATION_PATH)) {
+  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason })) {
     await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
       .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));
   }

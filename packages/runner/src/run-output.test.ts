@@ -15,6 +15,12 @@ import { createControlPlaneDouble } from "./test-control-plane.js";
 
 const REGRESSION_OUTPUT_KIND = "regression-verification-v2";
 
+const committedFixtureChange = [
+  'printf "delivered fixture change\\n" > runner-fixture.txt',
+  "git add runner-fixture.txt",
+  'git commit -m "test: create delivered fixture change" >/dev/null',
+] as const;
+
 /**
  * What a failed run actually hands the API.
  *
@@ -63,6 +69,7 @@ const succeedingAgent = [
   '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
   "esac",
   "cat > /dev/null",
+  ...committedFixtureChange,
   'echo \'{"type":"result","is_error":false,"terminal_reason":"completed",'
   + '"result":"inverted the lock ordering in reconcile.ts and added the regression test"}\'',
   "exit 0",
@@ -94,6 +101,7 @@ const remediatingAgent = (
   "    ;;",
   "  *)",
   "    cat > /dev/null",
+  ...committedFixtureChange.map((command) => `    ${command}`),
   '    echo \'{"type":"system","session_id":"conversation-114"}\'',
   '    echo \'{"type":"result","is_error":false,"terminal_reason":"completed","session_id":"conversation-114","result":"implemented the requested change"}\'',
   "    ;;",
@@ -163,6 +171,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     id: "run-114",
     runNumber: 1,
     opensPullRequest: false,
+    requiresCommit: true,
     pullRequestBase: "master",
     maxDurationMin: 30,
     stallTimeoutMin: 10,
@@ -210,6 +219,7 @@ const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
   const base = claim(remoteUrl);
   return {
     ...base,
+    run: { ...base.run, requiresCommit: false },
     task: {
       ...base.task,
       chainId: "chain-1",
@@ -353,6 +363,10 @@ test("a negative Regression verdict settles mechanically when provider transport
     assert.equal(completion?.signal, null);
     assert.equal(completion?.terminalEventSeen, true);
     assert.equal(completion?.terminationReason, null);
+    assert.equal(completion?.baseSha, completion?.headSha, "Regression produced a verdict without advancing HEAD");
+    assert.equal(completion?.pushStatus, "SUCCEEDED");
+    assert.ok(completion?.pushedBranch);
+    assert.deepEqual(controlPlane.publishedBranches, [completion.pushedBranch]);
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
     assert.equal(
       controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"),

@@ -7,6 +7,7 @@ outputKind: documentation
 priorOutputKinds: [implementation, fixed-implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---

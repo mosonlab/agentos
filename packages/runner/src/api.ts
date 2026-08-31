@@ -108,6 +108,8 @@ export type ClaimedTask = {
      * it there makes doing so a compile error.
      */
     opensPullRequest: boolean;
+    /** Whether this Run must advance the workspace commit before delivery. */
+    requiresCommit: boolean;
     /** The integration branch selected by the chain's first run. Later runs'
      * targetBranch is the shared head and cannot recover this value. */
     pullRequestBase: string;

@@ -3,17 +3,25 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, RunnerKind, RunnerPreference, TaskStatus } from "@anneal/db";
+import { enqueueTaskRun, PrismaClient, RunnerKind, RunnerPreference, RunStatus, TaskStatus } from "@anneal/db";
 
-import { projectRunnerBackend, recordRunnerBackendReport } from "./runner-backend-health.js";
+import {
+  projectRunnerBackend,
+  recordRunnerBackendReport,
+  runnerBackendAllowsClaim,
+} from "./runner-backend-health.js";
+import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
 let sequence = 0;
 const priorDefaultChatId = process.env.FEISHU_DEFAULT_CHAT_ID;
+const priorRunnerToken = process.env.RUNNER_TOKEN;
+const RUNNER_TOKEN = "runner-backend-health-test-token";
 
 before(() => {
   process.env.FEISHU_DEFAULT_CHAT_ID = "backend-health-operators";
+  process.env.RUNNER_TOKEN = RUNNER_TOKEN;
   db = setupTestDb();
 });
 beforeEach(async () => { await resetTestDb(db); });
@@ -21,6 +29,8 @@ after(async () => {
   await db.$disconnect();
   if (priorDefaultChatId === undefined) delete process.env.FEISHU_DEFAULT_CHAT_ID;
   else process.env.FEISHU_DEFAULT_CHAT_ID = priorDefaultChatId;
+  if (priorRunnerToken === undefined) delete process.env.RUNNER_TOKEN;
+  else process.env.RUNNER_TOKEN = priorRunnerToken;
 });
 
 const seedQueuedTask = async (runnerPreference: RunnerPreference) => {
@@ -201,4 +211,57 @@ test("CLI availability shares the alert lifecycle and its transition is visible 
     circuitOpen: false,
     circuitReason: null,
   });
+});
+
+test("claims stay queued while CLI availability or preflight health denies the backend, then recover", async () => {
+  const task = await seedQueuedTask(RunnerPreference.CODEX);
+  const run = await db.run.findFirstOrThrow({ where: { taskId: task.id } });
+  const claim = (runnerId: string) => createApp(db).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId, leaseSeconds: 60 }),
+  });
+
+  const unavailable = await recordRunnerBackendReport(db, {
+    kind: "availability",
+    runner: RunnerKind.CODEX,
+    binary: "codex",
+    available: false,
+    resolvedPath: null,
+  }, new Date("2026-08-29T12:00:00.000Z"));
+  assert.equal(runnerBackendAllowsClaim(unavailable), false);
+  assert.equal((await claim("cli-unavailable-runner")).status, 204);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.QUEUED);
+  assert.equal(await db.session.count({ where: { runId: run.id } }), 0);
+
+  await recordRunnerBackendReport(db, {
+    kind: "availability",
+    runner: RunnerKind.CODEX,
+    binary: "codex",
+    available: true,
+    resolvedPath: "/opt/runner/bin/codex",
+  }, new Date("2026-08-29T12:01:00.000Z"));
+  const openCircuit = await recordRunnerBackendReport(db, {
+    kind: "preflight",
+    runner: RunnerKind.CODEX,
+    ok: false,
+    capabilities: { resume: true },
+    error: "not-authenticated: run codex login",
+  }, new Date("2026-08-29T12:02:00.000Z"));
+  assert.equal(runnerBackendAllowsClaim(openCircuit), false);
+  assert.equal((await claim("open-circuit-runner")).status, 204);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.QUEUED);
+  assert.equal(await db.session.count({ where: { runId: run.id } }), 0);
+
+  const recovered = await recordRunnerBackendReport(db, {
+    kind: "preflight",
+    runner: RunnerKind.CODEX,
+    ok: true,
+    capabilities: { resume: true },
+  }, new Date("2026-08-29T12:03:00.000Z"));
+  assert.equal(runnerBackendAllowsClaim(recovered), true);
+  const claimed = await claim("healthy-backend-runner");
+  assert.equal(claimed.status, 200, await claimed.text());
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.CLAIMED);
+  assert.equal(await db.session.count({ where: { runId: run.id } }), 1);
 });

@@ -7,6 +7,7 @@ outputKind: spec
 priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---

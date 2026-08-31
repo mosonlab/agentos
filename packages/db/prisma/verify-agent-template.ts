@@ -99,6 +99,9 @@ const main = async (): Promise<void> => {
       if (step.opensPullRequest !== expected.opensPullRequest) {
         throw new Error(`${templateName} step ${step.stepIndex} opensPullRequest must be ${expected.opensPullRequest}; found ${step.opensPullRequest}`);
       }
+      if (step.requiresCommit !== expected.requiresCommit) {
+        throw new Error(`${templateName} step ${step.stepIndex} requiresCommit must be ${expected.requiresCommit}; found ${step.requiresCommit}`);
+      }
       if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
         throw new Error(`${templateName} step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
       }
@@ -125,6 +128,7 @@ const main = async (): Promise<void> => {
   }
   if (integrator.approvalGate !== false) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not carry an approval gate`);
   if (integrator.opensPullRequest !== false) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not open a pull request`);
+  if (integrator.requiresCommit !== false) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not require a workspace commit`);
   if (integrator.spawnPolicy !== null) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not claim a spawn policy`);
 
   const executor = compound.steps.find((step) => step.assigneeAgent?.name === "implementation-plan-executioner");

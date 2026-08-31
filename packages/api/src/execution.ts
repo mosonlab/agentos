@@ -197,6 +197,12 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // class that can neither create a retry nor raise the ceiling: a runner that
   // lies here can only cost itself a run.
   if (envelope.runnerClass === FailureClass.BUDGET_EXCEEDED) return FailureClass.BUDGET_EXCEEDED;
+  // Delivery itself proves this class by comparing the captured repository
+  // HEAD with the workspace's starting commit. Provider output cannot express
+  // that repository fact, so preserve the runner's typed observation.
+  if (envelope.phase === "DELIVER" && envelope.runnerClass === FailureClass.NO_CHANGES_PRODUCED) {
+    return FailureClass.NO_CHANGES_PRODUCED;
+  }
   // A termination reason is an account of how *an agent session* was stopped:
   // a walltime kill, a stall kill, a cancel. `agentExited` is what says there
   // was a session at all, and without one this field is the runner narrating
@@ -242,6 +248,9 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
 const envelopeExternalFailure = (envelope: FailureEnvelope, failureClass: FailureClass): boolean => {
   // Never: raising the ceiling for exceeding the ceiling is an unbounded loop.
   if (failureClass === FailureClass.BUDGET_EXCEEDED) return false;
+  // The runner observed that the agent left HEAD unchanged. This is an agent
+  // outcome reported during delivery, not a delivery-plumbing failure.
+  if (failureClass === FailureClass.NO_CHANGES_PRODUCED) return false;
   // The runner's own plumbing failed, so the agent never got to decide
   // anything. This replaces trusting the runner's `externalFailure` claim with
   // two facts it reports and the API can reason about.

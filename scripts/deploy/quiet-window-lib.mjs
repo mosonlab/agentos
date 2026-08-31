@@ -62,6 +62,12 @@ export const failureOf = (error) => error instanceof DeployFailure
   ? error
   : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
 
+const resourceReleaseFailureOf = (error) => {
+  if (!(error instanceof AggregateError)) return failureOf(error);
+  const deployFailure = [...error.errors].find((failure) => failure instanceof DeployFailure);
+  return deployFailure ?? failureOf(error);
+};
+
 /** Execute the full deployment attempt through the host seam. Every phase
  * receives the attempt and establishes facts for the phases that follow. */
 export const executeUpgrade = async (host, attempt) => {
@@ -83,6 +89,42 @@ export const executeUpgrade = async (host, attempt) => {
     } catch (error) {
       throw ledgerError("record", error);
     }
+  };
+  const handleFailure = async (error) => {
+    const failure = failureOf(error);
+    let terminalLedgerFailure = null;
+    const ledger = attempt.fact("ledger");
+    if (ledger && failure.reason !== "deployment-ledger-write-failed") {
+      const terminalState = schemaAdvanced && activationAttempted && !activationOutcomeProven
+        ? "MANUAL_RECOVERY"
+        : "FAILED";
+      try {
+        await recordLedger(terminalState, { reasonCode: failure.reason });
+      } catch (ledgerFailure) {
+        terminalLedgerFailure = failureOf(ledgerFailure);
+        host.log?.(`STOP ${terminalLedgerFailure.reason}${terminalLedgerFailure.detail ? ` detail=${terminalLedgerFailure.detail}` : ""}; original=${failure.reason}`);
+      }
+    } else if (failure.reason === "deployment-ledger-write-failed") {
+      host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
+    }
+    const revisions = attempt.fact("revisions") ?? { from: "unknown", to: attempt.targetCommit };
+    const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
+    if (shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted })) {
+      await host.escalate(record);
+      try {
+        await host.notify(record);
+        await host.markEscalationNotified?.();
+      } catch (notificationError) {
+        host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
+      }
+    } else {
+      host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}; no-upgrade-started`);
+    }
+    return {
+      ok: false,
+      failure,
+      ...(terminalLedgerFailure ? { ledgerFailure: terminalLedgerFailure } : {}),
+    };
   };
   try {
     let publicationReady = false;
@@ -135,42 +177,13 @@ export const executeUpgrade = async (host, attempt) => {
     }
     return { ok: true };
   } catch (error) {
-    const failure = failureOf(error);
-    let terminalLedgerFailure = null;
-    const ledger = attempt.fact("ledger");
-    if (ledger && failure.reason !== "deployment-ledger-write-failed") {
-      const terminalState = schemaAdvanced && activationAttempted && !activationOutcomeProven
-        ? "MANUAL_RECOVERY"
-        : "FAILED";
-      try {
-        await recordLedger(terminalState, { reasonCode: failure.reason });
-      } catch (ledgerError) {
-        terminalLedgerFailure = failureOf(ledgerError);
-        host.log?.(`STOP ${terminalLedgerFailure.reason}${terminalLedgerFailure.detail ? ` detail=${terminalLedgerFailure.detail}` : ""}; original=${failure.reason}`);
-      }
-    } else if (failure.reason === "deployment-ledger-write-failed") {
-      host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
-    }
-    const revisions = attempt.fact("revisions") ?? { from: "unknown", to: attempt.targetCommit };
-    const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
-    if (shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted })) {
-      await host.escalate(record);
-      try {
-        await host.notify(record);
-        await host.markEscalationNotified?.();
-      } catch (notificationError) {
-        host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
-      }
-    } else {
-      host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}; no-upgrade-started`);
-    }
-    return {
-      ok: false,
-      failure,
-      ...(terminalLedgerFailure ? { ledgerFailure: terminalLedgerFailure } : {}),
-    };
+    return await handleFailure(error);
   } finally {
-    await attempt.release();
+    try {
+      await attempt.release();
+    } catch (error) {
+      return await handleFailure(resourceReleaseFailureOf(error));
+    }
   }
 };
 

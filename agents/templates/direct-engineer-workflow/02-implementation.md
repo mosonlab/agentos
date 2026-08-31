@@ -7,6 +7,7 @@ outputKind: implementation
 priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: true
+requiresCommit: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---

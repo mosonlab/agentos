@@ -270,7 +270,7 @@ test("parallel nodes share one non-null base and never open a pull request", asy
   }
 });
 
-test("layer is a structural field in canonical prompt drift comparison", async () => {
+test("layer and requiresCommit are structural fields in canonical prompt drift comparison", async () => {
   const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[2]!;
   const persisted: PersistedTemplateStepStructure = {
     name: expected.name,
@@ -282,9 +282,14 @@ test("layer is a structural field in canonical prompt drift comparison", async (
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
     priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
+    requiresCommit: expected.requiresCommit,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy as PersistedTemplateStepStructure["spawnPolicy"],
   };
   assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
   assert.deepEqual(templateStepStructureDifferences({ ...persisted, layer: expected.layer + 1 }, expected), ["layer"]);
+  assert.deepEqual(
+    templateStepStructureDifferences({ ...persisted, requiresCommit: !expected.requiresCommit }, expected),
+    ["requiresCommit"],
+  );
 });

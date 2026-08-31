@@ -378,6 +378,20 @@ test("the chain-branch migration installs opensPullRequest on Task, TaskTemplate
   assert.deepEqual(pushed, [{ is_nullable: "YES", data_type: "text" }]);
 });
 
+test("the run commit-contract migration installs behaviour-preserving defaults", async () => {
+  const flags = await db.$queryRaw<Array<{ table_name: string; is_nullable: string; column_default: string | null }>>`
+    SELECT table_name, is_nullable, column_default FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema}
+      AND table_name IN ('TaskTemplateStep', 'Run')
+      AND column_name = 'requiresCommit'
+    ORDER BY table_name
+  `;
+  assert.deepEqual(flags, [
+    { table_name: "Run", is_nullable: "NO", column_default: "true" },
+    { table_name: "TaskTemplateStep", is_nullable: "NO", column_default: "true" },
+  ]);
+});
+
 test("the blind-review migration installs nullable base and commit columns", async () => {
   const columns = await db.$queryRaw<Array<{ table_name: string; column_name: string; is_nullable: string; data_type: string }>>`
     SELECT table_name, column_name, is_nullable, data_type

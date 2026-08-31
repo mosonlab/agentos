@@ -87,6 +87,7 @@ test("a fresh seed writes the twelve-step and eight-step autonomous merge templa
   const step = await integratorStep();
   assert.equal(step.taskTemplate.steps.length, 12, "the template has twelve steps");
   assert.equal(step.opensPullRequest, false, "SF-3: the seeded integrator row must not open a pull request");
+  assert.equal(step.requiresCommit, false, "the mechanical integrator must not require a workspace commit");
   assert.equal(step.approvalGate, false);
   assert.equal(step.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.equal(step.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
@@ -108,14 +109,21 @@ test("a fresh seed writes the twelve-step and eight-step autonomous merge templa
 
   const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
   assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
+  assert.deepEqual(
+    step.taskTemplate.steps.filter((candidate) => candidate.requiresCommit).map((candidate) => candidate.stepIndex),
+    [2, 5],
+    "only plan and implementation require a workspace commit",
+  );
 
   const direct = await directTemplate();
   assert.equal(direct.steps.length, 8);
   assert.equal(direct.steps[0]?.assigneeAgent?.name, "spec-revalidator");
   assert.equal(direct.steps[0]?.opensPullRequest, false);
+  assert.equal(direct.steps[0]?.requiresCommit, false);
   assert.equal(direct.steps[0]?.outputKind, "revalidation");
   assert.equal(direct.steps[1]?.assigneeAgent?.name, "senior-dev-luna");
   assert.equal(direct.steps[1]?.opensPullRequest, true);
+  assert.equal(direct.steps[1]?.requiresCommit, true);
   assert.match(direct.steps[1]?.prompt ?? "", /brief is the specification of record/u);
   assert.equal(direct.steps[3]?.attachmentsFromPrevious, false);
   assert.equal(direct.steps[6]?.assigneeType, AssigneeType.AGENT);
@@ -141,6 +149,7 @@ test("re-seeding is idempotent and does not flip the integrator step back", asyn
   assert.equal((await seed()).code, 0);
   const step = await integratorStep();
   assert.equal(step.opensPullRequest, false, "the update branch of the upsert sets it too, not only create");
+  assert.equal(step.requiresCommit, false, "the update branch of the upsert restores the commit contract too");
   assert.equal(step.taskTemplate.steps.length, 12);
 });
 
@@ -257,6 +266,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
       outputKind: "must-fix",
       prompt: "Apply the canonical merge matrix to every finding from both reports.",
       opensPullRequest: false,
+      requiresCommit: false,
       attachmentsFromPrevious: true,
       baseFromStepIndex: blind.baseFromStepIndex,
     } });
@@ -463,6 +473,14 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
       await db.taskTemplateStep.update({ where: { id: step.id }, data: { opensPullRequest: true } });
     },
     expect: /opensPullRequest/u,
+  },
+  {
+    name: "the integrator step requiring a workspace commit",
+    break: async () => {
+      const step = await integratorStep();
+      await db.taskTemplateStep.update({ where: { id: step.id }, data: { requiresCommit: true } });
+    },
+    expect: /requiresCommit/u,
   },
   {
     name: "an LLM model on the integrator agent",

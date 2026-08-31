@@ -38,6 +38,19 @@ test("the agent's own stdout is never a verdict, whatever the runner guessed", (
   assert.equal(verdict.externalFailure, false);
 });
 
+test("delivery preserves the runner's no-changes-produced verdict", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "DELIVER",
+    runnerClass: FailureClass.NO_CHANGES_PRODUCED,
+    exitCode: 0,
+    terminalSuccess: true,
+    stderrSummary: "no-changes-produced: the session ended cleanly without committing any change on feature/test",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.NO_CHANGES_PRODUCED);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, false);
+});
+
 test("the same wording on stderr is a verdict", () => {
   const verdict = classifyEnvelope(envelope({ stderrSummary: "HTTP 429: rate limit exceeded" }));
   assert.equal(verdict.failureClass, FailureClass.RATE_LIMITED);

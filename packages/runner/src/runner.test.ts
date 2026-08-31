@@ -74,6 +74,7 @@ const mechanicalClaim: ClaimedTask = {
     id: "run-10",
     runNumber: 1,
     opensPullRequest: false,
+    requiresCommit: false,
     pullRequestBase: "master",
     maxDurationMin: 30,
     stallTimeoutMin: 10,
@@ -207,6 +208,12 @@ interface CodexStubOptions {
   };
 }
 
+const committedFixtureChange = [
+  'printf "delivered fixture change\\n" > runner-fixture.txt',
+  "git add runner-fixture.txt",
+  'git commit -m "test: create delivered fixture change" >/dev/null',
+] as const;
+
 const codexStub = (
   log: string,
   {
@@ -236,6 +243,7 @@ const codexStub = (
     : '  login) echo "Logged in using ChatGPT"; exit 0 ;;',
   "esac",
   "cat > /dev/null",
+  ...(session.exitCode === 0 ? committedFixtureChange : []),
   ...session.lines,
   `exit ${session.exitCode}`,
 ].join("\n");
@@ -291,6 +299,12 @@ const seedRemote = async (root: string): Promise<string> => {
   git(seed, "remote", "add", "origin", remote);
   git(seed, "push", "-u", "origin", "master");
   return remote;
+};
+
+const commitFixtureChange = async (workspace: string): Promise<void> => {
+  await writeFile(join(workspace, "runner-fixture.txt"), "delivered fixture change\n");
+  git(workspace, "add", "runner-fixture.txt");
+  git(workspace, "commit", "-m", "test: create delivered fixture change");
 };
 
 const seedCodexAuth = async (root: string): Promise<void> => {
@@ -524,7 +538,8 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     const adapter: CliAdapter = {
       ...adapters.CLAUDE,
       preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
-      start: async (_spec, sink) => {
+      start: async (spec, sink) => {
+        await commitFixtureChange(spec.workingDirectory);
         const now = new Date();
         sink({ source: "CLAUDE", type: "EVENT_A", payload: { text: "first" } });
         sink({ source: "CLAUDE", type: "EVENT_B", providerEventId: "provider-b", toolCallId: "tool-b", payload: { text: "second" } });
@@ -806,7 +821,7 @@ test("an outside worktree is reported without changing a successful run outcome"
     const binary = join(root, "codex.sh");
     await writeFile(binary, successfulCodexMutationStub(
       join(root, "argv.log"),
-      `git worktree add --detach '${outsideWorktree}' HEAD >/dev/null 2>&1`,
+      `git worktree add --detach '${outsideWorktree}' HEAD >/dev/null 2>&1; printf "delivered work\\n" > delivered.txt; git add delivered.txt; git commit -m "test: create delivered change" >/dev/null`,
     ));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
@@ -1368,7 +1383,7 @@ test("successful execution with failed delivery salvages before removing the wor
     const workspaces = join(root, "workspaces");
     const log = join(root, "codex-argv.log");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > recovered.txt'));
+    await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > recovered.txt; git add recovered.txt; git commit -m "test: create delivered change" >/dev/null'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
@@ -1425,7 +1440,7 @@ test("a pull-request failure after publication keeps the primary delivery eviden
     const binary = join(root, "codex.sh");
     const gh = join(root, "gh");
     const githubRemote = "git@github.com:owner/name.git";
-    await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > delivered.txt'));
+    await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > delivered.txt; git add delivered.txt; git commit -m "test: create delivered change" >/dev/null'));
     await chmod(binary, 0o755);
     await writeFile(gh, [
       "#!/bin/sh",

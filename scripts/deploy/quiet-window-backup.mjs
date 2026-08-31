@@ -101,7 +101,14 @@ export const pgDumpInvocation = ({ configuration, databaseUrl, env = process.env
   throw new Error(`backup-configuration-invalid:unsupported-mode-${String(configuration.mode)}`);
 };
 
-const runToFile = ({ invocation, output, spawnImpl = spawn, signal }) => new Promise((accept, reject) => {
+const runToFile = ({
+  invocation,
+  output,
+  spawnImpl = spawn,
+  signal,
+  killImpl = process.kill,
+  killGraceMs = 2_000,
+}) => new Promise((accept, reject) => {
   const temporary = `${output}.partial-${process.pid}-${randomUUID()}`;
   let descriptor;
   try {
@@ -112,10 +119,12 @@ const runToFile = ({ invocation, output, spawnImpl = spawn, signal }) => new Pro
   }
   let stderr = "";
   let settled = false;
+  const terminationTimers = [];
   const finish = (initialError) => {
     if (settled) return;
     settled = true;
     signal?.removeEventListener("abort", abort);
+    for (const timer of terminationTimers) clearTimeout(timer);
     let error = initialError;
     try {
       if (error === null) fsyncSync(descriptor);
@@ -152,9 +161,23 @@ const runToFile = ({ invocation, output, spawnImpl = spawn, signal }) => new Pro
   };
 
   let child;
+  let terminationError = null;
+  let childClosed = false;
+  let killSent = false;
+  const signalGroup = (childSignal) => {
+    if (child?.pid === undefined) return;
+    try { killImpl(-child.pid, childSignal); } catch { /* already exited */ }
+  };
   const abort = () => {
-    child?.kill("SIGTERM");
-    finish(new Error("pg_dump-interrupted"));
+    if (terminationError !== null) return;
+    terminationError = new Error("pg_dump-interrupted");
+    signalGroup("SIGTERM");
+    terminationTimers.push(setTimeout(() => {
+      killSent = true;
+      signalGroup("SIGKILL");
+      if (childClosed) finish(terminationError);
+    }, killGraceMs));
+    terminationTimers.push(setTimeout(() => finish(terminationError), 2 * killGraceMs));
   };
   if (signal?.aborted) {
     finish(new Error("pg_dump-interrupted"));
@@ -164,6 +187,7 @@ const runToFile = ({ invocation, output, spawnImpl = spawn, signal }) => new Pro
     child = spawnImpl(invocation.program, invocation.args, {
       env: invocation.env,
       shell: false,
+      detached: true,
       stdio: ["ignore", descriptor, "pipe"],
     });
   } catch (error) {
@@ -175,8 +199,19 @@ const runToFile = ({ invocation, output, spawnImpl = spawn, signal }) => new Pro
   child.stderr?.on("data", (chunk) => {
     stderr = `${stderr}${chunk}`.slice(-2_000);
   });
-  child.once("error", finish);
+  child.once("error", (error) => {
+    if (terminationError === null) finish(error);
+    else {
+      childClosed = true;
+      if (killSent) finish(terminationError);
+    }
+  });
   child.once("close", (code, signal) => {
+    if (terminationError !== null) {
+      childClosed = true;
+      if (killSent) finish(terminationError);
+      return;
+    }
     if (code === 0) finish(null);
     else finish(new Error(`pg_dump-exit-${code ?? "signal"}${signal ? `-${signal}` : ""}${stderr.trim() ? `: ${stderr.trim().replaceAll(/\s+/gu, " ")}` : ""}`));
   });
@@ -189,8 +224,29 @@ export const writePgDumpBackup = async ({
   env = process.env,
   spawnImpl = spawn,
   signal,
+  timeoutMs,
+  killImpl = process.kill,
+  killGraceMs = 2_000,
 }) => {
   const invocation = pgDumpInvocation({ configuration, databaseUrl, env });
-  await runToFile({ invocation, output, spawnImpl, signal });
-  return { output, program: invocation.program, args: invocation.args };
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  const timer = Number.isSafeInteger(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, timeoutMs)
+    : null;
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
+  try {
+    await runToFile({ invocation, output, spawnImpl, signal: combinedSignal, killImpl, killGraceMs });
+    return { output, program: invocation.program, args: invocation.args };
+  } catch (error) {
+    if (timedOut) throw new Error("pg_dump-timeout");
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 };

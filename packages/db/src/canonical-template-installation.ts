@@ -192,6 +192,7 @@ const writeCanonicalTemplate = async (
       outputKind: step.outputKind,
       prompt: step.prompt,
       opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       priorOutputKinds: step.priorOutputKinds,
       baseFromStepIndex: step.baseFromStepIndex,

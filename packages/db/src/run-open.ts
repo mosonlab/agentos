@@ -851,6 +851,7 @@ export const openRun = async (
     targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: intent.kind === "integrator-authorized" ? false : task.opensPullRequest,
+    requiresCommit: task.templateStep?.requiresCommit ?? true,
     maxDurationMin: preservesPriorTiming ? prior?.maxDurationMin ?? task.maxDurationMin : task.maxDurationMin,
     stallTimeoutMin: preservesPriorTiming ? prior?.stallTimeoutMin ?? task.stallTimeoutMin : task.stallTimeoutMin,
     // The configured budget plus the grants already earned, not the budget
