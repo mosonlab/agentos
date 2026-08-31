@@ -280,8 +280,22 @@ test("CLAUDE modelUsage includes each cached input component exactly once", () =
     primary: { inputTokens: 5, outputTokens: 7, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 },
     secondary: { inputTokens: 11, cacheReadInputTokens: 2 },
   } });
-  assert.deepEqual(usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 5, cacheCreationInputTokens: 4 });
+  // The secondary model reports input and a read, but omits creation. Its
+  // missing component makes the model aggregate's creation split unknown;
+  // the known read total still survives.
+  assert.deepEqual(usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 5 });
   assert.equal(deriveUsageColumns(usage).totalTokens, 32);
+});
+
+test("a modelUsage input-only model makes the aggregate creation split unknown", () => {
+  const usage = extractUsage({ modelUsage: {
+    complete: { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 50 },
+    inputOnly: { inputTokens: 20 },
+  } });
+  assert.equal(usage.inputTokens, 180);
+  assert.equal(usage.cachedInputTokens, 100);
+  assert.equal("cacheCreationInputTokens" in usage, false);
+  assert.equal(deriveUsageColumns(usage).cacheCreationInputTokens, null);
 });
 
 test("CLAUDE top-level usage preserves the read/write cache split", () => {
@@ -471,6 +485,17 @@ test("sumUsage never turns an absent field into zero", () => {
   assert.deepEqual(sumUsage([{ inputTokens: 1 }, { outputTokens: 2 }]), { inputTokens: 1, outputTokens: 2 });
   assert.equal(sumUsage([{ costUsd: new Prisma.Decimal(1) }, { costUsd: new Prisma.Decimal(2) }]).costUsd?.toString(), "3");
   assert.deepEqual(sumUsage([]), {});
+});
+
+test("sumUsage keeps known reads but makes creation unknown across an incomplete event", () => {
+  const total = sumUsage([
+    { inputTokens: 160, cachedInputTokens: 100, cacheCreationInputTokens: 50 },
+    { inputTokens: 20 },
+  ]);
+  assert.equal(total.inputTokens, 180);
+  assert.equal(total.cachedInputTokens, 100);
+  assert.equal("cacheCreationInputTokens" in total, false);
+  assert.equal(deriveUsageColumns(total).cacheCreationInputTokens, null);
 });
 
 test("recomputeSessionUsage writes absolute values once and is a no-op on replay", async () => {

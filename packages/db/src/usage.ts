@@ -122,6 +122,9 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
     cacheCreationInputTokens: null,
     costUsd: null,
   };
+  let observedCacheCreation = 0;
+  let hasObservedCacheCreation = false;
+  let cacheCreationUnknown = false;
   for (const entry of Object.values(models)) {
     const model = asRecord(entry);
     if (!model) continue;                       // one malformed entry must not discard the others
@@ -133,15 +136,28 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
     const cacheCreation = tokenCount(model.cacheCreationInputTokens, "modelUsage.cacheCreationInputTokens");
     if (cacheRead !== null) totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + cacheRead;
     if (cacheCreation !== null) {
-      totals.cacheCreationInputTokens = (totals.cacheCreationInputTokens ?? 0) + cacheCreation;
+      observedCacheCreation += cacheCreation;
+      hasObservedCacheCreation = true;
     }
+    // A model with input/cache data but no creation component makes the
+    // aggregate split unknown. Do not silently treat that model's omitted
+    // component as zero merely because another model reported a creation
+    // count. An explicitly invalid value is unknown as well, while output- or
+    // cost-only entries do not make the input split ambiguous.
+    const modelHasInput = model.inputTokens !== undefined
+      || model.cacheReadInputTokens !== undefined
+      || model.cacheCreationInputTokens !== undefined;
+    if (modelHasInput && cacheCreation === null) cacheCreationUnknown = true;
     const cost = costAmount(model.costUSD, "modelUsage.costUSD");
     if (cost !== null) totals.costUsd = (totals.costUsd ?? new Prisma.Decimal(0)).plus(cost);
   }
-  const knownCached = totals.cachedInputTokens === null && totals.cacheCreationInputTokens === null
+  const knownCached = totals.cachedInputTokens === null && !hasObservedCacheCreation
     ? null
-    : (totals.cachedInputTokens ?? 0) + (totals.cacheCreationInputTokens ?? 0);
+    : (totals.cachedInputTokens ?? 0) + observedCacheCreation;
   totals.inputTokens = canonicalInputTokens(totals.inputTokens, knownCached);
+  if (!cacheCreationUnknown && hasObservedCacheCreation) {
+    totals.cacheCreationInputTokens = observedCacheCreation;
+  }
   // The breakdown is usable iff this one pass produced tokens or cost. Token
   // usability is checked separately by the caller without traversing it again.
   return totals.inputTokens === null
@@ -318,16 +334,34 @@ export const extractUsage = (payload: unknown): SessionUsage => {
  */
 export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
   const total: SessionUsage = {};
+  let observedCacheCreation = 0;
+  let hasObservedCacheCreation = false;
+  let cacheCreationUnknown = false;
   for (const usage of usages) {
     if (usage.inputTokens !== undefined) total.inputTokens = (total.inputTokens ?? 0) + usage.inputTokens;
     if (usage.outputTokens !== undefined) total.outputTokens = (total.outputTokens ?? 0) + usage.outputTokens;
     if (usage.cachedInputTokens !== undefined) total.cachedInputTokens = (total.cachedInputTokens ?? 0) + usage.cachedInputTokens;
     if (usage.cacheCreationInputTokens !== undefined) {
-      total.cacheCreationInputTokens = (total.cacheCreationInputTokens ?? 0) + usage.cacheCreationInputTokens;
+      observedCacheCreation += usage.cacheCreationInputTokens;
+      hasObservedCacheCreation = true;
+    }
+    // An input-bearing event that omits the split makes the session-level
+    // creation total unknown. Keep any known read total, but never fold a
+    // creation value from a different event across that gap as though the
+    // omitted component were zero. Codex events avoid this path by carrying an
+    // explicit cacheCreationInputTokens: 0.
+    const usageHasInput = usage.inputTokens !== undefined
+      || usage.cachedInputTokens !== undefined
+      || usage.cacheCreationInputTokens !== undefined;
+    if (usageHasInput && usage.cacheCreationInputTokens === undefined) {
+      cacheCreationUnknown = true;
     }
     if (usage.costUsd !== undefined) {
       total.costUsd = (total.costUsd ?? new Prisma.Decimal(0)).plus(usage.costUsd);
     }
+  }
+  if (!cacheCreationUnknown && hasObservedCacheCreation) {
+    total.cacheCreationInputTokens = observedCacheCreation;
   }
   return total;
 };
