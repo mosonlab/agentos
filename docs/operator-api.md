@@ -1,10 +1,17 @@
 # Operator API handbook
 
+## Conventions
+
 The operator drives Anneal through this HTTP API. Unless a route is marked
 **Public** or **Webhook**, send `Authorization: Bearer $OPERATOR_TOKEN`.
 Examples use `$BASE_URL` (for example, `http://127.0.0.1:3000`) and placeholder
 IDs such as `$PROJECT_ID`; replace them with values from your installation.
 JSON request bodies require `Content-Type: application/json`.
+
+Malformed or empty JSON request bodies return `400 Bad Request` with code
+`invalid-json` and message `Request body must be valid JSON`. This applies to
+every JSON route; a syntactically valid body that fails its route schema still
+returns the usual `400 Bad Request` validation response.
 
 The route list and input requirements below use the same method and path
 spelling as the route definitions in `packages/api/src/app.ts`. Fields called
