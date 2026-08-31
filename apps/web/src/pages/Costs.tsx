@@ -50,47 +50,10 @@ export const chartSeries = (byAgent: CostsReport["byAgent"]): string[] =>
 
 /* ---------------------------------------------------------------- additive API view */
 
-/**
- * The API contract grows additively with this page. Keeping this narrow view
- * here lets the page remain consumable while an older generated db contract is
- * present in a dev checkout; once the server contract is updated these fields
- * are structurally identical to the wire response.
- */
-export type CostsPageAgent = CostsReport["byAgent"][number] & {
-  cacheUnknownRuns?: number;
-  uncachedInputTokens?: number;
-  uncachedInputUsd?: string | null;
-};
-
-export type CostsPageWaste = {
-  totalUsd: string;
-  operatorCancelledUsd: string;
-  failedUsd: string;
-  byFailureClass: Array<{ failureClass: string; usd: string; runs: number }>;
-};
-
-export type CostsPageChain = {
-  chainId: string;
-  chainName: string | null;
-  taskCount: number;
-  leadMinutes: number;
-  busyMinutes: number;
-  busyPct: number;
-  repairs: { gateFix: number; refreshConflict: number; reviewFix: number };
-  costUsd: string | null;
-  costByRole: Record<string, string>;
-  costUnavailableRuns: number;
-  longestGap: { minutes: number; beforeTaskName: string | null };
-  /** Optional link target supplied by API projections that have a task view. */
-  taskId?: string | null;
-  detailTaskId?: string | null;
-};
-
-export type CostsPageReport = Omit<CostsReport, "byAgent"> & {
-  byAgent: CostsPageAgent[];
-  waste?: CostsPageWaste;
-  chains?: CostsPageChain[];
-};
+export type CostsPageAgent = CostsReport["byAgent"][number];
+export type CostsPageWaste = CostsReport["waste"];
+export type CostsPageChain = CostsReport["chains"][number];
+export type CostsPageReport = CostsReport;
 
 export type CostsChainSort = "lead" | "cost";
 
@@ -401,17 +364,12 @@ export const WasteBreakdown = ({ waste }: { waste: CostsPageWaste }): ReactNode 
 
 /* --------------------------------------------------------------- chains */
 
-const chainTaskHref = (chain: CostsPageChain): string | null => {
-  const taskId = chain.detailTaskId ?? chain.taskId ?? null;
-  return taskId === null ? null : `/tasks/${encodeURIComponent(taskId)}`;
-};
+const chainTaskHref = (chain: CostsPageChain): string =>
+  `/tasks/${encodeURIComponent(chain.detailTaskId)}`;
 
 const ChainName = ({ chain }: { chain: CostsPageChain }): ReactNode => {
   const name = chain.chainName ?? chain.chainId.slice(0, 8);
-  const href = chainTaskHref(chain);
-  return href === null
-    ? <span>{name}</span>
-    : <Link to={href}>{name}</Link>;
+  return <Link to={chainTaskHref(chain)}>{name}</Link>;
 };
 
 /** Inline role chips keep the per-role spend visible without making each row

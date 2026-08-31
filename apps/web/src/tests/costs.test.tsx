@@ -115,7 +115,8 @@ test("the legend names every series, so identity is never colour alone", () => {
 const agents = (count: number): CostsReport["byAgent"] =>
   Array.from({ length: count }, (_, index) => ({
     agent: `Agent ${index}`, usd: String(count - index), runs: 1, costUnavailableRuns: 0,
-    avgUsd: String(count - index), cachePct: null, wastedUsd: "0",
+    avgUsd: String(count - index), cachePct: null, cacheUnknownRuns: 1,
+    uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
   }));
 
 test("six agents or fewer are each their own series", () => {
@@ -182,13 +183,13 @@ const report = (overrides: Partial<CostsPageReport> = {}): CostsPageReport => ({
       chainId: "slow-chain", chainName: "Slow chain", taskCount: 3, leadMinutes: 131, busyMinutes: 44,
       busyPct: 33.6, repairs: { gateFix: 1, refreshConflict: 0, reviewFix: 0 }, costUsd: "75",
       costByRole: { implementation: "50", repair: "25" }, costUnavailableRuns: 0,
-      longestGap: { minutes: 87, beforeTaskName: "Review" }, taskId: "slow-task",
+      longestGap: { minutes: 87, beforeTaskName: "Review" }, detailTaskId: "slow-task",
     },
     {
       chainId: "fast-chain", chainName: "Fast chain", taskCount: 2, leadMinutes: 45, busyMinutes: 30,
       busyPct: 66.7, repairs: { gateFix: 0, refreshConflict: 0, reviewFix: 0 }, costUsd: "120",
       costByRole: { implementation: "120" }, costUnavailableRuns: 1,
-      longestGap: { minutes: 15, beforeTaskName: null },
+      longestGap: { minutes: 15, beforeTaskName: null }, detailTaskId: "fast-task",
     },
   ],
   ...overrides,
@@ -290,14 +291,16 @@ test("an agent with no priced runs shows unavailable cost instead of zero spend"
     totalUsd: "0", estimatedUsd: "0", runCount: 3, costUnavailableRuns: 3, avgUsd: "0", wastedUsd: "0",
     daily: [], topRuns: [], byModel: [],
     byAgent: [{
-      agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0", cachePct: null, wastedUsd: "0",
+      agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0", cachePct: null,
+      cacheUnknownRuns: 3, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
     }],
   }));
   assert.match(text, /codex/);
   assert.match(text, /3 costs unavailable/);
   // Spend, average, cache and waste are all unknown here, and every one of them
   // says so rather than reporting a zero nobody measured.
-  assert.match(text, /codex3 costs unavailable—3———/);
+  assert.match(text, /codex3 costs unavailable—3/);
+  assert.match(text, /3 unknown cache split runs/);
 });
 
 /* --------------------------------------------------------- cache and waste */
@@ -317,11 +320,11 @@ test("a share is taken from the wire amounts, and is null when there is no total
 test("waste is a share of the agent's own spend, and null when it has none", () => {
   assert.equal(wasteShare({
     agent: "dev", usd: "200", runs: 4, costUnavailableRuns: 0, avgUsd: "50",
-    cachePct: null, wastedUsd: "50",
+    cachePct: null, cacheUnknownRuns: 4, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "50",
   }), 25);
   assert.equal(wasteShare({
     agent: "dev", usd: "0", runs: 2, costUnavailableRuns: 2, avgUsd: "0",
-    cachePct: null, wastedUsd: "0",
+    cachePct: null, cacheUnknownRuns: 2, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
   }), null);
 });
 
@@ -376,8 +379,15 @@ test("chain cost sorting puts unknown costs last and preserves lead-time ties", 
 });
 
 test("the Cost header sorts the rendered rows by amount, with unpriced chains last", async () => {
-  const unknown = { ...report().chains![0]!, chainId: "unknown-chain", chainName: "Unknown chain", costUsd: null, leadMinutes: 999 };
-  const page = await mountPage(<ChainsTable chains={[unknown, ...report().chains!]} />, {});
+  const unknown = {
+    ...report().chains[0]!,
+    chainId: "unknown-chain",
+    chainName: "Unknown chain",
+    costUsd: null,
+    costUnavailableRuns: 2,
+    leadMinutes: 999,
+  };
+  const page = await mountPage(<ChainsTable chains={[unknown, ...report().chains]} />, {});
   try {
     assert.ok((page.container.textContent ?? "").indexOf("Unknown chain") < (page.container.textContent ?? "").indexOf("Slow chain"));
     await page.press("Cost");
