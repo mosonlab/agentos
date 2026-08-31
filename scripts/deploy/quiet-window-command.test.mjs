@@ -70,11 +70,14 @@ test("timeout kills descendants even when the process-group leader exits first",
     const error = await runDeployCommand("/bin/sh", ["-c", script, "fixture", pidFile], {
       cwd: directory,
       env,
-      timeoutMs: 40,
+      // Leave enough time for the shell to create the descendant under the
+      // gate's concurrent build load before exercising the timeout path.
+      timeoutMs: 500,
       timeoutReason: "fixture-tree-timeout",
       killGraceMs: 50,
     }).then(() => null, (reason) => reason);
     assert.ok(error instanceof DeployFailure);
+    assert.equal(error.reason, "fixture-tree-timeout");
     const descendant = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
     assert.equal(await waitForDeath(descendant), true, "timed-out descendant survived the process-group kill");
   } finally {
