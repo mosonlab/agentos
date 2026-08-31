@@ -51,6 +51,42 @@ test("a provider-prefixed Claude Fable model uses its bare price row", () => {
   assert.equal(cost.estimated, true);
 });
 
+test("known cache creation is excluded from the read and uncached price bases", () => {
+  const cost = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null,
+    inputTokens: 160,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+    outputTokens: 10,
+  });
+  // Only 10 uncached, 100 cached, and 10 output tokens are priced. Cache
+  // creation has no table rate and must not be folded into either input side.
+  assert.equal(cost.costUsd?.toString(), "0.000016");
+  assert.equal(cost.estimated, true);
+});
+
+test("an unknown cache split suppresses token-only estimation but not provider cost", () => {
+  const unknown = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null,
+    inputTokens: 160,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: null,
+    outputTokens: 10,
+  });
+  assert.equal(unknown.costUsd, null);
+  assert.equal(unknown.estimated, false);
+
+  const reported = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: new Prisma.Decimal("0.25"),
+    inputTokens: 160,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: null,
+    outputTokens: 10,
+  });
+  assert.equal(reported.costUsd?.toString(), "0.25");
+  assert.equal(reported.estimated, false);
+});
+
 test("an unsplit native-child session uses the pinned Luna price", () => {
   const cost = sessionUsageCost("gpt-5.6-sol:high", {
     costUsd: null,
