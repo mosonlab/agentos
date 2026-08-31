@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
@@ -22,12 +24,18 @@ import {
 import { pruneDeployHistory } from "./deploy-preflight.mjs";
 import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-ledger.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
-import { checkExistingEscalation, selfClearEscalation } from "./quiet-window-escalation.mjs";
+import {
+  checkExistingEscalation,
+  ESCALATION_RETRY_CAP,
+  selfClearEscalation,
+  writeEscalationWithAttempts,
+} from "./quiet-window-escalation.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
+const DEPLOY_SCRIPT = fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url));
 const EXPECTED_PHASES = [
   "parse-arguments",
   "check-escalation",
@@ -246,22 +254,65 @@ test("retryable escalation self-clears after a successful deployment outcome", a
   });
   assert.equal(cleared, true);
   assert.equal(existsSync(state.escalationPath), false);
-  assert.equal(state.notifications.length, 1);
-  assert.equal(state.notifications[0].outcome, "success");
-  assert.equal(state.notifications[0].reason, "escalation-self-cleared");
+  assert.deepEqual(state.notifications, [{
+    outcome: "success",
+    reason: "escalation-self-cleared",
+    detail: "escalation reason=quiet-window-query-failed attempts=2",
+    from: revisions.from,
+    to: revisions.to,
+  }]);
   assert.deepEqual(state.logs, ["SELF-CLEAR escalation reason=quiet-window-query-failed attempts=2"]);
 });
 
-test("retryable escalation at the five-attempt cap remains blocked", async (t) => {
+test("repeated retryable failures persist attempts atomically through the cap and then block", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
-    attempts: 5,
+    attempts: ESCALATION_RETRY_CAP - 2,
   });
+  for (const expected of [ESCALATION_RETRY_CAP - 1, ESCALATION_RETRY_CAP]) {
+    const persisted = writeEscalationWithAttempts({
+      escalationPath: state.escalationPath,
+      record: { outcome: "failure", reason: "remote-main-unreadable" },
+      retryableReasons: RETRYABLE_ESCALATION_REASONS,
+    });
+    assert.equal(persisted.attempts, expected);
+    assert.equal(JSON.parse(readFileSync(state.escalationPath, "utf8")).attempts, expected);
+    assert.equal(lstatSync(state.escalationPath).mode & 0o777, 0o600);
+  }
   const checked = await checkExistingEscalation(state.options);
   assert.deepEqual(checked, { active: true });
   assert.equal(state.retryNotifications(), 1);
   assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("retry attempt persistence handles legacy, unreadable, and non-retryable markers", (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "remote-main-unreadable",
+  });
+  let persisted = writeEscalationWithAttempts({
+    escalationPath: state.escalationPath,
+    record: { outcome: "failure", reason: "remote-main-unreadable" },
+    retryableReasons: RETRYABLE_ESCALATION_REASONS,
+  });
+  assert.equal(persisted.attempts, 2);
+
+  writeFileSync(state.escalationPath, "not-json\n", { mode: 0o600 });
+  persisted = writeEscalationWithAttempts({
+    escalationPath: state.escalationPath,
+    record: { outcome: "failure", reason: "remote-main-unreadable" },
+    retryableReasons: RETRYABLE_ESCALATION_REASONS,
+  });
+  assert.equal(persisted.attempts, 1);
+
+  persisted = writeEscalationWithAttempts({
+    escalationPath: state.escalationPath,
+    record: { outcome: "failure", reason: "environment-unreadable" },
+    retryableReasons: RETRYABLE_ESCALATION_REASONS,
+  });
+  assert.equal(Object.hasOwn(persisted, "attempts"), false);
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(state.escalationPath, "utf8")), "attempts"), false);
 });
 
 test("malformed retry attempts fail closed", async (t) => {
@@ -286,6 +337,19 @@ test("non-retryable escalation remains blocked", async (t) => {
   assert.equal(existsSync(state.escalationPath), true);
 });
 
+test("a Prisma client import failure remains manually latched", async (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "database-client-unavailable",
+    detail: "prisma-client-import-failed",
+  });
+
+  const checked = await checkExistingEscalation(state.options);
+
+  assert.deepEqual(checked, { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
 test("self-clear notification failure keeps the escalation marker", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
@@ -304,6 +368,33 @@ test("self-clear notification failure keeps the escalation marker", async (t) =>
   assert.equal(readFileSync(state.escalationPath, "utf8"), state.snapshot);
   assert.equal(state.logs.length, 1);
   assert.match(state.logs[0], /^STOP escalation-self-clear-failed /u);
+});
+
+test("--clear-escalation removes any marker without deployment environment initialization", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-manual-clear-"));
+  const stateDir = join(root, ".agentos-deploy");
+  const escalationPath = join(stateDir, "escalated.json");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(escalationPath, JSON.stringify({
+    reason: "remote-main-unreadable",
+    attempts: ESCALATION_RETRY_CAP,
+  }), { mode: 0o600 });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const result = spawnSync(process.execPath, [DEPLOY_SCRIPT, "--clear-escalation"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      AGENTOS_REPOSITORY_ROOT: root,
+      QUIET_WINDOW_POLL_SECONDS: "60",
+      DATABASE_URL: "",
+      FEISHU_DEFAULT_CHAT_ID: "",
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(escalationPath), false);
+  assert.match(result.stdout, /CLEARED escalation operator-action-required-before-this-command/u);
 });
 
 test("service inventory covers the thirteen production labels", () => {

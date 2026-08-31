@@ -1,10 +1,10 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
 import { DeployFailure, failureOf, runLocked } from "./quiet-window-lib.mjs";
-import { autoClearTransientRemoteMainEscalation } from "./remote-main-read.mjs";
+import { writeEscalationRecord } from "./quiet-window-escalation-record.mjs";
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
-const DEFAULT_RETRY_CAP = 5;
+export const ESCALATION_RETRY_CAP = 5;
 
 /** Escalation attempts are one-based: the first persisted failure is attempt
  * one, and a marker without the field predates the retry policy. An explicitly
@@ -13,10 +13,6 @@ const validAttempts = (record) => {
   if (!Object.hasOwn(record, "attempts")) return 1;
   return Number.isSafeInteger(record.attempts) && record.attempts > 0 ? record.attempts : null;
 };
-
-const hasRetryableReason = (reasons, reason) => reasons instanceof Set
-  ? reasons.has(reason)
-  : Array.isArray(reasons) && reasons.includes(reason);
 
 const parseEscalation = (contents) => {
   try {
@@ -42,12 +38,10 @@ const escalationIdentity = (record) => JSON.stringify(
  * process lock. File comparison prevents a changed marker from being removed. */
 export const checkExistingEscalation = async ({
   escalationPath,
-  readRemoteMain,
   retryEscalationNotification,
   log,
-  now,
   retryableReasons,
-  retryCap = DEFAULT_RETRY_CAP,
+  retryCap = ESCALATION_RETRY_CAP,
 }) => {
   if (!existsSync(escalationPath)) return { active: false };
   let snapshot;
@@ -57,50 +51,8 @@ export const checkExistingEscalation = async ({
     fail("escalation-state-unreadable", "unreadable-or-invalid-json");
   }
   const escalation = parseEscalation(snapshot);
-  // Markers written before the common retry policy was introduced retain the
-  // provenance-gated remote-main recovery path when this legacy API is used.
-  // Production passes an explicit policy and normalizes those markers into the
-  // common retry/self-clear flow below.
-  const hasRetryPolicy = retryableReasons !== undefined;
-  if (!Object.hasOwn(escalation, "attempts")
-    && !hasRetryPolicy
-    && escalation.reason === "remote-main-unreadable"
-    && escalation.autoClear?.schemaVersion === 1
-    && escalation.autoClear.source === "remote-main-transport-classifier") {
-    try {
-      const recovery = await autoClearTransientRemoteMainEscalation({
-        escalation,
-        readRemoteMain,
-        clear: async () => {
-          let current;
-          try {
-            current = readFileSync(escalationPath, "utf8");
-          } catch (error) {
-            if (error?.code === "ENOENT") return false;
-            fail("escalation-state-changed", "marker-no-longer-readable");
-          }
-          if (current !== snapshot) {
-            fail("escalation-state-changed", "marker-replaced-during-clearing-read");
-          }
-          try {
-            unlinkSync(escalationPath);
-          } catch (error) {
-            if (error?.code === "ENOENT") return false;
-            fail("escalation-state-changed", "marker-clear-failed");
-          }
-          return true;
-        },
-        audit: log,
-        now,
-      });
-      if (recovery.cleared) return { active: false, revision: recovery.revision };
-    } catch (error) {
-      const failure = failureOf(error);
-      log(`STOP escalation-auto-clear-failed latched-reason=${String(escalation.reason ?? "unknown")} failure-reason=${failure.reason}`);
-    }
-  }
   const attempts = validAttempts(escalation);
-  if (hasRetryableReason(retryableReasons ?? [], escalation.reason)
+  if (retryableReasons.has(escalation.reason)
     && attempts !== null
     && attempts < retryCap) {
     // A previous escalation may have been persisted while its Inbox delivery
@@ -110,7 +62,7 @@ export const checkExistingEscalation = async ({
     try {
       await retryEscalationNotification();
     } catch {
-      log(`STOP inbox-notification-pending reason=${String(escalation.reason ?? "unknown-failure")}`);
+      log(`RETRY inbox-notification-pending reason=${String(escalation.reason ?? "unknown-failure")}`);
     }
     let currentSnapshot;
     try {
@@ -175,8 +127,6 @@ export const selfClearEscalation = async ({
       detail: `escalation reason=${reason} attempts=${attempts}`,
       from: String(record.from ?? "unknown"),
       to: String(record.to ?? "unknown"),
-      escalationReason: reason,
-      attempts,
     });
     const current = readMarker();
     if (current === null) return false;
@@ -209,14 +159,41 @@ export const resolveRemoteMainTarget = async ({
 }) => runLocked({ acquireLock, log }, async () => {
   const escalation = await checkEscalation();
   if (escalation.active) return { exitCode: 2 };
-  if (escalation.revision) return { targetCommit: escalation.revision };
   try {
-    return {
-      targetCommit: await readRemoteMain(),
-      ...(escalation.retryEscalation ? { retryEscalation: escalation.retryEscalation } : {}),
-    };
+    return { targetCommit: await readRemoteMain() };
   } catch (error) {
     await persistFailure(failureOf(error));
     return { exitCode: 1 };
   }
 });
+
+/** Compute the next one-based attempt count from the marker being replaced. */
+export const escalationAttemptCount = ({ record, previous, retryableReasons }) => {
+  if (!retryableReasons.has(record?.reason)) return null;
+  if (Number.isSafeInteger(previous?.attempts) && previous.attempts > 0) return previous.attempts + 1;
+  if (previous && retryableReasons.has(previous.reason)) return 2;
+  if (Number.isSafeInteger(record?.attempts) && record.attempts > 0) return record.attempts;
+  return 1;
+};
+
+/** Persist the terminal record through the production atomic writer while
+ * advancing retry state from the marker it replaces. */
+export const writeEscalationWithAttempts = ({
+  escalationPath,
+  record,
+  retryableReasons,
+  now,
+}) => {
+  let previous = null;
+  if (existsSync(escalationPath)) {
+    try {
+      previous = JSON.parse(readFileSync(escalationPath, "utf8"));
+    } catch {
+      // An unreadable marker is replaced by a fresh valid first-attempt record.
+    }
+  }
+  const attempts = escalationAttemptCount({ record, previous, retryableReasons });
+  const persisted = attempts === null ? record : { ...record, attempts };
+  writeEscalationRecord({ path: escalationPath, record: persisted, now });
+  return persisted;
+};
