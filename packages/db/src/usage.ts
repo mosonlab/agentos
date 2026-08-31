@@ -11,6 +11,7 @@ export type SessionUsage = {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
   costUsd?: Prisma.Decimal;
 };
 
@@ -85,6 +86,7 @@ type ModelTotals = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
   costUsd: Prisma.Decimal | null;
 };
 
@@ -113,7 +115,13 @@ const canonicalInputTokens = (uncached: number | null, cached: number | null): n
 const extractModelUsage = (value: unknown): ModelTotals | null => {
   const models = asRecord(value);
   if (!models) return null;
-  const totals: ModelTotals = { inputTokens: null, outputTokens: null, cachedInputTokens: null, costUsd: null };
+  const totals: ModelTotals = {
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    cacheCreationInputTokens: null,
+    costUsd: null,
+  };
   for (const entry of Object.values(models)) {
     const model = asRecord(entry);
     if (!model) continue;                       // one malformed entry must not discard the others
@@ -123,16 +131,24 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
     if (output !== null) totals.outputTokens = (totals.outputTokens ?? 0) + output;
     const cacheRead = tokenCount(model.cacheReadInputTokens, "modelUsage.cacheReadInputTokens");
     const cacheCreation = tokenCount(model.cacheCreationInputTokens, "modelUsage.cacheCreationInputTokens");
-    if (cacheRead !== null || cacheCreation !== null) {
-      totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0);
+    if (cacheRead !== null) totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + cacheRead;
+    if (cacheCreation !== null) {
+      totals.cacheCreationInputTokens = (totals.cacheCreationInputTokens ?? 0) + cacheCreation;
     }
     const cost = costAmount(model.costUSD, "modelUsage.costUSD");
     if (cost !== null) totals.costUsd = (totals.costUsd ?? new Prisma.Decimal(0)).plus(cost);
   }
-  totals.inputTokens = canonicalInputTokens(totals.inputTokens, totals.cachedInputTokens);
+  const knownCached = totals.cachedInputTokens === null && totals.cacheCreationInputTokens === null
+    ? null
+    : (totals.cachedInputTokens ?? 0) + (totals.cacheCreationInputTokens ?? 0);
+  totals.inputTokens = canonicalInputTokens(totals.inputTokens, knownCached);
   // The breakdown is usable iff this one pass produced tokens or cost. Token
   // usability is checked separately by the caller without traversing it again.
-  return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null && totals.costUsd === null
+  return totals.inputTokens === null
+    && totals.outputTokens === null
+    && totals.cachedInputTokens === null
+    && totals.cacheCreationInputTokens === null
+    && totals.costUsd === null
     ? null
     : totals;
 };
@@ -148,9 +164,11 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
  * runners:
  * - `input` is uncached input and `cacheRead`/`cacheWrite` are a DISJOINT
  *   cached subset. The extractor adds that subset exactly once to stored
- *   `inputTokens`; `cachedInputTokens` retains the subset for reporting.
+ *   `inputTokens`; `cachedInputTokens` retains reads and
+ *   `cacheCreationInputTokens` retains writes for reporting.
  * - CODEX's `input_tokens` already contains `cached_input_tokens`, so that
- *   branch does not add the cached subset a second time.
+ *   branch does not add the cached subset a second time and records zero cache
+ *   writes because Codex reports no write component.
  * - `output` already contains PI's reasoning tokens, so there is no reasoning
  *   field to fold in here.
  * - `costNanoUsd` is PI's own per-message `cost.total` summed, not derived from
@@ -193,9 +211,10 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
   if (output !== null) result.outputTokens = output;
   const cacheRead = tokenCount(totals.cacheRead, "agentosPiUsage.cacheRead");
   const cacheWrite = tokenCount(totals.cacheWrite, "agentosPiUsage.cacheWrite");
-  const cached = cacheRead === null && cacheWrite === null ? null : (cacheRead ?? 0) + (cacheWrite ?? 0);
-  if (cached !== null) result.cachedInputTokens = cached;
-  const canonicalInput = canonicalInputTokens(input, cached);
+  if (cacheRead !== null) result.cachedInputTokens = cacheRead;
+  if (cacheWrite !== null) result.cacheCreationInputTokens = cacheWrite;
+  const knownCached = cacheRead === null && cacheWrite === null ? null : (cacheRead ?? 0) + (cacheWrite ?? 0);
+  const canonicalInput = canonicalInputTokens(input, knownCached);
   if (canonicalInput !== null) result.inputTokens = canonicalInput;
   const cost = piCostAmount(totals.costNanoUsd);
   if (cost !== null) result.costUsd = cost;
@@ -240,7 +259,10 @@ export const extractUsage = (payload: unknown): SessionUsage => {
 
   const models = extractModelUsage(event.modelUsage);
   const hasModelTokens = models !== null && (
-    models.inputTokens !== null || models.outputTokens !== null || models.cachedInputTokens !== null
+    models.inputTokens !== null
+    || models.outputTokens !== null
+    || models.cachedInputTokens !== null
+    || models.cacheCreationInputTokens !== null
   );
   if (hasModelTokens) {
     // Absence survives the branch: a breakdown that reports only input leaves
@@ -249,6 +271,9 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     if (models.inputTokens !== null) result.inputTokens = models.inputTokens;
     if (models.outputTokens !== null) result.outputTokens = models.outputTokens;
     if (models.cachedInputTokens !== null) result.cachedInputTokens = models.cachedInputTokens;
+    if (models.cacheCreationInputTokens !== null) {
+      result.cacheCreationInputTokens = models.cacheCreationInputTokens;
+    }
   } else if (usage) {
     const input = tokenCount(usage.input_tokens, "usage.input_tokens");
     const output = tokenCount(usage.output_tokens, "usage.output_tokens");
@@ -264,8 +289,16 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     const disjointCached = cached === null && (cacheRead !== null || cacheCreation !== null)
       ? (cacheRead ?? 0) + (cacheCreation ?? 0)
       : null;
-    const persistedCached = cached ?? disjointCached;
-    if (persistedCached !== null) result.cachedInputTokens = persistedCached;
+    if (cached !== null) {
+      result.cachedInputTokens = cached;
+      // CODEX's input_tokens already contains cached_input_tokens and its
+      // protocol has no cache-creation component. Preserve that known zero so
+      // the new split is not reported as unknown for Codex sessions.
+      result.cacheCreationInputTokens = 0;
+    } else {
+      if (cacheRead !== null) result.cachedInputTokens = cacheRead;
+      if (cacheCreation !== null) result.cacheCreationInputTokens = cacheCreation;
+    }
     const canonicalInput = canonicalInputTokens(input, disjointCached);
     if (canonicalInput !== null) result.inputTokens = canonicalInput;
   }
@@ -289,6 +322,9 @@ export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
     if (usage.inputTokens !== undefined) total.inputTokens = (total.inputTokens ?? 0) + usage.inputTokens;
     if (usage.outputTokens !== undefined) total.outputTokens = (total.outputTokens ?? 0) + usage.outputTokens;
     if (usage.cachedInputTokens !== undefined) total.cachedInputTokens = (total.cachedInputTokens ?? 0) + usage.cachedInputTokens;
+    if (usage.cacheCreationInputTokens !== undefined) {
+      total.cacheCreationInputTokens = (total.cacheCreationInputTokens ?? 0) + usage.cacheCreationInputTokens;
+    }
     if (usage.costUsd !== undefined) {
       total.costUsd = (total.costUsd ?? new Prisma.Decimal(0)).plus(usage.costUsd);
     }
@@ -300,6 +336,7 @@ type DerivedUsage = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
   totalTokens: number | null;
   costUsd: Prisma.Decimal | null;
 };
@@ -341,6 +378,7 @@ export const deriveUsageColumns = (usage: SessionUsage): DerivedUsage => ({
   inputTokens: columnValue(usage.inputTokens, "inputTokens"),
   outputTokens: columnValue(usage.outputTokens, "outputTokens"),
   cachedInputTokens: columnValue(usage.cachedInputTokens, "cachedInputTokens"),
+  cacheCreationInputTokens: columnValue(usage.cacheCreationInputTokens, "cacheCreationInputTokens"),
   // Never 0 and never an estimate: null unless the provider reported at least
   // one of the two halves. Input is already canonical and includes the cached
   // subset, so it must not be added here a second time.
@@ -355,6 +393,7 @@ const sameColumns = (
     inputTokens: number | null;
     outputTokens: number | null;
     cachedInputTokens: number | null;
+    cacheCreationInputTokens: number | null;
     totalTokens: number | null;
     costUsd: Prisma.Decimal | null;
   },
@@ -363,6 +402,7 @@ const sameColumns = (
   current.inputTokens === derived.inputTokens
   && current.outputTokens === derived.outputTokens
   && current.cachedInputTokens === derived.cachedInputTokens
+  && current.cacheCreationInputTokens === derived.cacheCreationInputTokens
   && current.totalTokens === derived.totalTokens
   && (current.costUsd === null
     ? derived.costUsd === null
@@ -443,7 +483,14 @@ const recomputeSessionUsageOnce = async (db: PrismaClient, sessionId: string): P
     const derived = deriveUsageColumns(sumUsage(rows.map((row) => extractUsage(row.payload))));
     const current = await tx.session.findUnique({
       where: { id: sessionId },
-      select: { inputTokens: true, outputTokens: true, cachedInputTokens: true, totalTokens: true, costUsd: true },
+      select: {
+        inputTokens: true,
+        outputTokens: true,
+        cachedInputTokens: true,
+        cacheCreationInputTokens: true,
+        totalTokens: true,
+        costUsd: true,
+      },
     });
     if (!current || sameColumns(current, derived)) return false;
     await tx.session.update({ where: { id: sessionId }, data: derived });

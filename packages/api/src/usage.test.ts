@@ -203,12 +203,20 @@ type SessionColumns = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
   totalTokens: number | null;
   costUsd: Prisma.Decimal | null;
 };
 
 const emptyColumns = (): SessionColumns =>
-  ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null });
+  ({
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    cacheCreationInputTokens: null,
+    totalTokens: null,
+    costUsd: null,
+  });
 
 /** A Prisma stub holding one session's columns in memory, so a second
  * recompute observes what the first one wrote. */
@@ -242,7 +250,8 @@ test("extractUsage reads the real CLAUDE result payload across every model it us
   const usage = extractUsage(CLAUDE_RESULT);
   assert.equal(usage.inputTokens, 9313);
   assert.equal(usage.outputTokens, 98);
-  assert.equal(usage.cachedInputTokens, 8768);
+  assert.equal(usage.cachedInputTokens, 4332);
+  assert.equal(usage.cacheCreationInputTokens, 4436);
   assert.equal(usage.costUsd?.toString(), "0.049117");
 });
 
@@ -250,7 +259,8 @@ test("extractUsage reads the second real CLAUDE capture the same way", () => {
   const usage = extractUsage(CLAUDE_RESULT_SAFE_MODE);
   assert.equal(usage.inputTokens, 3504);
   assert.equal(usage.outputTokens, 20);
-  assert.equal(usage.cachedInputTokens, 2969);
+  assert.equal(usage.cachedInputTokens, 0);
+  assert.equal(usage.cacheCreationInputTokens, 2969);
   assert.equal(usage.costUsd?.toString(), "0.030392999999999996");
 });
 
@@ -270,8 +280,30 @@ test("CLAUDE modelUsage includes each cached input component exactly once", () =
     primary: { inputTokens: 5, outputTokens: 7, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 },
     secondary: { inputTokens: 11, cacheReadInputTokens: 2 },
   } });
-  assert.deepEqual(usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 9 });
+  assert.deepEqual(usage, { inputTokens: 25, outputTokens: 7, cachedInputTokens: 5, cacheCreationInputTokens: 4 });
   assert.equal(deriveUsageColumns(usage).totalTokens, 32);
+});
+
+test("CLAUDE top-level usage preserves the read/write cache split", () => {
+  const usage = extractUsage({ usage: {
+    input_tokens: 10,
+    cache_read_input_tokens: 100,
+    cache_creation_input_tokens: 50,
+    output_tokens: 7,
+  } });
+  assert.deepEqual(usage, {
+    inputTokens: 160,
+    outputTokens: 7,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+});
+
+test("an unreported cache-creation component remains unknown", () => {
+  const usage = extractUsage({ usage: { input_tokens: 10, cache_read_input_tokens: 100 } });
+  assert.equal(usage.cachedInputTokens, 100);
+  assert.equal("cacheCreationInputTokens" in usage, false);
+  assert.equal(deriveUsageColumns(usage).cacheCreationInputTokens, null);
 });
 
 test("an unusable modelUsage falls back to the top-level usage block", () => {
@@ -321,7 +353,12 @@ test("extractUsage reads the real CODEX turn.completed payload and finds no cost
   // from outputTokens.
   assert.equal(usage.costUsd, undefined);
   assert.equal(usage.outputTokens, 253);
-  assert.deepEqual(usage, { inputTokens: 40764, outputTokens: 253, cachedInputTokens: 35072 });
+  assert.deepEqual(usage, {
+    inputTokens: 40764,
+    outputTokens: 253,
+    cachedInputTokens: 35072,
+    cacheCreationInputTokens: 0,
+  });
   // CODEX's input_tokens already contains cached_input_tokens; adding the
   // subset again would inflate both the input and total columns.
   const columns = deriveUsageColumns(usage);
@@ -340,16 +377,25 @@ test("extractUsage reads the runner's PI aggregate with cached input included", 
     outputTokens: 24,
     // cacheRead + cacheWrite, the same fold CLAUDE's read/creation pair gets.
     cachedInputTokens: 3584,
+    cacheCreationInputTokens: 0,
     costUsd: new Prisma.Decimal("0.00123808"),
   });
   // PI's persisted input uses the same cached-inclusive caliber as CODEX.
   const derived = deriveUsageColumns(usage);
   assert.equal(derived.totalTokens, 9296);
   assert.equal(derived.cachedInputTokens, 3584);
+  assert.equal(derived.cacheCreationInputTokens, 0);
   assert.equal(derived.costUsd?.toString(), "0.0012");
   const codex = deriveUsageColumns(extractUsage(CODEX_TURN_COMPLETED));
   assert.equal(codex.totalTokens, 41017);
   assert.ok(codex.totalTokens! > codex.cachedInputTokens!, "CODEX totals already contain the cached tokens");
+});
+
+test("PI cacheWrite is persisted as cache creation input", () => {
+  assert.deepEqual(
+    extractUsage({ agentosPiUsage: { input: 10, output: 7, cacheRead: 100, cacheWrite: 50 } }),
+    { inputTokens: 160, outputTokens: 7, cachedInputTokens: 100, cacheCreationInputTokens: 50 },
+  );
 });
 
 test("the PI aggregate is exclusive of the provider vocabularies it replaces", () => {
@@ -435,7 +481,8 @@ test("recomputeSessionUsage writes absolute values once and is a no-op on replay
   assert.equal(updates.length, 1);
   assert.equal(columns.inputTokens, 9313);
   assert.equal(columns.outputTokens, 98);
-  assert.equal(columns.cachedInputTokens, 8768);
+  assert.equal(columns.cachedInputTokens, 4332);
+  assert.equal(columns.cacheCreationInputTokens, 4436);
   assert.equal(columns.totalTokens, 9411);
   assert.equal(columns.costUsd?.toString(), "0.0491");
 
@@ -489,7 +536,14 @@ test("recomputeSessionUsage repairs a session whose second attempt's write was l
   const attemptTwo = { type: "result", usage: { input_tokens: 7, output_tokens: 11 } };
   // Columns hold attempt 1 only, as if the process died between createMany and
   // the usage write. An additive design could never reach this session again.
-  const columns: SessionColumns = { inputTokens: 10, outputTokens: 3, cachedInputTokens: null, totalTokens: 13, costUsd: null };
+  const columns: SessionColumns = {
+    inputTokens: 10,
+    outputTokens: 3,
+    cachedInputTokens: null,
+    cacheCreationInputTokens: null,
+    totalTokens: 13,
+    costUsd: null,
+  };
   const { database } = stubDatabase([attemptOne, attemptTwo], columns);
 
   assert.equal(await recomputeSessionUsage(database, "session-1"), true);
