@@ -51,6 +51,9 @@ test("the template step replace route documents its contract, refusals, warnings
     "first_layer_not_single",
     "layer_order_invalid",
     "base_step_invalid",
+    "prior_kind_unproduced",
+    "output_kind_duplicate",
+    "prior_kind_duplicate",
   ]) {
     assert.match(text, new RegExp("422[\\s\\S]*`" + code + "`", "u"));
   }

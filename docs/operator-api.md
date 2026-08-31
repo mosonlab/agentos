@@ -800,7 +800,9 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   `graph_empty`. Other graph validator refusals use `422` with their stable
   code and optional `stepIndex`: `first_step_not_agent`,
   `first_layer_not_single`, `layer_order_invalid`, and `base_step_invalid` are
-  the ordering and base-reference checks. Warning codes are
+  the ordering and base-reference checks. Output wiring also refuses
+  `prior_kind_unproduced`, `output_kind_duplicate`, and `prior_kind_duplicate`.
+  Warning codes are
   `no_review_step`, `same_agent_implements_and_reviews`, and
   `pull_request_without_regression`.
 

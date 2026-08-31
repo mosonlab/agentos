@@ -164,6 +164,65 @@ export const validateTemplateGraph = (
     }
   }
 
+  // 6. prior_kind_unproduced. A prior attachment is available only when a
+  // producer has completed an earlier layer. Unknown kinds are fine when they
+  // are not consumed; this check only rejects a missing producer for a kind a
+  // Step explicitly names.
+  for (const step of steps) {
+    for (const priorKind of step.priorOutputKinds) {
+      const producedEarlier = steps.some((candidate) => (
+        candidate.outputKind === priorKind && candidate.layer < step.layer
+      ));
+      if (!producedEarlier) {
+        return {
+          refusal: authoringRefusal(
+            "prior_kind_unproduced",
+            `Template step ${step.stepIndex} prior output kind ${priorKind} is not produced in an earlier layer`,
+            step.stepIndex,
+          ),
+          warnings: [],
+        };
+      }
+    }
+  }
+
+  // 7. output_kind_duplicate. Output kinds identify the attachment a consumer
+  // receives, so one producer must own each kind. The later producer is the
+  // offending Step.
+  const outputKinds = new Set<string>();
+  for (const step of steps) {
+    if (outputKinds.has(step.outputKind)) {
+      return {
+        refusal: authoringRefusal(
+          "output_kind_duplicate",
+          `Template step ${step.stepIndex} duplicates output kind ${step.outputKind}`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+    outputKinds.add(step.outputKind);
+  }
+
+  // 8. prior_kind_duplicate. A duplicate declaration in one Step is a typo,
+  // even if a valid producer exists for that kind.
+  for (const step of steps) {
+    const priorKinds = new Set<string>();
+    for (const priorKind of step.priorOutputKinds) {
+      if (priorKinds.has(priorKind)) {
+        return {
+          refusal: authoringRefusal(
+            "prior_kind_duplicate",
+            `Template step ${step.stepIndex} declares prior output kind ${priorKind} more than once`,
+            step.stepIndex,
+          ),
+          warnings: [],
+        };
+      }
+      priorKinds.add(priorKind);
+    }
+  }
+
   return { refusal: null, warnings: [] };
 };
 
