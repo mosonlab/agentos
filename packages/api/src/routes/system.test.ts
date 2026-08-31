@@ -65,7 +65,7 @@ test("the shared remote table is the one the control plane enforces", () => {
   // something holds them to one table: both suites read this file and compare
   // the exact reason code, not merely accepted-or-not.
   const cases = JSON.parse(readFileSync(
-    fileURLToPath(new URL("../../../scripts/fixtures/onboarding-remote-cases.json", import.meta.url)), "utf8",
+    fileURLToPath(new URL("../../../../scripts/fixtures/onboarding-remote-cases.json", import.meta.url)), "utf8",
   )) as {
     accepted: Array<{ description: string; value: string }>;
     rejected: Array<{ description: string; value: string; reason: string }>;
