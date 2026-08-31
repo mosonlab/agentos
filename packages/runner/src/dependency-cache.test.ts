@@ -635,13 +635,14 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
 });
 
 test("retention keeps twelve entries, then evicts the least-recently-used thirteenth", async () => {
+  assert.equal(DEPENDENCY_CACHE_ENTRY_LIMIT, 12, "the dependency cache retains twelve entries");
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-"));
   try {
     const configured = config(root);
     const fake = fakeInstallExecutor();
     const events: DependencyCacheProgress[] = [];
     const retainedKeys: string[] = [];
-    for (let index = 0; index < 12; index += 1) {
+    for (let index = 0; index < DEPENDENCY_CACHE_ENTRY_LIMIT; index += 1) {
       const workspace = join(root, `workspace-${index}`);
       await createFixture(workspace);
       await writeFile(join(workspace, "package-lock.json"), packageLock(`1.0.${index}`));
@@ -658,23 +659,24 @@ test("retention keeps twelve entries, then evicts the least-recently-used thirte
 
     let entries = await readdir(join(root, "cache/entries"));
     let usage = await readdir(join(root, "cache/usage"));
-    assert.equal(DEPENDENCY_CACHE_ENTRY_LIMIT, 12);
-    assert.equal(entries.length, 12);
+    assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
     assert.deepEqual(usage.sort(), entries.sort());
     assert.equal(events.filter(({ event }) => event === "eviction").length, 0);
 
     // Refresh the oldest entry so the next distinct publication must evict the
     // second entry rather than the one we just used.
-    await materializeWorkspaceDependencies(
+    const refreshed = await materializeWorkspaceDependencies(
       configured,
       join(root, "workspace-0"),
       workspaceEnvironment(configured),
       { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
-    const thirteenthWorkspace = join(root, "workspace-12");
+    assert.equal(refreshed.status, "restored");
+    const overflowIndex = DEPENDENCY_CACHE_ENTRY_LIMIT;
+    const thirteenthWorkspace = join(root, `workspace-${overflowIndex}`);
     await createFixture(thirteenthWorkspace);
-    await writeFile(join(thirteenthWorkspace, "package-lock.json"), packageLock("1.0.12"));
+    await writeFile(join(thirteenthWorkspace, "package-lock.json"), packageLock(`1.0.${overflowIndex}`));
     const thirteenth = await materializeWorkspaceDependencies(
       configured,
       thirteenthWorkspace,
@@ -686,7 +688,7 @@ test("retention keeps twelve entries, then evicts the least-recently-used thirte
 
     entries = await readdir(join(root, "cache/entries"));
     usage = await readdir(join(root, "cache/usage"));
-    assert.equal(entries.length, 12);
+    assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
     assert.deepEqual(usage.sort(), entries.sort());
     assert.equal(events.filter(({ event }) => event === "eviction").length, 1);
     assert.ok(entries.includes(retainedKeys[0]!));
