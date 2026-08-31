@@ -9,22 +9,28 @@ const appSource = readFileSync("packages/api/src/app.ts", "utf8");
 const internalRoutePrefixes = ["/runner/", "/session/"];
 const isInternalRoute = (path) => internalRoutePrefixes.some((prefix) => path.startsWith(prefix));
 const routeKey = (method, path) => `${method.toUpperCase()} ${path}`;
+// These session capabilities are intentionally operator-documented despite their internal prefix.
+const documentedInternalRoutes = new Set([
+  routeKey("PATCH", "/session/runs/:runId/task"),
+  routeKey("POST", "/session/runs/:runId/revalidation/cancel"),
+]);
 
-const appRoutes = new Set(
-  [...appSource.matchAll(/\bapp\.(get|post|put|patch|delete)\s*\(\s*(["'])([^"']+)\2/gu)]
-    .map(([, method, , path]) => ({ method, path }))
-    .filter(({ path }) => !isInternalRoute(path))
-    .map(({ method, path }) => routeKey(method, path)),
-);
+const appRouteRegistrations = [
+  ...appSource.matchAll(/\bapp\.(get|post|put|patch|delete)\s*\(\s*(["'])([^"']+)\2/gu),
+].map(([, method, , path]) => ({ key: routeKey(method, path), path }));
+const appRoutes = new Set(appRouteRegistrations.map(({ key }) => key));
 const handbookRoutes = new Set(
   [...handbook.matchAll(/^###\s+(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`/gmu)]
     .map(([, method, path]) => ({ method, path }))
-    .filter(({ path }) => !isInternalRoute(path))
     .map(({ method, path }) => routeKey(method, path)),
 );
 
 test("every operator API route has a handbook entry", () => {
-  const missing = [...appRoutes].filter((route) => !handbookRoutes.has(route)).sort();
+  const missing = appRouteRegistrations
+    .filter(({ key, path }) => !isInternalRoute(path) || documentedInternalRoutes.has(key))
+    .map(({ key }) => key)
+    .filter((key) => !handbookRoutes.has(key))
+    .sort();
   const stale = [...handbookRoutes].filter((route) => !appRoutes.has(route)).sort();
   const mismatch = [
     "Operator API route coverage mismatch.",
