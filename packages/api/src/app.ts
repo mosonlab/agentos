@@ -680,8 +680,20 @@ const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 }).strict();
 
-const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
-  schema.parse(await request.json());
+class InvalidJsonBodyError extends Error {}
+
+const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> => {
+  let parsed: unknown;
+  try {
+    parsed = await request.json();
+  } catch (error: unknown) {
+    // Request.json() reports an empty or malformed body as a SyntaxError. Keep
+    // other body-read failures visible to the normal 500 fallback.
+    if (error instanceof SyntaxError) throw new InvalidJsonBodyError("Request body must be valid JSON");
+    throw error;
+  }
+  return schema.parse(parsed);
+};
 
 /**
  * A JSON response carrying a validator, so a poll that changed nothing costs a
@@ -3391,6 +3403,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
 
   app.onError((error, context) => {
+    if (error instanceof InvalidJsonBodyError) {
+      return refusalJson(context, refusal("invalid-request", error.message, { code: "invalid-json" }));
+    }
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
     if (error instanceof SerializableTransactionExhaustedError) {
       return context.json({ error: "Transaction is busy; retry later" }, 503);
