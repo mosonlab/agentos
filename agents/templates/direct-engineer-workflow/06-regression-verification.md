@@ -7,6 +7,7 @@ outputKind: regression-verification-v2
 priorOutputKinds: [implementation, sol-findings, blind-findings, fixed-implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---

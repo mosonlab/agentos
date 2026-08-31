@@ -74,6 +74,7 @@ const mechanicalClaim: ClaimedTask = {
     id: "run-10",
     runNumber: 1,
     opensPullRequest: false,
+    requiresCommit: false,
     pullRequestBase: "master",
     maxDurationMin: 30,
     stallTimeoutMin: 10,

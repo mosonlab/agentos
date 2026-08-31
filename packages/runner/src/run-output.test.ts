@@ -171,6 +171,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     id: "run-114",
     runNumber: 1,
     opensPullRequest: false,
+    requiresCommit: true,
     pullRequestBase: "master",
     maxDurationMin: 30,
     stallTimeoutMin: 10,
@@ -218,6 +219,7 @@ const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
   const base = claim(remoteUrl);
   return {
     ...base,
+    run: { ...base.run, requiresCommit: false },
     task: {
       ...base.task,
       chainId: "chain-1",
@@ -235,7 +237,6 @@ const regressionFailureAgent = [
   '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
   "esac",
   "cat > /dev/null",
-  ...committedFixtureChange,
   'head_sha="$(git rev-parse HEAD)"',
   'mkdir -p "$AGENTOS_WORKSPACE_PATH/.agentos"',
   'HEAD_SHA="$head_sha" node -e \'',
@@ -362,6 +363,10 @@ test("a negative Regression verdict settles mechanically when provider transport
     assert.equal(completion?.signal, null);
     assert.equal(completion?.terminalEventSeen, true);
     assert.equal(completion?.terminationReason, null);
+    assert.equal(completion?.baseSha, completion?.headSha, "Regression produced a verdict without advancing HEAD");
+    assert.equal(completion?.pushStatus, "SUCCEEDED");
+    assert.ok(completion?.pushedBranch);
+    assert.deepEqual(controlPlane.publishedBranches, [completion.pushedBranch]);
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
     assert.equal(
       controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"),

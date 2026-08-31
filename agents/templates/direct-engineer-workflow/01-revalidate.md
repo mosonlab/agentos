@@ -7,6 +7,7 @@ outputKind: revalidation
 priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---

@@ -516,6 +516,9 @@ model TaskTemplateStep {
   runner                  RunnerKind?
   outputKind              String       @default("result")
   opensPullRequest        Boolean      @default(true)
+  /// Whether a successful Run must advance the workspace commit. False still
+  /// publishes the branch, because a later Chain Step may need to clone it.
+  requiresCommit          Boolean      @default(true)
   baseFromStepIndex       Int?
   layer                   Int
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
@@ -947,6 +950,9 @@ model Run {
   /// PATCH of the task cannot change a run already queued. The runner reads this
   /// and never the live task row.
   opensPullRequest              Boolean                @default(true)
+  /// Immutable delivery contract copied from the template Step at Run birth.
+  /// Manual Tasks default to requiring a commit.
+  requiresCommit                Boolean                @default(true)
   targetBranch                  String?
   branch                        String?
   /// The ref this run actually handed to `git push`, written only after the push

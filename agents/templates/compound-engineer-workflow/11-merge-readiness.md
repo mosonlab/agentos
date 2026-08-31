@@ -7,6 +7,7 @@ outputKind: merge-authorization
 priorOutputKinds: []
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---

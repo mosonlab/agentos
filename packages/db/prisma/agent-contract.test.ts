@@ -223,8 +223,10 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(templateSteps[4]!.prompt, /platform-pinned Implementation proof boundary/u);
 });
 
-test("only implementation opens a pull request, and the integrator is not a model row", async () => {
+test("only artifact-producing steps require a commit, only implementation opens a pull request, and the integrator is not a model row", async () => {
   const templateSteps = await loadTemplateStepSources();
+  const requiringCommit = templateSteps.filter((step) => step.requiresCommit).map((step) => step.stepIndex);
+  assert.deepEqual(requiringCommit, [2, 5]);
   const opening = templateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex);
   assert.deepEqual(opening, [5]);
   const integrator = templateSteps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX)!;
@@ -259,6 +261,7 @@ test("the direct template sources expose the layered review spine and mechanical
   );
   // Only implementation opens the chain's pull request; the blind review
   // starts blind; regression verification reads the fix diff.
+  assert.deepEqual(directTemplateSteps.filter((step) => step.requiresCommit).map((step) => step.stepIndex), [2]);
   assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [2]);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.baseFromStepIndex, 2);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 4)?.attachmentsFromPrevious, false);
@@ -349,6 +352,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
     priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
+    requiresCommit: expected.requiresCommit,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy,
   };
@@ -363,6 +367,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],
     ["priorOutputKinds", { ...persisted, priorOutputKinds: ["different-output"] }],
     ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
+    ["requiresCommit", { ...persisted, requiresCommit: !persisted.requiresCommit }],
     ["baseFromStepIndex", { ...persisted, baseFromStepIndex: 0 }],
     ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],
   ];

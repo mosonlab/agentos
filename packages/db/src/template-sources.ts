@@ -51,6 +51,7 @@ const STRUCTURAL_FIELDS = [
   "attachmentsFromPrevious",
   "priorOutputKinds",
   "opensPullRequest",
+  "requiresCommit",
   "baseFromStepIndex",
   "spawnPolicy",
 ] as const;
@@ -65,6 +66,7 @@ export type TemplateStepSource = {
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
   opensPullRequest: boolean;
+  requiresCommit: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.InputJsonObject | null;
   prompt: string;
@@ -85,6 +87,7 @@ export type PersistedTemplateStepStructure = {
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
   opensPullRequest: boolean;
+  requiresCommit: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
 };
@@ -104,6 +107,7 @@ export const templateStepStructureDifferences = (
     ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
     ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
     ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
+    ["requiresCommit", actual.requiresCommit, expected.requiresCommit],
     ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
     ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
   ] as const;
@@ -183,6 +187,7 @@ export const loadTemplateStepSources = async (
       attachmentsFromPrevious: parseBoolean(requiredFrontmatter(document, "attachmentsFromPrevious", filePath), filePath, "attachmentsFromPrevious"),
       priorOutputKinds: parseInlineList(document.attributes.priorOutputKinds, filePath, "priorOutputKinds"),
       opensPullRequest: parseBoolean(requiredFrontmatter(document, "opensPullRequest", filePath), filePath, "opensPullRequest"),
+      requiresCommit: parseBoolean(requiredFrontmatter(document, "requiresCommit", filePath), filePath, "requiresCommit"),
       baseFromStepIndex: parseOptionalStepIndex(requiredFrontmatter(document, "baseFromStepIndex", filePath), filePath),
       spawnPolicy: parseSpawnPolicy(requiredFrontmatter(document, "spawnPolicy", filePath), filePath),
       prompt: document.body,

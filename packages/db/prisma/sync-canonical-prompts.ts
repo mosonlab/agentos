@@ -204,6 +204,7 @@ const main = async (): Promise<void> => {
               attachmentsFromPrevious: true,
               priorOutputKinds: true,
               opensPullRequest: true,
+              requiresCommit: true,
               baseFromStepIndex: true,
               spawnPolicy: true,
               _count: { select: { tasks: true } },

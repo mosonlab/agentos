@@ -7,6 +7,7 @@ outputKind: revised-plan
 priorOutputKinds: [spec, plan, plan-review]
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---

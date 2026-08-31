@@ -60,7 +60,7 @@ export type CommandExecutor = (
 export type DeliveryClaim = {
   task: Pick<ClaimedTask["task"], "id" | "name" | "templateStep">;
   repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch">;
-  run: Partial<Pick<ClaimedTask["run"], "opensPullRequest" | "pullRequestBase">>;
+  run: Partial<Pick<ClaimedTask["run"], "opensPullRequest" | "pullRequestBase" | "requiresCommit">>;
 };
 
 export type DeliverWorkspaceDependencies = {
@@ -220,14 +220,17 @@ export const deliverWorkspace = async (
   // No step name, output kind or task name is consulted here or anywhere in
   // this package.
   const opensPullRequest = claim.run.opensPullRequest !== false;
-  // A clean provider exit is not sufficient delivery evidence: when the agent
-  // made no commit there is nothing to publish, regardless of whether this step
-  // was meant to open a pull request. Detect that before any remote write so an
-  // empty session cannot masquerade as a push or GitHub failure.
+  // Missing means required for compatibility with an older API claim. The
+  // explicit false belongs to the immutable Run snapshot, never to a Step-name
+  // or output-kind exception in the runner.
+  const requiresCommit = claim.run.requiresCommit !== false;
+  // A clean provider exit is not sufficient delivery evidence when this Run's
+  // contract requires a commit. Optional-commit Runs still publish the shared
+  // branch below so later Chain Steps have a durable remote ref.
   try {
     const head = dependencies.headSha ?? await command("git", ["rev-parse", "HEAD"], workspace.path, env,
       { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
-    if (head === workspace.baseSha) return noChangesProduced(workspace.branch, remote);
+    if (head === workspace.baseSha && requiresCommit) return noChangesProduced(workspace.branch, remote);
   } catch (error: unknown) {
     const message = messageOf(error);
     return {

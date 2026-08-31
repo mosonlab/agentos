@@ -46,6 +46,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     attachmentsFromPrevious: step.attachmentsFromPrevious,
     priorOutputKinds: step.priorOutputKinds,
     opensPullRequest: step.opensPullRequest,
+    requiresCommit: step.requiresCommit,
     baseFromStepIndex: step.baseFromStepIndex,
     spawnPolicy: step.spawnPolicy as PersistedTransitionStep["spawnPolicy"],
     prompt: step.prompt,
@@ -127,7 +128,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
     priorOutputKinds: [],
-    opensPullRequest: true, baseFromStepIndex: null, spawnPolicy: null, prompt,
+    opensPullRequest: true, requiresCommit: true, baseFromStepIndex: null, spawnPolicy: null, prompt,
   }];
   const outgoing = stepsWith("the retired instruction");
   const successor = stepsWith("the replacement instruction");
@@ -138,6 +139,11 @@ test("a structure-identical generation is decided by its prompt digest alone", (
   };
 
   assert.equal(legacyGenerationMatches(generation, outgoing), true, "the retired generation is recognised");
+  assert.equal(
+    legacyGenerationMatches(generation, [{ ...outgoing[0]!, requiresCommit: false }]),
+    false,
+    "a mismatched commit contract is not the registered generation",
+  );
   assert.equal(legacyGenerationMatches(generation, successor), false, "its successor is not, so it cannot re-roll");
 
   // Without a digest the same entry would swallow both, which is the infinite
@@ -245,6 +251,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
       outputKind: step.outputKind,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy,
       priorOutputKinds: [],

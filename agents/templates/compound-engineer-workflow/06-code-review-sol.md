@@ -7,6 +7,7 @@ outputKind: sol-findings
 priorOutputKinds: [implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: 5
 spawnPolicy: null
 ---

@@ -32,6 +32,7 @@ outputKind: implementation
 priorOutputKinds: []         # Prior TaskStepOutput kinds required by this prompt
 attachmentsFromPrevious: true
 opensPullRequest: true
+requiresCommit: true          # false when a valid Step outcome may leave HEAD unchanged
 baseFromStepIndex: null                # null or a step in a strictly earlier layer
 spawnPolicy: null                      # null or an inline JSON object
 ```

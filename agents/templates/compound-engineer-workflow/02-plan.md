@@ -7,6 +7,7 @@ outputKind: plan
 priorOutputKinds: [spec]
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---

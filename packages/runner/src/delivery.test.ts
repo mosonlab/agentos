@@ -27,7 +27,7 @@ const salvageIdentity = {
 };
 const workspace = { path: "/fake/work", branch: "feature/test", baseSha: "base" };
 
-test("a clean session with no commit fails before push or pull-request creation", async () => {
+test("a missing requiresCommit defaults to required and fails before publication", async () => {
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
@@ -75,6 +75,29 @@ test("a clean no-PR session with no commit also fails before publication", async
   assert.equal(result.pushStatus, "FAILED");
   assert.match(result.pushError ?? "", /^no-changes-produced:/u);
   assert.deepEqual(calls, ["git rev-parse HEAD"]);
+});
+
+test("an unchanged optional-commit step still publishes its branch", async () => {
+  const calls: string[] = [];
+  const publications: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return "";
+  };
+  const result = await deliverWorkspace(config, {
+    ...claim,
+    repo: { ...claim.repo, remoteUrl: "ssh://git@example.test/acme/app.git" },
+    run: { ...claim.run, opensPullRequest: false, requiresCommit: false },
+  }, workspace, {
+    command: fake,
+    headSha: workspace.baseSha,
+    recordPublication: async (branch) => { publications.push(branch); },
+  });
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushedBranch, workspace.branch);
+  assert.equal(result.failureClass, undefined);
+  assert.deepEqual(calls, ["git push --set-upstream origin feature/test"]);
+  assert.deepEqual(publications, [workspace.branch]);
 });
 
 test("a session with a captured commit keeps the existing push and pull-request path", async () => {
@@ -547,9 +570,9 @@ test("a failed run still pushes commits the agent made before crashing", async (
 
 // --- one branch and one PR per chain -----------------------------------------
 //
-// The `claim` fixture omits `opensPullRequest` entirely, so the tests above pin
-// that a claim payload from a stale API build still opens a pull request rather
-// than silently never opening one again.
+// The `claim` fixture omits `opensPullRequest` and `requiresCommit` entirely, so
+// the tests above pin both compatibility defaults for a stale API build: open
+// the pull request, and fail an unchanged Run unless it explicitly opts out.
 
 const noPrClaim = { ...claim, run: { ...claim.run, opensPullRequest: false } } satisfies DeliveryClaim;
 

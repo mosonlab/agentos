@@ -159,6 +159,59 @@ const integratorStep = {
   taskTemplate: { name: "compound-engineer-workflow" },
 };
 
+const outputOnlyStep = {
+  id: "regression-step",
+  stepIndex: 6,
+  outputKind: "regression-verification-v2",
+  requiresCommit: false,
+  baseFromStepIndex: null,
+  taskTemplate: { name: "direct-engineer-workflow" },
+};
+
+test("Run birth defaults manual Tasks to requiring a commit and snapshots an output-only Step", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const fixtures = [
+    {
+      name: "manual Task",
+      task: taskRow({ repoId: repo.id, repo }),
+      expected: true,
+    },
+    {
+      name: "output-only template Step",
+      task: taskRow({
+        repoId: repo.id,
+        repo,
+        templateId: "template-1",
+        templateStepId: outputOnlyStep.id,
+        templateStep: outputOnlyStep,
+      }),
+      expected: false,
+    },
+  ] as const;
+
+  for (const fixture of fixtures) {
+    const { tx, creates } = fakeTx(fixture.task);
+    const opened = await openRun(tx, fixture.task.id, { kind: "task-created", readyAt: now });
+    assert.equal(opened.ok, true, fixture.name);
+    assert.equal(creates[0]?.requiresCommit, fixture.expected, fixture.name);
+  }
+});
+
+test("a retry snapshots the current Step commit contract instead of inheriting its prior Run", async () => {
+  const task = taskRow({
+    templateId: "template-1",
+    templateStepId: outputOnlyStep.id,
+    templateStep: outputOnlyStep,
+    runs: [priorRun({ requiresCommit: true })],
+  });
+  const { tx, creates } = fakeTx(task);
+
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.requiresCommit, false);
+});
+
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
   const headSha = "2".repeat(40);
   let where: unknown;

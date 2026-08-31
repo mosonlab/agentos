@@ -7,6 +7,7 @@ outputKind: fixed-implementation
 priorOutputKinds: [sol-findings, blind-findings]
 attachmentsFromPrevious: true
 opensPullRequest: false
+requiresCommit: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---
