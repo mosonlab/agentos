@@ -37,8 +37,8 @@
 # objects under immutable cache refs and never mirrors the checkout's ref set.
 #
 # A PASS, FAIL or NOT AUTHORITATIVE result stops dispatch. A remote FAIL includes
-# run-gate.sh's bounded tail of the worker log, which is transported verbatim with
-# the proof line. A remote attempt that
+# run-gate.sh's bounded per-failing-step worker-log excerpt, which is transported
+# verbatim with the proof line. A remote attempt that
 # produces no verdict (including an ssh drop) is retired for this invocation and
 # the same candidate and baseline are tried on the next worker. No intermediate
 # GATE NOT RUN line is printed on stdout, so a successful fallback still has one

@@ -107,7 +107,8 @@ process.stdout.write(JSON.stringify(value));
 extract_gate_failure_excerpt() {
   local log="$1" summary="$2"
   node - "$log" "$summary" <<'NODE'
-const { readFileSync } = require("node:fs");
+const { createReadStream } = require("node:fs");
+const { createInterface } = require("node:readline");
 
 const [logPath, summary] = process.argv.slice(2);
 const MAX_LINES = 40;
@@ -134,8 +135,6 @@ const splitStages = (value) => {
 
 const stages = splitStages(summary);
 const fallbackStages = stages.length > 0 ? stages : [summary.trim() || "gate"];
-const source = readFileSync(logPath, "utf8").replaceAll("\r\n", "\n");
-const sourceLines = source.split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
 const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/gu, "");
 const records = [];
 const recordsByLine = new Map();
@@ -145,30 +144,35 @@ let currentStage = null;
 let failureOpen = false;
 let failureAge = 0;
 
-const stageForLine = (line) => {
-  const visible = stripAnsi(line);
+const stageForLine = (visible) => {
   const heading = visible.match(/^\s*---\s+(.+?)\s+---\s*$/u)?.[1];
   if (heading && stages.includes(heading)) return heading;
   return stages.find((stage) => visible.includes(stage)) ?? null;
 };
 
 const addRecord = (line, index, stage) => {
+  if (stage) stageOutput.add(stage);
+  else if (stages.length === 1) stageOutput.add(stages[0]);
   const existing = recordsByLine.get(line);
   if (existing) {
     if (stage) existing.stages.add(stage);
-    else existing.unscoped = true;
     return;
   }
-  const record = { line, index, stages: new Set(), unscoped: !stage };
+  // The output can use at most forty unique records. Continue streaming after
+  // this cap only to learn which failed stages had attributable output.
+  if (records.length >= MAX_LINES) return;
+  const record = { line, index, stages: new Set() };
   if (stage) record.stages.add(stage);
   recordsByLine.set(line, record);
   records.push(record);
 };
 
-for (let index = 0; index < sourceLines.length; index += 1) {
-  const line = sourceLines[index];
+const readLog = async () => {
+  let index = 0;
+  const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of lines) {
   const visible = stripAnsi(line);
-  const lineStage = stageForLine(line);
+  const lineStage = stageForLine(visible);
   if (lineStage) currentStage = lineStage;
 
   const isSubtestContext = /^\s*#\s*Subtest\b/u.test(visible);
@@ -177,7 +181,7 @@ for (let index = 0; index < sourceLines.length; index += 1) {
   // a file path is retained even when the worker forwards only a short tail.
   const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(visible);
   if (isSubtestContext || isFileContext) {
-    pendingContexts.push({ line, index, stage: currentStage });
+    pendingContexts.push({ line: visible, index, stage: currentStage });
     if (pendingContexts.length > 12) pendingContexts.shift();
   }
 
@@ -193,11 +197,11 @@ for (let index = 0; index < sourceLines.length; index += 1) {
       }
     }
     pendingContexts.length = 0;
-    addRecord(line, index, failureStage);
+    addRecord(visible, index, failureStage);
     failureOpen = true;
     failureAge = 0;
   } else if (isAssertion || (failureOpen && isError)) {
-    addRecord(line, index, currentStage);
+    addRecord(visible, index, currentStage);
   }
 
   if (failureOpen) {
@@ -207,22 +211,24 @@ for (let index = 0; index < sourceLines.length; index += 1) {
     if (failureAge > 32 || /^\s*(?:---|==)\s+/u.test(visible)) failureOpen = false;
   }
 
-  // A completed TAP block cannot be the file context for a later failure.
-  if (/^\s*(?:#\s+(?:tests|pass|fail|duration)|1\.\.)\b/u.test(visible)) {
+  // A passing TAP/default-reporter result and a completed TAP block cannot be
+  // the file context for a later failure.
+  if (/^\s*(?:ok\b|[✔✓]\s+|#\s+(?:tests|pass|fail|duration)|1\.\.)/u.test(visible)) {
     pendingContexts.length = 0;
   }
-}
+  index += 1;
+  }
+};
+
+const main = async () => {
+await readLog();
 
 records.sort((left, right) => left.index - right.index);
-const hasUnscoped = records.some((record) => record.unscoped);
 for (const record of records) {
   for (const stage of record.stages) stageOutput.add(stage);
-  if (record.unscoped && stages.length === 1) stageOutput.add(stages[0]);
 }
 
-const missingStages = hasUnscoped
-  ? []
-  : fallbackStages.filter((stage) => !stageOutput.has(stage));
+const missingStages = fallbackStages.filter((stage) => !stageOutput.has(stage));
 const fallbackLines = missingStages.map((stage) => `${stage}: no per-test output in gate log`);
 
 const byteLength = (value) => Buffer.byteLength(value, "utf8");
@@ -233,41 +239,41 @@ const truncateUtf8 = (value, limit) => {
   return Buffer.from(value).subarray(0, end).toString("utf8");
 };
 
+const takeBounded = (lines, lineLimit, byteBudget) => {
+  const taken = [];
+  let bytes = 0;
+  for (const line of lines) {
+    if (taken.length >= lineLimit) break;
+    const separator = taken.length > 0 ? 1 : 0;
+    const remaining = byteBudget - bytes - separator;
+    if (remaining <= 0) break;
+    const fitted = truncateUtf8(line, remaining);
+    if (!fitted) break;
+    taken.push(fitted);
+    bytes += separator + byteLength(fitted);
+    if (fitted !== line) break;
+  }
+  return { lines: taken, bytes };
+};
+
 // Reserve room for notices before taking log lines. Otherwise forty noisy test
 // lines could crowd out the explicit "no per-test output" fact for another stage.
-const boundedFallback = [];
-let fallbackBytes = 0;
-for (const line of fallbackLines) {
-  if (boundedFallback.length >= MAX_LINES) break;
-  const separator = boundedFallback.length > 0 ? 1 : 0;
-  const remaining = MAX_BYTES - fallbackBytes - separator;
-  if (remaining <= 0) break;
-  const fitted = truncateUtf8(line, remaining);
-  if (!fitted) break;
-  boundedFallback.push(fitted);
-  fallbackBytes += separator + byteLength(fitted);
-}
+const boundedFallback = takeBounded(fallbackLines, MAX_LINES, MAX_BYTES);
 
-const candidateLimit = Math.max(0, MAX_LINES - boundedFallback.length);
+const candidateLimit = Math.max(0, MAX_LINES - boundedFallback.lines.length);
 const candidateBudget = Math.max(
   0,
-  MAX_BYTES - fallbackBytes - (boundedFallback.length > 0 ? 1 : 0),
+  MAX_BYTES - boundedFallback.bytes - (boundedFallback.lines.length > 0 ? 1 : 0),
 );
-const selected = [];
-let selectedBytes = 0;
-for (const record of records) {
-  if (selected.length >= candidateLimit) break;
-  const separator = selected.length > 0 ? 1 : 0;
-  const remaining = candidateBudget - selectedBytes - separator;
-  if (remaining <= 0) break;
-  const fitted = truncateUtf8(record.line, remaining);
-  if (!fitted) break;
-  selected.push(fitted);
-  selectedBytes += separator + byteLength(fitted);
-  if (fitted !== record.line) break;
-}
+const selected = takeBounded(records.map((record) => record.line), candidateLimit, candidateBudget);
 
-process.stdout.write([...selected, ...boundedFallback].join("\n"));
+process.stdout.write([...selected.lines, ...boundedFallback.lines].join("\n"));
+};
+
+main().catch((error) => {
+  process.stderr.write(`gate failure excerpt extraction failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});
 NODE
 }
 

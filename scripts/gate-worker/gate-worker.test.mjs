@@ -566,7 +566,7 @@ test("a gate that fails is 1 and says MERGE GATE: FAIL", (t) => {
   const result = runGate(fixture.home, [fixture.oid]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
-  assert.match(result.stdout, /failure excerpt \(last 200 lines of worker log\)/);
+  assert.match(result.stdout, /failure excerpt \(last 200 lines per failing step\)/);
   assert.match(result.stdout, /packages\/fixture\.test\.ts/);
   assert.match(result.stdout, /not ok 1 - first assertion/);
 });
@@ -581,7 +581,7 @@ test("a gate FAIL forwards a bounded tail of the worker log", (t) => {
   const result = runGate(fixture.home, [fixture.oid]);
   assert.equal(result.status, 1, result.stdout + result.stderr);
 
-  const marker = "run-gate: failure excerpt (last 200 lines of worker log)";
+  const marker = "run-gate: failure excerpt (last 200 lines per failing step)";
   const markerAt = result.stdout.indexOf(marker);
   const verdictAt = result.stdout.indexOf("MERGE GATE: FAIL", markerAt);
   assert.ok(markerAt >= 0, result.stdout);
@@ -591,6 +591,36 @@ test("a gate FAIL forwards a bounded tail of the worker log", (t) => {
   assert.ok(forwarded.length <= 200, `forwarded ${forwarded.length} lines`);
   assert.match(excerpt, /fixture-output-204/);
   assert.doesNotMatch(excerpt, /fixture-output-000/);
+});
+
+test("a gate FAIL forwards the last 200 lines of every failing step", (t) => {
+  const laterOutput = Array.from({ length: 205 }, (_, index) =>
+    `printf 'later-stage-output-${String(index).padStart(3, "0")}\\n'`,
+  ).join("\n");
+  const fixture = gateHome(t, {
+    verdict: [
+      "printf '%s\\n' '--- database tests (db + api) ---'",
+      "printf '%s\\n' '# Subtest: packages/db/src/early.dbtest.ts'",
+      "printf '%s\\n' 'not ok 1 - early database assertion'",
+      "printf '%s\\n' 'AssertionError: early database assertion'",
+      "printf '%s\\n' '--- unit tests (all workspaces) ---'",
+      laterOutput,
+      "printf '%s\\n' '# Subtest: packages/api/src/late.test.ts'",
+      "printf '%s\\n' 'not ok 1 - late unit assertion'",
+      "printf '%s\\n' 'AssertionError: late unit assertion'",
+      "printf '%s\\n' 'MERGE GATE: FAIL (database tests (db + api), unit tests (all workspaces))'",
+      "exit 1",
+    ].join("\n"),
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /--- database tests \(db \+ api\) ---/u);
+  assert.match(result.stdout, /packages\/db\/src\/early\.dbtest\.ts/u);
+  assert.match(result.stdout, /early database assertion/u);
+  assert.match(result.stdout, /--- unit tests \(all workspaces\) ---/u);
+  assert.match(result.stdout, /packages\/api\/src\/late\.test\.ts/u);
+  assert.match(result.stdout, /late unit assertion/u);
+  assert.ok(Buffer.byteLength(result.stdout, "utf8") <= 66_000, "forwarded stdout exceeded its bounded envelope");
 });
 
 test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {
@@ -611,7 +641,7 @@ test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {
     },
   );
   assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stdout, /run-gate: failure excerpt \(last 200 lines of worker log\)/);
+  assert.match(result.stdout, /run-gate: failure excerpt \(last 200 lines per failing step\)/);
   assert.match(result.stdout, /fixture-output-204/);
   assert.doesNotMatch(result.stdout, /fixture-output-000/);
   assert.match(result.stdout, /MERGE GATE: FAIL \(fixture\)/);

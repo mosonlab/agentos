@@ -30,8 +30,8 @@
 # worktree, run scripts/merge-gate.sh --expect-head <oid> inside it, keep the full
 # log on this host, and print the verdict on stdout. Everything else — progress,
 # npm noise, docker noise — goes to the log. A FAIL also forwards a bounded tail
-# of that log so the local dispatcher can record the first useful test evidence;
-# anyone debugging can still scp the full log.
+# for each failing step so the local dispatcher can record useful test evidence
+# from every failure; anyone debugging can still scp the full log.
 #
 # Exit codes are merge-gate.sh's, passed through unchanged, plus one this
 # harness adds for everything that stops it before merge-gate.sh forms a verdict.
@@ -369,16 +369,117 @@ if [ -z "$verdict" ]; then
   status="$GATE_EXIT_NO_VERDICT"
 fi
 
+forward_failure_excerpt() {
+  node - "$1" "$2" <<'NODE'
+const { createReadStream } = require("node:fs");
+const { createInterface } = require("node:readline");
+
+const [logPath, verdict] = process.argv.slice(2);
+const MAX_LINES_PER_STAGE = 200;
+const MAX_BYTES = 65536;
+const prefix = "MERGE GATE: FAIL (";
+
+const splitStages = (value) => {
+  const stages = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "(") depth += 1;
+    else if (character === ")" && depth > 0) depth -= 1;
+    else if (character === "," && depth === 0) {
+      const stage = value.slice(start, index).trim();
+      if (stage) stages.push(stage);
+      start = index + 1;
+    }
+  }
+  const finalStage = value.slice(start).trim();
+  if (finalStage) stages.push(finalStage);
+  return stages;
+};
+
+const summary = verdict.slice(prefix.length, -1);
+const stages = splitStages(summary);
+const rings = new Map(stages.map((stage) => [stage, []]));
+const globalRing = [];
+const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+const append = (ring, line) => {
+  ring.push(line);
+  if (ring.length > MAX_LINES_PER_STAGE) ring.shift();
+};
+
+const readLog = async () => {
+  let currentStage = null;
+  const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const rawLine of lines) {
+    const line = stripAnsi(rawLine);
+    const parallelHeading = line.match(/^\s*---\s+(.+?)\s+---\s*$/u)?.[1];
+    const serialHeading = line.match(/^\s*==\s+(.+?)\s*$/u)?.[1];
+    const heading = parallelHeading ?? serialHeading;
+    if (heading !== undefined) {
+      currentStage = stages.includes(heading) ? heading : null;
+      continue;
+    }
+    if (/^\s*(?:MERGE GATE:|GATE NOT RUN:)/u.test(line)) continue;
+    append(globalRing, line);
+    if (currentStage !== null) append(rings.get(currentStage), line);
+  }
+};
+
+const byteLength = (value) => Buffer.byteLength(value, "utf8");
+const truncateTailUtf8 = (value, limit) => {
+  const buffer = Buffer.from(value);
+  if (buffer.length <= limit) return value;
+  let start = buffer.length - limit;
+  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start += 1;
+  return buffer.subarray(start).toString("utf8");
+};
+
+const renderSection = (stage, sourceLines, budget) => {
+  const heading = `--- ${stage} ---`;
+  const selected = [];
+  let bytes = byteLength(heading);
+  for (let index = sourceLines.length - 1; index >= 0; index -= 1) {
+    const line = sourceLines[index];
+    const remaining = budget - bytes - 1;
+    if (remaining <= 0) break;
+    if (byteLength(line) > remaining) {
+      if (selected.length === 0) selected.unshift(truncateTailUtf8(line, remaining));
+      break;
+    }
+    selected.unshift(line);
+    bytes += 1 + byteLength(line);
+  }
+  return [heading, ...selected].join("\n");
+};
+
+const main = async () => {
+  await readLog();
+  const outputStages = stages.length > 0 ? stages : [summary.trim() || "gate"];
+  if (stages.length === 0) rings.set(outputStages[0], globalRing);
+  if (stages.length === 1 && rings.get(stages[0]).length === 0) rings.set(stages[0], globalRing);
+  const sectionBudget = Math.floor((MAX_BYTES - Math.max(0, outputStages.length - 1)) / outputStages.length);
+  const sections = outputStages.map((stage) => renderSection(stage, rings.get(stage) ?? [], sectionBudget));
+  process.stdout.write(sections.join("\n"));
+};
+
+main().catch((error) => {
+  process.stderr.write(`run-gate: could not forward failure excerpt: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});
+NODE
+}
+
 # The default path above keeps the gate's noisy output on the worker, which is
 # why a remote FAIL used to carry only its stage name back to the dispatcher.
-# Forward only the tail needed for a repair description. The line cap preserves
-# the useful last part of a step, and the byte cap keeps one pathological line
-# from turning the worker's stdout into an unbounded transport. Emit the final
-# verdict after the excerpt so every consumer still sees the proof line last.
+# Forward each failing step's tail for a repair description. Per-step line caps
+# preserve every failure, and the shared byte cap keeps pathological output from
+# becoming an unbounded transport. Emit the final verdict after the excerpt so
+# every consumer still sees the proof line last.
 case "$verdict" in
   'MERGE GATE: FAIL ('*')')
-    printf 'run-gate: failure excerpt (last 200 lines of worker log)\n'
-    tail -n 200 "$LOG" 2>/dev/null | head -c 65536 || true
+    printf 'run-gate: failure excerpt (last 200 lines per failing step)\n'
+    forward_failure_excerpt "$LOG" "$verdict" || true
     printf '\n'
     ;;
 esac
