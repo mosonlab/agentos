@@ -41,6 +41,8 @@ const assertRefusal = async (
   assert.equal(result.status, 422, JSON.stringify(result.body));
   assert.equal(result.body.code, code, JSON.stringify(result.body));
   assert.equal(result.body.stepIndex, stepIndex, JSON.stringify(result.body));
+  assert.notEqual(result.body.error, code, JSON.stringify(result.body));
+  assert.match(result.body.error, /Agent assignment.*invalid/u, JSON.stringify(result.body));
   assert.deepEqual(await readStepSnapshots(db, seed.template.id), before);
 };
 

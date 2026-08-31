@@ -258,7 +258,7 @@ export const validateTemplateGraph = (
       return {
         refusal: authoringRefusal(
           "assignee_invalid",
-          `Template step ${step.stepIndex} has an invalid assignee`,
+          `Agent assignment for template step ${step.stepIndex} is missing, archived, cross-project, or otherwise invalid`,
           step.stepIndex,
         ),
         warnings: [],
