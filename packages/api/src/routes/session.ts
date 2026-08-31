@@ -469,11 +469,11 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     } as const;
 
     type MergeOutcomeSubject = {
-    runId: string;
-    task: {
-      stepOutput?: { kind: string; body: string; runId: string | null } | null;
-      runs?: Array<{ id: string }>;
-    } | null;
+      runId: string;
+      task: {
+        stepOutput?: { kind: string; body: string; runId: string | null } | null;
+        runs?: Array<{ id: string }>;
+      } | null;
     };
     const withMergeOutcome = <T extends MergeOutcomeSubject>(session: T) => {
       const output = session.task?.stepOutput;
