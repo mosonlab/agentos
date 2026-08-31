@@ -24,7 +24,11 @@ const visibleText = (node: Element): string => (node.textContent ?? "").replace(
 test("the aggregate run line renders its full details without an ellipsis or a nowrap ancestor", () => {
   const line = parse(renderToStaticMarkup(
     <LocaleProvider initialLocale="en">
-      <RunLine run={run({ model: "claude-opus-5-with-a-very-long-identifier:high" })} showElapsed showModel />
+      <RunLine
+        run={run({ model: "claude-opus-5-with-a-very-long-identifier:high", status: "WAITING_INBOX" })}
+        showElapsed
+        showModel
+      />
     </LocaleProvider>,
   ));
 
@@ -33,13 +37,20 @@ test("the aggregate run line renders its full details without an ellipsis or a n
   // the seconds are matched rather than pinned.
   assert.match(
     visibleText(line),
-    /^run 7 · claude-opus-5-with-a-very-long-identifier · high · running 2[23]m \d+s$/u,
+    /^run 7 · claude-opus-5-with-a-very-long-identifier · high · waiting inbox · running 2[23]m \d+s$/u,
   );
 
   const details = line.querySelector("[data-run-line-details]");
   assert.ok(details, "the details span renders");
   assert.doesNotMatch(details.className, /text-ellipsis|overflow-hidden/u);
   assert.match(details.className, /\[overflow-wrap:anywhere\]/u);
+  // Separator spaces are normal wrap opportunities. Spaces within a logical
+  // detail token are non-breaking, so wrapping prefers the separators while
+  // overflow-wrap remains the fallback for an over-long token.
+  assert.match(
+    details.textContent ?? "",
+    /^ · claude-opus-5-with-a-very-long-identifier · high · waiting\u00a0inbox · running\u00a02[23]m\u00a0\d+s$/u,
+  );
   for (let node: Element | null = details; node !== null; node = node.parentElement) {
     assert.doesNotMatch(node.className, /whitespace-nowrap/u, `no nowrap ancestor: ${node.className}`);
     if (node === line) break;

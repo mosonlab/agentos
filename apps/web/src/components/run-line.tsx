@@ -70,7 +70,7 @@ export const RunLine = ({
   const hideStatus = run.status === "RUNNING"
     && badge === null
     && (elapsed !== null || suppressRunningStatus);
-  const runDetails = [
+  const runDetailParts = [
     ...(model === null ? [] : [
       model.model,
       ...(model.effort === null ? [] : [model.effort]),
@@ -81,11 +81,14 @@ export const RunLine = ({
     // status made a live card say "running" twice.
     ...(hideStatus ? [] : [t(presentation.key)]),
     ...(elapsed === null ? [] : [elapsed]),
-  ].join(" · ");
+  ];
+  const runDetails = runDetailParts
+    .map((part) => part.replaceAll(" ", "\u00a0"))
+    .join(" · ");
   // The row's live values sit at the end of the details string, so truncating
-  // it hid exactly what the row exists to show. The details wrap instead: the
-  // browser breaks at the " · " separators, and [overflow-wrap:anywhere]
-  // catches a single token wider than the column, such as a long model id.
+  // it hid exactly what the row exists to show. Non-breaking spaces keep each
+  // logical detail together so normal wrapping prefers the " · " separators;
+  // [overflow-wrap:anywhere] catches a token wider than the column.
   return (
     <span data-run-line="" className="inline-flex min-w-0 flex-wrap items-center gap-x-[6px]">
       <span className="inline-flex flex-none items-center gap-[6px] whitespace-nowrap">
