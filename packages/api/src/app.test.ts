@@ -178,67 +178,6 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
   assert.deepEqual(lost, ["run-dead"]);
 });
 
-test("template instantiate route maps an archived step agent to a named 400", async () => {
-  await withTokens(async () => {
-    const archivedAt = new Date();
-    const template = {
-      id: "template-1",
-      name: "Template",
-      variables: [],
-      steps: [{
-        id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work", outputKind: "result",
-        attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: "AGENT", assigneeAgentId: "agent-1",
-        assigneeAgent: { id: "agent-1", name: "Archived Ada", archivedAt },
-        approvalGate: false, opensPullRequest: true, runner: null,
-      }],
-    };
-    const database = {
-      $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
-        $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
-          const sql = "sql" in query ? query.sql : query.join(" ");
-          return sql.includes('"TaskTemplate"')
-            ? [{ id: template.id, projectId: "project-1", name: template.name }]
-            : [{ id: "agent-1", name: "Archived Ada", projectId: "project-1", archivedAt }];
-        },
-        taskTemplate: { findFirst: async () => template },
-        repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
-      }),
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
-      method: "POST",
-      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ repoId: "repo-1", variables: {}, autoStart: false }),
-    });
-    assert.equal(response.status, 400);
-    assert.match(String((await response.json() as { error: string }).error), /Implementation.*Archived Ada.*archived/);
-  });
-});
-
-test("template instantiate route rejects blank variables and invalid Git refs before database access", async () => {
-  await withTokens(async () => {
-    const database = new Proxy({}, {
-      get: () => { throw new Error("database must not be read for invalid input"); },
-    }) as unknown as PrismaClient;
-    const cases = [
-      { branchName: "" },
-      { branchName: "   " },
-      { branchName: "bad..branch" },
-      { branchName: "refs/heads/main" },
-      { branchName: "feature/.hidden" },
-      { branchName: "feature/main.lock" },
-      { branchName: "bad\nbranch" },
-    ];
-    for (const variables of cases) {
-      const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
-        method: "POST",
-        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: "repo-1", variables, autoStart: false }),
-      });
-      assert.equal(response.status, 400, JSON.stringify(variables));
-    }
-  });
-});
-
 test("partitionArchivable keeps the busy tasks out of the archive set and counts them as skipped", () => {
   assert.deepEqual(partitionArchivable(["a", "b", "c"], ["b"]), { archive: ["a", "c"], skipped: 1 });
   assert.deepEqual(partitionArchivable(["a", "b"], []), { archive: ["a", "b"], skipped: 0 });

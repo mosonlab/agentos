@@ -79,9 +79,9 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
     });
   });
 
-  // The webhook route remains inline in app.ts for this chain. Return a
-  // continuation so that app.ts can register it between /runners and /files,
-  // preserving Hono's route matching order exactly.
+  // registerTemplateRoutes registers the webhook route between /runners and the
+  // deferred /files routes. Return a continuation so app.ts can preserve Hono's
+  // route matching order exactly.
   return (): void => {
     app.get("/files", async (context) => {
       try {
