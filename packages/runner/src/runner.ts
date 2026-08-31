@@ -46,6 +46,7 @@ import {
 import { createRunLease, deliverUnderLease, type RunLease } from "./run-lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
+import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
@@ -601,6 +602,73 @@ export const executeClaim = async (
     // execute evidence. The opening delivery renewal fixes the deadline from
     // the last attempt known to have landed.
     await runLease.enterPhase({ name: "deliver", startedAt: new Date() });
+    let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
+    let capturedHeadSha: string | undefined;
+    try {
+      gitResult = await captureWorkspaceResult(config, workspace);
+      capturedHeadSha = gitResult.headSha;
+    } catch (error: unknown) {
+      const message = `Unable to snapshot git result: ${errorMessage(error)}`;
+      sink({ source: "RUNNER", type: "WORKSPACE_RESULT_SNAPSHOT_FAILED", payload: { message } });
+      await controlPlane.appendActivity(config, claim, message, { stream: "runner" }).catch((activityError: unknown) => {
+        sink({
+          source: "RUNNER",
+          type: "WORKSPACE_RESULT_SNAPSHOT_REPORT_FAILED",
+          payload: { message: errorMessage(activityError) },
+        });
+      });
+    }
+    let postDeliveryDisconnectTolerated = false;
+    const disconnectCandidate = evidence.exitCode === 0
+      && evidence.signal === null
+      && evidence.terminationReason === null
+      && (!evidence.terminalEventSeen || !evidence.terminalSuccess)
+      && adapter.classifyError(evidence).failureClass === "PROTOCOL_ERROR"
+      && remediationFailureReason === null
+      && budgetReason === null
+      && runLease.held;
+    if (disconnectCandidate) {
+      try {
+        const outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
+        const receipt = outputStatus?.outputPersisted
+          ? await readTaskOutputReceipt(workspace.path)
+          : null;
+        const expectedKind = "result";
+        postDeliveryDisconnectTolerated = outputStatus?.outputPersisted === true
+          && outputStatus.outputKind === expectedKind
+          && receipt?.runId === claim.run.id
+          && receipt.kind === expectedKind
+          && /^[0-9a-f]{40}$/u.test(receipt.commitSha)
+          && receipt.commitSha === capturedHeadSha;
+        if (outputStatus?.outputPersisted && !receipt) {
+          throw new Error(`Persisted ${expectedKind} output has no local delivery receipt`);
+        }
+        if (postDeliveryDisconnectTolerated) {
+          const providerError = summarizeEvidence(evidence.providerError) ?? "no providerError reported";
+          try {
+            await controlPlane.appendActivity(
+              config,
+              claim,
+              `A provider disconnect after delivery was tolerated: ${providerError}`,
+              { stream: "runner" },
+            );
+          } catch (error: unknown) {
+            postDeliveryDisconnectTolerated = false;
+            sink({
+              source: "RUNNER",
+              type: "POST_DELIVERY_DISCONNECT_ACTIVITY_FAILED",
+              payload: { message: errorMessage(error), providerError },
+            });
+          }
+        }
+      } catch (error: unknown) {
+        sink({
+          source: "RUNNER",
+          type: "POST_DELIVERY_DISCONNECT_CHECK_FAILED",
+          payload: { message: errorMessage(error), providerError: evidence.providerError },
+        });
+      }
+    }
     await drainEventsUnderLease(runLease);
     if (!runLease.held) {
       const authority = await runLease.checkpoint();
@@ -618,18 +686,12 @@ export const executeClaim = async (
     const regressionMechanicallySettled = regressionHandoffPersisted
       && remediationFailureReason === null
       && budgetReason === null;
-    const executionSucceeded = (adapterExecutionSucceeded(evidence) || regressionMechanicallySettled)
+    const executionSucceeded = (adapterExecutionSucceeded(evidence)
+      || regressionMechanicallySettled
+      || postDeliveryDisconnectTolerated)
       && remediationFailureReason === null
       && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
-    let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
-    let capturedHeadSha: string | undefined;
-    try {
-      gitResult = await captureWorkspaceResult(config, workspace);
-      capturedHeadSha = gitResult.headSha;
-    } catch (error: unknown) {
-      await controlPlane.appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
-    }
     // Bound outside the closures below: `workspace` is nullable at the top of
     // this function, and the narrowing does not survive into a callback.
     const delivered = { ...workspace, branch: gitResult.branch };
@@ -711,7 +773,7 @@ export const executeClaim = async (
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     await runLease.close();
-    const acceptedEvidence = regressionMechanicallySettled
+    const acceptedEvidence = regressionMechanicallySettled || postDeliveryDisconnectTolerated
       ? {
         ...evidence,
         exitCode: 0,

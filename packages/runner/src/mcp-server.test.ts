@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { handleRequest, invokeTool, readCredentials, TOOLS, type SessionCredentials } from "./mcp-server.js";
+import { readTaskOutputReceipt } from "./task-output-receipt.js";
 
 type Received = { method: string; url: string; authorization: string | undefined; body: string };
 
@@ -12,6 +17,13 @@ const withApi = async (
   callback: (credentials: SessionCredentials, received: Received[]) => Promise<void>,
 ): Promise<void> => {
   const received: Received[] = [];
+  const workspace = await mkdtemp(join(tmpdir(), "agentos-mcp-workspace-"));
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: workspace });
+  execFileSync("git", ["config", "user.name", "Anneal Test"], { cwd: workspace });
+  execFileSync("git", ["config", "user.email", "runner@agentos.local"], { cwd: workspace });
+  await writeFile(join(workspace, "fixture.txt"), "fixture\n");
+  execFileSync("git", ["add", "fixture.txt"], { cwd: workspace });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: workspace });
   const server: Server = createServer((request, response) => {
     let body = "";
     request.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
@@ -31,10 +43,11 @@ const withApi = async (
       runId: "run-1",
       sessionToken: "agos_session_test",
       fencingToken: "1:run-1:token",
-      workspacePath: process.cwd(),
+      workspacePath: workspace,
     }, received);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(workspace, { recursive: true, force: true });
   }
 };
 
@@ -112,7 +125,13 @@ test("tools carry the session token and fencing token to the session endpoints",
     ]);
     assert.ok(received.every((hit) => hit.authorization === "Bearer agos_session_test"));
     assert.ok(received.every((hit) => JSON.parse(hit.body).fencingToken === "1:run-1:token"));
-    assert.match(String(JSON.parse(received[0]!.body).commitSha), /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
+    const commitSha = String(JSON.parse(received[0]!.body).commitSha);
+    assert.match(commitSha, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
+    assert.deepEqual(await readTaskOutputReceipt(credentials.workspacePath), {
+      runId: "run-1",
+      kind: "spec",
+      commitSha,
+    });
   });
 });
 

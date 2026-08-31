@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { requestFor, toolsFor, type SessionToolRequest } from "./session-tool-contract.js";
+import { writeTaskOutputReceipt } from "./task-output-receipt.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -127,6 +128,9 @@ export const invokeTool = async (
   if (name === "task_output") {
     const body = rawArguments.body as string;
     const kind = rawArguments.kind as string;
+    const commitSha = request.body?.commitSha;
+    if (typeof commitSha !== "string") throw new Error("task_output request omitted commitSha");
+    await writeTaskOutputReceipt(credentials.workspacePath, { runId: credentials.runId, kind, commitSha });
     const persisted = result as { predecessorOutputs?: unknown } | null;
     const predecessorOutputs = persisted?.predecessorOutputs;
     return text([

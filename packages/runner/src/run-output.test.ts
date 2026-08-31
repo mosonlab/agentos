@@ -215,6 +215,17 @@ const requiredOutputClaim = (remoteUrl: string): ClaimedTask => {
   };
 };
 
+const resultOutputClaim = (remoteUrl: string): ClaimedTask => {
+  const base = claim(remoteUrl);
+  return {
+    ...base,
+    task: {
+      ...base.task,
+      templateStep: { name: "Implementation", outputKind: "result" },
+    },
+  };
+};
+
 const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
   const base = claim(remoteUrl);
   return {
@@ -273,6 +284,27 @@ const outputStatus = (overrides: Partial<{
  */
 const succeedingAgentThatSignalsExit = (sentinel: string): string =>
   succeedingAgent.replace(/exit 0$/u, `touch ${sentinel}\nexit 0`);
+
+const disconnectedAfterDeliveryAgent = (
+  output: "matching" | "mismatched" | "missing",
+  exitCode = 0,
+): string => [
+  "#!/bin/sh",
+  'case "$1" in',
+  '  --version) echo "1.2.3-stub"; exit 0 ;;',
+  '  --help) echo "--setting-sources"; exit 0 ;;',
+  '  auth) echo \'{"loggedIn": true, "authMethod": "stub"}\'; exit 0 ;;',
+  "esac",
+  "cat > /dev/null",
+  ...committedFixtureChange,
+  ...(output === "missing" ? [] : [
+    'head_sha="$(git rev-parse HEAD)"',
+    ...(output === "mismatched" ? [`head_sha="${"a".repeat(40)}"`] : []),
+    'printf \'{"runId":"run-114","kind":"result","commitSha":"%s"}\\n\' "$head_sha" > .agentos/task-output-receipt.json',
+  ]),
+  'echo \'{"type":"result","is_error":true,"result":"provider stream ended before terminal completion"}\'',
+  `exit ${exitCode}`,
+].join("\n");
 
 test("a failed run's completion carries the output tail the run produced", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-"));
@@ -485,6 +517,7 @@ test("a successful run remediates its missing required output in the same provid
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion);
     assert.equal(completion.terminalSuccess, true);
+    assert.equal(completion.pushStatus, "SUCCEEDED");
     assert.equal(completion.output, "implemented the requested change");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -738,6 +771,177 @@ test("the original Run budget continues through remediation", async () => {
     assert.match(String(completion?.failureReason), /walltime budget exceeded/u);
     assert.ok(finished);
     assert.equal(finished.payload.outputPersisted, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exit code 0 after a persisted matching output promotes the run to SUCCEEDED", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-promoted-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, disconnectedAfterDeliveryAgent("matching"));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
+    });
+    const promotedClaim = resultOutputClaim(remote);
+    promotedClaim.run.branch = "configured-delivery";
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), promotedClaim, {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion);
+    assert.equal(completion.terminalSuccess, true);
+    assert.equal(completion.pushedBranch, "configured-delivery", JSON.stringify(completion));
+    assert.equal(completion.failureEnvelope, undefined);
+    assert.equal(completion.failureClass, undefined);
+    assert.deepEqual(controlPlane.publishedBranches, ["configured-delivery"]);
+    const tolerated = controlPlane.activities.find(({ body, metadata }) =>
+      metadata.stream === "runner" && body.includes("provider disconnect after delivery was tolerated"));
+    assert.ok(tolerated);
+    assert.match(tolerated.body, /provider stream ended before terminal completion/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exit code 0 with no persisted output stays FAILED", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-missing-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, disconnectedAfterDeliveryAgent("missing"));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: false }).task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.ok(completion?.failureEnvelope);
+    assert.notEqual(completion?.pushedBranch, "master");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("output lookup errors preserve the original PROTOCOL_ERROR and are reported", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-lookup-error-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, disconnectedAfterDeliveryAgent("matching"));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => {
+        throw new ControlPlaneError(503, "output status unavailable");
+      },
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.ok(completion?.failureEnvelope);
+    const reported = controlPlane.eventBatches.flat()
+      .find(({ type }) => type === "POST_DELIVERY_DISCONNECT_CHECK_FAILED");
+    assert.match(String(reported?.payload.message), /503/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted output whose commitSha differs from HEAD stays FAILED", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-stale-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, disconnectedAfterDeliveryAgent("mismatched"));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.ok(completion?.failureEnvelope);
+    assert.notEqual(completion?.pushedBranch, "master");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("nonzero exit with persisted output stays FAILED", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-nonzero-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, disconnectedAfterDeliveryAgent("matching", 1));
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "TASK_FAILED");
+    assert.ok(completion?.failureEnvelope);
+    assert.equal(controlPlane.outputStatusReadCount(), 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("timeout terminationReason with persisted output stays FAILED", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-terminated-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, disconnectedAfterDeliveryAgent("matching"));
+    await chmod(agentBinary, 0o755);
+    const adapter = {
+      ...adapters.CLAUDE,
+      start: async (...args: Parameters<typeof adapters.CLAUDE.start>) => {
+        const runtime = await adapters.CLAUDE.start(...args);
+        runtime.terminationReason = "timeout: test deadline";
+        return runtime;
+      },
+    };
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
+    });
+
+    await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "CANCELLED_OR_TIMED_OUT");
+    assert.ok(completion?.failureEnvelope);
+    assert.equal(controlPlane.outputStatusReadCount(), 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

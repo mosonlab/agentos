@@ -12,6 +12,9 @@
  *  the canonical definitions and request shapes. */
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
 type ToolName = "task_activity_log" | "task_output" | "task_status" | "task_patch" | "inbox_ask" | "revalidation_cancel"
@@ -293,12 +296,30 @@ const call = async (request: ToolRequest): Promise<unknown> => {
 
 const said = (text: string): ToolResult => ({ content: [{ type: "text", text }], details: {} });
 
+const writeTaskOutputReceipt = async (kind: string, commitSha: string): Promise<void> => {
+  const session = credentials();
+  const path = join(session.workspacePath, ".agentos", "task-output-receipt.json");
+  const temporary = `${path}.${process.pid}.${randomUUID()}`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    await writeFile(temporary, `${JSON.stringify({ runId: session.runId, kind, commitSha })}\n`, { mode: 0o600 });
+    await rename(temporary, path);
+  } catch (error: unknown) {
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+};
+
 const invokeTool = async (name: ToolName, params: Record<string, unknown>): Promise<ToolResult> => {
-  const result = await call(requestFor(name, params));
+  const request = requestFor(name, params);
+  const result = await call(request);
   if (name === "task_activity_log") return said("Activity recorded.");
   if (name === "task_output") {
     const body = params.body as string;
     const kind = params.kind as string;
+    const commitSha = request.body?.commitSha;
+    if (typeof commitSha !== "string") throw new Error("task_output request omitted commitSha");
+    await writeTaskOutputReceipt(kind, commitSha);
     const predecessorOutputs = (result as { predecessorOutputs?: unknown } | null)?.predecessorOutputs;
     return said([
       `Output persisted as '${kind}' (${body.length} characters).`,
