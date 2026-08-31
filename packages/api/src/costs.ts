@@ -742,7 +742,7 @@ export const readProjectCosts = async (
             )
           )
       )
-      SELECT task."id", task."projectId", task."name", task."status",
+      SELECT task."id", task."projectId", task."name", UPPER(task."status"::text) AS "status",
         task."chainId", task."chainIndex", task."chainLayer",
         step."name" AS "templateStepName",
         step."outputKind" AS "templateStepOutputKind",

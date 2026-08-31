@@ -406,6 +406,57 @@ test("the default window is 30 days and unsupported or malformed values are refu
   }
 });
 
+test("completed chains survive raw PostgreSQL Task status decoding", async () => {
+  const { project, repo, agent } = await seedProject("costs-completed-chain");
+  const dev = await agent("dev", "Developer");
+  const startedAt = daysAgo(1);
+  const endedAt = new Date(startedAt.getTime() + 5 * 60 * 1000);
+  const task = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Completed chain task",
+    description: "costs",
+    status: "DONE",
+    assigneeAgentId: dev.id,
+    repoId: repo.id,
+    chainId: unique("completed-chain"),
+    chainIndex: 0,
+    chainLayer: 0,
+  } });
+  const run = await db.run.create({ data: {
+    projectId: project.id,
+    taskId: task.id,
+    agentId: dev.id,
+    repoId: repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${task.id}:run:1:completed-chain`,
+    runner: "CLAUDE",
+    status: "SUCCEEDED",
+    model: "claude-opus-5",
+    promptHash: "hash",
+    startedAt,
+    endedAt,
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: project.id,
+    agentId: dev.id,
+    taskId: task.id,
+    runner: "CLAUDE",
+    executionStatus: "SUCCEEDED",
+    startedAt,
+    endedAt,
+    nativeChildUsed: false,
+    costUsd: "1.0000",
+    cacheCreationInputTokens: 0,
+  } });
+
+  const report = await readProjectCosts(db, project.id, 7, "UTC", new Date());
+
+  assert.equal(report.chains.length, 1);
+  assert.equal(report.chains[0]?.chainId, task.chainId);
+  assert.equal(report.chains[0]?.costUsd?.toString(), "1");
+});
+
 test("the 90-day costs read uses one project-wide query per table", async () => {
   const { project, repo, agent } = await seedProject("costs-query-count");
   const dev = await agent("dev", "Developer");
