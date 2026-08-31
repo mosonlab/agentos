@@ -73,7 +73,9 @@ export const FILES_PRECHECK_COMMAND = ["npm", "run", "db:files-precheck"] as con
  * (the `chore(release): prepare` commit) updates these two values to the
  * migration tail on disk at that commit. Adding a migration does not touch
  * them. Between releases, `db:migrate:release` on a main checkout stops with
- * `migration-tail` by design.
+ * `migration-tail` by design. A migration created before the recorded terminal
+ * but merged after the release cut is the exception: its timestamp changes the
+ * terminal's recorded position, so that migration's merge must update the pin.
  */
 export const RELEASE_CANDIDATE_MIGRATIONS = {
   count: 47,
