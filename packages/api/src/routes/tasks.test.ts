@@ -649,7 +649,8 @@ test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
           id: "prefixed-run", runNumber: 2, status: "SUCCEEDED", model: "openai-codex/gpt-5.6-sol:high",
           subagentModel: "gpt-5.6-luna:max",
           session: {
-            nativeChildUsed: false, costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+            nativeChildUsed: false, costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000,
+            cacheCreationInputTokens: 0, outputTokens: 100_000,
             startedAt: null, endedAt: null,
           },
         },
@@ -657,7 +658,8 @@ test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
           id: "reported-run", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium",
           subagentModel: null,
           session: {
-            costUsd: "0.42", inputTokens: null, cachedInputTokens: null, outputTokens: null,
+            costUsd: "0.42", inputTokens: null, cachedInputTokens: null,
+            cacheCreationInputTokens: null, outputTokens: null,
             startedAt: null, endedAt: null,
           },
         },
