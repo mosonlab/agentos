@@ -27,6 +27,30 @@ test("a provider-prefixed model uses the existing bare model price row", () => {
   assert.equal(cost.estimated, true);
 });
 
+test("Claude Opus token-only usage uses the new price row and effort normalization", () => {
+  const cost = sessionUsageCost("claude-opus-5:high", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 400_000,
+    outputTokens: 100_000,
+  });
+  // 600k uncached + 400k cached input and 100k output at Opus 5 rates.
+  assert.equal(cost.costUsd?.toString(), "5.7");
+  assert.equal(cost.estimated, true);
+});
+
+test("a provider-prefixed Claude Fable model uses its bare price row", () => {
+  const cost = sessionUsageCost("anthropic/claude-fable-5:medium", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 400_000,
+    outputTokens: 100_000,
+  });
+  // 600k uncached + 400k cached input and 100k output at Fable 5 rates.
+  assert.equal(cost.costUsd?.toString(), "11.4");
+  assert.equal(cost.estimated, true);
+});
+
 test("an unsplit native-child session uses the pinned Luna price", () => {
   const cost = sessionUsageCost("gpt-5.6-sol:high", {
     costUsd: null,
