@@ -215,6 +215,32 @@ test("valid step override copies only the targeted assignee and leaves template 
   assert.equal(noOpTask.assigneeAgentId, seed.canonicalTwo.id);
 });
 
+test("cross-project template-default assignees on integrator steps are refused as missing", async () => {
+  const seed = await fixture("foreign-template-default");
+  await db.taskTemplateStep.updateMany({
+    where: { taskTemplateId: seed.template.id, stepIndex: 1 },
+    data: { assigneeAgentId: seed.foreign.id, outputKind: "merge-result" },
+  });
+  const before = {
+    tasks: await db.task.count(),
+    activities: await db.taskActivity.count(),
+    runs: await db.run.count(),
+  };
+
+  const result = await request(seed.project.id, seed.template.id, {
+    repoId: seed.repo.id,
+    variables: {},
+  });
+
+  assert.equal(result.status, 400, JSON.stringify(result.body));
+  assert.equal(result.body.code, "template_step_agent_missing", JSON.stringify(result.body));
+  assert.deepEqual({
+    tasks: await db.task.count(),
+    activities: await db.taskActivity.count(),
+    runs: await db.run.count(),
+  }, before);
+});
+
 test("schema and materializer refusals return stable codes and leave no partial rows", async () => {
   const seed = await fixture("refusals");
   const cases: Array<{ body: unknown; code: string }> = [

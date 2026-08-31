@@ -747,8 +747,10 @@ curl -X POST "$BASE_URL/goals/$GOAL_ID/progress-log" \
 
 ## Task templates
 
-There is no create-template route in `app.ts`; templates are read, patched for
-webhook configuration, or instantiated.
+Templates can be cloned under a new project-local name, read, patched for
+webhook configuration, or instantiated. Cloning copies the description,
+variables, and complete Step graph, but clears webhook configuration; Tasks
+and trigger fires are never copied.
 
 ### GET `/projects/:projectId/task-templates`
 
@@ -756,6 +758,67 @@ webhook configuration, or instantiated.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/task-templates" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/projects/:projectId/task-templates/:templateId/clone`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON field: `name` (trimmed, non-empty, and at most 200 characters).
+- Optional JSON field: `description` (at most 50,000 characters); when omitted,
+  the source description is copied.
+- Returns `201 Created` with the cloned template and its ordered Steps.
+- Refusals: `404 Not Found` with code `template_not_in_project` when the source
+  is not in the addressed project; `409 Conflict` with code
+  `template_name_taken` when the name is already used in the project; and
+  `409 Conflict` with code `template_name_reserved` when the name is a current
+  or registered-legacy canonical identity.
+
+```sh
+curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"custom-review-workflow","description":"A project-specific workflow"}'
+```
+
+### PUT `/projects/:projectId/task-templates/:templateId/steps`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON field: `steps`, an array of at most 64 Steps. Each Step
+  requires `name`, `assigneeType`, `assigneeAgentId`, `prompt`,
+  `approvalGate`, `attachmentsFromPrevious`, `priorOutputKinds`,
+  `spawnPolicy`, `runner`, `outputKind`, `opensPullRequest`,
+  `requiresCommit`, `baseFromStepIndex`, and `layer`; `stepIndex` is
+  assigned densely from array order. `baseFromStepIndex` is a 1-based
+  position in the submitted array and may be `null`.
+- The request and every nested Step are strict: unknown fields, including a
+  caller-supplied `stepIndex`, are rejected with `400 Bad Request`.
+- Returns `200 OK` with `{ template, warnings }`. `template` is the
+  resulting template read projection and `warnings` is the complete warning
+  array for that graph. Warnings are not persisted.
+- Refusals: `404 Not Found` with `template_not_in_project` when the
+  addressed template is absent from the project; `409 Conflict` with
+  `template_canonical` for current or registered-legacy canonical identity,
+  or `template_in_use` when any Task references the template or one of its
+  Steps. The `template_in_use` recovery is to clone again.
+- An empty array answers `422 Unprocessable Entity` with
+  `graph_empty`. Other graph validator refusals use `422` with their stable
+  code and optional `stepIndex`: `first_step_not_agent`,
+  `first_layer_not_single`, `layer_order_invalid`, and `base_step_invalid` are
+  the ordering and base-reference checks. Output wiring also refuses
+  `prior_kind_unproduced`, `output_kind_duplicate`, and `prior_kind_duplicate`.
+  Gate and assignee checks refuse `approval_gate_in_parallel_layer`,
+  `assignee_invalid`, and `integrator_binding_invalid`. Agent assignments must
+  name an existing, non-archived Agent in the addressed project. Repo grants
+  are not checked while authoring; the instantiation route checks the grant
+  against its selected Repo. Warning codes are
+  `no_review_step`, `same_agent_implements_and_reviews`, and
+  `pull_request_without_regression`; warnings are non-blocking, describe the
+  complete resulting graph, and are ephemeral (they are not persisted or
+  returned by template reads).
+
+```sh
+curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
 ```
 
 ### GET `/task-templates/:templateId`

@@ -30,6 +30,8 @@ export {
   lockChainRows,
   lockChainStructure,
   lockRunRow,
+  lockTemplateRow,
+  lockTemplateStepRows,
   lockTaskRow,
 } from "./locks.js";
 export {

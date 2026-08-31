@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  AssigneeType,
   Prisma,
   RunnerKind,
   SecretPurpose,
@@ -49,6 +50,7 @@ import {
   type LiveAppOptions,
   type RouteDeps,
 } from "./routes/support.js";
+import { cloneTemplate, replaceTemplateSteps } from "./template-authoring.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
 import { SerializableTransactionExhaustedError } from "./transaction.js";
 import { withoutUndefined } from "./without-undefined.js";
@@ -76,6 +78,29 @@ const instantiateTemplateInput = z.object({
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
   }
 });
+const cloneTemplateInput = z.object({
+  name: z.string().trim().min(1).max(200),
+  description: z.string().max(50_000).optional(),
+});
+const replaceTemplateStepInput = z.object({
+  name: z.string().trim().min(1).max(200),
+  assigneeType: z.nativeEnum(AssigneeType),
+  assigneeAgentId: id.nullable(),
+  prompt: z.string().max(500_000),
+  approvalGate: z.boolean(),
+  attachmentsFromPrevious: z.boolean(),
+  priorOutputKinds: z.array(z.string().trim().min(1).max(200)).max(64),
+  spawnPolicy: z.record(z.string(), z.unknown()).nullable(),
+  runner: z.nativeEnum(RunnerKind).nullable(),
+  outputKind: z.string().trim().min(1).max(200),
+  opensPullRequest: z.boolean(),
+  requiresCommit: z.boolean(),
+  baseFromStepIndex: z.number().int().min(1).max(2_147_483_647).nullable(),
+  layer: z.number().int().min(-2_147_483_648).max(2_147_483_647),
+}).strict();
+const replaceTemplateStepsInput = z.object({
+  steps: z.array(replaceTemplateStepInput).max(64),
+}).strict();
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -233,6 +258,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
+  });
+  app.post("/projects/:projectId/task-templates/:templateId/clone", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, cloneTemplateInput);
+    return context.json(await cloneTemplate(db, projectId, templateId, body), 201);
+  });
+  app.put("/projects/:projectId/task-templates/:templateId/steps", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, replaceTemplateStepsInput);
+    return context.json(await replaceTemplateSteps(db, projectId, templateId, body));
   });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));

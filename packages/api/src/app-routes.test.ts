@@ -86,6 +86,8 @@ const expectedRoutes = [
   "POST /goals/:goalId/progress-log",
   "GET /projects/:projectId/task-templates",
   "GET /task-templates/:templateId",
+  "POST /projects/:projectId/task-templates/:templateId/clone",
+  "PUT /projects/:projectId/task-templates/:templateId/steps",
   "PATCH /task-templates/:templateId",
   "POST /projects/:projectId/task-templates/:templateId/instantiate",
   "GET /projects/:projectId/triggers",

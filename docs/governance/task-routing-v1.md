@@ -51,7 +51,7 @@ Choose Direct when one implementation context window can deliver a brief whose c
 
 Keep the template's default implementation assignee. Assign `senior-dev` (same rule for the review-fix step) only when the work touches persisted data or a defense-list path — merge gate, gate worker, migrations, merge automation — or when that classification is uncertain. Assign `frontend-dev` when the work is primarily a new or redesigned web page or UI surface (the operator 2026-08-27); the defense-list rule wins when both apply.
 
-A backlog card that needs a non-default implementation assignee states it as the machine-readable line `Route: implementation=senior-dev` (or `=frontend-dev`) in its description. Direct-template instantiation consumes that line, validates the allowed Agent name, and applies it to the implementation step. Explicit `stepOverrides` remain a separate API mechanism; supplying both mechanisms for the direct implementation step is refused. Other templates do not interpret Route-looking prose.
+A backlog card that needs a non-default implementation assignee states it as the machine-readable line `Route: implementation=<agent-name>` in its description. Direct-template instantiation consumes that line, resolves the named Agent in the project, applies the existing override safety checks, and assigns it to the implementation step. Explicit `stepOverrides` remain a separate API mechanism; supplying both mechanisms for the direct implementation step is refused. Other templates do not interpret Route-looking prose.
 
 ## Critical classification
 
@@ -85,7 +85,7 @@ Record this block when creating or materially rerouting a chain:
 ```text
 Routing Contract: v1.4
 Tier: Direct
-Implementation Agent: senior-dev-luna
+Implementation Agent: <project-agent-name>
 Critical: no
 Reason: Bounded change; Direct review and exact-head acceptance remain intact.
 ```

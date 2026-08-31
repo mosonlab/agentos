@@ -145,10 +145,11 @@ something outside the checkout.
 - Do not commit while a database suite is running. `build-provenance.dbtest.ts`
   asserts that the build stamp names the commit the worktree is at, so a commit
   mid-run fails the suite on the first file and aborts everything after it.
-- Chain template structure has no authoring API. Templates are edited in
-  `agents/templates/` and reach production through an ordinary pull request;
-  the operator procedure is maintained outside this repository, while the
-  closed sync contract remains enforced here.
+- Repository-owned canonical templates are edited in `agents/templates/` and
+  reach production through an ordinary pull request; the closed sync contract
+  remains enforced here. Operators can clone canonical or custom templates and
+  edit unused, non-canonical clones through the API documented in
+  [`docs/operator-api.md`](docs/operator-api.md).
 - A checkout named by a loaded Anneal service is an appliance checkout. Follow
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);

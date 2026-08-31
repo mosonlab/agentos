@@ -180,21 +180,29 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
 
 test("template instantiate route maps an archived step agent to a named 400", async () => {
   await withTokens(async () => {
+    const archivedAt = new Date();
+    const template = {
+      id: "template-1",
+      name: "Template",
+      variables: [],
+      steps: [{
+        id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work", outputKind: "result",
+        attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: "AGENT", assigneeAgentId: "agent-1",
+        assigneeAgent: { id: "agent-1", name: "Archived Ada", archivedAt },
+        approvalGate: false, opensPullRequest: true, runner: null,
+      }],
+    };
     const database = {
-      taskTemplate: {
-        findFirst: async () => ({
-          id: "template-1",
-          name: "Template",
-          variables: [],
-          steps: [{
-            id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work", outputKind: "result",
-            attachmentsFromPrevious: false, assigneeType: "AGENT", assigneeAgentId: "agent-1",
-            assigneeAgent: { id: "agent-1", name: "Archived Ada", archivedAt: new Date() },
-            approvalGate: false, runner: null,
-          }],
-        }),
-      },
-      repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
+          const sql = "sql" in query ? query.sql : query.join(" ");
+          return sql.includes('"TaskTemplate"')
+            ? [{ id: template.id, projectId: "project-1", name: template.name }]
+            : [{ id: "agent-1", name: "Archived Ada", projectId: "project-1", archivedAt }];
+        },
+        taskTemplate: { findFirst: async () => template },
+        repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+      }),
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
       method: "POST",

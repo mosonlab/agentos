@@ -1,14 +1,54 @@
 /**
  * Global database lock order for this package. Fencing writers take the Run
- * row before any Task row. For Chain writers, Task rows first, then Agent rows,
- * then AgentRepoAccess grant rows. Multiple Task rows use chainLayer, chainIndex,
- * and id order; multiple Agent rows use id order. The Chain advisory mutex
- * serializes structural changes even when no Task row exists. Archive and grant
- * revocation take only their own final lock, so they cannot reverse the order.
+ * row before any Task row. Template authoring takes the TaskTemplate row first,
+ * then its TaskTemplateStep rows in stepIndex/id order. Template instantiation
+ * takes that template mutex before its existing predecessor Task, Agent, and
+ * AgentRepoAccess locks; Task inserts then acquire the template and
+ * template-step foreign-key reference locks. For Chain writers, Task rows
+ * first, then Agent rows, then AgentRepoAccess grant rows. Multiple Task rows
+ * use chainLayer, chainIndex, and id order; multiple Agent rows use id order.
+ * The Chain advisory mutex serializes structural changes even when no Task row
+ * exists. Archive and grant revocation take only their own final lock, so they
+ * cannot reverse the order. Existing template writers were audited: canonical
+ * installation creates/updates a template before its steps, canonical sync
+ * updates steps without later taking a template lock, and the operator webhook
+ * patch takes only the template row. No existing writer takes a step row and
+ * then acquires its template row.
  */
 import { Prisma, type Agent } from "@prisma/client";
 
 type Tx = Prisma.TransactionClient;
+
+/**
+ * Takes the template-row mutex shared by authoring and instantiation.
+ *
+ * The caller deliberately receives the project and name from the locked row:
+ * project ownership and canonical identity must be checked after this lock,
+ * not from an unlocked preflight read that could race a canonical rollover.
+ */
+export const lockTemplateRow = async (
+  tx: Tx,
+  templateId: string,
+): Promise<{ id: string; projectId: string; name: string } | null> => {
+  const rows = await tx.$queryRaw<Array<{ id: string; projectId: string; name: string }>>`
+    SELECT "id", "projectId", "name" FROM "TaskTemplate"
+    WHERE "id" = ${templateId} FOR UPDATE
+  `;
+  return rows[0] ?? null;
+};
+
+/** Locks an existing template graph after its template row is locked. */
+export const lockTemplateStepRows = async (
+  tx: Tx,
+  templateId: string,
+): Promise<string[]> => {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "TaskTemplateStep"
+    WHERE "taskTemplateId" = ${templateId}
+    ORDER BY "stepIndex", "id" FOR UPDATE
+  `;
+  return rows.map((row) => row.id);
+};
 
 /**
  * Takes the Task-row mutex the archive/start/retry/cron writers all take.
