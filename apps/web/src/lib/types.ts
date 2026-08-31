@@ -22,6 +22,7 @@ export type {
   BoardTask,
   Chain,
   ChainAggregate,
+  ChainActiveRepair,
   ChainAggregateState,
   ChainControl,
   ChainFrontier,

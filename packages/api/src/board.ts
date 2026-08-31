@@ -134,6 +134,7 @@ export type BoardRow = {
     runNumber: number;
     status: BoardRunStatus;
     model: string;
+    codexServiceTier: BoardContractLatestRun["codexServiceTier"];
     subagentModel?: string | null;
     budgetGrants: number;
     session: {
@@ -252,24 +253,27 @@ export type BoardChainMember = {
   createdAt: Date;
   updatedAt: Date;
   templateStep: { name: string } | null;
+  /** Present only for detached merge-tail repairs; primary steps omit it. */
+  repairKind?: string;
   runs: BoardRow["runs"];
   stepOutput?: BoardRow["stepOutput"];
 };
 
 const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | undefined): BoardLatestRun | null => {
   const run = runs?.[0];
-  return run === undefined
-    ? null
-    : ({
-        id: run.id,
-        runNumber: run.runNumber,
-        status: run.status,
-        model: run.model,
-        costUsd: decimal(run.session?.costUsd),
-        startedAt: run.session?.startedAt ?? null,
-        endedAt: run.session?.endedAt ?? null,
-      } satisfies BoardLatestRun);
+  return run === undefined ? null : latestRunProjectionFromRun(run);
 };
+
+const latestRunProjectionFromRun = (run: BoardRow["runs"][number]): BoardLatestRun => ({
+  id: run.id,
+  runNumber: run.runNumber,
+  status: run.status,
+  model: run.model,
+  codexServiceTier: run.codexServiceTier,
+  costUsd: decimal(run.session?.costUsd),
+  startedAt: run.session?.startedAt ?? null,
+  endedAt: run.session?.endedAt ?? null,
+});
 
 /** Bind a merge result to the newest Run displayed beside it. */
 const latestRunMergeOutcome = (
@@ -306,6 +310,14 @@ const isActiveLatestRun = (member: Pick<BoardChainMember, "runs">): boolean => {
   const status = (member.runs ?? [])[0]?.status;
   return status !== undefined && ACTIVE_RUN_STATUSES.includes(status as (typeof ACTIVE_RUN_STATUSES)[number]);
 };
+
+type ActiveRepairMember = BoardChainMember & {
+  repairKind: string;
+  runs: [BoardRow["runs"][number], ...BoardRow["runs"][number][]];
+};
+
+const isActiveRepairMember = (member: BoardChainMember): member is ActiveRepairMember =>
+  member.repairKind !== undefined && member.runs.length > 0 && isActiveLatestRun(member);
 
 /**
  * Derive the single board card projection for one chain. `primaryMembers` are
@@ -383,6 +395,11 @@ export const chainAggregate = (
   ), members[0]!.updatedAt);
 
   const frontierPosition = primary.indexOf(frontierMember);
+  const activeRepairMember = repairs.find(isActiveRepairMember);
+  const activeRepair = activeRepairMember === undefined ? null : {
+    repairKind: activeRepairMember.repairKind,
+    latestRun: latestRunProjectionFromRun(activeRepairMember.runs[0]),
+  };
   return {
     chainId,
     chainName,
@@ -399,6 +416,7 @@ export const chainAggregate = (
       failureReason: frontierMember.failureReason,
       ...(frontierPosition >= 0 ? { position: frontierPosition + 1 } : {}),
     },
+    activeRepair,
     activation: {
       state: activationState,
       predecessor: predecessor === null || predecessor.status === TaskStatus.DONE
@@ -790,6 +808,7 @@ const boardChainRows = async (
           runNumber: true,
           status: true,
           model: true,
+          codexServiceTier: true,
           subagentModel: true,
           budgetGrants: true,
           session: {
@@ -834,6 +853,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         orderBy: { runNumber: "desc" },
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
+          codexServiceTier: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true,
@@ -969,8 +989,9 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     }
     const key = repairChainKeyByTask.get(row.id);
     if (key === undefined) continue;
-    const group = addChain(key, repairByTask.get(row.id)?.chainName ?? null);
-    group.repairs.push(memberWithDisplay(row));
+    const repair = repairByTask.get(row.id);
+    const group = addChain(key, repair?.chainName ?? null);
+    group.repairs.push(memberWithDisplay(repair === undefined ? row : { ...row, repairKind: repair.repairKind }));
   }
   const aggregateByChain = new Map<string, BoardContractChainAggregate<Date>>();
   for (const [key, group] of membersByChain) {

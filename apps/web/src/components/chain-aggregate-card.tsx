@@ -73,6 +73,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
   const memberTaskIds = members.map((member) => member.id);
+  const activeRepair = aggregate.activeRepair;
   const handlers: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
   const metaRows: ReactNode[] = [
       <span data-chain-progress="" className="contents">
@@ -92,7 +93,14 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
         </button>
       </span>,
       ...(aggregate.frontier.latestRun === null ? [] : [
-        <RunLine run={aggregate.frontier.latestRun} mergeOutcome={aggregate.frontier.mergeOutcome} showElapsed />,
+        <RunLine run={aggregate.frontier.latestRun} mergeOutcome={aggregate.frontier.mergeOutcome} showElapsed showModel />,
+      ]),
+      ...(activeRepair?.latestRun === null || activeRepair?.latestRun === undefined ? [] : [
+        <span data-chain-repair="" className="contents">
+          <span>{activeRepair.repairKind}</span>
+          <span aria-hidden="true"> · </span>
+          <RunLine run={activeRepair.latestRun} showElapsed showModel />
+        </span>,
       ]),
       ...(state === "parked-unactivated" && aggregate.activation.taskId !== null ? [
           <Button type="button" variant="legacyPrimary" size="legacySmall" onClick={(event) => { event.stopPropagation(); handlers.onActivate(aggregate.activation.taskId!); }}>

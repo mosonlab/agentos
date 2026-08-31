@@ -207,7 +207,7 @@ test("a standalone Agent task with an active Run does not offer Backlog", () => 
       id: "a1", name: "developer", title: "Developer", model: "gpt-5.6-sol", archivedAt: null,
     },
     runs: [{
-      id: "run-1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", budgetGrants: 0, session: null,
+      id: "run-1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, session: null,
     }],
   }), null, { hasRepoGrant: true, chainPredecessorsDone: true });
 
@@ -295,7 +295,7 @@ test("chainAggregate returns the exact board contract keys", () => {
   const aggregate = chainAggregate("c1", "Release", [member()], []);
 
   assert.deepEqual(Object.keys(aggregate).sort(), [
-    "activation", "chainId", "chainName", "createdAt", "detailTaskId", "frontier",
+    "activation", "activeRepair", "chainId", "chainName", "createdAt", "detailTaskId", "frontier",
     "status", "statusCounts", "stepCount", "totalCost", "updatedAt",
   ]);
   assert.deepEqual(Object.keys(aggregate.frontier).sort(), [
@@ -359,14 +359,14 @@ test("chainAggregate offers activation after a bound predecessor has settled", (
 test("chainAggregate sums member usage and groups a detached repair without inflating steps", () => {
   const aggregate = chainAggregate("c1", "Release", [
     member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0, runs: [
-      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
+      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
     ] }),
     member({ id: "step-2", status: "DONE", chainIndex: 1, chainLayer: 1 }),
   ], [
     member({
       id: "repair", name: "Merge-tail repair", displayName: "Merge-tail repair", chainId: null,
       chainIndex: null, chainLayer: null, status: "TODO", runs: [
-        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: "0.50" }) },
+        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "0.50" }) },
       ],
     }),
   ]);
@@ -376,18 +376,51 @@ test("chainAggregate sums member usage and groups a detached repair without infl
   assert.equal(aggregate.status, "TODO");
   assert.deepEqual(aggregate.frontier, {
     taskId: "repair", title: "Merge-tail repair", status: "TODO", latestRun: {
-      id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", costUsd: "0.50", startedAt: null, endedAt: null,
+      id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.50", startedAt: null, endedAt: null,
     }, mergeOutcome: null, failureReason: null,
   });
   assert.equal(aggregate.activation.state, "idle");
   assert.equal(aggregate.totalCost?.costUsd, "1.75");
 });
 
+test("chainAggregate projects an active detached repair without moving the frontier", () => {
+  const startedAt = new Date("2026-08-16T00:00:00.000Z");
+  const aggregate = chainAggregate("c1", "Release", [
+    member({ id: "regression", status: "REVIEW", chainIndex: 0, chainLayer: 0 }),
+  ], [
+    member({
+      id: "repair", name: "Merge-tail repair", displayName: "Merge-tail repair", chainId: null,
+      chainIndex: null, chainLayer: null, status: "TODO", repairKind: "gate-fix", runs: [
+        { id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST", budgetGrants: 0, session: session({ startedAt }) },
+      ],
+    }),
+  ]);
+
+  assert.equal(aggregate.frontier.taskId, "regression");
+  assert.deepEqual(aggregate.activeRepair, {
+    repairKind: "gate-fix",
+    latestRun: {
+      id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST",
+      costUsd: null, startedAt, endedAt: null,
+    },
+  });
+});
+
+test("chainAggregate omits an inactive detached repair", () => {
+  const aggregate = chainAggregate("c1", "Release", [member({ status: "REVIEW" })], [
+    member({
+      id: "repair", chainId: null, chainIndex: null, chainLayer: null, repairKind: "gate-fix",
+      runs: [{ id: "repair-run", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, session: null }],
+    }),
+  ]);
+  assert.equal(aggregate.activeRepair, null);
+});
+
 test("the Chain frontier projects a stopped merge outcome only for the Run it shows", () => {
   const stopped = JSON.stringify({ outcome: "stopped", condition: "head-drift", evidence: "live head changed" });
   const frontierRun = {
     id: "run-2", runNumber: 2, status: "SUCCEEDED" as const,
-    model: "claude-opus-5", budgetGrants: 0, session: null,
+    model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, session: null,
   };
   const projection = (runId: string) => chainAggregate("c1", "Release", [member({
     status: "DONE",
@@ -446,7 +479,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
 
 test("the card's merge outcome is bound to the run it shows, and is null everywhere else", () => {
   const merged = JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) });
-  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED" as const, model: "gpt-5.6-sol", budgetGrants: 0, session: null };
+  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED" as const, model: "gpt-5.6-sol", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, session: null };
   // §SF-1: an ordinary step's output is not a malformed merge result, it is not
   // a merge result at all, and 112 board cards must not each carry a marker.
   assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "code-review", body: "fine", runId: "r1" } }), null, moveContext).mergeOutcome, null);
@@ -462,13 +495,13 @@ test("the card's merge outcome is bound to the run it shows, and is null everywh
 test("the projection drops the Run and Session columns the board never reads", () => {
   const card = boardCard(row({
     runs: [{
-      id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", budgetGrants: 0,
+      id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0,
       // The real row carries ~45 more columns; only these fields survive.
       session: session({ costUsd: "1.25", startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z") }),
     }],
   }), null, moveContext);
   assert.deepEqual(card.latestRun, {
-    id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", costUsd: "1.25",
+    id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "1.25",
     startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"),
   });
   assert.equal(card.taskCost?.costUsd, "1.25");
@@ -479,10 +512,18 @@ test("the latest run carries its own claimed model, not the assignee's current o
   // relabel a run that already happened.
   const card = boardCard(row({
     assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high", archivedAt: null },
-    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", budgetGrants: 0, session: null }],
+    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", budgetGrants: 0, session: null }],
   }), null, moveContext);
   assert.equal(card.latestRun?.model, "claude-opus-5:medium");
   assert.equal(card.assigneeAgent?.model, "gpt-5.6-sol:high");
+});
+
+test("the latest run carries its claimed Codex service tier", () => {
+  const card = boardCard(row({ runs: [{
+    id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST", budgetGrants: 0,
+    session: null,
+  }] }), null, moveContext);
+  assert.equal(card.latestRun?.codexServiceTier, "FAST");
 });
 
 test("a task with no runs reports no latest run rather than an empty one", () => {
@@ -491,7 +532,7 @@ test("a task with no runs reports no latest run rather than an empty one", () =>
 
 test("a run with no session reports a null cost, not a zero one", () => {
   // `0` would read as "this run spent nothing"; the runner simply never said.
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", budgetGrants: 0, session: null }] }), null, moveContext);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, session: null }] }), null, moveContext);
   assert.equal(card.taskCost, null);
 });
 
@@ -499,7 +540,7 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
   // Prisma hands back a Decimal instance, not a string, and `JSON.stringify`
   // of one is `{"s":1,"e":0,...}` unless it is stringified on the way out.
   const decimal = new Prisma.Decimal("0.42");
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: decimal }) }] }), null, moveContext);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: decimal }) }] }), null, moveContext);
   assert.equal(card.taskCost?.costUsd, "0.42");
   assert.equal(card.latestRun?.costUsd, "0.42");
   assert.match(JSON.stringify(card), /"costUsd":"0\.42"/);
@@ -507,19 +548,19 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
 
 test("task cost sums every run including failures and marks an estimated summand", () => {
   const card = boardCard(row({ runs: [
-    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", budgetGrants: 0, session: session({
+    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({
       inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0,
     }) },
-    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
+    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
   ] }), null, moveContext);
-  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", costUsd: null, startedAt: null, endedAt: null });
+  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
 });
 
 test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
   const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", budgetGrants: 0,
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", budgetGrants: 0,
     subagentModel: "gpt-5.6-luna:max",
     session: session({ nativeChildUsed: true, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
   }] }), null, moveContext);
@@ -530,7 +571,7 @@ test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
 
 test("a native subagent grant without an observed child uses the root estimate", () => {
   const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", budgetGrants: 0,
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", budgetGrants: 0,
     subagentModel: "gpt-5.6-luna:max",
     session: session({ nativeChildUsed: false, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
   }] }), null, moveContext);
@@ -634,6 +675,40 @@ test("readBoard carries one aggregate for visible chain members and repair", asy
   assert.equal(projection.detailTaskId, regression.id);
 });
 
+test("readBoard projects an active repair kind and latest Run without replacing the frontier", async () => {
+  const startedAt = new Date("2026-08-16T00:00:00.000Z");
+  const regression = row({
+    id: "regression", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Regression", templateStep: { name: "Regression" }, status: "REVIEW",
+  });
+  const repair = row({
+    id: "repair", name: "Merge-tail repair", status: "TODO",
+    runs: [{
+      id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST",
+      budgetGrants: 0, session: session({ startedAt }),
+    }],
+  });
+  const { db } = boardReadDatabase({
+    rows: [regression, repair],
+    related: [{ id: regression.id, projectId: "p1", chainId: "c1" }],
+    activities: [{ taskId: repair.id, metadata: {
+      schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: regression.id,
+    } }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  const projection = cards.find((card) => card.id === regression.id)?.chainAggregate;
+  assert.ok(projection);
+  assert.equal(projection.frontier.taskId, regression.id);
+  assert.deepEqual(projection.activeRepair, {
+    repairKind: "gate-fix",
+    latestRun: {
+      id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST",
+      costUsd: null, startedAt, endedAt: null,
+    },
+  });
+});
+
 test("readBoard does not resurrect a fully archived chain through a detached repair", async () => {
   const archivedAt = new Date("2026-08-15T00:00:00Z");
   const implementation = row({
@@ -667,12 +742,12 @@ test("readBoard restores partly archived primary facts when only a detached repa
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
     name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
-    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: session({ costUsd: "1.25" }) }],
+    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "1.25" }) }],
   });
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
     name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE", archivedAt,
-    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: session({ costUsd: "0.75" }) }],
+    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "0.75" }) }],
   });
   const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
   const { db } = boardReadDatabase({
@@ -701,7 +776,7 @@ test("readBoard keeps an archived repair bound when its primary chain remains li
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
     name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE",
-    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", budgetGrants: 0, session: session({ costUsd: "0.75" }) }],
+    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "0.75" }) }],
   });
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
@@ -746,7 +821,7 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   // less than that whenever the task did not fail.
   const card = boardCard(row({
     assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium", archivedAt: null },
-    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", budgetGrants: 0, session: session({ costUsd: "0.42" }) }],
+    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "0.42" }) }],
   }), null, moveContext);
   // The card carries both cost surfaces — the latest run's own cost and the
   // cross-run task total, ownership and the creation timestamp used for queue

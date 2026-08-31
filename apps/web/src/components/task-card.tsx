@@ -68,6 +68,11 @@ export const cardTitle = (task: BoardTask): string => {
 export const cardModel = (task: BoardTask): string | null =>
   task.latestRun?.model ?? task.assigneeAgent?.model ?? null;
 
+const cardModelFast = (task: BoardTask, model: string): string => {
+  const tier = task.latestRun?.codexServiceTier;
+  return tier === "FAST" ? `${model} · fast` : model;
+};
+
 export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): string => {
   const run = task.latestRun;
   if (!run) return timeAgo(task.updatedAt);
@@ -115,6 +120,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const schedule = scheduleLabel(task);
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
   const model = cardModel(task);
+  const modelLine = model === null ? null : cardModelFast(task, model);
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   const title = cardTitle(task);
@@ -163,9 +169,13 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </span>,
     ]),
-    ...(task.latestRun === null ? [] : [<RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} />]),
-    ...(model === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model })}>
-      {model}
+    ...(task.latestRun === null ? [] : [<RunLine
+      run={task.latestRun}
+      mergeOutcome={task.mergeOutcome}
+      suppressRunningStatus={task.latestRun.status === "RUNNING" && task.latestRun.startedAt !== null}
+    />]),
+    ...(modelLine === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: modelLine })}>
+      {modelLine}
     </span>]),
   ];
   const footer = <>

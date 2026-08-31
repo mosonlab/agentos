@@ -7,6 +7,7 @@ import { ChainAggregateCard } from "../components/chain-aggregate-card";
 import { BoardColumn } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { COLUMNS, type BoardEntry, boardEntries, boardEntriesByStatus, countByStatus } from "../lib/board";
+import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import type { BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
 import { useTaskStartConfirmation } from "../pages/Tasks";
@@ -26,9 +27,30 @@ const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => (
   detailTaskId: "step-1",
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
+  activeRepair: null,
   activation: { state: "running", predecessor: null, taskId: "step-1" }, totalCost: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z", ...overrides,
 });
+
+type RunWithTier = NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" };
+type AggregateWithRepair = ChainAggregate & {
+  activeRepair: { repairKind: string; latestRun: RunWithTier };
+};
+
+const runWithTier = (overrides: Partial<RunWithTier> = {}): RunWithTier => ({
+  id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT",
+  costUsd: null, startedAt: null, endedAt: null, ...overrides,
+});
+
+const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): AggregateWithRepair => ({
+  ...aggregate(overrides),
+  activeRepair: {
+    repairKind: "gate-fix",
+    latestRun: runWithTier({ id: "repair-run", runNumber: 3, status: "RUNNING", codexServiceTier: "FAST", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }),
+  },
+});
+
+const visibleText = (markup: string): string => markup.replace(/<[^>]*>/gu, "");
 
 const chainStep = (id: string, position: number, status: TaskStatus, projection: ChainAggregate, overrides: Partial<BoardTask> = {}): BoardTask => task({
   id, name: `Release: ${id}`, displayName: id, chainId: projection.chainId, chainIndex: position - 1, chainName: projection.chainName,
@@ -90,6 +112,66 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.match(waitingMarkup, /Prepare release/);
   assert.match(waitingMarkup, /Locked by/);
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
+});
+
+test("aggregate card renders an active repair line and omits it when no repair is active", () => {
+  const activeMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={activeRepairAggregate()} />);
+  const activeText = visibleText(activeMarkup);
+  assert.match(activeMarkup, /data-chain-repair=""/u);
+  assert.match(activeText, /gate-fix · .*run 3 · gpt-5\.6-sol · high · fast · running \d+m/u);
+
+  const settledMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
+  assert.doesNotMatch(settledMarkup, /data-chain-repair=/u);
+});
+
+test("aggregate run lines split model effort, mark FAST only, and avoid duplicate localized running status", () => {
+  const finished = aggregate({
+    frontier: {
+      taskId: "step-3", title: "Implement release", status: "DONE", latestRun: runWithTier(),
+      mergeOutcome: null, failureReason: null, position: 3,
+    },
+  });
+  const finishedText = visibleText(renderToStaticMarkup(<ChainAggregateCard aggregate={finished} />));
+  assert.match(finishedText, /run 1 · gpt-5\.6-sol · high · succeeded/u);
+  assert.doesNotMatch(finishedText, /fast/u);
+
+  const active = activeRepairAggregate();
+  const englishText = visibleText(renderToStaticMarkup(<ChainAggregateCard aggregate={active} />));
+  assert.equal((englishText.match(/running/gu) ?? []).length, 1, englishText);
+
+  const chineseText = visibleText(renderToStaticMarkup(
+    <LocaleProvider initialLocale="zh"><ChainAggregateCard aggregate={active} /></LocaleProvider>,
+  ));
+  assert.equal((chineseText.match(/运行中/gu) ?? []).length, 1, chineseText);
+  assert.match(chineseText, /第 3 次运行 · gpt-5\.6-sol · high · fast · 已运行 \d+ 分/u);
+});
+
+test("active elapsed preserves non-running statuses and merge-outcome badges", () => {
+  const waiting = {
+    ...activeRepairAggregate(),
+    activeRepair: {
+      repairKind: "review-fix",
+      latestRun: runWithTier({ status: "WAITING_INBOX", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }),
+    },
+  };
+  const waitingText = visibleText(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={waiting} /></LocaleProvider>,
+  ));
+  assert.match(waitingText, /review-fix · .*waiting inbox · running \d+m/u);
+
+  const stopped = aggregate({
+    status: "DOING",
+    frontier: {
+      taskId: "step-3", title: "Merge", status: "DOING",
+      latestRun: runWithTier({ status: "RUNNING", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }),
+      mergeOutcome: { outcome: "stopped", condition: "head-drift", incident: false },
+      failureReason: null, position: 3,
+    },
+  });
+  const stoppedText = visibleText(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={stopped} /></LocaleProvider>,
+  ));
+  assert.match(stoppedText, /Stopped · running \d+m/u);
 });
 
 test("the shared card shell does not navigate a Chain card while text is selected", async () => {
