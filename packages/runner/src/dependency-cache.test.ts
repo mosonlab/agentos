@@ -634,31 +634,66 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
   }
 });
 
-test("retention keeps four recently used entries and reports phase latency", async () => {
+test("retention keeps twelve entries, then evicts the least-recently-used thirteenth", async () => {
+  assert.equal(DEPENDENCY_CACHE_ENTRY_LIMIT, 12, "the dependency cache retains twelve entries");
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-"));
   try {
     const configured = config(root);
     const fake = fakeInstallExecutor();
     const events: DependencyCacheProgress[] = [];
-    const requestedEntries = DEPENDENCY_CACHE_ENTRY_LIMIT + 2;
-    for (let index = 0; index < requestedEntries; index += 1) {
+    const retainedKeys: string[] = [];
+    for (let index = 0; index < DEPENDENCY_CACHE_ENTRY_LIMIT; index += 1) {
       const workspace = join(root, `workspace-${index}`);
       await createFixture(workspace);
       await writeFile(join(workspace, "package-lock.json"), packageLock(`1.0.${index}`));
-      await materializeWorkspaceDependencies(
+      const result = await materializeWorkspaceDependencies(
         configured,
         workspace,
         workspaceEnvironment(configured),
         { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       );
+      assert.ok(result.key);
+      retainedKeys.push(result.key);
     }
 
-    const entries = await readdir(join(root, "cache/entries"));
-    const usage = await readdir(join(root, "cache/usage"));
+    let entries = await readdir(join(root, "cache/entries"));
+    let usage = await readdir(join(root, "cache/usage"));
     assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
     assert.deepEqual(usage.sort(), entries.sort());
-    assert.equal(events.filter(({ event }) => event === "eviction").length, requestedEntries - DEPENDENCY_CACHE_ENTRY_LIMIT);
+    assert.equal(events.filter(({ event }) => event === "eviction").length, 0);
+
+    // Refresh the oldest entry so the next distinct publication must evict the
+    // second entry rather than the one we just used.
+    const refreshed = await materializeWorkspaceDependencies(
+      configured,
+      join(root, "workspace-0"),
+      workspaceEnvironment(configured),
+      { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+    );
+    assert.equal(refreshed.status, "restored");
+    const overflowIndex = DEPENDENCY_CACHE_ENTRY_LIMIT;
+    const thirteenthWorkspace = join(root, `workspace-${overflowIndex}`);
+    await createFixture(thirteenthWorkspace);
+    await writeFile(join(thirteenthWorkspace, "package-lock.json"), packageLock(`1.0.${overflowIndex}`));
+    const thirteenth = await materializeWorkspaceDependencies(
+      configured,
+      thirteenthWorkspace,
+      workspaceEnvironment(configured),
+      { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+    );
+    assert.ok(thirteenth.key);
+
+    entries = await readdir(join(root, "cache/entries"));
+    usage = await readdir(join(root, "cache/usage"));
+    assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
+    assert.deepEqual(usage.sort(), entries.sort());
+    assert.equal(events.filter(({ event }) => event === "eviction").length, 1);
+    assert.ok(entries.includes(retainedKeys[0]!));
+    assert.ok(!entries.includes(retainedKeys[1]!));
+    assert.ok(entries.includes(thirteenth.key));
     const phases = new Set(events.filter(({ event }) => event === "phase").map(({ phase }) => phase));
     assert.ok(phases.has("identity"));
     assert.ok(phases.has("install"));
