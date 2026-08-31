@@ -9,6 +9,88 @@ written.
 
 ## Unreleased
 
+## v0.6.0 — Developer Preview 6
+
+The sixth preview adds wave activation and live repair visibility to the chain
+board, makes zero-commit delivery outcomes explicit, and bounds the maintainer
+appliance's deployment steps. As with every 0.x minor, behaviour changes below
+are breaking-eligible. There is still no supported upgrade path between
+previews other than a fresh install. This release adds four migrations.
+
+### Board and chain operations
+
+- The Todo column can activate every parked chain aggregate on its current
+  visible page after one confirmation. Each chain retains its own startability
+  check; starts run concurrently, and a named refusal for one chain does not
+  stop the others.
+- Aggregate chain cards show an active detached merge-tail repair, including
+  its repair kind, latest Run, model and reasoning effort, Codex `FAST` tier and
+  elapsed time. The additive Board wire fields are
+  `chainAggregate.activeRepair` and `latestRun.codexServiceTier`.
+- Fully archived chains no longer reappear on the active Board through a
+  detached repair binding. Archived siblings still contribute to an aggregate
+  when a live member owns the card.
+
+### Runner delivery and chain evidence
+
+- A successful provider session whose Run requires a commit but leaves `HEAD`
+  at its base now fails before push or pull-request creation as
+  `NO_CHANGES_PRODUCED`, rather than surfacing GitHub's misleading
+  `No commits between` response. This outcome is not classified as an external
+  delivery failure and does not raise the retry budget.
+- Canonical output-only Direct and Full Assurance Steps now snapshot an
+  explicit `requiresCommit=false` contract onto each Run. They may publish an
+  unchanged shared branch for the next Step; implementation and planning Steps,
+  and manual Tasks, still require a commit by default.
+- A negative Regression verdict from an older output-only Run rejected under
+  the former commit requirement is audit-only evidence unless an exact repair
+  attempt consumed it. Valid repair handoffs remain fail-closed.
+
+### Merge-tail reliability
+
+- Historical pre-intent and target-branch-mismatch recovery refusals now use
+  typed `MergeRecoveryRefusalCode` values. Two migrations add the codes and
+  backfill exact legacy messages, so recovery decisions no longer parse
+  operator-facing prose.
+- Runner backend claim health, dependency-cache collaborators and the shared
+  Session, Run, Task, Chain, Trigger, Costs and Board wire contracts each have
+  one owning module instead of competing projections.
+
+### Maintainer deployment
+
+- A transient `remote-main-unreadable` result is retried within a bounded
+  budget. Only that transport escalation may self-clear after a later successful
+  read; persistent, authorization and malformed-response failures remain
+  latched, and the Inbox record remains as historical evidence.
+- Artifact build, backup, migration, Prisma generation, prompt sync and service
+  control have independent deadlines plus a deployment-barrier watchdog.
+  Ordinary timeouts roll back and release normally; a migration-deploy timeout
+  deliberately keeps services stopped and the PostgreSQL barrier held until an
+  operator safely runs `--clear-escalation`.
+
+### Gate and test structure
+
+- The longest parallel-review database test is split by subject so the merge
+  gate can schedule its cases in parallel without changing runtime behaviour.
+- No command, HTTP route or configuration key is intentionally removed in this
+  release. Observable contract additions are the `NO_CHANGES_PRODUCED` failure
+  class, the Step and Run `requiresCommit` policy, and the additive Board fields
+  above.
+
+### Known limitations
+
+- There is no supported in-place upgrade from v0.5.0. Install v0.6.0 against an
+  empty schema with `npm run db:migrate:release -- --fresh`.
+- The delivery symptom in [Issue #305](https://github.com/mosonlab/anneal/issues/305)
+  is now classified accurately, but the provider-side cause is not eliminated:
+  a code-producing provider can still end a successful session without writing
+  or committing its announced work. A manual Task's final prose remains in its
+  Session events and is not promoted to retry handoff output.
+- macOS on Apple Silicon remains the only target platform. Linux remains
+  unverified and Windows unsupported.
+- Anneal still launches coding CLIs with the operator account's authority and
+  is not a sandbox.
+
 ## v0.5.0 — Developer Preview 5
 
 The fifth preview makes the board read at chain level, makes completed work

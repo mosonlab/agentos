@@ -1,6 +1,6 @@
 {
   "name": "@anneal/runner",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -30,9 +30,9 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@anneal/build-info": "0.5.0",
-    "@anneal/db": "0.5.0",
-    "@anneal/github-client": "0.5.0",
+    "@anneal/build-info": "0.6.0",
+    "@anneal/db": "0.6.0",
+    "@anneal/github-client": "0.6.0",
     "dotenv": "^17.2.3",
     "fs-ext": "^2.1.1"
   },

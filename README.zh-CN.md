@@ -118,7 +118,7 @@ merge-tail 修复。</sub>
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.5.0
+git checkout v0.6.0
 npm ci
 npm run setup:local
 npm run build
@@ -132,7 +132,7 @@ npm run db:migrate:release -- --fresh
 
 ## 当前状态
 
-Developer Preview 5（v0.5.0）：接口与存储数据形态在 preview 之间可能
+Developer Preview 6（v0.6.0）：接口与存储数据形态在 preview 之间可能
 变化，唯一升级路径是全新安装。仅支持 Apple Silicon 上的 macOS。
 
 **把它指向任何你在乎的东西之前先读这段：** Anneal 以非交互的权限旁路
@@ -150,7 +150,7 @@ Provider CLI、它们的认证与套餐条款始终在你和 provider 之间；�
 [安装](docs/install.md) ·
 [安全](docs/release/security.md) ·
 [迁移与恢复](docs/release/migration-and-recovery.md) ·
-[发布说明](docs/release/v0.5.0-release-notes.md) ·
+[发布说明](docs/release/v0.6.0-release-notes.md) ·
 [贡献指南](CONTRIBUTING.md) ·
 [支持](SECURITY.md)
 
