@@ -566,7 +566,7 @@ test("a gate that fails is 1 and says MERGE GATE: FAIL", (t) => {
   const result = runGate(fixture.home, [fixture.oid]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
-  assert.match(result.stdout, /failed gate output \(last 200 lines\)/);
+  assert.match(result.stdout, /failure excerpt \(last 200 lines of worker log\)/);
   assert.match(result.stdout, /packages\/fixture\.test\.ts/);
   assert.match(result.stdout, /not ok 1 - first assertion/);
 });

@@ -384,13 +384,5 @@ case "$verdict" in
 esac
 
 printf '%s\n' "$verdict"
-# A normal (non-verbose) remote gate keeps the complete log on the worker and
-# historically returned only the verdict and its path. The repair loop needs a
-# small amount of the failed test output too, so forward the worker log's tail
-# on a real FAIL. Verbose callers already received the complete stream above.
-if [ "$status" -eq "$GATE_EXIT_FAIL" ] && [[ "$verdict" == 'MERGE GATE: FAIL ('*')' ]] && [ "$VERBOSE" -eq 0 ]; then
-  printf 'run-gate: failed gate output (last 200 lines)\n'
-  tail -n 200 "$LOG" || printf 'run-gate: could not read the failed gate log tail\n' >&2
-fi
 printf 'run-gate: log %s\n' "$LOG"
 exit "$status"
