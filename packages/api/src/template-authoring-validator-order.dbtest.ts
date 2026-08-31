@@ -125,7 +125,7 @@ test("fixed validator order returns only the earliest rule on repeated submissio
     },
   ] as const;
   for (const candidate of cases) {
-    const result = await replaceRequest(db, seed.project.id, seed.template.id, candidate);
+    const result = await replaceRequest(db, seed.project.id, seed.template.id, { steps: candidate.steps });
     assert.equal(result.status, 422, JSON.stringify(result.body));
     assert.equal(result.body.code, candidate.code, JSON.stringify(result.body));
     assert.equal(result.body.stepIndex, candidate.stepIndex, JSON.stringify(result.body));
