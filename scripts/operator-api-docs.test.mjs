@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 const handbook = readFileSync("docs/operator-api.md", "utf8");
-const appSource = readFileSync("packages/api/src/app.ts", "utf8");
+const routeSourceDirectory = "packages/api/src/routes";
+const routeSourcePaths = [
+  "packages/api/src/app.ts",
+  ...readdirSync(routeSourceDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.includes(".test."))
+    .map((entry) => join(routeSourceDirectory, entry.name)),
+];
+const routeSources = routeSourcePaths.map((path) => readFileSync(path, "utf8"));
 
 // Runner and session endpoints are internal protocols, not operator-facing routes.
 const internalRoutePrefixes = ["/runner/", "/session/"];
@@ -15,10 +23,12 @@ const documentedInternalRoutes = new Set([
   routeKey("POST", "/session/runs/:runId/revalidation/cancel"),
 ]);
 
-const appRouteRegistrations = [
-  ...appSource.matchAll(/\bapp\.(get|post|put|patch|delete)\s*\(\s*(["'])([^"']+)\2/gu),
+const apiRouteRegistrations = [
+  ...routeSources.flatMap((source) => [
+    ...source.matchAll(/\bapp\.(get|post|put|patch|delete)\s*\(\s*(["'])([^"']+)\2/gu),
+  ]),
 ].map(([, method, , path]) => ({ key: routeKey(method, path), path }));
-const appRoutes = new Set(appRouteRegistrations.map(({ key }) => key));
+const apiRoutes = new Set(apiRouteRegistrations.map(({ key }) => key));
 const handbookRoutes = new Set(
   [...handbook.matchAll(/^###\s+(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`/gmu)]
     .map(([, method, path]) => ({ method, path }))
@@ -26,12 +36,12 @@ const handbookRoutes = new Set(
 );
 
 test("every operator API route has a handbook entry", () => {
-  const missing = appRouteRegistrations
+  const missing = apiRouteRegistrations
     .filter(({ key, path }) => !isInternalRoute(path) || documentedInternalRoutes.has(key))
     .map(({ key }) => key)
     .filter((key) => !handbookRoutes.has(key))
     .sort();
-  const stale = [...handbookRoutes].filter((route) => !appRoutes.has(route)).sort();
+  const stale = [...handbookRoutes].filter((route) => !apiRoutes.has(route)).sort();
   const mismatch = [
     "Operator API route coverage mismatch.",
     `Missing handbook entries: ${missing.length === 0 ? "none" : missing.join(", ")}.`,

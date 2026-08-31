@@ -7,11 +7,12 @@ IDs such as `$PROJECT_ID`; replace them with values from your installation.
 JSON request bodies require `Content-Type: application/json`.
 
 The route list and input requirements below use the same method and path
-spelling as the route definitions in `packages/api/src/app.ts`. Fields called
+spelling as the route definitions in `packages/api/src/app.ts` and
+`packages/api/src/routes/`. Fields called
 “optional (default …)” are filled by the API when omitted. A body described as
 “at least one” is validated by a patch schema and must contain one or more of
-the named fields. This route list is coverage-tested against
-`packages/api/src/app.ts`; missing or stale entries fail
+the named fields. This route list is coverage-tested against those API route
+source files; missing or stale entries fail
 `scripts/operator-api-docs.test.mjs`.
 
 The polled collection routes `GET /projects`, `GET /projects/:projectId/agents`,
