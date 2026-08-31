@@ -26,10 +26,6 @@ import {
 } from "./template-errors.js";
 import { serializable } from "./transaction.js";
 
-// The clone operation lives in the authoring module, but this compatibility
-// export keeps template service consumers on the existing import surface.
-export { cloneTemplate, type CloneTemplateInput } from "./template-authoring.js";
-
 export type InstantiateTemplateInput = {
   repoId: string;
   variables: Record<string, string>;
@@ -45,12 +41,16 @@ export type InstantiateTemplateInput = {
 
 const stepOverrideKey = /^[1-9]\d*$/u;
 
-const implementationRouteLine = /^Route: implementation=([A-Za-z0-9-]+)(?: - .+)?$/mu;
+const implementationRouteLine = /^Route: implementation=(.+)$/mu;
 
 /** Read the machine-readable implementation route from a brief description. */
 export const parseImplementationRoute = (description: string | undefined): string | null => {
   const match = description?.match(implementationRouteLine);
-  return match?.[1] ?? null;
+  const value = match?.[1];
+  if (!value) return null;
+  const reasonSeparator = value.indexOf(" - ");
+  const name = reasonSeparator === -1 ? value : value.slice(0, reasonSeparator);
+  return name.length <= 80 && name.trim() === name ? name : null;
 };
 
 type OverrideAgent = {
@@ -211,6 +211,17 @@ export const instantiateTemplate = async (
     }
   }
   try {
+    // Route identity is deliberately discovered once, outside the retrying
+    // Serializable callback. If a concurrent rename aborts an Agent-row lock,
+    // the retry must keep locking this id so it can report the requested name
+    // changed instead of re-resolving the old name as missing.
+    const requestedImplementationRoute = parseImplementationRoute(input.description);
+    const initiallyResolvedRouteAgent = requestedImplementationRoute === null
+      ? null
+      : await db.agent.findFirst({
+        where: { projectId, name: requestedImplementationRoute },
+        select: { id: true, name: true, projectId: true, archivedAt: true },
+      });
     return await serializable(db, async (tx) => {
       // The template row is the shared mutex with structure replacement. No
       // graph row or graph-dependent decision may be trusted until this lock
@@ -228,7 +239,7 @@ export const instantiateTemplate = async (
       if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
       if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
       const implementationRoute = template.name === "direct-engineer-workflow"
-        ? parseImplementationRoute(input.description)
+        ? requestedImplementationRoute
         : null;
       const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
       const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
@@ -271,10 +282,7 @@ export const instantiateTemplate = async (
               `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
             );
           }
-          const routeAgent = await tx.agent.findFirst({
-            where: { projectId, name: implementationRoute },
-            select: { id: true, name: true, projectId: true, archivedAt: true },
-          });
+          const routeAgent = initiallyResolvedRouteAgent;
           if (!routeAgent) {
             throw templateRefusal(
               "step_override_agent_not_found",
@@ -425,7 +433,7 @@ export const instantiateTemplate = async (
         for (const effective of effectiveSteps) {
           const { step, override, assigneeAgentId } = effective;
           const lockedAgent = assigneeAgentId ? lockedAgents.get(assigneeAgentId) : undefined;
-          const assigneeAgent = lockedAgent && assigneeAgentId
+          const assigneeAgent = lockedAgent && assigneeAgentId && lockedAgent.projectId === projectId
             ? { id: assigneeAgentId, ...lockedAgent }
             : null;
           effective.assigneeAgent = assigneeAgent;
@@ -435,7 +443,7 @@ export const instantiateTemplate = async (
               `Step override ${step.stepIndex} targets ${step.name}, whose assigneeType is ${step.assigneeType}; only AGENT steps may be overridden`,
             );
           }
-          if (override && (!assigneeAgent || assigneeAgent.projectId !== projectId)) {
+          if (override && !assigneeAgent) {
             throw templateRefusal(
               "step_override_agent_not_found",
               `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,

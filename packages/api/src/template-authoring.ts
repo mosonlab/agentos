@@ -91,10 +91,10 @@ const cloneJson = (value: Prisma.JsonValue | null): Prisma.InputJsonValue | type
  * refusal remains the only refusal returned for a graph. Agent facts are read
  * by the transaction caller so this function never opens a transaction.
  */
-export const validateTemplateGraph = (
+const validateTemplateGraph = (
   steps: readonly TemplateAuthoringStep[],
   agents: ReadonlyMap<string, TemplateAuthoringAgent>,
-  projectId?: string,
+  projectId: string,
 ): TemplateGraphValidation => {
   // 1. graph_empty.
   if (steps.length === 0) {
@@ -253,7 +253,7 @@ export const validateTemplateGraph = (
       : step.assigneeAgentId === null
         || agent === undefined
         || agent.archivedAt !== null
-        || (projectId !== undefined && agent.projectId !== projectId);
+        || agent.projectId !== projectId;
     if (invalid) {
       return {
         refusal: authoringRefusal(
@@ -294,7 +294,7 @@ export const validateTemplateGraph = (
   // complete order; the replace transaction never writes them anywhere.
   const reviewSteps = steps.filter((step) => {
     const role = stepRole({ outputKind: step.outputKind });
-    return role === "sol-findings" || role === "blind-findings";
+    return role === "plan-review" || role === "sol-findings" || role === "blind-findings";
   });
   const warnings: TemplateAuthoringWarning[] = [];
   if (reviewSteps.length === 0) {
@@ -505,28 +505,26 @@ export const replaceTemplateSteps = async (
   if (validation.refusal) throw validation.refusal;
 
   await tx.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId } });
-  if (normalizedSteps.length > 0) {
-    await tx.taskTemplateStep.createMany({
-      data: normalizedSteps.map((step) => ({
-        taskTemplateId: templateId,
-        stepIndex: step.stepIndex,
-        name: step.name,
-        assigneeType: step.assigneeType,
-        assigneeAgentId: step.assigneeAgentId,
-        prompt: step.prompt,
-        approvalGate: step.approvalGate,
-        attachmentsFromPrevious: step.attachmentsFromPrevious,
-        priorOutputKinds: step.priorOutputKinds,
-        spawnPolicy: cloneJson(step.spawnPolicy),
-        runner: step.runner,
-        outputKind: step.outputKind,
-        opensPullRequest: step.opensPullRequest,
-        requiresCommit: step.requiresCommit,
-        baseFromStepIndex: step.baseFromStepIndex,
-        layer: step.layer,
-      })),
-    });
-  }
+  await tx.taskTemplateStep.createMany({
+    data: normalizedSteps.map((step) => ({
+      taskTemplateId: templateId,
+      stepIndex: step.stepIndex,
+      name: step.name,
+      assigneeType: step.assigneeType,
+      assigneeAgentId: step.assigneeAgentId,
+      prompt: step.prompt,
+      approvalGate: step.approvalGate,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      priorOutputKinds: step.priorOutputKinds,
+      spawnPolicy: cloneJson(step.spawnPolicy),
+      runner: step.runner,
+      outputKind: step.outputKind,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      baseFromStepIndex: step.baseFromStepIndex,
+      layer: step.layer,
+    })),
+  });
 
   const savedTemplate = await tx.taskTemplate.findUniqueOrThrow({
     where: { id: templateId },

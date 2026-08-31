@@ -47,12 +47,3 @@ export class TemplateInstantiationRefusal extends Error {
 export const isTemplateInstantiationRefusal = (
   error: unknown,
 ): error is TemplateInstantiationRefusal => error instanceof TemplateInstantiationRefusal;
-
-// Kept alongside the instantiation errors for callers that centralise their
-// template error imports; the authoring family remains a distinct class and
-// status contract.
-export {
-  TemplateAuthoringRefusal,
-  isTemplateAuthoringRefusal,
-  type TemplateAuthoringRefusalCode,
-} from "./template-authoring-errors.js";

@@ -30,7 +30,7 @@ after(async () => {
 
 const warningCodes = (body: any): string[] => body.warnings.map((warning: any) => warning.code);
 
-test("a graph without a review warns, and recognized versioned review removes only that warning", async () => {
+test("a graph without a review warns, and every recognized review role removes only that warning", async () => {
   const seed = await seedAuthoringTemplate(db, "warnings-review");
   const implementation = stepPayload(seed, 1, {
     layer: 1,
@@ -60,6 +60,20 @@ test("a graph without a review warns, and recognized versioned review removes on
   });
   assert.equal(withReview.status, 200, JSON.stringify(withReview.body));
   assert.deepEqual(warningCodes(withReview.body), []);
+
+  const withPlanReview = await replaceRequest(db, seed.project.id, seed.template.id, {
+    steps: [
+      implementation,
+      stepPayload(seed, 2, {
+        layer: 2,
+        outputKind: "plan-review-v3",
+        assigneeAgentId: seed.agents[1]!.id,
+        priorOutputKinds: ["implementation-v2"],
+      }),
+    ],
+  });
+  assert.equal(withPlanReview.status, 200, JSON.stringify(withPlanReview.body));
+  assert.deepEqual(warningCodes(withPlanReview.body), []);
 });
 
 test("the same Agent implementing and reviewing warns, while different Agents remove it", async () => {

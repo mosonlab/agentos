@@ -64,6 +64,7 @@ test("composed task descriptions derive the prior-output reminder from declared 
 test("implementation route parsing accepts the machine-readable name before an optional reason", () => {
   assert.equal(parseImplementationRoute("Build it\nRoute: implementation=senior-dev\n"), "senior-dev");
   assert.equal(parseImplementationRoute("Route: implementation=frontend-dev"), "frontend-dev");
+  assert.equal(parseImplementationRoute("Route: implementation=project_specific.implementer"), "project_specific.implementer");
   assert.equal(parseImplementationRoute("Route: implementation=senior-dev - step renumbering crosses contracts"), "senior-dev");
   assert.equal(parseImplementationRoute("Route: implementation=senior-dev "), null);
   assert.equal(parseImplementationRoute("Route: implementation=unknown"), "unknown");
@@ -410,7 +411,8 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
     id: "agent-1", name: "Racing Agent", archivedAt: null, model: "codex",
     runnerPreference: RunnerPreference.CODEX, foundationalPrompt: "foundation", rolePrompt: "role",
   };
-  let attempts = 0;
+  let transactionAttempts = 0;
+  let agentLockConflicts = 0;
   const db = {
     taskTemplate: {
       findFirst: async () => ({
@@ -425,18 +427,21 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
     },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
-    $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
+    $transaction: async (operation: (client: unknown) => Promise<unknown>) => {
+      transactionAttempts += 1;
+      return operation({
       $queryRaw: async (query: TemplateStringsArray) => {
-        attempts += 1;
+        const sql = query.join(" ");
         // First attempt: the archive holds the row and commits under us.
-        if (attempts === 1) {
+        if (!sql.includes('"TaskTemplate"') && agentLockConflicts === 0) {
+          agentLockConflicts += 1;
           throw new Prisma.PrismaClientKnownRequestError("Raw query failed", {
             code: "P2010",
             clientVersion: "test",
             meta: { code: "40001", message: "could not serialize access due to concurrent update" },
           });
         }
-        return query.join(" ").includes('"TaskTemplate"')
+        return sql.includes('"TaskTemplate"')
           ? [{ id: "template-1", projectId: "project-1", name: "Template" }]
           : [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }];
       },
@@ -454,13 +459,15 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
       task: { create: async () => { throw new Error("must not create task"); } },
       run: { create: async () => { throw new Error("must not create run"); } },
       taskActivity: { createMany: async () => ({ count: 0 }) },
-    }),
+      });
+    },
   } as unknown as PrismaClient;
   await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
     "template_step_agent_archived",
   );
-  assert.equal(attempts, 3, "the conflicting attempt is retried once and then decides on the re-read");
+  assert.equal(agentLockConflicts, 1, "the conflict is injected on the Agent-row lock");
+  assert.equal(transactionAttempts, 2, "the Agent-lock conflict retries the whole serializable transaction once");
 });
 
 test("template instantiation rejects an archived step agent and names the step", async () => {

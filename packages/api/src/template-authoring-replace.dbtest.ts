@@ -216,6 +216,22 @@ test("replace adds, removes, reorders, and edits every Step field with dense ind
       baseFromStepIndex: 1,
       layer: 2,
     },
+    {
+      name: "Operator approval",
+      assigneeType: AssigneeType.HUMAN,
+      assigneeAgentId: null,
+      prompt: "Approve the edited graph",
+      approvalGate: true,
+      attachmentsFromPrevious: true,
+      priorOutputKinds: ["sol-findings"],
+      spawnPolicy: null,
+      runner: null,
+      outputKind: "approval",
+      opensPullRequest: false,
+      requiresCommit: false,
+      baseFromStepIndex: 3,
+      layer: 3,
+    },
   ];
   const beforeTasks = await db.task.count();
   const beforeActivities = await db.taskActivity.count();
@@ -238,6 +254,30 @@ test("replace adds, removes, reorders, and edits every Step field with dense ind
   })));
   assert.equal(await db.task.count(), beforeTasks);
   assert.equal(await db.taskActivity.count(), beforeActivities);
+
+  const reducedInput = [
+    { ...replacementStep(seed), opensPullRequest: false },
+    {
+      ...input[2]!,
+      baseFromStepIndex: 1,
+      layer: 2,
+    },
+  ];
+  const reduced = await request(seed.project.id, seed.template.id, { steps: reducedInput });
+  assert.equal(reduced.status, 200, JSON.stringify(reduced.body));
+  assert.deepEqual(reduced.body.warnings, []);
+  assert.deepEqual(reduced.body.template.steps.map(stepProjection), reducedInput.map((step, index) => ({
+    ...step,
+    stepIndex: index + 1,
+  })));
+  const reducedPersisted = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: seed.template.id },
+    orderBy: { stepIndex: "asc" },
+  });
+  assert.deepEqual(reducedPersisted.map(stepProjection), reducedInput.map((step, index) => ({
+    ...step,
+    stepIndex: index + 1,
+  })));
 });
 
 test("replace strict schema refuses unknown fields and bounds without changing the prior graph", async () => {
@@ -325,16 +365,13 @@ test("replace refuses structural and prompt-only edits after a Task references t
     where: { taskTemplateId: seed.template.id },
     orderBy: { stepIndex: "asc" },
   });
+  const promptOnlySteps = before.map((step, index) => {
+    const { stepIndex: _serverOwnedStepIndex, ...payload } = stepProjection(step);
+    return index === 1 ? { ...payload, prompt: `${payload.prompt} (edited)` } : payload;
+  });
   for (const candidate of [
     { steps: [replacementStep(seed)] },
-    {
-      steps: [
-        {
-          ...replacementStep(seed),
-          prompt: "Prompt-only edit",
-        },
-      ],
-    },
+    { steps: promptOnlySteps },
   ]) {
     const result = await request(seed.project.id, seed.template.id, candidate);
     assert.equal(result.status, 409, JSON.stringify(result.body));
