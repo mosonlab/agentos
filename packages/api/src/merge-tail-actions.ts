@@ -554,6 +554,7 @@ export const createMergeTailRepairTask = async (
     headSha: string;
     baseHeadSha: string;
     summary: string;
+    gateFailureExcerpt?: string;
     now: Date;
   },
 ): Promise<{ taskId: string } | { refusal: string }> => {
@@ -612,6 +613,9 @@ export const createMergeTailRepairTask = async (
       : [
         `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
         input.summary,
+        ...(input.repairKind === "gate-fix" && input.gateFailureExcerpt !== undefined
+          ? ["Gate failure excerpt", input.gateFailureExcerpt]
+          : []),
         "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
       ]),
     ...(chainContext ? [chainContext] : []),
@@ -786,6 +790,11 @@ export const handleRegressionCompletion = async (
     headSha: verdict.headSha,
     baseHeadSha: verdict.baseHeadSha,
     summary: verdict.summary,
+    ...(verdict.outcome === "gate-fail"
+      && "gateFailureExcerpt" in verdict
+      && typeof verdict.gateFailureExcerpt === "string"
+      ? { gateFailureExcerpt: verdict.gateFailureExcerpt }
+      : {}),
     now: input.now,
   });
   if ("refusal" in repair) return stop(repair.refusal);

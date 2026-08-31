@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
-import { canonicalOutputSchema } from "./canonical-output-schema.js";
+import { canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
   loadTemplateStepSources,
@@ -131,6 +131,29 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
   }
+});
+
+test("the canonical Regression v2 schema preserves an optional gate failure excerpt", () => {
+  const schema = canonicalOutputSchemas.regression?.v2;
+  assert.ok(schema);
+  const verdict = {
+    schemaVersion: 2,
+    outcome: "gate-fail",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+    gateVerdict: "FAIL",
+    gateProof: "MERGE GATE: FAIL (unit tests)",
+    summary: "unit tests",
+  };
+  assert.equal(schema.safeParse(verdict).success, true);
+  const withExcerpt = schema.safeParse({ ...verdict, gateFailureExcerpt: "not ok 1 - example.test.ts" });
+  assert.equal(withExcerpt.success, true);
+  if (!withExcerpt.success) throw new Error("canonical regression verdict rejected a string excerpt");
+  assert.equal(
+    (withExcerpt.data as Record<string, unknown>).gateFailureExcerpt,
+    "not ok 1 - example.test.ts",
+  );
+  assert.equal(schema.safeParse({ ...verdict, gateFailureExcerpt: 42 }).success, false);
 });
 
 test("nine authored Full Assurance output contracts match their canonical schemas", async () => {

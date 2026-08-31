@@ -89,14 +89,192 @@ read_state() {
 
 json_verdict() {
   node -e '
-const [outcome, headSha, baseHeadSha, proofOrSummary] = process.argv.slice(1);
+const [outcome, headSha, baseHeadSha, proofOrSummary, gateFailureExcerpt] = process.argv.slice(1);
 const value = outcome === "pass"
   ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "PASS", gateProof: proofOrSummary }
   : outcome === "gate-fail"
-    ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "FAIL", gateProof: proofOrSummary, summary: proofOrSummary.slice("MERGE GATE: FAIL (".length, -1) }
+    ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "FAIL", gateProof: proofOrSummary, summary: proofOrSummary.slice("MERGE GATE: FAIL (".length, -1), gateFailureExcerpt }
     : { schemaVersion: 2, outcome, headSha, baseHeadSha, summary: proofOrSummary };
 process.stdout.write(JSON.stringify(value));
-' "$1" "$2" "$3" "$4"
+' "$1" "$2" "$3" "$4" "${5:-}"
+}
+
+# Pull only the useful part of a failed worker log into the durable verdict. The
+# worker normally forwards the last 200 lines, so this must stay bounded even if
+# a test prints an unbounded amount of output. Keeping the extraction here (next
+# to json_verdict) also means the gate proof and PASS/FAIL decision remain owned
+# by the existing mechanical path.
+extract_gate_failure_excerpt() {
+  local log="$1" summary="$2"
+  node - "$log" "$summary" <<'NODE'
+const { createReadStream } = require("node:fs");
+const { createInterface } = require("node:readline");
+
+const [logPath, summary] = process.argv.slice(2);
+const MAX_LINES = 40;
+const MAX_BYTES = 4000;
+
+const splitStages = (value) => {
+  const stages = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "(") depth += 1;
+    else if (character === ")" && depth > 0) depth -= 1;
+    else if (character === "," && depth === 0) {
+      const stage = value.slice(start, index).trim();
+      if (stage) stages.push(stage);
+      start = index + 1;
+    }
+  }
+  const finalStage = value.slice(start).trim();
+  if (finalStage) stages.push(finalStage);
+  return stages;
+};
+
+const stages = splitStages(summary);
+const fallbackStages = stages.length > 0 ? stages : [summary.trim() || "gate"];
+const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+const records = [];
+const recordsByLine = new Map();
+const stageOutput = new Set();
+const pendingContexts = [];
+let currentStage = null;
+let failureOpen = false;
+let failureAge = 0;
+
+const stageForLine = (visible) => {
+  const heading = visible.match(/^\s*---\s+(.+?)\s+---\s*$/u)?.[1];
+  if (heading && stages.includes(heading)) return heading;
+  return stages.find((stage) => visible.includes(stage)) ?? null;
+};
+
+const addRecord = (line, index, stage) => {
+  if (stage) stageOutput.add(stage);
+  else if (stages.length === 1) stageOutput.add(stages[0]);
+  const existing = recordsByLine.get(line);
+  if (existing) {
+    if (stage) existing.stages.add(stage);
+    return;
+  }
+  // The output can use at most forty unique records. Continue streaming after
+  // this cap only to learn which failed stages had attributable output.
+  if (records.length >= MAX_LINES) return;
+  const record = { line, index, stages: new Set() };
+  if (stage) record.stages.add(stage);
+  recordsByLine.set(line, record);
+  records.push(record);
+};
+
+const readLog = async () => {
+  let index = 0;
+  const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of lines) {
+  const visible = stripAnsi(line);
+  const lineStage = stageForLine(visible);
+  if (lineStage) currentStage = lineStage;
+
+  const isSubtestContext = /^\s*#\s*Subtest\b/u.test(visible);
+  // Node's TAP reporter uses `# Subtest`, while the default reporter prints
+  // `test at ...`/`location: ...` and a marked failure. Accept either shape so
+  // a file path is retained even when the worker forwards only a short tail.
+  const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(visible);
+  if (isSubtestContext || isFileContext) {
+    pendingContexts.push({ line: visible, index, stage: currentStage });
+    if (pendingContexts.length > 12) pendingContexts.shift();
+  }
+
+  const isNotOk = /\bnot ok\b/u.test(visible);
+  const isFailureMarker = /^\s*[✖×]\s+(?!failing tests?:)/u.test(visible);
+  const isAssertion = /\bAssertionError\b/u.test(visible);
+  const isError = /\bError:/u.test(visible);
+  if (isNotOk || isFailureMarker) {
+    const failureStage = currentStage;
+    for (const context of pendingContexts) {
+      if (context.stage === failureStage || !context.stage || !failureStage) {
+        addRecord(context.line, context.index, failureStage);
+      }
+    }
+    pendingContexts.length = 0;
+    addRecord(visible, index, failureStage);
+    failureOpen = true;
+    failureAge = 0;
+  } else if (isAssertion || (failureOpen && isError)) {
+    addRecord(visible, index, currentStage);
+  }
+
+  if (failureOpen) {
+    failureAge += 1;
+    // Error details are adjacent to the not ok block in node:test output. This
+    // bound prevents an unrelated later Error line from being attributed to it.
+    if (failureAge > 32 || /^\s*(?:---|==)\s+/u.test(visible)) failureOpen = false;
+  }
+
+  // A passing TAP/default-reporter result and a completed TAP block cannot be
+  // the file context for a later failure.
+  if (/^\s*(?:ok\b|[✔✓]\s+|#\s+(?:tests|pass|fail|duration)|1\.\.)/u.test(visible)) {
+    pendingContexts.length = 0;
+  }
+  index += 1;
+  }
+};
+
+const main = async () => {
+await readLog();
+
+records.sort((left, right) => left.index - right.index);
+for (const record of records) {
+  for (const stage of record.stages) stageOutput.add(stage);
+}
+
+const missingStages = fallbackStages.filter((stage) => !stageOutput.has(stage));
+const fallbackLines = missingStages.map((stage) => `${stage}: no per-test output in gate log`);
+
+const byteLength = (value) => Buffer.byteLength(value, "utf8");
+const truncateUtf8 = (value, limit) => {
+  if (byteLength(value) <= limit) return value;
+  let end = limit;
+  while (end > 0 && (Buffer.from(value)[end] & 0xc0) === 0x80) end -= 1;
+  return Buffer.from(value).subarray(0, end).toString("utf8");
+};
+
+const takeBounded = (lines, lineLimit, byteBudget) => {
+  const taken = [];
+  let bytes = 0;
+  for (const line of lines) {
+    if (taken.length >= lineLimit) break;
+    const separator = taken.length > 0 ? 1 : 0;
+    const remaining = byteBudget - bytes - separator;
+    if (remaining <= 0) break;
+    const fitted = truncateUtf8(line, remaining);
+    if (!fitted) break;
+    taken.push(fitted);
+    bytes += separator + byteLength(fitted);
+    if (fitted !== line) break;
+  }
+  return { lines: taken, bytes };
+};
+
+// Reserve room for notices before taking log lines. Otherwise forty noisy test
+// lines could crowd out the explicit "no per-test output" fact for another stage.
+const boundedFallback = takeBounded(fallbackLines, MAX_LINES, MAX_BYTES);
+
+const candidateLimit = Math.max(0, MAX_LINES - boundedFallback.lines.length);
+const candidateBudget = Math.max(
+  0,
+  MAX_BYTES - boundedFallback.bytes - (boundedFallback.lines.length > 0 ? 1 : 0),
+);
+const selected = takeBounded(records.map((record) => record.line), candidateLimit, candidateBudget);
+
+process.stdout.write([...selected.lines, ...boundedFallback.lines].join("\n"));
+};
+
+main().catch((error) => {
+  process.stderr.write(`gate failure excerpt extraction failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});
+NODE
 }
 
 persist_output() {
@@ -191,7 +369,7 @@ review_fail() {
 }
 
 finalize() {
-  local current latest gate_log gate_status gate_proof attempt verdict
+  local current latest gate_log gate_status gate_proof gate_failure_summary gate_failure_excerpt attempt verdict
   read_state
   current="$(head_sha)" || die "cannot resolve finalize workspace HEAD"
   [ "$current" = "$VERIFIED_HEAD_SHA" ] || die "workspace HEAD changed after semantic verification"
@@ -238,7 +416,11 @@ finalize() {
       printf 'REGRESSION FINALIZE: pass %s\n' "$current"
       ;;
     'MERGE GATE: FAIL ('*')')
-      verdict="$(json_verdict gate-fail "$current" "$BASE_HEAD_SHA" "$gate_proof")"
+      gate_failure_summary="${gate_proof#MERGE GATE: FAIL (}"
+      gate_failure_summary="${gate_failure_summary%)}"
+      gate_failure_excerpt="$(extract_gate_failure_excerpt "$gate_log" "$gate_failure_summary")" \
+        || die "could not extract gate failure excerpt from gate log"
+      verdict="$(json_verdict gate-fail "$current" "$BASE_HEAD_SHA" "$gate_proof" "$gate_failure_excerpt")"
       persist_output "$verdict" "$current"
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;

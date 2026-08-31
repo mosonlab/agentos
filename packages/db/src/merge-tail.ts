@@ -152,8 +152,8 @@ export type RegressionVerdict =
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
   | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string }
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
-  | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
-  | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string }
+  | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string; gateFailureExcerpt?: string }
+  | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string }
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
 
 export type RegressionRepairHandoff = {
@@ -221,6 +221,9 @@ export const parseRegressionVerdict = (
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   if (value.outcome === "gate-fail" && value.gateVerdict === "FAIL" && typeof value.summary === "string" && value.summary.length > 0) {
+    if (Object.hasOwn(value, "gateFailureExcerpt") && typeof value.gateFailureExcerpt !== "string") {
+      return { status: "invalid", reason: "invalid regression gateFailureExcerpt" };
+    }
     if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
       && (typeof value.gateProof !== "string" || !FAIL_GATE_PROOF.test(value.gateProof))) {
       return { status: "invalid", reason: "invalid regression gateProof for FAIL" };

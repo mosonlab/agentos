@@ -480,6 +480,68 @@ const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
   return { root, home, oid };
 };
 
+const remoteDispatchFixture = (t) => {
+  const root = scratch(t);
+  const repo = join(root, "repo");
+  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  const output = Array.from({ length: 205 }, (_, index) =>
+    `printf 'fixture-output-${String(index).padStart(3, "0")}\\n'`,
+  ).join("\n");
+  writeFileSync(
+    join(repo, "scripts", "merge-gate.sh"),
+    `#!/usr/bin/env bash\n${output}\nprintf 'MERGE GATE: FAIL (fixture)\\n'\nexit 1\n`,
+  );
+  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh", "lib.sh"]) {
+    cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
+  }
+  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]) {
+    chmodSync(join(repo, "scripts", "gate-worker", name), 0o755);
+  }
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "fixture");
+  const oid = git(repo, "rev-parse", "HEAD");
+
+  const fakeHome = join(root, "worker-home");
+  const fakeBin = join(root, "fake-bin");
+  mkdirSync(fakeHome, { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "ssh"), `#!/usr/bin/env bash
+set -uo pipefail
+if [ "\${1:-}" = "-G" ]; then exit 1; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|-o|-i|-F) shift 2 ;;
+    -n|-T|-x) shift ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || exit 2
+shift
+cd "$FAKE_SSH_HOME"
+exec bash -c "$*"
+`);
+  writeFileSync(join(fakeBin, "scp"), `#!/usr/bin/env bash
+set -uo pipefail
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -P|-o) shift 2 ;;
+    -q) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -eq 2 ] || exit 2
+destination="\${2#*:}"
+mkdir -p "$(dirname "$FAKE_SSH_HOME/$destination")"
+cp "$1" "$FAKE_SSH_HOME/$destination"
+`);
+  chmodSync(join(fakeBin, "ssh"), 0o755);
+  chmodSync(join(fakeBin, "scp"), 0o755);
+  return { root, repo, oid, fakeHome, fakeBin };
+};
+
 // Bounded like every other fixture that runs a real script: a harness that
 // waits on something is a failing test, never a suite that stops returning.
 const runGate = (home, args, env = {}) =>
@@ -497,10 +559,92 @@ test("a gate that passes is reported as the gate's own verdict", (t) => {
 });
 
 test("a gate that fails is 1 and says MERGE GATE: FAIL", (t) => {
-  const fixture = gateHome(t, { verdict: 'printf "MERGE GATE: FAIL (fixture)\\n"; exit 1' });
+  const fixture = gateHome(t, {
+    verdict:
+      'printf "# Subtest: packages/fixture.test.ts\\nnot ok 1 - first assertion\\nMERGE GATE: FAIL (fixture)\\n"; exit 1',
+  });
   const result = runGate(fixture.home, [fixture.oid]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
+  assert.match(result.stdout, /failure excerpt \(last 200 lines per failing step\)/);
+  assert.match(result.stdout, /packages\/fixture\.test\.ts/);
+  assert.match(result.stdout, /not ok 1 - first assertion/);
+});
+
+test("a gate FAIL forwards a bounded tail of the worker log", (t) => {
+  const output = Array.from({ length: 205 }, (_, index) =>
+    `printf 'fixture-output-${String(index).padStart(3, "0")}\\n'`,
+  ).join("\n");
+  const fixture = gateHome(t, {
+    verdict: `${output}\nprintf 'MERGE GATE: FAIL (fixture)\\n'; exit 1`,
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+
+  const marker = "run-gate: failure excerpt (last 200 lines per failing step)";
+  const markerAt = result.stdout.indexOf(marker);
+  const verdictAt = result.stdout.indexOf("MERGE GATE: FAIL", markerAt);
+  assert.ok(markerAt >= 0, result.stdout);
+  assert.ok(verdictAt > markerAt, result.stdout);
+  const excerpt = result.stdout.slice(markerAt, verdictAt);
+  const forwarded = excerpt.match(/fixture-output-\d{3}/g) ?? [];
+  assert.ok(forwarded.length <= 200, `forwarded ${forwarded.length} lines`);
+  assert.match(excerpt, /fixture-output-204/);
+  assert.doesNotMatch(excerpt, /fixture-output-000/);
+});
+
+test("a gate FAIL forwards the last 200 lines of every failing step", (t) => {
+  const laterOutput = Array.from({ length: 205 }, (_, index) =>
+    `printf 'later-stage-output-${String(index).padStart(3, "0")}\\n'`,
+  ).join("\n");
+  const fixture = gateHome(t, {
+    verdict: [
+      "printf '%s\\n' '--- database tests (db + api) ---'",
+      "printf '%s\\n' '# Subtest: packages/db/src/early.dbtest.ts'",
+      "printf '%s\\n' 'not ok 1 - early database assertion'",
+      "printf '%s\\n' 'AssertionError: early database assertion'",
+      "printf '%s\\n' '--- unit tests (all workspaces) ---'",
+      laterOutput,
+      "printf '%s\\n' '# Subtest: packages/api/src/late.test.ts'",
+      "printf '%s\\n' 'not ok 1 - late unit assertion'",
+      "printf '%s\\n' 'AssertionError: late unit assertion'",
+      "printf '%s\\n' 'MERGE GATE: FAIL (database tests (db + api), unit tests (all workspaces))'",
+      "exit 1",
+    ].join("\n"),
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /--- database tests \(db \+ api\) ---/u);
+  assert.match(result.stdout, /packages\/db\/src\/early\.dbtest\.ts/u);
+  assert.match(result.stdout, /early database assertion/u);
+  assert.match(result.stdout, /--- unit tests \(all workspaces\) ---/u);
+  assert.match(result.stdout, /packages\/api\/src\/late\.test\.ts/u);
+  assert.match(result.stdout, /late unit assertion/u);
+  assert.ok(Buffer.byteLength(result.stdout, "utf8") <= 66_000, "forwarded stdout exceeded its bounded envelope");
+});
+
+test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {
+  const fixture = remoteDispatchFixture(t);
+  const result = spawnSync(
+    "bash",
+    [join(fixture.repo, "scripts", "gate-worker", "gate-dispatch.sh"), fixture.oid, "--server", "fake", "--master", fixture.oid],
+    {
+      cwd: fixture.repo,
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        ...FIXTURE_ENV,
+        PATH: `${fixture.fakeBin}:${process.env.PATH ?? ""}`,
+        FAKE_SSH_HOME: fixture.fakeHome,
+        XDG_CACHE_HOME: join(fixture.root, "cache"),
+      },
+    },
+  );
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /run-gate: failure excerpt \(last 200 lines per failing step\)/);
+  assert.match(result.stdout, /fixture-output-204/);
+  assert.doesNotMatch(result.stdout, /fixture-output-000/);
+  assert.match(result.stdout, /MERGE GATE: FAIL \(fixture\)/);
 });
 
 test("a credential in the trusted worker environment does not block the gate", (t) => {

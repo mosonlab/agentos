@@ -3,6 +3,44 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const handbook = readFileSync("docs/operator-api.md", "utf8");
+const appSource = readFileSync("packages/api/src/app.ts", "utf8");
+
+// Runner and session endpoints are internal protocols, not operator-facing routes.
+const internalRoutePrefixes = ["/runner/", "/session/"];
+const isInternalRoute = (path) => internalRoutePrefixes.some((prefix) => path.startsWith(prefix));
+const routeKey = (method, path) => `${method.toUpperCase()} ${path}`;
+// These session capabilities are intentionally operator-documented despite their internal prefix.
+const documentedInternalRoutes = new Set([
+  routeKey("PATCH", "/session/runs/:runId/task"),
+  routeKey("POST", "/session/runs/:runId/revalidation/cancel"),
+]);
+
+const appRouteRegistrations = [
+  ...appSource.matchAll(/\bapp\.(get|post|put|patch|delete)\s*\(\s*(["'])([^"']+)\2/gu),
+].map(([, method, , path]) => ({ key: routeKey(method, path), path }));
+const appRoutes = new Set(appRouteRegistrations.map(({ key }) => key));
+const handbookRoutes = new Set(
+  [...handbook.matchAll(/^###\s+(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`/gmu)]
+    .map(([, method, path]) => ({ method, path }))
+    .map(({ method, path }) => routeKey(method, path)),
+);
+
+test("every operator API route has a handbook entry", () => {
+  const missing = appRouteRegistrations
+    .filter(({ key, path }) => !isInternalRoute(path) || documentedInternalRoutes.has(key))
+    .map(({ key }) => key)
+    .filter((key) => !handbookRoutes.has(key))
+    .sort();
+  const stale = [...handbookRoutes].filter((route) => !appRoutes.has(route)).sort();
+  const mismatch = [
+    "Operator API route coverage mismatch.",
+    `Missing handbook entries: ${missing.length === 0 ? "none" : missing.join(", ")}.`,
+    `Stale handbook entries: ${stale.length === 0 ? "none" : stale.join(", ")}.`,
+  ].join(" ");
+
+  assert.equal(missing.length + stale.length, 0, mismatch);
+});
+
 const tasksStart = handbook.indexOf("## Tasks\n");
 const tasksEnd = handbook.indexOf("\n## ", tasksStart + 1);
 assert.notEqual(tasksStart, -1, "operator handbook must have a Tasks section");
