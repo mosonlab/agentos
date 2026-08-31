@@ -103,7 +103,7 @@ STOP preflight <condition>: <detail>
 | `compose-identity`, `server-identity` | The database answering is not the Compose database this checkout defines. |
 | `backup-bundle`, `backup-target`, `backup-wal` | Existing mode, and the bundle is unreadable/invalid, names another target, or no longer matches the target's WAL fingerprint. These are real consumer checks; this release does not ship the producer needed to create a supported bundle. |
 | `target-not-empty` | Fresh mode, and the schema already holds migration history or user objects. The line above it reports the census. |
-| `migration-tail` | This checkout's migration set is not the recorded release candidate — shorter or longer. |
+| `migration-tail` | This checkout's migration set is not the recorded release candidate — shorter or longer. A main checkout between releases stops here by design; the install path is the tagged release. |
 | `migration-state`, `files-precheck` | Existing mode, and migration history cannot be proven compatible or the owned-files precheck fails. |
 | `maintenance-lock-unavailable` | The exclusive maintenance lock could not be taken, was already held by another session or an active service, or was lost while the migration ran. |
 | `migrate-goal-execution`, `migrate-status`, `drift-check` | The composed migration, the status check, or the drift check exited non-zero. |
