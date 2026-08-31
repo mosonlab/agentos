@@ -44,6 +44,7 @@ import {
 import {
   checkExistingEscalation,
   resolveRemoteMainTarget,
+  selfClearEscalation,
 } from "./quiet-window-escalation.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
@@ -82,6 +83,11 @@ const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT
 const POLL_MS = POLL_SECONDS * 1_000;
 const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @anneal/db deploy-barrier.ts ("AGDP").
 const DEPLOY_BARRIER_KEY = 1;
+const RETRYABLE_ESCALATION_REASONS = new Set([
+  "remote-main-unreadable",
+  "quiet-window-query-failed",
+]);
+const ESCALATION_RETRY_CAP = 5;
 
 const generatedPrismaClientIsComplete = (root) =>
   existsSync(join(root, "node_modules/.prisma/client/index.js"))
@@ -426,9 +432,21 @@ const acquireLock = async () => {
   return lock === null ? null : trackResource(lock);
 };
 
+const escalationAttemptCount = (record) => {
+  if (Number.isSafeInteger(record?.attempts) && record.attempts > 0) return record.attempts;
+  if (!existsSync(ESCALATION_PATH)) return 1;
+  const previous = readJson(ESCALATION_PATH, "escalation-state-unreadable");
+  if (previous.reason !== record?.reason) return 1;
+  return Number.isSafeInteger(previous.attempts) && previous.attempts > 0
+    ? previous.attempts + 1
+    : 2;
+};
+
 const writeEscalation = async (record) => {
-  writeEscalationRecord({ path: ESCALATION_PATH, record });
-  log(`ESCALATED reason=${record.reason} from=${record.from} to=${record.to}`);
+  const attempts = escalationAttemptCount(record);
+  const persisted = { ...record, attempts };
+  writeEscalationRecord({ path: ESCALATION_PATH, record: persisted });
+  log(`ESCALATED reason=${persisted.reason} from=${persisted.from} to=${persisted.to}`);
 };
 
 const markEscalationNotified = async () => {
@@ -579,9 +597,15 @@ const makeWritable = (root) => {
 const createDeployHost = () => createProductionHost({
   parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
   checkEscalation: async () => {
-    if (!existsSync(ESCALATION_PATH)) return;
-    await retryEscalationNotification();
-    log(`STOP escalation-active path=${ESCALATION_PATH}`);
+    const escalation = await checkExistingEscalation({
+      escalationPath: ESCALATION_PATH,
+      readRemoteMain: remoteMainRevision,
+      retryEscalationNotification,
+      log,
+      retryableReasons: RETRYABLE_ESCALATION_REASONS,
+      retryCap: ESCALATION_RETRY_CAP,
+    });
+    if (!escalation.active) return;
     return { skip: "escalation-active", exitCode: 2 };
   },
   acquireLock: async () => {
@@ -895,6 +919,8 @@ const main = async () => {
       readRemoteMain: remoteMainRevision,
       retryEscalationNotification,
       log,
+      retryableReasons: RETRYABLE_ESCALATION_REASONS,
+      retryCap: ESCALATION_RETRY_CAP,
     }),
     readRemoteMain: remoteMainRevision,
     persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
@@ -909,6 +935,14 @@ const main = async () => {
     transactionId: randomUUID(),
   });
   const result = await executeUpgrade(createDeployHost(), attempt);
+  if (startup.retryEscalation && result.ok && result.skipped !== "lock-held") {
+    await selfClearEscalation({
+      escalationPath: ESCALATION_PATH,
+      retryEscalation: startup.retryEscalation,
+      notify,
+      log,
+    });
+  }
   if (result.ok && !result.skipped) pruneHistory();
   return result.ok ? (attempt.fact("exitCode") ?? 0) : 1;
 };
