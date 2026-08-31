@@ -37,19 +37,18 @@ import {
 } from "./deploy-preflight.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
-import {
-  readRemoteMainRevision,
-  transientRemoteMainEscalationFields,
-} from "./remote-main-read.mjs";
+import { readRemoteMainRevision } from "./remote-main-read.mjs";
 import {
   checkExistingEscalation,
+  ESCALATION_RETRY_CAP,
   resolveRemoteMainTarget,
+  selfClearEscalation,
+  writeEscalationWithAttempts,
 } from "./quiet-window-escalation.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 import { runDeployCommand } from "./quiet-window-command.mjs";
-import { writeEscalationRecord } from "./quiet-window-escalation-record.mjs";
 import {
   BARRIER_TIMEOUT_REASON,
   createBarrierWatchdog,
@@ -82,6 +81,12 @@ const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT
 const POLL_MS = POLL_SECONDS * 1_000;
 const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @anneal/db deploy-barrier.ts ("AGDP").
 const DEPLOY_BARRIER_KEY = 1;
+const RETRYABLE_ESCALATION_REASONS = new Set([
+  "remote-main-unreadable",
+  "remote-main-read-timeout",
+  "quiet-window-query-failed",
+  "deploy-barrier-unavailable",
+]);
 
 const generatedPrismaClientIsComplete = (root) =>
   existsSync(join(root, "node_modules/.prisma/client/index.js"))
@@ -343,7 +348,7 @@ const launchctlPrint = (label) => command("/bin/launchctl", ["print", `${domain(
 
 const acquireDeployBarrier = async () => {
   throwIfInterrupted();
-  const module = await import("@prisma/client").catch(() => fail("deploy-barrier-unavailable", "prisma-client-import-failed"));
+  const module = await import("@prisma/client").catch(() => fail("database-client-unavailable", "prisma-client-import-failed"));
   const url = new URL(process.env.DATABASE_URL);
   url.searchParams.set("connection_limit", "1");
   url.searchParams.set("max_connection_lifetime", "0");
@@ -427,8 +432,12 @@ const acquireLock = async () => {
 };
 
 const writeEscalation = async (record) => {
-  writeEscalationRecord({ path: ESCALATION_PATH, record });
-  log(`ESCALATED reason=${record.reason} from=${record.from} to=${record.to}`);
+  const persisted = writeEscalationWithAttempts({
+    escalationPath: ESCALATION_PATH,
+    record,
+    retryableReasons: RETRYABLE_ESCALATION_REASONS,
+  });
+  log(`ESCALATED reason=${persisted.reason} from=${persisted.from} to=${persisted.to}`);
 };
 
 const markEscalationNotified = async () => {
@@ -458,7 +467,6 @@ const persistAndNotifyFailure = async (failure, from, to) => {
     detail: failure.detail,
     from,
     to,
-    ...transientRemoteMainEscalationFields(failure),
   });
   try {
     await retryEscalationNotification();
@@ -576,80 +584,102 @@ const makeWritable = (root) => {
   visit(root);
 };
 
-const createDeployHost = () => createProductionHost({
-  parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
-  checkEscalation: async () => {
-    if (!existsSync(ESCALATION_PATH)) return;
-    await retryEscalationNotification();
-    log(`STOP escalation-active path=${ESCALATION_PATH}`);
-    return { skip: "escalation-active", exitCode: 2 };
-  },
-  acquireLock: async () => {
-    const lock = await acquireLock();
-    if (lock === null) {
-      log("SKIP concurrent-run lock-held");
-      return { skip: "lock-held" };
-    }
-    if (lock.recovered) {
-      await lock.release();
-      throw new DeployFailure(
-        "stale-deploy-owner-recovered",
-        `pid-${lock.recovered.pid ?? "unknown"}`,
-      );
-    }
-    return { lock, resources: [lock] };
-  },
-  readRevisions: async (attempt) => ({
-    revisions: { from: readDeployedRevision(), to: attempt.targetCommit },
-  }),
-  checkAlreadyDeployed: async (attempt) => {
-    const revisions = attempt.requireFact("revisions");
-    if (revisions.from !== revisions.to) return;
-    pruneHistory();
-    log(`NOOP already-deployed revision=${revisions.from}`);
-    return { skip: "already-deployed" };
-  },
-  startDeploymentLedger: async (attempt) => ({
-    ledger: createDeploymentLedger({
-      stateDir: STATE_DIR,
-      deploymentId: attempt.transactionId,
-      targetCommit: attempt.targetCommit,
+const createDeployHost = () => {
+  let retryEscalation = null;
+  return createProductionHost({
+    parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
+    checkEscalation: async () => {
+      const escalation = await checkExistingEscalation({
+        escalationPath: ESCALATION_PATH,
+        retryEscalationNotification,
+        log,
+        retryableReasons: RETRYABLE_ESCALATION_REASONS,
+        retryCap: ESCALATION_RETRY_CAP,
+      });
+      if (!escalation.active) {
+        retryEscalation = escalation.retryEscalation ?? null;
+        return;
+      }
+      retryEscalation = null;
+      return { skip: "escalation-active", exitCode: 2 };
+    },
+    selfClearEscalation: async () => {
+      const pending = retryEscalation;
+      retryEscalation = null;
+      if (!pending) return false;
+      return selfClearEscalation({
+        escalationPath: ESCALATION_PATH,
+        retryEscalation: pending,
+        notify,
+        log,
+      });
+    },
+    acquireLock: async () => {
+      const lock = await acquireLock();
+      if (lock === null) {
+        log("SKIP concurrent-run lock-held");
+        return { skip: "lock-held" };
+      }
+      if (lock.recovered) {
+        await lock.release();
+        throw new DeployFailure(
+          "stale-deploy-owner-recovered",
+          `pid-${lock.recovered.pid ?? "unknown"}`,
+        );
+      }
+      return { lock, resources: [lock] };
+    },
+    readRevisions: async (attempt) => ({
+      revisions: { from: readDeployedRevision(), to: attempt.targetCommit },
     }),
-  }),
-  prepareReleaseArtifact: async (attempt) => {
-    const built = await checked(
-      "release-artifact-build-failed",
-      loadBinaries().node,
-      [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
-      {
-        capture: true,
-        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
-        timeoutReason: "release-artifact-build-timeout",
-      },
-    );
-    const hasReceipt = built.stdout.trim().split("\n").some((line) => line.startsWith("RELEASE-ARTIFACT "));
-    const receipt = parseReleaseArtifactReceipt(built.stdout);
-    if (!receipt) fail("release-artifact-build-failed", hasReceipt ? "builder-receipt-invalid" : "builder-receipt-missing");
-    const preparedRelease = verifyReleaseArtifact({
-      deployRoot: attempt.deployRoot,
-      revision: attempt.targetCommit,
-      releaseName: receipt.releaseName,
-    });
-    return { preparedRelease };
-  },
-  verifyArtifact: async (attempt) => {
-    const preparedRelease = attempt.requireFact("preparedRelease");
-    return {
-      verifiedRelease: verifyReleaseArtifact({
+    checkAlreadyDeployed: async (attempt) => {
+      const revisions = attempt.requireFact("revisions");
+      if (revisions.from !== revisions.to) return;
+      pruneHistory();
+      log(`NOOP already-deployed revision=${revisions.from}`);
+      return { skip: "already-deployed" };
+    },
+    startDeploymentLedger: async (attempt) => ({
+      ledger: createDeploymentLedger({
+        stateDir: STATE_DIR,
+        deploymentId: attempt.transactionId,
+        targetCommit: attempt.targetCommit,
+      }),
+    }),
+    prepareReleaseArtifact: async (attempt) => {
+      const built = await checked(
+        "release-artifact-build-failed",
+        loadBinaries().node,
+        [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
+        {
+          capture: true,
+          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
+          timeoutReason: "release-artifact-build-timeout",
+        },
+      );
+      const hasReceipt = built.stdout.trim().split("\n").some((line) => line.startsWith("RELEASE-ARTIFACT "));
+      const receipt = parseReleaseArtifactReceipt(built.stdout);
+      if (!receipt) fail("release-artifact-build-failed", hasReceipt ? "builder-receipt-invalid" : "builder-receipt-missing");
+      const preparedRelease = verifyReleaseArtifact({
         deployRoot: attempt.deployRoot,
         revision: attempt.targetCommit,
-        releaseName: preparedRelease.releaseName,
-      }),
-    };
-  },
-  waitForQuiet: async (attempt) => {
-    const revisions = attempt.requireFact("revisions");
-    const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
+        releaseName: receipt.releaseName,
+      });
+      return { preparedRelease };
+    },
+    verifyArtifact: async (attempt) => {
+      const preparedRelease = attempt.requireFact("preparedRelease");
+      return {
+        verifiedRelease: verifyReleaseArtifact({
+          deployRoot: attempt.deployRoot,
+          revision: attempt.targetCommit,
+          releaseName: preparedRelease.releaseName,
+        }),
+      };
+    },
+    waitForQuiet: async (attempt) => {
+      const revisions = attempt.requireFact("revisions");
+      const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
         timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
         escalationPath: ESCALATION_PATH,
         escalationRecord: {
@@ -675,197 +705,198 @@ const createDeployHost = () => createProductionHost({
           interruption.interruptWithFailure(failure);
         },
       }));
-    log("PASS quiet-window deploy-barrier-held blockers=0");
-    return { barrier, resources: [barrier, watchdog] };
-  },
-  prepareWorkspace: async (attempt) => {
-    const release = attempt.requireFact("verifiedRelease");
-    const operationWorkspace = join(STATE_DIR, `operation-${attempt.transactionId}`);
-    try {
-      cpSync(release.releaseDirectory, operationWorkspace, { recursive: true, errorOnExist: true });
-      makeWritable(operationWorkspace);
-    } catch (error) {
-      if (existsSync(operationWorkspace)) {
+      log("PASS quiet-window deploy-barrier-held blockers=0");
+      return { barrier, resources: [barrier, watchdog] };
+    },
+    prepareWorkspace: async (attempt) => {
+      const release = attempt.requireFact("verifiedRelease");
+      const operationWorkspace = join(STATE_DIR, `operation-${attempt.transactionId}`);
+      try {
+        cpSync(release.releaseDirectory, operationWorkspace, { recursive: true, errorOnExist: true });
         makeWritable(operationWorkspace);
-        rmSync(operationWorkspace, { recursive: true, force: true });
-      }
-      fail("operation-workspace-preparation-failed", error?.code ?? "copy-failed");
-    }
-    return {
-      operationWorkspace,
-      resources: [{
-        release: async () => {
-          if (!existsSync(operationWorkspace)) return;
+      } catch (error) {
+        if (existsSync(operationWorkspace)) {
           makeWritable(operationWorkspace);
           rmSync(operationWorkspace, { recursive: true, force: true });
-        },
-      }],
-    };
-  },
-  verifyStableServicePaths: async () => {
-    await verifyStableServicePaths();
-  },
-  backup: async (attempt) => {
-    const revisions = attempt.requireFact("revisions");
-    const backupDirectory = join(STATE_DIR, "backups");
-    mkdirSync(backupDirectory, { recursive: true, mode: 0o700 });
-    const output = join(backupDirectory, `${new Date().toISOString().replace(/[:.]/gu, "-")}-${revisions.from.slice(0, 12)}-${revisions.to.slice(0, 12)}.dump`);
-    try {
-      await writePgDumpBackup({
-        configuration: loadBinaries().backup,
-        databaseUrl: process.env.DATABASE_URL,
-        output,
-        signal: interruptController.signal,
-        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.databaseBackup,
-      });
-    } catch (error) {
-      throwIfInterrupted();
-      if (error instanceof Error && error.message === "pg_dump-timeout") {
-        fail("database-backup-timeout", `budget-${DEPLOY_STEP_TIMEOUT_MS.databaseBackup}ms`);
-      }
-      fail("database-backup-failed", error instanceof Error ? error.message : String(error));
-    }
-    return { backup: { backupIdentity: basename(output) } };
-  },
-  guardedMigration: async (attempt) => {
-    const operationWorkspace = attempt.requireFact("operationWorkspace");
-    const migrationTailBefore = await migrationTail();
-    await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
-      cwd: operationWorkspace,
-      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
-      timeoutReason: "migration-preflight-timeout",
-    });
-    const barrier = attempt.requireFact("barrier");
-    await checked(
-      "guarded-migration-refused",
-      loadBinaries().node,
-      [
-        "node_modules/prisma/build/index.js",
-        "migrate",
-        "deploy",
-        "--schema",
-        "packages/db/prisma/schema.prisma",
-      ],
-      {
-        cwd: operationWorkspace,
-        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
-        timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
-        onTermination: () => barrier.retainUntilEscalationCleared(),
-      },
-    );
-    const migrationTailAfter = await migrationTail();
-    return { migration: { migrationTailBefore, migrationTailAfter } };
-  },
-  generatePrismaClient: (attempt) => checked("prisma-client-generation-refused", loadBinaries().node, [
-    "node_modules/prisma/build/index.js",
-    "generate",
-    "--schema",
-    "packages/db/prisma/schema.prisma",
-  ], {
-    cwd: attempt.requireFact("operationWorkspace"),
-    timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
-    timeoutReason: "prisma-client-generation-timeout",
-  }),
-  syncCanonicalPrompts: (attempt) => checked("canonical-prompt-sync-refused", loadBinaries().node, [
-    "node_modules/tsx/dist/cli.mjs",
-    "packages/db/prisma/sync-canonical-prompts.ts",
-  ], {
-    cwd: attempt.requireFact("operationWorkspace"),
-    timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
-    timeoutReason: "canonical-prompt-sync-timeout",
-  }),
-  verifyRuntimePrismaClient: async (attempt) => {
-    if (!generatedPrismaClientIsComplete(attempt.requireFact("operationWorkspace"))) {
-      fail("runtime-prisma-client-missing", "operation-generated-client-is-absent");
-    }
-  },
-  assertQuietBeforeRestart: async (attempt) => {
-    if (!await attempt.requireFact("barrier").verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");
-    const blockers = await blockingRuns();
-    if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
-  },
-  publishBuild: async (attempt) => {
-    const release = attempt.requireFact("verifiedRelease");
-    const verifiedRelease = verifyReleaseArtifact({
-      deployRoot: attempt.deployRoot,
-      revision: attempt.targetCommit,
-      releaseName: release.releaseName,
-    });
-    const activated = activateReleasePointer({ root: attempt.deployRoot, release: verifiedRelease.releaseName });
-    const relativeTarget = (target) => target === null ? null : `releases/${target}`;
-    const pointerTransition = Object.freeze({
-      oldTarget: relativeTarget(activated.oldTarget),
-      newTarget: relativeTarget(activated.newTarget),
-      previousTarget: relativeTarget(activated.previousTarget),
-    });
-    return {
-      verifiedRelease,
-      publication: {
-        releaseDirectoryIdentity: verifiedRelease.releaseName,
-        releaseIdentity: {
-          name: verifiedRelease.releaseName,
-          commit: verifiedRelease.revision,
-          digest: verifiedRelease.digest,
-        },
-        pointerOldTarget: pointerTransition.oldTarget,
-        pointerNewTarget: pointerTransition.newTarget,
-        pointerTransition,
-        rollback: async () => rollbackReleasePointer({ root: attempt.deployRoot }),
-      },
-    };
-  },
-  restartServices: async () => {
-    for (const label of SERVICE_LABELS) await launchctl("service-restart-failed", ["kickstart", "-k", `${domain()}/${label}`]);
-  },
-  verifyServices: async (attempt) => {
-    const revisions = attempt.requireFact("revisions");
-    const deadline = Date.now() + 30_000;
-    let lastReason = "not-ready";
-    while (Date.now() < deadline) {
-      const state = await serviceState();
-      if (!state.ok) lastReason = `launchd-unavailable-${state.unavailable.join(",")}`;
-      else {
-        try {
-          const port = process.env.API_PORT ?? "3000";
-          const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-          const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
-          const payload = version.ok ? await version.json() : {};
-          if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
-            throwIfInterrupted();
-            return {
-              serviceVerification: {
-                activatedBuildStamp: {
-                  packageName: payload.packageName,
-                  commit: payload.commit,
-                  dirty: payload.dirty,
-                },
-              },
-            };
-          }
-          lastReason = `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
-        } catch (error) {
-          if (error instanceof DeployFailure) throw error;
-          lastReason = error instanceof Error ? error.name : "probe-failed";
         }
+        fail("operation-workspace-preparation-failed", error?.code ?? "copy-failed");
       }
-      await sleep(1_000);
-    }
-    fail("service-verification-failed", lastReason);
-  },
-  restorePreviousServices: async () => {
-    for (const label of SERVICE_LABELS) {
-      await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], {
-        allowAfterInterrupt: true,
-        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore,
-        timeoutReason: "previous-service-restore-timeout",
+      return {
+        operationWorkspace,
+        resources: [{
+          release: async () => {
+            if (!existsSync(operationWorkspace)) return;
+            makeWritable(operationWorkspace);
+            rmSync(operationWorkspace, { recursive: true, force: true });
+          },
+        }],
+      };
+    },
+    verifyStableServicePaths: async () => {
+      await verifyStableServicePaths();
+    },
+    backup: async (attempt) => {
+      const revisions = attempt.requireFact("revisions");
+      const backupDirectory = join(STATE_DIR, "backups");
+      mkdirSync(backupDirectory, { recursive: true, mode: 0o700 });
+      const output = join(backupDirectory, `${new Date().toISOString().replace(/[:.]/gu, "-")}-${revisions.from.slice(0, 12)}-${revisions.to.slice(0, 12)}.dump`);
+      try {
+        await writePgDumpBackup({
+          configuration: loadBinaries().backup,
+          databaseUrl: process.env.DATABASE_URL,
+          output,
+          signal: interruptController.signal,
+          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.databaseBackup,
+        });
+      } catch (error) {
+        throwIfInterrupted();
+        if (error instanceof Error && error.message === "pg_dump-timeout") {
+          fail("database-backup-timeout", `budget-${DEPLOY_STEP_TIMEOUT_MS.databaseBackup}ms`);
+        }
+        fail("database-backup-failed", error instanceof Error ? error.message : String(error));
+      }
+      return { backup: { backupIdentity: basename(output) } };
+    },
+    guardedMigration: async (attempt) => {
+      const operationWorkspace = attempt.requireFact("operationWorkspace");
+      const migrationTailBefore = await migrationTail();
+      await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
+        cwd: operationWorkspace,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
+        timeoutReason: "migration-preflight-timeout",
       });
-    }
-  },
-  escalate: writeEscalation,
-  markEscalationNotified,
-  notify,
-  log,
-});
+      const barrier = attempt.requireFact("barrier");
+      await checked(
+        "guarded-migration-refused",
+        loadBinaries().node,
+        [
+          "node_modules/prisma/build/index.js",
+          "migrate",
+          "deploy",
+          "--schema",
+          "packages/db/prisma/schema.prisma",
+        ],
+        {
+          cwd: operationWorkspace,
+          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
+          timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
+          onTermination: () => barrier.retainUntilEscalationCleared(),
+        },
+      );
+      const migrationTailAfter = await migrationTail();
+      return { migration: { migrationTailBefore, migrationTailAfter } };
+    },
+    generatePrismaClient: (attempt) => checked("prisma-client-generation-refused", loadBinaries().node, [
+      "node_modules/prisma/build/index.js",
+      "generate",
+      "--schema",
+      "packages/db/prisma/schema.prisma",
+    ], {
+      cwd: attempt.requireFact("operationWorkspace"),
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
+      timeoutReason: "prisma-client-generation-timeout",
+    }),
+    syncCanonicalPrompts: (attempt) => checked("canonical-prompt-sync-refused", loadBinaries().node, [
+      "node_modules/tsx/dist/cli.mjs",
+      "packages/db/prisma/sync-canonical-prompts.ts",
+    ], {
+      cwd: attempt.requireFact("operationWorkspace"),
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
+      timeoutReason: "canonical-prompt-sync-timeout",
+    }),
+    verifyRuntimePrismaClient: async (attempt) => {
+      if (!generatedPrismaClientIsComplete(attempt.requireFact("operationWorkspace"))) {
+        fail("runtime-prisma-client-missing", "operation-generated-client-is-absent");
+      }
+    },
+    assertQuietBeforeRestart: async (attempt) => {
+      if (!await attempt.requireFact("barrier").verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");
+      const blockers = await blockingRuns();
+      if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
+    },
+    publishBuild: async (attempt) => {
+      const release = attempt.requireFact("verifiedRelease");
+      const verifiedRelease = verifyReleaseArtifact({
+        deployRoot: attempt.deployRoot,
+        revision: attempt.targetCommit,
+        releaseName: release.releaseName,
+      });
+      const activated = activateReleasePointer({ root: attempt.deployRoot, release: verifiedRelease.releaseName });
+      const relativeTarget = (target) => target === null ? null : `releases/${target}`;
+      const pointerTransition = Object.freeze({
+        oldTarget: relativeTarget(activated.oldTarget),
+        newTarget: relativeTarget(activated.newTarget),
+        previousTarget: relativeTarget(activated.previousTarget),
+      });
+      return {
+        verifiedRelease,
+        publication: {
+          releaseDirectoryIdentity: verifiedRelease.releaseName,
+          releaseIdentity: {
+            name: verifiedRelease.releaseName,
+            commit: verifiedRelease.revision,
+            digest: verifiedRelease.digest,
+          },
+          pointerOldTarget: pointerTransition.oldTarget,
+          pointerNewTarget: pointerTransition.newTarget,
+          pointerTransition,
+          rollback: async () => rollbackReleasePointer({ root: attempt.deployRoot }),
+        },
+      };
+    },
+    restartServices: async () => {
+      for (const label of SERVICE_LABELS) await launchctl("service-restart-failed", ["kickstart", "-k", `${domain()}/${label}`]);
+    },
+    verifyServices: async (attempt) => {
+      const revisions = attempt.requireFact("revisions");
+      const deadline = Date.now() + 30_000;
+      let lastReason = "not-ready";
+      while (Date.now() < deadline) {
+        const state = await serviceState();
+        if (!state.ok) lastReason = `launchd-unavailable-${state.unavailable.join(",")}`;
+        else {
+          try {
+            const port = process.env.API_PORT ?? "3000";
+            const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+            const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+            const payload = version.ok ? await version.json() : {};
+            if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
+              throwIfInterrupted();
+              return {
+                serviceVerification: {
+                  activatedBuildStamp: {
+                    packageName: payload.packageName,
+                    commit: payload.commit,
+                    dirty: payload.dirty,
+                  },
+                },
+              };
+            }
+            lastReason = `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
+          } catch (error) {
+            if (error instanceof DeployFailure) throw error;
+            lastReason = error instanceof Error ? error.name : "probe-failed";
+          }
+        }
+        await sleep(1_000);
+      }
+      fail("service-verification-failed", lastReason);
+    },
+    restorePreviousServices: async () => {
+      for (const label of SERVICE_LABELS) {
+        await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], {
+          allowAfterInterrupt: true,
+          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore,
+          timeoutReason: "previous-service-restore-timeout",
+        });
+      }
+    },
+    escalate: writeEscalation,
+    markEscalationNotified,
+    notify,
+    log,
+  });
+};
 
 const main = async () => {
   const options = parseArgs(process.argv.slice(2));
@@ -892,9 +923,10 @@ const main = async () => {
     log,
     checkEscalation: () => checkExistingEscalation({
       escalationPath: ESCALATION_PATH,
-      readRemoteMain: remoteMainRevision,
       retryEscalationNotification,
       log,
+      retryableReasons: RETRYABLE_ESCALATION_REASONS,
+      retryCap: ESCALATION_RETRY_CAP,
     }),
     readRemoteMain: remoteMainRevision,
     persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
