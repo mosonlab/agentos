@@ -802,7 +802,11 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   `first_layer_not_single`, `layer_order_invalid`, and `base_step_invalid` are
   the ordering and base-reference checks. Output wiring also refuses
   `prior_kind_unproduced`, `output_kind_duplicate`, and `prior_kind_duplicate`.
-  Warning codes are
+  Gate and assignee checks refuse `approval_gate_in_parallel_layer`,
+  `assignee_invalid`, and `integrator_binding_invalid`. Agent assignments must
+  name an existing, non-archived Agent in the addressed project. Repo grants
+  are not checked while authoring; the instantiation route checks the grant
+  against its selected Repo. Warning codes are
   `no_review_step`, `same_agent_implements_and_reviews`, and
   `pull_request_without_regression`.
 

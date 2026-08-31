@@ -1,5 +1,6 @@
 import {
   canonicalTemplateIdentity,
+  integratorBindingRefusal,
   lockTemplateRow,
   lockTemplateStepRows,
   Prisma,
@@ -91,7 +92,8 @@ const cloneJson = (value: Prisma.JsonValue | null): Prisma.InputJsonValue | type
  */
 export const validateTemplateGraph = (
   steps: readonly TemplateAuthoringStep[],
-  _agents: ReadonlyMap<string, TemplateAuthoringAgent>,
+  agents: ReadonlyMap<string, TemplateAuthoringAgent>,
+  projectId?: string,
 ): TemplateGraphValidation => {
   // 1. graph_empty.
   if (steps.length === 0) {
@@ -220,6 +222,69 @@ export const validateTemplateGraph = (
         };
       }
       priorKinds.add(priorKind);
+    }
+  }
+
+  // 9. approval_gate_in_parallel_layer. Approval is a single decision point;
+  // placing it alongside another Step would leave the layer with no unique
+  // gate owner.
+  const layerSizes = new Map<number, number>();
+  for (const step of steps) layerSizes.set(step.layer, (layerSizes.get(step.layer) ?? 0) + 1);
+  for (const step of steps) {
+    if (step.approvalGate && (layerSizes.get(step.layer) ?? 0) > 1) {
+      return {
+        refusal: authoringRefusal(
+          "approval_gate_in_parallel_layer",
+          `Template step ${step.stepIndex} cannot carry an approval gate in a parallel layer`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 10. assignee_invalid. Authoring validates only identity facts that are
+  // independent of a Repo. Repo grants remain an instantiation concern.
+  for (const step of steps) {
+    const agent = step.assigneeAgentId === null ? undefined : agents.get(step.assigneeAgentId);
+    const invalid = step.assigneeType === "HUMAN"
+      ? step.assigneeAgentId !== null
+      : step.assigneeAgentId === null
+        || agent === undefined
+        || agent.archivedAt !== null
+        || (projectId !== undefined && agent.projectId !== projectId);
+    if (invalid) {
+      return {
+        refusal: authoringRefusal(
+          "assignee_invalid",
+          `Template step ${step.stepIndex} has an invalid assignee`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 11. integrator_binding_invalid. This delegates the bidirectional sentinel
+  // invariant to the platform's canonical predicate; authoring must not grow
+  // a second, subtly different interpretation of the merge Step.
+  for (const step of steps) {
+    const agentName = step.assigneeAgentId === null
+      ? null
+      : agents.get(step.assigneeAgentId)?.name ?? null;
+    const bindingRefusal = integratorBindingRefusal(agentName, {
+      stepIndex: step.stepIndex,
+      outputKind: step.outputKind,
+    });
+    if (bindingRefusal) {
+      return {
+        refusal: authoringRefusal(
+          "integrator_binding_invalid",
+          `Template step ${step.stepIndex}: ${bindingRefusal}`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
     }
   }
 
@@ -392,7 +457,7 @@ export const replaceTemplateSteps = async (
       select: { id: true, name: true, projectId: true, archivedAt: true },
     });
   const agents = new Map(agentRows.map((agent) => [agent.id, agent]));
-  const validation = validateTemplateGraph(normalizedSteps, agents);
+  const validation = validateTemplateGraph(normalizedSteps, agents, projectId);
   if (validation.refusal) throw validation.refusal;
 
   await tx.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId } });
