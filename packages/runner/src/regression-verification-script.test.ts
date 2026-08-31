@@ -297,6 +297,7 @@ test("gate FAIL records bounded node:test failures and missing-stage output", ()
   const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
   const excerpt = verdict.gateFailureExcerpt;
   assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
   assert.match(excerpt, /packages\/first\.test\.ts/u);
   assert.match(excerpt, /first assertion in first\.test\.ts/u);
   assert.match(excerpt, /packages\/second\.test\.ts/u);

@@ -231,9 +231,10 @@ CAPTURE="$(mktemp "${TMPDIR:-/tmp}/agentos-remote-gate.XXXXXXXX")" \
 trap 'rm -f -- "$CAPTURE"' EXIT
 
 # -n so the remote command cannot consume this script's stdin, and no -t: a tty
-# would let the remote side interleave and colour its output, and the whole point
-# of this call is one machine-readable verdict line. Both oids were validated as
-# 40 hex characters above, so they carry nothing a remote shell could act on.
+# would let the remote side interleave and colour its output. The stream carries
+# the machine-readable verdict plus the worker's bounded FAIL excerpt. Both oids
+# were validated as 40 hex characters above, so they carry nothing a remote shell
+# could act on.
 if [ "$VERBOSE" -eq 1 ]; then
   ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -n "$SERVER" \
     "cd ${REPO_HOME} && ./run-gate.sh ${OID} --master ${MASTER_OID}${REMOTE_VERBOSE}" 2>&1 | tee "$CAPTURE"

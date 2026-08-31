@@ -172,16 +172,20 @@ for (let index = 0; index < sourceLines.length; index += 1) {
   if (lineStage) currentStage = lineStage;
 
   const isSubtestContext = /^\s*#\s*Subtest\b/u.test(visible);
-  const isFileContext = /^\s*#.*\b(?:test|spec|dbtest)\.[cm]?[jt]sx?\b/u.test(visible);
+  // Node's TAP reporter uses `# Subtest`, while the default reporter prints
+  // `test at ...`/`location: ...` and a marked failure. Accept either shape so
+  // a file path is retained even when the worker forwards only a short tail.
+  const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(visible);
   if (isSubtestContext || isFileContext) {
     pendingContexts.push({ line, index, stage: currentStage });
     if (pendingContexts.length > 12) pendingContexts.shift();
   }
 
   const isNotOk = /\bnot ok\b/u.test(visible);
+  const isFailureMarker = /^\s*[✖×]\s+(?!failing tests?:)/u.test(visible);
   const isAssertion = /\bAssertionError\b/u.test(visible);
   const isError = /\bError:/u.test(visible);
-  if (isNotOk) {
+  if (isNotOk || isFailureMarker) {
     const failureStage = currentStage;
     for (const context of pendingContexts) {
       if (context.stage === failureStage || !context.stage || !failureStage) {
