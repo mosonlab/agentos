@@ -11,6 +11,7 @@ import {
 } from "@anneal/db";
 
 import { createApp, partitionArchivable } from "./test-app.js";
+import { createApp as createLiveApp } from "./app.js";
 import { LOOPBACK_BROWSER_ORIGINS } from "./local-origin.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
@@ -52,6 +53,25 @@ test("operator principal cannot impersonate a runner", async () => {
       body: JSON.stringify({ runnerId: "fake-runner", leaseSeconds: 60 }),
     });
     assert.equal(response.status, 403);
+  });
+});
+
+test("live claim reconciliation asserts root ownership before touching database state", async () => {
+  await withTokens(async () => {
+    let databaseTouched = false;
+    const database = {
+      run: { findMany: async () => { databaseTouched = true; return []; } },
+    } as unknown as PrismaClient;
+    const app = createLiveApp(database, {
+      ownership: { assertHeld: () => { throw new Error("ownership-poisoned-for-test"); } },
+    });
+    const response = await app.request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: "runner-1", leaseSeconds: 60 }),
+    });
+    assert.equal(response.status, 500);
+    assert.equal(databaseTouched, false);
   });
 });
 

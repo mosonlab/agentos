@@ -9,27 +9,7 @@ import {
 } from "@anneal/db";
 
 import { createApp } from "../test-app.js";
-import { createApp as createLiveApp } from "../app.js";
 import { withTokens } from "./test-support.js";
-
-test("live claim reconciliation asserts root ownership before touching database state", async () => {
-  await withTokens(async () => {
-    let databaseTouched = false;
-    const database = {
-      run: { findMany: async () => { databaseTouched = true; return []; } },
-    } as unknown as PrismaClient;
-    const app = createLiveApp(database, {
-      ownership: { assertHeld: () => { throw new Error("ownership-poisoned-for-test"); } },
-    });
-    const response = await app.request("/runner/tasks/claim", {
-      method: "POST",
-      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ runnerId: "runner-1", leaseSeconds: 60 }),
-    });
-    assert.equal(response.status, 500);
-    assert.equal(databaseTouched, false);
-  });
-});
 
 test("starting a run without an exact dispatched prompt hash is refused before database access", async () => {
   await withTokens(async () => {

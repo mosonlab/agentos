@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json && node ../build-info/stamp.mjs dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
-    "test": "node --import tsx --test src/*.test.ts src/files/*.test.ts",
+    "test": "node --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
     "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner && npm run build -w @anneal/api",
     "test:db": "node --import tsx scripts/dbtest.mjs",
     "dev": "tsx watch src/index.ts",
