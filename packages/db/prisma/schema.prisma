@@ -951,7 +951,8 @@ model Run {
   /// and never the live task row.
   opensPullRequest              Boolean                @default(true)
   /// Immutable delivery contract copied from the template Step at Run birth.
-  /// Manual Tasks default to requiring a commit.
+  /// For manual Tasks, Run birth derives this from the snapshotted
+  /// pull-request decision.
   requiresCommit                Boolean                @default(true)
   targetBranch                  String?
   branch                        String?
