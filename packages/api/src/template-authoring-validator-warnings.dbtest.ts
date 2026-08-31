@@ -53,6 +53,7 @@ test("a graph without a review warns, and recognized versioned review removes on
       stepPayload(seed, 2, {
         layer: 2,
         outputKind: "sol-findings-v7",
+        assigneeAgentId: seed.agents[1]!.id,
         priorOutputKinds: ["implementation-v2"],
       }),
     ],
