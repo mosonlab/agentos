@@ -82,12 +82,18 @@ export const RunLine = ({
     ...(hideStatus ? [] : [t(presentation.key)]),
     ...(elapsed === null ? [] : [elapsed]),
   ].join(" · ");
+  // The row's live values sit at the end of the details string, so truncating
+  // it hid exactly what the row exists to show. The details wrap instead: the
+  // browser breaks at the " · " separators, and [overflow-wrap:anywhere]
+  // catches a single token wider than the column, such as a long model id.
   return (
-    <span data-run-line="" className="inline-flex min-w-0 items-center gap-[6px] whitespace-nowrap">
-      <span className={cn(DOT, DOT_TONE[dotTone(run.status, mergeOutcome)])} />
-      <span className="text-primary">{t("tasks.card.run", { n: run.runNumber })}</span>
+    <span data-run-line="" className="inline-flex min-w-0 flex-wrap items-center gap-x-[6px]">
+      <span className="inline-flex flex-none items-center gap-[6px] whitespace-nowrap">
+        <span className={cn(DOT, DOT_TONE[dotTone(run.status, mergeOutcome)])} />
+        <span className="text-primary">{t("tasks.card.run", { n: run.runNumber })}</span>
+      </span>
       {runDetails.length === 0 ? null : (
-        <span className="overflow-hidden text-ellipsis text-[color:var(--faint)]">
+        <span data-run-line-details="" className="min-w-0 [overflow-wrap:anywhere] text-[color:var(--faint)]">
           {` · ${runDetails}`}
         </span>
       )}
