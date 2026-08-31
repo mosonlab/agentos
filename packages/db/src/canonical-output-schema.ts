@@ -158,6 +158,7 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
         gateVerdict: z.literal("FAIL"),
         gateProof: failGateProof,
         summary: nonEmptyString,
+        gateFailureExcerpt: z.string().optional(),
       }),
       canonicalEnvelope.extend({
         schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),

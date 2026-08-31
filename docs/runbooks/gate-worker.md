@@ -84,7 +84,7 @@ Everything here is `scripts/gate-worker/`:
 | `provision.sh` | the server | Installs the pinned toolchain and creates `~/gate/`. Idempotent, dry-run by default. |
 | `mirror-push.sh` | the local machine | Pushes one exact candidate and one exact baseline into immutable `refs/gate/.../<oid>` cache refs, creating `~/gate/<repo>/mirror.git` on first push, and installs `run-gate.sh` beside it. |
 | `run-gate.sh` | the server | Holds one configured worker-wide execution slot, checks one oid out of its repository's mirror and runs `scripts/merge-gate.sh --expect-head <oid> --master <baseline-oid>` against it. |
-| `remote-gate.sh` | the local machine | One synchronous `ssh` call; returns the verdict line and the exit code. |
+| `remote-gate.sh` | the local machine | One synchronous `ssh` call; returns a bounded per-failing-step worker-log excerpt on FAIL, followed by the verdict line, and the exit code. |
 | `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then tries the primary worker and fallback worker. Local execution is explicit only. |
 | `lib.sh` | both | Shared input validation and atomic pid-slot locking. |
 
@@ -212,7 +212,8 @@ nothing but broken locks reports `76` at once instead of polling out the timeout
 and claiming the queue was full.
 
 Every code below `128` carries a matching stdout line, so a caller may read
-either: a verdict line starts `MERGE GATE:`, and everything that ran no gate
+either: the verdict is the last line starting `MERGE GATE:` or `GATE NOT RUN:`,
+and everything that ran no gate
 starts `GATE NOT RUN:` or `GATE DISPATCH:`. The exception is a gate killed by a
 signal it cannot handle. `merge-gate.sh` traps `INT` and `TERM` and prints
 `GATE NOT RUN: <reason>` through its `EXIT` trap, so `130` and `143` still say
