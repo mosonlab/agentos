@@ -215,11 +215,11 @@ test("valid step override copies only the targeted assignee and leaves template 
   assert.equal(noOpTask.assigneeAgentId, seed.canonicalTwo.id);
 });
 
-test("template-default assignees from another project are refused before grant checks", async () => {
+test("cross-project template-default assignees on integrator steps are refused as missing", async () => {
   const seed = await fixture("foreign-template-default");
   await db.taskTemplateStep.updateMany({
     where: { taskTemplateId: seed.template.id, stepIndex: 1 },
-    data: { assigneeAgentId: seed.foreign.id },
+    data: { assigneeAgentId: seed.foreign.id, outputKind: "merge-result" },
   });
   const before = {
     tasks: await db.task.count(),

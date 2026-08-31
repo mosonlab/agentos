@@ -471,6 +471,9 @@ export const instantiateTemplate = async (
               `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
             );
           }
+          if (step.assigneeType === AssigneeType.AGENT && !assigneeAgent) {
+            throw templateRefusal("template_step_agent_missing", `Template step ${step.name} has no agent`);
+          }
           // §D-P4, before any task row exists. A doctored template — the
           // sentinel on an ordinary step, or a model agent on the integrator
           // step — fails rather than materializing a chain that would later
@@ -486,15 +489,6 @@ export const instantiateTemplate = async (
               "template_integrator_binding_invalid",
               `Template step ${step.name}: ${bindingRefusal}`,
             );
-          }
-          if (step.assigneeType === AssigneeType.AGENT && !assigneeAgent) {
-            if (override) {
-              throw templateRefusal(
-                "step_override_agent_not_found",
-                `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
-              );
-            }
-            throw templateRefusal("template_step_agent_missing", `Template step ${step.name} has no agent`);
           }
           if (assigneeAgent?.archivedAt) {
             if (override) {
