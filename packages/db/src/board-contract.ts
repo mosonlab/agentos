@@ -141,6 +141,9 @@ export type CostsChain<DecimalValue = string> = {
   /** Priced spend only, or null when every run is unpriced. Unpriced runs are
    * represented by costUnavailableRuns rather than fabricated as zero. */
   costUsd: DecimalValue | null;
+  /** Exact partition of priced spend. Registered step roles and repair are
+   * seeded even when represented only by unpriced runs; `unassigned` surfaces
+   * priced tasks whose persisted output kind has no registered StepRole. */
   costByRole: Record<string, DecimalValue>;
   costUnavailableRuns: number;
   longestGap: {

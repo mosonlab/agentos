@@ -4,7 +4,6 @@ import {
   Prisma,
   RunStatus,
   TaskStatus,
-  markerFromMetadata,
   modelNameForPricing,
   runSessionUsageCost,
   type PrismaClient,
@@ -13,19 +12,20 @@ import {
 import type { CostsReport as CostsReportContract } from "@anneal/db/board-contract";
 import { stepRole, type StepRole } from "@anneal/db/merge-integrator";
 
-import { chainDisplayByTask, repairBinding } from "./board.js";
+import {
+  chainDisplayByTask,
+  repairChainBindingsFromRows,
+  type RepairMarkerRow,
+} from "./board.js";
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 
 /**
  * Spend aggregation for the Costs dashboard.
  *
- * Prisma `groupBy` owns the settled run counts by stable agent id. Amounts still
- * require the detailed rows because `Session.costUsd` is NULL for every codex
- * session, and `groupBy` cannot combine stored provider amounts with estimates
- * derived from token columns. `aggregateCosts` reconciles the grouped counts
- * with those detail rows before returning the report. Chain history is loaded
- * separately in the same transaction and joined in memory, so a long window
- * never performs one query per Chain or Task.
+ * Detailed settled rows own both counts and amounts because `Session.costUsd`
+ * is NULL for every Codex session and estimates come from token columns. Chain
+ * history is loaded in the same transaction and joined in memory, with one
+ * bounded read per table rather than one query per Chain or Task.
  *
  * TOKEN NORMALIZATION. `Session.totalTokens` is never read here: it is a
  * display projection, not the pricing basis. New persisted rows use the
@@ -63,9 +63,7 @@ export type CostsRunRow = {
     costUsd: Prisma.Decimal | null;
     inputTokens: number | null;
     cachedInputTokens: number | null;
-    /** Optional keeps pre-split unit fixtures source-compatible. Persisted
-     * rows selected by readProjectCosts always carry this key. */
-    cacheCreationInputTokens?: number | null;
+    cacheCreationInputTokens: number | null;
     outputTokens: number | null;
   } | null;
 };
@@ -91,7 +89,7 @@ export type CostsChainData = {
   tasks: readonly CostsTaskRow[];
   /** All project runs, not only the selected spend window. */
   runs: readonly CostsRunRow[];
-  until?: Date;
+  until: Date;
 };
 
 type NativeCostsWaste = {
@@ -116,17 +114,9 @@ type NativeCostsChain = {
   longestGap: { minutes: number; beforeTaskName: string | null };
 };
 
-type NativeCostsReport = Omit<CostsReportContract<Date, Prisma.Decimal>, "byAgent"> & {
+type NativeCostsReport = CostsReportContract<Date, Prisma.Decimal> & {
   waste: NativeCostsWaste;
   chains: NativeCostsChain[];
-  // The checked-out package's generated declaration can lag this branch until
-  // the contract slice is integrated. Keep the native projection type honest
-  // for focused API tests during that short handoff window.
-  byAgent: Array<CostsReportContract<Date, Prisma.Decimal>["byAgent"][number] & {
-    cacheUnknownRuns: number;
-    uncachedInputTokens: number;
-    uncachedInputUsd: Prisma.Decimal | null;
-  }>;
 };
 
 const ZERO = new Prisma.Decimal(0);
@@ -296,23 +286,11 @@ type CacheSplit = {
 };
 
 /** A split is known only when all three pieces of the canonical input total
- * are present and internally consistent. The undefined compatibility branch is
- * only for old in-memory unit fixtures; Prisma rows always select the nullable
- * column explicitly, so a persisted NULL stays unknown. */
+ * are present and internally consistent. A persisted NULL stays unknown. */
 const cacheSplit = (run: CostsRunRow): CacheSplit | null => {
   const session = run.session;
   if (session === null) return null;
   const { inputTokens, cachedInputTokens, cacheCreationInputTokens } = session;
-  if (cacheCreationInputTokens === undefined) {
-    if (inputTokens === null || cachedInputTokens === null
-      || cachedInputTokens < 0 || cachedInputTokens > inputTokens) return null;
-    return {
-      inputTokens,
-      cachedInputTokens,
-      cacheCreationInputTokens: 0,
-      uncachedInputTokens: inputTokens - cachedInputTokens,
-    };
-  }
   if (inputTokens === null || cachedInputTokens === null || cacheCreationInputTokens === null
     || inputTokens < 0 || cachedInputTokens < 0 || cacheCreationInputTokens < 0
     || cachedInputTokens + cacheCreationInputTokens > inputTokens) return null;
@@ -346,28 +324,6 @@ const boundChainKey = (task: CostsChainTask): string | null => {
 };
 
 const taskIdOfRun = (run: CostsRunRow): string | null => run.taskId ?? run.task?.id ?? null;
-
-const chainTaskRowsFromRuns = (runs: readonly CostsRunRow[]): CostsTaskRow[] => {
-  const byId = new Map<string, CostsTaskRow>();
-  for (const run of runs) {
-    const task = run.task;
-    const id = taskIdOfRun(run);
-    if (task === null || id === null || byId.has(id)) continue;
-    byId.set(id, {
-      id,
-      projectId: task.projectId,
-      name: task.name,
-      status: task.status,
-      chainId: task.chainId,
-      chainIndex: task.chainIndex,
-      chainLayer: task.chainLayer,
-      templateStep: task.templateStep,
-      ...(task.repairKind === undefined ? {} : { repairKind: task.repairKind }),
-      ...(task.repairChainId === undefined ? {} : { repairChainId: task.repairChainId }),
-    });
-  }
-  return [...byId.values()];
-};
 
 const roleForChainTask = (task: CostsChainTask): StepRole | "repair" | null => {
   if (task.repairKind !== undefined) return "repair";
@@ -419,7 +375,6 @@ const chainReport = (
       || left.id.localeCompare(right.id)
     ));
     const members = [...orderedPrimary, ...(repairsByChain.get(key) ?? [])];
-    if (orderedPrimary.length === 0 || orderedPrimary.some((task) => task.status !== TaskStatus.DONE)) continue;
     if (members.some((task) => task.status !== TaskStatus.DONE)) continue;
     const memberRuns = members.flatMap((task) => runsByTask.get(task.id) ?? []);
     if (memberRuns.length === 0) continue;
@@ -443,44 +398,37 @@ const chainReport = (
     let busyMilliseconds = 0;
     let longestGapMilliseconds = 0;
     let longestGapTaskName: string | null = null;
+    let busyFrontier = firstStarted;
     for (let index = 0; index < orderedRuns.length; index += 1) {
       const run = orderedRuns[index]!;
       busyMilliseconds += run.endedAt!.getTime() - run.startedAt!.getTime();
-      const next = orderedRuns[index + 1];
-      if (next === undefined) continue;
-      const gap = Math.max(0, next.startedAt!.getTime() - run.endedAt!.getTime());
+      const gap = Math.max(0, run.startedAt!.getTime() - busyFrontier);
       if (gap > longestGapMilliseconds) {
         longestGapMilliseconds = gap;
-        const nextTask = taskById.get(taskIdOfRun(next) ?? "");
-        longestGapTaskName = nextTask?.name ?? next.task?.name ?? null;
+        const task = taskById.get(taskIdOfRun(run) ?? "");
+        longestGapTaskName = task?.name ?? run.task?.name ?? null;
       }
+      busyFrontier = Math.max(busyFrontier, run.endedAt!.getTime());
     }
 
     const roleAmounts = new Map<string, Prisma.Decimal>();
     let total = ZERO;
     let pricedRuns = 0;
     let unavailableRuns = 0;
-    let unknownRole = false;
     for (const run of memberRuns) {
+      const task = taskById.get(taskIdOfRun(run) ?? "") ?? run.task;
+      const role = task === null ? null : roleForChainTask(task);
+      const roleBucket = role ?? "unassigned";
+      roleAmounts.set(roleBucket, roleAmounts.get(roleBucket) ?? ZERO);
       const cost = runCost(run);
       if (cost?.costUsd === null || cost === null) {
         unavailableRuns += 1;
         continue;
       }
-      const task = taskById.get(taskIdOfRun(run) ?? "") ?? run.task;
-      const role = task === null ? null : roleForChainTask(task);
-      if (role === null) {
-        // A priced run with no registered output role cannot be put in a
-        // truthful role partition. Omit the Chain row rather than assigning a
-        // task-name-derived pseudo-role or dropping spend from its total.
-        unknownRole = true;
-        continue;
-      }
       total = total.plus(cost.costUsd);
       pricedRuns += 1;
-      roleAmounts.set(role, (roleAmounts.get(role) ?? ZERO).plus(cost.costUsd));
+      roleAmounts.set(roleBucket, (roleAmounts.get(roleBucket) ?? ZERO).plus(cost.costUsd));
     }
-    if (unknownRole) continue;
     const roleEntries = [...roleAmounts.entries()].sort(([left], [right]) => left.localeCompare(right));
     const roleValues = partitionAmounts(roleEntries.map(([, value]) => value), total);
     const costByRole = Object.fromEntries(roleEntries.map(([role], index) => [role, roleValues[index]!])) as Record<string, Prisma.Decimal>;
@@ -515,46 +463,18 @@ const chainReport = (
   return reports.sort((left, right) => right.leadMinutes - left.leadMinutes || left.chainId.localeCompare(right.chainId));
 };
 
-const REPAIR_KINDS = new Set(["gate-fix", "refresh-conflict", "review-fix"]);
-
-type RepairActivityRow = { taskId: string; metadata: Prisma.JsonValue };
-
 /** Apply the board's detached-repair binding to the one project-wide Task
- * read. The newest valid marker wins per repair task; malformed/newer markers
- * are ignored exactly as readRepairChainByTask does, while an unknown repair
- * kind never becomes a synthetic cost role. */
+ * read. The shared resolver keeps its newest-valid-marker rule identical to
+ * readRepairChainByTask. */
 const bindRepairTasks = (
   tasks: readonly CostsTaskRow[],
-  activityRows: readonly RepairActivityRow[],
+  activityRows: readonly RepairMarkerRow[],
 ): CostsTaskRow[] => {
-  const primary = tasks.filter((task) => task.chainId !== null && task.repairKind === undefined);
-  const displayByTask = chainDisplayByTask(primary.map((task) => ({
-    id: task.id,
-    projectId: task.projectId,
-    name: task.name,
-    chainId: task.chainId,
-    templateStep: task.templateStep,
-  })));
-  const taskById = new Map(tasks.map((task) => [task.id, task]));
-  const boundByTask = new Map<string, { chainId: string; repairKind: string }>();
-  for (const row of activityRows) {
-    if (boundByTask.has(row.taskId)) continue;
-    const repair = taskById.get(row.taskId);
-    if (!repair || repair.chainId !== null) continue;
-    const marker = markerFromMetadata(row.metadata);
-    if (marker?.kind !== "repairAttempt" || marker.regressionTaskId === null
-      || marker.repairKind === null || !REPAIR_KINDS.has(marker.repairKind)) continue;
-    const binding = repairBinding(marker, (regressionTaskId) => {
-      const regression = taskById.get(regressionTaskId);
-      if (!regression || regression.projectId !== repair.projectId || regression.chainId === null) return null;
-      return {
-        chainId: regression.chainId,
-        chainName: displayByTask.get(regression.id)?.chainName ?? null,
-      };
-    });
-    if (binding === null) continue;
-    boundByTask.set(row.taskId, { chainId: binding.chainId, repairKind: binding.repairKind });
-  }
+  const boundByTask = repairChainBindingsFromRows(
+    tasks.filter((task) => task.chainId === null),
+    activityRows,
+    tasks.filter((task) => task.chainId !== null),
+  );
   return tasks.map((task) => {
     const binding = boundByTask.get(task.id);
     return binding === undefined
@@ -563,21 +483,17 @@ const bindRepairTasks = (
   });
 };
 
-export type CostsRunGroup = { agentId: string; _count: { _all: number } };
-
 export const aggregateCosts = (
   runs: readonly CostsRunRow[],
-  groupedRuns: readonly CostsRunGroup[],
   since: Date,
   days: number,
   timeZone: string,
-  chainData?: CostsChainData,
+  chainData: CostsChainData,
 ): NativeCostsReport => {
   const daily = new Map<string, Map<string, Prisma.Decimal>>(
     windowDays(since, days, timeZone).map((date) => [date, new Map<string, Prisma.Decimal>()]),
   );
-  const groupedCountByAgent = new Map(groupedRuns.map((group) => [group.agentId, group._count._all]));
-  const observedCountByAgent = new Map<string, number>();
+  const runCountByAgent = new Map<string, number>();
   const perAgent = new Map<string, {
     agent: string;
     usd: Prisma.Decimal;
@@ -612,7 +528,7 @@ export const aggregateCosts = (
     if (startedAt === null) throw new Error(`Run ${run.id} has no startedAt in a Costs window`);
     const agentId = run.agent.id;
     const agent = run.agent.name;
-    observedCountByAgent.set(agentId, (observedCountByAgent.get(agentId) ?? 0) + 1);
+    runCountByAgent.set(agentId, (runCountByAgent.get(agentId) ?? 0) + 1);
     const cost = runCost(run);
     const agentTotal = perAgent.get(agentId) ?? {
       agent, usd: ZERO, pricedRuns: 0, costUnavailableRuns: 0,
@@ -675,15 +591,7 @@ export const aggregateCosts = (
     priced.push({ run, cost: { ...cost, costUsd: usd } });
   }
 
-  for (const [agentId, count] of observedCountByAgent) {
-    if (groupedCountByAgent.get(agentId) !== count) {
-      throw new Error(`Grouped and detailed cost run counts disagree for agent ${agentId}`);
-    }
-  }
-  if (groupedCountByAgent.size !== observedCountByAgent.size) {
-    throw new Error("Grouped and detailed cost run agents disagree");
-  }
-  const runCount = groupedRuns.reduce((sum, group) => sum + group._count._all, 0);
+  const runCount = runs.length;
   const pricedRuns = runCount - unavailable;
   const modelTotals = [...perModel.values()];
   const modelAmounts = partitionAmounts(modelTotals.map((entry) => entry.usd), total);
@@ -698,11 +606,6 @@ export const aggregateCosts = (
     failureEntries.map(([, entry]) => entry.usd),
     failedAmount ?? ZERO,
   );
-  const end = chainData?.until ?? localMidnight(
-    shiftCalendarDate(calendarParts(since, timeZone), days),
-    timeZone,
-  );
-  const chainInput = chainData ?? { tasks: chainTaskRowsFromRuns(runs), runs };
   return {
     days,
     since,
@@ -722,7 +625,7 @@ export const aggregateCosts = (
         runs: entry.runs,
       })),
     },
-    chains: chainReport(chainInput, since, end),
+    chains: chainReport(chainData, since, chainData.until),
     daily: [...daily].map(([date, byAgent]) => ({
       date,
       byAgent: Object.fromEntries([...byAgent].map(([agent, usd]) => [agent, amount(usd)])),
@@ -731,7 +634,7 @@ export const aggregateCosts = (
       .map(([agentId, agentTotal]) => ({
         agent: agentTotal.agent,
         usd: amount(agentTotal.usd),
-        runs: groupedCountByAgent.get(agentId) ?? 0,
+        runs: runCountByAgent.get(agentId) ?? 0,
         costUnavailableRuns: agentTotal.costUnavailableRuns,
         avgUsd: amount(agentTotal.pricedRuns === 0 ? ZERO : agentTotal.usd.dividedBy(agentTotal.pricedRuns)),
         cachePct: agentTotal.cacheKnownRuns > 0 && agentTotal.inputTokens > 0
@@ -778,40 +681,122 @@ export const readProjectCosts = async (
 ): Promise<NativeCostsReport> => {
   const since = costsWindowStart(now, days, timeZone);
   const until = costsWindowEnd(now, timeZone);
-  // Costs is a bounded report, but a Chain is not: its first run can predate the
-  // selected window and its last run can be a detached repair. Read each table
-  // once, then partition the rows in memory. This keeps a 90-day dashboard from
-  // turning into one query per Chain (or, worse, one query per Task).
+  // Costs is a bounded report, but a matching Chain is not: its first run can
+  // predate the selected window and its last run can be a detached repair. The
+  // candidate CTE lets PostgreSQL select only report tasks and complete matching
+  // chains; the following activity and run reads stay fixed at one per table.
   return db.$transaction(async (tx) => {
-    const taskRows = await tx.task.findMany({
-      where: { projectId },
-      select: {
-        id: true,
-        projectId: true,
-        name: true,
-        status: true,
-        chainId: true,
-        chainIndex: true,
-        chainLayer: true,
-        templateStep: { select: { name: true, outputKind: true } },
-      },
-      orderBy: [{ chainId: "asc" }, { chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-    });
-    const detachedTaskIds = taskRows.filter((task) => task.chainId === null).map((task) => task.id);
-    const activityRows: RepairActivityRow[] = detachedTaskIds.length === 0
-      ? []
-      : await tx.taskActivity.findMany({
-          where: {
-            taskId: { in: detachedTaskIds },
-            actorType: "control-plane",
-            metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
-          },
-          select: { taskId: true, metadata: true },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        });
+    type RawTask = Omit<CostsTaskRow, "templateStep"> & {
+      templateStepName: string | null;
+      templateStepOutputKind: string | null;
+      repairMarkers: Prisma.JsonValue;
+    };
+    const rawTaskRows = await tx.$queryRaw<RawTask[]>(Prisma.sql`
+      WITH candidate_chains AS (
+        SELECT DISTINCT primary_task."chainId"
+        FROM "Task" AS primary_task
+        JOIN "Run" AS chain_run ON chain_run."taskId" = primary_task."id"
+        WHERE primary_task."projectId" = ${projectId}
+          AND primary_task."chainId" IS NOT NULL
+          AND chain_run."endedAt" >= ${since}
+          AND chain_run."endedAt" < ${until}
+        UNION
+        SELECT DISTINCT regression_task."chainId"
+        FROM "TaskActivity" AS marker
+        JOIN "Task" AS repair_task ON repair_task."id" = marker."taskId"
+        JOIN "Task" AS regression_task ON regression_task."id" = marker."metadata"->>'regressionTaskId'
+        JOIN "Run" AS repair_run ON repair_run."taskId" = repair_task."id"
+        WHERE repair_task."projectId" = ${projectId}
+          AND repair_task."chainId" IS NULL
+          AND marker."actorType" = 'control-plane'
+          AND marker."metadata"->>'kind' = ${MERGE_TAIL_KIND.repairAttempt}
+          AND regression_task."projectId" = repair_task."projectId"
+          AND regression_task."chainId" IS NOT NULL
+          AND repair_run."endedAt" >= ${since}
+          AND repair_run."endedAt" < ${until}
+      ), candidate_tasks AS (
+        SELECT candidate."id"
+        FROM "Task" AS candidate
+        WHERE candidate."projectId" = ${projectId}
+          AND (
+            EXISTS (
+              SELECT 1 FROM "Run" AS report_run
+              WHERE report_run."taskId" = candidate."id"
+                AND report_run."startedAt" >= ${since}
+                AND report_run."startedAt" < ${until}
+            )
+            OR candidate."chainId" IN (SELECT "chainId" FROM candidate_chains)
+            OR (
+              candidate."chainId" IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM "TaskActivity" AS repair_marker
+                JOIN "Task" AS regression
+                  ON regression."id" = repair_marker."metadata"->>'regressionTaskId'
+                WHERE repair_marker."taskId" = candidate."id"
+                  AND repair_marker."actorType" = 'control-plane'
+                  AND repair_marker."metadata"->>'kind' = ${MERGE_TAIL_KIND.repairAttempt}
+                  AND regression."projectId" = candidate."projectId"
+                  AND regression."chainId" IN (SELECT "chainId" FROM candidate_chains)
+              )
+            )
+          )
+      )
+      SELECT task."id", task."projectId", task."name", task."status",
+        task."chainId", task."chainIndex", task."chainLayer",
+        step."name" AS "templateStepName",
+        step."outputKind" AS "templateStepOutputKind",
+        COALESCE((
+          SELECT jsonb_agg(
+            jsonb_build_object('taskId', activity."taskId", 'metadata', activity."metadata")
+            ORDER BY activity."createdAt" DESC, activity."id" DESC
+          )
+          FROM "TaskActivity" AS activity
+          WHERE activity."taskId" = task."id"
+            AND activity."actorType" = 'control-plane'
+            AND activity."metadata"->>'kind' = ${MERGE_TAIL_KIND.repairAttempt}
+        ), '[]'::jsonb) AS "repairMarkers"
+      FROM "Task" AS task
+      JOIN candidate_tasks ON candidate_tasks."id" = task."id"
+      LEFT JOIN "TaskTemplateStep" AS step ON step."id" = task."templateStepId"
+      ORDER BY task."chainId" ASC NULLS LAST, task."chainLayer" ASC NULLS LAST,
+        task."chainIndex" ASC NULLS LAST, task."id" ASC
+    `);
+    const taskRows: CostsTaskRow[] = rawTaskRows.map((task) => ({
+      id: task.id,
+      projectId: task.projectId,
+      name: task.name,
+      status: task.status,
+      chainId: task.chainId,
+      chainIndex: task.chainIndex,
+      chainLayer: task.chainLayer,
+      templateStep: task.templateStepName === null || task.templateStepOutputKind === null
+        ? null
+        : { name: task.templateStepName, outputKind: task.templateStepOutputKind },
+    }));
+    const activityRows: RepairMarkerRow[] = rawTaskRows.flatMap((task) => (
+      Array.isArray(task.repairMarkers)
+        ? task.repairMarkers.flatMap((value) => {
+            if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+            const row = value as { taskId?: unknown; metadata?: Prisma.JsonValue };
+            return typeof row.taskId === "string" && row.metadata !== undefined
+              ? [{ taskId: row.taskId, metadata: row.metadata }]
+              : [];
+          })
+        : []
+    ));
     const tasks = bindRepairTasks(taskRows, activityRows);
+    const chainMemberIds = tasks
+      .filter((task) => task.chainId !== null || task.repairChainId !== undefined)
+      .map((task) => task.id);
     const allRuns = await tx.run.findMany({
-      where: { projectId },
+      where: {
+        projectId,
+        OR: [
+          { status: { in: [...terminalRunStatuses] }, startedAt: { gte: since, lt: until } },
+          { taskId: { in: chainMemberIds } },
+        ],
+      },
       select: {
         id: true,
         taskId: true,
@@ -845,14 +830,8 @@ export const readProjectCosts = async (
       && run.startedAt !== null
       && run.startedAt >= since
       && run.startedAt < until);
-    const groupedByAgent = new Map<string, number>();
-    for (const run of reportRuns) groupedByAgent.set(run.agent.id, (groupedByAgent.get(run.agent.id) ?? 0) + 1);
-    const groupedRuns = [...groupedByAgent.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([agentId, count]) => ({ agentId, _count: { _all: count } }));
     return aggregateCosts(
       reportRuns,
-      groupedRuns,
       since,
       days,
       timeZone,

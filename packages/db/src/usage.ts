@@ -327,6 +327,89 @@ export const extractUsage = (payload: unknown): SessionUsage => {
   return result;
 };
 
+export type ExtractedCacheSplit =
+  | { kind: "none" }
+  | { kind: "unknown" }
+  | {
+      kind: "known";
+      cachedInputTokens: number;
+      cacheCreationInputTokens: number;
+    };
+
+const strictToken = (value: unknown, field: string): void => {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_INT4) {
+    throw new Error(`${field} is not a storable non-negative integer`);
+  }
+};
+
+const strictRecord = (value: unknown, field: string): Record<string, unknown> => {
+  const record = asRecord(value);
+  if (record === null) throw new Error(`${field} is not an object`);
+  return record;
+};
+
+/**
+ * Read the cache pair through the exact provider precedence and completeness
+ * rules used by live ingestion. The backfill enables strict validation so a
+ * malformed retained payload stops the scan; ingestion remains diagnostic and
+ * tolerant. Both policies still share `extractUsage` as the only decoder.
+ */
+export const extractCacheSplit = (
+  payload: unknown,
+  options: { strict?: boolean } = {},
+): ExtractedCacheSplit => {
+  const event = asRecord(payload);
+  if (event === null) {
+    if (options.strict) throw new Error("payload is not an object");
+    return { kind: "none" };
+  }
+
+  const providerKeys = ["agentosPiUsage", "modelUsage", "usage"] as const;
+  const hasProviderUsage = providerKeys.some((key) => Object.prototype.hasOwnProperty.call(event, key));
+  if (!hasProviderUsage) return { kind: "none" };
+
+  if (options.strict) {
+    if (Object.prototype.hasOwnProperty.call(event, "agentosPiUsage")) {
+      const pi = strictRecord(event.agentosPiUsage, "agentosPiUsage");
+      for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+        strictToken(pi[key], `agentosPiUsage.${key}`);
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(event, "modelUsage")) {
+      const models = strictRecord(event.modelUsage, "modelUsage");
+      for (const [modelName, value] of Object.entries(models)) {
+        const model = strictRecord(value, `modelUsage.${modelName}`);
+        for (const key of ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const) {
+          strictToken(model[key], `modelUsage.${modelName}.${key}`);
+        }
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(event, "usage")) {
+      const usage = strictRecord(event.usage, "usage");
+      for (const key of [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_write_input_tokens",
+      ] as const) {
+        strictToken(usage[key], `usage.${key}`);
+      }
+    }
+  }
+
+  const usage = extractUsage(payload);
+  return usage.cachedInputTokens === undefined || usage.cacheCreationInputTokens === undefined
+    ? { kind: "unknown" }
+    : {
+        kind: "known",
+        cachedInputTokens: usage.cachedInputTokens,
+        cacheCreationInputTokens: usage.cacheCreationInputTokens,
+      };
+};
+
 /**
  * Fold many payloads' usage into one absolute total. A field stays absent
  * unless at least one input carried it, so a run of cost-only payloads yields

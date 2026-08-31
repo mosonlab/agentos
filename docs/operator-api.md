@@ -190,6 +190,17 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
 - Required path parameter: `projectId`.
 - Required query parameter: `tz` (recognized IANA timezone).
 - Optional query parameter: `days` (`1`, `7`, `30`, or `90`; default `30`).
+- The response retains the aggregate totals, daily series, model totals, agent
+  totals, and top runs. Agent rows additionally report cached-read percentage,
+  unknown-split run count, and known uncached-input tokens and spend.
+- `waste` partitions `wastedUsd` exactly into operator-cancelled and failed
+  spend; failed spend is further partitioned by failure class.
+- `chains` contains terminal chains whose last run ended in the window, with
+  lead/busy time, repair counts, longest idle gap, priced spend by step role,
+  and an unpriced-run count. The `unassigned` role is used when persisted step
+  metadata cannot classify priced spend. Unknown cache splits are counted and
+  excluded from cache metrics; unpriced chain runs never receive a fabricated
+  cost.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \

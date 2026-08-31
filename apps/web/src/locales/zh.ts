@@ -210,7 +210,6 @@ export const zh = {
   "costs.chains.longestGap": "最长间隔",
   "costs.chains.noRepairs": "无",
   "costs.chains.repairs": "修复",
-  "costs.chains.sort": "排序",
   "costs.chains.tasks": "任务",
   "costs.chains.title": "任务链",
   "costs.chains.unpriced": "{n} 笔成本未定价的 run",

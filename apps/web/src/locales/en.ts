@@ -211,7 +211,6 @@ export const en = {
   "costs.chains.longestGap": "Longest gap",
   "costs.chains.noRepairs": "None",
   "costs.chains.repairs": "Repairs",
-  "costs.chains.sort": "Sort",
   "costs.chains.tasks": "Tasks",
   "costs.chains.title": "Chains",
   "costs.chains.unpriced": "{n} unpriced runs",

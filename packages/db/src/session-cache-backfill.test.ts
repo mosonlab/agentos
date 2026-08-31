@@ -116,3 +116,31 @@ test("a provider payload without a complete cache pair remains unknown", async (
     cachedInputTokens: 77,
   });
 });
+
+test("an output-only model sibling does not make a complete modelUsage cache split unknown", async () => {
+  const sessions: MemorySession[] = [
+    { id: "output-sibling", cacheCreationInputTokens: null, cachedInputTokens: 150 },
+  ];
+  const exit = await runBackfillSessionCacheUsageCli({
+    db: memoryDatabase(sessions, {
+      "output-sibling": [{
+        type: "result",
+        modelUsage: {
+          "claude-opus-5": {
+            inputTokens: 10,
+            cacheReadInputTokens: 100,
+            cacheCreationInputTokens: 50,
+          },
+          "claude-fable-5": { outputTokens: 7 },
+        },
+      }],
+    }),
+  });
+
+  assert.equal(exit, 0);
+  assert.deepEqual(sessions[0], {
+    id: "output-sibling",
+    cacheCreationInputTokens: 50,
+    cachedInputTokens: 100,
+  });
+});

@@ -50,10 +50,9 @@ export const chartSeries = (byAgent: CostsReport["byAgent"]): string[] =>
 
 /* ---------------------------------------------------------------- additive API view */
 
-export type CostsPageAgent = CostsReport["byAgent"][number];
-export type CostsPageWaste = CostsReport["waste"];
 export type CostsPageChain = CostsReport["chains"][number];
 export type CostsPageReport = CostsReport;
+type CostsPageWaste = CostsReport["waste"];
 
 export type CostsChainSort = "lead" | "cost";
 
@@ -83,9 +82,6 @@ export const sortCostChains = (
   return (left.chainName ?? left.chainId).localeCompare(right.chainName ?? right.chainId)
     || left.chainId.localeCompare(right.chainId);
 });
-
-/** Compatibility alias for callers that describe the operation generically. */
-export const sortChains = sortCostChains;
 
 const minutes = (value: number): string => {
   if (!Number.isFinite(value)) return "—";
@@ -572,7 +568,7 @@ export const CostsPage = (): ReactNode => {
                 : t("costs.hint.complete")}
             </div>
 
-            {report.waste === undefined ? null : <WasteBreakdown waste={report.waste} />}
+            <WasteBreakdown waste={report.waste} />
 
             <div className={COSTS_COLUMNS}>
               <div className={STACK}>
@@ -582,9 +578,7 @@ export const CostsPage = (): ReactNode => {
                 </Card>
 
                 <Card title={t("costs.chains.title")} flush>
-                  {report.chains === undefined
-                    ? <EmptyState>{t("costs.chains.empty")}</EmptyState>
-                    : <ChainsTable chains={report.chains} />}
+                  <ChainsTable chains={report.chains} />
                 </Card>
 
                 <Card title={t("costs.topRuns.title")} flush>
@@ -675,12 +669,12 @@ export const CostsPage = (): ReactNode => {
                                     spend to have wasted. */}
                                 <TableCell className={TABLE_TIGHT}>
                                   {percent(entry.cachePct)}
-                                  {entry.cacheUnknownRuns === undefined || entry.cacheUnknownRuns === 0
+                                  {entry.cacheUnknownRuns === 0
                                     ? null
                                     : <span className={TABLE_SUB}>{t("costs.byAgent.cacheUnknown", { n: entry.cacheUnknownRuns })}</span>}
                                 </TableCell>
                                 <TableCell className={TABLE_TIGHT}>
-                                  {entry.uncachedInputUsd === undefined || entry.uncachedInputUsd === null
+                                  {entry.uncachedInputUsd === null
                                     ? "—"
                                     : usageMoney(entry.uncachedInputUsd)}
                                 </TableCell>

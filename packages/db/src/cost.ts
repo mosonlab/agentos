@@ -28,9 +28,9 @@ export type CostableSession = {
   costUsd: Prisma.Decimal | string | number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
-  /** Cache writes are separate from cached reads. Undefined is accepted only
-   * by legacy in-memory callers; persisted rows select the nullable column. */
-  cacheCreationInputTokens?: number | null;
+  /** Cache writes are separate from cached reads. Null means the historical
+   * row has not yielded a trustworthy read/write split. */
+  cacheCreationInputTokens: number | null;
   outputTokens: number | null;
 };
 
@@ -94,22 +94,23 @@ export const sessionUsageCost = (
   // the provider did not report that component, not that it was zero. Codex
   // reports cached input as a subset of input, so inconsistent rows also fall
   // back to their token columns instead of manufacturing a partial amount.
-  // A persisted NULL creation column means the cache split is unknown. It is
-  // intentionally not treated as zero: estimating against the old aggregate
-  // would fabricate uncached spend for historical Claude/PI rows.
-  if (session.cacheCreationInputTokens === null) {
-    return { costUsd: null, estimated: false, ...tokens };
-  }
   if (!prices || session.inputTokens === null || session.cachedInputTokens === null
     || session.outputTokens === null
-    || (session.cacheCreationInputTokens ?? 0) < 0
+    || (session.cacheCreationInputTokens !== null && session.cacheCreationInputTokens < 0)
     || session.cachedInputTokens < 0
     || session.cachedInputTokens + (session.cacheCreationInputTokens ?? 0) > session.inputTokens) {
     return { costUsd: null, estimated: false, ...tokens };
   }
 
   const cached = session.cachedInputTokens;
-  const uncached = session.inputTokens - cached - (session.cacheCreationInputTokens ?? 0);
+  // Preserve the pre-migration estimate for an explicitly unknown historical
+  // split. This does not claim creation was zero: cache reporting excludes the
+  // row, while the long-standing aggregate cost projection continues to price
+  // `input - cached` so migration alone cannot erase existing totals. Once the
+  // backfill establishes a split, known cache writes are excluded because the
+  // repository price table intentionally has no creation rate.
+  const uncached = session.inputTokens - cached
+    - (session.cacheCreationInputTokens === null ? 0 : session.cacheCreationInputTokens);
   const output = session.outputTokens;
   const costUsd = new Prisma.Decimal(uncached).times(prices.inputPerMillionUsd)
     .plus(new Prisma.Decimal(cached).times(prices.cachedInputPerMillionUsd))
