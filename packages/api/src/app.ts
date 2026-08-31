@@ -169,6 +169,7 @@ import {
 import { InboxRunFenceRefusal, supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
+import { cloneTemplate } from "./template-authoring.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
 import {
@@ -636,6 +637,10 @@ const instantiateTemplateInput = z.object({
   if (branchName !== undefined && !isValidBranchName(branchName)) {
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
   }
+});
+const cloneTemplateInput = z.object({
+  name: z.string().trim().min(1).max(200),
+  description: z.string().max(50_000).optional(),
 });
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
@@ -1733,6 +1738,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
+  });
+  app.post("/projects/:projectId/task-templates/:templateId/clone", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, cloneTemplateInput);
+    return context.json(await cloneTemplate(db, projectId, templateId, body), 201);
   });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));

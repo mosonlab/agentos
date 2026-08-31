@@ -15,6 +15,10 @@ import {
   isTemplateInstantiationRefusal,
   type TemplateInstantiationRefusalCode,
 } from "./template-errors.js";
+import {
+  isTemplateAuthoringRefusal,
+  type TemplateAuthoringRefusalCode,
+} from "./template-authoring-errors.js";
 
 export type RefusalReason =
   | WorkflowRefusalReason
@@ -40,14 +44,14 @@ export type RefusalValue =
 export type RefusalDetail = Readonly<Record<string, RefusalValue> & { error?: never }>;
 
 export type Refusal = {
-  reason: RefusalReason | TemplateInstantiationRefusalCode;
+  reason: RefusalReason | TemplateInstantiationRefusalCode | TemplateAuthoringRefusalCode;
   message: string;
   detail?: RefusalDetail;
 };
 
 export type RefusalResponse = {
   body: Readonly<{ error: string } & Record<string, RefusalValue>>;
-  status: 400 | 403 | 404 | 409;
+  status: 400 | 403 | 404 | 409 | 422;
 };
 
 export const refusalResponse = (refusal: Refusal): RefusalResponse => {
@@ -90,6 +94,9 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
     case "invalid-request":
       status = 400;
       break;
+    case "template_not_in_project":
+      status = 404;
+      break;
     case "forbidden":
       status = 403;
       break;
@@ -110,7 +117,24 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
     case "inbox-choice-mismatch":
     case "inbox-run-not-waiting":
     case "approval-gate-rejection-target-missing":
+    case "template_name_taken":
+    case "template_name_reserved":
+    case "template_canonical":
+    case "template_in_use":
       status = 409;
+      break;
+    case "graph_empty":
+    case "first_step_not_agent":
+    case "first_layer_not_single":
+    case "layer_order_invalid":
+    case "base_step_invalid":
+    case "prior_kind_unproduced":
+    case "output_kind_duplicate":
+    case "prior_kind_duplicate":
+    case "approval_gate_in_parallel_layer":
+    case "assignee_invalid":
+    case "integrator_binding_invalid":
+      status = 422;
       break;
     default: {
       const unhandled: never = refusal.reason;
@@ -126,6 +150,16 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
 };
 
 export const refusalFor = (error: unknown): Refusal | null => {
+  if (isTemplateAuthoringRefusal(error)) {
+    return {
+      reason: error.code,
+      message: error.message,
+      detail: {
+        code: error.code,
+        ...(error.stepIndex === undefined ? {} : { stepIndex: error.stepIndex }),
+      },
+    };
+  }
   if (isTemplateInstantiationRefusal(error)) {
     return {
       reason: error.code,

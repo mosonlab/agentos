@@ -20,6 +20,35 @@ import {
   refusalFor,
   refusalResponse,
 } from "./refusal.js";
+import {
+  TemplateAuthoringRefusal,
+  type TemplateAuthoringRefusalCode,
+} from "./template-authoring-errors.js";
+
+const authoringCodes = [
+  "template_not_in_project",
+  "template_name_taken",
+  "template_name_reserved",
+  "template_canonical",
+  "template_in_use",
+  "graph_empty",
+  "first_step_not_agent",
+  "first_layer_not_single",
+  "layer_order_invalid",
+  "base_step_invalid",
+  "prior_kind_unproduced",
+  "output_kind_duplicate",
+  "prior_kind_duplicate",
+  "approval_gate_in_parallel_layer",
+  "assignee_invalid",
+  "integrator_binding_invalid",
+] as const satisfies readonly TemplateAuthoringRefusalCode[];
+const authoringConflictCodes = new Set<TemplateAuthoringRefusalCode>([
+  "template_name_taken",
+  "template_name_reserved",
+  "template_canonical",
+  "template_in_use",
+]);
 
 const refusalByReason = {
   "invalid-request": { reason: "invalid-request", message: "invalid" },
@@ -130,4 +159,19 @@ test("refusal detail is preserved beside the public error message", () => {
     body: { error: "Run suspended for Inbox", code: "WAITING_INBOX" },
     status: 409,
   });
+});
+
+test("authoring refusals render every code with its status and optional stepIndex", () => {
+  for (const code of authoringCodes) {
+    const stepIndex = code === "first_step_not_agent" ? 1 : undefined;
+    const rendered = refusalResponse(refusalFor(new TemplateAuthoringRefusal(code, code, stepIndex))!);
+    const expectedStatus = code === "template_not_in_project" ? 404
+      : authoringConflictCodes.has(code) ? 409
+      : 422;
+    assert.equal(rendered.status, expectedStatus, code);
+    assert.equal(rendered.body.error, code);
+    assert.equal(rendered.body.code, code);
+    if (stepIndex === undefined) assert.equal("stepIndex" in rendered.body, false, code);
+    else assert.equal(rendered.body.stepIndex, stepIndex);
+  }
 });
