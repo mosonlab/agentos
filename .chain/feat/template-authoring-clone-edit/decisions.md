@@ -1,190 +1,198 @@
 # Plan decisions: template authoring clone-and-edit
 
-Each entry names the choice, the alternatives rejected, and the reason, so a
-fresh-context revision inherits the why.
+Each entry names the choice, alternatives rejected, and rationale so a fresh
+implementation context inherits the authoring decisions.
 
-## D1. One prefactor slice, limited to the refusal envelope
+## D1. The refusal envelope lands inside the clone tracer bullet
 
-Choice: slice 01 adds only the authoring refusal type, its code union and the
-404/409/422 mapping. The template-row lock helper, the validator module, the
-shared dbtest fixture and the docs-test helper each land with their first
-consumer (slice 03 for the first three, slice 10 for the last).
+Choice: slice 01 owns the clone route and the shared authoring refusal type,
+complete code union, optional step index, and 404/409/422 mapping. Slice 02
+depends on 01 and consumes that envelope for replace.
 
-Rejected: a wider prefactor carrying the lock helper, validator scaffold and
-fixture; folding the refusal type into the clone slice and making replace
-block on clone.
+Rejected: retaining the former standalone slice as an internal-only prefactor;
+giving that prefactor a synthetic endpoint solely to demonstrate it.
 
-Reason: the refusal type is the only thing two otherwise independent slices
-(02 clone, 03 replace) would both have to invent, so it is the only thing worth
-a prefactor. Everything else has exactly one first consumer and would be dead
-code with no red acceptance criterion if landed alone. Folding it into clone
-would deepen the critical path by one slice for no gain.
+Reason: PLAN-PR-001 correctly found that the prefactor had no standalone
+operator-visible outcome and its compatibility checkbox was already green.
+Folding it into clone removes one initial frontier slot and adds the 01-to-02
+edge, but every remaining slice is now a demonstrable vertical cut.
 
 ## D2. Validator split into three error groups plus warnings
 
-Choice: 04 (order and base: codes 2-5), 05 (output kinds: codes 6-8),
-06 (gate, assignee, integrator: codes 9-11), 07 (three warnings), all blocked
-only by 03. Slice 03 creates the validator as a pure function with the fixed
-check order laid out and `graph_empty` implemented; each later slice inserts
-its checks at their spec positions.
+Choice: 03 owns ordering and base errors, 04 output-kind errors, 05 gate,
+assignee and integrator errors, and 06 all warnings. Each is blocked only by
+02, which creates the pure validator frame, fixed order, and `graph_empty`.
 
-Rejected: one validator slice with all eleven errors and three warnings;
-one slice per code.
+Rejected: one slice for all eleven errors and three warnings; one slice per
+code.
 
-Reason: a single slice is the largest unit in the plan and would serialise
-four contexts' worth of work behind one; per-code slices would have eleven
-parallel edits to the same ordered list and the same handbook entry. Three
-groups follow natural fault lines (pure positions, pure output kinds, checks
-that need Agent facts), keep each slice well inside one context, and limit
-concurrent edits of the shared list to four insertions at known positions.
-Each group owns its own dbtest file to avoid append conflicts in one test file.
+Reason: four natural groups keep each slice reviewable, preserve a wide
+frontier after replace, and give each group an independent base-red HTTP test.
 
-## D3. Shared dbtest fixture created in slice 03, not in 01 or 02
+## D3. The shared database fixture begins with replace
 
-Choice: 03 creates the shared fixture helper (project, environment, Agents
-including `merge-integrator`, Repo with grants, non-canonical template, request
-helpers for clone, replace and instantiate). Slice 02 keeps its own inline
-fixture like `template-overrides.dbtest.ts` because it runs in parallel with 03.
+Choice: 02 creates the shared authoring fixture and request helpers used by
+03-07 and 09. Slice 01 keeps a small clone-specific fixture.
 
-Rejected: fixture in the prefactor slice; clone blocked on 03.
+Rejected: putting a fixture in the removed prefactor; making clone depend on
+replace.
 
-Reason: a fixture without a consumer has no red criterion; the clone test
-needs little (a source template with a webhook and a second project) and the
-duplication is a few lines. Every slice downstream of 03 reuses the helper.
+Reason: a fixture must land with its first consumer, while clone needs little
+of the larger graph and race setup.
 
-## D4. Handbook entries land with their routes; the docs-test assertion lands once, in slice 10
+## D4. Handbook assertions land with the documentation they verify
 
-Choice: 02 writes the clone entry, 03 writes the replace entry and removes the
-"no create-template route" sentence, 04-07 append their codes to the replace
-entry, 10 extends `scripts/operator-api-docs.test.mjs` with a section-scoped
-lookup asserting both routes.
+Choice: 01 writes and asserts the clone entry; 02 writes and asserts the
+replace entry and removes the obsolete no-authoring sentence; 03-06 add and
+assert only their own error or warning codes. Slice 09 contains no handbook
+work.
 
-Rejected: each route slice extending the docs test; a standalone docs-test
-slice.
+Rejected: deferring all handbook assertions to the former combined end-to-end
+slice; a standalone docs
+slice; dependency edges added only to avoid concurrent edits of one test.
 
-Reason: both route slices would have to generalise the same `routeSection`
-helper in parallel, a guaranteed conflict; a standalone slice would be a
-single test edit with no product behaviour. Slice 10 already blocks on both
-route slices and is the natural home for a whole-surface assertion.
+Reason: PLAN-PR-004 and PLAN-PR-007 correctly found the deferred criteria
+non-executable and handbook work independent of activation. Each docs change
+now has a base-red automated assertion in its owning vertical slice. Ordinary
+merge overlap is not a true prerequisite.
 
-## D5. Instantiation moves entirely inside its transaction behind the template lock
+## D5. The shared mutex decision includes every participating lock class
 
-Choice: `instantiateTemplate` takes the template-row lock as its first
-statement inside the existing Serializable transaction, then reads the
-template and steps and runs every dependent check there. The lock order
-becomes TaskTemplate row, then Task rows, then Agent rows, then grant rows;
-replace takes only the template row, so no cycle is possible.
+Choice: instantiation takes the template-row mutex before re-reading the graph
+and evaluating graph-dependent checks in its Serializable transaction. Replace
+takes the same mutex before deleting and creating template-step rows.
+Instantiation takes it before predecessor Task, Agent and grant locks and
+before Task inserts acquire foreign-key reference locks on template and
+template-step rows. The lock comment documents both concrete route paths.
 
-Rejected: keep the pre-transaction read and verify a step digest under the
-lock; a chain-structure style advisory lock keyed by template id.
+Rejected: keeping a pre-transaction read and checking a digest later; claiming
+replace takes only the template row; asserting a global order without auditing
+existing template writers.
 
-Reason: a digest re-check is a second mechanism to keep in step with the
-first, and the spec asks for one protocol shared by replace and instantiate.
-The row itself is the natural mutex and a `FOR UPDATE` helper matches the
-existing Task, Run and Agent helpers exactly. The unit seam that stubs Prisma
-for `instantiateTemplate` is touched, not extended (spec Testing Decisions).
+Reason: one row mutex is simpler than a second digest protocol. PLAN-PR-008
+correctly identified omitted step-row and foreign-key locks. Slice 02 audits
+writers before claiming the order is cycle-free: writers taking template and
+step locks must take template first, while step-only and template-only writers
+must not acquire the other class later. Slice 07 proves both real HTTP
+orderings.
 
-## D6. Replace deletes and recreates step rows; in-use is counted by template id or step id
+## D6. Replace deletes and recreates step rows
 
-Choice: the replace transaction deletes the template's step rows and creates
-the submitted ones with dense indexes; row ids are not preserved. The in-use
-check counts Task rows whose `templateId` is the template or whose
-`templateStepId` is one of its steps, under the lock.
+Choice: replace deletes all old step rows and creates the submitted rows with
+dense indexes. The in-use check counts Tasks referencing either the template
+or one of its step ids while the template mutex is held.
 
-Rejected: diffing and updating rows in place to preserve ids.
+Rejected: diffing rows in place to preserve ids.
 
-Reason: nothing may reference the rows once in-use is refused (`onDelete:
-SetNull` on Task is exactly what the in-use rule guards), and delete-plus-create
-is the only implementation with no cascade or renumbering policy. Counting by
-both columns covers a Task whose step pointer was already nulled.
+Reason: immutable-after-use guarantees no legitimate references, and whole
+replacement avoids cascade, identity-remapping and renumbering policies.
 
-## D7. Canonical detection uses the canonical identity registry
+## D7. Canonical identity comes from the existing registry
 
-Choice: `template_canonical` and `template_name_reserved` are true exactly when
-`canonicalTemplateIdentity(name)` is non-null, which covers both current
-canonical names and registered-legacy names minted by `legacyTemplateName`.
+Choice: `template_canonical` and `template_name_reserved` use
+`canonicalTemplateIdentity`, covering current and registered-legacy names.
 
-Rejected: comparing against the two canonical names only; a persisted
-canonical flag.
+Rejected: checking only two current names; adding a persisted canonical flag.
 
-Reason: the registry is the existing single authority for canonical identity
-(sync, run-open and rollover already consult it) and the schema needs no new
-column. Tests exercise one canonical and one legacy name each, per the brief.
+Reason: the registry is already authoritative and avoids a schema migration.
 
-## D8. Warning role sets
+## D8. Warning roles reuse platform role classification
 
-Choice: review role means `sol-findings` or `blind-findings`; implementation
-role means `implementation` or `fixed-implementation`; regression role means
-`regression-verification`; all resolved through `stepRole`, so versioned
-kinds (`-vN`) resolve too.
+Choice: review means the recognized Sol or blind code-review roles;
+implementation means implementation or fixed-implementation; regression means
+regression verification. Resolution goes through `stepRole`, including
+versioned output kinds.
 
-Rejected: counting `plan-review` as a review step; a new authoring-only list.
+Rejected: counting plan review as code review; creating an authoring-only role
+list.
 
-Reason: `no_review_step` and `same_agent_implements_and_reviews` are about
-code review of the implementation; a plan review does not review code. Using
-`stepRole` keeps the warnings aligned with the roles the rest of the platform
-recognises, as the spec requires.
+Reason: warnings must follow the roles the runtime already recognizes.
 
-## D9. Integrator check reuses `canonicalIntegratorBindingRefusal` verbatim
+## D9. Integrator validation reuses the canonical binding rule
 
-Choice: `integrator_binding_invalid` is produced when the existing canonical
-binding rule returns a refusal for the step (agent name, step index, output
-kind, template name). `assignee_invalid` runs first so the Agent name is known.
+Choice: `integrator_binding_invalid` wraps the result of the existing
+bidirectional sentinel check after assignee validity is known.
 
-Rejected: restating the rule in the validator.
+Rejected: restating the binding rule in the authoring validator.
 
-Reason: the spec forbids relaxing or restating the rule; one authority.
+Reason: one authority prevents hand-authored graphs from silently weakening
+the mechanical binding.
 
-## D10. Agent facts are read, not locked, inside replace
+## D10. Replace reads Agent facts without locking Agent rows
 
-Choice: the replace transaction reads the assignee Agents by id (no project
-filter, so other-project Agents are visible to `assignee_invalid`) and hands
-the facts to the pure validator; it does not take the Agent-row lock.
+Choice: replace reads all referenced Agent facts inside its transaction, with
+no project filter, and hands them to the pure validator. It does not lock Agent
+rows.
 
-Rejected: locking Agent rows in replace as instantiation does.
+Rejected: taking the instantiation Agent locks during authoring.
 
 Reason: authoring has no runtime consequence until instantiation, which locks
-and re-checks every Agent itself; an Agent archived after authoring is caught
-there. Locking here would add the Agent rows to replace's lock set for no
-observable guarantee.
+and re-checks every Agent. An archive after authoring is caught there, while an
+authoring lock would add contention without a lasting guarantee.
 
-## D11. Route allowlist removal is an independent slice
+## D11. Route allowlist removal remains independent
 
-Choice: slice 09 has no blockers and touches `templates.ts`,
-`template-errors.ts`, `refusal.ts`, the dispatch-binding dbtest, the templates
-unit test and `task-routing-v1.md`.
+Choice: 08 has no blockers and owns Route resolution, refusal-code cleanup,
+its persisted Task assignment evidence, and routing governance text.
 
-Rejected: sequencing it after 01 or 08 because they touch neighbouring lines.
+Rejected: sequencing it after 01 or 07 because of neighboring source edits.
 
-Reason: it removes one case line where 01 adds a new block and 08 edits a
-different region of `templates.ts`; the overlap is a trivial merge and the
-slice is the only one that can start immediately alongside 01.
+Reason: source overlap is a merge concern, not a behavior prerequisite, so 08
+can start beside 01.
 
-## D12. Slice 10 blocks on 08 as well as 02 and 03
+## D12. End-to-end authoring depends only on route functionality
 
-Choice: the end-to-end slice waits for the instantiation change.
+Choice: 09 is blocked only by 02, which already depends on clone. Handbook
+assertions live in their owning slices, and end-to-end activation does not wait
+for 07.
 
-Rejected: blocking on 02 and 03 only for a shallower path.
+Rejected: preserving the 07-to-09 edge because instantiation is later
+refactored; bundling handbook coverage with activation evidence.
 
-Reason: the end-to-end test is the acceptance evidence for the final shape of
-the instantiate path; running it before 08 would verify a path that 08 then
-rewrites. The critical path is 01 - 03 - 08 - 10, four slices; everything else
-is width.
+Reason: PLAN-PR-004 correctly found that ordinary clone, replace,
+instantiation and activation do not observe the row-lock protocol. Preferred
+implementation order is not a dependency. After 02, 07 and 09 can proceed in
+parallel; the critical path is three slices.
 
-## D13. Risk flags
+## D13. Risk flags follow persisted effects
 
-Choice: `risk: true` on 02 (creates template and step rows), 03 (deletes and
-creates step rows), 08 (changes the transaction that writes Tasks); `false` on
-01, 04-07, 09, 10, which add checks, tests or documentation and write no
-persisted data of their own.
+Choice: `risk: true` on 01 (creates template and step rows), 02 (deletes and
+creates step rows), 07 (changes the transaction writing Tasks), and 08 (changes
+which Agent id can be persisted on an implementation Task). Slices 03-06 and
+09 are `false` because they add validation, ephemeral warnings, or evidence
+without selecting new persisted identities or changing persisted shape.
 
-Reason: the frontmatter contract defines risk as touching persisted data or an
-irreversible external action; a validator refusal touches nothing.
+Rejected: leaving 08 false because it adds no new table or column.
+
+Reason: PLAN-PR-005 correctly found that Route resolution changes persisted
+Task assignment. Validator refusals and warnings persist no new state.
 
 ## D14. No schema migration
 
-Choice: the feature uses the existing `TaskTemplate` and `TaskTemplateStep`
-columns; no generation, revision or canonical flag is added.
+Choice: use the existing template and template-step columns; add no revision,
+generation or canonical flag.
 
-Reason: immutable-after-use replaces copy-on-write (brief ruling), so nothing
-new needs to be persisted, and canonical identity is derivable (D7).
+Reason: immutable-after-use replaces copy-on-write, and canonical identity is
+derivable from the registry.
+
+## D15. Requirements and verification have single slice owners
+
+Choice: slice frontmatter carries disjoint `requirements` groups and exact
+verification commands. Ownership is: clone, shared refusal envelope and clone
+handbook in 01; replace mechanics, strict schema, guards, `graph_empty`, lock
+helper and base handbook in 02; ordered/base errors in 03; output-kind errors
+in 04; gate/assignee/integrator rules and authoring-time Repo-grant timing in
+05; all warnings and ephemerality in 06; serialization and locked graph re-read
+in 07; Route resolution and governance in 08; clone-to-activation evidence in
+09. No implementation requirement is assigned twice.
+
+Rejected: phrases such as "new dbtest" without a path and command; acceptance
+checkboxes for unchanged behavior; dependency edges used to serialize test
+file edits.
+
+Reason: PLAN-PR-006 and PLAN-PR-007 require executable base-red evidence.
+Exact targeted commands live in frontmatter so slice bodies remain free of
+specific file paths and code snippets. Already-green compatibility checks are
+explicitly regression verification. Repository-wide lint, snapshot scan, the
+full suite, and the repository Merge Gate remain chain-level evidence outside
+the slice set.
