@@ -8,7 +8,6 @@ export type TemplateInstantiationRefusalCode =
   | "dispatch_conflicts_with_auto_start"
   | "implementation_route_agent_renamed"
   | "implementation_route_conflicts_with_step_override"
-  | "implementation_route_unknown_agent"
   | "repo_not_found"
   | "step_override_agent_archived"
   | "step_override_agent_not_found"
