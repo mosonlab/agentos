@@ -119,6 +119,26 @@ test("Regression v2 gate failures carry the complete Merge gate verdict", () => 
   }), "regression-verification-v2").status, "invalid");
 });
 
+test("Regression v2 gate failure excerpts are optional strings", () => {
+  const verdict = {
+    schemaVersion: 2,
+    outcome: "gate-fail",
+    headSha: A,
+    baseHeadSha: B,
+    gateVerdict: "FAIL",
+    gateProof: "MERGE GATE: FAIL (unit tests)",
+    summary: "unit tests",
+  };
+  assert.equal(parseRegressionVerdict(JSON.stringify(verdict), "regression-verification-v2").status, "ok");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    ...verdict,
+    gateFailureExcerpt: "not ok 1 - packages/db/src/example.test.ts",
+  }), "regression-verification-v2").status, "ok");
+  for (const gateFailureExcerpt of [null, 42, true, {}, []]) {
+    assert.equal(parseRegressionVerdict(JSON.stringify({ ...verdict, gateFailureExcerpt }), "regression-verification-v2").status, "invalid");
+  }
+});
+
 test("readiness role is mechanical across template generations and ordinals", () => {
   assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow" }), true);
   assert.equal(isMergeReadinessStep({ stepIndex: 11, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow" }), true);
