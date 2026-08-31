@@ -798,18 +798,19 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   Steps. The `template_in_use` recovery is to clone again.
 - An empty array answers `422 Unprocessable Entity` with
   `graph_empty`. Other graph validator refusals use `422` with their stable
-  code and optional `stepIndex`. Warning codes are
+  code and optional `stepIndex`: `first_step_not_agent`,
+  `first_layer_not_single`, `layer_order_invalid`, and `base_step_invalid` are
+  the ordering and base-reference checks. Output wiring also refuses
+  `prior_kind_unproduced`, `output_kind_duplicate`, and `prior_kind_duplicate`.
+  Gate and assignee checks refuse `approval_gate_in_parallel_layer`,
+  `assignee_invalid`, and `integrator_binding_invalid`. Agent assignments must
+  name an existing, non-archived Agent in the addressed project. Repo grants
+  are not checked while authoring; the instantiation route checks the grant
+  against its selected Repo. Warning codes are
   `no_review_step`, `same_agent_implements_and_reviews`, and
-  `pull_request_without_regression`.
-
-curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
-- An empty array answers `422 Unprocessable Entity` with
-  `graph_empty`. Other graph validator refusals use `422` with their stable
-  code and optional `stepIndex`. Warning codes are
-  `no_review_step`, `same_agent_implements_and_reviews`, and
-  `pull_request_without_regression`.
+  `pull_request_without_regression`; warnings are non-blocking, describe the
+  complete resulting graph, and are ephemeral (they are not persisted or
+  returned by template reads).
 
 ```sh
 curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \

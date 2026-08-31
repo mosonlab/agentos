@@ -1,8 +1,10 @@
 import {
   canonicalTemplateIdentity,
+  integratorBindingRefusal,
   lockTemplateRow,
   lockTemplateStepRows,
   Prisma,
+  stepRole,
   type PrismaClient,
 } from "@anneal/db";
 
@@ -71,7 +73,8 @@ export type TemplateGraphValidation = {
 const authoringRefusal = (
   code: TemplateAuthoringRefusalCode,
   message: string,
-): TemplateAuthoringRefusal => new TemplateAuthoringRefusal(code, message);
+  stepIndex?: number,
+): TemplateAuthoringRefusal => new TemplateAuthoringRefusal(code, message, stepIndex);
 
 const isUniqueConstraintError = (error: unknown): boolean => (
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
@@ -90,17 +93,246 @@ const cloneJson = (value: Prisma.JsonValue | null): Prisma.InputJsonValue | type
  */
 export const validateTemplateGraph = (
   steps: readonly TemplateAuthoringStep[],
-  _agents: ReadonlyMap<string, TemplateAuthoringAgent>,
+  agents: ReadonlyMap<string, TemplateAuthoringAgent>,
+  projectId?: string,
 ): TemplateGraphValidation => {
-  // 1. graph_empty. The remaining fixed positions are intentionally empty in
-  // this slice; later slices own their checks and warning computation.
+  // 1. graph_empty.
   if (steps.length === 0) {
     return {
       refusal: authoringRefusal("graph_empty", "Template graph must contain at least one step"),
       warnings: [],
     };
   }
-  return { refusal: null, warnings: [] };
+
+  // 2. first_step_not_agent. The first Step is the only one that can be
+  // started without a predecessor, so it must be executable by an Agent.
+  const first = steps[0]!;
+  if (first.assigneeType !== "AGENT") {
+    return {
+      refusal: authoringRefusal(
+        "first_step_not_agent",
+        "The first template step must be agent-executable",
+        first.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 3. first_layer_not_single. A parallel first layer has no unique starting
+  // Step and therefore cannot be materialized as a runnable graph.
+  const firstLayerSteps = steps.filter((step) => step.layer === first.layer);
+  if (firstLayerSteps.length > 1) {
+    return {
+      refusal: authoringRefusal(
+        "first_layer_not_single",
+        "The first template layer must contain exactly one step",
+        firstLayerSteps[1]!.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 4. layer_order_invalid. Step indexes are assigned from array order, so a
+  // lower layer after a higher one is the first offending position.
+  for (let index = 1; index < steps.length; index += 1) {
+    const previous = steps[index - 1]!;
+    const current = steps[index]!;
+    if (current.layer < previous.layer) {
+      return {
+        refusal: authoringRefusal(
+          "layer_order_invalid",
+          `Template step ${current.stepIndex} layer ${current.layer} must not precede layer ${previous.layer}`,
+          current.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 5. base_step_invalid. A base is a positional reference, but its semantic
+  // contract is stricter: it must point to an earlier Step in a lower layer.
+  const stepsByIndex = new Map(steps.map((step) => [step.stepIndex, step]));
+  for (const step of steps) {
+    if (step.baseFromStepIndex === null) continue;
+    const base = stepsByIndex.get(step.baseFromStepIndex);
+    if (!base || base.stepIndex >= step.stepIndex || base.layer >= step.layer) {
+      return {
+        refusal: authoringRefusal(
+          "base_step_invalid",
+          `Template step ${step.stepIndex} baseFromStepIndex must reference an earlier step in a strictly lower layer`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 6. prior_kind_unproduced. A prior attachment is available only when a
+  // producer has completed an earlier layer. Unknown kinds are fine when they
+  // are not consumed; this check only rejects a missing producer for a kind a
+  // Step explicitly names.
+  for (const step of steps) {
+    for (const priorKind of step.priorOutputKinds) {
+      const producedEarlier = steps.some((candidate) => (
+        candidate.outputKind === priorKind && candidate.layer < step.layer
+      ));
+      if (!producedEarlier) {
+        return {
+          refusal: authoringRefusal(
+            "prior_kind_unproduced",
+            `Template step ${step.stepIndex} prior output kind ${priorKind} is not produced in an earlier layer`,
+            step.stepIndex,
+          ),
+          warnings: [],
+        };
+      }
+    }
+  }
+
+  // 7. output_kind_duplicate. Output kinds identify the attachment a consumer
+  // receives, so one producer must own each kind. The later producer is the
+  // offending Step.
+  const outputKinds = new Set<string>();
+  for (const step of steps) {
+    if (outputKinds.has(step.outputKind)) {
+      return {
+        refusal: authoringRefusal(
+          "output_kind_duplicate",
+          `Template step ${step.stepIndex} duplicates output kind ${step.outputKind}`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+    outputKinds.add(step.outputKind);
+  }
+
+  // 8. prior_kind_duplicate. A duplicate declaration in one Step is a typo,
+  // even if a valid producer exists for that kind.
+  for (const step of steps) {
+    const priorKinds = new Set<string>();
+    for (const priorKind of step.priorOutputKinds) {
+      if (priorKinds.has(priorKind)) {
+        return {
+          refusal: authoringRefusal(
+            "prior_kind_duplicate",
+            `Template step ${step.stepIndex} declares prior output kind ${priorKind} more than once`,
+            step.stepIndex,
+          ),
+          warnings: [],
+        };
+      }
+      priorKinds.add(priorKind);
+    }
+  }
+
+  // 9. approval_gate_in_parallel_layer. Approval is a single decision point;
+  // placing it alongside another Step would leave the layer with no unique
+  // gate owner.
+  const layerSizes = new Map<number, number>();
+  for (const step of steps) layerSizes.set(step.layer, (layerSizes.get(step.layer) ?? 0) + 1);
+  for (const step of steps) {
+    if (step.approvalGate && (layerSizes.get(step.layer) ?? 0) > 1) {
+      return {
+        refusal: authoringRefusal(
+          "approval_gate_in_parallel_layer",
+          `Template step ${step.stepIndex} cannot carry an approval gate in a parallel layer`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 10. assignee_invalid. Authoring validates only identity facts that are
+  // independent of a Repo. Repo grants remain an instantiation concern.
+  for (const step of steps) {
+    const agent = step.assigneeAgentId === null ? undefined : agents.get(step.assigneeAgentId);
+    const invalid = step.assigneeType === "HUMAN"
+      ? step.assigneeAgentId !== null
+      : step.assigneeAgentId === null
+        || agent === undefined
+        || agent.archivedAt !== null
+        || (projectId !== undefined && agent.projectId !== projectId);
+    if (invalid) {
+      return {
+        refusal: authoringRefusal(
+          "assignee_invalid",
+          `Agent assignment for template step ${step.stepIndex} is missing, archived, cross-project, or otherwise invalid`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 11. integrator_binding_invalid. This delegates the bidirectional sentinel
+  // invariant to the platform's canonical predicate; authoring must not grow
+  // a second, subtly different interpretation of the merge Step.
+  for (const step of steps) {
+    const agentName = step.assigneeAgentId === null
+      ? null
+      : agents.get(step.assigneeAgentId)?.name ?? null;
+    const bindingRefusal = integratorBindingRefusal(agentName, {
+      stepIndex: step.stepIndex,
+      outputKind: step.outputKind,
+    });
+    if (bindingRefusal) {
+      return {
+        refusal: authoringRefusal(
+          "integrator_binding_invalid",
+          `Template step ${step.stepIndex}: ${bindingRefusal}`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // Warnings are deliberately computed only after every blocking check has
+  // passed. They describe the graph being saved and are returned in a stable,
+  // complete order; the replace transaction never writes them anywhere.
+  const reviewSteps = steps.filter((step) => {
+    const role = stepRole({ outputKind: step.outputKind });
+    return role === "sol-findings" || role === "blind-findings";
+  });
+  const warnings: TemplateAuthoringWarning[] = [];
+  if (reviewSteps.length === 0) {
+    warnings.push({
+      code: "no_review_step",
+      message: "Template graph has no review step",
+    });
+  }
+
+  const implementationAgentIds = new Set(
+    steps
+      .filter((step) => {
+        const role = stepRole({ outputKind: step.outputKind });
+        return role === "implementation" || role === "fixed-implementation";
+      })
+      .flatMap((step) => step.assigneeAgentId === null ? [] : [step.assigneeAgentId]),
+  );
+  const selfReview = reviewSteps.some((step) => (
+    step.assigneeAgentId !== null && implementationAgentIds.has(step.assigneeAgentId)
+  ));
+  if (selfReview) {
+    warnings.push({
+      code: "same_agent_implements_and_reviews",
+      message: "One Agent implements and reviews the same template graph",
+    });
+  }
+
+  const regressionStep = steps.find((step) => stepRole({ outputKind: step.outputKind }) === "regression");
+  const pullRequestStep = steps.find((step) => step.opensPullRequest);
+  if (pullRequestStep && !regressionStep) {
+    warnings.push({
+      code: "pull_request_without_regression",
+      message: `Template step ${pullRequestStep.stepIndex} opens a pull request but the graph has no regression step`,
+      stepIndex: pullRequestStep.stepIndex,
+    });
+  }
+
+  return { refusal: null, warnings };
 };
 
 /**
@@ -269,7 +501,7 @@ export const replaceTemplateSteps = async (
       select: { id: true, name: true, projectId: true, archivedAt: true },
     });
   const agents = new Map(agentRows.map((agent) => [agent.id, agent]));
-  const validation = validateTemplateGraph(normalizedSteps, agents);
+  const validation = validateTemplateGraph(normalizedSteps, agents, projectId);
   if (validation.refusal) throw validation.refusal;
 
   await tx.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId } });
