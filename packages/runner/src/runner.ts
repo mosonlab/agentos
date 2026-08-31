@@ -623,7 +623,6 @@ export const executeClaim = async (
       && evidence.signal === null
       && evidence.terminationReason === null
       && (!evidence.terminalEventSeen || !evidence.terminalSuccess)
-      && adapter.classifyError(evidence).failureClass === "PROTOCOL_ERROR"
       && remediationFailureReason === null
       && budgetReason === null
       && runLease.held;
@@ -631,7 +630,7 @@ export const executeClaim = async (
       try {
         const outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
         const receipt = outputStatus?.outputPersisted
-          ? await readTaskOutputReceipt(workspace.path)
+          ? await readTaskOutputReceipt(config, workspace)
           : null;
         const expectedKind = "result";
         postDeliveryDisconnectTolerated = outputStatus?.outputPersisted === true
@@ -642,24 +641,6 @@ export const executeClaim = async (
           && receipt.commitSha === capturedHeadSha;
         if (outputStatus?.outputPersisted && !receipt) {
           throw new Error(`Persisted ${expectedKind} output has no local delivery receipt`);
-        }
-        if (postDeliveryDisconnectTolerated) {
-          const providerError = summarizeEvidence(evidence.providerError) ?? "no providerError reported";
-          try {
-            await controlPlane.appendActivity(
-              config,
-              claim,
-              `A provider disconnect after delivery was tolerated: ${providerError}`,
-              { stream: "runner" },
-            );
-          } catch (error: unknown) {
-            postDeliveryDisconnectTolerated = false;
-            sink({
-              source: "RUNNER",
-              type: "POST_DELIVERY_DISCONNECT_ACTIVITY_FAILED",
-              payload: { message: errorMessage(error), providerError },
-            });
-          }
         }
       } catch (error: unknown) {
         sink({
@@ -742,6 +723,22 @@ export const executeClaim = async (
       await controlPlane.appendActivity(config, claim,
         cleaned.salvage.deliveryInstructions ?? cleaned.salvage.pushError ?? "WIP salvage attempted",
         { stream: "runner" }).catch(() => undefined);
+    }
+    if (succeeded && postDeliveryDisconnectTolerated) {
+      const providerError = summarizeEvidence(evidence.providerError) ?? "no providerError reported";
+      await controlPlane.appendActivity(
+        config,
+        claim,
+        `A provider disconnect after delivery was tolerated: ${providerError}`,
+        { stream: "runner" },
+      ).catch((error: unknown) => {
+        sink({
+          source: "RUNNER",
+          type: "POST_DELIVERY_DISCONNECT_ACTIVITY_FAILED",
+          payload: { message: errorMessage(error), providerError },
+        });
+      });
+      await flushEvents().catch(observeEventFlush);
     }
     const sessionDisposal = await sessionConfigLease.settle(succeeded ? "succeeded" : "failed");
     const { salvage: _salvage, ...finishedCleanup } = cleaned;

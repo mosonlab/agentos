@@ -312,14 +312,19 @@ const writeTaskOutputReceipt = async (kind: string, commitSha: string): Promise<
 
 const invokeTool = async (name: ToolName, params: Record<string, unknown>): Promise<ToolResult> => {
   const request = requestFor(name, params);
+  const taskOutputCommitSha = name === "task_output" ? request.body?.commitSha : null;
+  if (name === "task_output" && typeof taskOutputCommitSha !== "string") {
+    throw new Error("task_output request omitted commitSha");
+  }
   const result = await call(request);
   if (name === "task_activity_log") return said("Activity recorded.");
   if (name === "task_output") {
     const body = params.body as string;
     const kind = params.kind as string;
-    const commitSha = request.body?.commitSha;
-    if (typeof commitSha !== "string") throw new Error("task_output request omitted commitSha");
-    await writeTaskOutputReceipt(kind, commitSha);
+    const commitSha = taskOutputCommitSha as string;
+    await writeTaskOutputReceipt(kind, commitSha).catch((error: unknown) => {
+      console.error(`Unable to write task output receipt: ${error instanceof Error ? error.message : String(error)}`);
+    });
     const predecessorOutputs = (result as { predecessorOutputs?: unknown } | null)?.predecessorOutputs;
     return said([
       `Output persisted as '${kind}' (${body.length} characters).`,

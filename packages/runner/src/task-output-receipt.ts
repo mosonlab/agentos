@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+import type { RunnerConfig } from "./config.js";
+import { runCommand } from "./exec.js";
+import { workspaceEnvironment, type Workspace } from "./workspace.js";
+
+const MAX_RECEIPT_BYTES = 8 * 1024;
 
 export type TaskOutputReceipt = {
   runId: string;
@@ -45,11 +51,50 @@ export const writeTaskOutputReceipt = async (
   }
 };
 
-export const readTaskOutputReceipt = async (workspacePath: string): Promise<TaskOutputReceipt | null> => {
-  try {
-    return receipt(JSON.parse(await readFile(taskOutputReceiptPath(workspacePath), "utf8")));
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+const readReceiptFile = async (config: RunnerConfig, workspace: Workspace): Promise<string | null> => {
+  const output = await runCommand(
+    config.runAsPrefix,
+    "/bin/sh",
+    ["-c", `
+path="$1"
+directory="$(dirname "$path")"
+if [ -L "$directory" ]; then
+  printf 'INVALID:symlinked-parent-directory'
+  exit 0
+fi
+if [ ! -e "$path" ]; then
+  printf 'ABSENT'
+  exit 0
+fi
+if [ -L "$path" ] || [ ! -f "$path" ]; then
+  printf 'INVALID:not-a-plain-file'
+  exit 0
+fi
+size="$(wc -c < "$path" | tr -d '[:space:]')"
+case "$size" in ''|*[!0-9]*) printf 'INVALID:unreadable-size'; exit 0 ;; esac
+if [ "$size" -gt "${MAX_RECEIPT_BYTES}" ]; then
+  printf 'INVALID:too-large'
+  exit 0
+fi
+printf 'PRESENT\n'
+cat -- "$path"
+`, "agentos-task-output-receipt", taskOutputReceiptPath(workspace.path)],
+    workspace.path,
+    workspaceEnvironment(config),
+  );
+  if (output === "ABSENT") return null;
+  if (output.startsWith("INVALID:")) {
+    throw new Error(`Task output receipt is invalid: ${output.slice("INVALID:".length)}`);
   }
+  if (!output.startsWith("PRESENT\n")) throw new Error("Task output receipt reader returned an unknown result");
+  return output.slice("PRESENT\n".length);
+};
+
+export const readTaskOutputReceipt = async (
+  config: RunnerConfig,
+  workspace: Workspace,
+): Promise<TaskOutputReceipt | null> => {
+  const raw = await readReceiptFile(config, workspace);
+  if (raw === null) return null;
+  return receipt(JSON.parse(raw));
 };
