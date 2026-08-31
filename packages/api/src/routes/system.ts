@@ -1,21 +1,14 @@
-import { activeRunStatuses, RunnerKind } from "@anneal/db";
+import { RunnerKind } from "@anneal/db";
 import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { projectRunnerBackend } from "../runner-backend-health.js";
 import { versionPayload } from "../version.js";
 import { getFileStore } from "../files/config.js";
-import type { FileStore } from "../files/store.js";
-import {
-  DirectoryNotEmptyError,
-  InvalidPathError,
-  IsADirectoryError,
-  NotADirectoryError,
-  NotFoundError,
-  SymlinkError,
-} from "../files/store.js";
+import { NotFoundError, type FileStore } from "../files/store.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "../onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "../onboarding-preflight.js";
+import { activeRunStatuses } from "../run-fence.js";
 import {
   FILE_WRITE_LIMIT,
   fileErrorResponse,
