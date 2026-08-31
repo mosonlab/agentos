@@ -141,6 +141,9 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
     return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
   });
 
+  // The webhook route registers eagerly between /runners and /files. Defer the
+  // template and trigger routes so app.ts can register them after /goals and
+  // preserve the ordered route table asserted by app-routes.test.ts.
   return (): void => {
     app.get("/projects/:projectId/task-templates", async (context) => context.json(await db.taskTemplate.findMany({
       where: { projectId: id.parse(context.req.param("projectId")) },
