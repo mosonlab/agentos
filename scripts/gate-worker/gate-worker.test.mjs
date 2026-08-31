@@ -559,10 +559,16 @@ test("a gate that passes is reported as the gate's own verdict", (t) => {
 });
 
 test("a gate that fails is 1 and says MERGE GATE: FAIL", (t) => {
-  const fixture = gateHome(t, { verdict: 'printf "MERGE GATE: FAIL (fixture)\\n"; exit 1' });
+  const fixture = gateHome(t, {
+    verdict:
+      'printf "# Subtest: packages/fixture.test.ts\\nnot ok 1 - first assertion\\nMERGE GATE: FAIL (fixture)\\n"; exit 1',
+  });
   const result = runGate(fixture.home, [fixture.oid]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
+  assert.match(result.stdout, /failed gate output \(last 200 lines\)/);
+  assert.match(result.stdout, /packages\/fixture\.test\.ts/);
+  assert.match(result.stdout, /not ok 1 - first assertion/);
 });
 
 test("a gate FAIL forwards a bounded tail of the worker log", (t) => {
