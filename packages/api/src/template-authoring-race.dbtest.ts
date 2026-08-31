@@ -301,7 +301,7 @@ test("instantiate wins a held assignee lock and replace then refuses the used te
       assert.equal(instantiated.status, 201, JSON.stringify(instantiated.body));
       assert.equal(replaced.status, 409, JSON.stringify(replaced.body));
       assert.equal(replaced.body.code, "template_in_use", JSON.stringify(replaced.body));
-      assert.match(replaced.body.error, /clone again/iu);
+      assert.match(replaced.body.error, /clone it again/iu);
       const persistedSteps = await db.taskTemplateStep.findMany({
         where: { taskTemplateId: seeded.template.id },
         orderBy: { stepIndex: "asc" },
