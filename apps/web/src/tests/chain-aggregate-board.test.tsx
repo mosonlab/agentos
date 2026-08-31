@@ -50,7 +50,7 @@ const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): Aggrega
   },
 });
 
-const visibleText = (markup: string): string => markup.replace(/<[^>]*>/gu, "");
+const visibleText = (markup: string): string => markup.replace(/<[^>]*>/gu, "").replace(/\s+/gu, " ");
 
 const chainStep = (id: string, position: number, status: TaskStatus, projection: ChainAggregate, overrides: Partial<BoardTask> = {}): BoardTask => task({
   id, name: `Release: ${id}`, displayName: id, chainId: projection.chainId, chainIndex: position - 1, chainName: projection.chainName,
