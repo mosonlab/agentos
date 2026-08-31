@@ -9,6 +9,7 @@ import {
   runOwnsMergeOutcome,
   selectAuthorization,
   taskIsIntegratorStep,
+  isRegressionVerificationOutputKind,
   type CandidateActivity,
   type CardRow,
   type DecisionRow,
@@ -20,7 +21,6 @@ import { z } from "zod";
 
 import {
   isCanonicalBlindFindingsStep,
-  isRegressionVerificationOutputKind,
   outputIsImmutableOncePersisted,
   persistSessionTaskOutput,
   requiredOutputKind,
