@@ -774,6 +774,56 @@ test("invalid Regression output opens a stop notice with no unusable operator ch
   assert.match(card.dedupeKey ?? "", /^merge-tail-stop:/u);
 });
 
+test("a fresh Regression retry ignores an unconsumed no-changes output", async () => {
+  const seeded = await seedRegression();
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.regression.id,
+    runId: seeded.run.id,
+    kind: "regression-verification",
+    body: verdict("refresh-conflict"),
+    commitSha: HEAD,
+  } });
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: {
+      status: "FAILED",
+      failureClass: "NO_CHANGES_PRODUCED",
+      failureReason: "delivery failed after the verdict was persisted",
+      endedAt: new Date(),
+    },
+  });
+  await db.task.update({
+    where: { id: seeded.regression.id },
+    data: { status: TaskStatus.REVIEW, failureReason: "delivery failed after the verdict was persisted" },
+  });
+
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
+  try {
+    const retried = await createApp(db).request(`/tasks/${seeded.regression.id}/retry`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-operator-token" },
+    });
+    assert.equal(retried.status, 201, await retried.text());
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorOperator;
+  }
+
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as {
+    run: { id: string };
+    regressionRepairHandoff: unknown;
+    resume: unknown;
+  };
+  assert.equal(body.run.id, run2.id);
+  assert.equal(body.regressionRepairHandoff, null);
+  assert.equal(body.resume, null);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+});
+
 test("a fresh Regression claim carries the prior verdict and exact published repair without resuming context", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");
@@ -801,6 +851,37 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
     kind: "review-fix", taskId: repair.id, startHeadSha: HEAD, targetHeadSha: BASE,
     resolvedHeadSha: RESOLVED, outputKind: "result", outputBody: repairOutput,
   });
+});
+
+test("a repaired Regression claim keeps the handoff from a failed durable source Run", async () => {
+  const seeded = await exercise("review-fail");
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: {
+      status: "FAILED",
+      failureClass: "PROTOCOL_ERROR",
+      failureReason: "provider stream ended after the verdict was persisted",
+      retryable: true,
+      endedAt: new Date(),
+    },
+  });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as {
+    run: { id: string };
+    regressionRepairHandoff: {
+      trigger: { verdict: { outcome: string } };
+      repair: { taskId: string; resolvedHeadSha: string };
+    };
+  };
+  assert.equal(body.run.id, run2.id);
+  assert.equal(body.regressionRepairHandoff.trigger.verdict.outcome, "review-fail");
+  assert.equal(body.regressionRepairHandoff.repair.taskId, repair.id);
+  assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, RESOLVED);
 });
 
 test("a repaired Regression retry pins a failed prior Run's published head without rewriting repair evidence", async () => {

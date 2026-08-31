@@ -1,5 +1,6 @@
 import {
   asJsonObject,
+  FailureClass,
   isRegressionVerificationOutputKind,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
@@ -42,7 +43,13 @@ export const regressionRepairHandoffForClaim = async (
   if (!isRegressionVerificationOutputKind(input.outputKind)) return { status: "none" };
   const priorOutput = await tx.taskStepOutput.findUnique({
     where: { taskId: input.taskId },
-    select: { body: true, runId: true, updatedAt: true },
+    select: {
+      body: true,
+      commitSha: true,
+      runId: true,
+      updatedAt: true,
+      run: { select: { failureClass: true, headSha: true, status: true } },
+    },
   });
   if (!priorOutput?.runId || priorOutput.runId === input.runId) return { status: "none" };
   const parsed = parseRegressionVerdict(priorOutput.body, input.outputKind);
@@ -84,7 +91,34 @@ export const regressionRepairHandoffForClaim = async (
     && metadata.targetHeadSha === expectedBaseHeadSha
     && metadata.state === undefined
   ));
-  if (!result) return invalid(`no successful ${repairKind} result binds ${expectedHeadSha} to ${expectedBaseHeadSha}`);
+  if (!result) {
+    const orphanedNoChangesOutput = priorOutput.run?.status === RunStatus.FAILED
+      && priorOutput.run.failureClass === FailureClass.NO_CHANGES_PRODUCED
+      && priorOutput.run.headSha === expectedHeadSha
+      && priorOutput.commitSha === expectedHeadSha;
+    if (orphanedNoChangesOutput) {
+      const consumedAttempt = await tx.taskActivity.findFirst({
+        where: {
+          taskId: input.taskId,
+          actorType: "control-plane",
+          createdAt: { gte: evidenceAt },
+          AND: [
+            { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt } },
+            { metadata: { path: ["sourceRunId"], equals: priorOutput.runId } },
+            { metadata: { path: ["repairKind"], equals: repairKind } },
+            { metadata: { path: ["headSha"], equals: expectedHeadSha } },
+            { metadata: { path: ["baseHeadSha"], equals: expectedBaseHeadSha } },
+          ],
+        },
+        select: { id: true },
+      });
+      // The old delivery contract could reject an otherwise valid output-only
+      // Run after its verdict was persisted. With no exact repair attempt, that
+      // output is audit evidence only and a fresh verifier must run.
+      if (!consumedAttempt) return { status: "none" };
+    }
+    return invalid(`no successful ${repairKind} result binds ${expectedHeadSha} to ${expectedBaseHeadSha}`);
+  }
   const repairTaskId = typeof result.repairTaskId === "string" ? result.repairTaskId : null;
   const resolvedHeadSha = typeof result.resolvedHeadSha === "string" ? result.resolvedHeadSha : null;
   if (!repairTaskId || !resolvedHeadSha || !EXACT_SHA.test(resolvedHeadSha)) {
