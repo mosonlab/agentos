@@ -171,7 +171,7 @@ const editedGraph = (agents: Array<{ id: string }>) => [
     outputKind: "e2e-left",
     opensPullRequest: false,
     requiresCommit: false,
-    baseFromStepIndex: 1,
+    baseFromStepIndex: null,
     layer: 2,
   },
   {
@@ -187,7 +187,7 @@ const editedGraph = (agents: Array<{ id: string }>) => [
     outputKind: "e2e-right",
     opensPullRequest: false,
     requiresCommit: false,
-    baseFromStepIndex: 1,
+    baseFromStepIndex: null,
     layer: 2,
   },
   {
@@ -203,7 +203,7 @@ const editedGraph = (agents: Array<{ id: string }>) => [
     outputKind: "e2e-join",
     opensPullRequest: false,
     requiresCommit: true,
-    baseFromStepIndex: 2,
+    baseFromStepIndex: null,
     layer: 3,
   },
 ];
