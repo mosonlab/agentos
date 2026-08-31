@@ -362,6 +362,7 @@ test("chains render lead-time order, role spend and the existing task link", asy
   assert.match(text, /Implementation:\$50\.00/);
   assert.match(text, /Repair:\$25\.00/);
   assert.match(text, /1 unpriced run/);
+  assert.match(text, /Before Review/);
   assert.ok(html.includes('href="#/tasks/slow-task"'));
   assert.ok(html.indexOf("Slow chain") < html.indexOf("Fast chain"), "default order is lead time descending");
 });
@@ -372,6 +373,22 @@ test("chain cost sorting puts unknown costs last and preserves lead-time ties", 
   assert.deepEqual(sortCostChains(chains, "cost").map((chain) => chain.chainId), ["fast-chain", "slow-chain"]);
   const markup = renderToStaticMarkup(<ChainsTable chains={chains} />);
   assert.match(markup, /aria-sort="descending"/);
+});
+
+test("the Cost header sorts the rendered rows by amount, with unpriced chains last", async () => {
+  const unknown = { ...report().chains![0]!, chainId: "unknown-chain", chainName: "Unknown chain", costUsd: null, leadMinutes: 999 };
+  const page = await mountPage(<ChainsTable chains={[unknown, ...report().chains!]} />, {});
+  try {
+    assert.ok((page.container.textContent ?? "").indexOf("Unknown chain") < (page.container.textContent ?? "").indexOf("Slow chain"));
+    await page.press("Cost");
+    const text = page.container.textContent ?? "";
+    assert.ok(text.indexOf("Fast chain") < text.indexOf("Slow chain"));
+    assert.ok(text.indexOf("Slow chain") < text.indexOf("Unknown chain"));
+    const costHead = [...page.container.querySelectorAll("th")].find((node) => node.textContent?.trim() === "Cost");
+    assert.equal(costHead?.getAttribute("aria-sort"), "descending");
+  } finally {
+    await page.dispose();
+  }
 });
 
 /* ------------------------------------------------------------------ by model */

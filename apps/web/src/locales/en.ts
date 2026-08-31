@@ -200,7 +200,7 @@ export const en = {
   "costs.byModel.title": "By model",
   "costs.byModel.tooltip": "{model} · {amount} · {share}",
   "costs.byModel.unavailable": "{n} costs unavailable",
-  "costs.chains.before": "After {task}",
+  "costs.chains.before": "Before {task}",
   "costs.chains.busy": "Busy",
   "costs.chains.busyPct": "Busy %",
   "costs.chains.chain": "Chain",

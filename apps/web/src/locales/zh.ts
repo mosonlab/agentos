@@ -199,7 +199,7 @@ export const zh = {
   "costs.byModel.title": "按模型",
   "costs.byModel.tooltip": "{model} · {amount} · {share}",
   "costs.byModel.unavailable": "{n} 笔成本不可用",
-  "costs.chains.before": "在 {task} 之后",
+  "costs.chains.before": "在 {task} 之前",
   "costs.chains.busy": "忙碌时间",
   "costs.chains.busyPct": "忙碌 %",
   "costs.chains.chain": "任务链",
