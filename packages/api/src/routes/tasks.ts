@@ -20,6 +20,7 @@ import {
   Prisma,
   projectMergeOutcome,
   requestConfirmationCard,
+  resumeChain,
   runOwnsMergeOutcome,
   runSessionUsageCost,
   ScheduleKind,
@@ -70,7 +71,7 @@ import { activityInput } from "../run-lifecycle.js";
 import { OPERATOR_NOTE_METADATA_FIELD } from "../run-claim.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
-import { hasActiveRun, isLiveStatus, lockTaskMutationRows } from "../task-write.js";
+import { hasActiveRun, isLiveStatus, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
 import { readCommitted } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
