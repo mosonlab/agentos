@@ -10,7 +10,6 @@ export const writeEscalationRecord = ({ path, record, now = () => new Date() }) 
   const temporary = `${path}.${process.pid}.${randomUUID()}`;
   writeFileSync(temporary, `${JSON.stringify({
     notificationDelivered: false,
-    attempts: 1,
     ...record,
     escalatedAt: now().toISOString(),
   }, null, 2)}\n`, { mode: 0o600, flag: "wx" });

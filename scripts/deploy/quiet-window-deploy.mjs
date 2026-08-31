@@ -85,7 +85,9 @@ const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @anneal/db deploy-barr
 const DEPLOY_BARRIER_KEY = 1;
 const RETRYABLE_ESCALATION_REASONS = new Set([
   "remote-main-unreadable",
+  "remote-main-read-timeout",
   "quiet-window-query-failed",
+  "deploy-barrier-unavailable",
 ]);
 const ESCALATION_RETRY_CAP = 5;
 
@@ -433,18 +435,26 @@ const acquireLock = async () => {
 };
 
 const escalationAttemptCount = (record) => {
+  const retryable = RETRYABLE_ESCALATION_REASONS.has(record?.reason);
+  if (!retryable) return null;
+  let previous = null;
+  if (existsSync(ESCALATION_PATH)) {
+    try {
+      previous = JSON.parse(readFileSync(ESCALATION_PATH, "utf8"));
+    } catch {
+      // Preserve the existing replacement behavior for an unreadable marker;
+      // the terminal failure below will write a fresh, valid record.
+    }
+  }
+  if (Number.isSafeInteger(previous?.attempts) && previous.attempts > 0) return previous.attempts + 1;
+  if (previous && RETRYABLE_ESCALATION_REASONS.has(previous.reason)) return 2;
   if (Number.isSafeInteger(record?.attempts) && record.attempts > 0) return record.attempts;
-  if (!existsSync(ESCALATION_PATH)) return 1;
-  const previous = readJson(ESCALATION_PATH, "escalation-state-unreadable");
-  if (previous.reason !== record?.reason) return 1;
-  return Number.isSafeInteger(previous.attempts) && previous.attempts > 0
-    ? previous.attempts + 1
-    : 2;
+  return 1;
 };
 
 const writeEscalation = async (record) => {
   const attempts = escalationAttemptCount(record);
-  const persisted = { ...record, attempts };
+  const persisted = attempts === null ? record : { ...record, attempts };
   writeEscalationRecord({ path: ESCALATION_PATH, record: persisted });
   log(`ESCALATED reason=${persisted.reason} from=${persisted.from} to=${persisted.to}`);
 };
@@ -594,52 +604,69 @@ const makeWritable = (root) => {
   visit(root);
 };
 
-const createDeployHost = () => createProductionHost({
-  parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
-  checkEscalation: async () => {
-    const escalation = await checkExistingEscalation({
-      escalationPath: ESCALATION_PATH,
-      readRemoteMain: remoteMainRevision,
-      retryEscalationNotification,
-      log,
-      retryableReasons: RETRYABLE_ESCALATION_REASONS,
-      retryCap: ESCALATION_RETRY_CAP,
-    });
-    if (!escalation.active) return;
-    return { skip: "escalation-active", exitCode: 2 };
-  },
-  acquireLock: async () => {
-    const lock = await acquireLock();
-    if (lock === null) {
-      log("SKIP concurrent-run lock-held");
-      return { skip: "lock-held" };
-    }
-    if (lock.recovered) {
-      await lock.release();
-      throw new DeployFailure(
-        "stale-deploy-owner-recovered",
-        `pid-${lock.recovered.pid ?? "unknown"}`,
-      );
-    }
-    return { lock, resources: [lock] };
-  },
-  readRevisions: async (attempt) => ({
-    revisions: { from: readDeployedRevision(), to: attempt.targetCommit },
-  }),
-  checkAlreadyDeployed: async (attempt) => {
-    const revisions = attempt.requireFact("revisions");
-    if (revisions.from !== revisions.to) return;
-    pruneHistory();
-    log(`NOOP already-deployed revision=${revisions.from}`);
-    return { skip: "already-deployed" };
-  },
-  startDeploymentLedger: async (attempt) => ({
-    ledger: createDeploymentLedger({
-      stateDir: STATE_DIR,
-      deploymentId: attempt.transactionId,
-      targetCommit: attempt.targetCommit,
+const createDeployHost = () => {
+  let retryEscalation = null;
+  return createProductionHost({
+    parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
+    checkEscalation: async () => {
+      const escalation = await checkExistingEscalation({
+        escalationPath: ESCALATION_PATH,
+        readRemoteMain: remoteMainRevision,
+        retryEscalationNotification,
+        log,
+        retryableReasons: RETRYABLE_ESCALATION_REASONS,
+        retryCap: ESCALATION_RETRY_CAP,
+      });
+      if (!escalation.active) {
+        retryEscalation = escalation.retryEscalation ?? null;
+        return;
+      }
+      retryEscalation = null;
+      return { skip: "escalation-active", exitCode: 2 };
+    },
+    selfClearEscalation: async () => {
+      const pending = retryEscalation;
+      retryEscalation = null;
+      if (!pending) return false;
+      return selfClearEscalation({
+        escalationPath: ESCALATION_PATH,
+        retryEscalation: pending,
+        notify,
+        log,
+      });
+    },
+    acquireLock: async () => {
+      const lock = await acquireLock();
+      if (lock === null) {
+        log("SKIP concurrent-run lock-held");
+        return { skip: "lock-held" };
+      }
+      if (lock.recovered) {
+        await lock.release();
+        throw new DeployFailure(
+          "stale-deploy-owner-recovered",
+          `pid-${lock.recovered.pid ?? "unknown"}`,
+        );
+      }
+      return { lock, resources: [lock] };
+    },
+    readRevisions: async (attempt) => ({
+      revisions: { from: readDeployedRevision(), to: attempt.targetCommit },
     }),
-  }),
+    checkAlreadyDeployed: async (attempt) => {
+      const revisions = attempt.requireFact("revisions");
+      if (revisions.from !== revisions.to) return;
+      pruneHistory();
+      log(`NOOP already-deployed revision=${revisions.from}`);
+      return { skip: "already-deployed" };
+    },
+    startDeploymentLedger: async (attempt) => ({
+      ledger: createDeploymentLedger({
+        stateDir: STATE_DIR,
+        deploymentId: attempt.transactionId,
+        targetCommit: attempt.targetCommit,
+      }),
+    }),
   prepareReleaseArtifact: async (attempt) => {
     const built = await checked(
       "release-artifact-build-failed",
@@ -888,8 +915,9 @@ const createDeployHost = () => createProductionHost({
   escalate: writeEscalation,
   markEscalationNotified,
   notify,
-  log,
-});
+    log,
+  });
+};
 
 const main = async () => {
   const options = parseArgs(process.argv.slice(2));
@@ -935,14 +963,6 @@ const main = async () => {
     transactionId: randomUUID(),
   });
   const result = await executeUpgrade(createDeployHost(), attempt);
-  if (startup.retryEscalation && result.ok && result.skipped !== "lock-held") {
-    await selfClearEscalation({
-      escalationPath: ESCALATION_PATH,
-      retryEscalation: startup.retryEscalation,
-      notify,
-      log,
-    });
-  }
   if (result.ok && !result.skipped) pruneHistory();
   return result.ok ? (attempt.fact("exitCode") ?? 0) : 1;
 };

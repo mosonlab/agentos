@@ -22,6 +22,7 @@ import {
 import { pruneDeployHistory } from "./deploy-preflight.mjs";
 import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-ledger.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
+import { checkExistingEscalation, selfClearEscalation } from "./quiet-window-escalation.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
@@ -191,6 +192,120 @@ const removeTree = (root) => {
   rmSync(root, { recursive: true, force: true });
 };
 
+const RETRYABLE_ESCALATION_REASONS = new Set([
+  "remote-main-unreadable",
+  "remote-main-read-timeout",
+  "quiet-window-query-failed",
+  "deploy-barrier-unavailable",
+]);
+
+const escalationFixture = (t, record) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-escalation-self-heal-"));
+  const escalationPath = join(root, "escalated.json");
+  const snapshot = `${JSON.stringify(record)}\n`;
+  writeFileSync(escalationPath, snapshot, { mode: 0o600 });
+  const logs = [];
+  const notifications = [];
+  let retryNotifications = 0;
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return {
+    escalationPath,
+    snapshot,
+    logs,
+    notifications,
+    options: {
+      escalationPath,
+      retryableReasons: RETRYABLE_ESCALATION_REASONS,
+      retryCap: 5,
+      readRemoteMain: async () => assert.fail("retry admission must not read remote main"),
+      retryEscalationNotification: async () => { retryNotifications += 1; },
+      log: (line) => logs.push(line),
+    },
+    retryNotifications: () => retryNotifications,
+  };
+};
+
+test("retryable escalation self-clears after a successful deployment outcome", async (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "quiet-window-query-failed",
+    detail: "platform-database-unreadable",
+    attempts: 2,
+    from: revisions.from,
+    to: revisions.to,
+  });
+  const checked = await checkExistingEscalation(state.options);
+  assert.equal(checked.active, false);
+  assert.equal(checked.retryEscalation.attempts, 2);
+  assert.equal(state.retryNotifications(), 1);
+  const cleared = await selfClearEscalation({
+    escalationPath: state.escalationPath,
+    retryEscalation: checked.retryEscalation,
+    notify: async (record) => { state.notifications.push(record); },
+    log: (line) => state.logs.push(line),
+  });
+  assert.equal(cleared, true);
+  assert.equal(existsSync(state.escalationPath), false);
+  assert.equal(state.notifications.length, 1);
+  assert.equal(state.notifications[0].outcome, "success");
+  assert.equal(state.notifications[0].reason, "escalation-self-cleared");
+  assert.deepEqual(state.logs, ["SELF-CLEAR escalation reason=quiet-window-query-failed attempts=2"]);
+});
+
+test("retryable escalation at the five-attempt cap remains blocked", async (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "remote-main-unreadable",
+    attempts: 5,
+  });
+  const checked = await checkExistingEscalation(state.options);
+  assert.deepEqual(checked, { active: true });
+  assert.equal(state.retryNotifications(), 1);
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("malformed retry attempts fail closed", async (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "remote-main-unreadable",
+    attempts: "1",
+  });
+  const checked = await checkExistingEscalation(state.options);
+  assert.deepEqual(checked, { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("non-retryable escalation remains blocked", async (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "environment-unreadable",
+    attempts: 1,
+  });
+  const checked = await checkExistingEscalation(state.options);
+  assert.deepEqual(checked, { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("self-clear notification failure keeps the escalation marker", async (t) => {
+  const state = escalationFixture(t, {
+    outcome: "failure",
+    reason: "deploy-barrier-unavailable",
+    attempts: 1,
+  });
+  const checked = await checkExistingEscalation(state.options);
+  const cleared = await selfClearEscalation({
+    escalationPath: state.escalationPath,
+    retryEscalation: checked.retryEscalation,
+    notify: async () => { throw new Error("inbox-unavailable"); },
+    log: (line) => state.logs.push(line),
+  });
+  assert.equal(cleared, false);
+  assert.equal(existsSync(state.escalationPath), true);
+  assert.equal(readFileSync(state.escalationPath, "utf8"), state.snapshot);
+  assert.equal(state.logs.length, 1);
+  assert.match(state.logs[0], /^STOP escalation-self-clear-failed /u);
+});
+
 test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.length, 13);
   assert.equal(SERVICE_LABELS[0], "com.agentos.api");
@@ -282,6 +397,42 @@ test("fixture executes the whole deploy sequence with explicit attempt facts", a
   assert.deepEqual(records.map(({ state }) => state), [
     "STARTED", "ARTIFACT_PREPARED", "ARTIFACT_VERIFIED", "BACKED_UP", "SCHEMA_ADVANCED", "ACTIVATED", "VERIFIED", "SUCCEEDED",
   ]);
+});
+
+test("a successful attempt invokes self-clear before releasing its resources", async () => {
+  const { host, calls } = fixture();
+  let clearCalls = 0;
+  host.selfClearEscalation = async () => {
+    clearCalls += 1;
+    calls.push("self-clear");
+  };
+  assert.deepEqual(await executeUpgrade(host, attempt()), { ok: true });
+  assert.equal(clearCalls, 1);
+  assert.ok(calls.indexOf("self-clear") < calls.indexOf("release-lock"));
+});
+
+test("an already-deployed no-op also invokes self-clear", async () => {
+  const { host, calls } = fixture();
+  let clearCalls = 0;
+  host.checkAlreadyDeployed = async () => ({ skip: "already-deployed" });
+  host.selfClearEscalation = async () => {
+    clearCalls += 1;
+    calls.push("self-clear");
+  };
+  const result = await executeUpgrade(host, attempt());
+  assert.deepEqual(result, { ok: true, skipped: "already-deployed" });
+  assert.equal(clearCalls, 1);
+  assert.ok(calls.indexOf("self-clear") < calls.indexOf("release-lock"));
+});
+
+test("a lock-held skip does not self-clear a retryable escalation", async () => {
+  const { host } = fixture();
+  let clearCalls = 0;
+  host.acquireLock = async () => ({ skip: "lock-held" });
+  host.selfClearEscalation = async () => { clearCalls += 1; };
+  const result = await executeUpgrade(host, attempt());
+  assert.deepEqual(result, { ok: true, skipped: "lock-held" });
+  assert.equal(clearCalls, 0);
 });
 
 test("missing artifact records FAILED without quiet-window, build, or activation", async () => {
