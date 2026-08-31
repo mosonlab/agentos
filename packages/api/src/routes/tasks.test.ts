@@ -1,0 +1,795 @@
+import "../test-workspace-root.js";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import test from "node:test";
+
+import {
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  RunnerKind,
+  RunnerPreference,
+  type PrismaClient,
+} from "@anneal/db";
+
+import { createApp } from "../test-app.js";
+import {
+  boardDatabase,
+  getTasks,
+  lockedAgent,
+  taskRow,
+  withTokens,
+} from "./test-support.js";
+
+const retryRequest = async (
+  assigneeAgent: {
+    id: string;
+    model: string;
+    runnerPreference: RunnerPreference;
+    foundationalPrompt: string;
+    rolePrompt: string;
+    archivedAt?: Date | null;
+    name?: string;
+  } | null,
+  templateStep: {
+    runner: RunnerKind | null;
+    stepIndex?: number;
+    outputKind?: string;
+    taskTemplate?: { name: string };
+  } | null = null,
+) => {
+  let created: Record<string, unknown> | undefined;
+  const currentTemplateStep = templateStep
+    ? { stepIndex: 1, outputKind: "result", taskTemplate: { name: "direct-engineer-workflow" }, ...templateStep }
+    : null;
+  const last = {
+    id: "run-1",
+    projectId: "project-1",
+    taskId: "task-1",
+    goalId: "goal-1",
+    agentId: "old-agent",
+    repoId: "repo-previous",
+    runNumber: 1,
+    status: "FAILED",
+    runner: RunnerKind.CLAUDE,
+    model: "old-model",
+    targetBranch: "main",
+    branch: "feature/retry",
+    promptHash: createHash("sha256").update("foundation\nrole\nRetry me\nUse current config").digest("hex"),
+    maxDurationMin: 90,
+    stallTimeoutMin: 7,
+    maxRunsPerTask: 4,
+    // Nothing granted, so the retry ceiling is the task's configured budget —
+    // which is what `maxRunsPerTask: 4` already was.
+    budgetGrants: 0,
+  };
+  const currentTask = {
+    id: "task-1",
+    projectId: "project-1",
+    name: "Retry me",
+    description: "Use current config",
+    assigneeType: "AGENT",
+    assigneeAgentId: assigneeAgent?.id ?? null,
+    repoId: "repo-current",
+    repo: null,
+    templateId: null,
+    templateStepId: currentTemplateStep ? "step-1" : null,
+    maxSessionsPerTask: 4,
+    maxDurationMin: 120,
+    stallTimeoutMin: 10,
+    opensPullRequest: true,
+    chainId: null,
+    chainIndex: null,
+    targetBranch: "main",
+    archivedAt: null,
+    dispatchAfterTaskId: null,
+    dispatchAfter: null,
+    assigneeAgent,
+    templateStep: currentTemplateStep,
+    runs: [last],
+  };
+  const database = {
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      // Retry takes the shared task-row lock before it reads anything else.
+      $queryRaw: async () => [{ id: "task-1" }],
+      agent: { findUnique: async () => lockedAgent(assigneeAgent as Record<string, unknown> | null) },
+      task: {
+        findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
+        findUnique: async () => currentTask,
+        findMany: async () => [currentTask],
+        update: async () => ({}),
+      },
+      run: {
+        count: async () => 0,
+        groupBy: async () => [{
+          taskId: "task-1",
+          status: "FAILED",
+          _count: { _all: 1 },
+          _max: { budgetGrants: 0 },
+        }],
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          created = data;
+          return { id: "run-2", ...data };
+        },
+      },
+      agentRepoAccess: { count: async () => 1 },
+      taskActivity: { create: async () => ({}) },
+    }),
+  } as unknown as PrismaClient;
+  const response = await createApp(database).request("/tasks/task-1/retry", {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-unit-token" },
+  });
+  return { response, created, last };
+};
+
+const taskDetailDatabase = (task: Record<string, unknown>): PrismaClient => ({
+  task: { findUnique: async () => task, findMany: async () => [task] },
+  run: { groupBy: async () => [] },
+  agentRepoAccess: { findMany: async () => [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }] },
+  mergeRecoveryAttempt: { findFirst: async () => null },
+} as unknown as PrismaClient);
+
+test("task status patch does not apply create defaults to other fields", async () => {
+  await withTokens(async () => {
+    let updateData: unknown;
+    // A status write now runs under the Task-row mutex, so the mock supplies
+    // `$transaction` and the `FOR UPDATE` read the route takes first.
+    const tx = {
+      $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId, status: "REVIEW", archivedAt: null }],
+      task: {
+        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null, dispatchAfterTaskId: null, dispatchAfter: null }),
+        // §D-P7's stop-state guard loads the task with its template step before
+        // any status write. An ordinary task has no step, and the guard is then
+        // a no-op — but it still asks.
+        findUnique: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null, assigneeType: "HUMAN", chainId: null, templateStep: null }),
+        update: async ({ data }: { data: unknown }) => { updateData = data; return { id: "task-1", status: "DONE" }; },
+      },
+      run: { count: async () => 0 },
+      inboxMessage: { findFirst: async () => null, updateMany: async () => ({ count: 0 }), count: async () => 0 },
+      taskActivity: { create: async () => ({ id: "activity-1" }) },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(updateData, { status: "DONE" });
+  });
+});
+
+test("task PATCH names and rejects an invalid compound implementation assignee before writing", async () => {
+  await withTokens(async () => {
+    let updates = 0;
+    const before = {
+      id: "implementation-1",
+      projectId: "project-1",
+      name: "Implementation",
+      description: "execute the plan",
+      status: "TODO",
+      archivedAt: null,
+      assigneeType: "AGENT",
+      assigneeAgentId: "executioner-1",
+      repoId: "repo-1",
+      templateStepId: "step-5",
+      chainId: "chain-1",
+      approvalGate: false,
+    };
+    const senior = {
+      id: "senior-1",
+      projectId: before.projectId,
+      name: "senior-dev-high",
+      archivedAt: null,
+    };
+    const database = {
+      task: {
+        findUniqueOrThrow: async () => before,
+        update: async () => { updates += 1; return before; },
+      },
+      agent: { findFirst: async () => senior },
+      taskTemplateStep: { findUnique: async () => ({
+        stepIndex: 5,
+        outputKind: "implementation",
+        taskTemplate: { name: "compound-engineer-workflow" },
+      }) },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/tasks/${before.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ assigneeAgentId: senior.id }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+    });
+    assert.equal(updates, 0);
+  });
+});
+
+test("task create requires chainId and chainIndex together", async () => {
+  await withTokens(async () => {
+    const response = await createApp({} as PrismaClient).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Broken chain", chainId: "chain-1" }),
+    });
+    assert.equal(response.status, 400);
+  });
+});
+
+test("public task creation assigns a linear layer and rejects layer/dependency inputs", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, unknown> | undefined;
+    const database = {
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        task: {
+          count: async () => 0,
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            stored = data;
+            return { id: "task-1", ...data };
+          },
+        },
+        taskActivity: { create: async () => ({}) },
+        $queryRaw: async () => [{ locked: "" }],
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Layered API task", assigneeType: "HUMAN", chainId: "chain-1", chainIndex: 4,
+      }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(stored?.chainLayer, 4);
+
+    for (const field of ["layer", "chainLayer", "dependencies", "blockedBy"]) {
+      const response = await createApp({} as PrismaClient).request("/projects/project-1/tasks", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Rejected", assigneeType: "HUMAN", [field]: field === "layer" ? 2 : [] }),
+      });
+      assert.equal(response.status, 400, field);
+    }
+  });
+});
+
+test("operator DONE on an AGENT chain task is refused without closing its gate", async () => {
+  await withTokens(async () => {
+    let closed = false;
+    const successor = {
+      id: "task-2", projectId: "project-1", name: "Next", description: "next", chainId: "chain-1", chainIndex: 1,
+      updatedAt: new Date(), assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", templateId: null,
+      targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
+      assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
+      repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
+    };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null, dispatchAfterTaskId: null, dispatchAfter: null };
+    const tx = {
+      // The status write takes the Task-row mutex before advancing the chain.
+      $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
+      task: {
+        update: async () => ({ ...before, status: "DONE" }),
+        findFirst: async () => successor,
+        findMany: async () => [before],
+        findUnique: async ({ where }: { where: { id: string } }) => where.id === before.id ? before : successor,
+        updateMany: async () => ({ count: 1 }),
+        findUniqueOrThrow: async () => successor,
+      },
+      inboxMessage: {
+        findFirst: async () => null,
+        updateMany: async () => { closed = true; return { count: 1 }; },
+        count: async () => 1,
+      },
+      taskActivity: { create: async () => ({}) },
+      chainControl: { findMany: async () => [] },
+      // findFirst answers resolveRunBranches' publication query: nothing in this
+      // chain has pushed the shared branch, so the successor bases on the default.
+      run: { create: async () => ({ id: "run-1" }), findFirst: async () => null, count: async () => 0 },
+      agent: { findUnique: async () => lockedAgent(successor.assigneeAgent) },
+    };
+    const database = {
+      task: { findUniqueOrThrow: async () => before },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      // §D-P4 resolves the effective assignee's *name* before allowing a
+      // reassignment, because the invariant is stated over the name.
+      agent: { findUnique: async () => ({ name: "senior-dev" }) },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json() as { error: string }).error), /controlled by chain execution/u);
+    assert.equal(closed, false);
+  });
+});
+
+test("a template HUMAN final step closes its exact OPEN gate even when approvalGate is false", async () => {
+  await withTokens(async () => {
+    let closedWhere: unknown;
+    const before = {
+      id: "task-1", projectId: "project-1", name: "Human final", status: "REVIEW", templateId: "template-1",
+      approvalGate: false, chainId: "chain-1", chainIndex: 2,
+      assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
+      dispatchAfterTaskId: null, dispatchAfter: null,
+    };
+    const tx = {
+      $queryRaw: async () => [{ id: before.id }],
+      task: {
+        findUniqueOrThrow: async () => before,
+        findUnique: async () => before,
+        findMany: async () => [before],
+        update: async () => ({ ...before, status: "DONE" }),
+        findFirst: async () => null,
+      },
+      run: { count: async () => 0 },
+      inboxMessage: {
+        findFirst: async () => null,
+        updateMany: async ({ where }: { where: unknown }) => { closedWhere = where; return { count: 1 }; },
+        count: async () => 1,
+      },
+      taskActivity: { create: async () => ({}) },
+      chainControl: { findMany: async () => [] },
+    };
+    const database = {
+      task: { findUniqueOrThrow: async () => before },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(closedWhere, { gateTaskId: before.id, status: "OPEN" });
+  });
+});
+
+test("CRON create computes runAt, ignores caller runAt, and creates no immediate run", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, any> | undefined;
+    let runs = 0;
+    const agent = { id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" };
+    const repo = { id: "repo-1", defaultBranch: "main" };
+    const tx = {
+      $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
+      agent: { findUnique: async () => lockedAgent(agent) },
+      task: { create: async ({ data }: { data: Record<string, any> }) => { stored = data; return { id: "task-1", ...data }; } },
+      taskActivity: { create: async () => ({}) },
+      run: { create: async () => { runs += 1; return {}; } },
+    };
+    const database = {
+      agent: { findFirst: async () => agent }, repo: { findFirst: async () => repo },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Nightly", assigneeAgentId: "agent-1", repoId: "repo-1", scheduleKind: "CRON",
+        cron: "0 2 * * *", timezone: "Asia/Shanghai", runAt: "2000-01-01T00:00:00Z",
+      }),
+    });
+    assert.equal(response.status, 201);
+    assert.equal(runs, 0);
+    assert.ok(stored?.runAt instanceof Date);
+    assert.ok(stored!.runAt.getTime() > Date.now());
+  });
+});
+
+test("schedule create rejects invalid dialect, timezone, missing fields, and non-agent AT", async () => {
+  await withTokens(async () => {
+    const database = {
+      agent: { findFirst: async () => ({ id: "agent-1" }) }, repo: { findFirst: async () => ({ id: "repo-1" }) },
+      agentRepoAccess: { findFirst: async () => ({}) },
+    } as unknown as PrismaClient;
+    const cases = [
+      { scheduleKind: "CRON", cron: "0 */2 * * * *" },
+      { scheduleKind: "CRON", cron: "* * * * * *" },
+      { scheduleKind: "CRON", cron: "@daily" },
+      { scheduleKind: "CRON", cron: "0 2 * * *", timezone: "Mars/Olympus" },
+      { scheduleKind: "CRON" },
+      { scheduleKind: "AT", assigneeType: "HUMAN", runAt: new Date().toISOString() },
+      { scheduleKind: "AT", assigneeAgentId: "agent-1", runAt: null },
+    ];
+    for (const value of cases) {
+      const response = await createApp(database).request("/projects/project-1/tasks", {
+        method: "POST", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Invalid", ...value }),
+      });
+      assert.equal(response.status, 400, JSON.stringify(value));
+    }
+  });
+});
+
+test("AT create waits for the scheduler and merged-view patch cannot remove its executor", async () => {
+  await withTokens(async () => {
+    let runs = 0;
+    const runAt = new Date(Date.now() - 60_000);
+    const before = { id: "task-1", projectId: "project-1", status: "TODO", templateId: null, approvalGate: false, chainId: null, scheduleKind: "AT", runAt, cron: null, timezone: null, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1" };
+    const database = {
+      agent: { findFirst: async () => ({ id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
+      repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      task: { findUniqueOrThrow: async () => before },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
+        agent: { findUnique: async () => lockedAgent({ id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
+        task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
+        taskActivity: { create: async () => ({}) }, run: { create: async () => { runs += 1; return {}; } },
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Later", scheduleKind: "AT", runAt, assigneeAgentId: "agent-1", repoId: "repo-1" }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(runs, 0);
+    const patched = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ assigneeType: "HUMAN", assigneeAgentId: null }),
+    });
+    assert.equal(patched.status, 400);
+  });
+});
+
+test("operator retry re-derives runtime configuration and clears promptHash until dispatch", async () => {
+  await withTokens(async () => {
+    const { response, created, last } = await retryRequest({
+      id: "current-agent",
+      model: "deepseek-current",
+      runnerPreference: RunnerPreference.PI,
+      foundationalPrompt: "new foundation",
+      rolePrompt: "new role",
+    });
+    assert.equal(response.status, 201);
+    assert.equal(created?.agentId, "current-agent");
+    assert.equal(created?.repoId, "repo-current");
+    assert.equal(created?.runner, RunnerKind.PI);
+    assert.equal(created?.model, "deepseek-current");
+    assert.equal(created?.promptHash, null);
+    assert.equal(created?.branch, last.branch);
+    assert.equal(created?.targetBranch, last.targetBranch);
+    assert.equal(created?.maxRunsPerTask, last.maxRunsPerTask);
+  });
+});
+
+test("operator retry with unchanged agent preserves runtime config but not a prior dispatch hash", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    });
+    assert.equal(response.status, 201);
+    assert.deepEqual({
+      agentId: created?.agentId,
+      repoId: created?.repoId,
+      runner: created?.runner,
+      model: created?.model,
+      branch: created?.branch,
+      targetBranch: created?.targetBranch,
+      maxDurationMin: created?.maxDurationMin,
+      stallTimeoutMin: created?.stallTimeoutMin,
+      maxRunsPerTask: created?.maxRunsPerTask,
+      promptHash: created?.promptHash,
+    }, {
+      agentId: "old-agent",
+      repoId: "repo-current",
+      runner: RunnerKind.CLAUDE,
+      model: "old-model",
+      branch: "feature/retry",
+      targetBranch: "main",
+      maxDurationMin: 90,
+      stallTimeoutMin: 7,
+      maxRunsPerTask: 4,
+      promptHash: null,
+    });
+  });
+});
+
+test("operator retry honors a template-step runner override", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-1",
+      model: "deepseek-current",
+      runnerPreference: RunnerPreference.PI,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, { runner: RunnerKind.CODEX });
+    assert.equal(response.status, 201);
+    assert.equal(created?.runner, RunnerKind.CODEX);
+  });
+});
+
+test("operator retry refuses a compound implementation Step assigned to a non-executioner Agent", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-1",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      name: "senior-dev",
+    }, {
+      runner: RunnerKind.CODEX,
+      stepIndex: 5,
+      outputKind: "implementation",
+      taskTemplate: { name: "compound-engineer-workflow" },
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID",
+    });
+    assert.equal(created, undefined);
+  });
+});
+
+test("operator retry returns 409 when the task assignee no longer exists", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest(null);
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Task assignee no longer exists; assign an agent before retrying",
+    });
+    assert.equal(created, undefined);
+  });
+});
+
+test("operator retry rejects an archived assignee with a named 409", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-archived",
+      model: "model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      archivedAt: new Date(),
+      name: "Archived Ada",
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: "Assignee Archived Ada is archived; unarchive it to retry" });
+    assert.equal(created, undefined);
+  });
+});
+
+test("a task creation that loses the Agent-row race writes neither task nor run", async () => {
+  await withTokens(async () => {
+    // The unlocked check above the transaction sees a live agent; the archive
+    // commits; the locked re-read inside the transaction is what decides.
+    let taskCreates = 0;
+    const database = {
+      agent: { findFirst: async () => ({ id: "agent-1", name: "Agent", archivedAt: null, runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
+      repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: "agent-1", archivedAt: new Date() }],
+        agent: { findUnique: async () => lockedAgent({ id: "agent-1", name: "Agent", archivedAt: new Date(), runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
+        task: { create: async () => { taskCreates += 1; return { id: "task-1" }; } },
+        taskActivity: { create: async () => ({}) },
+        run: { create: async () => { throw new Error("must not create run"); } },
+      }),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Race", description: "race", assigneeAgentId: "agent-1", repoId: "repo-1" }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "Assignee Agent is archived" });
+    assert.equal(taskCreates, 0);
+  });
+});
+
+test("task create and patch reject an archived assignee with a named 400", async () => {
+  await withTokens(async () => {
+    const archived = { id: "agent-archived", name: "Archived Ada", archivedAt: new Date() };
+    const createDb = {
+      agent: { findFirst: async () => archived },
+    } as unknown as PrismaClient;
+    const created = await createApp(createDb).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Blocked", assigneeAgentId: archived.id, repoId: "repo-1" }),
+    });
+    assert.equal(created.status, 400);
+    assert.deepEqual(await created.json(), { error: "Assignee Archived Ada is archived" });
+
+    const patchDb = {
+      task: { findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", assigneeAgentId: null, repoId: null }) },
+      agent: { findFirst: async () => archived },
+    } as unknown as PrismaClient;
+    const patched = await createApp(patchDb).request("/tasks/task-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ assigneeAgentId: archived.id }),
+    });
+    assert.equal(patched.status, 400);
+    assert.deepEqual(await patched.json(), { error: "Assignee Archived Ada is archived" });
+  });
+});
+
+test("GET /tasks?view=board answers with the card projection, not the whole row", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<Record<string, unknown>>;
+    assert.equal(body.length, 1);
+    // The fields the board reads survive...
+    assert.equal(body[0]!.name, "Ship the thing");
+    assert.equal(body[0]!.displayName, "Ship the thing");
+    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.42", startedAt: null, endedAt: null });
+    assert.deepEqual(body[0]!.taskCost, {
+      costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, outputTokens: null,
+    });
+    // ...and the ones it does not are gone, which is the entire point.
+    for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
+      assert.equal(dropped in body[0]!, false, `${dropped} must not ride along`);
+    }
+  });
+});
+
+test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
+  await withTokens(async () => {
+    const task = taskRow({
+      assigneeType: "AGENT",
+      description: "detail",
+      runs: [
+        {
+          id: "prefixed-run", runNumber: 2, status: "SUCCEEDED", model: "openai-codex/gpt-5.6-sol:high",
+          subagentModel: "gpt-5.6-luna:max",
+          session: {
+            nativeChildUsed: false, costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+            startedAt: null, endedAt: null,
+          },
+        },
+        {
+          id: "reported-run", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium",
+          subagentModel: null,
+          session: {
+            costUsd: "0.42", inputTokens: null, cachedInputTokens: null, outputTokens: null,
+            startedAt: null, endedAt: null,
+          },
+        },
+        { id: "unreported-run", runNumber: 0, status: "SUCCEEDED", model: "gpt-5.6-luna:max", subagentModel: null, session: null },
+      ],
+    });
+    const response = await createApp(taskDetailDatabase(task)).request("/tasks/t1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      taskCost: { costUsd: string; estimated: boolean; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null };
+      runs: Array<{ id: string; session: { usageCost: { costUsd: string; estimated: boolean } } | null }>;
+    };
+    assert.deepEqual(body.taskCost, {
+      costUsd: "6.62", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+    });
+    assert.deepEqual(body.runs.map((run) => ({ id: run.id, usageCost: run.session?.usageCost ?? null })), [
+      { id: "prefixed-run", usageCost: { costUsd: "6.2", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000 } },
+      { id: "reported-run", usageCost: { costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, outputTokens: null } },
+      { id: "unreported-run", usageCost: null },
+    ]);
+    assert.equal("moveTargets" in body, true, "the detail shape keeps operator move targets");
+    for (const listOnly of ["chainProgress", "recurringLastFiredAt", "recurringFireCount"]) {
+      assert.equal(listOnly in body, false, `${listOnly} must remain list-only`);
+    }
+  });
+});
+
+test("the board derives a shared title and badge for API-created chains", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([
+      taskRow({ id: "build", chainId: "direct", chainIndex: 0, name: "Release: Build", templateStep: null }),
+      taskRow({ id: "review", chainId: "direct", chainIndex: 1, name: "Release: Review", templateStep: null }),
+    ]), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; name: string; displayName: string; chainName: string | null }>;
+    assert.deepEqual(body.map(({ id, name, displayName, chainName }) => ({ id, name, displayName, chainName })), [
+      { id: "build", name: "Release: Build", displayName: "Build", chainName: "Release" },
+      { id: "review", name: "Release: Review", displayName: "Review", chainName: "Release" },
+    ]);
+  });
+});
+
+test("the board binds a chain-detached repair task to the chain its marker names", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase(
+      [
+        taskRow({ id: "regression", chainId: "c1", chainIndex: 1, name: "Release: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair", name: "Autonomous merge tail: gate-fix", templateStep: null }),
+      ],
+      {
+        related: [{ id: "regression", projectId: "p1", chainId: "c1" }],
+        activity: [{ taskId: "repair", metadata: {
+          schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression",
+        } }],
+      },
+    ), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; chainId: string | null; repairOf: unknown }>;
+    const repair = body.find((card) => card.id === "repair")!;
+    // The repair task stays chain-detached on the wire — the binding is the
+    // read side's answer to where the card belongs, not a chain column.
+    assert.equal(repair.chainId, null);
+    assert.deepEqual(repair.repairOf, { chainId: "c1", chainName: "Release", repairKind: "gate-fix" });
+    assert.equal(body.find((card) => card.id === "regression")!.repairOf, null);
+  });
+});
+
+test("a global board keeps two projects' same-named chains apart when it binds their repairs", async () => {
+  await withTokens(async () => {
+    // `chainId` is unique per project, not globally, so a board that spans
+    // projects can hold the same one twice. A repair card must be named by its
+    // own project's chain, not by whichever came first on the page.
+    const response = await getTasks(boardDatabase(
+      [
+        taskRow({ id: "regression-1", chainId: "c1", chainIndex: 1, name: "Release: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair-1", name: "Autonomous merge tail: gate-fix", templateStep: null }),
+        taskRow({ id: "regression-2", projectId: "p2", chainId: "c1", chainIndex: 1, name: "Hotfix: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair-2", projectId: "p2", name: "Autonomous merge tail: review-fix", templateStep: null }),
+      ],
+      {
+        related: [
+          { id: "regression-1", projectId: "p1", chainId: "c1" },
+          { id: "regression-2", projectId: "p2", chainId: "c1" },
+        ],
+        activity: [
+          { taskId: "repair-1", metadata: {
+            schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression-1",
+          } },
+          { taskId: "repair-2", metadata: {
+            schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "review-fix", regressionTaskId: "regression-2",
+          } },
+        ],
+      },
+    ), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; repairOf: unknown }>;
+    assert.deepEqual(body.find((card) => card.id === "repair-1")!.repairOf, {
+      chainId: "c1", chainName: "Release", repairKind: "gate-fix",
+    });
+    assert.deepEqual(body.find((card) => card.id === "repair-2")!.repairOf, {
+      chainId: "c1", chainName: "Hotfix", repairKind: "review-fix",
+    });
+  });
+});
+
+test("GET /tasks?enrich=false keeps creation ordering without enrichment queries", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([
+      taskRow({ id: "older", createdAt: new Date("2026-08-15T00:00:00Z") }),
+      taskRow({ id: "newer", createdAt: new Date("2026-08-16T00:00:00Z") }),
+    ]), "?enrich=false");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string }>;
+    assert.deepEqual(body.map(({ id }) => id), ["newer", "older"]);
+  });
+});
+
+test("board and full task views order by createdAt descending with a stable id tie-break", async () => {
+  await withTokens(async () => {
+    const rows = [
+      taskRow({ id: "older-recently-updated", createdAt: new Date("2026-08-15T00:00:00Z"), updatedAt: new Date("2026-08-20T00:00:00Z") }),
+      taskRow({ id: "b-tie", createdAt: new Date("2026-08-16T00:00:00Z"), updatedAt: new Date("2026-08-18T00:00:00Z") }),
+      taskRow({ id: "newest", createdAt: new Date("2026-08-17T00:00:00Z"), updatedAt: new Date("2026-08-17T00:00:00Z") }),
+      taskRow({ id: "a-tie", createdAt: new Date("2026-08-16T00:00:00Z"), updatedAt: new Date("2026-08-19T00:00:00Z") }),
+    ];
+    for (const query of ["?view=board", ""]) {
+      const response = await getTasks(boardDatabase(rows), query);
+      assert.equal(response.status, 200);
+      const body = await response.json() as Array<{ id: string }>;
+      assert.deepEqual(body.map(({ id }) => id), ["newest", "a-tie", "b-tie", "older-recently-updated"]);
+    }
+  });
+});

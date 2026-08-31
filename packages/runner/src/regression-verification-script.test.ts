@@ -269,7 +269,68 @@ test("gate FAIL preserves its proof without touching the merge lease", () => {
     gateVerdict: "FAIL",
     gateProof: "MERGE GATE: FAIL (runner package tests)",
     summary: "runner package tests",
+    gateFailureExcerpt: "runner package tests: no per-test output in gate log",
   });
+});
+
+test("gate FAIL records bounded node:test failures and missing-stage output", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  const noisyFailures = [
+    "== unit tests (all workspaces)",
+    "# Subtest: packages/passing.test.ts",
+    "    ok 1 - passing assertion in passing.test.ts",
+    "# Subtest: packages/first.test.ts",
+    "    not ok 1 - first assertion in first.test.ts",
+    "      \u001b[31mAssertionError: first assertion in first.test.ts\u001b[0m",
+    "# Subtest: packages/second.test.ts",
+    "    not ok 1 - first assertion in second.test.ts",
+    "      Error: first assertion in second.test.ts",
+    ...Array.from({ length: 45 }, (_, index) => `    not ok ${index + 2} - noisy assertion ${index + 1}`),
+    "--- database tests (db + api) ---",
+  ];
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = noisyFailures.join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF =
+    "MERGE GATE: FAIL (unit tests (all workspaces), database tests (db + api))";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  const excerpt = verdict.gateFailureExcerpt;
+  assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
+  assert.match(excerpt, /packages\/first\.test\.ts/u);
+  assert.match(excerpt, /first assertion in first\.test\.ts/u);
+  assert.match(excerpt, /packages\/second\.test\.ts/u);
+  assert.match(excerpt, /first assertion in second\.test\.ts/u);
+  assert.doesNotMatch(excerpt, /passing\.test\.ts/u);
+  assert.equal(excerpt.includes("\u001b"), false);
+  assert.match(excerpt, /database tests \(db \+ api\): no per-test output in gate log/u);
+  assert.ok(excerpt.split("\n").length <= 40, "failure excerpt exceeded its line cap");
+  assert.ok(Buffer.byteLength(excerpt, "utf8") <= 4000, "failure excerpt exceeded its byte cap");
+});
+
+test("gate FAIL keeps missing-stage notices when forwarded output starts mid-stage", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = [
+    "    not ok 1 - packages/api/src/late.test.ts",
+    "      AssertionError: late failure",
+  ].join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF =
+    "MERGE GATE: FAIL (unit tests (all workspaces), database tests (db + api))";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  const excerpt = verdict.gateFailureExcerpt;
+  assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
+  assert.match(excerpt, /packages\/api\/src\/late\.test\.ts/u);
+  assert.match(excerpt, /unit tests \(all workspaces\): no per-test output in gate log/u);
+  assert.match(excerpt, /database tests \(db \+ api\): no per-test output in gate log/u);
 });
 
 test("prepare emits refresh-conflict mechanically and leaves a deliverable workspace", () => {
