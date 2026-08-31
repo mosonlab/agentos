@@ -9,6 +9,7 @@ import {
   lockAgentRepoGrant,
   lockAgentRows,
   lockChainRows,
+  lockTemplateRow,
   Prisma,
   type PrismaClient,
   TaskSource,
@@ -191,10 +192,10 @@ export const instantiateTemplate = async (
       `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
     );
   }
-  let effectiveStepOverrides: Record<string, { assigneeAgentId: string }> = {
+  const requestedStepOverrides: Record<string, { assigneeAgentId: string }> = {
     ...(input.stepOverrides ?? {}),
   };
-  let overrideEntries = Object.entries(effectiveStepOverrides);
+  const overrideEntries = Object.entries(requestedStepOverrides);
   if (overrideEntries.length > 64) {
     throw templateRefusal(
       "step_override_too_many",
@@ -209,192 +210,114 @@ export const instantiateTemplate = async (
       );
     }
   }
-  const [template, repo] = await Promise.all([
-    db.taskTemplate.findFirst({
-      where: { id: templateId, projectId },
-      include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
-    }),
-    db.repo.findFirst({ where: { id: input.repoId, projectId } }),
-  ]);
-  if (!template) throw templateRefusal("template_not_found", "Template not found in project");
-  if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
-  if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
-  const implementationRoute = template.name === "direct-engineer-workflow"
-    ? parseImplementationRoute(input.description)
-    : null;
-  const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
-  const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
-  if (missing.length > 0) {
-    throw templateRefusal("template_variables_missing", `Missing template variables: ${missing.join(", ")}`);
-  }
-  if (unknown.length > 0) {
-    throw templateRefusal("template_variables_unknown", `Unknown template variables: ${unknown.join(", ")}`);
-  }
-  if (input.variables.branchName !== undefined && !isValidBranchName(input.variables.branchName)) {
-    throw templateRefusal("template_branch_invalid", "Invalid template branch name");
-  }
-  assertValidBaseReferences(template.steps);
-
-  const conditionalRevalidation = template.name === "direct-engineer-workflow"
-    ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
-    : null;
-  const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
-  const instantiatedTemplateSteps = omitRevalidation
-    ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
-    : template.steps;
-  if (instantiatedTemplateSteps.length === 0) {
-    throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
-  }
-
-  let routedImplementationStepIndex: number | null = null;
-  if (implementationRoute !== null) {
-    const implementationStep = template.steps.find((step) => isDirectImplementationStep({
-      outputKind: step.outputKind,
-      taskTemplate: { name: template.name },
-    }));
-    if (implementationStep) {
-      const stepKey = String(implementationStep.stepIndex);
-      if (effectiveStepOverrides[stepKey]) {
-        throw templateRefusal(
-          "implementation_route_conflicts_with_step_override",
-          `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
-        );
-      }
-      const routeAgent = await db.agent.findFirst({
-        where: { projectId, name: implementationRoute },
-        select: { id: true, name: true, projectId: true, archivedAt: true },
-      });
-      if (!routeAgent) {
-        throw templateRefusal(
-          "step_override_agent_not_found",
-          `Implementation route agent ${implementationRoute} was not found in this project`,
-        );
-      }
-      effectiveStepOverrides = {
-        ...effectiveStepOverrides,
-        [stepKey]: { assigneeAgentId: routeAgent.id },
-      };
-      routedImplementationStepIndex = implementationStep.stepIndex;
-      overrideEntries = Object.entries(effectiveStepOverrides);
-      if (overrideEntries.length > 64) {
-        throw templateRefusal(
-          "step_override_too_many",
-          `stepOverrides contains ${overrideEntries.length} entries; at most 64 step overrides are allowed`,
-        );
-      }
-    }
-  }
-
-  const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
-  for (const [stepIndex] of overrideEntries) {
-    if (!templateStepsByIndex.has(stepIndex)) {
-      throw templateRefusal(
-        "step_override_unknown_step",
-        `Step override names unknown template step ${stepIndex}`,
-      );
-    }
-  }
-  const overrideAgentIds = [...new Set(overrideEntries.map(([, override]) => override.assigneeAgentId))].sort();
-  const overrideAgents = new Map<string, OverrideAgent>();
-  if (overrideAgentIds.length > 0) {
-    const rows = await db.agent.findMany({
-      where: { projectId, id: { in: overrideAgentIds } },
-      select: { id: true, name: true, projectId: true, archivedAt: true },
-    });
-    for (const row of rows) overrideAgents.set(row.id, row);
-  }
-  const effectiveSteps = instantiatedTemplateSteps.map((step): EffectiveTemplateStep => {
-    const override = effectiveStepOverrides[String(step.stepIndex)];
-    const assigneeAgentId = override?.assigneeAgentId ?? step.assigneeAgentId;
-    return {
-      step,
-      override,
-      assigneeAgentId,
-      assigneeAgent: override
-        ? overrideAgents.get(override.assigneeAgentId) ?? null
-        : step.assigneeAgent,
-    };
-  });
-
-  for (const effective of effectiveSteps) {
-    const { step, override, assigneeAgent } = effective;
-    if (override && step.assigneeType !== AssigneeType.AGENT) {
-      throw templateRefusal(
-        "step_override_step_not_agent",
-        `Step override ${step.stepIndex} targets ${step.name}, whose assigneeType is ${step.assigneeType}; only AGENT steps may be overridden`,
-      );
-    }
-    if (override && (!assigneeAgent || assigneeAgent.projectId !== projectId)) {
-      throw templateRefusal(
-        "step_override_agent_not_found",
-        `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
-      );
-    }
-    // §D-P4, before any task row exists. A doctored template — the sentinel on
-    // an ordinary step, or a model agent on the integrator step — fails
-    // instantiation rather than materializing a chain that would later claim as
-    // the wrong execution mode.
-    const bindingRefusal = canonicalIntegratorBindingRefusal(assigneeAgent?.name ?? null, {
-      stepIndex: step.stepIndex,
-      outputKind: step.outputKind,
-      taskTemplateName: template.name,
-    });
-    if (bindingRefusal) {
-      if (override) throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${bindingRefusal}`);
-      throw templateRefusal("template_integrator_binding_invalid", `Template step ${step.name}: ${bindingRefusal}`);
-    }
-    if (step.assigneeType === AssigneeType.AGENT && !assigneeAgent) {
-      if (override) {
-        throw templateRefusal(
-          "step_override_agent_not_found",
-          `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
-        );
-      }
-      throw templateRefusal("template_step_agent_missing", `Template step ${step.name} has no agent`);
-    }
-    if (assigneeAgent?.archivedAt) {
-      if (override) {
-        throw templateRefusal(
-          "step_override_agent_archived",
-          `Override agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} is archived`,
-        );
-      }
-      throw templateRefusal(
-        "template_step_agent_archived",
-        `Template step ${step.name} agent ${assigneeAgent.name} is archived`,
-      );
-    }
-    if (override && !compoundImplementationAssigneeValid(
-      projectId,
-      step.assigneeType,
-      assigneeAgent,
-      { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
-    )) {
-      throw templateRefusal(
-        "step_override_compound_implementation",
-        `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`,
-      );
-    }
-    if (assigneeAgent) {
-      const access = await db.agentRepoAccess.findFirst({
-        where: { agentId: assigneeAgent.id, repoId: repo.id, projectId },
-      });
-      if (!access) {
-        if (override) {
-          throw templateRefusal(
-            "step_override_missing_repo_grant",
-            `Override agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} has no grant for Repo ${repo.name}`,
-          );
-        }
-        throw templateRefusal(
-          "template_agent_repo_grant_missing",
-          `Agent ${assigneeAgent.name} has no grant for Repo ${repo.name}`,
-        );
-      }
-    }
-  }
   try {
     return await serializable(db, async (tx) => {
+      // The template row is the shared mutex with structure replacement. No
+      // graph row or graph-dependent decision may be trusted until this lock
+      // is held; a replace that wins the race is therefore read as a whole.
+      const lockedTemplate = await lockTemplateRow(tx, templateId);
+      if (!lockedTemplate || lockedTemplate.projectId !== projectId) {
+        throw templateRefusal("template_not_found", "Template not found in project");
+      }
+      const template = await tx.taskTemplate.findFirst({
+        where: { id: templateId, projectId },
+        include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+      });
+      if (!template) throw templateRefusal("template_not_found", "Template not found in project");
+      const repo = await tx.repo.findFirst({ where: { id: input.repoId, projectId } });
+      if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
+      if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
+      const implementationRoute = template.name === "direct-engineer-workflow"
+        ? parseImplementationRoute(input.description)
+        : null;
+      const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
+      const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
+      if (missing.length > 0) {
+        throw templateRefusal("template_variables_missing", `Missing template variables: ${missing.join(", ")}`);
+      }
+      if (unknown.length > 0) {
+        throw templateRefusal("template_variables_unknown", `Unknown template variables: ${unknown.join(", ")}`);
+      }
+      if (input.variables.branchName !== undefined && !isValidBranchName(input.variables.branchName)) {
+        throw templateRefusal("template_branch_invalid", "Invalid template branch name");
+      }
+      assertValidBaseReferences(template.steps);
+
+      const conditionalRevalidation = template.name === "direct-engineer-workflow"
+        ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
+        : null;
+      const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
+      const instantiatedTemplateSteps = omitRevalidation
+        ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
+        : template.steps;
+      if (instantiatedTemplateSteps.length === 0) {
+        throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
+      }
+
+      let effectiveStepOverrides: Record<string, { assigneeAgentId: string }> = {
+        ...requestedStepOverrides,
+      };
+      let routedImplementationStepIndex: number | null = null;
+      if (implementationRoute !== null) {
+        const implementationStep = template.steps.find((step) => isDirectImplementationStep({
+          outputKind: step.outputKind,
+          taskTemplate: { name: template.name },
+        }));
+        if (implementationStep) {
+          const stepKey = String(implementationStep.stepIndex);
+          if (effectiveStepOverrides[stepKey]) {
+            throw templateRefusal(
+              "implementation_route_conflicts_with_step_override",
+              `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
+            );
+          }
+          const routeAgent = await tx.agent.findFirst({
+            where: { projectId, name: implementationRoute },
+            select: { id: true, name: true, projectId: true, archivedAt: true },
+          });
+          if (!routeAgent) {
+            throw templateRefusal(
+              "step_override_agent_not_found",
+              `Implementation route agent ${implementationRoute} was not found in this project`,
+            );
+          }
+          effectiveStepOverrides = {
+            ...effectiveStepOverrides,
+            [stepKey]: { assigneeAgentId: routeAgent.id },
+          };
+          routedImplementationStepIndex = implementationStep.stepIndex;
+          if (Object.keys(effectiveStepOverrides).length > 64) {
+            throw templateRefusal(
+              "step_override_too_many",
+              `stepOverrides contains ${Object.keys(effectiveStepOverrides).length} entries; at most 64 step overrides are allowed`,
+            );
+          }
+        }
+      }
+
+      const overrideEntries = Object.entries(effectiveStepOverrides);
+      const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
+      for (const [stepIndex] of overrideEntries) {
+        if (!templateStepsByIndex.has(stepIndex)) {
+          throw templateRefusal(
+            "step_override_unknown_step",
+            `Step override names unknown template step ${stepIndex}`,
+          );
+        }
+      }
+      const overrideAgentIds = [...new Set(overrideEntries.map(([, override]) => override.assigneeAgentId))].sort();
+      const effectiveSteps = instantiatedTemplateSteps.map((step): EffectiveTemplateStep => {
+        const override = effectiveStepOverrides[String(step.stepIndex)];
+        return {
+          step,
+          override,
+          assigneeAgentId: override?.assigneeAgentId ?? step.assigneeAgentId,
+          // The relation on the graph read is intentionally not trusted for
+          // assignment decisions. It is replaced with the Agent-row-locked
+          // value below before any Task is written.
+          assigneeAgent: null,
+        };
+      });
       const chainId = randomUUID();
       const branchName = input.variables.branchName ?? `agentos/${chainId}`;
         let predecessor: DispatchPredecessor | null = null;
@@ -484,15 +407,14 @@ export const instantiateTemplate = async (
             chainId: lockedPredecessor.chainId,
           };
         }
-        // The step validation above read every assignee outside this
-        // transaction. Re-read them all under the shared Agent-row mutex before
-        // the first task exists: instantiation writes a whole chain plus its
-        // first run, and an archive committing between the check and the write
-        // would leave every step of that chain pointed at an agent no runner
-        // will ever claim for. The name is equally authoritative here: a rename
-        // can change whether the assignee is a mechanical integrator or the
-        // pinned compound implementation agent. One id-ordered statement, so
-        // two instantiations sharing agents cannot deadlock.
+        // Re-read every assignee under the shared Agent-row mutex before the
+        // first task exists: instantiation writes a whole chain plus its first
+        // run, and an archive committing between the check and the write would
+        // leave every step of that chain pointed at an agent no runner will
+        // ever claim for. The name is equally authoritative here: a rename can
+        // change whether the assignee is a mechanical integrator or the pinned
+        // compound implementation agent. One id-ordered statement, so two
+        // instantiations sharing agents cannot deadlock.
         const canonicalAgentIds = effectiveSteps.flatMap((effective) => (
           effective.step.assigneeAgentId ? [effective.step.assigneeAgentId] : []
         ));
@@ -502,55 +424,72 @@ export const instantiateTemplate = async (
         );
         for (const effective of effectiveSteps) {
           const { step, override, assigneeAgentId } = effective;
-          if (!assigneeAgentId) continue;
-          const lockedAgent = lockedAgents.get(assigneeAgentId);
-          if (!lockedAgent || lockedAgent.projectId !== projectId) {
+          const lockedAgent = assigneeAgentId ? lockedAgents.get(assigneeAgentId) : undefined;
+          const assigneeAgent = lockedAgent && assigneeAgentId
+            ? { id: assigneeAgentId, ...lockedAgent }
+            : null;
+          effective.assigneeAgent = assigneeAgent;
+          if (override && step.assigneeType !== AssigneeType.AGENT) {
+            throw templateRefusal(
+              "step_override_step_not_agent",
+              `Step override ${step.stepIndex} targets ${step.name}, whose assigneeType is ${step.assigneeType}; only AGENT steps may be overridden`,
+            );
+          }
+          if (override && (!assigneeAgent || assigneeAgent.projectId !== projectId)) {
+            throw templateRefusal(
+              "step_override_agent_not_found",
+              `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
+            );
+          }
+          // §D-P4, before any task row exists. A doctored template — the
+          // sentinel on an ordinary step, or a model agent on the integrator
+          // step — fails rather than materializing a chain that would later
+          // claim as the wrong execution mode.
+          const bindingRefusal = canonicalIntegratorBindingRefusal(assigneeAgent?.name ?? null, {
+            stepIndex: step.stepIndex,
+            outputKind: step.outputKind,
+            taskTemplateName: template.name,
+          });
+          if (bindingRefusal) {
+            if (override) throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${bindingRefusal}`);
+            throw templateRefusal(
+              "template_integrator_binding_invalid",
+              `Template step ${step.name}: ${bindingRefusal}`,
+            );
+          }
+          if (step.assigneeType === AssigneeType.AGENT && !assigneeAgent) {
             if (override) {
               throw templateRefusal(
                 "step_override_agent_not_found",
-                `Override agent ${assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
+                `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
               );
             }
-            throw templateRefusal("template_step_agent_missing", `Template step ${step.name} agent was not found`);
+            throw templateRefusal("template_step_agent_missing", `Template step ${step.name} has no agent`);
           }
-          if (lockedAgent.archivedAt) {
+          if (assigneeAgent?.archivedAt) {
             if (override) {
               throw templateRefusal(
                 "step_override_agent_archived",
-                `Override agent ${lockedAgent.name} (${assigneeAgentId}) for step ${step.stepIndex} is archived`,
+                `Override agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} is archived`,
               );
             }
             throw templateRefusal(
               "template_step_agent_archived",
-              `Template step ${step.name} agent ${lockedAgent.name} is archived`,
+              `Template step ${step.name} agent ${assigneeAgent.name} is archived`,
             );
           }
           if (implementationRoute !== null
             && step.stepIndex === routedImplementationStepIndex
-            && lockedAgent.name !== implementationRoute) {
+            && assigneeAgent?.name !== implementationRoute) {
             throw templateRefusal(
               "implementation_route_agent_renamed",
               `Implementation route agent ${implementationRoute} changed identity before the chain was created`,
             );
           }
-          const lockedBindingRefusal = canonicalIntegratorBindingRefusal(lockedAgent.name, {
-            stepIndex: step.stepIndex,
-            outputKind: step.outputKind,
-            taskTemplateName: template.name,
-          });
-          if (lockedBindingRefusal) {
-            if (override) {
-              throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${lockedBindingRefusal}`);
-            }
-            throw templateRefusal(
-              "template_integrator_binding_invalid",
-              `Template step ${step.name}: ${lockedBindingRefusal}`,
-            );
-          }
-          if (!compoundImplementationAssigneeValid(
+          if (assigneeAgent && !compoundImplementationAssigneeValid(
             projectId,
             step.assigneeType,
-            lockedAgent,
+            assigneeAgent,
             { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
           )) {
             const message = `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`;
@@ -577,6 +516,10 @@ export const instantiateTemplate = async (
               `Agent ${agentName} has no grant for Repo ${repo.name}`,
             );
           }
+        }
+        const firstEffectiveStep = effectiveSteps[0]!;
+        if (firstEffectiveStep.step.assigneeType !== AssigneeType.AGENT) {
+          throw templateRefusal("template_first_step_not_agent", "The first template step must be agent-executable");
         }
         const tasks = [];
         const promptVariables = { ...input.variables, chainId };
@@ -610,9 +553,6 @@ export const instantiateTemplate = async (
           } }));
         }
         const first = tasks[0]!;
-        if (first.assigneeType !== AssigneeType.AGENT) {
-          throw templateRefusal("template_first_step_not_agent", "The first template step must be agent-executable");
-        }
         if (input.autoStart ?? false) {
           await enqueueTaskRun(tx, first.id);
         }
