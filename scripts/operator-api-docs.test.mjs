@@ -36,6 +36,23 @@ test("the template clone route documents its contract, refusals, and example", (
   assert.match(text, /curl -X POST "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/clone"/u);
 });
 
+test("the template step replace route documents its contract, refusals, warnings, and example", () => {
+  const { text } = templateRouteSection("PUT", "/projects/:projectId/task-templates/:templateId/steps");
+  assert.match(text, /Required path parameters: `projectId`, `templateId`/u);
+  assert.match(text, /Required JSON field: `steps`/u);
+  assert.match(text, /Each Step.*`name`.*`assigneeType`.*`baseFromStepIndex`/su);
+  assert.match(text, /200 OK/u);
+  assert.match(text, /404[\s\S]*`template_not_in_project`/u);
+  assert.match(text, /409[\s\S]*`template_canonical`/u);
+  assert.match(text, /409[\s\S]*`template_in_use`/u);
+  assert.match(text, /422[\s\S]*`graph_empty`/u);
+  assert.match(text, /`no_review_step`/u);
+  assert.match(text, /`same_agent_implements_and_reviews`/u);
+  assert.match(text, /`pull_request_without_regression`/u);
+  assert.match(text, /clone again/iu);
+  assert.match(text, /curl -X PUT "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/steps"/u);
+});
+
 test("the Chain read route documents the control projection and never-held value", () => {
   const { text } = routeSection("GET", "/tasks/:taskId/chain");
   assert.match(text, /control[` ]+object/u);
