@@ -53,6 +53,21 @@ export const parseImplementationRoute = (description: string | undefined): strin
   return match?.[1] ?? null;
 };
 
+const implementationRouteLineExact = new RegExp(implementationRouteLine.source, "u");
+
+/**
+ * Finds the first line that claims to be a machine-readable route but does not
+ * match the full grammar. A near-miss must refuse loudly: silently ignoring it
+ * dispatches the implementation step on the template default agent while the
+ * brief author believes their route was applied.
+ */
+export const findMalformedRouteLine = (description: string | undefined): string | null => {
+  for (const line of (description ?? "").split("\n")) {
+    if (line.startsWith("Route:") && !implementationRouteLineExact.test(line)) return line;
+  }
+  return null;
+};
+
 type OverrideAgent = {
   id: string;
   name: string;
@@ -223,6 +238,15 @@ export const instantiateTemplate = async (
   const implementationRoute = template.name === "direct-engineer-workflow"
     ? parseImplementationRoute(input.description)
     : null;
+  if (template.name === "direct-engineer-workflow") {
+    const malformedRouteLine = findMalformedRouteLine(input.description);
+    if (malformedRouteLine !== null) {
+      throw templateRefusal(
+        "implementation_route_malformed",
+        `Malformed Route line ${JSON.stringify(malformedRouteLine)}; expected "Route: implementation=<agent> - <reason>" with agent one of senior-dev-luna, senior-dev, frontend-dev`,
+      );
+    }
+  }
   if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
     throw templateRefusal(
       "implementation_route_unknown_agent",
