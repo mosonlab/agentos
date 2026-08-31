@@ -67,11 +67,15 @@ test("implementation route parsing accepts the machine-readable name before an o
   assert.equal(parseImplementationRoute("Route: implementation=frontend-dev"), "frontend-dev");
   assert.equal(parseImplementationRoute("Route: implementation=project_specific.implementer"), "project_specific.implementer");
   assert.equal(parseImplementationRoute("Route: implementation=senior-dev - step renumbering crosses contracts"), "senior-dev");
+  assert.equal(parseImplementationRoute("Route: implementation= - reason given"), null);
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev - "), null);
   assert.equal(parseImplementationRoute("Route: implementation=senior-dev "), null);
   assert.equal(parseImplementationRoute("Route: implementation=unknown"), "unknown");
   assert.equal(parseImplementationRoute(undefined), null);
   assert.equal(findMalformedRouteLine("Build it\nRoute: implementation=senior-dev\n"), null);
   assert.equal(findMalformedRouteLine("Route: implementation=senior-dev - reason given"), null);
+  assert.equal(findMalformedRouteLine("Route: implementation= - reason given"), "Route: implementation= - reason given");
+  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev - "), "Route: implementation=senior-dev - ");
   assert.equal(findMalformedRouteLine("Route: implementation=unknown"), null);
   assert.equal(findMalformedRouteLine("Route: senior-dev - missing the implementation= key"), "Route: senior-dev - missing the implementation= key");
   assert.equal(findMalformedRouteLine("Route: implementation=senior-dev "), "Route: implementation=senior-dev ");

@@ -50,7 +50,8 @@ export const parseImplementationRoute = (description: string | undefined): strin
   if (!value) return null;
   const reasonSeparator = value.indexOf(" - ");
   const name = reasonSeparator === -1 ? value : value.slice(0, reasonSeparator);
-  return name.length <= 80 && name.trim() === name ? name : null;
+  const reason = reasonSeparator === -1 ? null : value.slice(reasonSeparator + 3);
+  return name.length > 0 && name.length <= 80 && name.trim() === name && reason !== "" ? name : null;
 };
 
 /**
