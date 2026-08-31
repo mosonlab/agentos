@@ -224,7 +224,7 @@ const escalationFixture = (t, record) => {
     options: {
       escalationPath,
       retryableReasons: RETRYABLE_ESCALATION_REASONS,
-      retryCap: 5,
+      retryCap: ESCALATION_RETRY_CAP,
       readRemoteMain: async () => assert.fail("retry admission must not read remote main"),
       retryEscalationNotification: async () => { retryNotifications += 1; },
       log: (line) => logs.push(line),
