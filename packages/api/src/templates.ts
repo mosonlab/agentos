@@ -41,11 +41,6 @@ export type InstantiateTemplateInput = {
 const stepOverrideKey = /^[1-9]\d*$/u;
 
 const implementationRouteLine = /^Route: implementation=([A-Za-z0-9-]+)(?: - .+)?$/mu;
-const implementationRouteAgents = new Set([
-  "senior-dev-luna",
-  "senior-dev",
-  "frontend-dev",
-]);
 
 /** Read the machine-readable implementation route from a brief description. */
 export const parseImplementationRoute = (description: string | undefined): string | null => {
@@ -223,12 +218,6 @@ export const instantiateTemplate = async (
   const implementationRoute = template.name === "direct-engineer-workflow"
     ? parseImplementationRoute(input.description)
     : null;
-  if (implementationRoute !== null && !implementationRouteAgents.has(implementationRoute)) {
-    throw templateRefusal(
-      "implementation_route_unknown_agent",
-      `Unknown implementation route agent ${implementationRoute}; expected one of senior-dev-luna, senior-dev, frontend-dev`,
-    );
-  }
   const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
   if (missing.length > 0) {

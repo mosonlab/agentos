@@ -186,13 +186,13 @@ test("afterTaskId binds only the first of the chain's tasks and writes both audi
   assert.equal((predecessorActivity.metadata as { successorChainId: string }).successorChainId, response.body.chainId);
 });
 
-test("a direct brief routes implementation by Agent name and rejects an unknown route atomically", async () => {
+test("a direct brief routes implementation by any same-project Agent and rejects a missing route atomically", async () => {
   const seed = await fixture("implementation-route");
   const senior = await db.agent.create({
     data: {
       projectId: seed.project.id,
       environmentId: (await db.agent.findUniqueOrThrow({ where: { id: seed.agent.id } })).environmentId,
-      name: "senior-dev",
+      name: "project-specific-implementer",
       title: "Senior developer",
       model: "codex",
       foundationalPrompt: "foundation",
@@ -223,7 +223,7 @@ test("a direct brief routes implementation by Agent name and rejects an unknown 
   const routed = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
-    description: "Implement the brief.\n\nRoute: implementation=senior-dev - explicit fixture route.",
+    description: "Implement the brief.\n\nRoute: implementation=project-specific-implementer - explicit fixture route.",
   });
   assert.equal(routed.status, 201, JSON.stringify(routed.body));
   const routedImplementation = await db.task.findFirstOrThrow({
@@ -238,7 +238,7 @@ test("a direct brief routes implementation by Agent name and rejects an unknown 
     description: "Implement the brief.\n\nRoute: implementation=missing-agent",
   });
   assert.equal(unknown.status, 400, JSON.stringify(unknown.body));
-  assert.equal(unknown.body.code, "implementation_route_unknown_agent");
+  assert.equal(unknown.body.code, "step_override_agent_not_found");
   await assertNoPartialRows(beforeUnknown);
 });
 
