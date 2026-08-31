@@ -288,6 +288,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       assigneeType: "AGENT",
       approvalGate: false,
       outputKind: "must-fix",
+      requiresCommit: false,
       attachmentsFromPrevious: true,
       opensPullRequest: false,
       baseFromStepIndex: adjudication.baseFromStepIndex,
