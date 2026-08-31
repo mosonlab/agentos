@@ -339,7 +339,7 @@ test("replace refuses structural and prompt-only edits after a Task references t
     const result = await request(seed.project.id, seed.template.id, candidate);
     assert.equal(result.status, 409, JSON.stringify(result.body));
     assert.equal(result.body.code, "template_in_use", JSON.stringify(result.body));
-    assert.match(result.body.error, /clone again/iu);
+    assert.match(result.body.error, /clone it again/iu);
     assert.deepEqual(
       await db.taskTemplateStep.findMany({ where: { taskTemplateId: seed.template.id }, orderBy: { stepIndex: "asc" } }),
       before,
