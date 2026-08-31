@@ -66,11 +66,12 @@ previews other than a fresh install. This release adds four migrations.
   latched, and the Inbox record remains as historical evidence.
 - Artifact build, backup, migration, Prisma generation, prompt sync and service
   control have independent deadlines plus a deployment-barrier watchdog.
-  Ordinary timeouts follow the normal failure path and release the barrier; the
-  current release remains active or is restored after a post-activation
-  failure. A migration-deploy timeout instead prevents activation and restart
-  and keeps the PostgreSQL barrier blocking new Run claims until an operator
-  safely runs `--clear-escalation`.
+  Ordinary timeouts follow the normal failure path and release the barrier.
+  Before publication the current release remains active; afterwards recovery
+  attempts to restore the prior release and services. Database migrations are
+  not rolled back. A migration-deploy timeout instead prevents activation and
+  restart and keeps the PostgreSQL barrier blocking new Run claims until an
+  operator safely runs `--clear-escalation`.
 
 ### Gate and test structure
 

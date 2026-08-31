@@ -211,8 +211,10 @@ same escalation mechanism as other deployment failures.
 
 Timeouts for ordinary steps follow the normal failure path: the deployment
 process exits, its session-scoped PostgreSQL barrier is released automatically,
-and the services remain on (or return to) the current release. The
-`prisma migrate deploy` migration step is the deliberate exception. If it
+and before publication the current release remains active. After publication,
+recovery attempts to restore the prior release and services; database
+migrations are not rolled back. The `prisma migrate deploy` migration step is
+the deliberate exception. If it
 reaches its deadline, the child is terminated and the failure is written to
 `escalated.json` and notified, but the deploy process remains alive with the
 same database session and barrier held. The current release's service processes
