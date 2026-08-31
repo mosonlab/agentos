@@ -60,6 +60,7 @@
     "db:verify-starter-onboarding": "npm run db:verify-starter-onboarding -w @anneal/db",
     "db:export-goal-lineage": "npm run db:export-goal-lineage -w @anneal/db",
     "db:backfill-session-usage": "npm run db:backfill-session-usage -w @anneal/db",
+    "db:backfill-session-cache": "npm run db:backfill-session-cache -w @anneal/db",
     "db:backfill-task-source": "npm run db:backfill-task-source -w @anneal/db",
     "postinstall": "npm run db:generate"
   },

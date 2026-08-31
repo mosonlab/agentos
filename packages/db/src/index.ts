@@ -95,6 +95,7 @@ export {
   applyInboxDecisionTx,
 } from "./inbox-decision.js";
 export * from "./usage.js";
+export * from "./session-cache-backfill.js";
 export * from "./cost.js";
 export * from "./task-source.js";
 export * from "./failure-envelope.js";
