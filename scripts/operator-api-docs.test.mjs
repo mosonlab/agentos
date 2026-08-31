@@ -3,18 +3,38 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const handbook = readFileSync("docs/operator-api.md", "utf8");
-const tasksStart = handbook.indexOf("## Tasks\n");
-const tasksEnd = handbook.indexOf("\n## ", tasksStart + 1);
-assert.notEqual(tasksStart, -1, "operator handbook must have a Tasks section");
-const tasks = handbook.slice(tasksStart, tasksEnd === -1 ? handbook.length : tasksEnd);
-
-const routeSection = (method, path) => {
-  const marker = `### ${method} \`${path}\``;
-  const start = tasks.indexOf(marker);
-  assert.notEqual(start, -1, `${marker} must be documented in the Tasks section`);
-  const end = tasks.indexOf("\n### ", start + marker.length);
-  return { start, text: tasks.slice(start, end === -1 ? tasks.length : end) };
+const section = (heading) => {
+  const start = handbook.indexOf(`${heading}\n`);
+  assert.notEqual(start, -1, `operator handbook must have a ${heading} section`);
+  const end = handbook.indexOf("\n## ", start + heading.length + 1);
+  return handbook.slice(start, end === -1 ? handbook.length : end);
 };
+
+const tasks = section("## Tasks");
+const templates = section("## Task templates");
+
+const routeIn = (source, method, path) => {
+  const marker = `### ${method} \`${path}\``;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `${marker} must be documented in its section`);
+  const end = source.indexOf("\n### ", start + marker.length);
+  return { start, text: source.slice(start, end === -1 ? source.length : end) };
+};
+
+const routeSection = (method, path) => routeIn(tasks, method, path);
+const templateRouteSection = (method, path) => routeIn(templates, method, path);
+
+test("the template clone route documents its contract, refusals, and example", () => {
+  const { text } = templateRouteSection("POST", "/projects/:projectId/task-templates/:templateId/clone");
+  assert.match(text, /Required path parameters: `projectId`, `templateId`/u);
+  assert.match(text, /Required JSON field: `name`/u);
+  assert.match(text, /Optional JSON field: `description`/u);
+  assert.match(text, /201 Created/u);
+  assert.match(text, /404[\s\S]*`template_not_in_project`/u);
+  assert.match(text, /409[\s\S]*`template_name_taken`/u);
+  assert.match(text, /409[\s\S]*`template_name_reserved`/u);
+  assert.match(text, /curl -X POST "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/clone"/u);
+});
 
 test("the Chain read route documents the control projection and never-held value", () => {
   const { text } = routeSection("GET", "/tasks/:taskId/chain");

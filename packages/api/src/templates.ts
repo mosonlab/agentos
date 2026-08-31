@@ -25,6 +25,10 @@ import {
 } from "./template-errors.js";
 import { serializable } from "./transaction.js";
 
+// The clone operation lives in the authoring module, but this compatibility
+// export keeps template service consumers on the existing import surface.
+export { cloneTemplate, type CloneTemplateInput } from "./template-authoring.js";
+
 export type InstantiateTemplateInput = {
   repoId: string;
   variables: Record<string, string>;

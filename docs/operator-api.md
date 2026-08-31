@@ -744,8 +744,10 @@ curl -X POST "$BASE_URL/goals/$GOAL_ID/progress-log" \
 
 ## Task templates
 
-There is no create-template route in `app.ts`; templates are read, patched for
-webhook configuration, or instantiated.
+Templates can be cloned under a new project-local name, read, patched for
+webhook configuration, or instantiated. Cloning copies the description,
+variables, and complete Step graph, but clears webhook configuration; Tasks
+and trigger fires are never copied.
 
 ### GET `/projects/:projectId/task-templates`
 
@@ -753,6 +755,25 @@ webhook configuration, or instantiated.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/task-templates" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/projects/:projectId/task-templates/:templateId/clone`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON field: `name` (trimmed, non-empty, and at most 200 characters).
+- Optional JSON field: `description` (at most 50,000 characters); when omitted,
+  the source description is copied.
+- Returns `201 Created` with the cloned template and its ordered Steps.
+- Refusals: `404 Not Found` with code `template_not_in_project` when the source
+  is not in the addressed project; `409 Conflict` with code
+  `template_name_taken` when the name is already used in the project; and
+  `409 Conflict` with code `template_name_reserved` when the name is a current
+  or registered-legacy canonical identity.
+
+```sh
+curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"custom-review-workflow","description":"A project-specific workflow"}'
 ```
 
 ### GET `/task-templates/:templateId`
