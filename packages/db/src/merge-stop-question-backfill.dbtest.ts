@@ -121,6 +121,7 @@ const createStop = async (input: {
   condition: string;
   archived?: boolean;
   terminal?: boolean;
+  sourceLess?: boolean;
 }) => {
   const task = await db.task.create({ data: {
     projectId,
@@ -163,7 +164,7 @@ const createStop = async (input: {
       outcome: "stopped",
       condition: input.condition,
       evidence: `${input.label} evidence`,
-      sourceRunId: run.id,
+      sourceRunId: input.sourceLess ? null : run.id,
     },
   } });
   if (input.terminal) await db.taskActivity.create({ data: {
@@ -188,11 +189,16 @@ test("repairs one active incident, then remains idempotent while skipping protec
   const terminal = await createStop({ label: "answered incident", condition: "base-drift-post-merge", terminal: true });
   const archived = await createStop({ label: "archived incident", condition: "base-drift-post-merge", archived: true });
   const ordinary = await createStop({ label: "ordinary base drift", condition: "base-drift" });
+  const sourceLess = await createStop({
+    label: "historical source-less incident",
+    condition: "base-drift-post-merge",
+    sourceLess: true,
+  });
 
   const first = await backfillMergeStopQuestions(db as unknown as MergeStopQuestionBackfillDatabase);
   assert.deepEqual(first, {
-    scanned: 4,
-    created: 1,
+    scanned: 5,
+    created: 2,
     alreadyPresent: 0,
     deferredOrdinaryBaseDrift: 1,
     skipped: 2,
@@ -207,13 +213,18 @@ test("repairs one active incident, then remains idempotent while skipping protec
   assert.deepEqual((activeCard.choices as Array<{ id: string }>).map((choice) => choice.id), ["accept", "revert"]);
   assert.equal(activeCard.agentId, agentId);
   assert.equal(activeCard.sessionId, active.session.id);
+  const sourceLessCard = await db.inboxMessage.findUniqueOrThrow({
+    where: { dedupeKey: `merge-stop:${sourceLess.stop.id}` },
+  });
+  assert.equal(sourceLessCard.agentId, agentId);
+  assert.equal(sourceLessCard.sessionId, sourceLess.session.id);
   assert.equal(await db.inboxMessage.count({ where: { taskId: { in: [terminal.task.id, archived.task.id, ordinary.task.id] } } }), 0);
 
   const second = await backfillMergeStopQuestions(db as unknown as MergeStopQuestionBackfillDatabase);
   assert.deepEqual(second, {
-    scanned: 4,
+    scanned: 5,
     created: 0,
-    alreadyPresent: 1,
+    alreadyPresent: 2,
     deferredOrdinaryBaseDrift: 1,
     skipped: 2,
     failed: 0,

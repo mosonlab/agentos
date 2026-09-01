@@ -188,7 +188,7 @@ export type RecordedStop = {
   stopId: string;
   condition: StopCondition;
   evidence: string;
-  sourceRunId: string;
+  sourceRunId: string | null;
   createdAt: Date;
 };
 
@@ -203,7 +203,7 @@ export type RecordedStop = {
 export type StoppedResultMetadata = {
   condition: StopCondition;
   evidence: string;
-  sourceRunId: string;
+  sourceRunId: string | null;
 };
 
 export const parseStoppedResultMetadata = (value: unknown): StoppedResultMetadata | null => {
@@ -214,12 +214,14 @@ export const parseStoppedResultMetadata = (value: unknown): StoppedResultMetadat
     || metadata.outcome !== "stopped"
     || !isStopCondition(metadata.condition)
     || typeof metadata.evidence !== "string"
-    || typeof metadata.sourceRunId !== "string"
+    || !(metadata.sourceRunId === undefined
+      || metadata.sourceRunId === null
+      || typeof metadata.sourceRunId === "string")
   ) return null;
   return {
     condition: metadata.condition,
     evidence: metadata.evidence,
-    sourceRunId: metadata.sourceRunId,
+    sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
   };
 };
 
@@ -551,19 +553,27 @@ const latestValidResultActivity = async (
 
 /**
  * Resolve the identities attached to a stop question. A source Run is the
- * durable owner of the Agent and Session, not caller-supplied strings. Every
- * production result writer stamps the source Run before the activity commits.
+ * durable owner of the Agent and Session, not caller-supplied strings. New
+ * production writers stamp the source Run. For historical source-less rows,
+ * repair uses the newest Session-bearing Run on the same Task rather than an
+ * identity guessed by its caller.
  */
 const stopQuestionIdentity = async (
   tx: Tx,
   task: IntegratorTask,
-  stop: { sourceRunId: string },
+  stop: { sourceRunId: string | null },
 ): Promise<{ agentId: string; sessionId: string }> => {
-  const sourceRun = await tx.run.findUnique({
-    where: { id: stop.sourceRunId },
-    select: { taskId: true, agentId: true, session: { select: { id: true } } },
-  });
-  if (!sourceRun) throw new Error(`Merge stop source Run ${stop.sourceRunId} no longer exists`);
+  const select = { taskId: true, agentId: true, session: { select: { id: true } } } as const;
+  const sourceRun = stop.sourceRunId
+    ? await tx.run.findUnique({ where: { id: stop.sourceRunId }, select })
+    : await tx.run.findFirst({
+        where: { taskId: task.id, session: { isNot: null } },
+        orderBy: [{ runNumber: "desc" }, { createdAt: "desc" }],
+        select,
+      });
+  if (!sourceRun) {
+    throw new Error(`Merge stop on task ${task.id} has no durable Session-bearing Run identity`);
+  }
   if (sourceRun.taskId !== task.id) {
     throw new Error(`Merge stop ${stop.sourceRunId} is not owned by integrator task ${task.id}`);
   }
@@ -691,7 +701,7 @@ export const landIntegratorStop = async (
     };
   }
   const questionDeferred = stopped.condition === "base-drift" && isCanonicalIntegratorStep(task.templateStep);
-  const sourceRunIsActive = questionDeferred
+  const sourceRunIsActive = questionDeferred && stopped.sourceRunId
     ? await tx.run.findUnique({ where: { id: stopped.sourceRunId }, select: { taskId: true, status: true } })
       .then((sourceRun) => {
         if (!sourceRun) throw new Error(`Merge stop source Run ${stopped.sourceRunId} no longer exists`);

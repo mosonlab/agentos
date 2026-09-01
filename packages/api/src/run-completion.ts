@@ -560,7 +560,9 @@ export const completeRun = async (
     // Preserve a failed completion's diagnostic reason even when a definitive
     // mechanical result overrides its protocol classification. Ordinary
     // reported success still carries no failure reason.
-    const failureReason = reportedSuccess ? null : missingOutputReason ?? body.failureReason ?? "Execution failed";
+    const failureReason = succeeded && reportedSuccess
+      ? null
+      : missingOutputReason ?? body.failureReason ?? "Execution failed";
     // §D-P5 / MF-5. For the integrator step that compensation is switched off
     // entirely, so the answer transaction is the *only* writer of a ceiling
     // above the task's original. Otherwise a run authorized once could buy
