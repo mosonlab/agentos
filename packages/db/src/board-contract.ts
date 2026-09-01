@@ -81,9 +81,17 @@ export type CostsAgentTotal<DecimalValue = string> = {
   runs: number;
   costUnavailableRuns: number;
   avgUsd: DecimalValue;
-  /** Cached share of this agent's input tokens, 0-100, or null when no run
-   * reported both token columns. */
+  /** Cached-read share of this agent's input tokens, 0-100, or null when no
+   * run has a complete cache read/write split. */
   cachePct: number | null;
+  /** Runs excluded from cache metrics because their read/write split is
+   * unknown. Unknown is deliberately not folded into either token total. */
+  cacheUnknownRuns: number;
+  /** Uncached input tokens from runs with a complete cache split. */
+  uncachedInputTokens: number;
+  /** Uncached input spend at the model table rate, or null when a contributing
+   * model has no repository price. */
+  uncachedInputUsd: DecimalValue | null;
   wastedUsd: DecimalValue;
 };
 
@@ -102,6 +110,46 @@ export type CostsTopRun<DateTime = string, DecimalValue = string> = {
   usd: DecimalValue;
   estimated: boolean;
   startedAt: DateTime;
+};
+
+export type CostsWaste<DecimalValue = string> = {
+  totalUsd: DecimalValue;
+  operatorCancelledUsd: DecimalValue;
+  failedUsd: DecimalValue;
+  byFailureClass: Array<{
+    failureClass: string;
+    usd: DecimalValue;
+    runs: number;
+  }>;
+};
+
+export type CostsChain<DecimalValue = string> = {
+  chainId: string;
+  /** First primary task, used by the web client to open the existing chain
+   * detail route. */
+  detailTaskId: string;
+  chainName: string | null;
+  taskCount: number;
+  leadMinutes: number;
+  busyMinutes: number;
+  busyPct: number;
+  repairs: {
+    gateFix: number;
+    refreshConflict: number;
+    reviewFix: number;
+  };
+  /** Priced spend only, or null when every run is unpriced. Unpriced runs are
+   * represented by costUnavailableRuns rather than fabricated as zero. */
+  costUsd: DecimalValue | null;
+  /** Exact partition of priced spend. Registered step roles and repair are
+   * seeded even when represented only by unpriced runs; `unassigned` surfaces
+   * priced tasks whose persisted output kind has no registered StepRole. */
+  costByRole: Record<string, DecimalValue>;
+  costUnavailableRuns: number;
+  longestGap: {
+    minutes: number;
+    beforeTaskName: string | null;
+  };
 };
 
 /** `GET /projects/:projectId/costs` and its native API projection.
@@ -126,6 +174,8 @@ export type CostsReport<DateTime = string, DecimalValue = string> = {
   avgUsd: DecimalValue;
   /** Priced spend of settled runs that did not succeed. */
   wastedUsd: DecimalValue;
+  waste: CostsWaste<DecimalValue>;
+  chains: CostsChain<DecimalValue>[];
   daily: CostsDailyBucket<DecimalValue>[];
   byAgent: CostsAgentTotal<DecimalValue>[];
   byModel: CostsModelTotal<DecimalValue>[];

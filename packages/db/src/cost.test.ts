@@ -10,6 +10,7 @@ test("Codex tokens use the model table, cached rate, and ignore the effort suffi
     costUsd: null,
     inputTokens: 1_000_000,
     cachedInputTokens: 400_000,
+    cacheCreationInputTokens: 0,
     outputTokens: 100_000,
   });
   assert.equal(cost.costUsd?.toString(), "6.2");
@@ -21,10 +22,73 @@ test("a provider-prefixed model uses the existing bare model price row", () => {
     costUsd: null,
     inputTokens: 1_000_000,
     cachedInputTokens: 400_000,
+    cacheCreationInputTokens: 0,
     outputTokens: 100_000,
   });
   assert.equal(cost.costUsd?.toString(), "6.2");
   assert.equal(cost.estimated, true);
+});
+
+test("Claude Opus token-only usage uses the new price row and effort normalization", () => {
+  const cost = sessionUsageCost("claude-opus-5:high", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 400_000,
+    cacheCreationInputTokens: 0,
+    outputTokens: 100_000,
+  });
+  // 600k uncached + 400k cached input and 100k output at Opus 5 rates.
+  assert.equal(cost.costUsd?.toString(), "5.7");
+  assert.equal(cost.estimated, true);
+});
+
+test("a provider-prefixed Claude Fable model uses its bare price row", () => {
+  const cost = sessionUsageCost("anthropic/claude-fable-5:medium", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 400_000,
+    cacheCreationInputTokens: 0,
+    outputTokens: 100_000,
+  });
+  // 600k uncached + 400k cached input and 100k output at Fable 5 rates.
+  assert.equal(cost.costUsd?.toString(), "11.4");
+  assert.equal(cost.estimated, true);
+});
+
+test("known cache creation is excluded from the read and uncached price bases", () => {
+  const cost = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null,
+    inputTokens: 160,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+    outputTokens: 10,
+  });
+  // Only 10 uncached, 100 cached, and 10 output tokens are priced. Cache
+  // creation has no table rate and must not be folded into either input side.
+  assert.equal(cost.costUsd?.toString(), "0.000016");
+  assert.equal(cost.estimated, true);
+});
+
+test("an unknown historical cache split preserves the legacy estimate and provider cost remains authoritative", () => {
+  const unknown = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null,
+    inputTokens: 160,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: null,
+    outputTokens: 10,
+  });
+  assert.equal(unknown.costUsd?.toString(), "0.000026");
+  assert.equal(unknown.estimated, true);
+
+  const reported = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: new Prisma.Decimal("0.25"),
+    inputTokens: 160,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: null,
+    outputTokens: 10,
+  });
+  assert.equal(reported.costUsd?.toString(), "0.25");
+  assert.equal(reported.estimated, false);
 });
 
 test("an unsplit native-child session uses the pinned Luna price", () => {
@@ -32,6 +96,7 @@ test("an unsplit native-child session uses the pinned Luna price", () => {
     costUsd: null,
     inputTokens: 1_000_000,
     cachedInputTokens: 100_000,
+    cacheCreationInputTokens: 0,
     outputTokens: 500_000,
   }, { mixedModels: true });
   // 900k uncached + 100k cached input and 500k output at Luna rates.
@@ -52,6 +117,7 @@ test("a native-child grant without an observed child keeps the root model price"
       costUsd: null,
       inputTokens: 1_000_000,
       cachedInputTokens: 400_000,
+      cacheCreationInputTokens: 0,
       outputTokens: 100_000,
     },
   };
@@ -68,6 +134,7 @@ test("an observed unsplit native child prices the aggregate at Luna", () => {
       costUsd: null,
       inputTokens: 1_000_000,
       cachedInputTokens: 100_000,
+      cacheCreationInputTokens: 0,
       outputTokens: 500_000,
     },
   });
@@ -77,10 +144,10 @@ test("an observed unsplit native child prices the aggregate at Luna", () => {
 
 test("a clean root and child split keeps each model's pricing", () => {
   const root = sessionUsageCost("gpt-5.6-sol:high", {
-    costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+    costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, cacheCreationInputTokens: 0, outputTokens: 100_000,
   });
   const child = sessionUsageCost("gpt-5.6-luna:max", {
-    costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+    costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 400_000, cacheCreationInputTokens: 0, outputTokens: 100_000,
   });
   assert.equal(root.costUsd?.toString(), "6.2");
   assert.equal(child.costUsd?.toString(), "0.248");
@@ -92,6 +159,7 @@ test("an unpriced model exposes tokens and no dollar figure", () => {
     costUsd: null,
     inputTokens: 120,
     cachedInputTokens: 20,
+    cacheCreationInputTokens: 0,
     outputTokens: 30,
   });
   assert.equal(cost.costUsd, null);
@@ -108,6 +176,7 @@ test("a provider-reported Claude cost always wins over the price table", () => {
     costUsd: reported,
     inputTokens: 1_000_000,
     cachedInputTokens: 400_000,
+    cacheCreationInputTokens: 0,
     outputTokens: 100_000,
   });
   assert.equal(cost.costUsd?.toString(), "0.049117");
@@ -116,10 +185,10 @@ test("a provider-reported Claude cost always wins over the price table", () => {
 
 test("an unpriced token component suppresses a partial aggregate dollar amount", () => {
   const priced = sessionUsageCost("gpt-5.6-luna", {
-    costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50,
+    costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 50,
   });
   const unknown = sessionUsageCost("future-model", {
-    costUsd: null, inputTokens: 10, cachedInputTokens: null, outputTokens: 5,
+    costUsd: null, inputTokens: 10, cachedInputTokens: null, cacheCreationInputTokens: 0, outputTokens: 5,
   });
   const total = sumUsageCosts([priced, unknown]);
   assert.equal(total?.costUsd, null);
@@ -138,7 +207,7 @@ test("incomplete priced token rows never produce a partial dollar estimate", () 
   ];
 
   for (const tokens of incomplete) {
-    const cost = sessionUsageCost("gpt-5.6-sol", { costUsd: null, ...tokens });
+    const cost = sessionUsageCost("gpt-5.6-sol", { costUsd: null, cacheCreationInputTokens: 0, ...tokens });
     assert.equal(cost.costUsd, null, JSON.stringify(tokens));
     assert.equal(cost.estimated, false, JSON.stringify(tokens));
     assert.deepEqual(
@@ -150,10 +219,10 @@ test("incomplete priced token rows never produce a partial dollar estimate", () 
 
 test("an incomplete priced session suppresses a partial aggregate dollar amount", () => {
   const complete = sessionUsageCost("gpt-5.6-luna", {
-    costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50,
+    costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 50,
   });
   const incomplete = sessionUsageCost("gpt-5.6-luna", {
-    costUsd: null, inputTokens: 10, cachedInputTokens: null, outputTokens: 5,
+    costUsd: null, inputTokens: 10, cachedInputTokens: null, cacheCreationInputTokens: 0, outputTokens: 5,
   });
   const total = sumUsageCosts([complete, incomplete]);
   assert.equal(total?.costUsd, null);

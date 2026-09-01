@@ -14,17 +14,23 @@ export type TokenPrices = {
  * https://developers.openai.com/api/docs/models/gpt-5.6-sol
  * https://developers.openai.com/api/docs/models/gpt-5.6-terra
  * https://developers.openai.com/api/docs/models/gpt-5.6-luna
+ * https://platform.claude.com/docs/en/about-claude/pricing
  */
 export const MODEL_TOKEN_PRICES: Readonly<Record<string, TokenPrices>> = {
   "gpt-5.6-sol": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "30" },
   "gpt-5.6-terra": { inputPerMillionUsd: "2", cachedInputPerMillionUsd: "0.2", outputPerMillionUsd: "12" },
   "gpt-5.6-luna": { inputPerMillionUsd: "0.2", cachedInputPerMillionUsd: "0.02", outputPerMillionUsd: "1.2" },
+  "claude-opus-5": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "25" },
+  "claude-fable-5": { inputPerMillionUsd: "10", cachedInputPerMillionUsd: "1", outputPerMillionUsd: "50" },
 };
 
 export type CostableSession = {
   costUsd: Prisma.Decimal | string | number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  /** Cache writes are separate from cached reads. Null means the historical
+   * row has not yielded a trustworthy read/write split. */
+  cacheCreationInputTokens: number | null;
   outputTokens: number | null;
 };
 
@@ -89,12 +95,22 @@ export const sessionUsageCost = (
   // reports cached input as a subset of input, so inconsistent rows also fall
   // back to their token columns instead of manufacturing a partial amount.
   if (!prices || session.inputTokens === null || session.cachedInputTokens === null
-    || session.outputTokens === null || session.cachedInputTokens > session.inputTokens) {
+    || session.outputTokens === null
+    || (session.cacheCreationInputTokens !== null && session.cacheCreationInputTokens < 0)
+    || session.cachedInputTokens < 0
+    || session.cachedInputTokens + (session.cacheCreationInputTokens ?? 0) > session.inputTokens) {
     return { costUsd: null, estimated: false, ...tokens };
   }
 
   const cached = session.cachedInputTokens;
-  const uncached = session.inputTokens - cached;
+  // Preserve the pre-migration estimate for an explicitly unknown historical
+  // split. This does not claim creation was zero: cache reporting excludes the
+  // row, while the long-standing aggregate cost projection continues to price
+  // `input - cached` so migration alone cannot erase existing totals. Once the
+  // backfill establishes a split, known cache writes are excluded because the
+  // repository price table intentionally has no creation rate.
+  const uncached = session.inputTokens - cached
+    - (session.cacheCreationInputTokens === null ? 0 : session.cacheCreationInputTokens);
   const output = session.outputTokens;
   const costUsd = new Prisma.Decimal(uncached).times(prices.inputPerMillionUsd)
     .plus(new Prisma.Decimal(cached).times(prices.cachedInputPerMillionUsd))
