@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { JSDOM } from "jsdom";
 import { act, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -39,7 +40,7 @@ type AggregateWithRepair = ChainAggregate & {
 
 const runWithTier = (overrides: Partial<RunWithTier> = {}): RunWithTier => ({
   id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT",
-  costUsd: null, startedAt: null, endedAt: null, ...overrides,
+  costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null, ...overrides,
 });
 
 const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): AggregateWithRepair => ({
@@ -146,17 +147,73 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
 });
 
+const element = (markup: string, selector: string): Element => {
+  const found = new JSDOM(`<!doctype html><html><body>${markup}</body></html>`)
+    .window.document.body.querySelector(selector);
+  assert.ok(found, `${selector} renders: ${markup}`);
+  return found;
+};
+
+test("a long chain title wraps in full rather than ending in an ellipsis", () => {
+  const name = "Board cards: full titles, single-state rows, and a PR link";
+  const title = element(renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({ chainName: name })} />), "[data-card-title]");
+  assert.equal(title.textContent, name);
+  assert.doesNotMatch(title.className, /line-clamp/u);
+});
+
+test("a running aggregate drops the state pill and the frontier row's filter button", () => {
+  // Running is already on the card twice over — the run line's amber dot and
+  // its own status — so the pill was the third telling. Every other state has
+  // nothing else to say it.
+  const running = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
+    frontier: { taskId: "step-3", title: "Implement release", status: "DOING", latestRun: runWithTier({ status: "RUNNING" }), mergeOutcome: null, failureReason: null, position: 3 },
+  })} />);
+  assert.doesNotMatch(running, /data-slot="badge"/u);
+  assert.doesNotMatch(running, /Filter steps/u);
+
+  const parked = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
+    activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1" },
+  })} />);
+  assert.match(parked, /data-slot="badge"[^>]*>Parked</u);
+});
+
+test("the progress and the step it names are one row", () => {
+  const row = element(renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />), "[data-chain-progress]");
+  assert.equal(row.textContent, "Step 3/12 · Implement release");
+  assert.ok(row.querySelector("[data-chain-frontier]"), "the frontier keeps its own hook");
+});
+
+test("the footer links the newest run's pull request and states the cost bare", () => {
+  const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
+    frontier: {
+      taskId: "step-3", title: "Implement release", status: "DOING",
+      latestRun: runWithTier({ pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351" }),
+      mergeOutcome: null, failureReason: null, position: 3,
+    },
+    totalCost: { costUsd: "13.74", estimated: true, inputTokens: null, cachedInputTokens: null, cacheCreationInputTokens: null, outputTokens: null },
+  })} />);
+  const link = element(markup, "a[data-card-pull-request]");
+  assert.equal(link.getAttribute("href"), "https://github.com/mosonlab/anneal/pull/351");
+  assert.equal(link.textContent, "#351");
+  const text = visibleText(markup);
+  assert.match(text, /\$13\.74 · \d+d ago/u);
+  assert.doesNotMatch(text, /Cost:|est\./u);
+
+  // No run, no link: the footer's left slot is simply empty.
+  assert.doesNotMatch(renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />), /data-card-pull-request/u);
+});
+
 test("aggregate card renders an active repair line and omits it when no repair is active", () => {
   const activeMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={activeRepairAggregate()} />);
   const activeText = visibleText(activeMarkup);
   assert.match(activeMarkup, /data-chain-repair=""/u);
-  assert.match(activeText, /gate-fix · .*run 3 · gpt-5\.6-sol · high · fast · running \d+m/u);
+  assert.match(activeText, /gate-fix · .*run 3 · gpt-5\.6-sol · high · fast · \d+m/u);
 
   const settledMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
   assert.doesNotMatch(settledMarkup, /data-chain-repair=/u);
 });
 
-test("aggregate run lines split model effort, mark FAST only, and avoid duplicate localized running status", () => {
+test("aggregate run lines split model effort, mark FAST only, and never say a run is running twice", () => {
   const finished = aggregate({
     frontier: {
       taskId: "step-3", title: "Implement release", status: "DONE", latestRun: runWithTier(),
@@ -167,15 +224,16 @@ test("aggregate run lines split model effort, mark FAST only, and avoid duplicat
   assert.match(finishedText, /run 1 · gpt-5\.6-sol · high · succeeded/u);
   assert.doesNotMatch(finishedText, /fast/u);
 
+  // The dot carries the state, so the word appears in neither locale.
   const active = activeRepairAggregate();
   const englishText = visibleText(renderToStaticMarkup(<ChainAggregateCard aggregate={active} />));
-  assert.equal((englishText.match(/running/gu) ?? []).length, 1, englishText);
+  assert.doesNotMatch(englishText, /running/u);
 
   const chineseText = visibleText(renderToStaticMarkup(
     <LocaleProvider initialLocale="zh"><ChainAggregateCard aggregate={active} /></LocaleProvider>,
   ));
-  assert.equal((chineseText.match(/运行中/gu) ?? []).length, 1, chineseText);
-  assert.match(chineseText, /第 3 次运行 · gpt-5\.6-sol · high · fast · 已运行 \d+ 分/u);
+  assert.doesNotMatch(chineseText, /运行中/u);
+  assert.match(chineseText, /第 3 次运行 · gpt-5\.6-sol · high · fast · \d+ 分/u);
 });
 
 test("active elapsed preserves non-running statuses and merge-outcome badges", () => {
@@ -189,7 +247,7 @@ test("active elapsed preserves non-running statuses and merge-outcome badges", (
   const waitingText = visibleText(renderToStaticMarkup(
     <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={waiting} /></LocaleProvider>,
   ));
-  assert.match(waitingText, /review-fix · .*waiting inbox · running \d+m/u);
+  assert.match(waitingText, /review-fix · .*waiting inbox · \d+m/u);
 
   const stopped = aggregate({
     status: "DOING",
@@ -203,7 +261,7 @@ test("active elapsed preserves non-running statuses and merge-outcome badges", (
   const stoppedText = visibleText(renderToStaticMarkup(
     <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={stopped} /></LocaleProvider>,
   ));
-  assert.match(stoppedText, /Stopped · running \d+m/u);
+  assert.match(stoppedText, /Stopped · \d+m/u);
 });
 
 test("the shared card shell does not navigate a Chain card while text is selected", async () => {
