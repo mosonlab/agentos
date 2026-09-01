@@ -197,8 +197,7 @@ test("a first-deployment mirror dry-run describes creation without pushing into 
   writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
   cpSync(mirrorPushPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"));
   cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
-  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
-  cpSync(runGatePath, join(repo, "scripts", "gate-worker", "run-gate.sh"));
+  cpSync(runGatePath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "run-gate.sh"));
   git(repo, "init", "-q", "-b", "main");
   git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/agentos-public.git");
   git(repo, "add", "-A");
@@ -250,30 +249,6 @@ exec bash -c "$*"
   assert.equal(existsSync(join(fakeHome, "gate", "agentos-public", "mirror.git")), false);
 });
 
-test("mirror push refuses a checkout without the worker harness before transport", (t) => {
-  const root = scratch(t);
-  const repo = join(root, "source");
-  mkdirSync(join(repo, "scripts"), { recursive: true });
-  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
-  writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
-  for (const name of ["mirror-push.sh", "lib.sh"]) {
-    cpSync(toolPath(name), join(repo, "packages", "runner", "runtime-tools", "gate-worker", name));
-  }
-  git(repo, "init", "-q", "-b", "main");
-  git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/missing-harness.git");
-  git(repo, "add", "-A");
-  git(repo, "commit", "-q", "-m", "fixture");
-  const oid = git(repo, "rev-parse", "HEAD");
-
-  const result = spawnSync(
-    "bash",
-    [join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid, "--dry-run"],
-    { cwd: repo, encoding: "utf8", env: { ...FIXTURE_ENV, AGENTOS_WORKSPACE_PATH: repo } },
-  );
-  assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stderr, /has no scripts\/gate-worker\/run-gate\.sh; the worker harness must be repository-owned/u);
-});
-
 test("mirror push retries two transient push failures before succeeding", (t) => {
   const root = scratch(t);
   const repo = join(root, "source");
@@ -283,7 +258,7 @@ test("mirror push retries two transient push failures before succeeding", (t) =>
   for (const name of ["mirror-push.sh", "lib.sh"]) {
     cpSync(toolPath(name), join(repo, "packages", "runner", "runtime-tools", "gate-worker", name));
   }
-  cpSync(runGatePath, join(repo, "scripts", "gate-worker", "run-gate.sh"));
+  cpSync(runGatePath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "run-gate.sh"));
   git(repo, "init", "-q", "-b", "main");
   git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/retry.git");
   git(repo, "add", "-A");
@@ -384,7 +359,7 @@ test("dispatch transports a detached candidate and current baseline without mirr
   for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "lib.sh"]) {
     cpSync(toolPath(name), join(source, "packages", "runner", "runtime-tools", "gate-worker", name));
   }
-  cpSync(runGatePath, join(source, "scripts", "gate-worker", "run-gate.sh"));
+  cpSync(runGatePath, join(source, "packages", "runner", "runtime-tools", "gate-worker", "run-gate.sh"));
   writeFileSync(
     join(source, "scripts", "merge-gate.sh"),
     '#!/usr/bin/env bash\nprintf "MERGE GATE: PASS %s\\n" "$(git rev-parse HEAD)"\n',
@@ -534,7 +509,7 @@ const remoteDispatchFixture = (t) => {
   for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "lib.sh"]) {
     cpSync(toolPath(name), join(repo, "packages", "runner", "runtime-tools", "gate-worker", name));
   }
-  cpSync(runGatePath, join(repo, "scripts", "gate-worker", "run-gate.sh"));
+  cpSync(runGatePath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "run-gate.sh"));
   for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]) {
     chmodSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker", name), 0o755);
   }

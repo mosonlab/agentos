@@ -159,9 +159,8 @@ Complete these steps before starting a Direct or Full Assurance workflow:
   `npm run db:verify-agent-template -- --project <projectId>`.
 - [ ] Confirm that the Project has an in-Project Repo and that every effective
   template assignee has an `AgentRepoAccess` grant for that Repo.
-- [ ] Put the two target-repository Tier 1 files in the repository:
-  `scripts/merge-gate.sh` and the worker harness
-  `scripts/gate-worker/run-gate.sh`.
+- [ ] Put exactly one target-repository Tier 1 file in the repository:
+  `scripts/merge-gate.sh`.
 - [ ] Provide the required model CLIs for the selected roles and their
   runner-host authentication, plus an authenticated `gh`.
 - [ ] Provide `GITHUB_READ_TOKEN`, `RUNNER_GATE_SERVER`, and the target
@@ -212,11 +211,9 @@ mechanical checks.
 
 #### 1. Repository files (repository contract)
 
-The target repository carries exactly two repository-owned Tier 1 files:
-`scripts/merge-gate.sh` and `scripts/gate-worker/run-gate.sh`. The runner
-supplies the Regression verification tooling and the shared gate library. Use
-the platform worker harness at `scripts/gate-worker/run-gate.sh`; the target
-gate follows the standalone reference contract below.
+The target repository carries exactly one repository-owned Tier 1 file,
+`scripts/merge-gate.sh`. The runner supplies the Regression verification
+tooling; the target file follows the standalone reference contract below.
 
 #### 2. Control-plane prerequisites
 
@@ -242,8 +239,8 @@ A missing prerequisite stops the chain rather than authorizing a weaker merge.
 
 ### Reference merge-gate contract
 
-The target repository's Tier 1 gate entrypoint, `scripts/merge-gate.sh`, is a
-Bash implementation of the [standalone reference](../repo-contract/merge-gate.sh).
+The target repository's sole Tier 1 file, `scripts/merge-gate.sh`, is a Bash
+implementation of the [standalone reference](../repo-contract/merge-gate.sh).
 Replace only the body of the clearly marked `run_repository_tests`
 repository-specific test-command function with that repository's test command.
 Keep the argument parsing, preconditions, verdicts, and signal handling from

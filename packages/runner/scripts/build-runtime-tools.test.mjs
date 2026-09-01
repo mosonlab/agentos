@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import {
   chmodSync,
@@ -45,6 +46,27 @@ const inventory = (root) => {
   return files.sort();
 };
 
+// Clean build at c7a843c4847d6f74b0a9cbcc296918fbe8744c15.
+const targetBundleDigests = new Map([
+  ["gate-worker/gate-dispatch.sh", "ad317307a57ba723099423b468e21f7af4c96b9f1bf3f1d2b60265e378078e38"],
+  ["gate-worker/lib.sh", "65bd4791208879523c75bf8f1e29ea539dbd1f54b482e851cf466720e7650bf2"],
+  ["gate-worker/mirror-push.sh", "8974c7bd2a82c35df8f8b6bde243ac45de1d779063c172a8e24c3a1413fbb07b"],
+  ["gate-worker/remote-gate.sh", "ecfba015e3dac6c62ff8039aa97d6831772800d568ed1be8e3489c4243470695"],
+  ["regression-verification.sh", "53dacc7438dbb9da350904c4d9955ebea1c111cf8b1400597510e867aef3134a"],
+]);
+
+test("buildRuntimeTools preserves the target commit's exact bundle bytes", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-runner-target-runtime-tools-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { outputRoot } = buildRuntimeTools({ packageRoot: join(root, "packages", "runner") });
+
+  assert.deepEqual(inventory(outputRoot), [...targetBundleDigests.keys()].sort());
+  for (const [destination, expected] of targetBundleDigests) {
+    const actual = createHash("sha256").update(readFileSync(join(outputRoot, destination))).digest("hex");
+    assert.equal(actual, expected, destination);
+  }
+});
+
 test("buildRuntimeTools creates the exact byte-identical tree and purges stale files", (t) => {
   const context = fixture(t);
   const first = buildRuntimeTools(context);
@@ -57,10 +79,9 @@ test("buildRuntimeTools creates the exact byte-identical tree and purges stale f
     "regression-verification.sh",
   ]);
   for (const { source, destination } of RUNTIME_TOOL_FILES) {
-    assert.deepEqual(
-      readFileSync(join(context.repositoryRoot, source)),
-      readFileSync(join(context.outputRoot, destination)),
-    );
+    const expected = readFileSync(join(context.repositoryRoot, source), "utf8")
+      .replaceAll("packages/runner/runtime-tools/", "scripts/");
+    assert.equal(readFileSync(join(context.outputRoot, destination), "utf8"), expected);
   }
 
   writeFileSync(join(context.outputRoot, "stale-file"), "must be removed\n");
@@ -111,7 +132,7 @@ test("buildRuntimeTools turns copy and byte-integrity failures into build failur
   const context = fixture(t);
   const copyFailureFilesystem = {
     ...nodeFs,
-    copyFileSync: () => { throw new Error("injected copy failure"); },
+    writeFileSync: () => { throw new Error("injected copy failure"); },
   };
   assert.throws(
     () => buildRuntimeTools({ ...context, filesystem: copyFailureFilesystem }),
@@ -120,8 +141,8 @@ test("buildRuntimeTools turns copy and byte-integrity failures into build failur
 
   const byteMismatchFilesystem = {
     ...nodeFs,
-    copyFileSync: (source, destination) => {
-      nodeFs.copyFileSync(source, destination);
+    writeFileSync: (destination, bytes) => {
+      nodeFs.writeFileSync(destination, bytes);
       nodeFs.writeFileSync(destination, "tampered\n");
     },
   };
