@@ -19,6 +19,7 @@ import {
 } from "./gate-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const runtimeGateWorker = join(here, "..", "..", "packages", "runner", "runtime-tools", "gate-worker");
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
@@ -57,9 +58,9 @@ test("hostNeutralEnv strips the gate's configuration and keeps the rest", () => 
 // operator's environment is not a question about this environment.
 const GATE_SCRIPTS = [
   join(here, "..", "merge-gate.sh"),
-  ...["lib.sh", "step-engine.sh", "run-gate.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"].map((name) =>
-    join(here, name),
-  ),
+  join(runtimeGateWorker, "lib.sh"),
+  ...["step-engine.sh", "run-gate.sh"].map((name) => join(here, name)),
+  ...["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"].map((name) => join(runtimeGateWorker, name)),
 ];
 
 // A shell script reads an environment variable by defaulting it —

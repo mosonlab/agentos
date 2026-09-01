@@ -46,10 +46,15 @@ import { fileURLToPath } from "node:url";
 import { fixtureEnv } from "./gate-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const libPath = join(here, "lib.sh");
+const runtimeTools = join(here, "..", "..", "packages", "runner", "runtime-tools");
+const runtimeGateWorker = join(runtimeTools, "gate-worker");
+const runnerToolNames = new Set(["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]);
+const toolPath = (name) => join(runnerToolNames.has(name) ? runtimeGateWorker : here, name);
+const libPath = toolPath("lib.sh");
 const runGatePath = join(here, "run-gate.sh");
-const dispatchPath = join(here, "gate-dispatch.sh");
-const mirrorPushPath = join(here, "mirror-push.sh");
+const dispatchPath = toolPath("gate-dispatch.sh");
+const mirrorPushPath = toolPath("mirror-push.sh");
+const remoteGatePath = toolPath("remote-gate.sh");
 const provisionPath = join(here, "provision.sh");
 const runbookPath = join(here, "..", "..", "docs", "runbooks", "gate-worker.md");
 
@@ -187,10 +192,11 @@ test("gate_repo_name refuses a name carrying remote shell syntax", (t) => {
 test("a first-deployment mirror dry-run describes creation without pushing into an absent mirror", (t) => {
   const root = scratch(t);
   const repo = join(root, "source");
-  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  mkdirSync(join(repo, "scripts"), { recursive: true });
+  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
   writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
-  cpSync(mirrorPushPath, join(repo, "scripts", "gate-worker", "mirror-push.sh"));
-  cpSync(libPath, join(repo, "scripts", "gate-worker", "lib.sh"));
+  cpSync(mirrorPushPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"));
+  cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
   git(repo, "init", "-q", "-b", "main");
   git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/agentos-public.git");
   git(repo, "add", "-A");
@@ -224,7 +230,7 @@ exec bash -c "$*"
 
   const result = spawnSync(
     "bash",
-    [join(repo, "scripts", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid, "--dry-run"],
+    [join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid, "--dry-run"],
     {
       cwd: repo,
       encoding: "utf8",
@@ -246,10 +252,12 @@ test("mirror push retries two transient push failures before succeeding", (t) =>
   const root = scratch(t);
   const repo = join(root, "source");
   mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
   writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
-  for (const name of ["mirror-push.sh", "run-gate.sh", "lib.sh"]) {
-    cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
+  for (const name of ["mirror-push.sh", "lib.sh"]) {
+    cpSync(toolPath(name), join(repo, "packages", "runner", "runtime-tools", "gate-worker", name));
   }
+  cpSync(runGatePath, join(repo, "scripts", "gate-worker", "run-gate.sh"));
   git(repo, "init", "-q", "-b", "main");
   git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/retry.git");
   git(repo, "add", "-A");
@@ -313,7 +321,7 @@ exec "$REAL_GIT" "$@"
 
   const result = spawnSync(
     "bash",
-    [join(repo, "scripts", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid],
+    [join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid],
     {
       cwd: repo,
       encoding: "utf8",
@@ -346,9 +354,11 @@ test("dispatch transports a detached candidate and current baseline without mirr
 
   const source = join(root, "source");
   mkdirSync(join(source, "scripts", "gate-worker"), { recursive: true });
-  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh", "lib.sh"]) {
-    cpSync(join(here, name), join(source, "scripts", "gate-worker", name));
+  mkdirSync(join(source, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
+  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "lib.sh"]) {
+    cpSync(toolPath(name), join(source, "packages", "runner", "runtime-tools", "gate-worker", name));
   }
+  cpSync(runGatePath, join(source, "scripts", "gate-worker", "run-gate.sh"));
   writeFileSync(
     join(source, "scripts", "merge-gate.sh"),
     '#!/usr/bin/env bash\nprintf "MERGE GATE: PASS %s\\n" "$(git rev-parse HEAD)"\n',
@@ -425,7 +435,7 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
   chmodSync(join(fakeBin, "scp"), 0o755);
 
   const cache = join(root, "cache");
-  const result = spawnSync("bash", [dispatchPath.replace(here, join(checkout, "scripts", "gate-worker")), candidate, "--server", "fake"], {
+  const result = spawnSync("bash", [join(checkout, "packages", "runner", "runtime-tools", "gate-worker", "gate-dispatch.sh"), candidate, "--server", "fake"], {
     cwd: checkout,
     encoding: "utf8",
     timeout: 30_000,
@@ -487,6 +497,7 @@ const remoteDispatchFixture = (t) => {
   const root = scratch(t);
   const repo = join(root, "repo");
   mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
   const output = Array.from({ length: 205 }, (_, index) =>
     `printf 'fixture-output-${String(index).padStart(3, "0")}\\n'`,
   ).join("\n");
@@ -494,11 +505,12 @@ const remoteDispatchFixture = (t) => {
     join(repo, "scripts", "merge-gate.sh"),
     `#!/usr/bin/env bash\n${output}\nprintf 'MERGE GATE: FAIL (fixture)\\n'\nexit 1\n`,
   );
-  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh", "lib.sh"]) {
-    cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
+  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "lib.sh"]) {
+    cpSync(toolPath(name), join(repo, "packages", "runner", "runtime-tools", "gate-worker", name));
   }
+  cpSync(runGatePath, join(repo, "scripts", "gate-worker", "run-gate.sh"));
   for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]) {
-    chmodSync(join(repo, "scripts", "gate-worker", name), 0o755);
+    chmodSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker", name), 0o755);
   }
   git(repo, "init", "-q", "-b", "main");
   git(repo, "add", "-A");
@@ -630,7 +642,7 @@ test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {
   const fixture = remoteDispatchFixture(t);
   const result = spawnSync(
     "bash",
-    [join(fixture.repo, "scripts", "gate-worker", "gate-dispatch.sh"), fixture.oid, "--server", "fake", "--master", fixture.oid],
+    [join(fixture.repo, "packages", "runner", "runtime-tools", "gate-worker", "gate-dispatch.sh"), fixture.oid, "--server", "fake", "--master", fixture.oid],
     {
       cwd: fixture.repo,
       encoding: "utf8",
@@ -910,16 +922,16 @@ test("the sweep leaves a worktree whose gate is still running", (t) => {
 
 test("every gate-worker script parses", () => {
   for (const name of [
-    "lib.sh",
-    "gate-dispatch.sh",
-    "mirror-push.sh",
-    "remote-gate.sh",
     "run-gate.sh",
     "provision.sh",
     "bench-postgres.sh",
     "bench-dbtest-concurrency.sh",
   ]) {
     const result = spawnSync("bash", ["-n", join(here, name)], { encoding: "utf8" });
+    assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+  }
+  for (const name of ["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]) {
+    const result = spawnSync("bash", ["-n", join(runtimeGateWorker, name)], { encoding: "utf8" });
     assert.equal(result.status, 0, `${name}: ${result.stderr}`);
   }
 });
@@ -935,11 +947,11 @@ test("a usage error is 2 everywhere the exit-code table applies", () => {
   // The table has one row for a usage error. remote-gate.sh documented 2 and
   // exited sysexits' 64 in every one of its argument checks, which is two
   // numbers for one meaning and a case a caller does not handle.
-  const remoteGate = spawnSync("bash", [join(here, "remote-gate.sh"), "--port"], {
+  const remoteGate = spawnSync("bash", [remoteGatePath, "--port"], {
     encoding: "utf8",
   });
   assert.equal(remoteGate.status, 2, remoteGate.stderr);
-  const dispatch = spawnSync("bash", [join(here, "gate-dispatch.sh"), "--master"], {
+  const dispatch = spawnSync("bash", [dispatchPath, "--master"], {
     encoding: "utf8",
   });
   assert.equal(dispatch.status, 2, dispatch.stderr);
@@ -958,12 +970,12 @@ test("every script that names the gate's exit codes takes them from lib.sh", () 
   // grep is the property that made it unnecessary — each script sources the one
   // file that defines it, and none of them redeclares it.
   for (const name of ["run-gate.sh", "remote-gate.sh", "gate-dispatch.sh", "mirror-push.sh"]) {
-    const source = readFileSync(join(here, name), "utf8");
+    const source = readFileSync(toolPath(name), "utf8");
     assert.match(source, /^\. "\$\{(SCRIPT_DIR|HARNESS_DIR)\}\/lib\.sh"$/m, `${name} does not source lib.sh`);
     assert.doesNotMatch(source, /^EXIT_NO_VERDICT=/m, `${name} declares the no-verdict code again`);
   }
   const gate = readFileSync(join(here, "..", "merge-gate.sh"), "utf8");
-  assert.match(gate, /^\. "\$\{SCRIPT_DIR\}\/gate-worker\/lib\.sh"$/m);
+  assert.match(gate, /^\. "\$\{REPO_ROOT\}\/packages\/runner\/runtime-tools\/gate-worker\/lib\.sh"$/m);
   assert.doesNotMatch(gate, /^EXIT_(FAIL|NOT_AUTHORITATIVE|NO_VERDICT)=/m);
 });
 
@@ -1032,7 +1044,7 @@ test("the runbook's exit-code table is the table lib.sh defines", () => {
       `the runbook's row for ${code} does not carry ${line}`,
     );
   }
-  assert.match(runbook, /`scripts\/gate-worker\/lib\.sh`/);
+  assert.match(runbook, /`packages\/runner\/runtime-tools\/gate-worker\/lib\.sh`/);
   // 75 and 76 are only useful to an automation if the table says which is
   // which, and a gate the OOM killer takes is 128+N with no line at all — the
   // one case where a reader must not expect stdout to agree with the code.
@@ -1061,7 +1073,7 @@ test("the isolation claim stays the one that is actually enforced", () => {
 
   // Exact pushed inputs and a mirror with no remote remain enforced.
   assert.match(
-    readFileSync(join(here, "mirror-push.sh"), "utf8"),
+    readFileSync(mirrorPushPath, "utf8"),
     /refusing to push into a mirror this check could not inspect/,
   );
 });
