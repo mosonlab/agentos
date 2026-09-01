@@ -1108,6 +1108,77 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   });
 });
 
+test("a retry handoff includes valid immutable findings refused under the prior ownership rule", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "sol-findings",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 2,
+  });
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "immutable-handoff-runner-1");
+  const body = solFindingsOutput();
+  const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "sol-findings",
+    body,
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  assert.equal((await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    failedCompletion("immutable-handoff-runner-1", first.fencingToken, first.run.branch ?? "master"),
+  )).status, 200);
+
+  const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const second = await claimRun(retried.body.id as string, "immutable-handoff-runner-2");
+  const legacyRefusal = `sol-findings task output belongs to prior Run ${firstRunId}, not current Run ${second.run.id}`;
+  const endedAt = new Date();
+  await db.$transaction([
+    db.run.update({ where: { id: second.run.id }, data: {
+      status: "SUCCEEDED",
+      headSha: SHA,
+      endedAt,
+      failureReason: null,
+    } }),
+    db.task.update({ where: { id: task.id }, data: {
+      status: TaskStatus.REVIEW,
+      failureReason: legacyRefusal,
+    } }),
+    db.taskActivity.create({ data: {
+      taskId: task.id,
+      actorType: "control-plane",
+      body: `Canonical task output refused: ${legacyRefusal}`,
+      metadata: {
+        kind: "canonicalTaskOutput.refusal",
+        schemaVersion: 1,
+        runId: second.run.id,
+        reason: legacyRefusal,
+      },
+    } }),
+  ]);
+
+  const queuedThird = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(queuedThird.status, 201, JSON.stringify(queuedThird.body));
+  const loaded = await db.task.findUniqueOrThrow({
+    where: { id: task.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
+    taskId: task.id,
+    runId: queuedThird.body.id as string,
+    runNumber: 3,
+    templateStep: loaded.templateStep,
+  }));
+  assert.deepEqual(handoff?.output, {
+    runId: firstRunId,
+    kind: "sol-findings",
+    body,
+    commitSha: SHA,
+  });
+});
+
 test("canonical JSON contracts reject malformed bodies and never activate a successor", async () => {
   const malformed = [
     { name: "non-JSON", body: "implementation prose", error: /must be valid JSON/u },
