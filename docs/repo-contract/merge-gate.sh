@@ -34,7 +34,11 @@ not_run() { printf 'GATE NOT RUN: %s\n' "$1"; exit "$2"; }
 stopped() {
   local signal="$1" status="$2"
   trap - INT TERM
-  if [ -n "$TEST_PID" ]; then kill -TERM "$TEST_PID" 2>/dev/null || true; fi
+  if [ -n "$TEST_PID" ]; then
+    kill -TERM -- "-$TEST_PID" 2>/dev/null || kill -TERM "$TEST_PID" 2>/dev/null || true
+    wait "$TEST_PID" 2>/dev/null || true
+    TEST_PID=""
+  fi
   not_run "the gate was stopped by SIG${signal} during ${CURRENT_STEP}" "$status"
 }
 trap 'stopped INT 130' INT
@@ -73,14 +77,19 @@ run_repository_tests() {
 # --- END REPOSITORY-SPECIFIC TEST COMMAND. ---------------------------------
 
 CURRENT_STEP="the repository test command"
+set -m
 ( cd "$REPO_ROOT"; run_repository_tests ) &
 TEST_PID="$!"
+set +m
 if wait "$TEST_PID"; then TEST_STATUS=0; else TEST_STATUS="$?"; fi
 TEST_PID=""
 POST_HEAD="$(read_head)" || fail_gate "could not read HEAD after the repository test command"
 POST_DIRTY="$(read_dirty)" || fail_gate "could not read the working tree state after the repository test command"
 case "$TEST_STATUS" in
+  129) not_run "the repository test command was stopped by SIGHUP" 129 ;;
   130) not_run "the repository test command was stopped by SIGINT" 130 ;;
+  131) not_run "the repository test command was stopped by SIGQUIT" 131 ;;
+  137) not_run "the repository test command was stopped by SIGKILL" 137 ;;
   143) not_run "the repository test command was stopped by SIGTERM" 143 ;;
   0) ;;
   *) fail_gate "the repository test command failed (exit $TEST_STATUS)" ;;

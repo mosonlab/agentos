@@ -25,7 +25,7 @@ const regressionInvocations = [
   `${regressionToolPrefix} review-fail '<concise finding IDs or defect>'`,
   `${regressionToolPrefix} finalize`,
 ];
-const regressionInvocationPattern = /"\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" (?:prepare|review-fail '[^']+'|finalize)/gu;
+const regressionCommandPattern = /(?:"\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh"|scripts\/regression-verification\.sh) (?:prepare|review-fail '[^']+'|finalize)/gu;
 
 const withTemplateCopy = async (
   templateName: CanonicalTemplateName,
@@ -144,11 +144,12 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
 });
 
 test("canonical regression commands require runner tools without a checkout fallback", async () => {
-  for (const templateName of [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME]) {
+  const templateNames = [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME] as const satisfies readonly CanonicalTemplateName[];
+  for (const templateName of templateNames) {
     const regression = (await loadTemplateStepSources(templateName))
       .find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression, `${templateName} must contain a v2 regression step`);
-    const invocations = [...regression.prompt.matchAll(regressionInvocationPattern)].map(([invocation]) => invocation);
+    const invocations = [...regression.prompt.matchAll(regressionCommandPattern)].map(([invocation]) => invocation);
     assert.deepEqual(invocations, regressionInvocations, `${templateName} must use only the runner-owned invocations`);
     assert.doesNotMatch(regression.prompt, /scripts\/regression-verification\.sh/u);
 

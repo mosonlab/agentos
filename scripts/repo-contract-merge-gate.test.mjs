@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,6 +75,33 @@ const run = (t, fixtureData, replacement, args = [], overrides = {}) => {
   return { ...result, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 };
 
+const runWithExternalSignal = async (t, fixtureData, signal, status) => {
+  const ready = join(fixtureData.cwd, `ready-${signal}`);
+  const replacement = [
+    `trap 'sleep 0.1; printf "DUMMY LATE OUTPUT\\n"; exit ${status}' TERM`,
+    `printf 'ready\\n' > "$GATE_FIXTURE_READY"`,
+    "while :; do sleep 1; done",
+  ].join("\n");
+  const script = installGate(t, replacement);
+  const child = spawn("bash", ["-c", 'exec "$@" 2>&1', "signal-gate", "bash", script, "--master", fixtureData.master], {
+    cwd: fixtureData.cwd,
+    env: { ...GIT_ENV, GATE_FIXTURE_READY: ready },
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { output += chunk; });
+
+  for (let attempt = 0; attempt < 100 && !existsSync(ready); attempt += 1) await delay(10);
+  assert.equal(existsSync(ready), true, `repository command never became ready for ${signal}`);
+  assert.equal(child.kill(signal), true, `could not send ${signal}`);
+  const result = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (exitStatus) => resolve({ status: exitStatus, output }));
+  });
+  return result;
+};
+
 const finalLine = (result) => {
   const lines = result.output.trimEnd().split(/\r?\n/u);
   const ansiEscape = String.fromCharCode(27);
@@ -103,6 +131,16 @@ test("a command failure is a FAIL verdict with status one", (t) => {
   const result = run(t, data, "exit 7", ["--expect-head", data.head, "--master", data.master]);
   assert.equal(result.status, 1, result.output);
   assert.equal(finalLine(result), "MERGE GATE: FAIL (the repository test command failed (exit 7))");
+});
+
+test("test commands stopped from outside retain no-verdict statuses", (t) => {
+  const signals = [[129, "SIGHUP"], [131, "SIGQUIT"], [137, "SIGKILL"]];
+  for (const [status, signal] of signals) {
+    const data = fixture(t);
+    const result = run(t, data, `exit ${status}`, ["--master", data.master]);
+    assert.equal(result.status, status, result.output);
+    assert.equal(finalLine(result), `GATE NOT RUN: the repository test command was stopped by ${signal}`);
+  }
 });
 
 test("usage errors return two without any verdict and do not run the command", (t) => {
@@ -171,14 +209,12 @@ test("dirty-before, HEAD drift, and dirty-after are all FAIL verdicts", (t) => {
   assert.equal(finalLine(after), "MERGE GATE: FAIL (working tree is not clean after the repository test command)");
 });
 
-test("SIGINT and SIGTERM retain their no-verdict codes and wire line", (t) => {
-  for (const [signal, status, replacement] of [
-    ["SIGINT", 130, 'kill -INT "$$"'],
-    ["SIGTERM", 143, 'kill -TERM "$$"'],
-  ]) {
+test("external SIGINT and SIGTERM reap delayed command output before the final wire line", async (t) => {
+  for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
     const data = fixture(t);
-    const result = run(t, data, replacement, ["--master", data.master]);
+    const result = await runWithExternalSignal(t, data, signal, status);
     assert.equal(result.status, status, result.output);
+    assert.match(result.output, /DUMMY LATE OUTPUT/u);
     assert.equal(finalLine(result), `GATE NOT RUN: the gate was stopped by ${signal} during the repository test command`);
   }
 });

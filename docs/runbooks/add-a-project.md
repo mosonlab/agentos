@@ -269,3 +269,7 @@ The Anneal-run refusal happens before `run_repository_tests` unless
 `AGENTOS_RUN_SCOPE_BYPASS=regression-verification` is set. A passing manual
 run without `--master` is never authoritative. Every completed run emits the
 corresponding line as its final line; ANSI color does not change its meaning.
+If the repository test command is stopped from outside by SIGHUP, SIGINT,
+SIGQUIT, SIGKILL, or SIGTERM, the gate makes no commit judgment: it prints a
+`GATE NOT RUN: <reason>` final line and retains status 129, 130, 131, 137, or
+143 respectively.
