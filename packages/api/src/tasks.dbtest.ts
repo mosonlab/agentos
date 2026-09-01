@@ -597,6 +597,69 @@ test("archive and unarchive round-trip, and the board hides the archived task", 
   assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
 });
 
+test("archiving or unarchiving one Chain task changes the whole Chain atomically", async () => {
+  const chainId = `archive-chain-${Date.now()}`;
+  const context = await seedTask("archive-chain", { chainId, chainIndex: 0, status: "DONE" });
+  const frontier = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Archive Chain frontier",
+    description: "d",
+    status: "REVIEW",
+    chainId,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+
+  assert.equal((await call("POST", `/tasks/${frontier.id}/archive`)).status, 200);
+  assert.equal((await db.task.count({ where: { chainId, archivedAt: null } })), 0);
+  assert.equal((await call("GET", `/tasks?projectId=${context.project.id}`)).body.length, 0);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: { in: [context.task.id, frontier.id] }, body: "Task archived" },
+  }), 2);
+
+  assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
+  assert.equal((await db.task.count({ where: { chainId, archivedAt: null } })), 2);
+  assert.equal((await call("GET", `/tasks?projectId=${context.project.id}`)).body.length, 2);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: { in: [context.task.id, frontier.id] }, body: "Task unarchived" },
+  }), 2);
+});
+
+test("a busy Chain member refuses the whole archive without partial writes", async () => {
+  const chainId = `archive-chain-busy-${Date.now()}`;
+  const context = await seedTask("archive-chain-busy", { chainId, chainIndex: 0, status: "DONE" });
+  const busy = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Busy Chain member",
+    description: "d",
+    status: "DOING",
+    chainId,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+  await db.run.create({ data: {
+    projectId: context.project.id,
+    taskId: busy.id,
+    agentId: context.agent.id,
+    repoId: context.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${busy.id}:run:1`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "h",
+    status: "RUNNING",
+  } });
+
+  const response = await call("POST", `/tasks/${context.task.id}/archive`);
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error, "Cannot archive a task with an active run");
+  assert.equal((await db.task.count({ where: { chainId, archivedAt: null } })), 2);
+});
+
 test("archive refuses a task with an active run", async () => {
   const context = await seedTask("archive-busy");
   await seedRun(context, 1, "RUNNING");

@@ -449,7 +449,9 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           </Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>
-          <IconArchive />{t(task.archivedAt === null ? "tasks.menu.archive" : "archived.menu.unarchive")}
+          <IconArchive />{t(task.archivedAt === null
+            ? task.chainId === null ? "tasks.menu.archive" : "tasks.aggregate.menu.archive"
+            : task.chainId === null ? "archived.menu.unarchive" : "archived.menu.unarchiveChain")}
         </Button>
         <Button type="button" variant="legacy" size="legacy" onClick={reload}><IconRefresh />{t("common.refresh")}</Button>
       </div>
