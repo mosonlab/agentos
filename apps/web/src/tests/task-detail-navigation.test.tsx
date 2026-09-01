@@ -106,6 +106,12 @@ test("the Details card leads with the live fields and keeps configuration behind
     "/tasks/details/chain": emptyChain(),
   }, "http://localhost/tasks/details");
   const text = (): string => page.container.textContent ?? "";
+  const configurationButton = (): HTMLButtonElement => {
+    const button = [...page.container.querySelectorAll("button")]
+      .find((candidate) => /configuration/u.test(candidate.textContent ?? ""));
+    assert.ok(button instanceof HTMLButtonElement);
+    return button;
+  };
   try {
     for (const label of ["Execution owner", "Branch", "Pull request"]) assert.match(text(), new RegExp(label), label);
     for (const label of ["Repo", "Target branch", "Schedule", "Working directory", "Created"]) {
@@ -113,8 +119,10 @@ test("the Details card leads with the live fields and keeps configuration behind
     }
     // Every checklist item is satisfied and the task has run, so it says nothing.
     assert.doesNotMatch(text(), /Ready to start/u);
+    assert.equal(configurationButton().getAttribute("aria-expanded"), "false");
 
     await page.press("Show configuration");
+    assert.equal(configurationButton().getAttribute("aria-expanded"), "true");
     for (const label of ["Repo", "Target branch", "Schedule", "Working directory", "Requires approval", "Created"]) {
       assert.match(text(), new RegExp(label), label);
     }

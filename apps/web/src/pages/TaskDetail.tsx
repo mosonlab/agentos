@@ -465,7 +465,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             </div>
           ) : null}
           <div className="mt-[16px]">
-            <Button type="button" variant="legacy" size="legacy" onClick={() => setConfigurationShown(!configurationShown)}>
+            <Button type="button" variant="legacy" size="legacy" aria-expanded={configurationShown}
+              onClick={() => setConfigurationShown(!configurationShown)}>
               {t(configurationShown ? "taskDetail.details.hideConfiguration" : "taskDetail.details.showConfiguration")}
             </Button>
           </div>
