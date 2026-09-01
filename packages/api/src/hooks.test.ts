@@ -69,10 +69,16 @@ test("webhook payload errors and exact public route matching are enforced", asyn
   try {
     const template = { id: "template", projectId: "project", variables: [], webhookPayloadMapping: null, webhookSecretId: "secret", webhookRepoId: "repo", webhookSecret: { encryptedValue: encryptSecret("correct"), ciphertextVersion: 1, disabledAt: null } };
     const database = { taskTemplate: { findUnique: async () => template } } as unknown as PrismaClient;
-    const invalid = await createApp(database).request("/hooks/templates/template", {
-      method: "POST", headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "correct" }, body: "not-json",
-    });
-    assert.equal(invalid.status, 400);
+    for (const body of ["", "not-json"]) {
+      const invalid = await createApp(database).request("/hooks/templates/template", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "correct" }, body,
+      });
+      assert.equal(invalid.status, 400);
+      assert.deepEqual(await invalid.json(), {
+        error: "Request body must be valid JSON",
+        code: "invalid-json",
+      });
+    }
     const oversized = await createApp(database).request("/hooks/templates/template", {
       method: "POST", headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "correct" }, body: JSON.stringify({ value: "x".repeat(1024 * 1024) }),
     });

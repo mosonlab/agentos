@@ -324,6 +324,9 @@ export type BoardLatestRun<DateTime = string> = {
   costUsd: string | null;
   startedAt: DateTime | null;
   endedAt: DateTime | null;
+  /** The pull request the Run published, or null when it opened none. Cards
+   *  link it; nothing on the board derives anything else from it. */
+  pullRequestUrl: string | null;
 };
 
 export type RepairBinding = {
@@ -364,6 +367,8 @@ export type ChainAggregate<DateTime = string> = {
   stepCount: number;
   /** Status counts for every primary-Step status. */
   statusCounts: Record<TaskStatus, number>;
+  /** The Step the aggregate card opens: the frontier, which is what the
+   * operator came to read. Always equal to `frontier.taskId`. */
   detailTaskId: string;
   /** Derived board column; this is not a persisted Task status. */
   status: TaskStatus;

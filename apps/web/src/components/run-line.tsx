@@ -43,6 +43,11 @@ const dotTone = (status: RunStatus, mergeOutcome?: MergeOutcome | null | undefin
   return "amber";
 };
 
+/** Cards name the model, not the route that reached it: an `openai-codex/`
+ *  prefix repeats what the model name already says, and the card has no room to
+ *  say it twice. The detail page keeps the full identifier. */
+const cardModelName = (model: string): string => model.slice(model.lastIndexOf("/") + 1);
+
 /** The sole board rendering of a Run: number, dot tone, status word, and merge override. */
 export const RunLine = ({
   run,
@@ -63,7 +68,7 @@ export const RunLine = ({
   const t = useT();
   const presentation = runPresentation(run.status, mergeOutcome);
   const elapsed = showElapsed && isActiveRunStatus(run.status) && run.startedAt !== null
-    ? t("tasks.card.runningDuration", { duration: duration(run.startedAt, null) })
+    ? duration(run.startedAt, null)
     : null;
   const model = showModel ? splitModel(run.model) : null;
   const badge = mergeBadge(mergeOutcome);
@@ -72,13 +77,13 @@ export const RunLine = ({
     && (elapsed !== null || suppressRunningStatus);
   const runDetailParts = [
     ...(model === null ? [] : [
-      model.model,
+      cardModelName(model.model),
       ...(model.effort === null ? [] : [model.effort]),
       ...(run.codexServiceTier === "FAST" ? ["fast"] : []),
     ]),
-    // An active run's elapsed copy already says "running". It may sit on this
-    // line or in the task-card footer; either way, repeating the plain run
-    // status made a live card say "running" twice.
+    // The dot already says a run is live, so a RUNNING row spends its width on
+    // the elapsed time rather than on the word. Every other status still names
+    // itself: nothing else on the row distinguishes queued from waiting inbox.
     ...(hideStatus ? [] : [t(presentation.key)]),
     ...(elapsed === null ? [] : [elapsed]),
   ];
