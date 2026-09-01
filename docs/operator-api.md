@@ -1080,19 +1080,27 @@ is written to the Inbox. Its `failureReason` is exactly one of these shapes:
 These are the repair ceiling, not an API defect. From this state,
 `POST /tasks/:taskId/retry` on the regression task opens a Run whose
 `regression-repair-handoff` claim fails at claim time as `handoff-invalid` with
-`no successful review-fix result binds <head> to <base>`. A
-`PATCH /tasks/:taskId` request that supplies `status` is refused with
-`Chain task statuses are controlled by chain execution`. Both refusals are
-expected behaviour; do not use them to reopen the old Chain.
+`regression repair handoff is invalid: no successful review-fix result binds <head> to <base>`
+for a semantic regression stop, or
+`regression repair handoff is invalid: no successful gate-fix result binds <head> to <base>`
+for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
+is refused with `Chain task statuses are controlled by chain execution`. Both
+refusals are expected behaviour; do not use them to reopen the old Chain.
 
 Carry the delivered branch forward in this order. The brief used in step (c)
 must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).
 
 1. (a) Read the regression task output and the stop notice, and confirm that
-   the last verdict identifies a real defect.
+   the last verdict identifies a real defect. Find the notice by listing the
+   project's Inbox and selecting the message for the regression task whose
+   body starts with `Autonomous merge tail stopped:`.
 
    ```sh
    curl "$BASE_URL/tasks/$REGRESSION_TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   STOP_NOTICE_ID=$(curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq -r --arg taskId "$REGRESSION_TASK_ID" \
+       '.[] | select(.taskId == $taskId and (.body | startswith("Autonomous merge tail stopped:"))) | .id' | head -n 1)
    curl "$BASE_URL/inbox/messages/$STOP_NOTICE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
    ```
 
@@ -1111,16 +1119,34 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
    pattern, with its first Change merging the delivered branch.
 
    ```sh
+   SUCCESSOR_BODY=$(jq -n \
+     --arg repoId "$REPO_ID" \
+     --arg branchName "$NEW_BRANCH_NAME" \
+     --arg description "$SUCCESSOR_BRIEF" \
+     '{repoId: $repoId, variables: {branchName: $branchName}, description: $description, autoStart: true}')
    curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$DIRECT_CHAIN_TEMPLATE_ID/instantiate" \
      -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-     -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"'$NEW_BRANCH_NAME'"},"description":"'$SUCCESSOR_BRIEF'","autoStart":true}'
+     -d "$SUCCESSOR_BODY"
    ```
 
-4. (d) Archive every task in the old Chain, including each task ID returned
-   for that Chain. Repeat this request once per task.
+4. (d) Archive every task in the old Chain. `GET /tasks/:taskId/chain` returns
+   the primary Chain rows but omits its chain-detached merge-tail repair tasks.
+   Find those tasks with `GET /tasks?view=board`: their `repairOf.chainId`
+   contains the Chain binding derived from the same repair markers that
+   `DELETE /tasks/:taskId/chain` covers. Archive both sets of task IDs.
 
    ```sh
-   curl -X POST "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   OLD_CHAIN=$(curl "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN")
+   OLD_CHAIN_ID=$(printf '%s' "$OLD_CHAIN" | jq -r '.chainId')
+   OLD_TASK_IDS=$(printf '%s' "$OLD_CHAIN" | jq -r '.steps[].taskId')
+   REPAIR_TASK_IDS=$(curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=board&archived=false" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq -r --arg chainId "$OLD_CHAIN_ID" \
+       '.[] | select(.repairOf.chainId? == $chainId) | .id')
+   printf '%s\n%s\n' "$OLD_TASK_IDS" "$REPAIR_TASK_IDS" | sed '/^$/d' | sort -u | while read -r TASK_ID; do
+     curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   done
    ```
 
 5. (e) Never edit database rows to reopen the loop. Use the API only to inspect
