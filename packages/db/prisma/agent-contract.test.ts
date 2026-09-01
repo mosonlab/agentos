@@ -212,9 +212,9 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
   assert.match(compoundRegression, /platform script owns refresh\/merge[\s\S]*final `regression-verification-v2`/u);
-  assert.match(compoundRegression, /regression-verification\.sh prepare/u);
-  assert.match(compoundRegression, /regression-verification\.sh review-fail/u);
-  assert.match(compoundRegression, /regression-verification\.sh finalize/u);
+  assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
+  assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
+  assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   assert.match(compoundRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   assert.match(compoundRegression, /implementation summary,\s+both review reports/u);
   assert.match(compoundRegression, /fixed implementation with its dispositions/u);
@@ -299,9 +299,9 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directFix, /Read both immutable review outputs from the preceding layer/u);
   assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;
-  assert.match(directRegression, /regression-verification\.sh prepare/u);
-  assert.match(directRegression, /regression-verification\.sh review-fail/u);
-  assert.match(directRegression, /regression-verification\.sh finalize/u);
+  assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
+  assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
+  assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   assert.match(directRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   assert.doesNotMatch(directRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directImplementation = directTemplateSteps.find((step) => step.stepIndex === 2)!.prompt;

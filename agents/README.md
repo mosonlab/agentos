@@ -6,70 +6,10 @@ The chain prompts with an upstream counterpart in [mattpocock/skills](https://gi
 
 ## Canonical synchronization and verification
 
-`npm run db:sync-canonical-prompts` synchronizes the canonical sources in this
-directory across every Project in one all-or-none transaction. It repairs
-canonical-named active Agents and canonical template rows that a Project
-already holds. Outside `agentos-example`, a partial inventory is valid: an
-ordinary sync does not create absent Agents or templates. The canonical Project
-still owns the complete inventory, including restoration of a missing
-canonical template.
-
-An operator may fill one other Project's missing post-A1 inventory explicitly:
-
-```sh
-npm run db:sync-canonical-prompts -- --install-full <projectId>
-```
-
-`--install-full` fills only missing canonical Agents and templates in the
-addressed Project. An unknown Project id is refused before the transaction; the
-addressed Project must have exactly one Environment, and an archived
-same-name Agent is refused. It never resurrects or
-overwrites an existing object and it creates no Repo, `AgentRepoAccess`,
-`AgentSecretGrant`, or other grant. The ordinary synchronization and the
-installation share the same transaction, so a refusal leaves every Project
-unchanged. A second successful installation is a no-op.
-
-To check one Project without requiring a complete canonical inventory, run:
-
-```sh
-npm run db:verify-agent-template -- --project <projectId>
-```
-
-Project-scoped verification checks exactly the canonical Agents and templates
-that are present and ignores absent and noncanonical inventory. With no
-`--project`, verification retains its complete `agentos-example` inventory
-requirement and its special Full Assurance and Direct checks.
-
-## Full-tail readiness — three categories
-
-Full-tail readiness is a contract between the repository, the control plane,
-and operator infrastructure. Keep these three categories separate:
-
-### 1. Repository files (repository contract)
-
-The target repository must carry the merge-tail files that define its checks and
-worker dispatch:
-
-- `scripts/merge-gate.sh`
-- `scripts/regression-verification.sh`
-- `scripts/gate-worker/gate-dispatch.sh`
-- `scripts/gate-worker/lib.sh`
-
-### 2. Control-plane prerequisites
-
-The target Project must have an in-Project Repo. Every effective template
-assignee must have an `AgentRepoAccess` row for that Repo; synchronization does
-not create the Repo or grants for you.
-
-### 3. Operator infrastructure
-
-The operator supplies the required model CLIs for the selected roles and their
-runner-host authentication, an authenticated `gh`, `GITHUB_READ_TOKEN`, an
-SSH-reachable gate worker selected through `RUNNER_GATE_SERVER`, and the
-private merge-executor GitHub App installed on the target repository with its
-isolated executor service. Provider authentication is runner-host
-infrastructure: it is not an `AgentSecretGrant`, and `AgentSecretGrant` is not
-a full-tail readiness prerequisite.
+The canonical synchronization, project-scoped installation and verification,
+and full-tail readiness contract are maintained in the
+[Tier 0 / Tier 1 onboarding runbook](../docs/runbooks/add-a-project.md).
+Follow its Tier 1 checklist when onboarding another Project.
 
 ## Layout
 
