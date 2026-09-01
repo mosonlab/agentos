@@ -87,7 +87,11 @@ const EMPTY: Record<InboxFilter, string> = {
 };
 
 export const InboxPage = (): ReactNode => {
-  const { data, loading, error, reload } = usePoll<InboxMessage[]>("/inbox/messages");
+  const { projectId } = useProjectScope();
+  const messagesPath = projectId === ""
+    ? "/inbox/messages"
+    : `/inbox/messages?projectId=${encodeURIComponent(projectId)}`;
+  const { data, loading, error, reload } = usePoll<InboxMessage[]>(messagesPath);
   const names = useAgentNames();
   const [filter, setFilter] = useState<InboxFilter>("active");
   const { pending, error: actionError, run } = useAction();
@@ -168,7 +172,11 @@ export const InboxPage = (): ReactNode => {
 };
 
 export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode => {
-  const { data, error, reload } = usePoll<InboxMessage[]>("/inbox/messages");
+  const { projectId } = useProjectScope();
+  const messagesPath = projectId === ""
+    ? "/inbox/messages"
+    : `/inbox/messages?projectId=${encodeURIComponent(projectId)}`;
+  const { data, error, reload } = usePoll<InboxMessage[]>(messagesPath);
   const names = useAgentNames();
   const [reply, setReply] = useState("");
   const { pending, error: actionError, run } = useAction();

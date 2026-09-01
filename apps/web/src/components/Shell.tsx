@@ -75,6 +75,7 @@ export const ThemeCycleButton = (): ReactNode => {
 
 export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   const path = useRoute();
+  const { projectId } = useProjectScope();
   /* The badge is one number, so it polls one number. This used to read
    * `GET /inbox/messages` — the complete global message collection, 490 KB
    * across 231 messages, every 5s from whichever page the operator happened to
@@ -83,7 +84,10 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
    * Detached notifications are open too, but nobody is blocked on them, and
    * counting them is what made the badge read 145 with nothing actually waiting;
    * they live in the Inbox's Notices lane instead. */
-  const { data: summary, error: summaryError } = usePoll<InboxSummary>("/inbox/messages/summary", 5_000);
+  const summaryPath = projectId === ""
+    ? "/inbox/messages/summary"
+    : `/inbox/messages/summary?projectId=${encodeURIComponent(projectId)}`;
+  const { data: summary, error: summaryError } = usePoll<InboxSummary>(summaryPath, 5_000);
   const openCount = summary?.needsReply;
   const t = useT();
 

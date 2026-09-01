@@ -42,19 +42,19 @@ const PROJECTS = '[{"id":"p1","name":"Vibeville","slug":"vibeville"}]';
 test("the badge reads its count from the summary route", async () => {
   const { paths, markup } = await mounted({
     "/api/projects": PROJECTS,
-    "/api/inbox/messages/summary": '{"needsReply":3}',
+    "/api/inbox/messages/summary?projectId=p1": '{"needsReply":3}',
   });
-  assert.ok(paths.includes("/api/inbox/messages/summary"));
+  assert.ok(paths.includes("/api/inbox/messages/summary?projectId=p1"));
   assert.match(markup, /aria-label="3 unread[^"]*"/u);
 });
 
 test("a page that is not the Inbox never downloads the Inbox message collection", async () => {
   const { paths } = await mounted({
     "/api/projects": PROJECTS,
-    "/api/inbox/messages/summary": '{"needsReply":0}',
+    "/api/inbox/messages/summary?projectId=p1": '{"needsReply":0}',
   });
   assert.deepEqual(
-    paths.filter((path) => path.startsWith("/api/inbox/messages") && path !== "/api/inbox/messages/summary"),
+    paths.filter((path) => path.startsWith("/api/inbox/messages") && !path.startsWith("/api/inbox/messages/summary")),
     [],
     "the badge must not pull the message history",
   );
