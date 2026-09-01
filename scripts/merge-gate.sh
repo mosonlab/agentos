@@ -1053,9 +1053,10 @@ FAILED_STEP=""
 # gives each gate half the machine. Every parallel width below is derived from
 # this one number instead of each phase reading the CPU count for itself: two
 # concurrent gates then add up to one host, rather than each sizing itself for a
-# whole machine it does not have. A gate run by hand states no share and gets
-# the host, which is what it in fact has.
-GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-1}"
+# whole machine it does not have. An absent variable means half the host because
+# the shared runner host is where it is unset; a gate worker always exports its
+# own share.
+GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-2}"
 case "${GATE_HOST_SHARE}" in
   1|2) ;;
   *) die "AGENTOS_GATE_HOST_SHARE must be 1 or 2, got ${GATE_HOST_SHARE}" ;;
