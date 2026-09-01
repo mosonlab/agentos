@@ -6,6 +6,14 @@ import type { RunnerConfig, RunnerKind } from "./config.js";
 
 export type { CleanupStatus, FailureClass } from "@anneal/db";
 export type CodexServiceTier = "DEFAULT" | "FAST";
+/** The only repository dependency-provisioning policies understood by a runner. */
+export const DEPENDENCY_PROVISIONING_VALUES = ["NONE", "NPM_CI"] as const;
+export type DependencyProvisioning = (typeof DEPENDENCY_PROVISIONING_VALUES)[number];
+
+export const isDependencyProvisioning = (value: unknown): value is DependencyProvisioning =>
+  typeof value === "string"
+  && (DEPENDENCY_PROVISIONING_VALUES as readonly string[]).includes(value);
+
 export type CancellationRequest = { requestId: string; reason: string; requestedAt: string };
 export type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null };
 
@@ -92,6 +100,7 @@ export type ClaimedTask = {
     remoteUrl: string;
     defaultBranch: string;
     mountPath: string;
+    dependencyProvisioning: DependencyProvisioning;
   };
   run: {
     id: string;

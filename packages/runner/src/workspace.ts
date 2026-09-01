@@ -104,7 +104,7 @@ export type WorkspaceCommandExecutor = (
 
 export type WorkspaceProvisionClaim = GitProvenanceClaim & Pick<ClaimedTask, "specificationMaterialization"> & {
   task: GitProvenanceClaim["task"] & Pick<ClaimedTask["task"], "id">;
-  repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch">;
+  repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch" | "dependencyProvisioning">;
   run: GitProvenanceClaim["run"] & Pick<
     ClaimedTask["run"],
     | "runNumber"
@@ -581,7 +581,14 @@ export const provisionWorkspace = async (
       execute,
       env,
     );
-    await materializeWorkspaceDependencies(config, workspace, env, { execute }, dependencyCacheOptions);
+    await materializeWorkspaceDependencies(
+      config,
+      workspace,
+      claim.repo.dependencyProvisioning,
+      env,
+      { execute },
+      dependencyCacheOptions,
+    );
     return materialized;
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);
