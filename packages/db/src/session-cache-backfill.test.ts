@@ -5,7 +5,7 @@ import {
   runBackfillSessionCacheUsageCli,
   type SessionCacheBackfillDatabase,
 } from "./session-cache-backfill.js";
-import { extractCacheSplit, extractUsage } from "./usage.js";
+import { deriveUsageColumns, extractCacheSplit, extractUsage, sumUsage } from "./usage.js";
 
 type MemorySession = {
   id: string;
@@ -222,4 +222,83 @@ test("a JSON null input field has the same cache-split classification as absence
     cachedInputTokens: 100,
     cacheCreationInputTokens: 50,
   });
+});
+
+test("live aggregation and cache backfill both keep a sequence with a missing read unknown", async () => {
+  const payloads = [
+    {
+      type: "result",
+      usage: { input_tokens: 10, cache_creation_input_tokens: 50 },
+    },
+    {
+      type: "result",
+      usage: { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 50 },
+    },
+  ];
+  const live = deriveUsageColumns(sumUsage(payloads.map(extractUsage)));
+  assert.equal(live.cachedInputTokens, 100);
+  assert.equal(live.cacheCreationInputTokens, null);
+
+  const sessions: MemorySession[] = [
+    { id: "missing-read", cacheCreationInputTokens: null, cachedInputTokens: 150 },
+  ];
+  const lines: string[] = [];
+  assert.equal(await runBackfillSessionCacheUsageCli({
+    db: memoryDatabase(sessions, { "missing-read": payloads }),
+    log: (line) => lines.push(line),
+  }), 0);
+  assert.equal(lines[0], "scanned 1, updated 0, failed 0, unknown 1");
+  assert.deepEqual(sessions[0], {
+    id: "missing-read",
+    cacheCreationInputTokens: null,
+    cachedInputTokens: 150,
+  });
+});
+
+test("strict cache decoding ignores provider fields that ingestion does not read", () => {
+  const payload = {
+    type: "result",
+    usage: {
+      input_tokens: 10,
+      cache_read_input_tokens: 100,
+      cache_creation_input_tokens: 50,
+      cache_write_input_tokens: "ignored-provider-extension",
+    },
+  };
+
+  assert.deepEqual(extractCacheSplit(payload, { strict: true }), {
+    kind: "known",
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+});
+
+test("an aggregate cache split overflow stays unknown and does not stop later sessions", async () => {
+  const sessions: MemorySession[] = [
+    { id: "overflow", cacheCreationInputTokens: null, cachedInputTokens: 9 },
+    { id: "z-after-overflow", cacheCreationInputTokens: null, cachedInputTokens: 150 },
+  ];
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const exit = await runBackfillSessionCacheUsageCli({
+    db: memoryDatabase(sessions, {
+      overflow: [
+        { type: "result", usage: { input_tokens: 1, cache_read_input_tokens: 2_147_483_647, cache_creation_input_tokens: 0 } },
+        { type: "result", usage: { input_tokens: 1, cache_read_input_tokens: 1, cache_creation_input_tokens: 0 } },
+      ],
+      "z-after-overflow": [
+        { type: "result", usage: { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 50 } },
+      ],
+    }),
+    log: (line) => lines.push(line),
+    error: (line) => errors.push(line),
+  });
+
+  assert.equal(exit, 0);
+  assert.deepEqual(errors, []);
+  assert.equal(lines[0], "scanned 2, updated 1, failed 0, unknown 1");
+  assert.deepEqual(sessions, [
+    { id: "overflow", cacheCreationInputTokens: null, cachedInputTokens: 9 },
+    { id: "z-after-overflow", cacheCreationInputTokens: 50, cachedInputTokens: 100 },
+  ]);
 });

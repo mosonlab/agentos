@@ -44,6 +44,9 @@ export type UsageCost = {
   estimated: boolean;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  /** Null marks a legacy combined cached-input figure whose read/write split
+   * is unknown; otherwise cachedInputTokens is reads only. */
+  cacheCreationInputTokens: number | null;
   outputTokens: number | null;
 };
 
@@ -63,7 +66,8 @@ export const modelNameForPricing = (model: string): string => {
 };
 
 const hasTokens = (session: CostableSession): boolean =>
-  session.inputTokens !== null || session.cachedInputTokens !== null || session.outputTokens !== null;
+  session.inputTokens !== null || session.cachedInputTokens !== null
+  || session.cacheCreationInputTokens !== null || session.outputTokens !== null;
 
 /** Provider cost is authoritative. Estimation is a read-time projection so it
  * applies to historical rows without ever overwriting their reported amount. */
@@ -75,6 +79,7 @@ export const sessionUsageCost = (
   const tokens = {
     inputTokens: session.inputTokens,
     cachedInputTokens: session.cachedInputTokens,
+    cacheCreationInputTokens: session.cacheCreationInputTokens,
     outputTokens: session.outputTokens,
   };
   if (session.costUsd !== null) {
@@ -103,17 +108,18 @@ export const sessionUsageCost = (
   }
 
   const cached = session.cachedInputTokens;
+  const cacheCreation = session.cacheCreationInputTokens ?? 0;
   // Preserve the pre-migration estimate for an explicitly unknown historical
   // split. This does not claim creation was zero: cache reporting excludes the
   // row, while the long-standing aggregate cost projection continues to price
   // `input - cached` so migration alone cannot erase existing totals. Once the
-  // backfill establishes a split, known cache writes are excluded because the
-  // repository price table intentionally has no creation rate.
-  const uncached = session.inputTokens - cached
-    - (session.cacheCreationInputTokens === null ? 0 : session.cacheCreationInputTokens);
+  // backfill establishes a split, keep cache writes in the legacy cached-rate
+  // estimate. The price table intentionally has no independent creation rate,
+  // and migration alone must not change totalUsd or estimatedUsd.
+  const uncached = session.inputTokens - cached - cacheCreation;
   const output = session.outputTokens;
   const costUsd = new Prisma.Decimal(uncached).times(prices.inputPerMillionUsd)
-    .plus(new Prisma.Decimal(cached).times(prices.cachedInputPerMillionUsd))
+    .plus(new Prisma.Decimal(cached + cacheCreation).times(prices.cachedInputPerMillionUsd))
     .plus(new Prisma.Decimal(output).times(prices.outputPerMillionUsd))
     .dividedBy(MILLION);
   return { costUsd, estimated: true, ...tokens };
@@ -134,10 +140,15 @@ export const sumUsageCosts = (items: UsageCost[]): UsageCost | null => {
   let unpriced = false;
   let inputTokens: number | null = null;
   let cachedInputTokens: number | null = null;
+  let cacheCreationInputTokens = 0;
+  let cacheCreationKnown = true;
+  let hasTokenItems = false;
   let outputTokens: number | null = null;
 
   for (const item of items) {
-    const itemHasTokens = item.inputTokens !== null || item.cachedInputTokens !== null || item.outputTokens !== null;
+    const itemHasTokens = item.inputTokens !== null || item.cachedInputTokens !== null
+      || item.cacheCreationInputTokens !== null || item.outputTokens !== null;
+    hasTokenItems ||= itemHasTokens;
     if (item.costUsd === null) unpriced ||= itemHasTokens;
     else {
       costUsd = costUsd.plus(item.costUsd);
@@ -146,6 +157,10 @@ export const sumUsageCosts = (items: UsageCost[]): UsageCost | null => {
     }
     if (item.inputTokens !== null) inputTokens = (inputTokens ?? 0) + item.inputTokens;
     if (item.cachedInputTokens !== null) cachedInputTokens = (cachedInputTokens ?? 0) + item.cachedInputTokens;
+    if (itemHasTokens) {
+      if (item.cacheCreationInputTokens === null) cacheCreationKnown = false;
+      else cacheCreationInputTokens += item.cacheCreationInputTokens;
+    }
     if (item.outputTokens !== null) outputTokens = (outputTokens ?? 0) + item.outputTokens;
   }
 
@@ -155,6 +170,7 @@ export const sumUsageCosts = (items: UsageCost[]): UsageCost | null => {
     estimated,
     inputTokens,
     cachedInputTokens,
+    cacheCreationInputTokens: hasTokenItems && cacheCreationKnown ? cacheCreationInputTokens : null,
     outputTokens,
   };
 };

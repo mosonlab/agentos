@@ -582,7 +582,7 @@ test("task cost sums every run including failures and marks an estimated summand
   assert.equal(card.taskCost?.estimated, true);
 });
 
-test("board cost excludes known cache creation from both priced input buckets", () => {
+test("board cost preserves its estimate when cache creation is split from cached input", () => {
   const card = boardCard(row({ runs: [{
     id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-luna", codexServiceTier: "DEFAULT", budgetGrants: 0,
     session: session({
@@ -593,8 +593,9 @@ test("board cost excludes known cache creation from both priced input buckets", 
     }),
   }] }), null, moveContext);
 
-  assert.equal(card.taskCost?.costUsd, "0.000016");
+  assert.equal(card.taskCost?.costUsd, "0.000017");
   assert.equal(card.taskCost?.estimated, true);
+  assert.equal(card.taskCost?.cacheCreationInputTokens, 50);
 });
 
 test("mixed-model native subagent Runs use the pinned Luna estimate", () => {

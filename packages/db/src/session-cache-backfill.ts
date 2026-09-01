@@ -39,10 +39,8 @@ const MAX_INT4 = 2_147_483_647;
 const add = (
   current: number,
   value: number,
-  path: string,
-  malformed: (reason: string) => never,
-): number => {
-  if (value > MAX_INT4 - current) return malformed(`${path} exceeds INTEGER range after summing`);
+): number | null => {
+  if (value > MAX_INT4 - current) return null;
   return current + value;
 };
 
@@ -84,12 +82,17 @@ const finalPair = (sessionId: string, payloads: unknown[], summary: SessionCache
     if (parsed.kind === "unknown") unknown = true;
     if (parsed.kind === "known") {
       pair = pair ?? { cachedInputTokens: 0, cacheCreationInputTokens: 0 };
-      pair.cachedInputTokens = add(pair.cachedInputTokens, parsed.cachedInputTokens, "cachedInputTokens", (reason) => {
-        throw new SessionCacheBackfillError(sessionId, reason, { ...summary, failed: summary.failed + 1 });
-      });
-      pair.cacheCreationInputTokens = add(pair.cacheCreationInputTokens, parsed.cacheCreationInputTokens, "cacheCreationInputTokens", (reason) => {
-        throw new SessionCacheBackfillError(sessionId, reason, { ...summary, failed: summary.failed + 1 });
-      });
+      const cachedInputTokens = add(pair.cachedInputTokens, parsed.cachedInputTokens);
+      const cacheCreationInputTokens = add(pair.cacheCreationInputTokens, parsed.cacheCreationInputTokens);
+      if (cachedInputTokens === null || cacheCreationInputTokens === null) {
+        // Every payload was valid, but the aggregate cannot fit the persisted
+        // INTEGER columns. Live recomputation stores NULL for the same case;
+        // the cache-only backfill therefore leaves the row unknown and keeps
+        // scanning instead of misreporting a malformed retained payload.
+        unknown = true;
+      } else {
+        pair = { cachedInputTokens, cacheCreationInputTokens };
+      }
     }
   }
   // A partially understood set cannot safely be rewritten. A no-usage terminal

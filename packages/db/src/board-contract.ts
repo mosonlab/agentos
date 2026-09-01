@@ -66,6 +66,9 @@ export type UsageCost = {
   estimated: boolean;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  /** Null means cachedInputTokens may still be the legacy combined read/write
+   * value; otherwise cachedInputTokens is cache reads only. */
+  cacheCreationInputTokens: number | null;
   outputTokens: number | null;
 };
 

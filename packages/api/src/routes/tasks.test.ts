@@ -630,7 +630,8 @@ test("GET /tasks?view=board answers with the card projection, not the whole row"
     assert.equal(body[0]!.displayName, "Ship the thing");
     assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.42", startedAt: null, endedAt: null });
     assert.deepEqual(body[0]!.taskCost, {
-      costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, outputTokens: null,
+      costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null,
+      cacheCreationInputTokens: null, outputTokens: null,
     });
     // ...and the ones it does not are gone, which is the entire point.
     for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
@@ -671,15 +672,16 @@ test("GET /tasks/:id projects per-run and cumulative usage costs", async () => {
     });
     assert.equal(response.status, 200);
     const body = await response.json() as {
-      taskCost: { costUsd: string; estimated: boolean; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null };
+      taskCost: { costUsd: string; estimated: boolean; inputTokens: number | null; cachedInputTokens: number | null; cacheCreationInputTokens: number | null; outputTokens: number | null };
       runs: Array<{ id: string; session: { usageCost: { costUsd: string; estimated: boolean } } | null }>;
     };
     assert.deepEqual(body.taskCost, {
-      costUsd: "6.62", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000,
+      costUsd: "6.62", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000,
+      cacheCreationInputTokens: 0, outputTokens: 100_000,
     });
     assert.deepEqual(body.runs.map((run) => ({ id: run.id, usageCost: run.session?.usageCost ?? null })), [
-      { id: "prefixed-run", usageCost: { costUsd: "6.2", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000 } },
-      { id: "reported-run", usageCost: { costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, outputTokens: null } },
+      { id: "prefixed-run", usageCost: { costUsd: "6.2", estimated: true, inputTokens: 1_000_000, cachedInputTokens: 400_000, cacheCreationInputTokens: 0, outputTokens: 100_000 } },
+      { id: "reported-run", usageCost: { costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null, cacheCreationInputTokens: null, outputTokens: null } },
       { id: "unreported-run", usageCost: null },
     ]);
     assert.equal("moveTargets" in body, true, "the detail shape keeps operator move targets");

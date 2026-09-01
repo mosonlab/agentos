@@ -104,6 +104,13 @@ retained payload stops the scan and names its session; correct the data or
 restore it before rerunning. The operation is idempotent, so rerunning it is
 safe after an interrupted run.
 
+This migration command is not interchangeable with
+`npm run db:backfill-session-usage`. The latter is a tolerant repair command
+that recomputes every usage column from all retained events; it does not provide
+the cache migration's strict malformed-payload check or its cache-only write
+scope. Use `db:backfill-session-cache` to establish the new split, and use the
+general usage backfill only when repairing all derived usage columns.
+
 `npm run setup:local` writes `.env` once, at mode 0600, with distinct random
 operator and runner tokens, a session-cookie secret, a base64 32-byte encryption
 key, and one database password written identically into `POSTGRES_PASSWORD` and

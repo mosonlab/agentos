@@ -55,18 +55,24 @@ test("a provider-prefixed Claude Fable model uses its bare price row", () => {
   assert.equal(cost.estimated, true);
 });
 
-test("known cache creation is excluded from the read and uncached price bases", () => {
-  const cost = sessionUsageCost("gpt-5.6-luna", {
+test("splitting cache creation from the legacy cached total preserves the estimate", () => {
+  const beforeSplit = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null,
+    inputTokens: 160,
+    cachedInputTokens: 150,
+    cacheCreationInputTokens: null,
+    outputTokens: 10,
+  });
+  const afterSplit = sessionUsageCost("gpt-5.6-luna", {
     costUsd: null,
     inputTokens: 160,
     cachedInputTokens: 100,
     cacheCreationInputTokens: 50,
     outputTokens: 10,
   });
-  // Only 10 uncached, 100 cached, and 10 output tokens are priced. Cache
-  // creation has no table rate and must not be folded into either input side.
-  assert.equal(cost.costUsd?.toString(), "0.000016");
-  assert.equal(cost.estimated, true);
+  assert.equal(beforeSplit.costUsd?.toString(), "0.000017");
+  assert.equal(afterSplit.costUsd?.toString(), beforeSplit.costUsd?.toString());
+  assert.equal(afterSplit.estimated, true);
 });
 
 test("an unknown historical cache split preserves the legacy estimate and provider cost remains authoritative", () => {

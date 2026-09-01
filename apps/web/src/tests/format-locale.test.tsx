@@ -117,21 +117,21 @@ test("money, compactTokens and sha are locale-invariant", () => {
 test("usage cost labels distinguish estimates, preserve small values, and never show partial dollars", () => {
   asLocale("en");
   assert.equal(usageCostLabel({
-    costUsd: "0.42", estimated: true, inputTokens: 10, cachedInputTokens: 2, outputTokens: 3,
+    costUsd: "0.42", estimated: true, inputTokens: 10, cachedInputTokens: 2, cacheCreationInputTokens: 0, outputTokens: 3,
   }), "$0.42 est.");
   assert.equal(usageCostLabel({
-    costUsd: "0.0002", estimated: true, inputTokens: 1_000, cachedInputTokens: 0, outputTokens: 0,
+    costUsd: "0.0002", estimated: true, inputTokens: 1_000, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0,
   }), "$0.0002 est.");
   assert.equal(usageCostLabel({
-    costUsd: "0", estimated: true, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0,
+    costUsd: "0", estimated: true, inputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0,
   }), "$0.00 est.");
   assert.equal(usageCostLabel({
-    costUsd: null, estimated: false, inputTokens: 10, cachedInputTokens: 2, outputTokens: 3,
+    costUsd: null, estimated: false, inputTokens: 10, cachedInputTokens: 2, cacheCreationInputTokens: null, outputTokens: 3,
   }), "10 input · 2 cached (included in input) · 3 output");
 });
 
 test("usage cost labels translate estimate and token fragments with placeholder parity", () => {
-  const estimated = { costUsd: "0.42", estimated: true, inputTokens: 10, cachedInputTokens: 2, outputTokens: 3 };
+  const estimated = { costUsd: "0.42", estimated: true, inputTokens: 10, cachedInputTokens: 2, cacheCreationInputTokens: 0, outputTokens: 3 };
   const unpriced = { ...estimated, costUsd: null, estimated: false };
   asLocale("en");
   assert.equal(usageCostLabel(estimated), "$0.42 est.");

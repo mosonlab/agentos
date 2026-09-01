@@ -417,7 +417,6 @@ function validateProviderShapes(event: Record<string, unknown>): void {
         "cached_input_tokens",
         "cache_read_input_tokens",
         "cache_creation_input_tokens",
-        "cache_write_input_tokens",
       ] as const) {
         strictToken(usage[key], `usage.${key}`);
       }
@@ -452,8 +451,9 @@ export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
     if (usage.inputTokens !== undefined) total.inputTokens = (total.inputTokens ?? 0) + usage.inputTokens;
     if (usage.outputTokens !== undefined) total.outputTokens = (total.outputTokens ?? 0) + usage.outputTokens;
     if (usage.cachedInputTokens !== undefined) total.cachedInputTokens = (total.cachedInputTokens ?? 0) + usage.cachedInputTokens;
-    if (usage.cacheCreationInputTokens !== undefined) {
-      observedCacheCreation += usage.cacheCreationInputTokens;
+    const cacheSplit = cacheSplitFromUsage(usage);
+    if (cacheSplit.kind === "known") {
+      observedCacheCreation += cacheSplit.cacheCreationInputTokens;
       hasObservedCacheCreation = true;
     }
     // An input-bearing event that omits the split makes the session-level
@@ -461,12 +461,7 @@ export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
     // creation value from a different event across that gap as though the
     // omitted component were zero. Codex events avoid this path by carrying an
     // explicit cacheCreationInputTokens: 0.
-    const usageHasInput = usage.inputTokens !== undefined
-      || usage.cachedInputTokens !== undefined
-      || usage.cacheCreationInputTokens !== undefined;
-    if (usageHasInput && usage.cacheCreationInputTokens === undefined) {
-      cacheCreationUnknown = true;
-    }
+    if (cacheSplit.kind === "unknown") cacheCreationUnknown = true;
     if (usage.costUsd !== undefined) {
       total.costUsd = (total.costUsd ?? new Prisma.Decimal(0)).plus(usage.costUsd);
     }
