@@ -107,7 +107,7 @@
 # How wide each group runs is not read from the core count. run-gate.sh states
 # what share of the worker this gate was given, and every fan-out below is
 # derived from that one number, so two gates on a two-slot worker still add up
-# to one machine. A gate invoked by hand states no share and has the host.
+# to one machine. A gate invoked by hand states no share and takes half the host.
 #
 # A parallel group reports every member that failed, not the first one to fail,
 # and replays each member's output under its own heading in submission order.

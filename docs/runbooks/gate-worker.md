@@ -35,7 +35,7 @@ How wide each group runs is derived from a stated share of the host, not from
 the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
 slot count, so on the two-slot desktop each gate sizes itself for half the
 machine and two concurrent gates still add up to one host. A gate invoked by
-hand states no share and has the machine. Do not restore a per-phase fan-out in
+hand states no share and takes half the machine. Do not restore a per-phase fan-out in
 `run-gate.sh`: `7886fad` set `AGENTOS_DBTEST_CONCURRENCY` there, `merge-gate.sh`
 recomputed that same variable moments later, and the bound silently never took
 effect while both logs claimed it had.
