@@ -1,4 +1,5 @@
 import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@anneal/github-client";
+import { canonicalOutputSchema, PR_TEMPLATE_NAME } from "@anneal/db";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -58,9 +59,24 @@ export type CommandExecutor = (
 ) => Promise<string>;
 
 export type DeliveryClaim = {
-  task: Pick<ClaimedTask["task"], "id" | "name" | "templateStep">;
+  task: Pick<ClaimedTask["task"], "id" | "name" | "templateStep"> & {
+    /** The full task description is used only by the canonical PR body. */
+    description?: string;
+    /** Chain identity is required by the canonical PR body. */
+    chainId?: string | null;
+    chainIndex?: number | null;
+  };
   repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch">;
   run: Partial<Pick<ClaimedTask["run"], "opensPullRequest" | "pullRequestBase" | "requiresCommit">>;
+};
+
+/** Server-projected, run-bound evidence for the canonical PR handover. */
+export type PrWorkflowOutput = {
+  taskId: string;
+  chainIndex: number;
+  kind: string;
+  body: string;
+  commitSha: string | null;
 };
 
 export type DeliverWorkspaceDependencies = {
@@ -69,6 +85,8 @@ export type DeliverWorkspaceDependencies = {
    *  omit it and let delivery resolve the commit itself. */
   headSha?: string;
   recordPublication?: (branch: string) => Promise<void>;
+  /** Persisted canonical PR outputs projected by the session status route. */
+  prWorkflowOutputs?: readonly PrWorkflowOutput[];
   retryOptions?: RetryOptions;
 };
 
@@ -189,6 +207,271 @@ const pullRequestFromUrl = (stdout: string): { url: string; number: number } | n
   return url && Number.isInteger(number) && number > 0 ? { url, number } : null;
 };
 
+const PR_IMPLEMENTATION_KIND = "implementation";
+const PR_SOL_FINDINGS_KIND = "sol-findings";
+const PR_BLIND_FINDINGS_KIND = "blind-findings";
+const PR_FIXED_IMPLEMENTATION_KIND = "fixed-implementation";
+const PR_INITIAL_OUTPUT_KINDS = [PR_IMPLEMENTATION_KIND] as const;
+const PR_FINAL_OUTPUT_KINDS = [
+  PR_IMPLEMENTATION_KIND,
+  PR_SOL_FINDINGS_KIND,
+  PR_BLIND_FINDINGS_KIND,
+  PR_FIXED_IMPLEMENTATION_KIND,
+] as const;
+
+type PrImplementationArtifact = {
+  headSha: string;
+  summary: string;
+  testsRun: string[];
+};
+
+type PrReviewFinding = {
+  id: string;
+  severity: string;
+  title: string;
+};
+
+type PrReviewArtifact = {
+  headSha: string;
+  reviewedBase: string;
+  reviewedHead: string;
+  findings: PrReviewFinding[];
+};
+
+type PrFixedArtifact = {
+  headSha: string;
+  sourceHead: string;
+  dispositions: Array<{ id: string; disposition: string; reason: string }>;
+  closedFindings: Array<{ id: string; status: string; codeEvidence: string; testEvidence: string }>;
+  testsRun: string[];
+  residualRisks: string[];
+};
+
+const canonicalPrTemplateName = (claim: DeliveryClaim): boolean => (
+  (claim.task.templateStep as { taskTemplate?: { name?: string } } | null | undefined)
+    ?.taskTemplate?.name === PR_TEMPLATE_NAME
+);
+
+const canonicalPrOutputKind = (claim: DeliveryClaim): string | null => (
+  canonicalPrTemplateName(claim) ? claim.task.templateStep?.outputKind ?? null : null
+);
+
+const isCanonicalPrImplementation = (claim: DeliveryClaim): boolean => (
+  canonicalPrOutputKind(claim) === PR_IMPLEMENTATION_KIND
+);
+
+const isCanonicalPrFinal = (claim: DeliveryClaim): boolean => (
+  canonicalPrOutputKind(claim) === PR_FIXED_IMPLEMENTATION_KIND
+);
+
+const firstDescriptionLine = (claim: DeliveryClaim): string | null => {
+  if (typeof claim.task.description !== "string") return null;
+  return claim.task.description.split(/\r?\n/u)[0] ?? "";
+};
+
+const parsePrOutput = <T>(
+  output: PrWorkflowOutput | undefined,
+  expectedKind: string,
+): T => {
+  if (!output || output.kind !== expectedKind) {
+    throw new Error(`missing required ${expectedKind} canonical output evidence`);
+  }
+  if (typeof output.taskId !== "string" || !Number.isInteger(output.chainIndex)
+    || typeof output.body !== "string" || typeof output.commitSha !== "string") {
+    throw new Error(`malformed ${expectedKind} canonical output evidence`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(output.body);
+  } catch {
+    throw new Error(`${expectedKind} canonical output body is not valid JSON`);
+  }
+  const schema = canonicalOutputSchema({ outputKind: expectedKind, taskTemplate: { name: PR_TEMPLATE_NAME } });
+  if (!schema || !schema.safeParse(value).success) {
+    throw new Error(`${expectedKind} canonical output body violates its schema`);
+  }
+  return value as T;
+};
+
+const validatePrReviewHandoff = (
+  implementation: PrImplementationArtifact,
+  implementationOutput: PrWorkflowOutput,
+  sol: PrReviewArtifact,
+  solOutput: PrWorkflowOutput,
+  blind: PrReviewArtifact,
+  blindOutput: PrWorkflowOutput,
+  fixed: PrFixedArtifact,
+  fixedOutput: PrWorkflowOutput,
+): void => {
+  if (implementationOutput.commitSha !== implementation.headSha
+    || solOutput.commitSha !== sol.headSha
+    || blindOutput.commitSha !== blind.headSha
+    || fixedOutput.commitSha !== fixed.headSha) {
+    throw new Error("canonical PR output commit SHA does not match its body headSha");
+  }
+  if (sol.headSha !== blind.headSha
+    || sol.reviewedHead !== sol.headSha
+    || blind.reviewedHead !== blind.headSha
+    || fixed.sourceHead !== sol.headSha
+    || sol.reviewedBase !== blind.reviewedBase) {
+    throw new Error("canonical PR review outputs do not describe one reviewed head and base");
+  }
+  const findings = [...sol.findings, ...blind.findings];
+  const findingIds = findings.map(({ id }) => id);
+  if (new Set(findingIds).size !== findingIds.length) {
+    throw new Error("canonical PR review outputs contain duplicate finding ids");
+  }
+  const dispositionIds = fixed.dispositions.map(({ id }) => id);
+  if (new Set(dispositionIds).size !== dispositionIds.length
+    || dispositionIds.length !== findingIds.length
+    || dispositionIds.some((id) => !findingIds.includes(id))) {
+    throw new Error("fixed-implementation dispositions do not account for every review finding");
+  }
+  const adoptedIds = fixed.dispositions.filter(({ disposition }) => disposition === "ADOPTED").map(({ id }) => id);
+  const closedIds = fixed.closedFindings.map(({ id }) => id);
+  if (new Set(closedIds).size !== closedIds.length
+    || adoptedIds.length !== closedIds.length
+    || adoptedIds.some((id) => !closedIds.includes(id))) {
+    throw new Error("fixed-implementation closedFindings do not match adopted review fixes");
+  }
+};
+
+const requiredPrOutputs = (
+  claim: DeliveryClaim,
+  outputs: readonly PrWorkflowOutput[] | undefined,
+  final: boolean,
+): readonly PrWorkflowOutput[] => {
+  const expectedKinds = final ? PR_FINAL_OUTPUT_KINDS : PR_INITIAL_OUTPUT_KINDS;
+  if (!Array.isArray(outputs) || outputs.length !== expectedKinds.length) {
+    throw new Error(`canonical PR workflow requires exactly ${expectedKinds.length} output evidence entr${expectedKinds.length === 1 ? "y" : "ies"}`);
+  }
+  for (const [index, expectedKind] of expectedKinds.entries()) {
+    const output = outputs[index];
+    if (!output || output.kind !== expectedKind) {
+      throw new Error(`canonical PR workflow output evidence is missing or out of order at ${expectedKind}`);
+    }
+    if (typeof output.taskId !== "string" || !Number.isInteger(output.chainIndex)
+      || typeof output.body !== "string" || typeof output.commitSha !== "string") {
+      throw new Error(`malformed ${expectedKind} canonical output evidence`);
+    }
+    if (index > 0 && output.chainIndex <= outputs[index - 1]!.chainIndex) {
+      throw new Error("canonical PR workflow output evidence is not ordered by chain index");
+    }
+  }
+  const current = outputs.at(-1)!;
+  if (final && current.taskId !== claim.task.id) {
+    throw new Error("fixed-implementation canonical output evidence belongs to another Task");
+  }
+  if (!final && outputs[0]!.taskId !== claim.task.id) {
+    throw new Error("implementation canonical output evidence belongs to another Task");
+  }
+  if (claim.task.chainId === undefined || claim.task.chainId === null || claim.task.chainId.length === 0) {
+    throw new Error("canonical PR workflow requires a non-null chain identity");
+  }
+  if (claim.task.chainIndex !== undefined && claim.task.chainIndex !== null
+    && current.chainIndex !== claim.task.chainIndex) {
+    throw new Error(`${current.kind} canonical output evidence is not for the current chain index`);
+  }
+  return outputs;
+};
+
+const markdownTests = (testsRun: readonly string[]): string => testsRun.length > 0
+  ? testsRun.map((entry) => `- ${entry}`).join("\n")
+  : "No commands reported in the task output.";
+
+const initialPullRequestBody = (
+  claim: DeliveryClaim,
+  implementation: PrImplementationArtifact,
+): string => {
+  const goal = firstDescriptionLine(claim);
+  if (goal === null) throw new Error("canonical PR workflow task description is unavailable");
+  if (!claim.task.chainId) throw new Error("canonical PR workflow requires a non-null chain identity");
+  return [
+    "## Goal",
+    goal,
+    "## Summary",
+    implementation.summary,
+    "## Verification",
+    markdownTests(implementation.testsRun),
+    "## Review outcomes",
+    "Not available at this step.",
+    "## Anneal",
+    `Task: ${claim.task.id}`,
+    `Chain: ${claim.task.chainId}`,
+  ].join("\n\n");
+};
+
+const finalPullRequestBody = (
+  claim: DeliveryClaim,
+  implementation: PrImplementationArtifact,
+  sol: PrReviewArtifact,
+  blind: PrReviewArtifact,
+  fixed: PrFixedArtifact,
+): string => {
+  const goal = firstDescriptionLine(claim);
+  if (goal === null) throw new Error("canonical PR workflow task description is unavailable");
+  if (!claim.task.chainId) throw new Error("canonical PR workflow requires a non-null chain identity");
+  const adoptedFixes = fixed.closedFindings;
+  const summary = [
+    implementation.summary,
+    adoptedFixes.length === 0
+      ? "No review-driven code change was required."
+      : [
+        "Review-driven fixes:",
+        ...adoptedFixes.map((finding) => `- ${finding.id}: ${finding.codeEvidence}`),
+      ].join("\n"),
+  ].join("\n\n");
+  const renderReview = (label: string, report: PrReviewArtifact): string => {
+    const dispositions = new Map(fixed.dispositions.map((item) => [item.id, item]));
+    const closed = new Map(fixed.closedFindings.map((item) => [item.id, item]));
+    const findings = report.findings.length === 0
+      ? "No findings reported."
+      : report.findings.map((finding) => {
+        const disposition = dispositions.get(finding.id);
+        const evidence = closed.get(finding.id);
+        return [
+          `- ${finding.id} [${finding.severity}] ${finding.title}`,
+          `  Disposition: ${disposition?.disposition ?? "UNACCOUNTED"}`,
+          `  Reason: ${disposition?.reason ?? "No final disposition was reported."}`,
+          ...(evidence ? [
+            `  Code evidence: ${evidence.codeEvidence}`,
+            `  Test evidence: ${evidence.testEvidence}`,
+          ] : []),
+        ].join("\n");
+      }).join("\n");
+    return `### ${label}\n${findings}`;
+  };
+  const residualRisks = fixed.residualRisks.length > 0
+    ? fixed.residualRisks.map((risk) => `- ${risk}`).join("\n")
+    : "None reported.";
+  return [
+    "## Goal",
+    goal,
+    "## Summary",
+    summary,
+    "## Verification",
+    `Implementation:\n${markdownTests(implementation.testsRun)}\n\nFixed implementation:\n${markdownTests(fixed.testsRun)}`,
+    "## Review outcomes",
+    `${renderReview("Sol findings", sol)}\n\n${renderReview("Blind findings", blind)}\n\nResidual risks:\n${residualRisks}`,
+    "## Anneal",
+    `Task: ${claim.task.id}`,
+    `Chain: ${claim.task.chainId}`,
+  ].join("\n\n");
+};
+
+const readPullRequestBody = (stdout: string): string => {
+  const trimmed = stdout.trim();
+  if (trimmed.startsWith("{")) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(trimmed); } catch { throw new Error("gh pr view returned malformed body JSON"); }
+    if (!parsed || typeof parsed !== "object" || typeof (parsed as { body?: unknown }).body !== "string") {
+      throw new Error("gh pr view returned no readable pull request body");
+    }
+    return (parsed as { body: string }).body;
+  }
+  return stdout.replace(/\r?\n$/u, "");
+};
+
 // A chain step is named "<chain>: <step>"; the PR is the chain's, not the step's.
 export const pullRequestTitle = (
   task: Pick<ClaimedTask["task"], "name" | "templateStep">,
@@ -211,6 +494,52 @@ export const deliverWorkspace = async (
   const retryOptions = dependencies.retryOptions ?? {};
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
+  const canonicalImplementation = isCanonicalPrImplementation(claim);
+  const canonicalFinal = isCanonicalPrFinal(claim);
+  const canonicalPr = canonicalImplementation || canonicalFinal;
+  let canonicalBody: string | undefined;
+  let canonicalOutputs: readonly PrWorkflowOutput[] | undefined;
+  let implementationArtifact: PrImplementationArtifact | undefined;
+  let solArtifact: PrReviewArtifact | undefined;
+  let blindArtifact: PrReviewArtifact | undefined;
+  let fixedArtifact: PrFixedArtifact | undefined;
+
+  // Canonical PR delivery is deliberately evidence-driven. Validate the
+  // projected bodies before any publication command so a missing, foreign, or
+  // malformed output cannot turn into an ordinary branch push.
+  if (canonicalPr) {
+    try {
+      canonicalOutputs = requiredPrOutputs(claim, dependencies.prWorkflowOutputs, canonicalFinal);
+      implementationArtifact = parsePrOutput<PrImplementationArtifact>(canonicalOutputs[0], PR_IMPLEMENTATION_KIND);
+      if (canonicalFinal) {
+        solArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs[1], PR_SOL_FINDINGS_KIND);
+        blindArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs[2], PR_BLIND_FINDINGS_KIND);
+        fixedArtifact = parsePrOutput<PrFixedArtifact>(canonicalOutputs[3], PR_FIXED_IMPLEMENTATION_KIND);
+        validatePrReviewHandoff(
+          implementationArtifact,
+          canonicalOutputs[0]!,
+          solArtifact,
+          canonicalOutputs[1]!,
+          blindArtifact,
+          canonicalOutputs[2]!,
+          fixedArtifact,
+          canonicalOutputs[3]!,
+        );
+        canonicalBody = finalPullRequestBody(claim, implementationArtifact, solArtifact, blindArtifact, fixedArtifact);
+      } else {
+        canonicalBody = initialPullRequestBody(claim, implementationArtifact);
+      }
+    } catch (error: unknown) {
+      const message = messageOf(error);
+      return {
+        pushStatus: "FAILED",
+        pushRemote: remote,
+        pushError: message,
+        failureClass: failureClassFor(message),
+        failure: { operation: "canonical PR output validation", message, error },
+      };
+    }
+  }
   // `!== false`, not a truthiness test, and the difference is the whole point.
   // ClaimedTask requires the field, while this interface keeps it optional so
   // a stale API build that omits it degrades to today's behaviour (open the PR)
@@ -230,6 +559,21 @@ export const deliverWorkspace = async (
   try {
     const head = dependencies.headSha ?? await command("git", ["rev-parse", "HEAD"], workspace.path, env,
       { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
+    if (canonicalPr) {
+      const currentOutput = canonicalOutputs?.at(-1);
+      const currentArtifact = canonicalFinal ? fixedArtifact : implementationArtifact;
+      if (!currentOutput || !currentArtifact || currentOutput.commitSha !== head || currentArtifact.headSha !== head) {
+        const reason = `${canonicalOutputKind(claim)} canonical output does not match current workspace HEAD`;
+        const error = new Error(reason);
+        return {
+          pushStatus: "FAILED",
+          pushRemote: remote,
+          pushError: reason,
+          failureClass: failureClassFor(reason),
+          failure: { operation: "canonical PR output/head comparison", message: reason, error },
+        };
+      }
+    }
     if (head === workspace.baseSha && requiresCommit) return noChangesProduced(workspace.branch, remote);
   } catch (error: unknown) {
     const message = messageOf(error);
@@ -240,6 +584,32 @@ export const deliverWorkspace = async (
       failureClass: failureClassFor(message),
       failure: { operation: "git rev-parse HEAD", message, error },
     };
+  }
+  if (canonicalFinal) {
+    try {
+      const trackedChain = await command("git", ["ls-files", "--", ".chain"], workspace.path, env,
+        { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
+      if (trackedChain.trim().length > 0) {
+        const reason = "canonical PR final delivery requires a clean tracked .chain tree";
+        const error = new Error(`${reason}: ${trackedChain.trim()}`);
+        return {
+          pushStatus: "FAILED",
+          pushRemote: remote,
+          pushError: error.message,
+          failureClass: failureClassFor(error.message),
+          failure: { operation: "git ls-files -- .chain", message: error.message, error },
+        };
+      }
+    } catch (error: unknown) {
+      const message = messageOf(error);
+      return {
+        pushStatus: "FAILED",
+        pushRemote: remote,
+        pushError: message,
+        failureClass: failureClassFor(message),
+        failure: { operation: "git ls-files -- .chain", message, error },
+      };
+    }
   }
   // A step that opens no PR still publishes its changed branch, which is what
   // lets the *next* step of the chain clone it.
@@ -280,7 +650,7 @@ export const deliverWorkspace = async (
     // hung `gh` would otherwise stall the phase before the budget applies.
     await command("gh", ["--version"], workspace.path, env, { timeoutMs: boundedTimeout(retryOptions, GH_PROBE_TIMEOUT_MS) });
   } catch (error: unknown) {
-    if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
+    if (!opensPullRequest && !canonicalFinal) return noPullRequest(workspace.branch, remote);
     const reason = messageOf(error);
     return failedPullRequestDelivery(
       workspace.branch,
@@ -310,19 +680,69 @@ export const deliverWorkspace = async (
     const parsed = JSON.parse(raw || "[]") as Array<{ url: string; number: number }>;
     return parsed[0] ?? null;
   };
+  const editPullRequestBody = async (
+    pullRequest: { url: string; number: number },
+    body: string,
+  ): Promise<void> => {
+    const editArguments = [
+      "pr", "edit", String(pullRequest.number), "--repo", repo, "--body", body,
+    ];
+    await command("gh", editArguments, workspace.path, env,
+      { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) });
+    const readArguments = [
+      "pr", "view", String(pullRequest.number), "--repo", repo, "--json", "body", "--jq", ".body",
+    ];
+    let readBack: string;
+    try {
+      readBack = readPullRequestBody(await command("gh", readArguments, workspace.path, env,
+        { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) }));
+    } catch (error: unknown) {
+      throw new Error(`pull request body read-back was unreadable: ${messageOf(error)}`, { cause: error });
+    }
+    if (readBack !== body) throw new Error("pull request body read-back did not match the canonical body");
+  };
   try {
     // The lookup runs before the flag check on purpose: a documentation step
     // running after the implementation step still reports the chain's PR on its
     // gate card and in GET /tasks/:id. Only *creation* is suppressed.
     const existing = await openPullRequest();
-    if (existing) return { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
+    if (existing) {
+      if (canonicalPr) {
+        try {
+          await editPullRequestBody(existing, canonicalBody!);
+        } catch (error: unknown) {
+          const reason = messageOf(error);
+          return failedPullRequestDelivery(
+            workspace.branch,
+            remote,
+            reason.includes("read-back") ? "gh pr view" : "gh pr edit",
+            error,
+            reason,
+            `Branch '${workspace.branch}' was pushed, but updating the pull request body failed: ${reason}.`,
+          );
+        }
+      }
+      return { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
+    }
+    if (canonicalFinal) {
+      const reason = "canonical PR final delivery found no open pull request";
+      const error = new Error(reason);
+      return failedPullRequestDelivery(
+        workspace.branch,
+        remote,
+        "gh pr list",
+        error,
+        reason,
+        `Branch '${workspace.branch}' was pushed, but no open pull request was found for the final handover.`,
+      );
+    }
     if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
     const createArguments = [
       "pr", "create", "--repo", repo,
       "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
       "--head", workspace.branch,
       "--title", pullRequestTitle(claim.task),
-      "--body", `Automated delivery for Anneal task ${claim.task.id}.`,
+      "--body", canonicalBody ?? `Automated delivery for Anneal task ${claim.task.id}.`,
     ];
     // The one creating GitHub write this package makes, and the reason #139
     // exists. A create response can be lost after GitHub has committed the PR,

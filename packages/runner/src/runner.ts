@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+import { PR_TEMPLATE_NAME, REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
 
 import {
   ADAPTER_VERSION,
@@ -33,7 +33,7 @@ import {
 } from "./availability.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { deliverWorkspace } from "./delivery.js";
+import { deliverWorkspace, type PrWorkflowOutput } from "./delivery.js";
 import { disposeWorkspace, type WorkspaceDisposal } from "./dispose-workspace.js";
 import {
   buildFailureEnvelope,
@@ -687,6 +687,30 @@ export const executeClaim = async (
       });
       return;
     }
+    let prWorkflowOutputs: readonly PrWorkflowOutput[] | undefined;
+    const templateStep = claim.task.templateStep as (NonNullable<ClaimedTask["task"]["templateStep"]> & {
+      taskTemplate?: { name?: string };
+    }) | null;
+    const canonicalPrDelivery = templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
+      && (templateStep.outputKind === "implementation" || templateStep.outputKind === "fixed-implementation");
+    if (canonicalPrDelivery && runLease.held) {
+      try {
+        const status = await controlPlane.readSessionTaskOutputStatus(config, claim) as (
+          SessionTaskOutputStatus & { prWorkflowOutputs?: readonly PrWorkflowOutput[] }
+        ) | null;
+        if (!status || !Array.isArray(status.prWorkflowOutputs)) {
+          throw new Error("session status omitted canonical PR workflow output evidence");
+        }
+        prWorkflowOutputs = status.prWorkflowOutputs;
+      } catch (error: unknown) {
+        remediationFailureReason = `Canonical PR workflow evidence handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        sink({
+          source: "RUNNER",
+          type: "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED",
+          payload: { message: errorMessage(error) },
+        });
+      }
+    }
     // A validated, fenced Regression handoff is the step's terminal product
     // only when the provider did not explicitly reject the session. Transport
     // loss remains recoverable, but a terminal failure keeps its authority.
@@ -721,6 +745,7 @@ export const executeClaim = async (
           delivered,
           {
             ...(capturedHeadSha ? { headSha: capturedHeadSha } : {}),
+            ...(prWorkflowOutputs ? { prWorkflowOutputs } : {}),
             recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
             retryOptions,
           },
