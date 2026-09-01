@@ -29,6 +29,8 @@ import { z } from "zod";
 import { jsonValue } from "../execution.js";
 import { filesRootGrantKey } from "../files/config.js";
 import { isCanonicalRelPath, normalizeRelPath } from "../files/paths.js";
+import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
+import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
 import { readCommitted } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
@@ -123,6 +125,13 @@ const repoInput = z.object({
   mountPath: z.string().trim().min(1).default("repo"),
   defaultBranch: z.string().trim().min(1).default("main"),
   credentialSecretId: id.nullable().default(null),
+});
+// Keep remoteUrl raw for POST /projects/:projectId/repos. The onboarding remote
+// policy must see exactly what the operator submitted; PATCH continues to use
+// repoInput above and therefore retains its established trimming behavior.
+const repoCreateInput = repoInput.extend({
+  remoteUrl: z.string(),
+  grantAgents: z.boolean().default(false),
 });
 const repoAccessInput = z.object({
   permissions: z.nativeEnum(RepoPermission).default(RepoPermission.GIT_WRITE),
@@ -518,12 +527,62 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
   })) satisfies RepoResponse[]));
   app.post("/projects/:projectId/repos", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
-    const body = await readJson(context.req.raw, repoInput);
+    const body = await readJson(context.req.raw, repoCreateInput);
+    const remote = parseRepoRemote(body.remoteUrl);
+    if (!remote.ok) {
+      return context.json({
+        error: "Repository remote is invalid",
+        code: "repository-remote-invalid",
+        reason: remote.reason,
+      }, 400);
+    }
+    if (!isValidBranchName(body.defaultBranch)) {
+      return context.json({
+        error: "Repository default branch is invalid",
+        code: "repository-default-branch-invalid",
+      }, 400);
+    }
+    try {
+      await deps.repositoryPreflight({ remoteUrl: remote.remoteUrl, defaultBranch: body.defaultBranch });
+    } catch (error: unknown) {
+      if (error instanceof RepositoryPreflightError) {
+        return context.json({
+          error: "Repository preflight failed",
+          code: "repository-preflight-failed",
+          reason: error.reason,
+        }, 422);
+      }
+      throw error;
+    }
     if (body.credentialSecretId) {
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
-    return context.json((await db.repo.create({ data: { ...body, projectId } })) satisfies RepoResponse, 201);
+    const { grantAgents, ...repoInput } = body;
+    const result = await db.$transaction(async (tx) => {
+      const repo = await tx.repo.create({
+        data: { ...repoInput, remoteUrl: remote.remoteUrl, projectId },
+      });
+      if (!grantAgents) return repo;
+      const agents = await tx.agent.findMany({
+        where: { projectId, archivedAt: null, name: { not: INTEGRATOR_AGENT_NAME } },
+        orderBy: { id: "asc" },
+      });
+      const grants = [];
+      for (const agent of agents) {
+        grants.push(await tx.agentRepoAccess.create({
+          data: {
+            agentId: agent.id,
+            repoId: repo.id,
+            projectId,
+            permissions: RepoPermission.GIT_WRITE,
+            mountPath: repo.mountPath,
+          },
+        }));
+      }
+      return { repo, grants };
+    });
+    return context.json(result satisfies RepoResponse | { repo: RepoResponse; grants: AgentRepoAccessContract[] }, 201);
   });
   app.patch("/repos/:repoId", async (context) => {
     const body = await readJson(context.req.raw, repoPatch);
