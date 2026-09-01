@@ -305,6 +305,16 @@ export type SessionTaskOutputStatus = {
     kind: string;
     commitSha: string | null;
   } | null;
+  /** Persisted canonical PR handoff bodies projected by the session route. */
+  prWorkflowOutputs?: SessionPrWorkflowOutput[];
+};
+
+export type SessionPrWorkflowOutput = {
+  taskId: string;
+  chainIndex: number;
+  kind: "implementation" | "sol-findings" | "blind-findings" | "fixed-implementation";
+  body: string;
+  commitSha: string | null;
 };
 
 export type SessionTaskOutput = {
@@ -347,9 +357,11 @@ export const readSessionTaskOutputStatus = async (
       outputSatisfiedByPriorRun?: unknown;
       outputPersisted?: unknown;
       output?: unknown;
+      prWorkflowOutputs?: unknown;
     } | null;
   };
   const output = payload.task?.output;
+  const prWorkflowOutputs = payload.task?.prWorkflowOutputs;
   const validOutput = output === null || (
     typeof output === "object"
     && !Array.isArray(output)
@@ -358,6 +370,21 @@ export const readSessionTaskOutputStatus = async (
     && (typeof (output as Record<string, unknown>).commitSha === "string"
       || (output as Record<string, unknown>).commitSha === null)
   );
+  const validPrWorkflowOutputs = prWorkflowOutputs === undefined || (
+    Array.isArray(prWorkflowOutputs)
+    && prWorkflowOutputs.every((entry: unknown) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const value = entry as Record<string, unknown>;
+      return typeof value.taskId === "string"
+        && Number.isInteger(value.chainIndex)
+        && typeof value.body === "string"
+        && (typeof value.commitSha === "string" || value.commitSha === null)
+        && (value.kind === "implementation"
+          || value.kind === "sol-findings"
+          || value.kind === "blind-findings"
+          || value.kind === "fixed-implementation");
+    })
+  );
   if (payload.task === null) return null;
   if (!payload.task
     || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
@@ -365,7 +392,8 @@ export const readSessionTaskOutputStatus = async (
     || typeof payload.task.outputRemediationAllowed !== "boolean"
     || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
     || typeof payload.task.outputPersisted !== "boolean"
-    || !validOutput) {
+    || !validOutput
+    || !validPrWorkflowOutputs) {
     throw new Error(`Anneal API returned an invalid task output status for Run ${claim.run.id}`);
   }
   return {
@@ -375,6 +403,9 @@ export const readSessionTaskOutputStatus = async (
     outputSatisfiedByPriorRun: payload.task.outputSatisfiedByPriorRun,
     outputPersisted: payload.task.outputPersisted,
     output: output as SessionTaskOutputStatus["output"],
+    ...(prWorkflowOutputs === undefined ? {} : {
+      prWorkflowOutputs: prWorkflowOutputs as SessionPrWorkflowOutput[],
+    }),
   };
 };
 
