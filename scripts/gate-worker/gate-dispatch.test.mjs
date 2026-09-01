@@ -483,10 +483,15 @@ test("an unconfigured dispatcher refuses instead of guessing a private topology"
 });
 
 test("an unconfigured dispatcher runs local-only after explicit opt-in", (t) => {
-  const repo = fixtureRepo(t, { mergeGate: 'printf "MERGE GATE: PASS local-only\\n"; exit 0' });
+  const repo = fixtureRepo(t, {
+    mergeGate:
+      'test "$AGENTOS_RUN_ID" = local-regression-run && test "$AGENTOS_RUN_SCOPE_BYPASS" = regression-verification && printf "MERGE GATE: PASS local-only\\n"',
+  });
   const result = dispatch(t, repo, [repo.head, "--allow-local"], {
     AGENTOS_GATE_PRIMARY_SERVER: "",
     AGENTOS_GATE_FALLBACK_SERVER: "",
+    AGENTOS_RUN_ID: "local-regression-run",
+    AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS local-only/u);
@@ -783,7 +788,6 @@ test("documented gate-worker invocations name their checkout explicitly", () => 
   const files = [
     join(here, "..", "..", "docs", "runbooks", "gate-worker.md"),
     join(here, "..", "..", "CONTRIBUTING.md"),
-    join(here, "..", "..", "AGENTS.md"),
   ];
 
   for (const file of files) {

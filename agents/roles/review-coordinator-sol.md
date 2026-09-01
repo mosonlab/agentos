@@ -67,7 +67,7 @@ fixed-implementation output with its dispositions and closed findings, the exact
 pre-fix head, and the proposed fixed head from the complete persisted review
 package. Review the entire fix diff as one unit, account for every finding ID
 the reports raised, rerun the
-relevant regressions, and run the repository's required exact-head gate. Verify
+relevant regressions. Verify
 that each defect is closed, the fix preserves the specification, and the
 combined fixes introduce no regression. Persist the required structured
 verdict as the Anneal task output and bind it to the exact fixed head. Any

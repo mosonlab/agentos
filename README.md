@@ -155,6 +155,8 @@ Developer Preview 6 (v0.6.0): interfaces and stored data shapes may
 change between previews, and the only upgrade path is a fresh install.
 macOS on Apple Silicon only.
 
+For the pull-request workflow, follow [Add a project](docs/runbooks/add-a-project.md).
+
 **Read before pointing this at anything you care about:** Anneal
 launches coding CLIs with non-interactive permission bypass, as your
 macOS user, outside a sandbox. Use a disposable repository and a

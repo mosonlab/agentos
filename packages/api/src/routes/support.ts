@@ -19,13 +19,14 @@ import { appendRunActivity, fencedActivityInput } from "../run-lifecycle.js";
 import type { Principal } from "../auth.js";
 import type { ProjectBootstrapLoaders } from "../project-bootstrap.js";
 import { refusalResponse, type Refusal, type RefusalDetail, type RefusalReason } from "../refusal.js";
-import type { preflightOnboardingRepository } from "../onboarding-preflight.js";
+import type { preflightOnboardingRepository, RepositoryPreflight } from "../onboarding-preflight.js";
 
 export type AppEnvironment = { Variables: { principal: Principal } };
 
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
+  repositoryPreflight?: RepositoryPreflight;
   releaseMergeLease?: ReleaseMergeLease;
   /** Repository content capability used to verify materialized review specs. */
   specificationReader?: SpecificationReader | null;
@@ -36,6 +37,7 @@ export interface LiveAppOptions {
 export type RouteDeps = {
   db: PrismaClient;
   options: LiveAppOptions;
+  repositoryPreflight: RepositoryPreflight;
   projectBootstrapLoaders: ProjectBootstrapLoaders;
   releaseChainLease: ReleaseMergeLease;
   runners: ReturnType<typeof createRunnerRegistry>;

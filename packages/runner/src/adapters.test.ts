@@ -609,10 +609,12 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
     assert.ok(args.includes('agents.default_subagent_reasoning_effort="max"'));
     assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
   }
-  assert.match(buildPrompt(executioner), /maximum concurrent child threads: 8 \(root excluded\)/u);
-  assert.match(buildPrompt(executioner), /do not launch nested Codex CLI processes/u);
-  assert.match(buildPrompt(executioner), /one affected-workspace compile or typecheck after integration/u);
-  assert.match(buildPrompt(executioner), /Do not run repository-wide suites or the repository Merge Gate in Implementation/u);
+  const prompt = buildPrompt(executioner);
+  assert.match(prompt, /maximum concurrent child threads: 8 \(root excluded\)/u);
+  assert.match(prompt, /do not launch nested Codex CLI processes/u);
+  assert.match(prompt, /The runner enforces the same child model and concurrency snapshot on fresh starts and resumes/u);
+  assert.doesNotMatch(prompt, /Implementation proof is limited/u);
+  assert.doesNotMatch(prompt, /repository-wide suites/u);
   assert.throws(
     () => buildPrompt({
       ...executioner,

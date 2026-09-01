@@ -149,6 +149,7 @@ test("Inbox list applies project scope and returns stored human replies", async 
     assert.equal(messages[0]?.replies[0]?.from, "HUMAN");
     const where = query?.where as { replyToMessageId: null; OR: unknown[] };
     assert.equal(where.replyToMessageId, null);
-    assert.equal(where.OR.length, 4);
+    assert.equal(where.OR.length, 5);
+    assert.deepEqual(where.OR[4], { agentId: null, taskId: null, goalId: null, sessionId: null });
   });
 });

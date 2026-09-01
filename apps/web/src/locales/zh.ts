@@ -108,6 +108,7 @@ export const zh = {
   "agents.tools.toggle": "启用{tool}",
   "archived.empty": "还没有归档任何东西。",
   "archived.menu.unarchive": "取消归档",
+  "archived.menu.unarchiveChain": "取消归档任务链",
   "archived.table.agent": "Agent",
   "archived.table.archived": "归档时间",
   "archived.table.chain": "任务链",

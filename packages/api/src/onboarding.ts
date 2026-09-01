@@ -94,9 +94,9 @@ const SCP_LIKE = /^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9._-]+):(.+)$/u;
  * indistinguishable from a login name, so no charset or length rule separates
  * the two. Every Git host's SSH endpoint is reached as `git@…`, so the accept
  * set is that one name and a remote with no user at all. A self-hosted account
- * under a different name is still reachable through the ordinary Repo route,
- * which is an operator action rather than a first-run one; what onboarding
- * refuses is the shape that can persist a credential.
+ * under a different name is refused here as well as by the ordinary Repo route:
+ * no route that stores a remote should persist an account token where a Secret
+ * is expected to be the deliberate credential boundary.
  */
 const SSH_ACCOUNT = "git";
 

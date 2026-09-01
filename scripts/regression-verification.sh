@@ -391,7 +391,8 @@ finalize() {
   for attempt in 1 2 3; do
     : > "$gate_log"
     gate_status=0
-    "$GATE_DISPATCH" "$current" --master "$BASE_HEAD_SHA" > "$gate_log" 2>&1 \
+    AGENTOS_RUN_SCOPE_BYPASS=regression-verification \
+      "$GATE_DISPATCH" "$current" --master "$BASE_HEAD_SHA" > "$gate_log" 2>&1 \
       || gate_status=$?
     case "$gate_status" in
       75|76)
