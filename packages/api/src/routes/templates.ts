@@ -106,12 +106,7 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
     // The body is read exactly once, as text: the replay key hashes the raw
     // bytes, and a Request body cannot be consumed twice.
     const raw = await context.req.text();
-    let payload: unknown;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      return context.json({ error: "Invalid JSON payload" }, 400);
-    }
+    const payload: unknown = JSON.parse(raw);
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return context.json({ error: "Webhook payload must be an object" }, 400);
     }
@@ -363,15 +358,10 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
       const templateId = id.parse(context.req.param("templateId"));
       // `Fire now` on a fully-defaulted trigger sends no body at all, and
       // `request.json()` throws on an empty one — hence the hand-rolled parse
-      // instead of `readJson`. It still has to answer a malformed body the way
-      // every other route does: a client error is a 400, not a 500.
+      // instead of `readJson`. A malformed non-empty body still reaches the
+      // shared SyntaxError mapping in app.ts.
       const raw = await context.req.text();
-      let parsed: unknown;
-      try {
-        parsed = raw.trim() === "" ? {} : JSON.parse(raw);
-      } catch {
-        return context.json({ error: "Invalid JSON payload" }, 400);
-      }
+      const parsed: unknown = raw.trim() === "" ? {} : JSON.parse(raw);
       const body = manualFireInput.parse(parsed);
       const trigger = await db.taskTemplate.findUnique({ where: { id: templateId }, select: triggerSelect });
       if (!trigger) return context.json({ error: "Template not found" }, 404);
