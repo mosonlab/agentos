@@ -105,6 +105,7 @@ const readRows = async (sessionIds: readonly string[]): Promise<UsageRow[]> => d
   costUsd: row.costUsd,
   inputTokens: row.inputTokens,
   cachedInputTokens: row.cachedInputTokens,
+  cacheCreationInputTokens: null,
   outputTokens: row.outputTokens,
   totalTokens: row.totalTokens,
 })));
@@ -122,6 +123,7 @@ const legacyCost = (row: UsageRow) => sessionUsageCost(row.model, {
     ? row.inputTokens
     : row.inputTokens + row.cachedInputTokens,
   cachedInputTokens: row.cachedInputTokens,
+  cacheCreationInputTokens: null,
   outputTokens: row.outputTokens,
 });
 
@@ -131,6 +133,7 @@ const canonicalCost = (row: UsageRow) => sessionUsageCost(row.model, {
   costUsd: row.costUsd,
   inputTokens: row.inputTokens,
   cachedInputTokens: row.cachedInputTokens,
+  cacheCreationInputTokens: null,
   outputTokens: row.outputTokens,
 });
 

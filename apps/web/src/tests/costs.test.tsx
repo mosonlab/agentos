@@ -6,9 +6,10 @@ import { mountPage } from "./dom-harness";
 
 import {
   COSTS_COLUMNS, COSTS_RANGES, ChartLegend, DailySpendChart, ModelBar, SERIES_SLOTS, axisDates,
-  chartSegments, chartSeries, percent, seriesColor, sharePct, wasteShare,
+  ChainsTable, sortCostChains, chartSegments, chartSeries, percent, seriesColor, sharePct, wasteShare,
 } from "../pages/Costs";
 import type { CostsReport } from "../lib/types";
+import type { CostsPageReport } from "../pages/Costs";
 
 const bucket = (date: string, byAgent: Record<string, string>): CostsReport["daily"][number] => ({ date, byAgent });
 
@@ -114,7 +115,8 @@ test("the legend names every series, so identity is never colour alone", () => {
 const agents = (count: number): CostsReport["byAgent"] =>
   Array.from({ length: count }, (_, index) => ({
     agent: `Agent ${index}`, usd: String(count - index), runs: 1, costUnavailableRuns: 0,
-    avgUsd: String(count - index), cachePct: null, wastedUsd: "0",
+    avgUsd: String(count - index), cachePct: null, cacheUnknownRuns: 1,
+    uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
   }));
 
 test("six agents or fewer are each their own series", () => {
@@ -141,7 +143,7 @@ test("a day with more than six agents retains every segment and its exact total"
 
 /* ---------------------------------------------------------------- the page */
 
-const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
+const report = (overrides: Partial<CostsPageReport> = {}): CostsPageReport => ({
   days: 30,
   since: "2026-07-29T00:00:00.000Z",
   totalUsd: "2489.211742",
@@ -154,11 +156,11 @@ const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
   byAgent: [
     {
       agent: "Senior Developer", usd: "1800", runs: 400, costUnavailableRuns: 100, avgUsd: "6",
-      cachePct: 72.5, wastedUsd: "180",
+      cachePct: 72.5, cacheUnknownRuns: 0, uncachedInputTokens: 2_000, uncachedInputUsd: "24.50", wastedUsd: "180",
     },
     {
       agent: "Planner", usd: "689.211742", runs: 288, costUnavailableRuns: 53, avgUsd: "2.932816",
-      cachePct: null, wastedUsd: "0",
+      cachePct: null, cacheUnknownRuns: 1, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
     },
   ],
   byModel: [
@@ -169,13 +171,34 @@ const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
     runId: "run-1", taskName: "Costs dashboard page: Implementation", agent: "Senior Developer",
     model: "openai-codex/gpt-5.6-sol", usd: "36.5", estimated: true, startedAt: "2026-08-26T09:00:00.000Z",
   }],
+  waste: {
+    totalUsd: "180", operatorCancelledUsd: "40", failedUsd: "140",
+    byFailureClass: [
+      { failureClass: "environment", usd: "100", runs: 2 },
+      { failureClass: "timeout", usd: "40", runs: 1 },
+    ],
+  },
+  chains: [
+    {
+      chainId: "slow-chain", chainName: "Slow chain", taskCount: 3, leadMinutes: 131, busyMinutes: 44,
+      busyPct: 33.6, repairs: { gateFix: 1, refreshConflict: 0, reviewFix: 0 }, costUsd: "75",
+      costByRole: { implementation: "50", repair: "25" }, costUnavailableRuns: 0,
+      longestGap: { minutes: 87, beforeTaskName: "Review" }, detailTaskId: "slow-task",
+    },
+    {
+      chainId: "fast-chain", chainName: "Fast chain", taskCount: 2, leadMinutes: 45, busyMinutes: 30,
+      busyPct: 66.7, repairs: { gateFix: 0, refreshConflict: 0, reviewFix: 0 }, costUsd: "120",
+      costByRole: { implementation: "120" }, costUnavailableRuns: 1,
+      longestGap: { minutes: 15, beforeTaskName: null }, detailTaskId: "fast-task",
+    },
+  ],
   ...overrides,
 });
 
 /** Mounts the page against a scripted control plane, reads it, and unmounts.
  *  The unmount is not tidiness: `usePoll` holds a `setInterval`, and a root left
  *  mounted keeps the test process alive forever. */
-const readPage = async (body: CostsReport): Promise<{ text: string; html: string; requested: string[] }> => {
+const readPage = async (body: CostsPageReport): Promise<{ text: string; html: string; requested: string[] }> => {
   const [{ CostsPage }, { ProjectProvider }] = await Promise.all([import("../pages/Costs"), import("../lib/project")]);
   const requested: string[] = [];
   const page = await mountPage(<ProjectProvider><CostsPage /></ProjectProvider>, { "*": ({ input }) => {
@@ -268,14 +291,16 @@ test("an agent with no priced runs shows unavailable cost instead of zero spend"
     totalUsd: "0", estimatedUsd: "0", runCount: 3, costUnavailableRuns: 3, avgUsd: "0", wastedUsd: "0",
     daily: [], topRuns: [], byModel: [],
     byAgent: [{
-      agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0", cachePct: null, wastedUsd: "0",
+      agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0", cachePct: null,
+      cacheUnknownRuns: 3, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
     }],
   }));
   assert.match(text, /codex/);
   assert.match(text, /3 costs unavailable/);
   // Spend, average, cache and waste are all unknown here, and every one of them
   // says so rather than reporting a zero nobody measured.
-  assert.match(text, /codex3 costs unavailable—3———/);
+  assert.match(text, /codex3 costs unavailable—3/);
+  assert.match(text, /3 unknown cache split runs/);
 });
 
 /* --------------------------------------------------------- cache and waste */
@@ -295,25 +320,85 @@ test("a share is taken from the wire amounts, and is null when there is no total
 test("waste is a share of the agent's own spend, and null when it has none", () => {
   assert.equal(wasteShare({
     agent: "dev", usd: "200", runs: 4, costUnavailableRuns: 0, avgUsd: "50",
-    cachePct: null, wastedUsd: "50",
+    cachePct: null, cacheUnknownRuns: 4, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "50",
   }), 25);
   assert.equal(wasteShare({
     agent: "dev", usd: "0", runs: 2, costUnavailableRuns: 2, avgUsd: "0",
-    cachePct: null, wastedUsd: "0",
+    cachePct: null, cacheUnknownRuns: 2, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
   }), null);
 });
 
 test("the by-agent table states a cache rate and a waste rate per agent", async () => {
   const { text } = await readPage(report());
   assert.match(text, /Cache %/);
+  assert.match(text, /Uncached input \$/);
   assert.match(text, /Waste %/);
   // Senior Developer: 72.5% cached, $180 wasted of $1800 spent.
   assert.match(text, /72\.5%/);
+  assert.match(text, /\$24\.50/);
   assert.match(text, /10\.0%/);
-  // Planner reported no cache columns at all, and reports an em dash for it —
-  // not the 0% that would claim it never hit a cache.
+  // Planner has one run whose cache split is unknown. It is counted explicitly,
+  // while the percentage and uncached amount remain unknown.
   assert.match(text, /Planner.*—/s);
+  assert.match(text, /1 unknown cache split run/);
   assert.ok(!/0\.0%\s*0\.0%/.test(text));
+});
+
+test("waste is split into operator cancellations and failed classes", async () => {
+  const { text } = await readPage(report());
+  assert.match(text, /Operator cancellations/);
+  assert.match(text, /\$40\.00/);
+  assert.match(text, /Failures/);
+  assert.match(text, /\$140\.00/);
+  assert.match(text, /2 failure classes/);
+  assert.match(text, /environment/);
+  assert.match(text, /timeout/);
+});
+
+test("chains render lead-time order, role spend and the existing task link", async () => {
+  const { text, html } = await readPage(report());
+  assert.match(text, /Chains/);
+  assert.match(text, /Lead time/);
+  assert.match(text, /Cost by role/);
+  assert.match(text, /Slow chain/);
+  assert.match(text, /Fast chain/);
+  assert.match(text, /Implementation:\$50\.00/);
+  assert.match(text, /Repair:\$25\.00/);
+  assert.match(text, /1 unpriced run/);
+  assert.match(text, /Before Review/);
+  assert.ok(html.includes('href="#/tasks/slow-task"'));
+  assert.ok(html.indexOf("Slow chain") < html.indexOf("Fast chain"), "default order is lead time descending");
+});
+
+test("chain cost sorting puts unknown costs last and preserves lead-time ties", () => {
+  const chains = report().chains!;
+  assert.deepEqual(sortCostChains(chains).map((chain) => chain.chainId), ["slow-chain", "fast-chain"]);
+  assert.deepEqual(sortCostChains(chains, "cost").map((chain) => chain.chainId), ["fast-chain", "slow-chain"]);
+  const markup = renderToStaticMarkup(<ChainsTable chains={chains} />);
+  assert.match(markup, /aria-sort="descending"/);
+});
+
+test("the Cost header sorts the rendered rows by amount, with unpriced chains last", async () => {
+  const unknown = {
+    ...report().chains[0]!,
+    chainId: "unknown-chain",
+    chainName: "Unknown chain",
+    costUsd: null,
+    costUnavailableRuns: 2,
+    leadMinutes: 999,
+  };
+  const page = await mountPage(<ChainsTable chains={[unknown, ...report().chains]} />, {});
+  try {
+    assert.ok((page.container.textContent ?? "").indexOf("Unknown chain") < (page.container.textContent ?? "").indexOf("Slow chain"));
+    await page.press("Cost");
+    const text = page.container.textContent ?? "";
+    assert.ok(text.indexOf("Fast chain") < text.indexOf("Slow chain"));
+    assert.ok(text.indexOf("Slow chain") < text.indexOf("Unknown chain"));
+    const costHead = [...page.container.querySelectorAll("th")].find((node) => node.textContent?.trim() === "Cost");
+    assert.equal(costHead?.getAttribute("aria-sort"), "descending");
+  } finally {
+    await page.dispose();
+  }
 });
 
 /* ------------------------------------------------------------------ by model */

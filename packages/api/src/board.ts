@@ -142,6 +142,7 @@ export type BoardRow = {
       costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
       inputTokens: number | null;
       cachedInputTokens: number | null;
+      cacheCreationInputTokens: number | null;
       outputTokens: number | null;
       startedAt: Date | null;
       endedAt: Date | null;
@@ -578,6 +579,36 @@ export type RepairChainBinding = {
   repairKind: string;
 };
 
+export type RepairMarkerRow = { taskId: string; metadata: Prisma.JsonValue };
+export type RepairBindingTask = { id: string; projectId: string; chainId: string | null };
+
+/** Resolve newest-valid repair markers from already-loaded rows. Readers use
+ * this one rule with different query scopes, so board and Costs cannot disagree
+ * about whether a detached task belongs to a Chain. */
+export const repairChainBindingsFromRows = (
+  repairTasks: ReadonlyArray<{ id: string; projectId: string }>,
+  markerRows: readonly RepairMarkerRow[],
+  regressionTasks: readonly RepairBindingTask[],
+): Map<string, RepairChainBinding> => {
+  const projectByTask = new Map(repairTasks.map((task) => [task.id, task.projectId]));
+  const regressionById = new Map(regressionTasks.map((task) => [task.id, task]));
+  const bindingByRepair = new Map<string, RepairChainBinding>();
+  for (const row of markerRows) {
+    if (bindingByRepair.has(row.taskId)) continue;
+    const marker = markerFromMetadata(row.metadata);
+    const repairProjectId = projectByTask.get(row.taskId);
+    if (!marker?.regressionTaskId || !marker.repairKind || repairProjectId === undefined) continue;
+    const regression = regressionById.get(marker.regressionTaskId);
+    if (!regression?.chainId || regression.projectId !== repairProjectId) continue;
+    bindingByRepair.set(row.taskId, {
+      projectId: regression.projectId,
+      chainId: regression.chainId,
+      repairKind: marker.repairKind,
+    });
+  }
+  return bindingByRepair;
+};
+
 /**
  * Resolves detached repair tasks through their own newest valid marker. Board
  * projection and delete guards share this query so they cannot disagree about
@@ -616,19 +647,7 @@ export const readRepairChainByTask = async (
     },
     select: { id: true, projectId: true, chainId: true },
   });
-  const regressionById = new Map(regressions.map((task) => [task.id, task]));
-  const bindingByRepair = new Map<string, RepairChainBinding>();
-  for (const { taskId, projectId: repairProjectId, marker } of markers) {
-    if (bindingByRepair.has(taskId) || !marker.regressionTaskId || !marker.repairKind) continue;
-    const regression = regressionById.get(marker.regressionTaskId);
-    if (!regression?.chainId || regression.projectId !== repairProjectId) continue;
-    bindingByRepair.set(taskId, {
-      projectId: regression.projectId,
-      chainId: regression.chainId,
-      repairKind: marker.repairKind,
-    });
-  }
-  return bindingByRepair;
+  return repairChainBindingsFromRows(tasks, markerRows, regressions);
 };
 
 /** Follows the Chain-side markers to every detached repair Task they name. */
@@ -817,6 +836,7 @@ const boardChainRows = async (
               costUsd: true,
               inputTokens: true,
               cachedInputTokens: true,
+              cacheCreationInputTokens: true,
               outputTokens: true,
               startedAt: true,
               endedAt: true,
@@ -856,7 +876,8 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
           codexServiceTier: true,
           session: {
             select: {
-              nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true,
+              nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
+              cacheCreationInputTokens: true, outputTokens: true,
               startedAt: true, endedAt: true,
             },
           },

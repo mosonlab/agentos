@@ -13,12 +13,14 @@ import {
   etagMatches,
   readBoard,
   repairBinding,
+  repairChainBindingsFromRows,
   taskChainName,
 } from "./board.js";
 import { chainProgress, type ChainRow } from "./chain.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
-  nativeChildUsed: false, costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
+  nativeChildUsed: false, costUsd: null, inputTokens: null, cachedInputTokens: null,
+  cacheCreationInputTokens: 0, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
 });
 
 const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
@@ -247,6 +249,28 @@ test("a repair task is bound to the chain of the regression task its marker name
     boardCard(row(), null, moveContext, undefined, null, { chainId: "c1", chainName: "Release", repairKind: "review-fix" }).repairOf,
     { chainId: "c1", chainName: "Release", repairKind: "review-fix" },
   );
+});
+
+test("row-based repair binding preserves the board rule for newly introduced repair kinds", () => {
+  const bindings = repairChainBindingsFromRows(
+    [{ id: "repair-1", projectId: "p1" }],
+    [{
+      taskId: "repair-1",
+      metadata: {
+        schemaVersion: 1,
+        kind: "mergeTail.repairAttempt",
+        repairKind: "future-repair",
+        regressionTaskId: "regression-1",
+      },
+    }],
+    [{ id: "regression-1", projectId: "p1", chainId: "chain-1" }],
+  );
+
+  assert.deepEqual(bindings.get("repair-1"), {
+    projectId: "p1",
+    chainId: "chain-1",
+    repairKind: "future-repair",
+  });
 });
 
 test("chainAggregate derives primary progress and every board column from the frontier", () => {
@@ -556,6 +580,22 @@ test("task cost sums every run including failures and marks an estimated summand
   assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
+});
+
+test("board cost preserves its estimate when cache creation is split from cached input", () => {
+  const card = boardCard(row({ runs: [{
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-luna", codexServiceTier: "DEFAULT", budgetGrants: 0,
+    session: session({
+      inputTokens: 160,
+      cachedInputTokens: 100,
+      cacheCreationInputTokens: 50,
+      outputTokens: 10,
+    }),
+  }] }), null, moveContext);
+
+  assert.equal(card.taskCost?.costUsd, "0.000017");
+  assert.equal(card.taskCost?.estimated, true);
+  assert.equal(card.taskCost?.cacheCreationInputTokens, 50);
 });
 
 test("mixed-model native subagent Runs use the pinned Luna estimate", () => {

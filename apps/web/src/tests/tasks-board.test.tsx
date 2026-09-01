@@ -44,10 +44,10 @@ const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}):
 
 test("a card marks estimated cumulative dollars and falls back to token counts", () => {
   assert.match(card({
-    taskCost: { costUsd: "1.45", estimated: true, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
+    taskCost: { costUsd: "1.45", estimated: true, inputTokens: 1_000, cachedInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 50 },
   }), /\$1\.45 est\./);
   const tokens = card({
-    taskCost: { costUsd: null, estimated: false, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
+    taskCost: { costUsd: null, estimated: false, inputTokens: 1_000, cachedInputTokens: 100, cacheCreationInputTokens: null, outputTokens: 50 },
   });
   assert.match(tokens, /1K input/);
   assert.match(tokens, /100 cached/);
@@ -57,7 +57,7 @@ test("a card marks estimated cumulative dollars and falls back to token counts",
 
 test("token fallback uses a bounded wrapping row at both desktop card widths", () => {
   const fallback = card({
-    taskCost: { costUsd: null, estimated: false, inputTokens: 12_345_678, cachedInputTokens: 1_234_567, outputTokens: 987_654 },
+    taskCost: { costUsd: null, estimated: false, inputTokens: 12_345_678, cachedInputTokens: 1_234_567, cacheCreationInputTokens: null, outputTokens: 987_654 },
   });
   for (const cardWidth of [250, 222]) {
     const bounded = `<div style="width:${cardWidth}px">${fallback}</div>`;

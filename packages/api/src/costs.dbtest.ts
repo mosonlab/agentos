@@ -4,9 +4,9 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { PrismaClient } from "@anneal/db";
 
-import { COSTS_TOP_RUNS } from "./costs.js";
+import { COSTS_TOP_RUNS, readProjectCosts } from "./costs.js";
 import { createApp } from "./test-app.js";
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 /**
  * `GET /projects/:projectId/costs` against a real PostgreSQL.
@@ -70,6 +70,7 @@ type RunSpec = {
     costUsd?: string | null;
     inputTokens?: number | null;
     cachedInputTokens?: number | null;
+    cacheCreationInputTokens?: number | null;
     outputTokens?: number | null;
   } | null;
 };
@@ -95,6 +96,10 @@ const seedRun = async (
     ...(spec.subagentModel === true ? { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 } : {}),
   } });
   if (spec.session !== null) {
+    const cacheCreationInputTokens = spec.session !== undefined
+      && Object.hasOwn(spec.session, "cacheCreationInputTokens")
+      ? spec.session.cacheCreationInputTokens ?? null
+      : 0;
     await db.session.create({ data: {
       runId: run.id, projectId, agentId: spec.agentId, taskId: task.id, runner: spec.runner,
       executionStatus: "SUCCEEDED", startedAt: spec.startedAt,
@@ -102,6 +107,7 @@ const seedRun = async (
       costUsd: spec.session?.costUsd ?? null,
       inputTokens: spec.session?.inputTokens ?? null,
       cachedInputTokens: spec.session?.cachedInputTokens ?? null,
+      cacheCreationInputTokens,
       outputTokens: spec.session?.outputTokens ?? null,
     } });
   }
@@ -279,7 +285,8 @@ test("an entirely unpriced agent is explicit rather than indistinguishable from 
 
   const { body } = await call(costsPath(project.id, 7));
   assert.deepEqual(body.byAgent, [{
-    agent: "codex", usd: "0", runs: 1, costUnavailableRuns: 1, avgUsd: "0", cachePct: null, wastedUsd: "0",
+    agent: "codex", usd: "0", runs: 1, costUnavailableRuns: 1, avgUsd: "0", cachePct: null,
+    cacheUnknownRuns: 1, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
   }]);
 });
 
@@ -396,5 +403,88 @@ test("the default window is 30 days and unsupported or malformed values are refu
   for (const malformed of ["7.5", "7junk", "90days"]) {
     const response = await call(`/projects/${project.id}/costs?days=${malformed}&tz=UTC`);
     assert.equal(response.status, 400, malformed);
+  }
+});
+
+test("completed chains survive raw PostgreSQL Task status decoding", async () => {
+  const { project, repo, agent } = await seedProject("costs-completed-chain");
+  const dev = await agent("dev", "Developer");
+  const startedAt = daysAgo(1);
+  const endedAt = new Date(startedAt.getTime() + 5 * 60 * 1000);
+  const task = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Completed chain task",
+    description: "costs",
+    status: "DONE",
+    assigneeAgentId: dev.id,
+    repoId: repo.id,
+    chainId: unique("completed-chain"),
+    chainIndex: 0,
+    chainLayer: 0,
+  } });
+  const run = await db.run.create({ data: {
+    projectId: project.id,
+    taskId: task.id,
+    agentId: dev.id,
+    repoId: repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${task.id}:run:1:completed-chain`,
+    runner: "CLAUDE",
+    status: "SUCCEEDED",
+    model: "claude-opus-5",
+    promptHash: "hash",
+    startedAt,
+    endedAt,
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: project.id,
+    agentId: dev.id,
+    taskId: task.id,
+    runner: "CLAUDE",
+    executionStatus: "SUCCEEDED",
+    startedAt,
+    endedAt,
+    nativeChildUsed: false,
+    costUsd: "1.0000",
+    cacheCreationInputTokens: 0,
+  } });
+
+  const report = await readProjectCosts(db, project.id, 7, "UTC", new Date());
+
+  assert.equal(report.chains.length, 1);
+  assert.equal(report.chains[0]?.chainId, task.chainId);
+  assert.equal(report.chains[0]?.costUsd?.toString(), "1");
+});
+
+test("the 90-day costs read uses one project-wide query per table", async () => {
+  const { project, repo, agent } = await seedProject("costs-query-count");
+  const dev = await agent("dev", "Developer");
+  for (let index = 1; index <= 12; index += 1) {
+    await seedRun(project.id, repo.id, `Historical ${index}`, {
+      agentId: dev.id,
+      model: "claude-opus-5",
+      runner: "CLAUDE",
+      startedAt: daysAgo(index * 5),
+      session: { costUsd: "1.0000" },
+    });
+  }
+
+  const loggedDb = new PrismaClient({
+    datasources: { db: { url: testDatabaseUrl } },
+    log: [{ emit: "event", level: "query" }],
+  });
+  const selectQueries: string[] = [];
+  loggedDb.$on("query", (event) => {
+    if (/^\s*SELECT\b/iu.test(event.query)) selectQueries.push(event.query);
+  });
+  try {
+    const report = await readProjectCosts(loggedDb, project.id, 90, "UTC", new Date());
+    assert.equal(report.runCount, 12);
+    // Task, detached-repair marker, and Run are each loaded once; there is no
+    // per-chain or per-task follow-up query hidden behind the report.
+    assert.equal(selectQueries.length, 3);
+  } finally {
+    await loggedDb.$disconnect();
   }
 });
