@@ -1,7 +1,9 @@
 import {
+  canonicalTemplateIdentity,
   githubRepositoryFromRemote,
   isDirectImplementationStep,
   Prisma,
+  PR_TEMPLATE_NAME,
   stepRole,
 } from "@anneal/db";
 
@@ -39,6 +41,24 @@ export type SpecificationMaterialization = {
   body: string;
 };
 
+/**
+ * Both direct and PR workflows materialize the task brief before their
+ * implementation branch is handed to a runner. Keep this predicate local to
+ * specification fidelity: `isDirectImplementationStep` also drives the
+ * direct-only native-child and revalidation contracts.
+ */
+const isSpecificationMaterializationImplementationStep = (
+  templateStep: Parameters<typeof isDirectImplementationStep>[0],
+): boolean => {
+  if (!templateStep) return false;
+  if (isDirectImplementationStep(templateStep)) return true;
+  const templateName = templateStep.taskTemplate?.name;
+  return templateName !== undefined
+    && canonicalTemplateIdentity(templateName)?.canonicalName === PR_TEMPLATE_NAME
+    && templateStep.outputKind !== undefined
+    && stepRole({ outputKind: templateStep.outputKind }) === "implementation";
+};
+
 /** Prepare the direct-chain brief for runner-owned workspace bootstrap. */
 export const specificationMaterializationForDirectImplementation = (
   task: {
@@ -55,7 +75,7 @@ export const specificationMaterializationForDirectImplementation = (
   branch: string | null,
 ): SpecificationMaterialization | null => {
   if (!task.templateId || !task.chainId
-    || !isDirectImplementationStep(task.templateStep ?? null)
+    || !isSpecificationMaterializationImplementationStep(task.templateStep ?? null)
     || !branch || !isValidBranchName(branch)) return null;
   const parsed = readBrief(task.description, {
     legacyAttachmentsFromPrevious: (task.templateStep?.priorOutputKinds.length ?? 0) > 0,

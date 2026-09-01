@@ -1,6 +1,6 @@
 import { AssigneeType, CodexServiceTier, PrismaClient } from "@prisma/client";
 
-import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
+import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
   applyCanonicalInstallation,
@@ -48,9 +48,10 @@ type HistoricalSeedTemplate = Readonly<{
 }>;
 
 const historicalSeedLegacyName = (
-  templateName: "compound-engineer-workflow" | "direct-engineer-workflow",
+  templateName: "compound-engineer-workflow" | "direct-engineer-workflow" | typeof PR_TEMPLATE_NAME,
   existing: HistoricalSeedTemplate,
 ): string | null => {
+  if (templateName === PR_TEMPLATE_NAME) return null;
   if (templateName === "direct-engineer-workflow") {
     return existing.steps.length === 6
       && existing.steps[5]?.assigneeType === AssigneeType.HUMAN
@@ -173,7 +174,7 @@ const main = async (): Promise<void> => {
       });
     }
   }
-  const canonicalNames = [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME] as const;
+  const canonicalNames = [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME] as const;
   await prisma.$transaction(async (tx) => {
     const installationRows: CanonicalInstallationRow[] = [];
     for (const templateName of canonicalNames) {
@@ -210,7 +211,7 @@ const main = async (): Promise<void> => {
     }
   }, { timeout: 30_000 });
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the eight-step bound-capable direct template.`);
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, the eight-step bound-capable direct template, and the four-step ${PR_TEMPLATE_NAME} pull-request template.`);
 };
 
 try {

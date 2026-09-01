@@ -1,6 +1,6 @@
 import { PrismaClient, Prisma, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
-import { catalogRunnerForModel } from "../src/agent-contract.js";
+import { catalogRunnerForModel, PR_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
   applyCanonicalInstallation,
@@ -70,7 +70,13 @@ const main = async (): Promise<void> => {
       const installationRows: CanonicalInstallationRow[] = [];
       for (const templateName of templateSources.keys()) {
         const rows = await readCanonicalTemplateRows(tx, templateName);
-        if (rows.length === 0) throw new Error(`Template ${templateName} was not found`);
+        // The pull-request-only template was introduced after the original
+        // canonical installation. Its first sync must create it in the
+        // canonical project, while the established templates retain their
+        // fail-loud missing-row contract.
+        if (rows.length === 0 && templateName !== PR_TEMPLATE_NAME) {
+          throw new Error(`Template ${templateName} was not found`);
+        }
         installationRows.push(...rows.map((row) => ({
           ...row,
           name: templateName,
@@ -78,6 +84,17 @@ const main = async (): Promise<void> => {
         })));
       }
       const installationPlan = planCanonicalInstallation(installationRows, templateSources);
+      const prSource = templateSources.get(PR_TEMPLATE_NAME);
+      if (!prSource) throw new Error(`Template ${PR_TEMPLATE_NAME} source was not loaded`);
+      const prRows = installationRows.filter((row) => row.name === PR_TEMPLATE_NAME);
+      const canonicalPrRowPresent = prRows.some((row) => row.projectId === canonicalProject.id);
+      const missingPullRequestTemplatePlan = !canonicalPrRowPresent
+        ? planCanonicalInstallation(
+          [],
+          new Map([[PR_TEMPLATE_NAME, prSource]]),
+          [canonicalProject.id],
+        )
+        : [];
       let createdAgents = 0;
       let createdAgentRepoGrants = 0;
       const regressionRole = rolesByName.get(REGRESSION_AGENT_NAME);
@@ -165,7 +182,11 @@ const main = async (): Promise<void> => {
         }
         createdAgents += 1;
       }
-      const createdCanonicalTemplates = (await applyCanonicalInstallation(tx, installationPlan, templateSources)).created;
+      const createdCanonicalTemplates = (await applyCanonicalInstallation(
+        tx,
+        [...installationPlan, ...missingPullRequestTemplatePlan],
+        templateSources,
+      )).created;
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;

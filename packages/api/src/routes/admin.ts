@@ -11,6 +11,7 @@ import type {
 import { z } from "zod";
 
 import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts } from "../costs.js";
+import { createProjectBootstrap, projectFields, projectInput } from "../project-bootstrap.js";
 import { encryptSecret } from "../secrets.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
@@ -22,12 +23,6 @@ import {
   type RouteDeps,
 } from "./support.js";
 
-const projectFields = {
-  name: z.string().trim().min(1).max(120),
-  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  yamlDocument: z.string(),
-};
-const projectInput = z.object({ ...projectFields, yamlDocument: projectFields.yamlDocument.default("") });
 const projectPatch = z.object(projectFields).partial().refine((value) => Object.keys(value).length > 0);
 
 const environmentFields = {
@@ -54,11 +49,15 @@ const secretPatch = z.object(secretFields).partial().extend({ value: z.string().
 type ProjectResponse = ProjectContract<Date, Prisma.Decimal>;
 type SecretResponse = SecretContract<Date>;
 
-export const registerAdminRoutes = (app: RouteApp, { db }: RouteDeps): void => {
+export const registerAdminRoutes = (app: RouteApp, { db, projectBootstrapLoaders }: RouteDeps): void => {
   app.get("/projects", async (context) => validated(context,
     (await db.project.findMany({ orderBy: { createdAt: "asc" } })) satisfies ProjectResponse[]));
-  app.post("/projects", async (context) => context.json(
-    (await db.project.create({ data: await readJson(context.req.raw, projectInput) })) satisfies ProjectResponse, 201));
+  app.post("/projects", async (context) => {
+    const input = await readJson(context.req.raw, projectInput);
+    const result = await createProjectBootstrap(db, input, projectBootstrapLoaders);
+    if (!result.ok) return context.json({ error: result.message, code: result.code }, 409);
+    return context.json(result.project satisfies ProjectResponse, 201);
+  });
   app.get("/projects/:projectId", async (context) => {
     const project = await db.project.findUnique({ where: { id: id.parse(context.req.param("projectId")) } });
     return project ? context.json(project satisfies ProjectResponse) : context.json({ error: "Project not found" }, 404);

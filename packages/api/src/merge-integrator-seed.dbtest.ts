@@ -29,6 +29,7 @@ import {
   INTEGRATOR_SENTINEL_MODEL,
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
+  PR_TEMPLATE_NAME,
   legacyNineStepTemplateName,
   legacyAdjudicationTemplateName,
   legacyTenStepTemplateName,
@@ -78,7 +79,7 @@ const directTemplate = async () => db.taskTemplate.findUniqueOrThrow({
 
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes the twelve-step and eight-step autonomous merge templates", async () => {
+test("a fresh seed writes the twelve-step, eight-step, and four-step canonical templates", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
@@ -135,13 +136,28 @@ test("a fresh seed writes the twelve-step and eight-step autonomous merge templa
   const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
   assert.equal(resolver.model, "gpt-5.6-sol:high");
   assert.equal(resolver.runnerPreference, "CODEX");
+
+  const pullRequest = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: step.taskTemplate.projectId, name: PR_TEMPLATE_NAME } },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(pullRequest.steps.length, 4);
+  assert.deepEqual(pullRequest.steps.map(({ name }) => name), [
+    "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
+  ]);
+  assert.deepEqual(pullRequest.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
+    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev",
+  ]);
+  assert.deepEqual(pullRequest.steps.map(({ opensPullRequest }) => opensPullRequest), [true, false, false, false]);
+  assert.deepEqual(pullRequest.steps.map(({ requiresCommit }) => requiresCommit), [true, false, false, false]);
+  assert.equal(pullRequest.steps.at(-1)?.outputKind, "fixed-implementation");
 });
 
 test("the verifier passes on a freshly seeded database, and says how many steps it saw", async () => {
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /20 steps across 2 templates/u);
+  assert.match(verified.output, /24 steps across 3 templates/u);
 });
 
 test("re-seeding is idempotent and does not flip the integrator step back", async () => {

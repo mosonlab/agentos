@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { PR_TEMPLATE_NAME } from "@anneal/db";
+
 import {
   normalizeLineEndings,
   prepareSpecificationVerification,
@@ -108,6 +110,30 @@ test("direct implementation materialization uses only the marker-delimited autho
     kind: "direct-implementation",
     path: ".chain/feature/direct/spec.md",
     body: "the exact brief",
+  });
+});
+
+test("PR implementation materialization uses the marker-delimited authoritative brief", () => {
+  const description = composeTemplateTaskDescription({
+    prompt: "Implement the feature below.",
+    featureBrief: "the PR workflow brief",
+    priorOutputKinds: [],
+    outputKind: "implementation",
+  });
+  assert.deepEqual(specificationMaterializationForDirectImplementation({
+    description,
+    templateId: "pr-template",
+    chainId: "pr-chain",
+    templateStep: {
+      stepIndex: 1,
+      outputKind: "implementation",
+      priorOutputKinds: [],
+      taskTemplate: { name: PR_TEMPLATE_NAME },
+    },
+  }, "feature/pr"), {
+    kind: "direct-implementation",
+    path: ".chain/feature/pr/spec.md",
+    body: "the PR workflow brief",
   });
 });
 
@@ -292,6 +318,64 @@ test("direct authority is read from the implementation task and compound authori
   }, "d".repeat(40));
   assert.equal(compound.status, "ready");
   if (compound.status === "ready") assert.equal(new TextDecoder().decode(compound.verification.authoritativeBytes), "approved compound spec");
+});
+
+test("PR review claims prepare identical implementation authority for Sol and blind review", async () => {
+  const brief = "the PR workflow authoritative brief";
+  const implementationDescription = composeTemplateTaskDescription({
+    prompt: "Implement the feature below.",
+    featureBrief: brief,
+    priorOutputKinds: [],
+    outputKind: "implementation",
+  });
+  const tx = {
+    task: { findMany: async () => [{
+      description: implementationDescription,
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
+      stepOutput: null,
+    }] },
+  } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
+  const candidate = (outputKind: "sol-findings" | "blind-findings") => ({
+    task: {
+      id: `pr-${outputKind}`,
+      projectId: "project",
+      templateId: "pr-template",
+      chainId: "pr-chain",
+      chainIndex: outputKind === "sol-findings" ? 2 : 3,
+      description: "review task description must not become authority",
+      templateStep: {
+        stepIndex: outputKind === "sol-findings" ? 2 : 3,
+        outputKind,
+        baseFromStepIndex: 1,
+        taskTemplate: { name: PR_TEMPLATE_NAME },
+      },
+    },
+    repo: { remoteUrl: "git@github.com:acme/repo.git" },
+    branch: "feature/pr",
+  });
+
+  const [sol, blind] = await Promise.all([
+    prepareSpecificationVerification(tx, candidate("sol-findings"), "e".repeat(40)),
+    prepareSpecificationVerification(tx, candidate("blind-findings"), "e".repeat(40)),
+  ]);
+  assert.equal(sol.status, "ready");
+  assert.equal(blind.status, "ready");
+  if (sol.status !== "ready" || blind.status !== "ready") return;
+  assert.deepEqual(sol.verification.authoritativeBytes, blind.verification.authoritativeBytes);
+
+  const reads: Array<{ repository: string; path: string; commitSha: string }> = [];
+  const reader = {
+    readFileAtCommit: async (repository: string, path: string, commitSha: string) => {
+      reads.push({ repository, path, commitSha });
+      return sol.verification.authoritativeBytes;
+    },
+  };
+  assert.equal(await verifyPreparedSpecification(sol.verification, reader, new AbortController().signal), null);
+  assert.equal(await verifyPreparedSpecification(blind.verification, reader, new AbortController().signal), null);
+  assert.deepEqual(reads, [
+    { repository: "acme/repo", path: ".chain/feature/pr/spec.md", commitSha: "e".repeat(40) },
+    { repository: "acme/repo", path: ".chain/feature/pr/spec.md", commitSha: "e".repeat(40) },
+  ]);
 });
 
 test("an unsupported repository remote is refused before repository I/O with a named cause", async () => {

@@ -25,6 +25,7 @@ import {
   assertCanonicalAgentSources,
   catalogRunnerForModel,
   DIRECT_TEMPLATE_NAME,
+  PR_TEMPLATE_NAME,
 } from "../src/agent-contract.js";
 import {
   CANONICAL_TEMPLATE_SOURCE_SPECS,
@@ -301,11 +302,12 @@ test("the direct template sources expose the layered review spine and mechanical
   }
 });
 
-test("the complete template source inventory contains only the twelve-step and direct workflows", async () => {
+test("the complete template source inventory contains exactly the three canonical workflows", async () => {
   const templates = await loadAllTemplateStepSources();
-  assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
+  assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME]);
   assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
   assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 8);
+  assert.equal(templates.get(PR_TEMPLATE_NAME)?.length, 4);
 });
 
 test("the complete template source inventory rejects an unregistered workflow directory", async () => {

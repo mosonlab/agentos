@@ -6,19 +6,20 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 
-import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
+import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
   loadTemplateStepSources,
   templateStepStructureDifferences,
+  type CanonicalTemplateName,
   type PersistedTemplateStepStructure,
 } from "./template-sources.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
 
 const withTemplateCopy = async (
-  templateName: typeof DIRECT_TEMPLATE_NAME | typeof INTEGRATOR_TEMPLATE_NAME,
+  templateName: CanonicalTemplateName,
   mutate: (root: string) => Promise<void>,
   assertion: (root: string) => Promise<void>,
 ): Promise<void> => {
@@ -34,7 +35,7 @@ const withTemplateCopy = async (
 
 const updateFrontmatter = async (
   root: string,
-  templateName: typeof DIRECT_TEMPLATE_NAME | typeof INTEGRATOR_TEMPLATE_NAME,
+  templateName: CanonicalTemplateName,
   filename: string,
   replace: (source: string) => string,
 ): Promise<void> => {
@@ -131,6 +132,105 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
   }
+});
+
+test("the pull-request workflow source exposes its exact four-step graph and prompt contract", async () => {
+  const steps = await loadTemplateStepSources(PR_TEMPLATE_NAME);
+  assert.deepEqual(
+    steps.map((step) => ({
+      name: step.name,
+      stepIndex: step.stepIndex,
+      layer: step.layer,
+      agent: step.agentName,
+      approvalGate: step.approvalGate,
+      outputKind: step.outputKind,
+      priorOutputKinds: step.priorOutputKinds,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      baseFromStepIndex: step.baseFromStepIndex,
+      spawnPolicy: step.spawnPolicy,
+    })),
+    [
+      {
+        name: "Implementation",
+        stepIndex: 1,
+        layer: 1,
+        agent: "senior-dev-luna",
+        approvalGate: false,
+        outputKind: "implementation",
+        priorOutputKinds: [],
+        attachmentsFromPrevious: false,
+        opensPullRequest: true,
+        requiresCommit: true,
+        baseFromStepIndex: null,
+        spawnPolicy: null,
+      },
+      {
+        name: "Code review (Sol)",
+        stepIndex: 2,
+        layer: 2,
+        agent: "review-coordinator-sol",
+        approvalGate: false,
+        outputKind: "sol-findings",
+        priorOutputKinds: ["implementation"],
+        attachmentsFromPrevious: true,
+        opensPullRequest: false,
+        requiresCommit: false,
+        baseFromStepIndex: 1,
+        spawnPolicy: null,
+      },
+      {
+        name: "Code review (Opus blind)",
+        stepIndex: 3,
+        layer: 2,
+        agent: "review-coordinator-opus",
+        approvalGate: false,
+        outputKind: "blind-findings",
+        priorOutputKinds: [],
+        attachmentsFromPrevious: false,
+        opensPullRequest: false,
+        requiresCommit: false,
+        baseFromStepIndex: 1,
+        spawnPolicy: null,
+      },
+      {
+        name: "Apply review fixes",
+        stepIndex: 4,
+        layer: 3,
+        agent: "senior-dev",
+        approvalGate: false,
+        outputKind: "fixed-implementation",
+        priorOutputKinds: ["sol-findings", "blind-findings"],
+        attachmentsFromPrevious: true,
+        opensPullRequest: false,
+        requiresCommit: false,
+        baseFromStepIndex: null,
+        spawnPolicy: null,
+      },
+    ],
+  );
+
+  const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
+  assert.deepEqual(
+    steps.slice(1).map(({ prompt }) => prompt),
+    direct.slice(2, 5).map(({ prompt }) => prompt),
+  );
+
+  const implementationPrompt = steps[0]!.prompt;
+  assert.match(implementationPrompt, /task description[^.]*specification of record/u);
+  assert.match(implementationPrompt, /\.chain\/\{\{branchName\}\}\/spec\.md/u);
+  assert.match(implementationPrompt, /leaves that file untouched/u);
+  assert.match(implementationPrompt, /commit/u);
+  for (const field of ["schemaVersion", "headSha", "baseSha", "summary", "testsRun"]) {
+    assert.match(implementationPrompt, new RegExp(field, "u"));
+  }
+  assert.match(implementationPrompt, /exactly one.*implementation.*JSON output object/u);
+  assert.match(implementationPrompt, /publication and pull-request creation to the platform/u);
+  assert.doesNotMatch(implementationPrompt, /child|Route|revalidat/u);
+
+  const source = await readFile(join(templatesRoot, PR_TEMPLATE_NAME, "01-implementation.md"), "utf8");
+  assert.equal(implementationPrompt, source.slice(source.indexOf("\n---\n", 4) + 5).trim());
 });
 
 test("the canonical Regression v2 schema preserves an optional gate failure excerpt", () => {

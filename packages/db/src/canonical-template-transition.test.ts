@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
@@ -260,6 +261,16 @@ test("bound direct revalidation is a registered structural rollover", async () =
     "pre-revalidate-step",
   );
   assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
+});
+
+test("the pull-request workflow has current ordinals without a retired generation", () => {
+  assert.deepEqual(LEGACY_TEMPLATE_GENERATIONS[PR_TEMPLATE_NAME], []);
+  assert.deepEqual(canonicalStepOrdinals(PR_TEMPLATE_NAME, null), {
+    implementation: 1,
+    "sol-findings": 2,
+    "blind-findings": 3,
+    "fixed-implementation": 4,
+  });
 });
 
 test("the internal npm scope rename is a registered prompt-only rollover", async () => {
