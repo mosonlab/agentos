@@ -1,0 +1,145 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { LocaleProvider } from "../lib/i18n";
+import { ProjectProvider } from "../lib/project";
+import { storage } from "../lib/storage";
+import { ThemeProvider } from "../lib/theme";
+import type { InboxMessage } from "../lib/types";
+import { mountPage, type PageRoutes } from "./dom-harness";
+
+const PROJECT = { id: "p-selected", name: "Selected project", slug: "selected-project" };
+const PROJECTS = [PROJECT];
+const now = "2026-08-26T00:00:00.000Z";
+
+const deployNotice: InboxMessage = {
+  id: "deploy-1", from: "AGENT", dismissible: true, agentId: null, sessionId: null,
+  taskId: null, goalId: null, gateTaskId: null, artifactTaskId: null, threadId: "thread-1",
+  replyToMessageId: null, kind: "TEXT", body: "[auto-deploy] success: old -> cb46e4a; reason=deployed",
+  choices: null, selectedChoiceId: null, status: "CLOSED", channel: "FEISHU",
+  deliveryStatus: "DELIVERED", deliveryAttempts: 1, lastDeliveryError: null,
+  createdAt: now, answeredAt: now, decisions: [], replies: [],
+};
+
+const plainMessage: InboxMessage = {
+  ...deployNotice,
+  id: "message-1",
+  body: "A project-scoped message",
+  status: "OPEN",
+  answeredAt: null,
+};
+
+const selectedProjectRoutes = (messages: InboxMessage[] = [plainMessage]): PageRoutes => ({
+  "/projects": PROJECTS,
+  "/projects/p-selected/agents": [],
+  "/inbox/messages?projectId=p-selected": messages,
+  "/inbox/messages/summary?projectId=p-selected": { needsReply: 1 },
+});
+
+const emptyProjectRoutes = (): PageRoutes => ({
+  "/projects": [],
+  "/inbox/messages": [],
+  "/inbox/messages/summary": { needsReply: 0 },
+});
+
+const prepareSelection = (projectId: string | null) => (): void => {
+  if (projectId === null) storage.remove("agentos.projectId");
+  else storage.set("agentos.projectId", projectId);
+};
+
+test("InboxPage scopes its messages request and still renders a global deploy notice", async () => {
+  const [{ InboxPage }] = await Promise.all([import("../pages/Inbox")]);
+  const page = await mountPage(
+    <ProjectProvider><InboxPage /></ProjectProvider>,
+    selectedProjectRoutes([deployNotice]),
+    "http://127.0.0.1:5173/inbox",
+    prepareSelection("p-selected"),
+  );
+  try {
+    assert.ok(page.requests.some(({ path }) => path === "/inbox/messages?projectId=p-selected"));
+    assert.match(page.container.textContent ?? "", /cb46e4a/);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("InboxThreadPage scopes its messages request to the selected project", async () => {
+  const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="message-1" /></ProjectProvider>,
+    selectedProjectRoutes(),
+    "http://127.0.0.1:5173/inbox/message-1",
+    prepareSelection("p-selected"),
+  );
+  try {
+    assert.ok(page.requests.some(({ path }) => path === "/inbox/messages?projectId=p-selected"));
+    assert.match(page.container.textContent ?? "", /A project-scoped message/);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("Shell scopes the Inbox summary request to the selected project", async () => {
+  const [{ Shell }] = await Promise.all([import("../components/Shell")]);
+  const page = await mountPage(
+    <ThemeProvider><LocaleProvider initialLocale="en"><ProjectProvider><Shell><div /></Shell></ProjectProvider></LocaleProvider></ThemeProvider>,
+    selectedProjectRoutes(),
+    "http://127.0.0.1:5173/tasks",
+    prepareSelection("p-selected"),
+  );
+  try {
+    assert.ok(page.requests.some(({ path }) => path === "/inbox/messages/summary?projectId=p-selected"));
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("InboxPage, InboxThreadPage, and Shell retain unfiltered paths without a project", async () => {
+  const [{ InboxPage, InboxThreadPage }, { Shell }] = await Promise.all([
+    import("../pages/Inbox"),
+    import("../components/Shell"),
+  ]);
+
+  const inbox = await mountPage(
+    <ProjectProvider><InboxPage /></ProjectProvider>,
+    emptyProjectRoutes(),
+    "http://127.0.0.1:5173/inbox",
+    prepareSelection(null),
+  );
+  try {
+    assert.ok(inbox.requests.some(({ path }) => path === "/inbox/messages"));
+    assert.equal(inbox.requests.some(({ path }) => path.includes("projectId=")), false);
+  } finally {
+    await inbox.dispose();
+  }
+
+  const thread = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="missing" /></ProjectProvider>,
+    emptyProjectRoutes(),
+    "http://127.0.0.1:5173/inbox/missing",
+    prepareSelection(null),
+  );
+  try {
+    assert.ok(thread.requests.some(({ path }) => path === "/inbox/messages"));
+    assert.equal(thread.requests.some(({ path }) => path.includes("projectId=")), false);
+  } finally {
+    await thread.dispose();
+  }
+
+  const shell = await mountPage(
+    <ThemeProvider><LocaleProvider initialLocale="en"><ProjectProvider><Shell><div /></Shell></ProjectProvider></LocaleProvider></ThemeProvider>,
+    emptyProjectRoutes(),
+    "http://127.0.0.1:5173/tasks",
+    prepareSelection(null),
+  );
+  try {
+    assert.ok(shell.requests.some(({ path }) => path === "/inbox/messages/summary"));
+    assert.equal(shell.requests.some(({ path }) => path.includes("projectId=")), false);
+  } finally {
+    await shell.dispose();
+    storage.remove("agentos.projectId");
+  }
+});

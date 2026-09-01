@@ -6,7 +6,7 @@ import type { PrismaClient } from "@anneal/db";
 import { createApp as createLiveApp } from "./app.js";
 import { defaultControlPlaneStateDir } from "./control-plane-state.js";
 import type { ReleaseMergeLease } from "./merge-lease.js";
-import type { preflightOnboardingRepository } from "./onboarding-preflight.js";
+import type { preflightOnboardingRepository, RepositoryPreflight } from "./onboarding-preflight.js";
 import type { ProjectBootstrapLoaders } from "./project-bootstrap.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
 import { defaultWorkspaceRoot } from "./workspace-root.js";
@@ -78,6 +78,7 @@ const assertRootIsDisposable = (root: string): string => {
 export const createApp = (db: PrismaClient, options: {
   workspaceRoot?: string;
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
+  repositoryPreflight?: RepositoryPreflight;
   projectBootstrapLoaders?: Partial<ProjectBootstrapLoaders>;
   releaseMergeLease?: ReleaseMergeLease;
   specificationReader?: SpecificationReader | null;
@@ -95,6 +96,7 @@ export const createApp = (db: PrismaClient, options: {
   return createLiveApp(db, {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
     onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
+    repositoryPreflight: options.repositoryPreflight ?? (async () => {}),
     ...(options.projectBootstrapLoaders === undefined ? {} : { projectBootstrapLoaders: options.projectBootstrapLoaders }),
     releaseMergeLease: options.releaseMergeLease ?? (async () => {}),
     specificationReader: options.specificationReader ?? null,
