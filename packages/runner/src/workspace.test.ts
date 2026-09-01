@@ -1,20 +1,48 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chown, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chown, chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import { runCommand } from "./exec.js";
 import {
-  cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
+  cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
   type WorkspaceCommandExecutor, type WorkspaceProvisionClaim,
 } from "./workspace.js";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+const canonicalRuntimeTools = [
+  ["regression-verification.sh", "../../../scripts/regression-verification.sh"],
+  ["gate-worker/gate-dispatch.sh", "../../../scripts/gate-worker/gate-dispatch.sh"],
+  ["gate-worker/lib.sh", "../../../scripts/gate-worker/lib.sh"],
+  ["gate-worker/mirror-push.sh", "../../../scripts/gate-worker/mirror-push.sh"],
+  ["gate-worker/remote-gate.sh", "../../../scripts/gate-worker/remote-gate.sh"],
+] as const;
+
+const createRuntimeToolsFixture = async (): Promise<string> => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-source-"));
+  await mkdir(join(root, "gate-worker"));
+  const sourceRoot = dirname(fileURLToPath(import.meta.url));
+  await Promise.all(canonicalRuntimeTools.map(async ([relativePath, sourcePath]) => {
+    const target = join(root, relativePath);
+    await copyFile(resolve(sourceRoot, sourcePath), target);
+  }));
+  return root;
+};
+
+const pathWithFailingCommand = async (root: string, command: "cp" | "chmod"): Promise<string> => {
+  const bin = join(root, `${command}-fails`);
+  await mkdir(bin);
+  await writeFile(join(bin, command), `#!/bin/sh\n/bin/${command} "$@"\nexit 73\n`);
+  await chmod(join(bin, command), 0o755);
+  return `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+};
 
 /**
  * Faking git means faking a repository, but the mirror's bookkeeping — its
@@ -616,6 +644,9 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
       // overlaps its workspace root.
       assert.equal(scratch.stateDir.startsWith(`${scratch.workspaceRoot}${sep}`), false);
       assert.equal(scratch.workspaceRoot.startsWith(`${scratch.stateDir}${sep}`), false);
+      assert.equal(scratch.toolsDir, join(scratch.base, "tools"));
+      assert.equal(scratch.toolsDir.startsWith(`${scratch.workspaceRoot}${sep}`), false);
+      assert.equal(scratch.toolsDir.startsWith(`${scratch.stateDir}${sep}`), false);
 
       for (const directory of [scratch.workspaceRoot, scratch.stateDir]) {
         const info = await stat(directory);
@@ -639,6 +670,180 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
     await assert.rejects(stat(scratch.base));
   });
 }
+
+for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
+  const label = runAsPrefix.length > 0 ? "behind a run-as launcher" : "directly";
+  test(`materializes the release-local runtime tools outside the checkout ${label}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-"));
+    const sourceRoot = await createRuntimeToolsFixture();
+    const config = {
+      workspaceRoot: join(root, "checkout-root"),
+      runAsPrefix,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+    } as unknown as RunnerConfig;
+    const scratch = await provisionAgentScratch(config);
+    try {
+      // A checkout may contain the canonical copies; the materializer still
+      // writes only into the release-local scratch directory.
+      const checkout = join(root, "checkout");
+      await mkdir(checkout, { recursive: true });
+      for (const [relativePath, sourcePath] of canonicalRuntimeTools) {
+        const target = join(checkout, "scripts", relativePath);
+        await mkdir(dirname(target), { recursive: true });
+        await copyFile(resolve(dirname(fileURLToPath(import.meta.url)), sourcePath), target);
+      }
+      await materializeRuntimeTools(config, scratch, { sourceRoot });
+
+      assert.equal(scratch.toolsDir, join(scratch.base, "tools"));
+      assert.equal(scratch.toolsDir.startsWith(`${checkout}${sep}`), false);
+      assert.deepEqual(
+        (await readdir(scratch.toolsDir)).sort(),
+        ["gate-worker", "regression-verification.sh"],
+      );
+      assert.deepEqual(
+        (await readdir(join(scratch.toolsDir, "gate-worker"))).sort(),
+        ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh"],
+      );
+      for (const [relativePath] of canonicalRuntimeTools) {
+        assert.deepEqual(
+          await readFile(join(sourceRoot, relativePath)),
+          await readFile(join(scratch.toolsDir, relativePath)),
+          relativePath,
+        );
+        assert.equal((await stat(join(scratch.toolsDir, relativePath))).mode & 0o777, 0o500);
+      }
+      assert.equal((await stat(scratch.toolsDir)).mode & 0o777, 0o700);
+      assert.equal((await stat(join(scratch.toolsDir, "gate-worker"))).mode & 0o777, 0o700);
+    } finally {
+      await cleanupAgentScratch(config, scratch);
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+    await assert.rejects(stat(scratch.toolsDir));
+  });
+}
+
+test("runtime-tool materialization rejects collisions, absent sources, copy failures, and chmod failures", async () => {
+  const cases: Array<{ name: string; prepare: (sourceRoot: string, scratch: Awaited<ReturnType<typeof provisionAgentScratch>>, root: string) => Promise<RunnerConfig> }> = [
+    {
+      name: "an existing destination",
+      prepare: async (_sourceRoot, scratch) => {
+        await mkdir(scratch.toolsDir);
+        await writeFile(join(scratch.toolsDir, "sentinel"), "must remain untouched\n");
+        return {
+          workspaceRoot: scratch.base,
+          runAsPrefix: [],
+          path: process.env.PATH ?? "/usr/bin:/bin",
+          home: scratch.base,
+        } as unknown as RunnerConfig;
+      },
+    },
+    {
+      name: "a missing source file",
+      prepare: async (sourceRoot, scratch) => {
+        await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+        return {
+          workspaceRoot: scratch.base,
+          runAsPrefix: [],
+          path: process.env.PATH ?? "/usr/bin:/bin",
+          home: scratch.base,
+        } as unknown as RunnerConfig;
+      },
+    },
+    {
+      name: "a wrong source file type",
+      prepare: async (sourceRoot, scratch) => {
+        await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+        await mkdir(join(sourceRoot, "gate-worker", "lib.sh"));
+        return {
+          workspaceRoot: scratch.base,
+          runAsPrefix: [],
+          path: process.env.PATH ?? "/usr/bin:/bin",
+          home: scratch.base,
+        } as unknown as RunnerConfig;
+      },
+    },
+    {
+      name: "a copy failure",
+      prepare: async (_sourceRoot, scratch, root) => ({
+        workspaceRoot: scratch.base,
+        runAsPrefix: [],
+        path: await pathWithFailingCommand(root, "cp"),
+        home: scratch.base,
+      } as unknown as RunnerConfig),
+    },
+    {
+      name: "a chmod failure",
+      prepare: async (_sourceRoot, scratch, root) => ({
+        workspaceRoot: scratch.base,
+        runAsPrefix: [],
+        path: await pathWithFailingCommand(root, "chmod"),
+        home: scratch.base,
+      } as unknown as RunnerConfig),
+    },
+  ];
+
+  for (const failureCase of cases) {
+    const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-failure-"));
+    const sourceRoot = await createRuntimeToolsFixture();
+    const baseConfig = {
+      workspaceRoot: join(root, "checkout-root"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+    } as unknown as RunnerConfig;
+    const scratch = await provisionAgentScratch(baseConfig);
+    try {
+      const configured = await failureCase.prepare(sourceRoot, scratch, root);
+      await assert.rejects(
+        materializeRuntimeTools(configured, scratch, { sourceRoot }),
+        /runtime tools materialization|failed|expected/u,
+        failureCase.name,
+      );
+      if (failureCase.name === "an existing destination") {
+        assert.equal(await readFile(join(scratch.toolsDir, "sentinel"), "utf8"), "must remain untouched\n");
+      } else {
+        await assert.rejects(stat(scratch.toolsDir), /ENOENT/u, failureCase.name);
+      }
+    } finally {
+      await cleanupAgentScratch(baseConfig, scratch);
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime-tool materialization never falls back to copies in the project checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-no-fallback-"));
+  const sourceRoot = await createRuntimeToolsFixture();
+  const checkout = join(root, "checkout");
+  const config = {
+    workspaceRoot: checkout,
+    runAsPrefix: [],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home: root,
+  } as unknown as RunnerConfig;
+  await mkdir(checkout);
+  for (const [relativePath, sourcePath] of canonicalRuntimeTools) {
+    const target = join(checkout, "scripts", relativePath);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(resolve(dirname(fileURLToPath(import.meta.url)), sourcePath), target);
+  }
+  const scratch = await provisionAgentScratch(config);
+  try {
+    await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+    await assert.rejects(
+      materializeRuntimeTools(config, scratch, { sourceRoot }),
+      /expected a regular file/u,
+    );
+    await assert.rejects(stat(scratch.toolsDir), /ENOENT/u);
+  } finally {
+    await cleanupAgentScratch(config, scratch);
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Codex session config contains only the platform baseline and host auth, then deletes on success", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-codex-config-"));
@@ -754,7 +959,7 @@ test("a distinct run-as uid can create and read its Codex config root", {
     assert.equal((await stat(join(scratch.configRoot, "auth.json"))).uid, targetUid);
     assert.equal(execFileSync("/usr/bin/sudo", ["-n", "-u", targetUser, "--", "/bin/cat", join(scratch.configRoot, "auth.json")], { encoding: "utf8" }), '{"tokens":"target-only"}\n');
     await cleanupAgentScratch(config, scratch);
-    for (const removed of [scratch.configRoot, configParent, scratch.workspaceRoot, scratch.stateDir, scratch.base]) {
+    for (const removed of [scratch.configRoot, configParent, scratch.workspaceRoot, scratch.stateDir, scratch.toolsDir, scratch.base]) {
       await assert.rejects(stat(removed), /ENOENT/u);
     }
   } finally {

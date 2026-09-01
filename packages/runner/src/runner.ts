@@ -48,7 +48,7 @@ import { openSessionConfig, type SessionConfigLease } from "./session-config-lea
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
-  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
+  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
   type AgentScratch, type Workspace, type WorkspaceSnapshot,
 } from "./workspace.js";
@@ -148,6 +148,7 @@ const preflightEvidence = (message: string): ExitEvidence => ({
 });
 
 export type ExecuteClaimDependencies = {
+  materializeRuntimeTools?: typeof materializeRuntimeTools;
   provisionSessionConfig?: typeof provisionSessionConfig;
   cleanupAgentScratch?: typeof cleanupAgentScratch;
   writeSessionCredentials?: typeof writeSessionCredentials;
@@ -337,6 +338,7 @@ export const executeClaim = async (
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
+    await (dependencies.materializeRuntimeTools ?? materializeRuntimeTools)(config, scratch);
     sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies);
     await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
       reuse: claim.resume !== null,
