@@ -392,6 +392,35 @@ test("the retired repository CLI is absent from snapshot authority", () => {
   assert.equal(globs.some((glob) => glob === "packages/cli" || glob.startsWith("packages/cli/")), false);
 });
 
+const PROJECT_MERGE_GATE_MANIFEST_ENTRIES = [
+  "docs/repo-contract/merge-gate.sh",
+  "scripts/repo-contract-merge-gate.test.mjs",
+];
+
+test("the project merge-gate contract and proof are published by exact name", () => {
+  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
+  const included = new Set(manifest.include.map((entry) => entry.glob));
+  for (const path of PROJECT_MERGE_GATE_MANIFEST_ENTRIES) {
+    assert.equal(included.has(path), true, `${path} must be published by exact name`);
+    assert.equal(scopeFor(path, manifest).classification, "included", `${path} must classify as included`);
+    assert.equal(
+      execFileSync("git", ["ls-files", path]).toString("utf8").trim(),
+      path,
+      `${path} must be tracked, not merely present on disk`,
+    );
+  }
+  assert.equal(
+    included.has("docs/runbooks/add-a-project.md"),
+    true,
+    "the add-project runbook must remain published by exact name",
+  );
+  assert.equal(
+    scopeFor("docs/runbooks/add-a-project.md", manifest).classification,
+    "included",
+    "the add-project runbook must remain classified as included",
+  );
+});
+
 test("the docs surface is closed and named one file at a time", () => {
   const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
   const docs = manifest.include.map((entry) => entry.glob).filter((glob) => glob.startsWith("docs/"));
