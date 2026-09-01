@@ -209,7 +209,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     const taskOutput = run.task?.stepOutput;
     const outputPersisted = taskOutput?.runId === run.id;
     const outputSatisfiedByPriorRun = Boolean(
-      taskOutput
+      run.task && taskOutput
       && !outputPersisted
       && outputIsImmutableOncePersisted(run.task.templateStep),
     );
