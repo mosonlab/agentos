@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient } from "@anneal/db";
+import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient, RunStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -225,6 +225,7 @@ const prepareReviewReport = async (
   await db.run.update({ where: { id: run.id }, data: {
     status: "SUCCEEDED",
     baseSha: baseSha,
+    headSha: headSha,
     startedAt: now,
     endedAt: now,
   } });
@@ -238,6 +239,63 @@ const prepareReviewReport = async (
   } });
   await db.task.update({ where: { id: task.id }, data: { status: "DONE" } });
   return { task, run };
+};
+
+const prepareFixedImplementation = async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const fix = await queueCanonicalStep(template, repo.id, 8);
+  const sol = await prepareReviewReport(fix.chain, 6, "sol-findings", REVIEWED_HEAD);
+  const blind = await prepareReviewReport(fix.chain, 7, "blind-findings", REVIEWED_HEAD);
+  const claimed = await claim();
+  assert.equal(claimed.run.id, fix.run.id);
+  const fixedHead = "a".repeat(40);
+  const closed = (id: string) => ({
+    id,
+    status: "CLOSED",
+    codeEvidence: `fixed ${id}`,
+    testEvidence: `covered ${id}`,
+  });
+  const body = {
+    schemaVersion: 1,
+    headSha: fixedHead,
+    sourceHead: REVIEWED_HEAD,
+    dispositions: [
+      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+      { id: UNIQUE_BLIND_FINDING.id, disposition: "REJECTED", reason: "follow-up only" },
+    ],
+    closedFindings: [closed(UNIQUE_PREDECESSOR_FINDING.id)],
+    testsRun: ["focused"],
+    residualRisks: [],
+  };
+  const write = () => createApp(db).request(`/session/runs/${fix.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: claimed.fencingToken,
+      kind: "fixed-implementation",
+      body: JSON.stringify(body),
+      commitSha: fixedHead,
+    }),
+  });
+  return { fix, sol, blind, write };
+};
+
+const addSuccessfulReviewRetry = async (
+  review: Awaited<ReturnType<typeof prepareReviewReport>>,
+  headSha: string,
+) => {
+  await db.run.update({ where: { id: review.run.id }, data: { status: RunStatus.LOST } });
+  await db.task.update({ where: { id: review.task.id }, data: { status: "TODO" } });
+  const retry = await db.$transaction((tx) => enqueueTaskRun(tx as never, review.task.id));
+  const now = new Date();
+  await db.run.update({ where: { id: retry.id }, data: {
+    status: RunStatus.SUCCEEDED,
+    headSha,
+    startedAt: now,
+    endedAt: now,
+  } });
+  await db.task.update({ where: { id: review.task.id }, data: { status: "DONE" } });
+  return retry;
 };
 
 test("blind session cannot read Sol evidence before or after its immutable report", async () => {
@@ -374,6 +432,32 @@ test("the fix step claims both immutable reports and cannot rewrite either", asy
   });
   assert.equal(operatorRewrite.status, 409);
   assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } })).body, originalSol.body);
+});
+
+test("a fixed implementation accepts a review output authored by a LOST Run after a matching successful retry", async () => {
+  const { sol, write } = await prepareFixedImplementation();
+  await addSuccessfulReviewRetry(sol, REVIEWED_HEAD);
+
+  const response = await write();
+  assert.equal(response.status, 200, await response.text());
+});
+
+test("a fixed implementation refuses when the only matching review Run failed", async () => {
+  const { sol, write } = await prepareFixedImplementation();
+  await db.run.update({ where: { id: sol.run.id }, data: { status: RunStatus.FAILED, headSha: REVIEWED_HEAD } });
+
+  const response = await write();
+  assert.equal(response.status, 409);
+  assert.match(await response.text(), /sibling output is not backed by a successful completed Run/u);
+});
+
+test("a fixed implementation refuses when no successful review Run matches the output commit", async () => {
+  const { sol, write } = await prepareFixedImplementation();
+  await db.run.update({ where: { id: sol.run.id }, data: { status: RunStatus.SUCCEEDED, headSha: "f".repeat(40) } });
+
+  const response = await write();
+  assert.equal(response.status, 409);
+  assert.match(await response.text(), /sibling output is not backed by a successful completed Run/u);
 });
 
 
