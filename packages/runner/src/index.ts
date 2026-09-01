@@ -6,8 +6,6 @@ import {
 } from "@anneal/db/service-lock";
 import { config as loadEnvironment } from "dotenv";
 
-import type { RunnerConfig } from "./config.js";
-
 loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true });
 
 // Before the config, the token check and the adapters: whichever of those fails,
@@ -96,10 +94,7 @@ const reclaim = async (): Promise<void> => {
   }
 };
 
-// `claimMaxLoadAverage` is added to RunnerConfig by the configuration change
-// in this chain. Keep this adapter buildable against the starting snapshot so
-// the polling-loop change can be integrated independently.
-await runPollingLoop(config as RunnerConfig & { claimMaxLoadAverage: number }, {
+await runPollingLoop(config, {
   reclaim,
   claim: () => pollForTask(config),
   shouldStop: () => stopping,
