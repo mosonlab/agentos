@@ -590,6 +590,7 @@ test("a fenced SESSION stopped result lands its question in the activity transac
     taskActivity: {
       create: async () => resultActivity,
       findUnique: async () => resultActivity,
+      findMany: async () => [],
     },
     inboxMessage: {
       findFirst: async () => null,
