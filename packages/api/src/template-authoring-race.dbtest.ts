@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AssigneeType,
+  DependencyProvisioning,
   Prisma,
   PrismaClient,
   RunnerKind,
@@ -67,6 +68,7 @@ const seed = async (label: string) => {
       name: "race-repo",
       remoteUrl: "https://example.test/race.git",
       mountPath: "/repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   for (const agent of [implementationAgent, reviewAgent]) {

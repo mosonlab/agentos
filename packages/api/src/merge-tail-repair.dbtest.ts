@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import {
   AssigneeType,
+  DependencyProvisioning,
   INTEGRATOR_TEMPLATE_NAME,
   legacyTemplateName,
   PrismaClient,
@@ -65,7 +66,7 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
   ]);
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "widgets", remoteUrl: "https://github.com/acme/widgets.git",
-    mountPath: "/repo", defaultBranch: "main",
+    mountPath: "/repo", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   for (const agent of [regressionAgent, resolverAgent, fixAgent, reviewAgent, librarianAgent]) {
     await db.agentRepoAccess.create({ data: {

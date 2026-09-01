@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -36,6 +36,7 @@ test("mixed literal-NUL events persist in order without PostgreSQL 22P05", async
     } });
     const repo = await db.repo.create({ data: {
       projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     } });
     const task = await db.task.create({ data: {
       projectId: project.id, name: "Event task", description: "event ingestion", assigneeAgentId: agent.id, repoId: repo.id,

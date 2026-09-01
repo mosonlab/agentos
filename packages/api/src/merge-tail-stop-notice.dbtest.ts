@@ -6,6 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AssigneeType,
+  DependencyProvisioning,
   enqueueTaskRun,
   FailureClass,
   PrismaClient,
@@ -72,6 +73,7 @@ const seedInvalidHandoffRegression = async () => {
     remoteUrl: "https://example.test/widgets.git",
     mountPath: "/repo",
     defaultBranch: "main",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { backfillTaskSource, backfilledFireId, PrismaClient } from "@anneal/db";
+import { backfillTaskSource, backfilledFireId, DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import {
   dbDirectory,
@@ -190,7 +190,7 @@ test("batch 2.5 migrations install the backlog status, the visibility columns, a
 test("webhook foreign keys set a deleted secret null and restrict repo deletion", async () => {
   const project = await db.project.create({ data: { name: "Migration", slug: `migration-${Date.now()}` } });
   const secret = await db.secret.create({ data: { name: `secret-${Date.now()}`, encryptedValue: "x", purpose: "WEBHOOK" } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   const template = await db.taskTemplate.create({
     data: { projectId: project.id, name: "template", description: "test", variables: [], webhookSecretId: secret.id, webhookRepoId: repo.id },
   });
@@ -211,7 +211,7 @@ const seedExecutor = async (label: string) => {
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   return { project, agent, repo };
 };
 

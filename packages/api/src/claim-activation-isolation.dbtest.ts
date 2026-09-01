@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   enqueueTaskRun,
+  DependencyProvisioning,
   FailureClass,
   PrismaClient,
   RunStatus,
@@ -72,6 +73,7 @@ const seedCandidates = async (options: {
     name: "claim-activation-repo",
     remoteUrl: "https://example.test/claim-activation.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

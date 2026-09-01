@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   AssigneeType,
   type ChangedFile,
+  DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MergeLeaseEventState,
   MERGE_TAIL_KIND,
@@ -166,6 +167,7 @@ const seedReadiness = async () => {
     remoteUrl: "https://github.com/acme/widgets.git",
     mountPath: "/repo",
     defaultBranch: "main",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   for (const agent of [regressionAgent, reviewAgent, integratorAgent]) {
     await db.agentRepoAccess.create({ data: {
