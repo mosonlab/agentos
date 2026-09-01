@@ -197,6 +197,8 @@ test("a first-deployment mirror dry-run describes creation without pushing into 
   writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
   cpSync(mirrorPushPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"));
   cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
+  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  cpSync(runGatePath, join(repo, "scripts", "gate-worker", "run-gate.sh"));
   git(repo, "init", "-q", "-b", "main");
   git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/agentos-public.git");
   git(repo, "add", "-A");
@@ -246,6 +248,30 @@ exec bash -c "$*"
   assert.match(result.stdout, /would create the bare mirror/);
   assert.match(result.stdout, /MIRROR PUSH: DRY RUN OK/);
   assert.equal(existsSync(join(fakeHome, "gate", "agentos-public", "mirror.git")), false);
+});
+
+test("mirror push refuses a checkout without the worker harness before transport", (t) => {
+  const root = scratch(t);
+  const repo = join(root, "source");
+  mkdirSync(join(repo, "scripts"), { recursive: true });
+  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
+  writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  for (const name of ["mirror-push.sh", "lib.sh"]) {
+    cpSync(toolPath(name), join(repo, "packages", "runner", "runtime-tools", "gate-worker", name));
+  }
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/missing-harness.git");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "fixture");
+  const oid = git(repo, "rev-parse", "HEAD");
+
+  const result = spawnSync(
+    "bash",
+    [join(repo, "packages", "runner", "runtime-tools", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid, "--dry-run"],
+    { cwd: repo, encoding: "utf8", env: { ...FIXTURE_ENV, AGENTOS_WORKSPACE_PATH: repo } },
+  );
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /has no scripts\/gate-worker\/run-gate\.sh; the worker harness must be repository-owned/u);
 });
 
 test("mirror push retries two transient push failures before succeeding", (t) => {

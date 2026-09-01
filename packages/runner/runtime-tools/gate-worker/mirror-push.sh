@@ -128,6 +128,9 @@ git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 # A repository without it has nothing for the worker to run.
 [ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
   || die "${REPO_ROOT} has no scripts/merge-gate.sh; the worker gates repositories that ship their own gate"
+RUN_GATE_SOURCE="${REPO_ROOT}/scripts/gate-worker/run-gate.sh"
+[ -f "$RUN_GATE_SOURCE" ] \
+  || die "${REPO_ROOT} has no scripts/gate-worker/run-gate.sh; the worker harness must be repository-owned"
 git -C "$REPO_ROOT" cat-file -e "${CANDIDATE_OID}^{commit}" 2>/dev/null \
   || die "candidate ${CANDIDATE_OID} is not in ${REPO_ROOT}"
 git -C "$REPO_ROOT" cat-file -e "${BASELINE_OID}^{commit}" 2>/dev/null \
@@ -276,12 +279,11 @@ printf '\n== Installing the gate harness\n'
 # lib.sh before run-gate.sh, because run-gate.sh sources it: the order is what
 # keeps the installed harness runnable at every instant of an install rather
 # than only at the end of one.
-for harness_file in lib.sh run-gate.sh; do
-  if [ "$harness_file" = "lib.sh" ]; then
-    harness_source="${SCRIPT_DIR}/lib.sh"
-  else
-    harness_source="${REPO_ROOT}/scripts/gate-worker/run-gate.sh"
-  fi
+harness_files=(lib.sh run-gate.sh)
+harness_sources=("${SCRIPT_DIR}/lib.sh" "$RUN_GATE_SOURCE")
+for harness_index in 0 1; do
+  harness_file="${harness_files[$harness_index]}"
+  harness_source="${harness_sources[$harness_index]}"
   harness_tmp_name="${harness_file}.tmp.$$.${RANDOM}"
   remote_harness_tmp="${SERVER}:${REPO_HOME}/${harness_tmp_name}"
 

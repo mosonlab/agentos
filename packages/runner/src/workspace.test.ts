@@ -841,6 +841,11 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
       // project checkout contents do not participate in this operation.
       const checkout = join(root, "checkout");
       await mkdir(checkout, { recursive: true });
+      for (const [relativePath] of canonicalRuntimeTools) {
+        const decoy = join(checkout, "packages", "runner", "runtime-tools", relativePath);
+        await mkdir(dirname(decoy), { recursive: true });
+        await writeFile(decoy, "checkout decoy must not be used\n");
+      }
       await materializeRuntimeTools(config, scratch, { sourceRoot });
 
       assert.equal(scratch.toolsDir, join(scratch.base, "tools"));
@@ -973,9 +978,11 @@ test("runtime-tool materialization never falls back to copies in the project che
     home: root,
   } as unknown as RunnerConfig;
   await mkdir(checkout);
-  const checkoutDecoy = join(checkout, "runtime-tools", "gate-worker", "lib.sh");
-  await mkdir(dirname(checkoutDecoy), { recursive: true });
-  await writeFile(checkoutDecoy, "checkout decoy must not be used\n");
+  for (const [relativePath] of canonicalRuntimeTools) {
+    const decoy = join(checkout, "packages", "runner", "runtime-tools", relativePath);
+    await mkdir(dirname(decoy), { recursive: true });
+    await writeFile(decoy, "checkout decoy must not be used\n");
+  }
   const scratch = await provisionAgentScratch(config);
   try {
     await rm(join(sourceRoot, "gate-worker", "lib.sh"));

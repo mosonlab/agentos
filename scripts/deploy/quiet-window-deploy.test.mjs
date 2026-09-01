@@ -704,6 +704,34 @@ test("artifact verification rejects missing, extra, non-regular, and misplaced r
       writeFileSync(join(source, "runtime-tools/unexpected.sh"), "unexpected\n");
     },
   });
+  assertRuntimeInventoryFailure({
+    artifactPaths: [...completePaths, "runtime-tool-alias"],
+    mutate: (source) => {
+      symlinkSync("packages/runner/dist/runtime-tools", join(source, "runtime-tool-alias"));
+    },
+  });
+});
+
+test("artifact verification accepts an unrelated nested lib.sh", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-unrelated-lib-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  writeFileSync(join(source, "packages/db/src/lib.sh"), "unrelated fixture\n");
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
+      optionalArtifactPaths: [],
+    });
+    assert.doesNotThrow(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
 });
 
 test("artifact verification rejects an incomplete DB maintenance runtime before activation", () => {

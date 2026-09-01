@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { join, sep } from "node:path";
 
 import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
@@ -21,23 +21,10 @@ const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
   "gate-worker/mirror-push.sh",
   "gate-worker/remote-gate.sh",
 ]);
-const RUNTIME_TOOL_NAMES = new Set(RUNTIME_TOOL_DESTINATIONS.map((destination) => destination.split("/").at(-1)));
-
-const runtimeToolEntries = () => {
-  const entries = new Map([["", new Set()], ["gate-worker", new Set()]]);
-  for (const destination of RUNTIME_TOOL_DESTINATIONS) {
-    const components = destination.split("/");
-    const directory = components.slice(0, -1).join("/");
-    if (!entries.has(directory) || components.length === 0) {
-      throw new Error(`invalid runtime-tool destination: ${destination}`);
-    }
-    entries.get(directory).add(components.at(-1));
-  }
-  entries.get("").add("gate-worker");
-  return entries;
-};
-
-const RUNTIME_TOOL_ENTRIES = runtimeToolEntries();
+const RUNTIME_TOOL_ENTRIES = new Map([
+  ["", new Set(["gate-worker", "regression-verification.sh"])],
+  ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh"])],
+]);
 
 const fail = (reason, detail) => {
   throw new DeployFailure(reason, detail);
@@ -72,7 +59,6 @@ const assertRuntimeToolFile = (releaseDirectory, relativePath) => {
 const sortedEntryNames = (path) => readdirSync(path, { withFileTypes: true }).map(({ name }) => name).sort();
 
 const assertRuntimeToolInventory = (releaseDirectory) => {
-  if (RUNTIME_TOOL_DESTINATIONS.length !== 5) runtimeFailure("runtime-tools-count-mismatch");
   const runtimeRoot = join(releaseDirectory, RUNTIME_TOOL_ROOT);
   assertRuntimeToolDirectory(releaseDirectory, RUNTIME_TOOL_ROOT);
   for (const [directory, expectedNames] of RUNTIME_TOOL_ENTRIES) {
@@ -90,17 +76,26 @@ const assertRuntimeToolInventory = (releaseDirectory) => {
     }
   }
 
-  // Runtime tools are runner-owned. An internally consistent release must not
-  // smuggle a second tree into another artifact or leave one of the five
-  // uniquely named tools at a different path.
+  // Runtime tools are runner-owned. Reject another runtime-tools component or
+  // a symlink alias to the canonical tree, without treating an unrelated file
+  // that happens to share a generic basename (such as lib.sh) as tooling.
+  const canonicalRuntimeRoot = realpathSync(runtimeRoot);
   const walk = (directory, prefix) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (relativePath === RUNTIME_TOOL_ROOT) continue;
-      if (relativePath.split("/").includes("runtime-tools") || RUNTIME_TOOL_NAMES.has(entry.name)) {
-        runtimeFailure(`misplaced-${relativePath}`);
+      if (relativePath.split("/").includes("runtime-tools")) runtimeFailure(`misplaced-${relativePath}`);
+      const entryPath = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        const resolved = realpathSync(entryPath);
+        if (resolved === canonicalRuntimeRoot || resolved.startsWith(`${canonicalRuntimeRoot}${sep}`)) {
+          runtimeFailure(`misplaced-${relativePath}`);
+        }
       }
-      if (entry.isDirectory()) walk(join(directory, entry.name), relativePath);
+      // Dependency trees are independent artifacts and cannot be a runner
+      // bundle destination. Avoid turning their size or basenames into deploy
+      // verification inputs.
+      if (entry.isDirectory() && entry.name !== "node_modules") walk(entryPath, relativePath);
     }
   };
   walk(releaseDirectory, "");
