@@ -38,7 +38,7 @@ export const ArchivedRow = ({ task, onUnarchive }: { task: TaskList; onUnarchive
       <TableCell>{chainMarker(task.chainProgress) ?? "—"}</TableCell>
       <TableCell>{formatDateTime(task.archivedAt)}</TableCell>
       <TableCell className={TABLE_TIGHT}>
-        <RowMenu items={[{ label: t("archived.menu.unarchive"), onSelect: () => onUnarchive(task) }]} />
+        <RowMenu items={[{ label: t(task.chainId === null ? "archived.menu.unarchive" : "archived.menu.unarchiveChain"), onSelect: () => onUnarchive(task) }]} />
       </TableCell>
     </TableRow>
   );

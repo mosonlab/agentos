@@ -109,6 +109,7 @@ export const en = {
   "agents.tools.toggle": "Enable {tool}",
   "archived.empty": "Nothing archived yet.",
   "archived.menu.unarchive": "Unarchive",
+  "archived.menu.unarchiveChain": "Unarchive chain",
   "archived.table.agent": "Agent",
   "archived.table.archived": "Archived",
   "archived.table.chain": "Chain",

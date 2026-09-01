@@ -593,7 +593,57 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
 - Required path parameter: `projectId`.
 - Required JSON fields: `name`, `remoteUrl`.
 - Optional JSON fields: `mountPath` (default `repo`), `defaultBranch`
-  (default `main`), `credentialSecretId` (default `null`).
+  (default `main`), `credentialSecretId` (default `null`), and `grantAgents`
+  (default `false`).
+- `remoteUrl` is validated as the raw submitted string before any trim or
+  transform. The onboarding remote policy accepts HTTPS without userinfo,
+  `ssh://` and scp-like SSH remotes with no account or the `git` account, and
+  local `file:///` remotes. It rejects whitespace, control characters,
+  query/fragment data, option-like values, unsupported schemes or SSH
+  accounts, missing hosts or paths, and values over the maximum length. This
+  ordinary Repo route deliberately applies onboarding's SSH-account
+  restriction too.
+- `defaultBranch` is defaulted to `main` and must pass the API's
+  `isValidBranchName` policy. A rejected remote returns `400 Bad Request`
+  with exactly:
+
+  ```json
+  { "error": "Repository remote is invalid", "code": "repository-remote-invalid", "reason": "<parseRepoRemote rejection reason>" }
+  ```
+
+  A rejected branch returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository default branch is invalid", "code": "repository-default-branch-invalid" }
+  ```
+
+  Neither refusal echoes the rejected value, opens the Repo/grant transaction,
+  or invokes repository preflight. A duplicate `(projectId, name)` returns
+  `409 Conflict` with exactly `{ "error": "Unique constraint violated" }`.
+- After validation and before the database transaction opens, the route runs
+  repository preflight against `{ remoteUrl, defaultBranch }`. The preflight
+  uses the API host's ambient Git identity and credentials for its identity,
+  remote/default-branch, fetch, and dry-run-push checks; it never receives,
+  reads, or decrypts `credentialSecretId` (that field's existing Secret
+  existence/enabled validation is unchanged). A preflight refusal returns
+  `422 Unprocessable Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-preflight-failed", "reason": "<existing failure reason>" }
+  ```
+
+  The possible reasons are `git-unavailable`, `git-identity-missing`,
+  `remote-unreachable`, `default-branch-missing`, `push-not-authorized`, and
+  `command-timeout`. Other failures use the existing error path. Preflight is
+  never skipped as a success fallback.
+- With `grantAgents: false` or when omitted, a successful request returns
+  `201 Created` with the created Repo row itself (the existing response
+  shape), and creates no grants. With `grantAgents: true`, the same transaction
+  creates one `GIT_WRITE` `AgentRepoAccess` for every active Project Agent
+  (`archivedAt: null`) except `INTEGRATOR_AGENT_NAME`; each grant uses the
+  created Repo's `mountPath`. The response is `201 Created` with exactly
+  `{ "repo": <created Repo row>, "grants": <created access rows> }`. Any
+  Repo or grant write failure rolls back the Repo and all grants.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
@@ -1234,6 +1284,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATO
 ### POST `/tasks/:taskId/archive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, archives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1242,6 +1293,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERA
 ### POST `/tasks/:taskId/unarchive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, unarchives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/unarchive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1345,7 +1397,13 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
 ### GET `/inbox/messages`
 
 - Required parameters: none.
-- Optional query: `projectId`.
+- Optional query parameter: `projectId`.
+- With `projectId`, the list includes messages whose Agent, Task, Goal, or
+  Session belongs to that Project, plus global messages whose
+  `agentId`, `taskId`, `goalId`, and `sessionId` are all `null` (including
+  history whose nullable relation was removed; all four relation ids are
+  `null` for these global rows). It retains top-level-message
+  behavior. With no `projectId`, the list remains unfiltered by Project.
 
 ```sh
 curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1354,7 +1412,12 @@ curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer 
 ### GET `/inbox/messages/summary`
 
 - Required parameters: none.
-- Returns the small global count used by the sidebar: `{ "needsReply": number }`.
+- Optional query parameter: `projectId`.
+- With `projectId`, the summary applies its existing open, top-level,
+  needs-reply rule to the same Project-plus-global scope as the list: a
+  related Agent, Task, Goal, or Session belongs to that Project, or all four
+  relation ids are `null`. With no `projectId`, it remains unfiltered by
+  Project. The response is `{ "needsReply": number }`.
 
 ```sh
 curl "$BASE_URL/inbox/messages/summary" -H "Authorization: Bearer $OPERATOR_TOKEN"

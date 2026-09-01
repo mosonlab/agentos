@@ -26,17 +26,18 @@ for required in AGENTOS_RUN_ID AGENTOS_WORKSPACE_PATH AGENTOS_PULL_REQUEST_BASE;
   require_env "$required"
 done
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" \
+  || die "cannot resolve the regression tooling directory"
 cd "$AGENTOS_WORKSPACE_PATH" || die "cannot enter AGENTOS_WORKSPACE_PATH"
 git check-ref-format --branch "$AGENTOS_PULL_REQUEST_BASE" >/dev/null 2>&1 \
   || die "AGENTOS_PULL_REQUEST_BASE is not a valid branch"
 
-SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_FILE="${AGENTOS_REGRESSION_STATE:-$AGENTOS_WORKSPACE_PATH/.git/agentos-regression-state}"
 OUTPUT_FILE="$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"
-GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_ROOT/scripts/gate-worker/gate-dispatch.sh}"
+GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_DIR/gate-worker/gate-dispatch.sh}"
 GATE_LOG=""
 # shellcheck source=scripts/gate-worker/lib.sh
-. "$SCRIPT_ROOT/scripts/gate-worker/lib.sh"
+. "$SCRIPT_DIR/gate-worker/lib.sh"
 
 cleanup() {
   [ -z "$GATE_LOG" ] || rm -f -- "$GATE_LOG"
@@ -390,7 +391,8 @@ finalize() {
   for attempt in 1 2 3; do
     : > "$gate_log"
     gate_status=0
-    "$GATE_DISPATCH" "$current" --master "$BASE_HEAD_SHA" > "$gate_log" 2>&1 \
+    AGENTOS_RUN_SCOPE_BYPASS=regression-verification \
+      "$GATE_DISPATCH" "$current" --master "$BASE_HEAD_SHA" > "$gate_log" 2>&1 \
       || gate_status=$?
     case "$gate_status" in
       75|76)

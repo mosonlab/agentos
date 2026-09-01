@@ -77,7 +77,7 @@ import { activityInput } from "../run-lifecycle.js";
 import { OPERATOR_NOTE_METADATA_FIELD } from "../run-claim.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
-import { hasActiveRun, isLiveStatus, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
+import { isLiveStatus, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
 import { readCommitted } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
@@ -567,19 +567,37 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return refusal("not-found", "Task not found");
-      if (await hasActiveRun(tx, taskId)) {
+      const taskIds = locked.chainId === null
+        ? [taskId]
+        : (await tx.task.findMany({
+            where: { projectId: locked.projectId, chainId: locked.chainId },
+            select: { id: true },
+          })).map((task) => task.id);
+      const activeRuns = await tx.run.count({
+        where: { taskId: { in: taskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+      });
+      if (activeRuns > 0) {
         return refusal("conflict", "Cannot archive a task with an active run");
       }
-      if (locked.status === TaskStatus.REVIEW) {
-        const open = await tx.inboxMessage.count({ where: { gateTaskId: taskId, status: InboxStatus.OPEN } });
+      const tasks = await tx.task.findMany({
+        where: { id: { in: taskIds } },
+        select: { id: true, status: true, archivedAt: true },
+      });
+      const reviewIds = tasks.filter((task) => task.status === TaskStatus.REVIEW).map((task) => task.id);
+      if (reviewIds.length > 0) {
+        const open = await tx.inboxMessage.count({
+          where: { gateTaskId: { in: reviewIds }, status: InboxStatus.OPEN },
+        });
         if (open > 0) return refusal("conflict", "Decide the approval gate in the Inbox first");
       }
-      if (locked.archivedAt !== null) {
-        return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
+      const archiveIds = tasks.filter((task) => task.archivedAt === null).map((task) => task.id);
+      if (archiveIds.length > 0) {
+        await tx.task.updateMany({ where: { id: { in: archiveIds } }, data: { archivedAt: new Date() } });
+        await tx.taskActivity.createMany({ data: archiveIds.map((archivedTaskId) => ({
+          taskId: archivedTaskId, actorType: "operator", body: "Task archived",
+        })) });
       }
-      const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: new Date() } });
-      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task archived" } });
-      return { task };
+      return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
     });
     if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
@@ -599,16 +617,34 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return refusal("not-found", "Task not found");
-      if (locked.archivedAt === null) {
-        return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
-      }
-      if (isLiveStatus(locked.status)) {
-        const blocked = await reactivationBlocked(tx, locked);
+      const taskIds = locked.chainId === null
+        ? [taskId]
+        : (await tx.task.findMany({
+            where: { projectId: locked.projectId, chainId: locked.chainId },
+            select: { id: true },
+          })).map((task) => task.id);
+      const tasks = await tx.task.findMany({
+        where: { id: { in: taskIds } },
+        select: { id: true, status: true, archivedAt: true, projectId: true, assigneeAgentId: true },
+      });
+      const reactivating = tasks
+        .filter((task) => task.archivedAt !== null && isLiveStatus(task.status))
+        .sort((left, right) => (
+          (left.assigneeAgentId ?? "").localeCompare(right.assigneeAgentId ?? "")
+          || left.id.localeCompare(right.id)
+        ));
+      for (const task of reactivating) {
+        const blocked = await reactivationBlocked(tx, task);
         if (blocked) return refusal("conflict", blocked);
       }
-      const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: null } });
-      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
-      return { task };
+      const unarchiveIds = tasks.filter((task) => task.archivedAt !== null).map((task) => task.id);
+      if (unarchiveIds.length > 0) {
+        await tx.task.updateMany({ where: { id: { in: unarchiveIds } }, data: { archivedAt: null } });
+        await tx.taskActivity.createMany({ data: unarchiveIds.map((unarchivedTaskId) => ({
+          taskId: unarchivedTaskId, actorType: "operator", body: "Task unarchived",
+        })) });
+      }
+      return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
     });
     if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
