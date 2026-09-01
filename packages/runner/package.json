@@ -6,18 +6,22 @@
   "exports": {
     "./adapters": {
       "types": "./src/adapters.ts",
+      "development": "./src/adapters.ts",
       "import": "./dist/adapters.js"
     },
     "./api": {
       "types": "./src/api.ts",
+      "development": "./src/api.ts",
       "import": "./dist/api.js"
     },
     "./reclaim": {
       "types": "./src/reclaim.ts",
+      "development": "./src/reclaim.ts",
       "import": "./dist/reclaim.js"
     },
     "./config": {
       "types": "./src/config.ts",
+      "development": "./src/config.ts",
       "import": "./dist/config.js"
     }
   },
