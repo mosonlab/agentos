@@ -221,6 +221,7 @@ const PR_FINAL_OUTPUT_KINDS = [
 
 type PrImplementationArtifact = {
   headSha: string;
+  baseSha: string;
   summary: string;
   testsRun: string[];
 };
@@ -310,6 +311,8 @@ const validatePrReviewHandoff = (
     throw new Error("canonical PR output commit SHA does not match its body headSha");
   }
   if (sol.headSha !== blind.headSha
+    || implementation.headSha !== sol.headSha
+    || implementation.baseSha !== sol.reviewedBase
     || sol.reviewedHead !== sol.headSha
     || blind.reviewedHead !== blind.headSha
     || fixed.sourceHead !== sol.headSha
@@ -350,7 +353,8 @@ const requiredPrOutputs = (
     if (!output || output.kind !== expectedKind) {
       throw new Error(`canonical PR workflow output evidence is missing or out of order at ${expectedKind}`);
     }
-    if (typeof output.taskId !== "string" || !Number.isInteger(output.chainIndex)
+    if (typeof output.taskId !== "string" || output.taskId.trim().length === 0
+      || !Number.isInteger(output.chainIndex) || output.chainIndex <= 0
       || typeof output.body !== "string" || typeof output.commitSha !== "string") {
       throw new Error(`malformed ${expectedKind} canonical output evidence`);
     }
@@ -365,8 +369,12 @@ const requiredPrOutputs = (
   if (!final && outputs[0]!.taskId !== claim.task.id) {
     throw new Error("implementation canonical output evidence belongs to another Task");
   }
-  if (claim.task.chainId === undefined || claim.task.chainId === null || claim.task.chainId.length === 0) {
+  if (claim.task.chainId === undefined || claim.task.chainId === null || claim.task.chainId.trim().length === 0) {
     throw new Error("canonical PR workflow requires a non-null chain identity");
+  }
+  if (claim.task.chainIndex === undefined || claim.task.chainIndex === null
+    || !Number.isInteger(claim.task.chainIndex) || claim.task.chainIndex <= 0) {
+    throw new Error("canonical PR workflow requires a non-null chain index");
   }
   if (claim.task.chainIndex !== undefined && claim.task.chainIndex !== null
     && current.chainIndex !== claim.task.chainIndex) {
@@ -563,7 +571,7 @@ export const deliverWorkspace = async (
       const currentOutput = canonicalOutputs?.at(-1);
       const currentArtifact = canonicalFinal ? fixedArtifact : implementationArtifact;
       if (!currentOutput || !currentArtifact || currentOutput.commitSha !== head || currentArtifact.headSha !== head) {
-        const reason = `${canonicalOutputKind(claim)} canonical output does not match current workspace HEAD`;
+        const reason = `${canonicalPrOutputKind(claim)} canonical output does not match current workspace HEAD`;
         const error = new Error(reason);
         return {
           pushStatus: "FAILED",
@@ -574,7 +582,13 @@ export const deliverWorkspace = async (
         };
       }
     }
-    if (head === workspace.baseSha && requiresCommit) return noChangesProduced(workspace.branch, remote);
+    // A canonical PR output is durable evidence for a retry after the same
+    // head was already published. Such a retry must be able to repair the PR
+    // body without inventing a second commit; ordinary required-commit Runs
+    // retain the no-change refusal.
+    if (head === workspace.baseSha && requiresCommit && !canonicalPr) {
+      return noChangesProduced(workspace.branch, remote);
+    }
   } catch (error: unknown) {
     const message = messageOf(error);
     return {
@@ -677,8 +691,26 @@ export const deliverWorkspace = async (
       ({ timeoutMs }) => command("gh", args, workspace.path, env, { timeoutMs }),
       { ...retryOptions, ...(inherited.deadline === undefined ? {} : { deadline: inherited.deadline }) },
     );
-    const parsed = JSON.parse(raw || "[]") as Array<{ url: string; number: number }>;
-    return parsed[0] ?? null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw || "[]");
+    } catch (error: unknown) {
+      throw new Error(`gh pr list returned malformed JSON: ${messageOf(error)}`, { cause: error });
+    }
+    if (!Array.isArray(parsed)) throw new Error("gh pr list returned a non-array response");
+    const first = parsed[0];
+    if (first === undefined) return null;
+    if (!first || typeof first !== "object" || Array.isArray(first)
+      || typeof (first as { url?: unknown }).url !== "string"
+      || (first as { url: string }).url.trim().length === 0
+      || !Number.isInteger((first as { number?: unknown }).number)
+      || (first as { number: number }).number <= 0) {
+      throw new Error("gh pr list returned a malformed open pull request");
+    }
+    return {
+      url: (first as { url: string }).url,
+      number: (first as { number: number }).number,
+    };
   };
   const editPullRequestBody = async (
     pullRequest: { url: string; number: number },
