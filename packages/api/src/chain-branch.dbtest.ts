@@ -1239,6 +1239,7 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
       base: join(root, "scratch"),
       workspaceRoot: join(root, "scratch", "workspaces"),
       stateDir: join(root, "scratch", "state"),
+      toolsDir: join(root, "scratch", "tools"),
       configRoot: join(root, "scratch", "config"),
     }, workspace.path, workspace.commitHooksPath);
     await writeFile(join(workspace.path, "claimed.txt"), "claimed chain work\n");

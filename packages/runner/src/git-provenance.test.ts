@@ -136,6 +136,7 @@ const providerEnvironment = (configured: RunnerConfig, claimed: ClaimedTask, wor
     base: join(configured.workspaceRoot, "scratch"),
     workspaceRoot: join(configured.workspaceRoot, "scratch", "workspaces"),
     stateDir: join(configured.workspaceRoot, "scratch", "state"),
+    toolsDir: join(configured.workspaceRoot, "scratch", "tools"),
     configRoot: join(configured.workspaceRoot, "scratch", "config"),
   }, workspace.path, workspace.commitHooksPath);
 

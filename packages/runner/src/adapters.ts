@@ -150,6 +150,8 @@ export const buildChildEnvironment = (
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
   return {
     ...taskSecrets,
+    // The runner owns all three paths/counts and sets them after task Secrets.
+    AGENTOS_TOOLS: scratch.toolsDir,
     AGENTOS_HOST_PROOF_SLOT_DIR: hostProofSlotDirectory(config),
     AGENTOS_HOST_PROOF_SLOTS: String(config.hostProofSlots),
     ...workspaceEnvironment(config),

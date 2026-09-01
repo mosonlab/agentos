@@ -142,10 +142,18 @@ if [ -n "$SSH_PORT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+
+if [ -z "${AGENTOS_WORKSPACE_PATH:-}" ]; then
+  no_verdict "AGENTOS_WORKSPACE_PATH is required"
+fi
+[ -d "$AGENTOS_WORKSPACE_PATH" ] \
+  || no_verdict "AGENTOS_WORKSPACE_PATH is not a directory: $AGENTOS_WORKSPACE_PATH"
+REPO_ROOT="$(CDPATH= cd -- "$AGENTOS_WORKSPACE_PATH" && pwd -P)" \
+  || no_verdict "cannot enter AGENTOS_WORKSPACE_PATH: $AGENTOS_WORKSPACE_PATH"
+export AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
 
 # Nothing here forms a verdict, so nothing here may exit 1: a precondition that
 # fails means no gate ran, and lib.sh's GATE_EXIT_NO_VERDICT is the code for
