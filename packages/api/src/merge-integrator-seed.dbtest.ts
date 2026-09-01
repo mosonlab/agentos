@@ -333,6 +333,10 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
     "git ls-files -- .chain",
   );
   assert.notEqual(reviewedPrompt, fixed.prompt);
+  await db.taskTemplateStep.updateMany({
+    where: { taskTemplateId: template.id },
+    data: { provisionDependencies: true },
+  });
   await db.taskTemplateStep.update({ where: { id: fixed.id }, data: { prompt: reviewedPrompt } });
   const reviewedSteps = await db.taskTemplateStep.findMany({
     where: { taskTemplateId: template.id },
@@ -440,6 +444,10 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
   // node one index and one layer further out.
   const oldTasks: Task[] = [];
   for (const template of [direct, compound]) {
+    await db.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
     let historicalSteps = template.steps;
     if (template.name === DIRECT_TEMPLATE_NAME) {
       const revalidation = historicalSteps.find((step) => step.outputKind === "revalidation");
