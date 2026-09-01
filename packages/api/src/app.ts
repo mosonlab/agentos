@@ -27,6 +27,7 @@ import { registerSystemRoutes } from "./routes/system.js";
 import { registerTasksRoutes } from "./routes/tasks.js";
 import { registerTemplateRoutes } from "./routes/templates.js";
 import { createRunnerRegistry } from "./runners.js";
+import { defaultProjectBootstrapLoaders } from "./project-bootstrap.js";
 import {
   createAppendFencedActivityHandler,
   refusal,
@@ -106,6 +107,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const routeDeps: RouteDeps = {
     db,
     options,
+    projectBootstrapLoaders: {
+      ...defaultProjectBootstrapLoaders,
+      ...options.projectBootstrapLoaders,
+    },
     releaseChainLease,
     runners,
     appendFencedActivity,

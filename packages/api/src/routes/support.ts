@@ -17,6 +17,7 @@ import type { SpecificationReader } from "../specification-fidelity.js";
 import { createRunnerRegistry } from "../runners.js";
 import { appendRunActivity, fencedActivityInput } from "../run-lifecycle.js";
 import type { Principal } from "../auth.js";
+import type { ProjectBootstrapLoaders } from "../project-bootstrap.js";
 import { refusalResponse, type Refusal, type RefusalDetail, type RefusalReason } from "../refusal.js";
 import type { preflightOnboardingRepository } from "../onboarding-preflight.js";
 
@@ -28,11 +29,14 @@ export interface LiveAppOptions {
   releaseMergeLease?: ReleaseMergeLease;
   /** Repository content capability used to verify materialized review specs. */
   specificationReader?: SpecificationReader | null;
+  /** Source loaders used by POST /projects; injectable for route tests. */
+  projectBootstrapLoaders?: Partial<ProjectBootstrapLoaders>;
 }
 
 export type RouteDeps = {
   db: PrismaClient;
   options: LiveAppOptions;
+  projectBootstrapLoaders: ProjectBootstrapLoaders;
   releaseChainLease: ReleaseMergeLease;
   runners: ReturnType<typeof createRunnerRegistry>;
   appendFencedActivity: ReturnType<typeof createAppendFencedActivityHandler>;
