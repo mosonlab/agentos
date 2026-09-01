@@ -676,17 +676,6 @@ export const executeClaim = async (
         });
       }
     }
-    await drainEventsUnderLease(runLease);
-    if (!runLease.held) {
-      const authority = await runLease.checkpoint();
-      if (!authority.held && (authority.reason === "cancelled" || authority.reason === "waiting-inbox")) return;
-      const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
-      const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-      await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
-        console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
-      });
-      return;
-    }
     let prWorkflowOutputs: readonly PrWorkflowOutput[] | undefined;
     const templateStep = claim.task.templateStep as (NonNullable<ClaimedTask["task"]["templateStep"]> & {
       taskTemplate?: { name?: string };
@@ -710,6 +699,21 @@ export const executeClaim = async (
           payload: { message: errorMessage(error) },
         });
       }
+    }
+    // Flush the handoff failure (if any) before checking authority or entering
+    // delivery. This status read happens after the provider's final events, so
+    // placing it after the existing drain would leave the new diagnostic event
+    // queued and then lose it when the run completes.
+    await drainEventsUnderLease(runLease);
+    if (!runLease.held) {
+      const authority = await runLease.checkpoint();
+      if (!authority.held && (authority.reason === "cancelled" || authority.reason === "waiting-inbox")) return;
+      const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
+      const { salvage: _salvage, ...cleanupOutcome } = cleaned;
+      await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+        console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
+      });
+      return;
     }
     // A validated, fenced Regression handoff is the step's terminal product
     // only when the provider did not explicitly reject the session. Transport
