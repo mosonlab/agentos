@@ -731,6 +731,30 @@ export const completeRun = async (
               reason: outputRefusal,
             },
           } });
+        } else if (
+          existingOutput?.runId
+          && existingOutput.runId !== run.id
+          && outputIsImmutableOncePersisted(run.task.templateStep)
+        ) {
+          // Findings are immutable once authored. When a retry's completion
+          // validates the prior Run's exact artifact, retain that row and
+          // leave an explicit control-plane record of why this Run may still
+          // advance the chain. The refusal helper above is the authority for
+          // kind, head, and body validation; this branch only narrates its
+          // successful prior-Run ownership exception.
+          await tx.taskActivity.create({ data: {
+            taskId: run.taskId,
+            actorType: "control-plane",
+            body: `Canonical task output satisfied by prior Run ${existingOutput.runId}`,
+            metadata: {
+              kind: "canonicalTaskOutput.priorRunSatisfied",
+              schemaVersion: 1,
+              runId: run.id,
+              priorRunId: existingOutput.runId,
+              outputKind: existingOutput.kind,
+              commitSha: existingOutput.commitSha,
+            },
+          } });
         }
         canonicalOutputFailure = outputRefusal;
       }

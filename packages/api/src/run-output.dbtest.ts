@@ -814,12 +814,14 @@ test("a run that authored nothing is re-queued even when a prior run's output is
 });
 
 test("an immutable prior Run output disables remediation and explicitly satisfies the task", async () => {
-  const { task } = await seedTask({
+  const seeded = await seedTask({
     chained: true,
     outputKind: "sol-findings",
     templateName: DIRECT_TEMPLATE_NAME,
     stepIndex: 2,
   });
+  const { task } = seeded;
+  const successor = await addSuccessor(seeded);
   const firstRunId = await enqueue(task.id);
   const first = await claimRun(firstRunId, "immutable-output-runner-1");
   const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
@@ -845,6 +847,81 @@ test("an immutable prior Run output disables remediation and explicitly satisfie
   assert.equal(status.body.task.outputRemediationAllowed, false);
   assert.equal(status.body.task.outputSatisfiedByPriorRun, true);
   assert.equal(status.body.task.outputPersisted, false);
+
+  const completed = await call(
+    "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,
+    succeededCompletion("immutable-output-runner-2", second.fencingToken, second.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.succeeded, true);
+  assert.equal(completed.body.retryCreated, false);
+
+  const settled = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(settled.status, TaskStatus.DONE);
+  assert.equal(settled.failureReason, null);
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: task.id } });
+  assert.equal(output.runId, firstRunId);
+
+  const activities = await db.taskActivity.findMany({ where: { taskId: task.id }, orderBy: { createdAt: "asc" } });
+  const priorRunSatisfaction = activities.filter(({ actorType, body }) => (
+    actorType === "control-plane" && body.includes(firstRunId)
+  ));
+  assert.equal(priorRunSatisfaction.length, 1, "one control-plane activity records prior-Run satisfaction");
+  assert.match(priorRunSatisfaction[0]!.body, /prior Run/u);
+  assert.equal(
+    activities.filter(({ body }) => body.includes("belongs to prior Run")).length,
+    0,
+    "accepted immutable output does not record the prior-Run refusal",
+  );
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
+});
+
+test("an immutable prior Run output bound to another head remains refused", async () => {
+  const seeded = await seedTask({
+    chained: true,
+    outputKind: "sol-findings",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 2,
+  });
+  const { task } = seeded;
+  const successor = await addSuccessor(seeded);
+  const authoredHead = "a".repeat(40);
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "immutable-bound-head-runner-1");
+  const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "sol-findings",
+    body: solFindingsOutput(authoredHead),
+    commitSha: authoredHead,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  const firstCompleted = await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    {
+      ...failedCompletion("immutable-bound-head-runner-1", first.fencingToken, first.run.branch ?? "master"),
+      baseSha: authoredHead,
+      headSha: authoredHead,
+    },
+  );
+  assert.equal(firstCompleted.status, 200, JSON.stringify(firstCompleted.body));
+
+  const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const secondRunId = retried.body.id as string;
+  const second = await claimRun(secondRunId, "immutable-bound-head-runner-2");
+  const completed = await call(
+    "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,
+    succeededCompletion("immutable-bound-head-runner-2", second.fencingToken, second.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: task.id } });
+  assert.equal(output.runId, firstRunId);
+  assert.equal(output.commitSha, authoredHead);
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(stopped.status, TaskStatus.REVIEW);
+  assert.match(stopped.failureReason ?? "", /is bound to .*not completion head/u);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
 });
 
 test("a required deliverable that is present still settles SUCCEEDED", async () => {
@@ -1027,6 +1104,77 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
     runId: firstRunId,
     kind: "implementation",
     body: implementationOutput("Run 1 implementation"),
+    commitSha: SHA,
+  });
+});
+
+test("a retry handoff includes valid immutable findings refused under the prior ownership rule", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "sol-findings",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 2,
+  });
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "immutable-handoff-runner-1");
+  const body = solFindingsOutput();
+  const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "sol-findings",
+    body,
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  assert.equal((await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    failedCompletion("immutable-handoff-runner-1", first.fencingToken, first.run.branch ?? "master"),
+  )).status, 200);
+
+  const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const second = await claimRun(retried.body.id as string, "immutable-handoff-runner-2");
+  const legacyRefusal = `sol-findings task output belongs to prior Run ${firstRunId}, not current Run ${second.run.id}`;
+  const endedAt = new Date();
+  await db.$transaction([
+    db.run.update({ where: { id: second.run.id }, data: {
+      status: "SUCCEEDED",
+      headSha: SHA,
+      endedAt,
+      failureReason: null,
+    } }),
+    db.task.update({ where: { id: task.id }, data: {
+      status: TaskStatus.REVIEW,
+      failureReason: legacyRefusal,
+    } }),
+    db.taskActivity.create({ data: {
+      taskId: task.id,
+      actorType: "control-plane",
+      body: `Canonical task output refused: ${legacyRefusal}`,
+      metadata: {
+        kind: "canonicalTaskOutput.refusal",
+        schemaVersion: 1,
+        runId: second.run.id,
+        reason: legacyRefusal,
+      },
+    } }),
+  ]);
+
+  const queuedThird = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(queuedThird.status, 201, JSON.stringify(queuedThird.body));
+  const loaded = await db.task.findUniqueOrThrow({
+    where: { id: task.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
+    taskId: task.id,
+    runId: queuedThird.body.id as string,
+    runNumber: 3,
+    templateStep: loaded.templateStep,
+  }));
+  assert.deepEqual(handoff?.output, {
+    runId: firstRunId,
+    kind: "sol-findings",
+    body,
     commitSha: SHA,
   });
 });
