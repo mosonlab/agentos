@@ -163,7 +163,10 @@ test("task creation leaves promptHash empty until the exact prompt is dispatched
           } : null,
         },
         taskActivity: { create: async () => ({ id: "activity-1" }) },
-        run: { create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; } },
+        run: {
+          findFirst: async () => null,
+          create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; },
+        },
       }),
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/projects/project-1/tasks", {

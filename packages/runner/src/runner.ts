@@ -622,26 +622,52 @@ export const executeClaim = async (
     const disconnectCandidate = evidence.exitCode === 0
       && evidence.signal === null
       && evidence.terminationReason === null
-      && (!evidence.terminalEventSeen || !evidence.terminalSuccess)
+      && evidence.terminalEventSeen === false
       && remediationFailureReason === null
       && budgetReason === null
       && runLease.held;
     if (disconnectCandidate) {
       try {
         const outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
-        const receipt = outputStatus?.outputPersisted
-          ? await readTaskOutputReceipt(config, workspace)
-          : null;
         const expectedKind = "result";
-        postDeliveryDisconnectTolerated = outputStatus?.outputPersisted === true
-          && outputStatus.outputKind === expectedKind
-          && receipt?.runId === claim.run.id
-          && receipt.kind === expectedKind
-          && /^[0-9a-f]{40}$/u.test(receipt.commitSha)
-          && receipt.commitSha === capturedHeadSha;
-        if (outputStatus?.outputPersisted && !receipt) {
-          throw new Error(`Persisted ${expectedKind} output has no local delivery receipt`);
+        if (outputStatus?.outputPersisted !== true) {
+          throw new Error(`No persisted ${expectedKind} output exists for this Run`);
         }
+        const output = outputStatus.output;
+        if (!output) throw new Error(`Persisted ${expectedKind} output has no server-side identity`);
+        if (output.runId !== claim.run.id) {
+          throw new Error(`Persisted ${expectedKind} output belongs to Run ${output.runId}`);
+        }
+        if (output.kind !== expectedKind) {
+          throw new Error(`Persisted output kind ${output.kind} is not ${expectedKind}`);
+        }
+        if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) {
+          throw new Error(`Persisted ${expectedKind} output has an invalid commit SHA`);
+        }
+        if (output.commitSha !== capturedHeadSha) {
+          throw new Error(`Persisted ${expectedKind} output does not match captured workspace HEAD`);
+        }
+        postDeliveryDisconnectTolerated = true;
+        let localReceipt = null;
+        let localReceiptReadError: string | null = null;
+        try {
+          localReceipt = await readTaskOutputReceipt(config, workspace);
+          if (!localReceipt) localReceiptReadError = "Local task output receipt is absent";
+        } catch (error: unknown) {
+          localReceiptReadError = errorMessage(error);
+        }
+        sink({
+          source: "RUNNER",
+          type: "POST_DELIVERY_DISCONNECT_ACCEPTED",
+          payload: {
+            runId: claim.run.id,
+            commitSha: output.commitSha,
+            providerError: evidence.providerError,
+            terminalEventSeen: evidence.terminalEventSeen,
+            localReceipt,
+            localReceiptReadError,
+          },
+        });
       } catch (error: unknown) {
         sink({
           source: "RUNNER",
@@ -661,10 +687,12 @@ export const executeClaim = async (
       });
       return;
     }
-    // A validated, fenced Regression handoff is the step's terminal product.
-    // Provider diagnostics that arrive after it must remain observable without
-    // turning the completed verification into another model retry.
+    // A validated, fenced Regression handoff is the step's terminal product
+    // only when the provider did not explicitly reject the session. Transport
+    // loss remains recoverable, but a terminal failure keeps its authority.
+    const explicitTerminalFailure = evidence.terminalEventSeen && !evidence.terminalSuccess;
     const regressionMechanicallySettled = regressionHandoffPersisted
+      && !explicitTerminalFailure
       && remediationFailureReason === null
       && budgetReason === null;
     const executionSucceeded = (adapterExecutionSucceeded(evidence)

@@ -300,6 +300,11 @@ export type SessionTaskOutputStatus = {
   outputRemediationAllowed: boolean;
   outputSatisfiedByPriorRun: boolean;
   outputPersisted: boolean;
+  output: {
+    runId: string;
+    kind: string;
+    commitSha: string | null;
+  } | null;
 };
 
 export type SessionTaskOutput = {
@@ -341,15 +346,26 @@ export const readSessionTaskOutputStatus = async (
       outputRemediationAllowed?: unknown;
       outputSatisfiedByPriorRun?: unknown;
       outputPersisted?: unknown;
+      output?: unknown;
     } | null;
   };
+  const output = payload.task?.output;
+  const validOutput = output === null || (
+    typeof output === "object"
+    && !Array.isArray(output)
+    && typeof (output as Record<string, unknown>).runId === "string"
+    && typeof (output as Record<string, unknown>).kind === "string"
+    && (typeof (output as Record<string, unknown>).commitSha === "string"
+      || (output as Record<string, unknown>).commitSha === null)
+  );
   if (payload.task === null) return null;
   if (!payload.task
     || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
     || typeof payload.task.outputRequired !== "boolean"
     || typeof payload.task.outputRemediationAllowed !== "boolean"
     || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
-    || typeof payload.task.outputPersisted !== "boolean") {
+    || typeof payload.task.outputPersisted !== "boolean"
+    || !validOutput) {
     throw new Error(`Anneal API returned an invalid task output status for Run ${claim.run.id}`);
   }
   return {
@@ -358,6 +374,7 @@ export const readSessionTaskOutputStatus = async (
     outputRemediationAllowed: payload.task.outputRemediationAllowed,
     outputSatisfiedByPriorRun: payload.task.outputSatisfiedByPriorRun,
     outputPersisted: payload.task.outputPersisted,
+    output: output as SessionTaskOutputStatus["output"],
   };
 };
 

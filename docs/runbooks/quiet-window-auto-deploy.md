@@ -314,8 +314,16 @@ artifact again; and rerun `--dry-run`.
 
 Only then clear and retry:
 
+Run this from the deployment root — the directory holding `current/` and
+`.agentos-deploy/`. The marker path hangs off `AGENTOS_REPOSITORY_ROOT`, so
+without it the command resolves its state directory to `current/.agentos-deploy/`,
+deletes nothing, and prints `NO-ESCALATION-TO-CLEAR path=...` while the real
+marker stays latched. Check that path in the output before assuming the
+escalation is gone.
+
 ```sh
-node current/scripts/deploy/quiet-window-deploy.mjs --clear-escalation
+AGENTOS_REPOSITORY_ROOT="$PWD" \
+  node current/scripts/deploy/quiet-window-deploy.mjs --clear-escalation
 launchctl kickstart -k "gui/$(id -u)/com.agentos.auto-deploy"
 ```
 

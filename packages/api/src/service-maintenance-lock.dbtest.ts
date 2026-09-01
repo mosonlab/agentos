@@ -223,12 +223,18 @@ test("api shared maintenance lock real-process acceptance", {
     await waitFor(api.child, /Anneal API listening/u, api.output);
     const holders = await holderPids(observer, schema);
     assert.equal(holders.length, 1);
-    await observer.$queryRawUnsafe("SELECT pg_terminate_backend($1::int4)", holders[0]);
-
-    const maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
-    assert.equal(maintenance.ok, true, JSON.stringify(maintenance));
-    if (!maintenance.ok) return;
+    // This case specifies which participant wins the recovery race. Pause the
+    // service before removing its backend so a loaded gate cannot let its
+    // 250 ms retention tick reacquire shared ahead of the maintenance client.
+    assert.equal(api.child.kill("SIGSTOP"), true);
+    let maintenance: Awaited<ReturnType<typeof acquireMaintenanceLock>> | undefined;
     try {
+      await observer.$queryRawUnsafe("SELECT pg_terminate_backend($1::int4)", holders[0]);
+      maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
+      assert.equal(maintenance.ok, true, JSON.stringify(maintenance));
+      if (!maintenance.ok) return;
+      assert.equal(api.child.kill("SIGCONT"), true);
+
       await waitFor(
         api.child,
         /result=reacquire-strike .*reason=exclusive-maintenance-lock-held-by-another-session/u,
@@ -241,7 +247,8 @@ test("api shared maintenance lock real-process acceptance", {
         exclusive: 1, shared: 0, waiting: 0,
       });
     } finally {
-      await maintenance.lock.release();
+      if (api.child.exitCode === null && api.child.signalCode === null) api.child.kill("SIGCONT");
+      if (maintenance?.ok) await maintenance.lock.release();
     }
   });
 });

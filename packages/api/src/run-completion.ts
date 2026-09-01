@@ -35,6 +35,7 @@ import {
 import { z } from "zod";
 
 import {
+  canonicalImplementationOutputRefusal,
   canonicalOutputRefusal,
   isCanonicalAgentStep,
   outputIsImmutableOncePersisted,
@@ -302,6 +303,75 @@ export type CompleteRunInput = {
   claimantClass: ClaimantClass;
 };
 
+type CompletionEvidenceStep = {
+  outputKind: string;
+  requiresCommit: boolean;
+  taskTemplate?: { name: string };
+};
+
+type CompletionEvidenceRun = {
+  id: string;
+  runNumber: number;
+  maxRunsPerTask: number;
+  requiresCommit: boolean;
+  opensPullRequest: boolean;
+  baseSha: string | null;
+  task: { templateStep: CompletionEvidenceStep | null } | null;
+};
+
+type CompletionEvidenceOutput = Parameters<typeof canonicalOutputRefusal>[1];
+
+type CompletionEvidenceRequirement =
+  | { kind: "canonical-implementation"; headSha: string }
+  | { kind: "current-run-output"; outputKind: string }
+  | null;
+
+const completionEvidenceRequirement = (
+  run: CompletionEvidenceRun,
+  reportedSuccess: boolean,
+  completionHeadSha: string | null,
+): CompletionEvidenceRequirement => {
+  if (!reportedSuccess) return null;
+  // `requiresCommit` is the immutable Run-birth snapshot. Comparing it with
+  // the configured contract distinguishes the own-publication relaxation from
+  // Steps that were always non-committing, without re-deriving publication
+  // ownership after birth.
+  const configuredRequiresCommit = run.task?.templateStep?.requiresCommit ?? run.opensPullRequest;
+  if (
+    configuredRequiresCommit
+    && !run.requiresCommit
+    && run.baseSha !== null
+    && completionHeadSha === run.baseSha
+  ) {
+    return { kind: "canonical-implementation", headSha: run.baseSha };
+  }
+  const requiredKind = requiredOutputKind(run.task?.templateStep);
+  return requiredKind && run.runNumber < run.maxRunsPerTask
+    ? { kind: "current-run-output", outputKind: requiredKind }
+    : null;
+};
+
+export const completionEvidenceRefusal = (
+  run: CompletionEvidenceRun,
+  reportedSuccess: boolean,
+  completionHeadSha: string | null,
+  persistedOutput: CompletionEvidenceOutput,
+): string | null => {
+  const requirement = completionEvidenceRequirement(run, reportedSuccess, completionHeadSha);
+  if (!requirement) return null;
+  if (requirement.kind === "canonical-implementation") {
+    return canonicalImplementationOutputRefusal(
+      persistedOutput,
+      run.id,
+      requirement.headSha,
+    );
+  }
+  return persistedOutput?.runId !== run.id
+    && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
+    ? `missing ${requirement.outputKind} task output for current Run ${run.id}`
+    : null;
+};
+
 /**
  * Complete a run: one ReadCommitted transaction of 33 writes, and the
  * pre-transaction principal read that refuses a mechanical completion from the
@@ -382,18 +452,26 @@ export const completeRun = async (
     // before this — the terminal park naming the absent output, with the
     // chain-lease release, the merge-tail stop notice and the refusal activity
     // that park has always written.
-    const requiredKind = requiredOutputKind(run.task?.templateStep);
-    const outputTaskId = reportedSuccess && requiredKind && run.runNumber < run.maxRunsPerTask
-      ? run.taskId
-      : null;
+    // A Run whose immutable commit snapshot differs from its configured
+    // contract is an own-publication continuation. An unchanged completion of
+    // that Run always requires canonical implementation evidence, including a
+    // manual Task or a Task whose configured output kind is not implementation.
+    // Ordinary canonical Steps retain their prior retry-ceiling semantics.
+    const evidenceRequirement = completionEvidenceRequirement(
+      run,
+      reportedSuccess,
+      body.headSha ?? null,
+    );
+    const outputTaskId = evidenceRequirement ? run.taskId : null;
     const persistedOutput = outputTaskId
-      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId }, select: { runId: true } })
+      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId } })
       : null;
-    const missingOutputReason = outputTaskId && requiredKind
-      && persistedOutput?.runId !== run.id
-      && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
-      ? `missing ${requiredKind} task output for current Run ${run.id}`
-      : null;
+    const missingOutputReason = completionEvidenceRefusal(
+      run,
+      reportedSuccess,
+      body.headSha ?? null,
+      persistedOutput,
+    );
     const succeeded = reportedSuccess && !missingOutputReason;
     // The runner is on the untrusted side of this boundary. When it reports a
     // structured envelope, the API classifies from the facts in it and

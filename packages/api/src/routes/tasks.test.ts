@@ -99,6 +99,7 @@ const retryRequest = async (
       },
       run: {
         count: async () => 0,
+        findFirst: async () => null,
         groupBy: async () => [{
           taskId: "task-1",
           status: "FAILED",
@@ -124,6 +125,7 @@ const retryRequest = async (
 const taskDetailDatabase = (task: Record<string, unknown>): PrismaClient => ({
   task: { findUnique: async () => task, findMany: async () => [task] },
   run: { groupBy: async () => [] },
+  sessionEvent: { findMany: async () => [] },
   agentRepoAccess: { findMany: async () => [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }] },
   mergeRecoveryAttempt: { findFirst: async () => null },
 } as unknown as PrismaClient);

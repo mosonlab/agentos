@@ -205,6 +205,11 @@ export type MergeRecovery<DateTime = string> = {
   updatedAt: DateTime;
 };
 
+export type LatestAgentMessage<DateTime = string> = {
+  body: string;
+  at: DateTime;
+};
+
 /** A serialized Session as returned by the operator session routes. */
 export type Session<DateTime = string, DecimalValue = string> = {
   id: string;
@@ -232,6 +237,9 @@ export type Session<DateTime = string, DecimalValue = string> = {
   cachedInputTokens: number | null;
   totalTokens: number | null;
   usageCost?: UsageCost | null;
+  /** The newest reader-visible agent-authored message, when projected by a
+   *  task detail read. Other session projections may omit this derived field. */
+  latestAgentMessage?: LatestAgentMessage<DateTime> | null;
   failureReason: string | null;
   /** Relations GET /sessions and GET /sessions/:id include; absent on the
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
