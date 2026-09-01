@@ -849,7 +849,7 @@ test("the share run-gate states is the one merge-gate sizes from, and nothing re
     "run-gate.sh names a fan-out of its own; it may only state the share",
   );
 
-  assert.match(mergeGate, /GATE_HOST_SHARE="\$\{AGENTOS_GATE_HOST_SHARE:-1\}"/);
+  assert.match(mergeGate, /GATE_HOST_SHARE="\$\{AGENTOS_GATE_HOST_SHARE:-2\}"/);
   assert.doesNotMatch(
     mergeGate,
     /^\s*export\s+AGENTOS_GATE_HOST_SHARE/m,

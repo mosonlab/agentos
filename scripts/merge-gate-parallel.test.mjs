@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,46 @@ const libPath = fileURLToPath(new URL("./gate-worker/lib.sh", import.meta.url));
 const enginePath = fileURLToPath(new URL("./gate-worker/step-engine.sh", import.meta.url));
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
+
+const extractHostSizing = () => {
+  const source = readFileSync(gatePath, "utf8");
+  const start = source.indexOf('GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-');
+  assert.notEqual(start, -1, "merge-gate.sh no longer defines GATE_HOST_SHARE");
+  const end = source.indexOf("\n\n# The proof waves", start);
+  assert.notEqual(end, -1, "merge-gate.sh no longer keeps host sizing together");
+  return source.slice(start, end);
+};
+
+const runHostSizing = (hostShare) => {
+  const env = { ...process.env };
+  if (hostShare === undefined) delete env.AGENTOS_GATE_HOST_SHARE;
+  else env.AGENTOS_GATE_HOST_SHARE = hostShare;
+  const harness = `
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+${extractHostSizing()}
+printf 'GATE_HOST_SHARE=%s\\nGATE_CPUS=%s\\n' "$GATE_HOST_SHARE" "$GATE_CPUS"
+`;
+  return spawnSync("bash", ["-c", harness], { encoding: "utf8", env });
+};
+
+test("HOST-SHARE defaults to half the host while explicit and invalid values keep their precedence", () => {
+  const cores = availableParallelism();
+
+  const defaultShare = runHostSizing(undefined);
+  assert.equal(defaultShare.status, 0, defaultShare.stderr);
+  assert.equal(
+    defaultShare.stdout,
+    `GATE_HOST_SHARE=2\nGATE_CPUS=${Math.max(1, Math.floor(cores / 2))}\n`,
+  );
+
+  const wholeHost = runHostSizing("1");
+  assert.equal(wholeHost.status, 0, wholeHost.stderr);
+  assert.equal(wholeHost.stdout, `GATE_HOST_SHARE=1\nGATE_CPUS=${cores}\n`);
+
+  const invalid = runHostSizing("3");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /AGENTOS_GATE_HOST_SHARE must be 1 or 2, got 3/);
+});
 
 // Enough of the gate for the engine to run: the two output helpers it owes the
 // engine, the temp root it writes member logs into, and the working directory
