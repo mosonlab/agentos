@@ -148,6 +148,14 @@ test("POST /projects/:projectId/repos documents onboarding, preflight, grants, a
   assert.match(text, /rolls back the Repo and all grants/iu);
 });
 
+test("PATCH /repos/:repoId documents the optional dependency policy and exact refusal", () => {
+  const { text } = repositoryRouteSection("PATCH", "/repos/:repoId");
+  assert.match(text, /`dependencyProvisioning` is optional and patchable/iu);
+  assert.match(text, /exactly `NONE` or `NPM_CI`/u);
+  assert.match(text, /omission preserves the stored value/iu);
+  assert.match(text, /\{\s*"error": "Repository dependency provisioning is invalid",\s*"code": "repository-dependency-provisioning-invalid"\s*\}/u);
+});
+
 test("Inbox list and summary document shared Project-plus-global scope", () => {
   const list = inboxRouteSection("GET", "/inbox/messages").text;
   const summary = inboxRouteSection("GET", "/inbox/messages/summary").text;

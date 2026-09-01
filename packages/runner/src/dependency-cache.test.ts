@@ -910,7 +910,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
       runner: "CODEX",
       specificationMaterialization: null,
       task: { id: "cache-task", chainId: null, chainIndex: null, templateStep: null },
-      repo: { remoteUrl: remote, defaultBranch: "main" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
       run: {
         id: "branch-run",
         runNumber: 1,
@@ -946,7 +946,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
       runner: "CODEX",
       specificationMaterialization: null,
       task: { id: "cache-review", chainId: null, chainIndex: null, templateStep: null },
-      repo: { remoteUrl: remote, defaultBranch: "main" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
       run: {
         id: "pinned-run",
         runNumber: 1,

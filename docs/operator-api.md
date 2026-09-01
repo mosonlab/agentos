@@ -628,8 +628,9 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
   or invokes repository preflight. A duplicate `(projectId, name)` returns
   `409 Conflict` with exactly `{ "error": "Unique constraint violated" }`.
 - After validation and before the database transaction opens, the route runs
-  repository preflight against `{ remoteUrl, defaultBranch }`. The preflight
-  uses the API host's ambient Git identity and credentials for its identity,
+  repository preflight against
+  `{ remoteUrl, defaultBranch, dependencyProvisioning }`. The preflight uses
+  the API host's ambient Git identity and credentials for its identity,
   remote/default-branch, fetch, and dry-run-push checks; it never receives,
   reads, or decrypts `credentialSecretId` (that field's existing Secret
   existence/enabled validation is unchanged). A preflight refusal returns
