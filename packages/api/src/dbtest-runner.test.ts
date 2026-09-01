@@ -131,7 +131,7 @@ const harness = (t: { after: (fn: () => void) => void }, fileNames = ["alpha.dbt
 const run = async (h: Harness, runTests: (options: RunTestsOptions) => Promise<number>): Promise<number> =>
   runDbtest({
     environment: h.environment,
-    cpuCount: 4,
+    concurrency: 2,
     files: h.files,
     manager: h.manager,
     runTests: async (options) => {

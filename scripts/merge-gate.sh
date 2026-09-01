@@ -166,6 +166,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 # needs one writer.
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/gate-worker/lib.sh"
+if [[ -n "${AGENTOS_RUN_ID:-}" && "${AGENTOS_RUN_SCOPE_BYPASS:-}" != "regression-verification" ]]; then
+  gate_verdict_not_run "refused inside Anneal run ${AGENTOS_RUN_ID}"
+  exit "${GATE_EXIT_NO_VERDICT}"
+fi
 # What it means to run a step, to run a group of them at once, and what this
 # run's outcome is. It travels with the commit rather than being installed on
 # the worker: run-gate.sh gates a worktree checked out of the mirror, so
@@ -1297,6 +1301,7 @@ parallel_steps "static analysis, build, and the suites that need no build output
   "lint (biome + type-aware no-floating-promises)" parallel_lint :: \
   "quiet-window auto-deploy harness" npm run test:auto-deploy :: \
   "typecheck (database CLI)" npm run typecheck:cli :: \
+  "run-scope guard fixtures" npm run test:run-scope-guard :: \
   "public snapshot scanner tests" npm run test:snapshot-scan :: \
   "public snapshot closed-scope scan" npm run snapshot:scan :: \
   "release documentation executable contract" npm run test:release-docs :: \

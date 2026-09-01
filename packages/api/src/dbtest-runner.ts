@@ -19,7 +19,6 @@ import {
   isolatedRootVariables,
   perFileDatabaseUrl,
   planEnvironmentVariable,
-  resolveConcurrency,
   type DbtestAssignment,
   type DbtestPlan,
 } from "./dbtest-plan.js";
@@ -52,7 +51,7 @@ export interface SignalSource {
 
 export interface DbtestRunOptions {
   environment: NodeJS.ProcessEnv;
-  cpuCount: number;
+  concurrency: number;
   files: string[];
   manager: ScratchManagerLike;
   runTests: (options: RunTestsOptions) => Promise<number>;
@@ -99,14 +98,13 @@ const isolatedRoot = (root: string, file: string): string => {
  */
 export const runDbtest = async ({
   environment,
-  cpuCount,
+  concurrency,
   files,
   manager,
   runTests,
   log,
   signals = process,
 }: DbtestRunOptions): Promise<number> => {
-  const concurrency = resolveConcurrency(environment, cpuCount);
   const controller = new AbortController();
   let signalled: NodeJS.Signals | null = null;
 
