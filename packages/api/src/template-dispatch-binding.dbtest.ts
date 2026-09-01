@@ -9,6 +9,7 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const OPERATOR = "template-dispatch-binding-operator";
 const STEP_COUNT = 13;
+const testDatabaseUrl = process.env.TEST_DATABASE_URL!;
 
 let db: PrismaClient;
 
@@ -74,6 +75,72 @@ const fixture = async (label: string) => {
     },
   });
   return { project, repo, agent, template };
+};
+
+const configureDirectTemplate = async (seed: Fixture) => {
+  await db.taskTemplate.update({
+    where: { id: seed.template.id },
+    data: { name: "direct-engineer-workflow" },
+  });
+  const implementation = await db.taskTemplateStep.findFirstOrThrow({
+    where: { taskTemplateId: seed.template.id, stepIndex: 1 },
+  });
+  await db.taskTemplateStep.update({
+    where: { id: implementation.id },
+    data: { outputKind: "implementation", opensPullRequest: true },
+  });
+  return implementation;
+};
+
+const createRouteAgent = async (
+  seed: Fixture,
+  name: string,
+  options: { archived?: boolean; grant?: boolean } = {},
+) => {
+  const agent = await db.agent.create({
+    data: {
+      projectId: seed.project.id,
+      environmentId: (await db.agent.findUniqueOrThrow({ where: { id: seed.agent.id } })).environmentId,
+      name,
+      title: name,
+      model: "codex",
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      archivedAt: options.archived ? new Date() : null,
+    },
+  });
+  if (options.grant !== false) {
+    await db.agentRepoAccess.create({
+      data: {
+        projectId: seed.project.id,
+        agentId: agent.id,
+        repoId: seed.repo.id,
+        mountPath: "/repo",
+        permissions: "GIT_WRITE",
+      },
+    });
+  }
+  return agent;
+};
+
+const renameUnderHeldLock = async <T>(agentId: string, name: string, operation: () => Promise<T>): Promise<T> => {
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let acquired!: () => void;
+  const held = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const renaming = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
+      await tx.agent.update({ where: { id: agentId }, data: { name } });
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }, { timeout: 10_000 });
+    await held;
+    const pending = operation();
+    await renaming;
+    return await pending;
+  } finally {
+    await holder.$disconnect();
+  }
 };
 
 const request = async (
@@ -186,44 +253,18 @@ test("afterTaskId binds only the first of the chain's tasks and writes both audi
   assert.equal((predecessorActivity.metadata as { successorChainId: string }).successorChainId, response.body.chainId);
 });
 
-test("a direct brief routes implementation by Agent name and rejects an unknown route atomically", async () => {
+test("a direct brief routes any valid same-project Agent name and preserves every Route refusal atomically", async () => {
   const seed = await fixture("implementation-route");
-  const senior = await db.agent.create({
-    data: {
-      projectId: seed.project.id,
-      environmentId: (await db.agent.findUniqueOrThrow({ where: { id: seed.agent.id } })).environmentId,
-      name: "senior-dev",
-      title: "Senior developer",
-      model: "codex",
-      foundationalPrompt: "foundation",
-      rolePrompt: "role",
-    },
-  });
-  await db.agentRepoAccess.create({
-    data: {
-      projectId: seed.project.id,
-      agentId: senior.id,
-      repoId: seed.repo.id,
-      mountPath: "/repo",
-      permissions: "GIT_WRITE",
-    },
-  });
-  await db.taskTemplate.update({
-    where: { id: seed.template.id },
-    data: { name: "direct-engineer-workflow" },
-  });
-  const implementation = await db.taskTemplateStep.findFirstOrThrow({
-    where: { taskTemplateId: seed.template.id, stepIndex: 1 },
-  });
-  await db.taskTemplateStep.update({
-    where: { id: implementation.id },
-    data: { outputKind: "implementation", opensPullRequest: true },
-  });
+  const senior = await createRouteAgent(seed, "project_specific.implementer");
+  const archived = await createRouteAgent(seed, "archived-route-agent", { archived: true });
+  const ungranted = await createRouteAgent(seed, "ungranted-route-agent", { grant: false });
+  await createRouteAgent(seed, "merge-integrator");
+  const implementation = await configureDirectTemplate(seed);
 
   const routed = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
-    description: "Implement the brief.\n\nRoute: implementation=senior-dev - explicit fixture route.",
+    description: "Implement the brief.\n\nRoute: implementation=project_specific.implementer - explicit fixture route.",
   });
   assert.equal(routed.status, 201, JSON.stringify(routed.body));
   const routedImplementation = await db.task.findFirstOrThrow({
@@ -231,15 +272,44 @@ test("a direct brief routes implementation by Agent name and rejects an unknown 
   });
   assert.equal(routedImplementation.assigneeAgentId, senior.id);
 
-  const beforeUnknown = await rowCounts();
-  const unknown = await request(seed.project.id, seed.template.id, {
-    repoId: seed.repo.id,
-    variables: {},
-    description: "Implement the brief.\n\nRoute: implementation=missing-agent",
-  });
-  assert.equal(unknown.status, 400, JSON.stringify(unknown.body));
-  assert.equal(unknown.body.code, "implementation_route_unknown_agent");
-  await assertNoPartialRows(beforeUnknown);
+  const refusals = [
+    { name: "missing-agent", code: "step_override_agent_not_found" },
+    { name: archived.name, code: "step_override_agent_archived" },
+    { name: ungranted.name, code: "step_override_missing_repo_grant" },
+    { name: "merge-integrator", code: "step_override_integrator_binding" },
+  ];
+  for (const refusal of refusals) {
+    const before = await rowCounts();
+    const response = await request(seed.project.id, seed.template.id, {
+      repoId: seed.repo.id,
+      variables: {},
+      description: `Implement the brief.\n\nRoute: implementation=${refusal.name}`,
+    });
+    assert.equal(response.status, 400, `${refusal.code}: ${JSON.stringify(response.body)}`);
+    assert.equal(response.body.code, refusal.code, JSON.stringify(response.body));
+    await assertNoPartialRows(before);
+  }
+});
+
+test("a Route Agent renamed under a held lock keeps its original identity across serializable retry", { timeout: 30_000 }, async () => {
+  const seed = await fixture("implementation-route-rename");
+  const routed = await createRouteAgent(seed, "rename.route_agent");
+  await configureDirectTemplate(seed);
+  const before = await rowCounts();
+
+  const response = await renameUnderHeldLock(routed.id, "renamed-route-agent", () => request(
+    seed.project.id,
+    seed.template.id,
+    {
+      repoId: seed.repo.id,
+      variables: {},
+      description: "Implement the brief.\n\nRoute: implementation=rename.route_agent",
+    },
+  ));
+
+  assert.equal(response.status, 400, JSON.stringify(response.body));
+  assert.equal(response.body.code, "implementation_route_agent_renamed", JSON.stringify(response.body));
+  await assertNoPartialRows(before);
 });
 
 test("status PATCH cannot move an unresolved bound first task away from TODO", async () => {

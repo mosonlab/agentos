@@ -330,7 +330,14 @@ export const canonicalOutputRefusal = (
 ): string | null => {
   if (!step || !isCanonicalAgentStep(step)) return null;
   if (!output) return `missing ${step.outputKind} task output for current Run ${runId}`;
-  if (output.runId !== runId) return `${step.outputKind} task output belongs to prior Run ${output.runId ?? "none"}, not current Run ${runId}`;
+  // Findings reports are immutable after their first persistence. A later Run
+  // may therefore validate and reuse a report authored by an earlier Run, but
+  // all other canonical outputs retain the original ownership refusal (and its
+  // position before the remaining validation checks).
+  const priorRun = output.runId !== runId;
+  if (priorRun && (output.runId === null || !outputIsImmutableOncePersisted(step))) {
+    return `${step.outputKind} task output belongs to prior Run ${output.runId ?? "none"}, not current Run ${runId}`;
+  }
   if (output.kind !== step.outputKind) return `task output kind ${output.kind} does not match canonical kind ${step.outputKind}`;
   if (!completionHeadSha) return `current Run ${runId} completed without an exact head`;
   if (output.commitSha !== completionHeadSha) {
@@ -572,6 +579,18 @@ export const previousRunHandoffForClaim = async (
     && !Array.isArray(refusalActivity.metadata)
     ? refusalActivity.metadata as Record<string, unknown>
     : null;
+  const recomputedRefusal = output && previous.headSha !== null
+    ? canonicalOutputRefusal(input.templateStep, output, previous.id, previous.headSha)
+    : null;
+  const priorRunOwnershipRefusal = output && input.templateStep
+    ? `${input.templateStep.outputKind} task output belongs to prior Run ${output.runId ?? "none"}, not current Run ${previous.id}`
+    : null;
+  // A retry created before immutable findings became reusable carries the old
+  // ownership refusal. Preserve its artifact in the handoff only when the
+  // current canonical checks accept that exact output at the previous head.
+  const acceptedImmutableOutputHadLegacyOwnershipRefusal = outputIsImmutableOncePersisted(input.templateStep)
+    && recomputedRefusal === null
+    && refusalMetadata?.reason === priorRunOwnershipRefusal;
   const refusedOutputMatchesPreviousHead = output?.runId !== null
     && output?.runId !== previous.id
     && previous.status === "SUCCEEDED"
@@ -579,12 +598,7 @@ export const previousRunHandoffForClaim = async (
     && output?.commitSha === previous.headSha
     && refusalMetadata?.kind === "canonicalTaskOutput.refusal"
     && refusalMetadata.runId === previous.id
-    && refusalMetadata.reason === canonicalOutputRefusal(
-      input.templateStep,
-      output,
-      previous.id,
-      previous.headSha,
-    );
+    && (refusalMetadata.reason === recomputedRefusal || acceptedImmutableOutputHadLegacyOwnershipRefusal);
   const retryReason = activity?.body === "Approval gate rejected; step queued again"
     ? "approval-rejected-without-feedback"
     : activity?.body === `Run ${input.runNumber} queued by operator retry`

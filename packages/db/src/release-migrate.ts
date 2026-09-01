@@ -69,9 +69,13 @@ export const FILES_PRECHECK_COMMAND = ["npm", "run", "db:files-precheck"] as con
 /**
  * The migration tail recorded for the release candidate. A checkout whose tail
  * is shorter or longer is not the candidate the preflight's authority evidence
- * describes, so it is a stop rather than a warning. Updating these two values
- * is part of adding a migration; `release-migrate.test.ts` fails until they
- * match what is on disk.
+ * describes, so it is a stop rather than a warning. The release-cut commit
+ * (the `chore(release): prepare` commit) updates these two values to the
+ * migration tail on disk at that commit. Adding a migration does not touch
+ * them. Between releases, `db:migrate:release` on a main checkout stops with
+ * `migration-tail` by design. A migration created before the recorded terminal
+ * but merged after the release cut is the exception: its timestamp changes the
+ * terminal's recorded position, so that migration's merge must update the pin.
  */
 export const RELEASE_CANDIDATE_MIGRATIONS = {
   count: 47,

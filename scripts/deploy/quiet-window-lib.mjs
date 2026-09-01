@@ -90,6 +90,13 @@ export const executeUpgrade = async (host, attempt) => {
       throw ledgerError("record", error);
     }
   };
+  /** A retryable escalation is kept on disk until the whole attempt (or a
+   * deliberate already-deployed no-op) succeeds. The production host owns the
+   * concrete marker/notification implementation; keeping this hook optional
+   * preserves the test host seam and other callers. */
+  const completeSuccessfulAttempt = async () => {
+    await host.selfClearEscalation?.(attempt);
+  };
   const handleFailure = async (error) => {
     const failure = failureOf(error);
     let terminalLedgerFailure = null;
@@ -150,10 +157,15 @@ export const executeUpgrade = async (host, attempt) => {
           activationOutcomeProven = publicationReady;
         }
         if (phase.ledgerState !== null) await recordLedger(phase.ledgerState);
-        if (attempt.fact("skip")) return { ok: true, skipped: attempt.fact("skip") };
+        if (attempt.fact("skip")) {
+          const skip = attempt.fact("skip");
+          if (skip === "already-deployed") await completeSuccessfulAttempt();
+          return { ok: true, skipped: skip };
+        }
       }
       await recordLedger("SUCCEEDED");
       await host.notify({ outcome: "success", reason: "deployed", ...attempt.requireFact("revisions") });
+      await completeSuccessfulAttempt();
     } catch (error) {
       if (publicationReady) {
         try {

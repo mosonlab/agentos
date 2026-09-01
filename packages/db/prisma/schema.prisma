@@ -1101,8 +1101,13 @@ model Session {
   /// provider includes it in its output figure.
   outputTokens           Int?
   /// The cached-input subset of inputTokens. It is informational and must not
-  /// be added to inputTokens again when computing totalTokens.
+  /// be added to inputTokens again when computing totalTokens. When
+  /// cacheCreationInputTokens is non-NULL this column is cache reads only;
+  /// while it is NULL, a legacy row may still contain reads plus writes.
   cachedInputTokens      Int?
+  /// Input tokens written to a provider cache. NULL means the provider did not
+  /// report a cache read/write split; it is never an observed zero.
+  cacheCreationInputTokens Int?
   /// True only after the runner observes a successful native child spawn.
   /// Run.subagentModel is launch capability, not evidence that a child ran.
   nativeChildUsed        Boolean                @default(false)

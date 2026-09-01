@@ -16,10 +16,13 @@ empty object. A syntactically valid body that fails its route schema still
 returns the usual `400 Bad Request` validation response.
 
 The route list and input requirements below use the same method and path
-spelling as the route definitions in `packages/api/src/app.ts`. Fields called
+spelling as the route definitions in `packages/api/src/app.ts` and
+`packages/api/src/routes/`. Fields called
 “optional (default …)” are filled by the API when omitted. A body described as
 “at least one” is validated by a patch schema and must contain one or more of
-the named fields.
+the named fields. This route list is coverage-tested against those API route
+source files; missing or stale entries fail
+`scripts/operator-api-docs.test.mjs`.
 
 The polled collection routes `GET /projects`, `GET /projects/:projectId/agents`,
 `GET /projects/:projectId/repos`, `GET /tasks`, `GET /inbox/messages`, and
@@ -199,6 +202,17 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
 - Required path parameter: `projectId`.
 - Required query parameter: `tz` (recognized IANA timezone).
 - Optional query parameter: `days` (`1`, `7`, `30`, or `90`; default `30`).
+- The response retains the aggregate totals, daily series, model totals, agent
+  totals, and top runs. Agent rows additionally report cached-read percentage,
+  unknown-split run count, and known uncached-input tokens and spend.
+- `waste` partitions `wastedUsd` exactly into operator-cancelled and failed
+  spend; failed spend is further partitioned by failure class.
+- `chains` contains terminal chains whose last run ended in the window, with
+  lead/busy time, repair counts, longest idle gap, priced spend by step role,
+  and an unpriced-run count. The `unassigned` role is used when persisted step
+  metadata cannot classify priced spend. Unknown cache splits are counted and
+  excluded from cache metrics; unpriced chain runs never receive a fabricated
+  cost.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \
@@ -753,8 +767,10 @@ curl -X POST "$BASE_URL/goals/$GOAL_ID/progress-log" \
 
 ## Task templates
 
-There is no create-template route in `app.ts`; templates are read, patched for
-webhook configuration, or instantiated.
+Templates can be cloned under a new project-local name, read, patched for
+webhook configuration, or instantiated. Cloning copies the description,
+variables, and complete Step graph, but clears webhook configuration; Tasks
+and trigger fires are never copied.
 
 ### GET `/projects/:projectId/task-templates`
 
@@ -762,6 +778,67 @@ webhook configuration, or instantiated.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/task-templates" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/projects/:projectId/task-templates/:templateId/clone`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON field: `name` (trimmed, non-empty, and at most 200 characters).
+- Optional JSON field: `description` (at most 50,000 characters); when omitted,
+  the source description is copied.
+- Returns `201 Created` with the cloned template and its ordered Steps.
+- Refusals: `404 Not Found` with code `template_not_in_project` when the source
+  is not in the addressed project; `409 Conflict` with code
+  `template_name_taken` when the name is already used in the project; and
+  `409 Conflict` with code `template_name_reserved` when the name is a current
+  or registered-legacy canonical identity.
+
+```sh
+curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"custom-review-workflow","description":"A project-specific workflow"}'
+```
+
+### PUT `/projects/:projectId/task-templates/:templateId/steps`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON field: `steps`, an array of at most 64 Steps. Each Step
+  requires `name`, `assigneeType`, `assigneeAgentId`, `prompt`,
+  `approvalGate`, `attachmentsFromPrevious`, `priorOutputKinds`,
+  `spawnPolicy`, `runner`, `outputKind`, `opensPullRequest`,
+  `requiresCommit`, `baseFromStepIndex`, and `layer`; `stepIndex` is
+  assigned densely from array order. `baseFromStepIndex` is a 1-based
+  position in the submitted array and may be `null`.
+- The request and every nested Step are strict: unknown fields, including a
+  caller-supplied `stepIndex`, are rejected with `400 Bad Request`.
+- Returns `200 OK` with `{ template, warnings }`. `template` is the
+  resulting template read projection and `warnings` is the complete warning
+  array for that graph. Warnings are not persisted.
+- Refusals: `404 Not Found` with `template_not_in_project` when the
+  addressed template is absent from the project; `409 Conflict` with
+  `template_canonical` for current or registered-legacy canonical identity,
+  or `template_in_use` when any Task references the template or one of its
+  Steps. The `template_in_use` recovery is to clone again.
+- An empty array answers `422 Unprocessable Entity` with
+  `graph_empty`. Other graph validator refusals use `422` with their stable
+  code and optional `stepIndex`: `first_step_not_agent`,
+  `first_layer_not_single`, `layer_order_invalid`, and `base_step_invalid` are
+  the ordering and base-reference checks. Output wiring also refuses
+  `prior_kind_unproduced`, `output_kind_duplicate`, and `prior_kind_duplicate`.
+  Gate and assignee checks refuse `approval_gate_in_parallel_layer`,
+  `assignee_invalid`, and `integrator_binding_invalid`. Agent assignments must
+  name an existing, non-archived Agent in the addressed project. Repo grants
+  are not checked while authoring; the instantiation route checks the grant
+  against its selected Repo. Warning codes are
+  `no_review_step`, `same_agent_implements_and_reviews`, and
+  `pull_request_without_regression`; warnings are non-blocking, describe the
+  complete resulting graph, and are ephemeral (they are not persisted or
+  returned by template reads).
+
+```sh
+curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
 ```
 
 ### GET `/task-templates/:templateId`
@@ -1010,6 +1087,94 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"requestId":"resume-001"}'
 ```
+
+### Recovering a merge tail stopped after its repair budget
+
+When a regression verdict fails after the automatic repair budget is exhausted,
+the Regression verification task remains parked in `REVIEW`, and a stop notice
+is written to the Inbox. Its `failureReason` is exactly one of these shapes:
+
+- `semantic regression FAIL on chain head <sha> after N automatic repair attempts`
+- `merge gate FAIL on chain head <sha> after N automatic repair attempts`
+
+These are the repair ceiling, not an API defect. From this state,
+`POST /tasks/:taskId/retry` on the regression task opens a Run whose
+`regression-repair-handoff` claim fails at claim time as `handoff-invalid` with
+`regression repair handoff is invalid: no successful review-fix result binds <head> to <base>`
+for a semantic regression stop, or
+`regression repair handoff is invalid: no successful gate-fix result binds <head> to <base>`
+for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
+is refused with `Chain task statuses are controlled by chain execution`. Both
+refusals are expected behaviour; do not use them to reopen the old Chain.
+
+Carry the delivered branch forward in this order. The brief used in step (c)
+must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).
+
+1. (a) Read the regression task output and the stop notice, and confirm that
+   the last verdict identifies a real defect. Find the notice by listing the
+   project's Inbox and selecting the message for the regression task whose
+   body starts with `Autonomous merge tail stopped:`.
+
+   ```sh
+   curl "$BASE_URL/tasks/$REGRESSION_TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   STOP_NOTICE_ID=$(curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq -r --arg taskId "$REGRESSION_TASK_ID" \
+       '.[] | select(.taskId == $taskId and (.body | startswith("Autonomous merge tail stopped:"))) | .id' | head -n 1)
+   curl "$BASE_URL/inbox/messages/$STOP_NOTICE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   ```
+
+2. (b) Hold the old Chain from any of its tasks, giving a `reason` that names
+   the successor Chain you plan to create (for example, by its planned
+   branch).
+
+   ```sh
+   curl -X POST "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain/hold" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d '{"requestId":"hold-merge-tail-repair-budget-exit","reason":"Continue in successor chain for branch '$NEW_BRANCH_NAME'"}'
+   ```
+
+3. (c) Instantiate a new direct Chain on the same repository with a fresh
+   `branchName`. Set `description` to the new brief following the linked
+   pattern, with its first Change merging the delivered branch.
+
+   ```sh
+   SUCCESSOR_BODY=$(jq -n \
+     --arg repoId "$REPO_ID" \
+     --arg branchName "$NEW_BRANCH_NAME" \
+     --arg description "$SUCCESSOR_BRIEF" \
+     '{repoId: $repoId, variables: {branchName: $branchName}, description: $description, autoStart: true}')
+   curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$DIRECT_CHAIN_TEMPLATE_ID/instantiate" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d "$SUCCESSOR_BODY"
+   ```
+
+4. (d) Archive every task in the old Chain. `GET /tasks/:taskId/chain` returns
+   the primary Chain rows but omits its chain-detached merge-tail repair tasks.
+   Find those tasks with `GET /tasks?view=board`: their `repairOf.chainId`
+   contains the Chain binding derived from the same repair markers that
+   `DELETE /tasks/:taskId/chain` covers. Archive both sets of task IDs.
+
+   ```sh
+   OLD_CHAIN=$(curl "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN")
+   OLD_CHAIN_ID=$(printf '%s' "$OLD_CHAIN" | jq -r '.chainId')
+   OLD_TASK_IDS=$(printf '%s' "$OLD_CHAIN" | jq -r '.steps[].taskId')
+   REPAIR_TASK_IDS=$(curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=board&archived=false" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq -r --arg chainId "$OLD_CHAIN_ID" \
+       '.[] | select(.repairOf.chainId? == $chainId) | .id')
+   printf '%s\n%s\n' "$OLD_TASK_IDS" "$REPAIR_TASK_IDS" | sed '/^$/d' | sort -u | while read -r TASK_ID; do
+     curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   done
+   ```
+
+5. (e) Never edit database rows to reopen the loop. Use the API only to inspect
+   the old Chain after the handoff; there is no supported database recovery.
+
+   ```sh
+   curl "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   ```
 
 ### PATCH `/tasks/:taskId`
 

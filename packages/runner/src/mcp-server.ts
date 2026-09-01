@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { requestFor, toolsFor, type SessionToolRequest } from "./session-tool-contract.js";
+import { writeTaskOutputReceipt } from "./task-output-receipt.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -120,6 +121,10 @@ export const invokeTool = async (
     ...(name === "task_output" ? { commitSha: workspaceHead(credentials) } : {}),
     ...(name === "inbox_ask" ? { requestIdPrefix: `mcp:${credentials.runId}` } : {}),
   });
+  const taskOutputCommitSha = name === "task_output" ? request.body?.commitSha : null;
+  if (name === "task_output" && typeof taskOutputCommitSha !== "string") {
+    throw new Error("task_output request omitted commitSha");
+  }
   const result = await call(credentials, request);
   if (name === "task_activity_log") {
     return text("Activity recorded.");
@@ -127,6 +132,11 @@ export const invokeTool = async (
   if (name === "task_output") {
     const body = rawArguments.body as string;
     const kind = rawArguments.kind as string;
+    const commitSha = taskOutputCommitSha as string;
+    await writeTaskOutputReceipt(credentials.workspacePath, { runId: credentials.runId, kind, commitSha })
+      .catch((error: unknown) => {
+        console.error(`Unable to write task output receipt: ${error instanceof Error ? error.message : String(error)}`);
+      });
     const persisted = result as { predecessorOutputs?: unknown } | null;
     const predecessorOutputs = persisted?.predecessorOutputs;
     return text([

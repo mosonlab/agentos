@@ -11,6 +11,7 @@ export type SessionUsage = {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
   costUsd?: Prisma.Decimal;
 };
 
@@ -85,6 +86,7 @@ type ModelTotals = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
   costUsd: Prisma.Decimal | null;
 };
 
@@ -113,7 +115,16 @@ const canonicalInputTokens = (uncached: number | null, cached: number | null): n
 const extractModelUsage = (value: unknown): ModelTotals | null => {
   const models = asRecord(value);
   if (!models) return null;
-  const totals: ModelTotals = { inputTokens: null, outputTokens: null, cachedInputTokens: null, costUsd: null };
+  const totals: ModelTotals = {
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    cacheCreationInputTokens: null,
+    costUsd: null,
+  };
+  let observedCacheCreation = 0;
+  let hasObservedCacheCreation = false;
+  let cacheCreationUnknown = false;
   for (const entry of Object.values(models)) {
     const model = asRecord(entry);
     if (!model) continue;                       // one malformed entry must not discard the others
@@ -123,16 +134,38 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
     if (output !== null) totals.outputTokens = (totals.outputTokens ?? 0) + output;
     const cacheRead = tokenCount(model.cacheReadInputTokens, "modelUsage.cacheReadInputTokens");
     const cacheCreation = tokenCount(model.cacheCreationInputTokens, "modelUsage.cacheCreationInputTokens");
-    if (cacheRead !== null || cacheCreation !== null) {
-      totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0);
+    if (cacheRead !== null) totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + cacheRead;
+    if (cacheCreation !== null) {
+      observedCacheCreation += cacheCreation;
+      hasObservedCacheCreation = true;
     }
+    // A model with input/cache data but no creation component makes the
+    // aggregate split unknown. Do not silently treat that model's omitted
+    // component as zero merely because another model reported a creation
+    // count. An explicitly invalid value is unknown as well, while output- or
+    // cost-only entries do not make the input split ambiguous.
+    // `null` is the JSON spelling of an omitted provider component. It still
+    // earns an ingestion diagnostic, but it must not make an output-only model
+    // sibling look input-bearing for cache-split completeness.
+    const modelHasInput = input !== null || cacheRead !== null || cacheCreation !== null;
+    if (modelHasInput && cacheCreation === null) cacheCreationUnknown = true;
     const cost = costAmount(model.costUSD, "modelUsage.costUSD");
     if (cost !== null) totals.costUsd = (totals.costUsd ?? new Prisma.Decimal(0)).plus(cost);
   }
-  totals.inputTokens = canonicalInputTokens(totals.inputTokens, totals.cachedInputTokens);
+  const knownCached = totals.cachedInputTokens === null && !hasObservedCacheCreation
+    ? null
+    : (totals.cachedInputTokens ?? 0) + observedCacheCreation;
+  totals.inputTokens = canonicalInputTokens(totals.inputTokens, knownCached);
+  if (!cacheCreationUnknown && hasObservedCacheCreation) {
+    totals.cacheCreationInputTokens = observedCacheCreation;
+  }
   // The breakdown is usable iff this one pass produced tokens or cost. Token
   // usability is checked separately by the caller without traversing it again.
-  return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null && totals.costUsd === null
+  return totals.inputTokens === null
+    && totals.outputTokens === null
+    && totals.cachedInputTokens === null
+    && totals.cacheCreationInputTokens === null
+    && totals.costUsd === null
     ? null
     : totals;
 };
@@ -148,9 +181,11 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
  * runners:
  * - `input` is uncached input and `cacheRead`/`cacheWrite` are a DISJOINT
  *   cached subset. The extractor adds that subset exactly once to stored
- *   `inputTokens`; `cachedInputTokens` retains the subset for reporting.
+ *   `inputTokens`; `cachedInputTokens` retains reads and
+ *   `cacheCreationInputTokens` retains writes for reporting.
  * - CODEX's `input_tokens` already contains `cached_input_tokens`, so that
- *   branch does not add the cached subset a second time.
+ *   branch does not add the cached subset a second time and records zero cache
+ *   writes because Codex reports no write component.
  * - `output` already contains PI's reasoning tokens, so there is no reasoning
  *   field to fold in here.
  * - `costNanoUsd` is PI's own per-message `cost.total` summed, not derived from
@@ -193,15 +228,51 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
   if (output !== null) result.outputTokens = output;
   const cacheRead = tokenCount(totals.cacheRead, "agentosPiUsage.cacheRead");
   const cacheWrite = tokenCount(totals.cacheWrite, "agentosPiUsage.cacheWrite");
-  const cached = cacheRead === null && cacheWrite === null ? null : (cacheRead ?? 0) + (cacheWrite ?? 0);
-  if (cached !== null) result.cachedInputTokens = cached;
-  const canonicalInput = canonicalInputTokens(input, cached);
+  if (cacheRead !== null) result.cachedInputTokens = cacheRead;
+  if (cacheWrite !== null) result.cacheCreationInputTokens = cacheWrite;
+  const knownCached = cacheRead === null && cacheWrite === null ? null : (cacheRead ?? 0) + (cacheWrite ?? 0);
+  const canonicalInput = canonicalInputTokens(input, knownCached);
   if (canonicalInput !== null) result.inputTokens = canonicalInput;
   const cost = piCostAmount(totals.costNanoUsd);
   if (cost !== null) result.costUsd = cost;
   // Nothing usable routes back to the other branches rather than claiming the
   // payload, exactly as an unusable `modelUsage` does.
   return Object.keys(result).length === 0 ? null : result;
+};
+
+export type ExtractedCacheSplit =
+  | { kind: "none" }
+  | { kind: "unknown" }
+  | {
+      kind: "known";
+      cachedInputTokens: number;
+      cacheCreationInputTokens: number;
+    };
+
+type DecodedUsage = {
+  usage: SessionUsage;
+  cacheSplit: ExtractedCacheSplit;
+};
+
+/**
+ * Cache-split completeness is a projection of the canonical usage that
+ * ingestion actually stores. Only input-bearing fields participate: an
+ * output-only or cost-only payload carries no evidence that a split is
+ * incomplete, so it is `none` and can never poison a known sibling event.
+ */
+const cacheSplitFromUsage = (usage: SessionUsage): ExtractedCacheSplit => {
+  const hasInput = usage.inputTokens !== undefined
+    || usage.cachedInputTokens !== undefined
+    || usage.cacheCreationInputTokens !== undefined;
+  if (!hasInput) return { kind: "none" };
+  if (usage.cachedInputTokens === undefined || usage.cacheCreationInputTokens === undefined) {
+    return { kind: "unknown" };
+  }
+  return {
+    kind: "known",
+    cachedInputTokens: usage.cachedInputTokens,
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+  };
 };
 
 /**
@@ -227,20 +298,28 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
  *   provider vocabularies above and carries its own caliber. See
  *   `extractPiUsage`.
  */
-export const extractUsage = (payload: unknown): SessionUsage => {
+const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): DecodedUsage => {
   const event = asRecord(payload);
-  if (!event) return {};
+  if (!event) {
+    if (options.strict) throw new Error("payload is not an object");
+    return { usage: {}, cacheSplit: { kind: "none" } };
+  }
+  if (options.strict) validateProviderShapes(event);
+
   // Exclusive and first: an `agentosPiUsage` payload is already a whole
   // session's totals, cost included, and PI's terminal event carries no other
   // usage vocabulary for the branches below to add to it.
   const pi = extractPiUsage(event.agentosPiUsage);
-  if (pi) return pi;
+  if (pi) return { usage: pi, cacheSplit: cacheSplitFromUsage(pi) };
   const usage = asRecord(event.usage);
   const result: SessionUsage = {};
 
   const models = extractModelUsage(event.modelUsage);
   const hasModelTokens = models !== null && (
-    models.inputTokens !== null || models.outputTokens !== null || models.cachedInputTokens !== null
+    models.inputTokens !== null
+    || models.outputTokens !== null
+    || models.cachedInputTokens !== null
+    || models.cacheCreationInputTokens !== null
   );
   if (hasModelTokens) {
     // Absence survives the branch: a breakdown that reports only input leaves
@@ -249,6 +328,9 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     if (models.inputTokens !== null) result.inputTokens = models.inputTokens;
     if (models.outputTokens !== null) result.outputTokens = models.outputTokens;
     if (models.cachedInputTokens !== null) result.cachedInputTokens = models.cachedInputTokens;
+    if (models.cacheCreationInputTokens !== null) {
+      result.cacheCreationInputTokens = models.cacheCreationInputTokens;
+    }
   } else if (usage) {
     const input = tokenCount(usage.input_tokens, "usage.input_tokens");
     const output = tokenCount(usage.output_tokens, "usage.output_tokens");
@@ -264,8 +346,16 @@ export const extractUsage = (payload: unknown): SessionUsage => {
     const disjointCached = cached === null && (cacheRead !== null || cacheCreation !== null)
       ? (cacheRead ?? 0) + (cacheCreation ?? 0)
       : null;
-    const persistedCached = cached ?? disjointCached;
-    if (persistedCached !== null) result.cachedInputTokens = persistedCached;
+    if (cached !== null) {
+      result.cachedInputTokens = cached;
+      // CODEX's input_tokens already contains cached_input_tokens and its
+      // protocol has no cache-creation component. Preserve that known zero so
+      // the new split is not reported as unknown for Codex sessions.
+      result.cacheCreationInputTokens = 0;
+    } else {
+      if (cacheRead !== null) result.cachedInputTokens = cacheRead;
+      if (cacheCreation !== null) result.cacheCreationInputTokens = cacheCreation;
+    }
     const canonicalInput = canonicalInputTokens(input, disjointCached);
     if (canonicalInput !== null) result.inputTokens = canonicalInput;
   }
@@ -275,8 +365,77 @@ export const extractUsage = (payload: unknown): SessionUsage => {
   // A reported terminal total remains authoritative when both sources exist.
   const cost = costAmount(event.total_cost_usd) ?? models?.costUsd ?? null;
   if (cost !== null) result.costUsd = cost;
-  return result;
+  return { usage: result, cacheSplit: cacheSplitFromUsage(result) };
 };
+
+function strictToken(value: unknown, field: string): void {
+  // Providers serialize an omitted component as either an absent property or
+  // JSON null. Ingestion drops both from the canonical usage; strict backfill
+  // must preserve that same meaning while still rejecting non-null junk.
+  if (value === undefined || value === null) return;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_INT4) {
+    throw new Error(`${field} is not a storable non-negative integer`);
+  }
+}
+
+function strictRecord(value: unknown, field: string): Record<string, unknown> {
+  const record = asRecord(value);
+  if (record === null) throw new Error(`${field} is not an object`);
+  return record;
+}
+
+/** Validate the provider fields decoded by `decodeUsage`. */
+function validateProviderShapes(event: Record<string, unknown>): void {
+  if (Object.prototype.hasOwnProperty.call(event, "agentosPiUsage")) {
+    const value = event.agentosPiUsage;
+    if (value !== undefined && value !== null) {
+      const pi = strictRecord(value, "agentosPiUsage");
+      for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+        strictToken(pi[key], `agentosPiUsage.${key}`);
+      }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(event, "modelUsage")) {
+    const value = event.modelUsage;
+    if (value !== undefined && value !== null) {
+      const models = strictRecord(value, "modelUsage");
+      for (const [modelName, rawModel] of Object.entries(models)) {
+        const model = strictRecord(rawModel, `modelUsage.${modelName}`);
+        for (const key of ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const) {
+          strictToken(model[key], `modelUsage.${modelName}.${key}`);
+        }
+      }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(event, "usage")) {
+    const value = event.usage;
+    if (value !== undefined && value !== null) {
+      const usage = strictRecord(value, "usage");
+      for (const key of [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+      ] as const) {
+        strictToken(usage[key], `usage.${key}`);
+      }
+    }
+  }
+}
+
+export const extractUsage = (payload: unknown): SessionUsage => decodeUsage(payload).usage;
+
+/**
+ * Read the cache pair through the exact provider precedence and completeness
+ * rules used by live ingestion. The backfill enables strict validation so a
+ * malformed retained payload stops the scan; ingestion remains diagnostic and
+ * tolerant. Both policies share `decodeUsage` and differ only in that policy.
+ */
+export const extractCacheSplit = (
+  payload: unknown,
+  options: { strict?: boolean } = {},
+): ExtractedCacheSplit => decodeUsage(payload, options).cacheSplit;
 
 /**
  * Fold many payloads' usage into one absolute total. A field stays absent
@@ -285,13 +444,30 @@ export const extractUsage = (payload: unknown): SessionUsage => {
  */
 export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
   const total: SessionUsage = {};
+  let observedCacheCreation = 0;
+  let hasObservedCacheCreation = false;
+  let cacheCreationUnknown = false;
   for (const usage of usages) {
     if (usage.inputTokens !== undefined) total.inputTokens = (total.inputTokens ?? 0) + usage.inputTokens;
     if (usage.outputTokens !== undefined) total.outputTokens = (total.outputTokens ?? 0) + usage.outputTokens;
     if (usage.cachedInputTokens !== undefined) total.cachedInputTokens = (total.cachedInputTokens ?? 0) + usage.cachedInputTokens;
+    const cacheSplit = cacheSplitFromUsage(usage);
+    if (cacheSplit.kind === "known") {
+      observedCacheCreation += cacheSplit.cacheCreationInputTokens;
+      hasObservedCacheCreation = true;
+    }
+    // An input-bearing event that omits the split makes the session-level
+    // creation total unknown. Keep any known read total, but never fold a
+    // creation value from a different event across that gap as though the
+    // omitted component were zero. Codex events avoid this path by carrying an
+    // explicit cacheCreationInputTokens: 0.
+    if (cacheSplit.kind === "unknown") cacheCreationUnknown = true;
     if (usage.costUsd !== undefined) {
       total.costUsd = (total.costUsd ?? new Prisma.Decimal(0)).plus(usage.costUsd);
     }
+  }
+  if (!cacheCreationUnknown && hasObservedCacheCreation) {
+    total.cacheCreationInputTokens = observedCacheCreation;
   }
   return total;
 };
@@ -300,6 +476,7 @@ type DerivedUsage = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
   totalTokens: number | null;
   costUsd: Prisma.Decimal | null;
 };
@@ -341,6 +518,7 @@ export const deriveUsageColumns = (usage: SessionUsage): DerivedUsage => ({
   inputTokens: columnValue(usage.inputTokens, "inputTokens"),
   outputTokens: columnValue(usage.outputTokens, "outputTokens"),
   cachedInputTokens: columnValue(usage.cachedInputTokens, "cachedInputTokens"),
+  cacheCreationInputTokens: columnValue(usage.cacheCreationInputTokens, "cacheCreationInputTokens"),
   // Never 0 and never an estimate: null unless the provider reported at least
   // one of the two halves. Input is already canonical and includes the cached
   // subset, so it must not be added here a second time.
@@ -355,6 +533,7 @@ const sameColumns = (
     inputTokens: number | null;
     outputTokens: number | null;
     cachedInputTokens: number | null;
+    cacheCreationInputTokens: number | null;
     totalTokens: number | null;
     costUsd: Prisma.Decimal | null;
   },
@@ -363,6 +542,7 @@ const sameColumns = (
   current.inputTokens === derived.inputTokens
   && current.outputTokens === derived.outputTokens
   && current.cachedInputTokens === derived.cachedInputTokens
+  && current.cacheCreationInputTokens === derived.cacheCreationInputTokens
   && current.totalTokens === derived.totalTokens
   && (current.costUsd === null
     ? derived.costUsd === null
@@ -443,7 +623,14 @@ const recomputeSessionUsageOnce = async (db: PrismaClient, sessionId: string): P
     const derived = deriveUsageColumns(sumUsage(rows.map((row) => extractUsage(row.payload))));
     const current = await tx.session.findUnique({
       where: { id: sessionId },
-      select: { inputTokens: true, outputTokens: true, cachedInputTokens: true, totalTokens: true, costUsd: true },
+      select: {
+        inputTokens: true,
+        outputTokens: true,
+        cachedInputTokens: true,
+        cacheCreationInputTokens: true,
+        totalTokens: true,
+        costUsd: true,
+      },
     });
     if (!current || sameColumns(current, derived)) return false;
     await tx.session.update({ where: { id: sessionId }, data: derived });

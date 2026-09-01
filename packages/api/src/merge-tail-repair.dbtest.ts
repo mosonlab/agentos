@@ -46,6 +46,7 @@ type RegressionSeedOptions = {
   withLibrarian?: boolean;
   withLibrarianHistory?: boolean;
   templateName?: string;
+  gateFailureExcerpt?: string;
 };
 
 const seedRegression = async (options: RegressionSeedOptions = {}) => {
@@ -182,11 +183,19 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
   return { project, template, repo, regressionAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
 };
 
-const verdict = (outcome: RegressionOutcome, headSha: string = HEAD) => JSON.stringify(outcome === "refresh-conflict"
+const verdict = (outcome: RegressionOutcome, headSha: string = HEAD, gateFailureExcerpt?: string) => JSON.stringify(outcome === "refresh-conflict"
   ? { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, summary: "merge conflict" }
   : outcome === "review-fail"
     ? { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, summary: "MF-2 remains open" }
-    : { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
+    : {
+      schemaVersion: 1,
+      outcome,
+      headSha,
+      baseHeadSha: BASE,
+      gateVerdict: "FAIL",
+      summary: "suite failed",
+      ...(gateFailureExcerpt === undefined ? {} : { gateFailureExcerpt }),
+    });
 
 type RegressionOutcome = "refresh-conflict" | "review-fail" | "gate-fail";
 
@@ -197,7 +206,7 @@ const exercise = async (
   const seeded = await seedRegression(options);
   await db.taskStepOutput.create({ data: {
     taskId: seeded.regression.id, runId: seeded.run.id, kind: "regression-verification",
-    body: verdict(outcome), commitSha: HEAD,
+    body: verdict(outcome, HEAD, options.gateFailureExcerpt), commitSha: HEAD,
   } });
   const input = {
     task: seeded.regression,
@@ -451,6 +460,57 @@ test("a gate FAIL is repaired twice and the third FAIL escalates with both heads
   assert.match(notice.body, /after 2 automatic repair attempts/u);
   const trail = await db.taskActivity.findMany({ where: { taskId: seeded.regression.id }, select: { body: true } });
   assert.match(trail.map(({ body }) => body).join("\n"), new RegExp(`${HEAD}.*${BASE}`, "s"));
+});
+
+test("a gate-fix prompt renders its failure excerpt while other repair prompts remain unchanged", async () => {
+  const excerpt = [
+    "not ok 1 - packages/api/src/merge-tail.test.ts",
+    "AssertionError: expected gate failure excerpt",
+  ].join("\n");
+  const gateSeeded = await exercise("gate-fail", { gateFailureExcerpt: excerpt });
+  const gateRepair = await repairFor(gateSeeded, "gate-fix");
+  const gateContext = [
+    "Persisted outputs from prior template steps:",
+    `## Implementation (implementation)\n${IMPLEMENTATION_BODY}`,
+  ].join("\n\n");
+  assert.equal(gateRepair.description, [
+    `Repair the autonomous merge tail failure at ${HEAD} against target ${BASE}.`,
+    "suite failed",
+    "Gate failure excerpt",
+    excerpt,
+    "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+    gateContext,
+  ].join("\n\n"));
+
+  await resetTestDb(db);
+  const reviewSeeded = await exercise("review-fail");
+  const reviewRepair = await repairFor(reviewSeeded, "review-fix");
+  const reviewContext = [
+    "Persisted outputs from prior template steps:",
+    `## Implementation (implementation)\n${IMPLEMENTATION_BODY}`,
+    `## Sol review (sol-findings)\n${SOL_FINDINGS_BODY}`,
+    `## Blind review (blind-findings)\n${BLIND_FINDINGS_BODY}`,
+  ].join("\n\n");
+  assert.equal(reviewRepair.description, [
+    `Repair the autonomous merge tail failure at ${HEAD} against target ${BASE}.`,
+    "MF-2 remains open",
+    "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+    reviewContext,
+  ].join("\n\n"));
+
+  await resetTestDb(db);
+  const conflictSeeded = await exercise("refresh-conflict");
+  const conflictRepair = await repairFor(conflictSeeded, "refresh-conflict");
+  const conflictContext = [
+    "Persisted outputs from prior template steps:",
+    `## Implementation (implementation)\n${IMPLEMENTATION_BODY}`,
+  ].join("\n\n");
+  assert.equal(conflictRepair.description, [
+    `Resolve the refresh conflict between chain head ${HEAD} and target head ${BASE}.`,
+    "merge conflict",
+    `Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist the role's versioned JSON bound to start ${HEAD} and target ${BASE}.`,
+    conflictContext,
+  ].join("\n\n"));
 });
 
 test("a semantic FAIL skips the gate path and is repaired twice before it escalates", async () => {

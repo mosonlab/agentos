@@ -79,6 +79,7 @@ const eventDatabase = (options: {
         inputTokens: null,
         outputTokens: null,
         cachedInputTokens: null,
+        cacheCreationInputTokens: null,
         totalTokens: null,
         costUsd: null,
       }),
@@ -391,7 +392,8 @@ test("FINAL_OUTPUT recomputes derived usage through the lifecycle interface", as
   assert.equal(write.where.id, "session-1");
   assert.equal(write.data.inputTokens, 8_824);
   assert.equal(write.data.outputTokens, 77);
-  assert.equal(write.data.cachedInputTokens, 8_820);
+  assert.equal(write.data.cachedInputTokens, 8_700);
+  assert.equal(write.data.cacheCreationInputTokens, 120);
   assert.equal(write.data.totalTokens, 8_901);
   assert.equal(String(write.data.costUsd), "0.0491");
 });

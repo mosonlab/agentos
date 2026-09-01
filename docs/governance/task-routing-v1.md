@@ -51,7 +51,7 @@ Choose Direct when one implementation context window can deliver a brief whose c
 
 Keep the template's default implementation assignee. Assign `senior-dev` (same rule for the review-fix step) only when the work touches persisted data or a defense-list path — merge gate, gate worker, migrations, merge automation — or when that classification is uncertain. Assign `frontend-dev` when the work is primarily a new or redesigned web page or UI surface (the operator 2026-08-27); the defense-list rule wins when both apply.
 
-A backlog card that needs a non-default implementation assignee states it as the machine-readable line `Route: implementation=senior-dev` (or `=frontend-dev`) in its description. Direct-template instantiation consumes that line, validates the allowed Agent name, and applies it to the implementation step. Explicit `stepOverrides` remain a separate API mechanism; supplying both mechanisms for the direct implementation step is refused. Other templates do not interpret Route-looking prose.
+A backlog card that needs a non-default implementation assignee states it as the machine-readable line `Route: implementation=<agent-name>` in its description. Direct-template instantiation consumes that line, resolves the named Agent in the project, applies the existing override safety checks, and assigns it to the implementation step. Explicit `stepOverrides` remain a separate API mechanism; supplying both mechanisms for the direct implementation step is refused. Other templates do not interpret Route-looking prose.
 
 ## Critical classification
 
@@ -85,7 +85,7 @@ Record this block when creating or materially rerouting a chain:
 ```text
 Routing Contract: v1.4
 Tier: Direct
-Implementation Agent: senior-dev-luna
+Implementation Agent: <project-agent-name>
 Critical: no
 Reason: Bounded change; Direct review and exact-head acceptance remain intact.
 ```
@@ -102,7 +102,7 @@ A backlog card is a dispatch-ready brief waiting for a decision, not a work item
   1. True dependency — the new chain consumes another chain's output, or needs that chain merged and deployed first: bind with `afterTaskId` and record the basis (`Depends on: <chain> — <what is consumed or why deploy-first>`) in the instantiate description or the card's activity log.
   2. Heavy overlap — no dependency, but both chains rewrite the same code area: weigh expected refresh-conflict repair cost against serial wall-clock loss; either choice is valid, and a serial choice records its reason the same way.
   3. Independent — dispatch in parallel, no justification needed; the merge tail and the deploy quiet window already serialize delivery.
-  Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — schema migrations touching the same tables, changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list).
+  Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list). Serialize unconditionally when both chains add a Prisma migration, whichever tables they touch: every migration bumps `RELEASE_CANDIDATE_MIGRATIONS` in `packages/db/src/release-migrate.ts`, so two concurrent migration-adding chains conflict on merge by construction (7 of the 19 refresh-conflict repairs between 2026-08-24 and 2026-08-31 were exactly those two lines).
 - Archive the card at the moment of instantiation. The archived card remains recoverable in the Archived view; re-dispatching its work is a new decision, not a revival of the card.
 
 ## Board column semantics

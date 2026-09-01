@@ -58,6 +58,7 @@
     "db:export-goal-lineage": "dotenv -e ../../.env -- tsx prisma/export-goal-lineage.ts",
     "db:files-precheck": "dotenv -e ../../.env -- tsx prisma/precheck-files.ts",
     "db:backfill-session-usage": "dotenv -e ../../.env -- tsx prisma/backfill-session-usage.ts",
+    "db:backfill-session-cache": "dotenv -e ../../.env -- tsx prisma/backfill-session-cache.ts",
     "db:backfill-task-source": "dotenv -e ../../.env -- tsx prisma/backfill-task-source.ts",
     "db:verify-agent-template": "dotenv -e ../../.env -- tsx prisma/verify-agent-template.ts",
     "db:validate": "dotenv -e ../../.env -- prisma validate",

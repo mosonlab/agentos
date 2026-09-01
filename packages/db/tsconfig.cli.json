@@ -18,6 +18,7 @@
   },
   "include": [
     "prisma/preflight-goal-execution.ts",
+    "prisma/backfill-session-cache.ts",
     "prisma/release-migrate.ts",
     "prisma/sync-canonical-prompts.ts",
     "prisma/verify-starter-onboarding.ts"

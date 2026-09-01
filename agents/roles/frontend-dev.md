@@ -1,7 +1,7 @@
 ---
 name: frontend-dev
 title: Frontend Developer
-model: claude-opus-5:medium
+model: claude-opus-5:high
 runner: claude
 inboxAccess: false
 collaborators: []

@@ -79,7 +79,9 @@ is — a brief that cannot reach mechanical Acceptance is compound-shaped
 regardless of tier.
 
 Direct-template instantiation parses and validates the `Route:` line and applies
-it to the implementation step. Explicit `stepOverrides` are a separate API
+it to the implementation step. A line starting with `Route:` that does not
+match the grammar exactly is refused at instantiation rather than silently
+ignored. Explicit `stepOverrides` are a separate API
 mechanism; do not supply both for that step. Compound and custom templates do
 not interpret Route-looking prose.
 
@@ -100,3 +102,16 @@ Constraints: <cross-cutting behavioral rules, if not already in Changes.>
 
 Acceptance: <mechanical criteria, covering every change.>
 ```
+
+### Continuing from a delivered branch
+
+When a new direct chain continues a delivered branch, see the operator
+handbook's [recovery procedure](operator-api.md#recovering-a-merge-tail-stopped-after-its-repair-budget)
+for the required hold and archive order. The brief must follow these rules:
+
+1. Change 1 is a plain merge of `origin/<old branch>` at a pinned commit sha.
+2. The remaining Changes cover only the defect that stopped the previous chain.
+3. Append the previous brief verbatim under a `Reference` heading so reviewers
+   can judge the merged diff against it.
+4. Acceptance must include “the chain branch contains <sha> as an ancestor”
+   and must include the previous brief's acceptance criteria unchanged.
