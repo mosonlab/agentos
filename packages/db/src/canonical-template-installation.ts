@@ -48,7 +48,7 @@ export type CanonicalInstallationAction =
 export type CanonicalInstallationPlan = readonly CanonicalInstallationAction[];
 export type CanonicalInstallationSources = ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>;
 
-const CANONICAL_REVIEW_STEP_IDENTITIES = new Set([
+export const CANONICAL_REVIEW_STEP_IDENTITIES: ReadonlySet<string> = new Set([
   "compound-engineer-workflow:6",
   "compound-engineer-workflow:7",
   "direct-engineer-workflow:3",
@@ -57,7 +57,7 @@ const CANONICAL_REVIEW_STEP_IDENTITIES = new Set([
   "pr-engineer-workflow:3",
 ]);
 
-const isCanonicalReviewStep = (templateName: CanonicalTemplateName, stepIndex: number): boolean =>
+export const isCanonicalReviewStep = (templateName: CanonicalTemplateName, stepIndex: number): boolean =>
   CANONICAL_REVIEW_STEP_IDENTITIES.has(`${templateName}:${stepIndex}`);
 
 const adoptionDifferenceAllowed = (

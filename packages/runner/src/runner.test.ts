@@ -274,6 +274,7 @@ test("a review step records the dependency skip before fake adapter preflight an
     const configured = {
       ...config(join(root, "workspaces")),
       home: root,
+      path: process.env.PATH ?? "/usr/bin:/bin",
       dependencyCacheRoot: join(root, "dependency-cache"),
     };
     const controlPlane = createControlPlaneDouble();
@@ -368,6 +369,111 @@ test("a review step records the dependency skip before fake adapter preflight an
     await assert.rejects(access(join(root, "dependency-cache")), { code: "ENOENT" });
   } finally {
     await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an implementation step provisions dependencies without recording the review skip", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-implementation-dependency-activity-"));
+  try {
+    const remote = await seedDependencyRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      dependencyCacheRoot: join(root, "dependency-cache"),
+    };
+    const controlPlane = createControlPlaneDouble();
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async ({ env }) => {
+        preflightCalls += 1;
+        assert.equal((await stat(join(env.AGENTOS_WORKSPACE_PATH!, "node_modules"))).isDirectory(), true);
+        assert.equal(
+          await readFile(join(env.AGENTOS_WORKSPACE_PATH!, "node_modules", "fixture-tool", "index.cjs"), "utf8"),
+          "module.exports = 'dependency fixture';\n",
+        );
+        return { ok: true, cliVersion: "test", authMode: "test", capabilities: {} };
+      },
+      start: async () => {
+        startCalls += 1;
+        const now = new Date();
+        return {
+          runId: "run-implementation",
+          runner: "CLAUDE",
+          child: null as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          providerState: null,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            terminalEventSeen: true,
+            terminalSuccess: true,
+            terminationReason: null,
+            finalOutput: null,
+            providerError: null,
+            stdout: "",
+            stderr: "",
+          }),
+        };
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    const claim = {
+      ...mechanicalClaim,
+      executionMode: "agent" as const,
+      runner: "CLAUDE" as const,
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      task: {
+        ...mechanicalClaim.task,
+        templateStep: { name: "Implementation", provisionDependencies: true },
+      },
+      run: {
+        ...mechanicalClaim.run,
+        requiresCommit: false,
+        opensPullRequest: false,
+        targetBranch: "master",
+        maxRunsPerTask: 3,
+      },
+      session: testSession(root),
+    } satisfies ClaimedTask;
+
+    await executeClaimProduction(configured, claim, {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => undefined,
+      provisionSessionConfig: async () => undefined,
+    });
+
+    assert.equal(preflightCalls, 1, JSON.stringify(controlPlane.completions));
+    assert.equal(startCalls, 1);
+    assert.deepEqual(controlPlane.activities
+      .filter(({ body }) => body.includes("Dependency provisioning skipped")), []);
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+  } finally {
+    await cleanupTestSession(root);
+    try { execFileSync("/bin/chmod", ["-R", "u+w", join(root, "dependency-cache")]); } catch { /* absent cache */ }
     await rm(root, { recursive: true, force: true });
   }
 });

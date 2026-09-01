@@ -4,6 +4,7 @@ import { catalogRunnerForModel, PR_TEMPLATE_NAME } from "../src/agent-contract.j
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
   applyCanonicalInstallation,
+  isCanonicalReviewStep,
   planCanonicalInstallation,
   type CanonicalInstallationRow,
 } from "../src/canonical-template-installation.js";
@@ -33,18 +34,6 @@ const STEP_BASE_TRANSITIONS = new Map([
   ["compound-engineer-workflow:6", { from: null, to: 5 }],
   ["direct-engineer-workflow:3", { from: null, to: 2 }],
 ]);
-
-const CANONICAL_REVIEW_STEP_IDENTITIES = new Set([
-  "compound-engineer-workflow:6",
-  "compound-engineer-workflow:7",
-  "direct-engineer-workflow:3",
-  "direct-engineer-workflow:4",
-  "pr-engineer-workflow:2",
-  "pr-engineer-workflow:3",
-]);
-
-const isCanonicalReviewStep = (templateName: string, stepIndex: number): boolean =>
-  CANONICAL_REVIEW_STEP_IDENTITIES.has(`${templateName}:${stepIndex}`);
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
   const expected = catalogRunnerForModel(agent.model);
