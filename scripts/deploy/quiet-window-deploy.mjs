@@ -902,7 +902,18 @@ const main = async () => {
   const options = parseArgs(process.argv.slice(2));
   if (!Number.isSafeInteger(POLL_MS) || POLL_MS < 1_000) fail("environment-invalid", "QUIET_WINDOW_POLL_SECONDS-must-be-a-positive-integer");
   if (options.clearEscalation) {
-    if (existsSync(ESCALATION_PATH)) unlinkSync(ESCALATION_PATH);
+    // Removing nothing and reporting CLEARED is how this command lied on
+    // 2026-09-01: STATE_DIR hangs off AGENTOS_REPOSITORY_ROOT, so running it
+    // from a release checkout without that variable pointed it at an empty
+    // `current/.agentos-deploy/`, deleted nothing, and printed the success
+    // line anyway while the real marker kept holding the deploy. Clearing an
+    // absent marker stays exit 0 — it is idempotent, not an error — but it
+    // says which path it looked at, so a wrong root is visible immediately.
+    if (!existsSync(ESCALATION_PATH)) {
+      log(`NO-ESCALATION-TO-CLEAR path=${ESCALATION_PATH}`);
+      return 0;
+    }
+    unlinkSync(ESCALATION_PATH);
     log("CLEARED escalation operator-action-required-before-this-command");
     return 0;
   }
