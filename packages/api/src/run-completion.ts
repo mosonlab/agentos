@@ -383,16 +383,46 @@ export const completeRun = async (
     // chain-lease release, the merge-tail stop notice and the refusal activity
     // that park has always written.
     const requiredKind = requiredOutputKind(run.task?.templateStep);
-    const outputTaskId = reportedSuccess && requiredKind && run.runNumber < run.maxRunsPerTask
+    // A Run whose persisted commit contract was relaxed may legitimately reach
+    // completion without advancing its base. That exception is accepted only
+    // when the canonical artifact proves the unchanged base itself is the
+    // implementation head. Unlike the ordinary missing-output retry path, this
+    // evidence gate applies even at the Run ceiling: a clean provider exit is
+    // never a substitute for the deliverable. Delegate the complete ownership,
+    // kind, commit, and body decision to the canonical validator below.
+    const ownPublishedBase = !run.requiresCommit && run.taskId && run.targetBranch
+      ? await tx.run.findFirst({
+        where: {
+          taskId: run.taskId,
+          runNumber: { lt: run.runNumber },
+          pushedBranch: run.targetBranch,
+        },
+        select: { id: true },
+      })
+      : null;
+    const relaxedNoChange = reportedSuccess
+      && ownPublishedBase !== null
+      && run.baseSha !== null
+      && body.headSha === run.baseSha;
+    const outputTaskId = reportedSuccess && requiredKind
+      && (relaxedNoChange || run.runNumber < run.maxRunsPerTask)
       ? run.taskId
       : null;
     const persistedOutput = outputTaskId
-      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId }, select: { runId: true } })
+      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId } })
       : null;
     const missingOutputReason = outputTaskId && requiredKind
-      && persistedOutput?.runId !== run.id
-      && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
-      ? `missing ${requiredKind} task output for current Run ${run.id}`
+      ? relaxedNoChange
+        ? canonicalOutputRefusal(
+          run.task?.templateStep,
+          persistedOutput,
+          run.id,
+          run.baseSha,
+        )
+        : persistedOutput?.runId !== run.id
+          && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
+          ? `missing ${requiredKind} task output for current Run ${run.id}`
+          : null
       : null;
     const succeeded = reportedSuccess && !missingOutputReason;
     // The runner is on the untrusted side of this boundary. When it reports a

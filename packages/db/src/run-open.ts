@@ -812,6 +812,22 @@ export const openRun = async (
               }
           : await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
 
+  // A salvaged publication can sit behind an intermediate cancelled Run, so
+  // the latest Run alone is not the ownership proof. Bind the relaxation to
+  // the persisted Task/repo/ref relation that resolved as this Run's base.
+  // This is evaluated once, before Run birth; later salvage repair may not
+  // rewrite a Run's snapshotted commit contract.
+  const continuesOwnPublication = task.repoId
+    ? await tx.run.findFirst({
+      where: {
+        taskId: task.id,
+        repoId: task.repoId,
+        pushedBranch: branches.targetBranch,
+      },
+      select: { id: true },
+    })
+    : null;
+
   const preservedConfiguration = sourceRetryIntent(intent) && prior
     ? {
       runner: prior.runner,
@@ -855,7 +871,9 @@ export const openRun = async (
     // the pre-contract delivery boundary: asking for a pull request requires a
     // commit, while branch-only work may complete through an external action or
     // durable prose without inventing a repository change.
-    requiresCommit: task.templateStep?.requiresCommit ?? task.opensPullRequest,
+    requiresCommit: continuesOwnPublication
+      ? false
+      : task.templateStep?.requiresCommit ?? task.opensPullRequest,
     maxDurationMin: preservesPriorTiming ? prior?.maxDurationMin ?? task.maxDurationMin : task.maxDurationMin,
     stallTimeoutMin: preservesPriorTiming ? prior?.stallTimeoutMin ?? task.stallTimeoutMin : task.stallTimeoutMin,
     // The configured budget plus the grants already earned, not the budget
