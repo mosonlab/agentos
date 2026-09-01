@@ -230,6 +230,7 @@ exec bash -c "$*"
       encoding: "utf8",
       env: {
         ...FIXTURE_ENV,
+        AGENTOS_WORKSPACE_PATH: repo,
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
         FAKE_SSH_HOME: fakeHome,
       },
@@ -319,6 +320,7 @@ exec "$REAL_GIT" "$@"
       timeout: 15_000,
       env: {
         ...FIXTURE_ENV,
+        AGENTOS_WORKSPACE_PATH: repo,
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
         FAKE_SSH_HOME: fakeHome,
         REAL_GIT: realGit,
@@ -429,6 +431,7 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
     timeout: 30_000,
     env: {
       ...FIXTURE_ENV,
+      AGENTOS_WORKSPACE_PATH: checkout,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       FAKE_SSH_HOME: fakeHome,
       XDG_CACHE_HOME: cache,
@@ -634,6 +637,7 @@ test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {
       timeout: 60_000,
       env: {
         ...FIXTURE_ENV,
+        AGENTOS_WORKSPACE_PATH: fixture.repo,
         PATH: `${fixture.fakeBin}:${process.env.PATH ?? ""}`,
         FAKE_SSH_HOME: fixture.fakeHome,
         XDG_CACHE_HOME: join(fixture.root, "cache"),

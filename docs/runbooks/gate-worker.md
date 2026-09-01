@@ -109,10 +109,10 @@ selects a local-only dispatch; with neither remote capacity nor local opt-in the
 dispatcher returns `76` instead of guessing a host.
 
 `gate-dispatch.sh` is the way to run a gate when anything else might also be
-running one:
+running one; set `AGENTOS_WORKSPACE_PATH` to the checkout explicitly:
 
 ```sh
-AGENTOS_GATE_SERVER=primary-worker scripts/gate-worker/gate-dispatch.sh <oid>
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=primary-worker scripts/gate-worker/gate-dispatch.sh <oid>
 ```
 
 - The candidate is the exact requested `<oid>`. Unless `--master <oid>` is
@@ -359,8 +359,8 @@ Removing the file returns the worker to one slot.
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
 
 ```sh
-scripts/gate-worker/mirror-push.sh primary-worker --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
-scripts/gate-worker/mirror-push.sh primary-worker --candidate <candidate-oid> --baseline <baseline-oid>
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/mirror-push.sh primary-worker --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/mirror-push.sh primary-worker --candidate <candidate-oid> --baseline <baseline-oid>
 ```
 
 Both oids must resolve in the local object database. Routine use does not ask an
@@ -370,15 +370,16 @@ origin baseline before it calls `mirror-push.sh`.
 **3. Gate a commit (local).**
 
 ```sh
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" \
 AGENTOS_GATE_PRIMARY_SERVER=primary-worker \
   AGENTOS_GATE_FALLBACK_SERVER=fallback-worker \
   scripts/gate-worker/gate-dispatch.sh <oid>                          # primary, then fallback
-scripts/gate-worker/gate-dispatch.sh <oid> --server primary-worker    # one worker
-scripts/gate-worker/gate-dispatch.sh <oid> --allow-local              # local only with no remote configured
-scripts/gate-worker/remote-gate.sh primary-worker <oid>                # one worker directly
-scripts/gate-worker/remote-gate.sh primary-worker <oid> --verbose      # stream it
-scripts/gate-worker/remote-gate.sh primary-worker <oid> --fetch-log    # copy the log back
-scripts/gate-worker/remote-gate.sh primary-worker <oid> --master <oid> # state the baseline
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/gate-dispatch.sh <oid> --server primary-worker    # one worker
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/gate-dispatch.sh <oid> --allow-local              # local only with no remote configured
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/remote-gate.sh primary-worker <oid>                # one worker directly
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/remote-gate.sh primary-worker <oid> --verbose      # stream it
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/remote-gate.sh primary-worker <oid> --fetch-log    # copy the log back
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/remote-gate.sh primary-worker <oid> --master <oid> # state the baseline
 ```
 
 `--master` is only needed when origin cannot be read (no network, expired
@@ -395,7 +396,7 @@ and compare the two verdict lines.
 ```sh
 git rev-parse HEAD                                       # <oid>
 bash scripts/merge-gate.sh --expect-head <oid>           # local
-scripts/gate-worker/remote-gate.sh primary-worker <oid>    # remote
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/remote-gate.sh primary-worker <oid>    # remote
 ```
 
 Both must end in `MERGE GATE: PASS <oid>` naming the same oid. Record both
@@ -426,7 +427,7 @@ at its default capacity of one.
 ## Routine use
 
 ```sh
-AGENTOS_GATE_SERVER=primary-worker scripts/gate-worker/gate-dispatch.sh <oid>
+AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=primary-worker scripts/gate-worker/gate-dispatch.sh <oid>
 ```
 
 That is the whole routine: the dispatcher refreshes the baseline and pushes the
@@ -456,7 +457,7 @@ that invariant true; do not fix a width independently of the share.
 ## Troubleshooting
 
 **`commit <oid> is not in the mirror`** — the mirror is behind. Run
-`mirror-push.sh <server> --candidate <oid> --baseline <baseline-oid>` and retry
+`AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <baseline-oid>` and retry
 (the dispatcher does this itself). The worker has no way to fetch what it was
 not given.
 
