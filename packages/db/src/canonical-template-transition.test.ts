@@ -205,19 +205,19 @@ test("a rollover refuses a source that is not the successor it was registered to
     assert.ok(current);
 
     // The source as registered: no drift.
-    assert.equal(successorPromptDrift(templateName, "pre-regression-step-split", current), null);
+    assert.equal(successorPromptDrift(templateName, "pre-runner-provided-regression-tooling", current), null);
 
     // The same rollover, with the prompts edited again after registration.
     const driftedSource = current.map((step) => (
       step.stepIndex === current[0]!.stepIndex ? { ...step, prompt: `${step.prompt}\n\nlater edit` } : step
     ));
-    const refusal = successorPromptDrift(templateName, "pre-regression-step-split", driftedSource);
+    const refusal = successorPromptDrift(templateName, "pre-runner-provided-regression-tooling", driftedSource);
     assert.ok(refusal, `${templateName} must refuse an unregistered successor`);
     assert.match(refusal, /registered to install prompt generation/u);
 
     // The outgoing row is unaffected by that edit and still matches, which is
     // exactly why the successor has to be checked separately.
-    const generation = generationOf(templateName, "pre-regression-step-split");
+    const generation = generationOf(templateName, "pre-runner-provided-regression-tooling");
     assert.ok(generation.successorPromptDigest);
     assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
   }
@@ -337,6 +337,24 @@ test("the product rename is a registered prompt-only rollover in both templates"
   }
 });
 
+test("runner-provided Regression tooling is a registered prompt-only rollover in both templates", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const retiredDigests = {
+    "direct-engineer-workflow": "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+    "compound-engineer-workflow": "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
+  } as const;
+
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+    const generation = generationOf(templateName, "pre-runner-provided-regression-tooling");
+    assert.equal(generation.promptDigest, retiredDigests[templateName]);
+    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+  }
+});
+
 test("every prompt-only generation can roll straight to the current source", async () => {
   const sources = await loadAllTemplateStepSources();
   const markers = {
@@ -346,11 +364,13 @@ test("every prompt-only generation can roll straight to the current source", asy
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
       "pre-product-rename-anneal",
+      "pre-runner-provided-regression-tooling",
     ],
     "compound-engineer-workflow": [
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
       "pre-product-rename-anneal",
+      "pre-runner-provided-regression-tooling",
     ],
   } as const;
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {

@@ -20,7 +20,8 @@ const CURRENT_CLI_SURFACE_DOCS = [
   "docs/release/v0.2.0-release-notes.md",
 ];
 
-const CANONICAL_SYNC_DOCS = ["agents/README.md", "docs/install.md"];
+const CANONICAL_ONBOARDING_DOC = "docs/runbooks/add-a-project.md";
+const REDUCED_CANONICAL_SYNC_DOCS = ["agents/README.md", "docs/install.md"];
 const CANONICAL_SYNC_COMMANDS = [
   "db:sync-canonical-prompts",
   "db:verify-agent-template",
@@ -33,9 +34,6 @@ const FULL_TAIL_READINESS_CATEGORIES = [
 ];
 const FULL_TAIL_REPOSITORY_FILES = [
   "scripts/merge-gate.sh",
-  "scripts/regression-verification.sh",
-  "scripts/gate-worker/gate-dispatch.sh",
-  "scripts/gate-worker/lib.sh",
 ];
 
 test("published docs do not advertise or require the retired repository CLI", () => {
@@ -83,29 +81,44 @@ test("published docs describe the executable existing-mode consumer truthfully",
   assert.match(migrationGuide, /does not ship the\n> backup producer/u);
 });
 
-test("canonical prompt docs describe project-scoped sync, verification, and full-tail readiness", () => {
-  for (const path of CANONICAL_SYNC_DOCS) {
+test("the add-project runbook owns canonical sync and full-tail onboarding", () => {
+  const onboarding = readFileSync(CANONICAL_ONBOARDING_DOC, "utf8");
+  assert.match(onboarding, /^## Tier 0 checklist\b/m);
+  assert.match(onboarding, /^## Tier 1 checklist\b/m);
+  assert.match(onboarding, /- \[ \]/u);
+
+  for (const command of CANONICAL_SYNC_COMMANDS) {
+    assert.ok(onboarding.includes(command), `${CANONICAL_ONBOARDING_DOC}: ${command}`);
+  }
+  assert.match(onboarding, /partial (?:canonical )?inventory/u, CANONICAL_ONBOARDING_DOC);
+  for (const category of FULL_TAIL_READINESS_CATEGORIES) {
+    assert.ok(onboarding.includes(category), `${CANONICAL_ONBOARDING_DOC}: ${category}`);
+  }
+  for (const repositoryFile of FULL_TAIL_REPOSITORY_FILES) {
+    assert.ok(onboarding.includes(`\`${repositoryFile}\``), `${CANONICAL_ONBOARDING_DOC}: ${repositoryFile}`);
+  }
+  assert.match(onboarding, /in-Project Repo/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /AgentRepoAccess[\s\S]*every\s+effective\s+template\s+assignee|every\s+effective\s+template\s+assignee[\s\S]*AgentRepoAccess/iu, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /required model CLIs for the selected roles/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /authenticated `gh`/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /GITHUB_READ_TOKEN/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /RUNNER_GATE_SERVER/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /private merge-executor GitHub App installed on the target repository/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /isolated executor service/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /Provider authentication is runner-host\s+infrastructure/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /AgentSecretGrant[\s\S]*not\s+(?:required|a\s+full-tail\s+readiness\s+prerequisite)/iu, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /Node on the runner[\s\S]*documented prerequisites, not probes/iu, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /Regression, not an in-Run agent, executes the gate/u, CANONICAL_ONBOARDING_DOC);
+
+  for (const path of REDUCED_CANONICAL_SYNC_DOCS) {
     const text = readFileSync(path, "utf8");
+    assert.match(text, /(?:\.\.\/)?(?:docs\/)?runbooks\/add-a-project\.md/u, path);
     for (const command of CANONICAL_SYNC_COMMANDS) {
-      assert.ok(text.includes(command), `${path}: ${command}`);
+      assert.doesNotMatch(text, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"), `${path}: ${command}`);
     }
-    assert.match(text, /partial (?:canonical )?inventory/u, path);
     for (const category of FULL_TAIL_READINESS_CATEGORIES) {
-      assert.ok(text.includes(category), `${path}: ${category}`);
+      assert.doesNotMatch(text, new RegExp(`^## .*${category}`, "mu"), `${path}: ${category}`);
     }
-    for (const repositoryFile of FULL_TAIL_REPOSITORY_FILES) {
-      assert.ok(text.includes(`\`${repositoryFile}\``), `${path}: ${repositoryFile}`);
-    }
-    assert.match(text, /in-Project Repo/u, path);
-    assert.match(text, /AgentRepoAccess[\s\S]*every\s+effective\s+template\s+assignee|every\s+effective\s+template\s+assignee[\s\S]*AgentRepoAccess/iu, path);
-    assert.match(text, /required model CLIs for the selected roles/u, path);
-    assert.match(text, /authenticated `gh`/u, path);
-    assert.match(text, /GITHUB_READ_TOKEN/u, path);
-    assert.match(text, /RUNNER_GATE_SERVER/u, path);
-    assert.match(text, /private merge-executor GitHub App installed on the target repository/u, path);
-    assert.match(text, /isolated executor service/u, path);
-    assert.match(text, /Provider authentication is runner-host\s+infrastructure/u, path);
-    assert.match(text, /AgentSecretGrant[\s\S]*not\s+(?:required|a\s+full-tail\s+readiness\s+prerequisite)/iu, path);
   }
 });
 

@@ -821,7 +821,7 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     { name: "direct-engineer-workflow: Code review (Sol)", descriptionSha256: "cea58637cbbf2616a41db1864a7d22fa9c20472b61e673a2d8b1312fb1691d2a" },
     { name: "direct-engineer-workflow: Code review (Opus blind)", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
     { name: "direct-engineer-workflow: Apply review fixes", descriptionSha256: "ba850c7de0ee4d19abe6e6f32d22ffa8e1731abe52cbb61d0ea00996c037e5ad" },
-    { name: "direct-engineer-workflow: Regression verification", descriptionSha256: "d59059cc2cdbfd03f6b45abfe4d656974a931f0f50a7f1624571e7e3bffa8e1a" },
+    { name: "direct-engineer-workflow: Regression verification", descriptionSha256: "29e3eb38fc11883aa8405110745ece9a3811cbe3796ff60824dad3e1939638e8" },
     { name: "direct-engineer-workflow: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
     { name: "direct-engineer-workflow: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);

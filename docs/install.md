@@ -58,81 +58,13 @@ LaunchDaemon and Linux systemd profiles in the public
 Those procedures do not change the platform classifications above or the
 authoritative support matrix.
 
-## Canonical prompt synchronization and verification
+## Project onboarding
 
-The files under [`agents/`](../agents/) are the source of truth for canonical
-Agent and template prompts. Synchronization is per-Project and remains one
-all-or-none transaction:
-
-```sh
-npm run db:sync-canonical-prompts
-```
-
-An ordinary sync visits every Project. It restores prompts and validates
-canonical-named Agents and template rows that a Project already holds. A
-partial inventory is valid outside `agentos-example`; absent canonical Agents
-and templates are left absent. `agentos-example` remains the canonical Project
-and its complete template inventory is restored when a canonical row is
-missing.
-
-To complete the post-A1 canonical inventory in a chosen Project, opt in
-explicitly:
-
-```sh
-npm run db:sync-canonical-prompts -- --install-full <projectId>
-```
-
-`--install-full` fills only missing canonical Agents and templates in the
-addressed Project. An unknown Project id is refused before the transaction; it
-rechecks the Project and its Environments inside the transaction, requires
-exactly one Environment, and refuses an archived same-name Agent. It never
-overwrites an existing object, resurrects an
-archived Agent, or creates a Repo, `AgentRepoAccess`, `AgentSecretGrant`, or
-other grant. Ordinary synchronization and installation share the same
-transaction; a second successful run has no mutations.
-
-Use project-scoped verification when a Project intentionally has only part of
-the canonical inventory:
-
-```sh
-npm run db:verify-agent-template -- --project <projectId>
-```
-
-This mode verifies exactly the canonical Agents and templates present in the
-addressed Project, ignores noncanonical inventory, and does not require absent
-canonical objects. Without `--project`, the verifier keeps its complete
-`agentos-example` inventory requirement and its compound/direct special checks.
-
-## Full-tail readiness — three categories
-
-Full-tail readiness has three separate categories. All three must be satisfied
-before a Direct or Full Assurance tail can rely on the repository's mechanical
-checks.
-
-### 1. Repository files (repository contract)
-
-The target repository must contain these merge-tail and worker-dispatch files:
-
-- `scripts/merge-gate.sh`
-- `scripts/regression-verification.sh`
-- `scripts/gate-worker/gate-dispatch.sh`
-- `scripts/gate-worker/lib.sh`
-
-### 2. Control-plane prerequisites
-
-The target Project needs an in-Project Repo. Every effective template assignee
-needs an `AgentRepoAccess` grant for that Repo. Canonical synchronization does
-not provision the Repo or any access grant.
-
-### 3. Operator infrastructure
-
-The operator must provide the required model CLIs for the selected roles and
-runner-host authentication, authenticated `gh`, `GITHUB_READ_TOKEN`, an
-SSH-reachable gate worker selected through `RUNNER_GATE_SERVER`, and the
-private merge-executor GitHub App installed on the target repository together
-with its isolated executor service. Provider authentication is runner-host
-infrastructure, not control-plane state: it is not an `AgentSecretGrant`, and
-`AgentSecretGrant` is not required for full-tail readiness.
+The canonical Tier 0 and Tier 1 onboarding contract — including canonical
+prompt synchronization, project-scoped installation and verification,
+and full-tail readiness — lives in the
+[Tier 0 / Tier 1 onboarding runbook](runbooks/add-a-project.md).
+Follow that runbook after completing the installation sequence above.
 
 ## Advanced delivery infrastructure
 
