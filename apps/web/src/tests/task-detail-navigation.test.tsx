@@ -5,7 +5,7 @@ import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApiError } from "../lib/api";
-import type { Chain, Run, TaskDetail, TaskStepOutput } from "../lib/types";
+import type { Chain, Run, TaskDetail, TaskStartability, TaskStepOutput } from "../lib/types";
 import { RunRow, TaskDetailPage, TaskOutput } from "../pages/TaskDetail";
 import { mountPage } from "./dom-harness";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
@@ -62,6 +62,76 @@ test("a resumed run identifies Duration as wall-clock time that includes Inbox w
   run.session = { executionStatus: "SUCCEEDED", resumeAttempt: 1 } as NonNullable<Run["session"]>;
   const markup = renderToStaticMarkup(<table><tbody><RunRow run={run} remoteUrl={null} expanded={false} onToggle={() => undefined} /></tbody></table>);
   assert.match(markup, /5m 0s wall-clock \(includes Inbox wait\)/);
+});
+
+test("the run row links its session in a column of its own, with Branch last", () => {
+  const run = sourceRun("task-1");
+  run.session = { id: "session-1", executionStatus: "SUCCEEDED", resumeAttempt: 0 } as NonNullable<Run["session"]>;
+  const rowMarkup = (expanded: boolean): string => renderToStaticMarkup(
+    <table><tbody><RunRow run={run} remoteUrl={null} expanded={expanded} onToggle={() => undefined} /></tbody></table>,
+  );
+
+  const collapsed = rowMarkup(false);
+  assert.match(collapsed, /href="#\/sessions\/session-1"/u);
+  const cells = [...collapsed.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gu)].map((match) => match[1]!);
+  assert.match(cells.at(-1)!, /source-branch/u, collapsed);
+  assert.equal(cells.filter((cell) => /source-branch/u.test(cell)).length, 1);
+
+  // The expanded panel no longer repeats the link the row already carries.
+  assert.equal((rowMarkup(true).match(/Open session/gu) ?? []).length, 1);
+});
+
+const startability = (satisfied: boolean): TaskStartability => ({
+  startable: satisfied,
+  checklist: {
+    repoBound: satisfied, agentAssignee: satisfied, repoAccessGrant: satisfied,
+    budgetRemaining: satisfied, noActiveRun: satisfied, predecessorsDone: satisfied,
+  },
+  task: { id: "details", name: "Details task", agent: null, repo: null, targetBranch: null },
+});
+
+test("the Details card leads with the live fields and keeps configuration behind a toggle", async () => {
+  const subject = task("details", "Details task", 0);
+  subject.runs = [sourceRun("details")];
+  subject.repo = {
+    id: "repo-1", projectId: "project-1", credentialSecretId: null, name: "anneal",
+    remoteUrl: "https://github.com/o/r", mountPath: "/repos/anneal", defaultBranch: "main",
+    createdAt: now, updatedAt: now,
+  };
+  const page = await mountPage(<TaskDetailPage taskId="details" />, {
+    "/tasks/details": subject,
+    "/tasks/details/output": new Response(JSON.stringify({ error: "not found" }), { status: 404 }),
+    "/tasks/details/startability": startability(true),
+    "/tasks/details/activity": [],
+    "/tasks/details/chain": emptyChain(),
+  }, "http://localhost/tasks/details");
+  const text = (): string => page.container.textContent ?? "";
+  const configurationButton = (): HTMLButtonElement => {
+    const button = [...page.container.querySelectorAll("button")]
+      .find((candidate) => /configuration/u.test(candidate.textContent ?? ""));
+    assert.ok(button instanceof HTMLButtonElement);
+    return button;
+  };
+  try {
+    for (const label of ["Execution owner", "Branch", "Pull request"]) assert.match(text(), new RegExp(label), label);
+    for (const label of ["Repo", "Target branch", "Schedule", "Working directory", "Created"]) {
+      assert.doesNotMatch(text(), new RegExp(label), label);
+    }
+    // Every checklist item is satisfied and the task has run, so it says nothing.
+    assert.doesNotMatch(text(), /Ready to start/u);
+    assert.equal(configurationButton().getAttribute("aria-expanded"), "false");
+
+    await page.press("Show configuration");
+    assert.equal(configurationButton().getAttribute("aria-expanded"), "true");
+    for (const label of ["Repo", "Target branch", "Schedule", "Working directory", "Requires approval", "Created"]) {
+      assert.match(text(), new RegExp(label), label);
+    }
+
+    await page.press("Hide configuration");
+    assert.doesNotMatch(text(), /Working directory/u);
+  } finally {
+    await page.dispose();
+  }
 });
 
 let replaceSubject: ((subject: ReactNode) => void) | null = null;

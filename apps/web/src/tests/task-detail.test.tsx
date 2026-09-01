@@ -52,13 +52,30 @@ test("the Details checklist renders every server verdict as satisfied or missing
     },
     task: { id: "t1", name: "Task", agent: null, repo: null, targetBranch: null },
   };
-  const markup = renderToStaticMarkup(<StartabilityChecklist verdict={verdict} />);
+  const markup = renderToStaticMarkup(<StartabilityChecklist verdict={verdict} hasRuns={false} />);
   assert.equal((markup.match(/Satisfied/g) ?? []).length, 3);
   assert.equal((markup.match(/Missing/g) ?? []).length, 3);
   for (const label of [
     "Repository bound", "Agent assigned", "Repository access granted",
     "Run budget remaining", "No active run", "Predecessors done",
   ]) assert.match(markup, new RegExp(label));
+});
+
+test("the readiness checklist disappears once it is fully satisfied on a task that has run", () => {
+  const satisfied: TaskStartability = {
+    startable: true,
+    checklist: {
+      repoBound: true, agentAssignee: true, repoAccessGrant: true,
+      budgetRemaining: true, noActiveRun: true, predecessorsDone: true,
+    },
+    task: { id: "t1", name: "Task", agent: null, repo: null, targetBranch: null },
+  };
+  assert.equal(renderToStaticMarkup(<StartabilityChecklist verdict={satisfied} hasRuns />), "");
+  // A task with no run is exactly when startability is still a live question.
+  assert.match(renderToStaticMarkup(<StartabilityChecklist verdict={satisfied} hasRuns={false} />), /Ready to start/);
+  // One unsatisfied item keeps the card even after the task has run.
+  const missing = { ...satisfied, startable: false, checklist: { ...satisfied.checklist, budgetRemaining: false } };
+  assert.match(renderToStaticMarkup(<StartabilityChecklist verdict={missing} hasRuns />), /Ready to start/);
 });
 
 /* ------------------------------------------------------------ link builders */

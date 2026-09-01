@@ -406,7 +406,7 @@ export const chainAggregate = (
     chainName,
     stepCount: primary.length,
     statusCounts: stepStatusCounts,
-    detailTaskId: firstPrimary?.id ?? frontierMember.id,
+    detailTaskId: frontierMember.id,
     status: columnStatus,
     frontier: {
       taskId: frontierMember.id,
