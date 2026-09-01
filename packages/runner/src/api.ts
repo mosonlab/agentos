@@ -314,7 +314,7 @@ export type SessionPrWorkflowOutput = {
   chainIndex: number;
   kind: "implementation" | "sol-findings" | "blind-findings" | "fixed-implementation";
   body: string;
-  commitSha: string | null;
+  commitSha: string;
 };
 
 export type SessionTaskOutput = {
@@ -370,19 +370,35 @@ export const readSessionTaskOutputStatus = async (
     && (typeof (output as Record<string, unknown>).commitSha === "string"
       || (output as Record<string, unknown>).commitSha === null)
   );
+  const isCanonicalCommitSha = (value: unknown): value is string => (
+    typeof value === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value)
+  );
   const validPrWorkflowOutputs = prWorkflowOutputs === undefined || (
     Array.isArray(prWorkflowOutputs)
-    && prWorkflowOutputs.every((entry: unknown) => {
+    && prWorkflowOutputs.every((entry: unknown, index: number, entries: unknown[]) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       const value = entry as Record<string, unknown>;
+      const previous = entries[index - 1];
+      const previousIndex = previous && typeof previous === "object" && !Array.isArray(previous)
+        ? (previous as Record<string, unknown>).chainIndex
+        : undefined;
       return typeof value.taskId === "string"
+        && value.taskId.trim().length > 0
         && Number.isInteger(value.chainIndex)
+        && (value.chainIndex as number) > 0
         && typeof value.body === "string"
-        && (typeof value.commitSha === "string" || value.commitSha === null)
+        && value.body.trim().length > 0
+        && isCanonicalCommitSha(value.commitSha)
         && (value.kind === "implementation"
           || value.kind === "sol-findings"
           || value.kind === "blind-findings"
-          || value.kind === "fixed-implementation");
+          || value.kind === "fixed-implementation")
+        && (index === 0 || (Number.isInteger(previousIndex)
+          && (value.chainIndex as number) > (previousIndex as number)))
+        && entries.findIndex((candidate) => candidate
+          && typeof candidate === "object"
+          && !Array.isArray(candidate)
+          && (candidate as Record<string, unknown>).taskId === value.taskId) === index;
     })
   );
   if (payload.task === null) return null;

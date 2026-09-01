@@ -100,25 +100,32 @@ const isPrDeliveryStep = (task: {
  */
 const prWorkflowOutputsFor = async (
   db: PrismaClient,
-  task: {
-    projectId: string;
-    chainId: string | null;
-    chainIndex: number | null;
-    templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
+  run: {
+    id: string;
+    task: {
+      projectId: string;
+      chainId: string | null;
+      chainIndex: number | null;
+      templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
+    };
   },
 ): Promise<PrWorkflowOutputProjection[] | undefined> => {
+  const { task } = run;
   if (!isPrDeliveryStep(task)) return undefined;
+  const implementationDelivery = task.templateStep?.outputKind === "implementation";
 
   const rows = await db.task.findMany({
     where: {
       projectId: task.projectId,
       chainId: task.chainId,
-      chainIndex: { lte: task.chainIndex! },
+      chainIndex: implementationDelivery ? task.chainIndex! : { lte: task.chainIndex! },
       templateStep: {
         outputKind: { in: [...PR_WORKFLOW_OUTPUT_KINDS] },
         taskTemplate: { name: PR_TEMPLATE_NAME },
       },
-      stepOutput: { isNot: null },
+      stepOutput: implementationDelivery
+        ? { is: { runId: run.id, kind: "implementation" } }
+        : { isNot: null },
     },
     orderBy: { chainIndex: "asc" },
     select: {
@@ -302,7 +309,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       }
       : null;
     const prWorkflowOutputs = run.task
-      ? await prWorkflowOutputsFor(db, run.task)
+      ? await prWorkflowOutputsFor(db, { id: run.id, task: run.task })
       : undefined;
     return context.json({
       run: {
