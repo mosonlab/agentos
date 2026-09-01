@@ -869,6 +869,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
     let installs = 0;
     const execute: DependencyCommandExecutor = async (runnerConfig, executable, args, cwd, env, options) => {
       if (executable === "npm" && args[0] === "ci") installs += 1;
+      if (executable === "npm" && args[0] === "config") return '{"install-links":true}';
       return realExecutor(runnerConfig, executable, args, cwd, env, options);
     };
     const branchClaim = {
