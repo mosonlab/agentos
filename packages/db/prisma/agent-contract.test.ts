@@ -83,6 +83,14 @@ test("canonical profiles start at Default and native child capability replaces A
   assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
+test("template-step dependency provisioning is a non-null true-default migration", async () => {
+  const schema = await readFile(`${prismaRoot}schema.prisma`, "utf8");
+  const migration = await readFile(`${prismaRoot}migrations/20260901010000_task_template_step_dependency_provisioning/migration.sql`, "utf8");
+  assert.match(schema, /provisionDependencies\s+Boolean\s+@default\(true\)/u);
+  assert.match(migration, /ALTER TABLE "TaskTemplateStep"[\s\S]*ADD COLUMN "provisionDependencies" BOOLEAN NOT NULL DEFAULT true;/u);
+  assert.doesNotMatch(migration, /DROP|UPDATE|CREATE TYPE/u);
+});
+
 test("named canonical roles use their model catalog runner and retired role names stay absent", async () => {
   const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
   for (const name of [
@@ -248,6 +256,22 @@ test("only artifact-producing steps require a commit, only implementation opens 
   assert.equal(catalogRunnerForModel(sentinel.model), null);
 });
 
+test("only canonical code-review rows disable dependency provisioning", async () => {
+  const templates = await loadAllTemplateStepSources();
+  const disabled = [...templates].flatMap(([templateName, steps]) => steps
+    .filter((step) => !step.provisionDependencies)
+    .map((step) => `${templateName}:${step.stepIndex}`));
+  assert.deepEqual(disabled, [
+    `${INTEGRATOR_TEMPLATE_NAME}:6`,
+    `${INTEGRATOR_TEMPLATE_NAME}:7`,
+    `${DIRECT_TEMPLATE_NAME}:3`,
+    `${DIRECT_TEMPLATE_NAME}:4`,
+    `${PR_TEMPLATE_NAME}:2`,
+    `${PR_TEMPLATE_NAME}:3`,
+  ]);
+  assert.equal([...templates.values()].flat().every((step) => step.provisionDependencies === true || step.provisionDependencies === false), true);
+});
+
 test("the direct template sources expose the layered review spine and mechanical tail", async () => {
   const directTemplateSteps = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   assert.deepEqual(
@@ -358,6 +382,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     requiresCommit: expected.requiresCommit,
+    provisionDependencies: expected.provisionDependencies,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy,
   };
@@ -373,6 +398,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     ["priorOutputKinds", { ...persisted, priorOutputKinds: ["different-output"] }],
     ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
     ["requiresCommit", { ...persisted, requiresCommit: !persisted.requiresCommit }],
+    ["provisionDependencies", { ...persisted, provisionDependencies: !persisted.provisionDependencies }],
     ["baseFromStepIndex", { ...persisted, baseFromStepIndex: 0 }],
     ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],
   ];

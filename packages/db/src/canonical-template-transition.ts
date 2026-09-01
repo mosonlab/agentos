@@ -587,6 +587,7 @@ export type PersistedTransitionStep = {
   priorOutputKinds: string[];
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
   prompt: string;
@@ -610,6 +611,7 @@ const shapeMatches = (
       || step.attachmentsFromPrevious !== expectedStep.attachmentsFromPrevious
       || step.opensPullRequest !== expectedStep.opensPullRequest
       || step.requiresCommit !== (expectedStep.outputKind === "plan" || expectedStep.outputKind === "implementation")
+      || step.provisionDependencies !== true
       || step.baseFromStepIndex !== expectedStep.baseFromStepIndex
       || step.layer !== expectedStep.layer
       || !isDeepStrictEqual(step.spawnPolicy, expectedStep.spawnPolicy)) {

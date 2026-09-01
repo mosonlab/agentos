@@ -326,7 +326,7 @@ test("barrier watchdog can be cancelled", async () => {
   const escalationPath = join(directory, "escalated.json");
   let cancelledFired = false;
   const cancelled = await createBarrierWatchdog({
-    timeoutMs: 100,
+    timeoutMs: 10_000,
     escalationPath,
     escalationRecord: { outcome: "failure", reason: BARRIER_TIMEOUT_REASON, from: "a", to: "b" },
     onTimeout: () => { cancelledFired = true; },

@@ -77,6 +77,7 @@ type ProjectCounters = {
   adoptedAssignees: number;
   adoptedStepBases: number;
   adoptedPriorOutputDeclarations: number;
+  adoptedDependencyProvisioning: number;
   renamedSteps: number;
   migratedTasks: number;
   adoptedAgentDefaults: number;
@@ -115,6 +116,7 @@ const zeroCounters = (): ProjectCounters => ({
   adoptedAssignees: 0,
   adoptedStepBases: 0,
   adoptedPriorOutputDeclarations: 0,
+  adoptedDependencyProvisioning: 0,
   renamedSteps: 0,
   migratedTasks: 0,
   adoptedAgentDefaults: 0,
@@ -274,6 +276,7 @@ const assertSummaryShape = (summary: { projects: Record<string, ProjectCounters>
     const roles = Object.values(counter.updatedRoles).reduce((sum, count) => sum + count, 0);
     const scalar = counter.createdCanonicalTemplates + counter.createdAgents + counter.createdAgentRepoGrants
       + counter.adoptedAssignees + counter.adoptedStepBases + counter.adoptedPriorOutputDeclarations
+      + counter.adoptedDependencyProvisioning
       + counter.renamedSteps + counter.migratedTasks + counter.adoptedAgentDefaults + counter.runtimeDriftNotices;
     assert.equal(counter.updated, scalar + nested + roles);
   }
@@ -962,7 +965,8 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     ...zeroCounters(),
     templates: 2,
     adoptedAgentDefaults: 1,
-    updated: 3,
+    adoptedDependencyProvisioning: 4,
+    updated: 7,
     preservedTaskAssignments: { archived: 1, nonTodo: 1, started: 1, output: 1 },
     updatedSteps: {
       ...zeroSteps(),

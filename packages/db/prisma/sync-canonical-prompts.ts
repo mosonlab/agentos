@@ -13,6 +13,7 @@ import { catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences, type AgentSources, type RoleSource } from "../src/agent-sources.js";
 import {
   applyCanonicalInstallation,
+  isCanonicalReviewStep,
   planCanonicalInstallation,
   type CanonicalInstallationAction,
   type CanonicalInstallationRow,
@@ -63,6 +64,7 @@ type ProjectCounters = {
   adoptedAssignees: number;
   adoptedStepBases: number;
   adoptedPriorOutputDeclarations: number;
+  adoptedDependencyProvisioning: number;
   renamedSteps: number;
   migratedTasks: number;
   adoptedAgentDefaults: number;
@@ -83,6 +85,7 @@ const mutationCounterNames = [
   "adoptedAssignees",
   "adoptedStepBases",
   "adoptedPriorOutputDeclarations",
+  "adoptedDependencyProvisioning",
   "renamedSteps",
   "migratedTasks",
   "adoptedAgentDefaults",
@@ -104,6 +107,7 @@ const emptyProjectCounters = (
   adoptedAssignees: 0,
   adoptedStepBases: 0,
   adoptedPriorOutputDeclarations: 0,
+  adoptedDependencyProvisioning: 0,
   renamedSteps: 0,
   migratedTasks: 0,
   adoptedAgentDefaults: 0,
@@ -615,6 +619,7 @@ const syncCanonicalTemplates = async (
           priorOutputKinds: true,
           opensPullRequest: true,
           requiresCommit: true,
+          provisionDependencies: true,
           baseFromStepIndex: true,
           spawnPolicy: true,
           _count: { select: { tasks: true } },
@@ -650,6 +655,10 @@ const syncCanonicalTemplates = async (
         const adoptsCanonicalPriorOutput = differences.includes("priorOutputKinds")
           && persisted.priorOutputKinds.length === 1
           && persisted.priorOutputKinds[0] === LEGACY_ALL_PRIOR_OUTPUTS;
+        const adoptsCanonicalDependencyProvisioning = differences.includes("provisionDependencies")
+          && isCanonicalReviewStep(templateName, step.stepIndex)
+          && persisted.provisionDependencies === true
+          && step.provisionDependencies === false;
         const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
         const adoptsCanonicalName = differences.includes("name")
           && nameTransition?.from === persisted.name
@@ -658,6 +667,7 @@ const syncCanonicalTemplates = async (
           ...(adoptsCanonicalAssignee ? ["agent"] : []),
           ...(adoptsCanonicalBase ? ["baseFromStepIndex"] : []),
           ...(adoptsCanonicalPriorOutput ? ["priorOutputKinds"] : []),
+          ...(adoptsCanonicalDependencyProvisioning ? ["provisionDependencies"] : []),
           ...(adoptsCanonicalName ? ["name"] : []),
         ]);
         if (differences.some((difference) => !adoptedDifferences.has(difference))) {
@@ -699,6 +709,13 @@ const syncCanonicalTemplates = async (
         if (adoptsCanonicalPriorOutput) {
           await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { priorOutputKinds: step.priorOutputKinds } });
           increment(countersByProject, project.id, "adoptedPriorOutputDeclarations");
+        }
+        if (adoptsCanonicalDependencyProvisioning) {
+          await tx.taskTemplateStep.update({
+            where: { id: persisted.id },
+            data: { provisionDependencies: step.provisionDependencies },
+          });
+          increment(countersByProject, project.id, "adoptedDependencyProvisioning");
         }
         if (adoptsCanonicalName) {
           protectInUse();

@@ -75,7 +75,7 @@ const claim = (
     maxDurationMin: 30,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 2,
-    templateStep: { name: "Implementation", outputKind: "implementation" },
+    templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true },
     ...overrides,
   },
   agent: {

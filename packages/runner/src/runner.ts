@@ -291,6 +291,30 @@ export const executeClaim = async (
   };
 
   try {
+    // A template step carries an explicit dependency decision. A missing or
+    // malformed value is a protocol violation: no default is safe because it
+    // could either strip dependencies from an implementation step or expose a
+    // review step to the dependency materializer. Validate before any runner
+    // workspace, dependency, adapter, or provider operation.
+    const claimedTemplateStep = claim.task.templateStep as {
+      provisionDependencies?: unknown;
+    } | null | undefined;
+    if (claimedTemplateStep === undefined
+      || (claimedTemplateStep !== null && typeof claimedTemplateStep.provisionDependencies !== "boolean")) {
+      const condition = "template-step-provision-dependencies-missing";
+      await controlPlane.completeRun(config, claim, {
+        exitCode: null,
+        terminalEventSeen: false,
+        terminalSuccess: false,
+        terminationReason: condition,
+        failureClass: "PROTOCOL_ERROR",
+        failureReason: condition,
+        retryable: false,
+        cleanupStatus: "SUCCEEDED",
+        workspaceRetained: false,
+      });
+      return;
+    }
     // Dependency provisioning is a required claim contract. A runner build
     // that predates this field must fail closed: treating an omitted value as
     // either policy would silently change whether a repository's dependencies
@@ -358,6 +382,17 @@ export const executeClaim = async (
     }
 
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
+    if (claim.task.templateStep?.provisionDependencies === false) {
+      // This is deliberately a fenced activity write with no fallback: the
+      // reviewer must have durable evidence of the dependency-free checkout
+      // before its adapter is preflighted or launched.
+      await controlPlane.appendActivity(
+        config,
+        claim,
+        "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
+        { stream: "runner" },
+      );
+    }
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
     await (dependencies.materializeRuntimeTools ?? materializeRuntimeTools)(config, scratch);

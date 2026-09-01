@@ -59,6 +59,7 @@ type TemplateStepRow = {
   outputKind: string;
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   assigneeAgent: { id: string; name: string; model: string } | null;
 };
@@ -313,6 +314,7 @@ const main = async (): Promise<void> => {
           outputKind: true,
           opensPullRequest: true,
           requiresCommit: true,
+          provisionDependencies: true,
           baseFromStepIndex: true,
           assigneeAgent: { select: { id: true, name: true, model: true } },
         },

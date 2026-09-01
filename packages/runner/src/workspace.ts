@@ -581,14 +581,19 @@ export const provisionWorkspace = async (
       execute,
       env,
     );
-    await materializeWorkspaceDependencies(
-      config,
-      workspace,
-      claim.repo.dependencyProvisioning,
-      env,
-      { execute },
-      dependencyCacheOptions,
-    );
+    // A canonical review step explicitly opts out of dependencies. Every
+    // other admitted path, including a null template step, remains governed
+    // by the repository policy supplied by the control plane.
+    if (claim.task.templateStep?.provisionDependencies !== false) {
+      await materializeWorkspaceDependencies(
+        config,
+        workspace,
+        claim.repo.dependencyProvisioning,
+        env,
+        { execute },
+        dependencyCacheOptions,
+      );
+    }
     return materialized;
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);

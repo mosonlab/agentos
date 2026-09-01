@@ -85,6 +85,7 @@ test("seed rolls a registered canonical generation over inside its installation 
         stepIndex: step.stepIndex - 1,
         layer: (step.layer ?? 0) - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+        provisionDependencies: true,
       },
     });
   }

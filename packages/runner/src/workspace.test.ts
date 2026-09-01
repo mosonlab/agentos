@@ -65,7 +65,8 @@ const realShell = async (
   : null);
 
 type WorkspaceClaimFixture = {
-  task: Pick<WorkspaceProvisionClaim["task"], "id">;
+  task: Pick<WorkspaceProvisionClaim["task"], "id">
+    & Partial<Pick<WorkspaceProvisionClaim["task"], "templateStep">>;
   repo: WorkspaceProvisionClaim["repo"];
   run: Pick<WorkspaceProvisionClaim["run"], "id" | "runNumber" | "targetBranch" | "branch">
     & Partial<Pick<
@@ -79,7 +80,7 @@ const workspaceClaim = (fixture: WorkspaceClaimFixture): WorkspaceProvisionClaim
   executionMode: "agent",
   runner: "CODEX",
   specificationMaterialization: fixture.specificationMaterialization ?? null,
-  task: { ...fixture.task, chainId: null, chainIndex: null, templateStep: null },
+  task: { ...fixture.task, chainId: null, chainIndex: null, templateStep: fixture.task.templateStep ?? null },
   repo: fixture.repo,
   run: {
     targetBranchPublished: false,
@@ -88,6 +89,109 @@ const workspaceClaim = (fixture: WorkspaceClaimFixture): WorkspaceProvisionClaim
     implementationHeadSha: null,
     ...fixture.run,
   },
+});
+
+const seedPackageRemote = async (root: string): Promise<string> => {
+  const remote = join(root, "origin.git");
+  const seed = join(root, "seed");
+  git(root, "init", "--bare", "--initial-branch=main", remote);
+  git(root, "init", "--initial-branch=main", seed);
+  git(seed, "config", "user.name", "Anneal Test");
+  git(seed, "config", "user.email", "runner@agentos.local");
+  await mkdir(join(seed, "packages/tool"), { recursive: true });
+  await writeFile(join(seed, "package.json"), JSON.stringify({
+    name: "runner-dependency-fixture",
+    version: "1.0.0",
+    private: true,
+    workspaces: ["packages/*"],
+    dependencies: { "fixture-tool": "*" },
+  }) + "\n");
+  await writeFile(join(seed, "packages/tool/package.json"), JSON.stringify({
+    name: "fixture-tool",
+    version: "1.0.0",
+    main: "index.cjs",
+  }) + "\n");
+  await writeFile(join(seed, "packages/tool/index.cjs"), "module.exports = 'dependency fixture';\n");
+  await runCommand([], "npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], seed, process.env);
+  git(seed, "add", ".");
+  git(seed, "commit", "-m", "dependency fixture");
+  git(seed, "remote", "add", "origin", remote);
+  git(seed, "push", "-u", "origin", "main");
+  return remote;
+};
+
+test("an explicit false template step skips all dependency inspection after checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-review-dependency-skip-"));
+  try {
+    const remote = await seedPackageRemote(root);
+    const calls: string[] = [];
+    const progress: unknown[] = [];
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
+    } as unknown as RunnerConfig;
+    const execute: WorkspaceCommandExecutor = async (runnerConfig, executable, args, cwd, env, options) => {
+      calls.push(`${executable} ${args.join(" ")}`);
+      return runCommand(runnerConfig.runAsPrefix, executable, args, cwd, env, options);
+    };
+    const workspace = await provisionWorkspace(config, workspaceClaim({
+      task: {
+        id: "task-review",
+        templateStep: { name: "Code review", provisionDependencies: false },
+      },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      run: { id: "run-review", runNumber: 1, targetBranch: "main", branch: "main" },
+    }), {
+      execute,
+      dependencyCacheOptions: { cacheRoot: join(root, "dependency-cache"), report: (event) => progress.push(event) },
+    });
+
+    assert.equal(await stat(join(workspace.path, "package.json")).then((info) => info.isFile()), true);
+    await assert.rejects(stat(join(workspace.path, "node_modules")), { code: "ENOENT" });
+    await assert.rejects(stat(join(root, "dependency-cache")), { code: "ENOENT" });
+    assert.deepEqual(progress, []);
+    assert.equal(calls.some((call) => /(?:^|\s)(?:node|npm)(?:\s|$)/u.test(call)), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit true template step keeps the repository dependency policy path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-review-dependency-allow-"));
+  try {
+    const remote = await seedPackageRemote(root);
+    const progress: Array<{ event: string; phase?: string; condition?: string }> = [];
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
+    } as unknown as RunnerConfig;
+    const workspace = await provisionWorkspace(config, workspaceClaim({
+      task: {
+        id: "task-implementation",
+        templateStep: { name: "Implementation", provisionDependencies: true },
+      },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      run: { id: "run-implementation", runNumber: 1, targetBranch: "main", branch: "main" },
+    }), {
+      dependencyCacheOptions: {
+        cacheRoot: join(root, "dependency-cache"),
+        report: (event) => progress.push(event),
+      },
+    });
+
+    assert.equal((await stat(join(workspace.path, "node_modules"))).isDirectory(), true);
+    assert.equal(progress.some((event) => event.phase === "identity"), true);
+    assert.equal(progress.some((event) => event.phase === "install" || event.event === "hit"), true);
+  } finally {
+    await runCommand([], "/bin/chmod", ["-R", "u+w", join(root, "dependency-cache")], root, process.env).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("provisioning trusts an already-published intended head after its database ACK was lost", async () => {

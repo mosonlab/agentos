@@ -12,6 +12,7 @@ import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
+  loadAllTemplateStepSources,
   loadTemplateStepSources,
   templateStepStructureDifferences,
   type CanonicalTemplateName,
@@ -196,6 +197,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       opensPullRequest: step.opensPullRequest,
       requiresCommit: step.requiresCommit,
+      provisionDependencies: step.provisionDependencies,
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy,
     })),
@@ -211,6 +213,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         attachmentsFromPrevious: false,
         opensPullRequest: true,
         requiresCommit: true,
+        provisionDependencies: true,
         baseFromStepIndex: null,
         spawnPolicy: null,
       },
@@ -225,6 +228,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         attachmentsFromPrevious: true,
         opensPullRequest: false,
         requiresCommit: false,
+        provisionDependencies: false,
         baseFromStepIndex: 1,
         spawnPolicy: null,
       },
@@ -239,6 +243,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         attachmentsFromPrevious: false,
         opensPullRequest: false,
         requiresCommit: false,
+        provisionDependencies: false,
         baseFromStepIndex: 1,
         spawnPolicy: null,
       },
@@ -253,6 +258,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         attachmentsFromPrevious: true,
         opensPullRequest: false,
         requiresCommit: false,
+        provisionDependencies: true,
         baseFromStepIndex: null,
         spawnPolicy: null,
       },
@@ -365,6 +371,41 @@ test("missing prior output declaration frontmatter is refused by the source load
   );
 });
 
+test("missing or malformed dependency provisioning frontmatter is refused by the source loader", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace(/^provisionDependencies: .*\n/mu, "")),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /frontmatter must contain exactly .*provisionDependencies/u,
+    ),
+  );
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("provisionDependencies: false\n", "provisionDependencies: no\n")),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /provisionDependencies must be true or false/u,
+    ),
+  );
+});
+
+test("only the six canonical code-review steps disable dependency provisioning", async () => {
+  const templates = await loadAllTemplateStepSources();
+  const disabled = [...templates].flatMap(([templateName, steps]) => steps
+    .filter((step) => !step.provisionDependencies)
+    .map((step) => `${templateName}:${step.stepIndex}`));
+  assert.deepEqual(disabled, [
+    `${INTEGRATOR_TEMPLATE_NAME}:6`,
+    `${INTEGRATOR_TEMPLATE_NAME}:7`,
+    `${DIRECT_TEMPLATE_NAME}:3`,
+    `${DIRECT_TEMPLATE_NAME}:4`,
+    `${PR_TEMPLATE_NAME}:2`,
+    `${PR_TEMPLATE_NAME}:3`,
+  ]);
+  assert.equal([...templates.values()].flat().every((step) => typeof step.provisionDependencies === "boolean"), true);
+});
+
 test("prior output declarations are unique and reference only earlier steps", async () => {
   await withTemplateCopy(
     INTEGRATOR_TEMPLATE_NAME,
@@ -461,7 +502,7 @@ test("parallel nodes share one non-null base and never open a pull request", asy
   }
 });
 
-test("layer and requiresCommit are structural fields in canonical prompt drift comparison", async () => {
+test("layer, requiresCommit, and dependency provisioning are structural fields in canonical prompt drift comparison", async () => {
   const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[2]!;
   const persisted: PersistedTemplateStepStructure = {
     name: expected.name,
@@ -474,6 +515,7 @@ test("layer and requiresCommit are structural fields in canonical prompt drift c
     priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     requiresCommit: expected.requiresCommit,
+    provisionDependencies: expected.provisionDependencies,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy as PersistedTemplateStepStructure["spawnPolicy"],
   };
@@ -482,5 +524,9 @@ test("layer and requiresCommit are structural fields in canonical prompt drift c
   assert.deepEqual(
     templateStepStructureDifferences({ ...persisted, requiresCommit: !expected.requiresCommit }, expected),
     ["requiresCommit"],
+  );
+  assert.deepEqual(
+    templateStepStructureDifferences({ ...persisted, provisionDependencies: !expected.provisionDependencies }, expected),
+    ["provisionDependencies"],
   );
 });

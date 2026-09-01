@@ -8,6 +8,7 @@ priorOutputKinds: [revised-plan]
 attachmentsFromPrevious: true
 opensPullRequest: true
 requiresCommit: true
+provisionDependencies: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---
