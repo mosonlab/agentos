@@ -47,6 +47,17 @@ order, in three terminals, and open `http://127.0.0.1:5173`.
 Once the installation is running, follow [Add a project](runbooks/add-a-project.md)
 to add a GitHub repository and run A1's pull-request workflow.
 
+`npm ci` must be allowed to run the lockfile's lifecycle scripts — this
+repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
+is not supported. The Inbox service is optional. No launchd definition is
+shipped for the foreground Developer Preview sequence; remote access and this
+repository's internal task-chain templates are also outside that sequence. A
+separate self-hosted merge executor instead has documented but unverified macOS
+LaunchDaemon and Linux systemd profiles in the public
+[`docs/runbooks/merge-executor.md`](runbooks/merge-executor.md) runbook.
+Those procedures do not change the platform classifications above or the
+authoritative support matrix.
+
 ## Canonical prompt synchronization and verification
 
 The files under [`agents/`](../agents/) are the source of truth for canonical
@@ -122,17 +133,6 @@ private merge-executor GitHub App installed on the target repository together
 with its isolated executor service. Provider authentication is runner-host
 infrastructure, not control-plane state: it is not an `AgentSecretGrant`, and
 `AgentSecretGrant` is not required for full-tail readiness.
-
-`npm ci` must be allowed to run the lockfile's lifecycle scripts — this
-repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
-is not supported. The Inbox service is optional. No launchd definition is
-shipped for the foreground Developer Preview sequence; remote access and this
-repository's internal task-chain templates are also outside that sequence. A
-separate self-hosted merge executor instead has documented but unverified macOS
-LaunchDaemon and Linux systemd profiles in the public
-[`docs/runbooks/merge-executor.md`](runbooks/merge-executor.md) runbook.
-Those procedures do not change the platform classifications above or the
-authoritative support matrix.
 
 ## Advanced delivery infrastructure
 

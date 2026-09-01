@@ -30,6 +30,7 @@ import {
 } from "./template-sources.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
+const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url)).replace(/\/+$/u, "");
 
 const scratchServer = (): URL => {
   if (process.env["AGENTOS_ALLOW_SCRATCH_DATABASES"] !== "1") throw new Error("scratch-database-opt-in-required");
@@ -52,6 +53,15 @@ const databaseUrl = (() => {
 const command = (args: string[]) => {
   const result = spawnSync("npx", args, {
     cwd: packageRoot,
+    encoding: "utf8",
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+  });
+  return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+};
+
+const rootNpmCommand = (args: string[]) => {
+  const result = spawnSync("npm", args, {
+    cwd: repositoryRoot,
     encoding: "utf8",
     env: { ...process.env, DATABASE_URL: databaseUrl },
   });
@@ -453,6 +463,23 @@ test("structural or invalid runtime drift in one Project refuses and rolls back 
   assert.notEqual(driftedBefore, before);
 });
 
+test("ordinary sync identifies an archived canonical-Project Agent by name and id", async () => {
+  const librarian = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "librarian" } },
+  });
+  await prisma.agent.update({ where: { id: librarian.id }, data: { archivedAt: new Date() } });
+  try {
+    const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+    assert.notEqual(refused.status, 0, refused.output);
+    assert.match(
+      refused.output,
+      new RegExp(`Project ${canonicalProject.slug}: Agent librarian \\(${librarian.id}\\) is archived`, "u"),
+    );
+  } finally {
+    await prisma.agent.update({ where: { id: librarian.id }, data: { archivedAt: null } });
+  }
+});
+
 test("partial template rows synchronize across Projects, leave missing rows valid, and adopt transitions", async (t) => {
   const partial = await createProject(`a2-pr-only-${randomBytes(4).toString("hex")}`);
   const partialAgentNames = await templateAssigneeNames("pr-engineer-workflow");
@@ -553,6 +580,7 @@ test("full installation fills only the addressed Project's missing inventory and
   const directNames = await templateAssigneeNames("direct-engineer-workflow");
   const initialNames = [...new Set([...existingNames, ...directNames])];
   const agents = await createAgents(project, initialNames);
+  const initialAgentIds = new Set(agents.values());
   const pr = await copyTemplate(project, "pr-engineer-workflow", agents);
   const prStep = await prisma.taskTemplateStep.findUniqueOrThrow({
     where: { taskTemplateId_stepIndex: { taskTemplateId: pr.id, stepIndex: 1 } },
@@ -563,14 +591,18 @@ test("full installation fills only the addressed Project's missing inventory and
     where: { id: agents.get("review-coordinator-sol")! },
     data: { ...customized, runtimeConfigCustomized: true },
   });
-  await copyTemplate(project, "direct-engineer-workflow", agents);
+  const direct = await copyTemplate(project, "direct-engineer-workflow", agents);
+  const initialTemplateIds = new Set([pr.id, direct.id]);
   await downgradeDirectToHistoricalSevenStep(project.id);
   const repoCountBefore = await prisma.repo.count({ where: { projectId: project.id } });
   const accessCountBefore = await prisma.agentRepoAccess.count({ where: { projectId: project.id } });
   const secretGrantCountBefore = await prisma.agentSecretGrant.count({ where: { agent: { projectId: project.id } } });
+  const filesystemGrantCountBefore = await prisma.filesystemGrant.count({ where: { agent: { projectId: project.id } } });
+  const skillGrantCountBefore = await prisma.agentSkill.count({ where: { agent: { projectId: project.id } } });
+  const mcpGrantCountBefore = await prisma.agentMCPConnection.count({ where: { agent: { projectId: project.id } } });
   t.after(async () => deleteProject(project.id));
 
-  const installed = command(["tsx", "prisma/sync-canonical-prompts.ts", "--install-full", project.id]);
+  const installed = rootNpmCommand(["run", "db:sync-canonical-prompts", "--", "--install-full", project.id]);
   assert.equal(installed.status, 0, installed.output);
   const allAgents = await prisma.agent.findMany({
     where: { projectId: project.id },
@@ -578,6 +610,44 @@ test("full installation fills only the addressed Project's missing inventory and
     orderBy: { name: "asc" },
   });
   assert.deepEqual(allAgents.map(({ name }) => name), canonicalRoleNames().sort());
+  const installedAgents = allAgents.filter(({ id }) => !initialAgentIds.has(id));
+  assert.equal(installedAgents.length, canonicalRoleNames().length - initialNames.length);
+  for (const agent of installedAgents) {
+    const source = role(agent.name);
+    assert.deepEqual({
+      projectId: agent.projectId,
+      environmentId: agent.environmentId,
+      name: agent.name,
+      title: agent.title,
+      model: agent.model,
+      runnerPreference: agent.runnerPreference,
+      inboxAccess: agent.inboxAccess,
+      foundationalPrompt: agent.foundationalPrompt,
+      rolePrompt: agent.rolePrompt,
+      runtimeConfigCustomized: agent.runtimeConfigCustomized,
+      runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
+      codexServiceTier: agent.codexServiceTier,
+      disabledTools: agent.disabledTools,
+      archivedAt: agent.archivedAt,
+      collaborators: agent.collaborators.map(({ allowedAgent }) => allowedAgent.name).sort(),
+    }, {
+      projectId: project.id,
+      environmentId: project.environmentId,
+      name: source.name,
+      title: source.title,
+      model: source.model,
+      runnerPreference: source.runnerPreference,
+      inboxAccess: source.inboxAccess,
+      foundationalPrompt: sources.foundationalPrompt,
+      rolePrompt: source.rolePrompt,
+      runtimeConfigCustomized: false,
+      runtimeConfigDriftNoticeFingerprint: null,
+      codexServiceTier: CodexServiceTier.DEFAULT,
+      disabledTools: [],
+      archivedAt: null,
+      collaborators: [...source.collaborators].sort(),
+    });
+  }
   for (const agent of allAgents) {
     const source = role(agent.name);
     assert.equal(agent.title, source.title);
@@ -597,6 +667,29 @@ test("full installation fills only the addressed Project's missing inventory and
     orderBy: { name: "asc" },
   }),
     canonicalTemplateNames().sort().map((name) => ({ name })));
+  const installedTemplates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: canonicalTemplateNames() } },
+    include: {
+      steps: {
+        include: { assigneeAgent: { select: { name: true, projectId: true } } },
+        orderBy: { stepIndex: "asc" },
+      },
+    },
+    orderBy: { name: "asc" },
+  });
+  const newTemplates = installedTemplates.filter(({ id }) => !initialTemplateIds.has(id));
+  assert.deepEqual(newTemplates.map(({ name }) => name), ["compound-engineer-workflow", "direct-engineer-workflow"]);
+  for (const template of newTemplates) {
+    const expectedSteps = templateSources.get(template.name as CanonicalTemplateName)!;
+    assert.deepEqual(template.variables, ["branchName"]);
+    assert.equal(template.steps.length, expectedSteps.length);
+    for (const [index, step] of template.steps.entries()) {
+      const expected = expectedSteps[index]!;
+      assert.equal(step.stepIndex, expected.stepIndex);
+      assert.equal(step.assigneeAgent?.name ?? null, expected.agentName);
+      if (step.assigneeAgent) assert.equal(step.assigneeAgent.projectId, project.id);
+    }
+  }
   const installedPr = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "pr-engineer-workflow" } },
     include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
@@ -607,6 +700,9 @@ test("full installation fills only the addressed Project's missing inventory and
   assert.equal(await prisma.repo.count({ where: { projectId: project.id } }), repoCountBefore);
   assert.equal(await prisma.agentRepoAccess.count({ where: { projectId: project.id } }), accessCountBefore);
   assert.equal(await prisma.agentSecretGrant.count({ where: { agent: { projectId: project.id } } }), secretGrantCountBefore);
+  assert.equal(await prisma.filesystemGrant.count({ where: { agent: { projectId: project.id } } }), filesystemGrantCountBefore);
+  assert.equal(await prisma.agentSkill.count({ where: { agent: { projectId: project.id } } }), skillGrantCountBefore);
+  assert.equal(await prisma.agentMCPConnection.count({ where: { agent: { projectId: project.id } } }), mcpGrantCountBefore);
   const installedSummary = summaryFrom(installed.output);
   assertSummaryShape(installedSummary);
   assert.equal(installedSummary.projects[project.slug]!.createdAgents, canonicalRoleNames().length - initialNames.length);
@@ -667,10 +763,143 @@ test("full installation refuses unknown, environment-invalid, and archived targe
   assert.equal(after, before);
 });
 
+test("--install-full does not fill a missing canonical-Project Agent before ordinary sync refuses", async () => {
+  const missing = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
+  });
+  await prisma.agent.delete({ where: { id: missing.id } });
+  try {
+    const refused = command(["tsx", "prisma/sync-canonical-prompts.ts", "--install-full", canonicalProject.id]);
+    assert.notEqual(refused.status, 0, refused.output);
+    assert.match(refused.output, new RegExp(`Project ${canonicalProject.slug}: Agent default was not found`, "u"));
+    assert.equal(await prisma.agent.count({ where: { projectId: canonicalProject.id, name: "default" } }), 0);
+  } finally {
+    const seeded = command(["tsx", "prisma/seed.ts"]);
+    assert.equal(seeded.status, 0, seeded.output);
+  }
+});
+
+test("sync refusal classes include every available Project and object identifier", async () => {
+  type RefusalFixture = {
+    args: string[];
+    expected: RegExp[];
+    cleanup: () => Promise<void>;
+  };
+  const cases: ReadonlyArray<{
+    name: string;
+    setup: () => Promise<RefusalFixture>;
+  }> = [
+    {
+      name: "Agent",
+      setup: async () => {
+        const project = await createProject(`a2-refusal-agent-${randomBytes(4).toString("hex")}`);
+        const agents = await createAgents(project, ["default"]);
+        const agentId = agents.get("default")!;
+        await prisma.agent.update({ where: { id: agentId }, data: { title: "structural drift" } });
+        return {
+          args: [],
+          expected: [new RegExp(`Project ${project.slug}:`, "u"), new RegExp(`Agent default \\(${agentId}\\)`, "u")],
+          cleanup: async () => deleteProject(project.id),
+        };
+      },
+    },
+    {
+      name: "Template",
+      setup: async () => {
+        const project = await createProject(`a2-refusal-template-${randomBytes(4).toString("hex")}`);
+        const agents = await createAgents(project, await templateAssigneeNames("pr-engineer-workflow"));
+        const template = await copyTemplate(project, "pr-engineer-workflow", agents);
+        const last = await prisma.taskTemplateStep.findFirstOrThrow({
+          where: { taskTemplateId: template.id },
+          orderBy: { stepIndex: "desc" },
+        });
+        await prisma.taskTemplateStep.delete({ where: { id: last.id } });
+        return {
+          args: [],
+          expected: [
+            new RegExp(`Project ${project.slug}:`, "u"),
+            new RegExp(`Template pr-engineer-workflow \\(${template.id}\\)`, "u"),
+          ],
+          cleanup: async () => deleteProject(project.id),
+        };
+      },
+    },
+    {
+      name: "Step",
+      setup: async () => {
+        const project = await createProject(`a2-refusal-step-${randomBytes(4).toString("hex")}`);
+        const agents = await createAgents(project, await templateAssigneeNames("pr-engineer-workflow"));
+        const template = await copyTemplate(project, "pr-engineer-workflow", agents);
+        const step = await prisma.taskTemplateStep.findUniqueOrThrow({
+          where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: 1 } },
+        });
+        await prisma.taskTemplateStep.update({ where: { id: step.id }, data: { outputKind: "structural-drift" } });
+        return {
+          args: [],
+          expected: [
+            new RegExp(`Project ${project.slug}:`, "u"),
+            new RegExp(`Template pr-engineer-workflow \\(${template.id}\\)`, "u"),
+            new RegExp(`pr-engineer-workflow step 1 \\(${step.id}\\)`, "u"),
+          ],
+          cleanup: async () => deleteProject(project.id),
+        };
+      },
+    },
+    {
+      name: "Environment",
+      setup: async () => {
+        const project = await createProject(`a2-refusal-environment-${randomBytes(4).toString("hex")}`, false);
+        return {
+          args: ["--install-full", project.id],
+          expected: [new RegExp(`Project ${project.slug}: Project has no Environment`, "u")],
+          cleanup: async () => deleteProject(project.id),
+        };
+      },
+    },
+    {
+      name: "installation Agent",
+      setup: async () => {
+        const project = await createProject(`a2-refusal-install-${randomBytes(4).toString("hex")}`);
+        const agent = await createAgent(project, "default", { archivedAt: new Date() });
+        return {
+          args: ["--install-full", project.id],
+          expected: [
+            new RegExp(`Project ${project.slug}:`, "u"),
+            new RegExp(`Agent default \\(${agent.id}\\) is archived`, "u"),
+          ],
+          cleanup: async () => deleteProject(project.id),
+        };
+      },
+    },
+  ];
+
+  for (const refusalCase of cases) {
+    const fixture = await refusalCase.setup();
+    try {
+      const refused = command(["tsx", "prisma/sync-canonical-prompts.ts", ...fixture.args]);
+      assert.notEqual(refused.status, 0, `${refusalCase.name}: ${refused.output}`);
+      for (const expected of fixture.expected) assert.match(refused.output, expected, refusalCase.name);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
+  const unknownId = `a2-refusal-unknown-${randomBytes(4).toString("hex")}`;
+  const unknown = command(["tsx", "prisma/sync-canonical-prompts.ts", "--install-full", unknownId]);
+  assert.notEqual(unknown.status, 0, unknown.output);
+  assert.match(unknown.output, new RegExp(unknownId, "u"));
+  assert.doesNotMatch(unknown.output, /Project [a-z0-9-]+:/u);
+});
+
 test("summary reports every Project, nested canonical keys, lexical slugs, and field-wise totals", async (t) => {
   const active = await createProject(`aaa-a2-summary-${randomBytes(4).toString("hex")}`);
-  const agents = await createAgents(active, await templateAssigneeNames("pr-engineer-workflow"));
+  const activeNames = new Set([
+    ...await templateAssigneeNames("pr-engineer-workflow"),
+    ...await templateAssigneeNames("compound-engineer-workflow"),
+  ]);
+  const agents = await createAgents(active, [...activeNames]);
   const template = await copyTemplate(active, "pr-engineer-workflow", agents);
+  const compound = await copyTemplate(active, "compound-engineer-workflow", agents);
   const firstStep = await prisma.taskTemplateStep.findUniqueOrThrow({
     where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: 1 } },
   });
@@ -685,6 +914,40 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
       runnerPreference: RunnerPreference.CODEX,
     },
   });
+  const regressionStepIndex = templateSources.get("compound-engineer-workflow")!
+    .find(({ agentName }) => agentName === "regression-verifier")!.stepIndex;
+  const regressionStep = await prisma.taskTemplateStep.findUniqueOrThrow({
+    where: { taskTemplateId_stepIndex: { taskTemplateId: compound.id, stepIndex: regressionStepIndex } },
+  });
+  const previousAssigneeId = agents.get("review-coordinator-sol")!;
+  const createPreservedTask = async (
+    name: string,
+    data: Pick<Prisma.TaskUncheckedCreateInput, "status" | "archivedAt">,
+  ) => prisma.task.create({ data: {
+    projectId: active.id,
+    templateId: compound.id,
+    templateStepId: regressionStep.id,
+    name,
+    description: "summary preservation fixture",
+    assigneeAgentId: previousAssigneeId,
+    assigneeType: "AGENT",
+    ...data,
+  } });
+  await createPreservedTask("summary archived", { status: TaskStatus.TODO, archivedAt: new Date() });
+  await createPreservedTask("summary non-TODO", { status: TaskStatus.DONE, archivedAt: null });
+  const started = await createPreservedTask("summary started", { status: TaskStatus.TODO, archivedAt: null });
+  await prisma.run.create({ data: {
+    projectId: active.id,
+    taskId: started.id,
+    agentId: previousAssigneeId,
+    runNumber: 1,
+    dedupeKey: `a2-summary-started:${started.id}`,
+    runner: "CODEX",
+    model: "gpt-5.6-sol:medium",
+    promptHash: "a2-summary-started",
+  } });
+  const withOutput = await createPreservedTask("summary output", { status: TaskStatus.TODO, archivedAt: null });
+  await prisma.taskStepOutput.create({ data: { taskId: withOutput.id, kind: "summary", body: "preserved output" } });
   const zero = await createProject(`zzz-a2-summary-${randomBytes(4).toString("hex")}`);
   t.after(async () => {
     await deleteProject(active.id);
@@ -695,34 +958,29 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
   assert.equal(synced.status, 0, synced.output);
   const summary = summaryFrom(synced.output);
   assertSummaryShape(summary);
-  const slugs = Object.keys(summary.projects);
-  assert.deepEqual(slugs, [...slugs].sort());
-  assert.ok(slugs.includes(canonicalProject.slug));
-  assert.ok(slugs.includes(active.slug));
-  assert.ok(slugs.includes(zero.slug));
-  const activeCounters = summary.projects[active.slug]!;
-  const zeroProjectCounters = summary.projects[zero.slug]!;
-  assert.equal(activeCounters.templates, 1);
-  assert.equal(activeCounters.updatedSteps["pr-engineer-workflow"]!["1"], 1);
-  assert.equal(activeCounters.updatedRoles["senior-dev"], 1);
-  assert.equal(activeCounters.adoptedAgentDefaults, 1);
-  assert.equal(zeroProjectCounters.templates, 0);
-  assert.deepEqual(zeroProjectCounters, zeroCounters());
-  for (const key of Object.keys(zeroProjectCounters) as Array<keyof ProjectCounters>) {
-    if (key === "preservedTaskAssignments" || key === "updatedSteps" || key === "updatedRoles") continue;
-    const sum = Object.values(summary.projects).reduce((total, counters) => total + Number(counters[key]), 0);
-    assert.equal(summary.totals[key], sum, `${key} total`);
-  }
-  for (const key of ["archived", "nonTodo", "started", "output"] as const) {
-    assert.equal(summary.totals.preservedTaskAssignments[key], Object.values(summary.projects)
-      .reduce((sum, counters) => sum + counters.preservedTaskAssignments[key], 0));
-  }
-  for (const name of canonicalTemplateNames()) for (const step of Object.keys(zeroSteps()[name]!)) {
-    assert.equal(summary.totals.updatedSteps[name]![step], Object.values(summary.projects)
-      .reduce((sum, counters) => sum + counters.updatedSteps[name]![step]!, 0));
-  }
-  for (const name of canonicalRoleNames()) {
-    assert.equal(summary.totals.updatedRoles[name], Object.values(summary.projects)
-      .reduce((sum, counters) => sum + counters.updatedRoles[name]!, 0));
-  }
+  const activeCounters: ProjectCounters = {
+    ...zeroCounters(),
+    templates: 2,
+    adoptedAgentDefaults: 1,
+    updated: 3,
+    preservedTaskAssignments: { archived: 1, nonTodo: 1, started: 1, output: 1 },
+    updatedSteps: {
+      ...zeroSteps(),
+      "pr-engineer-workflow": { ...zeroSteps()["pr-engineer-workflow"], "1": 1 },
+    },
+    updatedRoles: { ...zeroRoles(), "senior-dev": 1 },
+  };
+  const canonicalCounters: ProjectCounters = { ...zeroCounters(), templates: canonicalTemplateNames().length };
+  const totals: ProjectCounters = {
+    ...activeCounters,
+    templates: activeCounters.templates + canonicalCounters.templates,
+  };
+  assert.deepEqual(summary, {
+    projects: {
+      [active.slug]: activeCounters,
+      [canonicalProject.slug]: canonicalCounters,
+      [zero.slug]: zeroCounters(),
+    },
+    totals,
+  });
 });

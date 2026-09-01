@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
-import { AssigneeType, CodexServiceTier, PrismaClient, RunnerPreference } from "@prisma/client";
+import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, RunnerPreference } from "@prisma/client";
 
 import { loadAgentSources, type RoleSource } from "./agent-sources.js";
 import {
@@ -20,7 +20,11 @@ import {
   type CanonicalInstallationSources,
 } from "./canonical-template-installation.js";
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
-import { loadAllTemplateStepSources } from "./template-sources.js";
+import {
+  canonicalTemplateSourceSpec,
+  loadAllTemplateStepSources,
+  templateMetadataDifferences,
+} from "./template-sources.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
 
@@ -354,6 +358,53 @@ test("--project rejects canonical template metadata drift with the template iden
   }
 });
 
+test("the verifier's metadata seam detects a canonical template name mismatch", () => {
+  assert.deepEqual(templateMetadataDifferences({
+    name: "renamed-template",
+    description: canonicalTemplateSourceSpec(PR_TEMPLATE_NAME).description,
+    variables: ["branchName"],
+  }, PR_TEMPLATE_NAME), ["name"]);
+});
+
+test("--project rejects both missing and extra canonical template steps", async () => {
+  for (const mutation of ["missing", "extra"] as const) {
+    await withProject({ agents: partialRoleNames, template: true }, async (fixture) => {
+      const steps = await prisma.taskTemplateStep.findMany({
+        where: { taskTemplateId: fixture.templateId! },
+        orderBy: { stepIndex: "asc" },
+      });
+      const first = steps[0]!;
+      if (mutation === "missing") {
+        await prisma.taskTemplateStep.delete({ where: { id: first.id } });
+      } else {
+        await prisma.taskTemplateStep.create({ data: {
+          taskTemplateId: fixture.templateId!,
+          stepIndex: 99,
+          name: first.name,
+          layer: first.layer,
+          assigneeAgentId: first.assigneeAgentId,
+          assigneeType: first.assigneeType,
+          runner: first.runner,
+          approvalGate: first.approvalGate,
+          outputKind: first.outputKind,
+          prompt: first.prompt,
+          opensPullRequest: first.opensPullRequest,
+          requiresCommit: first.requiresCommit,
+          attachmentsFromPrevious: first.attachmentsFromPrevious,
+          priorOutputKinds: first.priorOutputKinds,
+          baseFromStepIndex: first.baseFromStepIndex,
+          ...(first.spawnPolicy === null ? {} : { spawnPolicy: first.spawnPolicy as Prisma.InputJsonValue }),
+        } });
+      }
+      const result = verify(fixture.id);
+      assert.notEqual(result.status, 0, `${mutation}: ${result.output}`);
+      assert.match(result.output, projectErrorPattern(fixture), mutation);
+      assert.match(result.output, templateIdentifierPattern(fixture), mutation);
+      assert.match(result.output, /must contain 4 steps/u, mutation);
+    });
+  }
+});
+
 test("--project rejects every canonical template step field with template/step identifiers", async () => {
   const mutations: ReadonlyArray<{
     name: string;
@@ -432,12 +483,46 @@ test("default verification keeps the complete-inventory requirement and success 
   assert.match(verified.output, /Agent\/template contract verified for 16 active agents and 24 steps across 3 templates\./u);
 
   const canonical = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const customized = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonical.id, name: "default" } },
+  });
+  await prisma.agent.update({
+    where: { id: customized.id },
+    data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, runtimeConfigCustomized: true },
+  });
+  try {
+    const compatible = verify();
+    assert.equal(compatible.status, 0, compatible.output);
+  } finally {
+    await prisma.agent.update({
+      where: { id: customized.id },
+      data: {
+        model: customized.model,
+        runnerPreference: customized.runnerPreference,
+        runtimeConfigCustomized: customized.runtimeConfigCustomized,
+      },
+    });
+  }
+
   const missing = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId: canonical.id, name: "default" } } });
   await prisma.agent.delete({ where: { id: missing.id } });
   try {
     const incomplete = verify();
     assert.notEqual(incomplete.status, 0, incomplete.output);
     assert.match(incomplete.output, /active agents differ from canonical contract/u);
+  } finally {
+    const seeded = command(["tsx", "prisma/seed.ts"]);
+    assert.equal(seeded.status, 0, seeded.output);
+  }
+
+  const missingTemplate = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonical.id, name: PR_TEMPLATE_NAME } },
+  });
+  await prisma.taskTemplate.delete({ where: { id: missingTemplate.id } });
+  try {
+    const incomplete = verify();
+    assert.notEqual(incomplete.status, 0, incomplete.output);
+    assert.match(incomplete.output, /expected 3 canonical templates; found 2/u);
   } finally {
     const seeded = command(["tsx", "prisma/seed.ts"]);
     assert.equal(seeded.status, 0, seeded.output);
@@ -462,7 +547,7 @@ test("default verification runs compound and direct special checks", async () =>
     const refused = verify();
     assert.notEqual(refused.status, 0, refused.output);
     assert.match(refused.output, /compound-engineer-workflow/u);
-    assert.match(refused.output, /approval gate/u);
+    assert.match(refused.output, /approvalGate|approval gate/u);
   } finally {
     await prisma.taskTemplateStep.update({
       where: { id: compoundIntegrator.id },
@@ -475,7 +560,7 @@ test("default verification runs compound and direct special checks", async () =>
     const refused = verify();
     assert.notEqual(refused.status, 0, refused.output);
     assert.match(refused.output, /direct-engineer-workflow/u);
-    assert.match(refused.output, /merge execution|approval gate/u);
+    assert.match(refused.output, /merge execution|approvalGate|approval gate/u);
   } finally {
     await prisma.taskTemplateStep.update({
       where: { id: directTail.id },

@@ -197,6 +197,22 @@ const readCanonicalTemplateRows = async (tx: Prisma.TransactionClient, name: Can
   include: { steps: { orderBy: { stepIndex: "asc" }, include: transitionStepInclude } },
 });
 
+const readCanonicalInstallationRows = async (
+  tx: Prisma.TransactionClient,
+  templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
+): Promise<CanonicalInstallationRow[]> => {
+  const installationRows: CanonicalInstallationRow[] = [];
+  for (const templateName of templateSources.keys()) {
+    const rows = await readCanonicalTemplateRows(tx, templateName);
+    installationRows.push(...rows.map((row) => ({
+      ...row,
+      name: templateName,
+      steps: row.steps as unknown as CanonicalInstallationRow["steps"],
+    })));
+  }
+  return installationRows;
+};
+
 export const parseInstallFullProjectId = (args: readonly string[] = process.argv.slice(2)): string | null => {
   if (args.length === 0) return null;
   if (args[0] !== "--install-full") throw new Error(`Unknown argument ${args[0]}`);
@@ -397,6 +413,7 @@ type PersistedCanonicalAgent = {
   id: string;
   projectId: string;
   name: string;
+  archivedAt: Date | null;
   title: string;
   model: string;
   runtimeConfigCustomized: boolean;
@@ -420,12 +437,13 @@ const synchronizeAgents = async (
     to: { model: string; runnerPreference: RunnerPreference };
   }>,
 ): Promise<void> => {
-  const presentAgents = await tx.agent.findMany({
-    where: { archivedAt: null, name: { in: [...roleNames] } },
+  const canonicalAgentRows = await tx.agent.findMany({
+    where: { name: { in: [...roleNames] } },
     select: {
       id: true,
       projectId: true,
       name: true,
+      archivedAt: true,
       title: true,
       model: true,
       runtimeConfigCustomized: true,
@@ -435,6 +453,7 @@ const synchronizeAgents = async (
       collaborators: { select: { allowedAgent: { select: { name: true } } } },
     },
   });
+  const presentAgents = canonicalAgentRows.filter((agent) => agent.archivedAt === null);
   const byProject = new Map<string, PersistedCanonicalAgent[]>();
   for (const agent of presentAgents) {
     const list = byProject.get(agent.projectId) ?? [];
@@ -444,7 +463,12 @@ const synchronizeAgents = async (
   const canonicalAgents = byProject.get(canonicalProject.id) ?? [];
   const canonicalNames = new Set(canonicalAgents.map(({ name }) => name));
   for (const name of roleNames) {
-    if (!canonicalNames.has(name)) throw projectError(canonicalProject, `Agent ${name} was not found`);
+    if (canonicalNames.has(name)) continue;
+    const archived = canonicalAgentRows.find((agent) => (
+      agent.projectId === canonicalProject.id && agent.name === name && agent.archivedAt !== null
+    ));
+    if (archived) throw projectError(canonicalProject, `Agent ${name} (${archived.id}) is archived`);
+    throw projectError(canonicalProject, `Agent ${name} was not found`);
   }
 
   for (const agent of presentAgents) {
@@ -573,38 +597,47 @@ const syncCanonicalTemplates = async (
     for (const template of templates) {
       const project = projectFor(projects, template.projectId);
       increment(countersByProject, project.id, "templates");
-      const presentStepCount = await tx.taskTemplateStep.count({ where: { taskTemplateId: template.id } });
-      if (presentStepCount !== steps.length) {
-        throw projectError(project, `Template ${templateName} (${template.id}) has structural drift: expected ${steps.length} steps, found ${presentStepCount}`);
+      const persistedSteps = await tx.taskTemplateStep.findMany({
+        where: { taskTemplateId: template.id },
+        select: {
+          id: true,
+          stepIndex: true,
+          name: true,
+          taskTemplateId: true,
+          prompt: true,
+          layer: true,
+          assigneeAgentId: true,
+          assigneeAgent: { select: { name: true } },
+          assigneeType: true,
+          approvalGate: true,
+          outputKind: true,
+          attachmentsFromPrevious: true,
+          priorOutputKinds: true,
+          opensPullRequest: true,
+          requiresCommit: true,
+          baseFromStepIndex: true,
+          spawnPolicy: true,
+          _count: { select: { tasks: true } },
+        },
+        orderBy: { stepIndex: "asc" },
+      });
+      if (persistedSteps.length !== steps.length) {
+        throw projectError(project, `Template ${templateName} (${template.id}) has structural drift: expected ${steps.length} steps, found ${persistedSteps.length}`);
       }
+      const persistedByIndex = new Map(persistedSteps.map((step) => [step.stepIndex, step]));
       for (const step of steps) {
-        const persistedSteps = await tx.taskTemplateStep.findMany({
-          where: { taskTemplateId: template.id, stepIndex: step.stepIndex },
-          select: {
-            id: true,
-            stepIndex: true,
-            name: true,
-            taskTemplateId: true,
-            prompt: true,
-            layer: true,
-            assigneeAgentId: true,
-            assigneeAgent: { select: { name: true } },
-            assigneeType: true,
-            approvalGate: true,
-            outputKind: true,
-            attachmentsFromPrevious: true,
-            priorOutputKinds: true,
-            opensPullRequest: true,
-            requiresCommit: true,
-            baseFromStepIndex: true,
-            spawnPolicy: true,
-            _count: { select: { tasks: true } },
-          },
-        });
-        if (persistedSteps.length !== 1) {
+        const persisted = persistedByIndex.get(step.stepIndex);
+        if (!persisted) {
+          const expectedIndexes = new Set(steps.map((source) => source.stepIndex));
+          const unexpected = persistedSteps.find((candidate) => !expectedIndexes.has(candidate.stepIndex));
+          if (unexpected) {
+            throw projectError(
+              project,
+              `Template ${templateName} (${template.id}), ${templateName} step ${unexpected.stepIndex} (${unexpected.id}) has structural drift: expected canonical step ${step.stepIndex}`,
+            );
+          }
           throw projectError(project, `Template ${templateName} (${template.id}) step ${step.stepIndex} was not found`);
         }
-        const persisted = persistedSteps[0]!;
         const differences = templateStepStructureDifferences(persisted, step);
         const transition = ASSIGNEE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
         const adoptsCanonicalAssignee = differences.includes("agent")
@@ -845,27 +878,12 @@ export const main = async (
         emptyProjectCounters(templateSources, roleNames),
       ]));
 
-      const installationRows: CanonicalInstallationRow[] = [];
-      for (const templateName of templateSources.keys()) {
-        const rows = await readCanonicalTemplateRows(tx, templateName);
-        installationRows.push(...rows.map((row) => ({
-          ...row,
-          name: templateName,
-          steps: row.steps as unknown as CanonicalInstallationRow["steps"],
-        })));
-      }
-      const requiredProjectIds = [
-        canonicalProject.id,
-        ...(fullInstallTarget && fullInstallTarget.id !== canonicalProject.id ? [fullInstallTarget.id] : []),
-      ];
-      const installationPlan = planCanonicalInstallation(installationRows, templateSources, requiredProjectIds);
+      const installationRows = await readCanonicalInstallationRows(tx, templateSources);
+      const installationPlan = planCanonicalInstallation(installationRows, templateSources, [canonicalProject.id]);
       const plannedRefusal = installationPlan.find((action): action is Extract<CanonicalInstallationAction, { kind: "refused" }> => action.kind === "refused");
       if (plannedRefusal) {
         const project = projectFor(projects, plannedRefusal.projectId);
-        const object = plannedRefusal.rowId === null
-          ? `Template ${plannedRefusal.templateName}`
-          : `Template ${plannedRefusal.templateName} (${plannedRefusal.rowId})`;
-        throw projectError(project, `${object} ${plannedRefusal.reason}`);
+        throw projectError(project, plannedRefusal.reason);
       }
       for (const action of installationPlan) {
         if (action.kind === "create" || action.kind === "rollover") {
@@ -874,9 +892,6 @@ export const main = async (
       }
 
       await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByName, countersByProject);
-      if (fullInstallTarget) {
-        await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, countersByProject);
-      }
 
       const runtimeConfigAdoptions: Array<{
         name: string;
@@ -899,6 +914,24 @@ export const main = async (
       });
       const regressionSteps = await syncCanonicalTemplates(tx, projects, templateSources, countersByProject);
       await migrateRegressionTasks(tx, projects, regressionSteps, countersByProject);
+
+      if (fullInstallTarget) {
+        await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, countersByProject);
+        const postSyncRows = await readCanonicalInstallationRows(tx, templateSources);
+        const fullInstallationPlan = planCanonicalInstallation(
+          postSyncRows,
+          templateSources,
+          [fullInstallTarget.id],
+        );
+        for (const action of fullInstallationPlan) {
+          if (action.kind === "create" || action.kind === "rollover") {
+            increment(countersByProject, action.projectId, "createdCanonicalTemplates");
+          }
+        }
+        await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
+          projectLabel: (projectId) => projects.get(projectId)?.slug,
+        });
+      }
       for (const counters of countersByProject.values()) finalizeUpdated(counters);
       return { projectRows, countersByProject, runtimeConfigAdoptions };
     }, { timeout: 120_000 });

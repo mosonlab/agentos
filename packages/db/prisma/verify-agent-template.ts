@@ -16,8 +16,8 @@ import {
   integratorBindingValid,
 } from "../src/merge-integrator.js";
 import {
-  canonicalTemplateSourceSpec,
   loadAllTemplateStepSources,
+  templateMetadataDifferences,
   templateStepStructureDifferences,
   type CanonicalTemplateName,
   type TemplateStepSource,
@@ -80,6 +80,15 @@ const templateLabel = (template: Pick<TemplateRow, "id" | "name">): string => `$
 const stepLabel = (template: Pick<TemplateRow, "name">, step: Pick<TemplateStepRow, "id" | "stepIndex">): string => (
   `${template.name} step ${step.stepIndex} (${step.id})`
 );
+const agentReference = (context: VerificationContext, agent: Pick<AgentRow, "id" | "name">): string => (
+  context.partial ? `Agent ${agentLabel(agent)}` : agent.name
+);
+const templateReference = (context: VerificationContext, template: TemplateRow): string => (
+  context.partial ? templateLabel(template) : template.name
+);
+const stepReference = (context: VerificationContext, template: TemplateRow, step: TemplateStepRow): string => (
+  context.partial ? `${templateLabel(template)}, ${stepLabel(template, step)}` : `${template.name} step ${step.stepIndex}`
+);
 
 const parseProjectArgument = (): string | null => {
   const args = process.argv.slice(2);
@@ -95,29 +104,27 @@ const verifyAgent = (
   context: VerificationContext,
 ): void => {
   const differences = roleSourceStructureDifferences(agent, expected);
-  if (agent.name !== expected.name) differences.unshift("name");
   const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
   const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
   if (structuralDifferences.length > 0) {
-    const message = `differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`;
-    throw new Error(scopedError(context, context.partial ? `Agent ${agentLabel(agent)} ${message}` : `${agent.name} ${message}`));
+    throw new Error(scopedError(context, `${agentReference(context, agent)} differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`));
   }
   if (runtimeDifferences.length > 0 && !agent.runtimeConfigCustomized) {
     const message = "runtime model/runner differs from canonical defaults without an operator override";
-    throw new Error(scopedError(context, context.partial ? `Agent ${agentLabel(agent)} ${message}` : `${agent.name} ${message}`));
+    throw new Error(scopedError(context, `${agentReference(context, agent)} ${message}`));
   }
   if (agent.foundationalPrompt !== foundationalPrompt) {
     const message = "foundational prompt differs from its canonical Markdown source";
-    throw new Error(scopedError(context, context.partial ? `Agent ${agentLabel(agent)} ${message}` : `${agent.name} ${message}`));
+    throw new Error(scopedError(context, `${agentReference(context, agent)} ${message}`));
   }
   if (agent.rolePrompt !== expected.rolePrompt) {
     const message = "role prompt differs from its canonical Markdown source";
-    throw new Error(scopedError(context, context.partial ? `Agent ${agentLabel(agent)} ${message}` : `${agent.name} ${message}`));
+    throw new Error(scopedError(context, `${agentReference(context, agent)} ${message}`));
   }
   const catalogRunner = catalogRunnerForModel(agent.model);
   if (catalogRunner && catalogRunner !== agent.runnerPreference) {
     const message = `runner/model mismatch: ${agent.runnerPreference}/${agent.model}`;
-    throw new Error(scopedError(context, context.partial ? `Agent ${agentLabel(agent)} ${message}` : `${agent.name} ${message}`));
+    throw new Error(scopedError(context, `${agentReference(context, agent)} ${message}`));
   }
 };
 
@@ -126,20 +133,13 @@ const verifyTemplateMetadata = (
   templateName: CanonicalTemplateName,
   context: VerificationContext,
 ): void => {
-  const differences: string[] = [];
-  const expectedDescription = canonicalTemplateSourceSpec(templateName).description;
-  if (template.name !== templateName) differences.push("name");
-  if (template.description !== expectedDescription) differences.push("description");
-  if (JSON.stringify(template.variables) !== JSON.stringify(["branchName"])) differences.push("variables");
+  const differences = templateMetadataDifferences(template, templateName);
   if (differences.length > 0) {
-    const message = context.partial
-      ? `${templateLabel(template)} differs from canonical template metadata: ${differences.join(", ")}`
-      : `${templateName} differs from canonical template metadata: ${differences.join(", ")}`;
-    throw new Error(scopedError(context, message));
+    throw new Error(scopedError(context, `${templateReference(context, template)} differs from canonical template metadata: ${differences.join(", ")}`));
   }
 };
 
-const verifyPartialTemplateStep = (
+const verifyTemplateStep = (
   template: TemplateRow,
   step: TemplateStepRow,
   expected: TemplateStepSource,
@@ -152,61 +152,8 @@ const verifyPartialTemplateStep = (
   if (differences.length > 0) {
     throw new Error(scopedError(
       context,
-      `${templateLabel(template)}, ${stepLabel(template, step)} differs from canonical Markdown structure: ${differences.join(", ")}`,
+      `${stepReference(context, template, step)} differs from canonical Markdown structure: ${differences.join(", ")}`,
     ));
-  }
-};
-
-const verifyCompleteTemplateStep = (
-  templateName: string,
-  step: TemplateStepRow,
-  expected: TemplateStepSource,
-): void => {
-  if (step.stepIndex !== expected.stepIndex) {
-    throw new Error(`${templateName} step ${step.stepIndex} must have stepIndex ${expected.stepIndex}; found ${step.stepIndex}`);
-  }
-  if ((step.assigneeAgent?.name ?? null) !== expected.agentName) {
-    throw new Error(`${templateName} step ${step.stepIndex} must bind ${expected.agentName ?? "HUMAN"}; found ${step.assigneeAgent?.name ?? "HUMAN"}`);
-  }
-  const expectedAssigneeType = expected.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
-  if (step.assigneeType !== expectedAssigneeType) {
-    throw new Error(`${templateName} step ${step.stepIndex} assignee type must be ${expectedAssigneeType}; found ${step.assigneeType}`);
-  }
-  if (step.layer !== expected.layer) {
-    throw new Error(`${templateName} step ${step.stepIndex} layer must be ${expected.layer}; found ${step.layer}`);
-  }
-  if (step.outputKind !== expected.outputKind) {
-    throw new Error(`${templateName} step ${step.stepIndex} must persist ${expected.outputKind}; found ${step.outputKind}`);
-  }
-  if (step.approvalGate !== expected.approvalGate) {
-    throw new Error(`${templateName} step ${step.stepIndex} approval gate must be ${expected.approvalGate}; found ${step.approvalGate}`);
-  }
-  if (step.prompt !== expected.prompt) {
-    throw new Error(`${templateName} step ${step.stepIndex} prompt differs from its canonical Markdown source`);
-  }
-  if (!isTemplateRunnerInherited(step.runner)) {
-    throw new Error(`${templateName} step ${step.stepIndex} must inherit its Agent runner; found ${step.runner}`);
-  }
-  if (step.name !== expected.name) {
-    throw new Error(`${templateName} step ${step.stepIndex} name differs from its canonical Markdown source`);
-  }
-  if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
-    throw new Error(`${templateName} step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
-  }
-  if (JSON.stringify(step.priorOutputKinds) !== JSON.stringify(expected.priorOutputKinds)) {
-    throw new Error(`${templateName} step ${step.stepIndex} priorOutputKinds differs from canonical Markdown source; expected ${JSON.stringify(expected.priorOutputKinds)}, found ${JSON.stringify(step.priorOutputKinds)}`);
-  }
-  if (step.opensPullRequest !== expected.opensPullRequest) {
-    throw new Error(`${templateName} step ${step.stepIndex} opensPullRequest must be ${expected.opensPullRequest}; found ${step.opensPullRequest}`);
-  }
-  if (step.requiresCommit !== expected.requiresCommit) {
-    throw new Error(`${templateName} step ${step.stepIndex} requiresCommit must be ${expected.requiresCommit}; found ${step.requiresCommit}`);
-  }
-  if (step.baseFromStepIndex !== expected.baseFromStepIndex) {
-    throw new Error(`${templateName} step ${step.stepIndex} baseFromStepIndex must be ${expected.baseFromStepIndex}; found ${step.baseFromStepIndex}`);
-  }
-  if (JSON.stringify(step.spawnPolicy) !== JSON.stringify(expected.spawnPolicy)) {
-    throw new Error(`${templateName} step ${step.stepIndex} spawnPolicy differs from its canonical Markdown source`);
   }
 };
 
@@ -218,11 +165,7 @@ const verifyTemplate = (
 ): void => {
   verifyTemplateMetadata(template, templateName, context);
   if (template.steps.length !== expectedSteps.length) {
-    const message = `${templateName} must contain ${expectedSteps.length} steps; found ${template.steps.length}`;
-    throw new Error(scopedError(
-      context,
-      context.partial ? `${templateLabel(template)} must contain ${expectedSteps.length} steps; found ${template.steps.length}` : message,
-    ));
+    throw new Error(scopedError(context, `${templateReference(context, template)} must contain ${expectedSteps.length} steps; found ${template.steps.length}`));
   }
   if (context.partial) {
     const expectedIndexes = new Set(expectedSteps.map((step) => step.stepIndex));
@@ -243,8 +186,7 @@ const verifyTemplate = (
         context.partial ? `${templateLabel(template)} is missing step ${expected.stepIndex}` : message,
       ));
     }
-    if (context.partial) verifyPartialTemplateStep(template, step, expected, context);
-    else verifyCompleteTemplateStep(templateName, step, expected);
+    verifyTemplateStep(template, step, expected, context);
   }
 };
 
@@ -254,34 +196,30 @@ const verifyCompoundSpecialChecks = (template: TemplateRow, context: Verificatio
   const integrator = template.steps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX);
   if (!integrator) throw specialError(context, `template must contain step ${INTEGRATOR_STEP_INDEX}`);
   if (integrator.assigneeAgent?.name !== INTEGRATOR_AGENT_NAME) {
-    const message = `${stepLabel(template, integrator)} must bind ${INTEGRATOR_AGENT_NAME}; found ${integrator.assigneeAgent?.name ?? "HUMAN"}`;
-    throw specialError(context, context.partial ? message : `template step ${INTEGRATOR_STEP_INDEX} must bind ${INTEGRATOR_AGENT_NAME}; found ${integrator.assigneeAgent?.name ?? "HUMAN"}`);
+    throw specialError(context, `${stepReference(context, template, integrator)} must bind ${INTEGRATOR_AGENT_NAME}; found ${integrator.assigneeAgent?.name ?? "HUMAN"}`);
   }
   const integratorAgent = integrator.assigneeAgent;
   if (!integratorAgent) throw specialError(context, `${stepLabel(template, integrator)} has no bound Agent`);
   if (integratorAgent.model !== INTEGRATOR_SENTINEL_MODEL) {
-    const message = `Agent ${integratorAgent.name} (${integratorAgent.id}) must carry the mechanical sentinel model ${INTEGRATOR_SENTINEL_MODEL}; found ${integratorAgent.model}`;
-    throw specialError(context, context.partial ? message : `${INTEGRATOR_AGENT_NAME} must carry the mechanical sentinel model ${INTEGRATOR_SENTINEL_MODEL}; found ${integratorAgent.model}`);
+    throw specialError(context, `${agentReference(context, integratorAgent)} must carry the mechanical sentinel model ${INTEGRATOR_SENTINEL_MODEL}; found ${integratorAgent.model}`);
   }
   if (catalogRunnerForModel(integratorAgent.model) !== null) {
-    const message = `Agent ${integratorAgent.name} (${integratorAgent.id}) model ${integratorAgent.model} resolves to a model-CLI runner; it must not`;
-    throw specialError(context, context.partial ? message : `${INTEGRATOR_AGENT_NAME} model ${integratorAgent.model} resolves to a model-CLI runner; it must not`);
+    throw specialError(context, `${agentReference(context, integratorAgent)} model ${integratorAgent.model} resolves to a model-CLI runner; it must not`);
   }
   if (integrator.outputKind !== INTEGRATOR_OUTPUT_KIND) {
-    const message = `${stepLabel(template, integrator)} must persist ${INTEGRATOR_OUTPUT_KIND}; found ${integrator.outputKind}`;
-    throw specialError(context, context.partial ? message : `template step ${INTEGRATOR_STEP_INDEX} must persist ${INTEGRATOR_OUTPUT_KIND}; found ${integrator.outputKind}`);
+    throw specialError(context, `${stepReference(context, template, integrator)} must persist ${INTEGRATOR_OUTPUT_KIND}; found ${integrator.outputKind}`);
   }
   if (integrator.approvalGate !== false) {
-    throw specialError(context, context.partial ? `${stepLabel(template, integrator)} must not carry an approval gate` : `template step ${INTEGRATOR_STEP_INDEX} must not carry an approval gate`);
+    throw specialError(context, `${stepReference(context, template, integrator)} must not carry an approval gate`);
   }
   if (integrator.opensPullRequest !== false) {
-    throw specialError(context, context.partial ? `${stepLabel(template, integrator)} must not open a pull request` : `template step ${INTEGRATOR_STEP_INDEX} must not open a pull request`);
+    throw specialError(context, `${stepReference(context, template, integrator)} must not open a pull request`);
   }
   if (integrator.requiresCommit !== false) {
-    throw specialError(context, context.partial ? `${stepLabel(template, integrator)} must not require a workspace commit` : `template step ${INTEGRATOR_STEP_INDEX} must not require a workspace commit`);
+    throw specialError(context, `${stepReference(context, template, integrator)} must not require a workspace commit`);
   }
   if (integrator.spawnPolicy !== null) {
-    throw specialError(context, context.partial ? `${stepLabel(template, integrator)} must not claim a spawn policy` : `template step ${INTEGRATOR_STEP_INDEX} must not claim a spawn policy`);
+    throw specialError(context, `${stepReference(context, template, integrator)} must not claim a spawn policy`);
   }
 
   const executor = template.steps.find((step) => step.assigneeAgent?.name === "implementation-plan-executioner");
@@ -297,8 +235,7 @@ const verifyDirectSpecialChecks = (template: TemplateRow, context: VerificationC
   const directLast = template.steps.at(-1);
   if (!directLast) throw specialError(context, `${DIRECT_TEMPLATE_NAME} must contain a final step`);
   if (directLast.assigneeAgent?.name !== INTEGRATOR_AGENT_NAME || directLast.approvalGate !== false) {
-    const message = `${stepLabel(template, directLast)} must end at mechanical merge execution`;
-    throw specialError(context, context.partial ? message : `${DIRECT_TEMPLATE_NAME} must end at mechanical merge execution`);
+    throw specialError(context, `${stepReference(context, template, directLast)} must end at mechanical merge execution`);
   }
   for (const step of template.steps) {
     if (!integratorBindingValid(step.assigneeAgent?.name ?? null, {
@@ -306,8 +243,7 @@ const verifyDirectSpecialChecks = (template: TemplateRow, context: VerificationC
       outputKind: step.outputKind,
       taskTemplate: { name: DIRECT_TEMPLATE_NAME },
     })) {
-      const message = `${stepLabel(template, step)} violates the integrator binding contract`;
-      throw specialError(context, context.partial ? message : `${DIRECT_TEMPLATE_NAME} step ${step.stepIndex} violates the integrator binding contract`);
+      throw specialError(context, `${stepReference(context, template, step)} violates the integrator binding contract`);
     }
   }
 };
