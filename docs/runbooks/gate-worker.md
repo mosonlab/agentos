@@ -35,7 +35,7 @@ How wide each group runs is derived from a stated share of the host, not from
 the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
 slot count, so on the two-slot desktop each gate sizes itself for half the
 machine and two concurrent gates still add up to one host. A gate invoked by
-hand states no share and has the machine. Do not restore a per-phase fan-out in
+hand states no share and takes half the machine. Do not restore a per-phase fan-out in
 `run-gate.sh`: `7886fad` set `AGENTOS_DBTEST_CONCURRENCY` there, `merge-gate.sh`
 recomputed that same variable moments later, and the bound silently never took
 effect while both logs claimed it had.
@@ -449,8 +449,9 @@ width in the run from `availableParallelism() / AGENTOS_GATE_HOST_SHARE`. A
 worker permits one gate by default or two only when `~/gate/worker-capacity`
 contains `2`, so on the 14-vCPU desktop worker a capacity-two gate gets 7 unit
 and 7 database lanes and two of them add up to the host, while a hand-run gate
-states no share and gets all 14. Deriving both from the one number is what keeps
-that invariant true; do not fix a width independently of the share.
+with no stated share defaults to half the host. Deriving both from the one
+number is what keeps that invariant true; do not fix a width independently of
+the share.
 `AGENTOS_DBTEST_CONCURRENCY` lowers the file concurrency on other paths and
 `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 

@@ -107,7 +107,7 @@
 # How wide each group runs is not read from the core count. run-gate.sh states
 # what share of the worker this gate was given, and every fan-out below is
 # derived from that one number, so two gates on a two-slot worker still add up
-# to one machine. A gate invoked by hand states no share and has the host.
+# to one machine. A gate invoked by hand states no share and takes half the host.
 #
 # A parallel group reports every member that failed, not the first one to fail,
 # and replays each member's output under its own heading in submission order.
@@ -1057,9 +1057,10 @@ FAILED_STEP=""
 # gives each gate half the machine. Every parallel width below is derived from
 # this one number instead of each phase reading the CPU count for itself: two
 # concurrent gates then add up to one host, rather than each sizing itself for a
-# whole machine it does not have. A gate run by hand states no share and gets
-# the host, which is what it in fact has.
-GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-1}"
+# whole machine it does not have. An absent variable means half the host because
+# the shared runner host is where it is unset; a gate worker always exports its
+# own share.
+GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-2}"
 case "${GATE_HOST_SHARE}" in
   1|2) ;;
   *) die "AGENTOS_GATE_HOST_SHARE must be 1 or 2, got ${GATE_HOST_SHARE}" ;;
