@@ -189,7 +189,7 @@ export const parseCodexTranscript = (
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
   const state = createAdapterState("CODEX", "transcript");
-  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent);
+  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent, () => true);
   return state;
 };
 
@@ -276,6 +276,7 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   childEnvironment: codexChildEnvironment,
   provisionSessionConfig: provisionCodexSessionConfig,
   initialProviderState: () => undefined,
+  providerEventPersistence: () => true,
   parseEvent: parseCodexEvent,
   preflight,
 });

@@ -119,7 +119,7 @@ export const parseClaudeTranscript = (
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
   const state = createAdapterState("CLAUDE", "transcript");
-  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseClaudeEvent);
+  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseClaudeEvent, () => true);
   return state;
 };
 
@@ -191,6 +191,7 @@ export const claudeDeclaration: AdapterDeclaration = Object.freeze({
   childEnvironment: claudeChildEnvironment,
   provisionSessionConfig: provisionClaudeSessionConfig,
   initialProviderState: () => undefined,
+  providerEventPersistence: () => true,
   parseEvent: parseClaudeEvent,
   preflight,
 });
