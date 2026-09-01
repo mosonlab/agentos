@@ -10,8 +10,10 @@ import { isRegressionStep } from "../lib/repair-subtimeline";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
+import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList } from "../components/chain-list";
+import { RunLine } from "../components/run-line";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
@@ -63,6 +65,60 @@ const SessionCell = ({ session }: { session: Run["session"] }): ReactNode => {
     <span onClick={(event) => event.stopPropagation()}>
       <Link to={`/sessions/${session.id}`}>{t("taskDetail.run.openSession")}</Link>
     </span>
+  );
+};
+
+type LatestAgentMessage = { body: string; at: string };
+type RunSessionWithLatestMessage = NonNullable<Run["session"]> & {
+  latestAgentMessage?: LatestAgentMessage | null;
+};
+
+const latestAgentMessage = (run: Run): LatestAgentMessage | null =>
+  (run.session as RunSessionWithLatestMessage | null | undefined)?.latestAgentMessage ?? null;
+
+/** The operator's answer to "what is the run doing now?" The message remains
+ * plain text even when it contains markdown-looking characters; agent text is
+ * data, not an instruction to build another document here. */
+export const NowBlock = ({ run }: { run: Run }): ReactNode => {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const message = latestAgentMessage(run);
+  const body = message?.body ?? t("taskDetail.now.noMessage");
+  // Task-detail Runs carry cost on their nested Session, while RunLine's
+  // shared board projection keeps it at the top level. The line only needs the
+  // common run fields, so provide the projection's unavailable cost as null.
+  const runLine = { ...run, costUsd: run.session?.costUsd ?? null };
+
+  return (
+    <div data-task-now="">
+      <Card title={t("taskDetail.now.title")}>
+        <div className="grid gap-[12px]">
+          <RunLine run={runLine} mergeOutcome={run.mergeOutcome} showElapsed showModel />
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-[10px]">
+            {message === null ? (
+              <span className="min-w-0 [overflow-wrap:anywhere] text-secondary-foreground">{body}</span>
+            ) : (
+              <button
+                type="button"
+                aria-expanded={expanded}
+                aria-label={t(expanded ? "taskDetail.now.collapse" : "taskDetail.now.expand")}
+                className={cn(
+                  "min-w-0 border-0 bg-transparent p-0 text-left text-secondary-foreground hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]",
+                  expanded ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "line-clamp-3 whitespace-pre-wrap [overflow-wrap:anywhere]",
+                )}
+                onClick={() => setExpanded((current) => !current)}
+              >
+                {body}
+              </button>
+            )}
+            {message === null ? null : <span className="ml-auto whitespace-nowrap text-right text-[11.5px] text-muted-foreground">{timeAgo(message.at)}</span>}
+          </div>
+          {run.session === null || run.session === undefined ? null : (
+            <Link to={`/sessions/${run.session.id}`}>{t("taskDetail.run.openSession")}</Link>
+          )}
+        </div>
+      </Card>
+    </div>
   );
 };
 
@@ -426,6 +482,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           <span className={STAT_PILL}>{t("taskDetail.stats.stall", { n: task.stallTimeoutMin })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.maxRuns", { n: task.maxSessionsPerTask })}</span>
         </div>
+
+        {newest === undefined ? null : <NowBlock run={newest} />}
 
         <Card title={t("taskDetail.details.title")}>
           {/* Only these three move while a task runs. Everything else was fixed

@@ -5,8 +5,9 @@ import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApiError } from "../lib/api";
+import { timeAgo } from "../lib/format";
 import type { Chain, Run, TaskDetail, TaskStartability, TaskStepOutput } from "../lib/types";
-import { RunRow, TaskDetailPage, TaskOutput } from "../pages/TaskDetail";
+import { NowBlock, RunRow, TaskDetailPage, TaskOutput } from "../pages/TaskDetail";
 import { mountPage } from "./dom-harness";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
@@ -129,6 +130,58 @@ test("the Details card leads with the live fields and keeps configuration behind
 
     await page.press("Hide configuration");
     assert.doesNotMatch(text(), /Working directory/u);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("the Now block shows the newest run, latest agent message and session link, and expands plain text", async () => {
+  const fullBody = "<agent update>\nline two\nline three\nline four";
+  const run = sourceRun("now");
+  run.session = {
+    id: "session-now", executionStatus: "SUCCEEDED", resumeAttempt: 0,
+    latestAgentMessage: { body: fullBody, at: now },
+  } as NonNullable<Run["session"]> & { latestAgentMessage: { body: string; at: string } };
+  const page = await mountPage(
+    <NowBlock run={run} />,
+    {},
+    "http://localhost/tasks/now",
+  );
+  const text = (): string => page.container.textContent ?? "";
+  const toggle = (): HTMLButtonElement => {
+    const button = page.container.querySelector("[data-task-now] button[aria-expanded]");
+    assert.ok(button instanceof HTMLButtonElement);
+    return button;
+  };
+  try {
+    assert.match(text(), /run 1 · claude · succeeded/u);
+    assert.match(text(), new RegExp(fullBody.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+    assert.match(text(), new RegExp(timeAgo(now).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+    assert.match(text(), /Open session/u);
+    assert.equal(page.container.querySelector("a[href='#/sessions/session-now']")?.textContent, "Open session ↗");
+    assert.equal(toggle().getAttribute("aria-expanded"), "false");
+    assert.match(toggle().className, /line-clamp-3/u);
+
+    await act(async () => toggle().dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
+    assert.equal(toggle().getAttribute("aria-expanded"), "true");
+    assert.doesNotMatch(toggle().className, /line-clamp-3/u);
+    assert.equal(toggle().textContent, fullBody);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("the task detail omits the Now block when it has no runs", async () => {
+  const subject = task("no-now", "No Now task", 0);
+  const page = await mountPage(<TaskDetailPage taskId="no-now" />, {
+    "/tasks/no-now": subject,
+    "/tasks/no-now/output": new Response(JSON.stringify({ error: "not found" }), { status: 404 }),
+    "/tasks/no-now/startability": startability(true),
+    "/tasks/no-now/activity": [],
+    "/tasks/no-now/chain": emptyChain(),
+  }, "http://localhost/tasks/no-now");
+  try {
+    assert.equal(page.container.querySelector("[data-task-now]"), null);
   } finally {
     await page.dispose();
   }
