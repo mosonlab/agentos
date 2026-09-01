@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { publishRun, startRun } from "./run-lifecycle.js";
@@ -54,7 +54,7 @@ const seed = async (overrides: {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/repo.git",
-    mountPath: "/repo", defaultBranch: "main",
+    mountPath: "/repo", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, name: "Fenced", description: "fenced work",

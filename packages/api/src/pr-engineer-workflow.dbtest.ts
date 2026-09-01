@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  DependencyProvisioning,
   PR_TEMPLATE_NAME,
   RepoPermission,
   type PrismaClient,
@@ -86,6 +87,7 @@ const addRepoAndGrants = async (projectId: string) => {
       remoteUrl: "https://github.com/example/pr-workflow.git",
       defaultBranch: "main",
       mountPath: "repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   const agents = await db.agent.findMany({ where: { projectId }, select: { id: true } });

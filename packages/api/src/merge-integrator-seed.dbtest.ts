@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import {
   activateChainSuccessor,
   AssigneeType,
+  DependencyProvisioning,
   DIRECT_TEMPLATE_NAME,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
@@ -617,7 +618,7 @@ test("re-seeding a historical ten-step template preserves and queues its in-flig
 
   const repo = await db.repo.create({ data: {
     projectId, name: "legacy-upgrade", remoteUrl: "https://github.com/acme/legacy-upgrade.git",
-    mountPath: "/scratch/legacy-upgrade", defaultBranch: "main",
+    mountPath: "/scratch/legacy-upgrade", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const integratorAgent = agents.get(INTEGRATOR_AGENT_NAME)!;
   await db.agentRepoAccess.create({ data: {
@@ -722,7 +723,7 @@ test("re-seeding a historical nine-step template preserves its in-flight task se
   const reviewStep = historicalSteps[5]!;
   const repo = await db.repo.create({ data: {
     projectId, name: "legacy-nine-upgrade", remoteUrl: "https://github.com/acme/legacy-nine-upgrade.git",
-    mountPath: "/scratch/legacy-nine-upgrade", defaultBranch: "main",
+    mountPath: "/scratch/legacy-nine-upgrade", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const inFlight = await db.task.create({ data: {
     projectId, repoId: repo.id, templateId, templateStepId: reviewStep.id,

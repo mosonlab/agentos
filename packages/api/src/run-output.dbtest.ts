@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@anneal/db";
 
 import { hashToken } from "./auth.js";
 import { previousRunHandoffForClaim } from "./canonical-task-output.js";
@@ -91,7 +91,7 @@ const seedTask = async (options: { chained: boolean; outputKind?: string; templa
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/widgets.git",
-    mountPath: "/repo", defaultBranch: "master",
+    mountPath: "/repo", defaultBranch: "master", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  DependencyProvisioning,
   PrismaClient, SESSION_USAGE_LOCK_CLASS, recomputeSessionUsage, runBackfillSessionUsageCli, sessionUsageLockKey,
 } from "@anneal/db";
 
@@ -56,7 +57,7 @@ const seedSession = async (label: string) => {
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   const task = await db.task.create({ data: {
     projectId: project.id, name: `Task ${unique}`, description: "usage", assigneeAgentId: agent.id, repoId: repo.id,
   } });

@@ -97,6 +97,7 @@ test("the Details card leads with the live fields and keeps configuration behind
   subject.repo = {
     id: "repo-1", projectId: "project-1", credentialSecretId: null, name: "anneal",
     remoteUrl: "https://github.com/o/r", mountPath: "/repos/anneal", defaultBranch: "main",
+    dependencyProvisioning: "NONE",
     createdAt: now, updatedAt: now,
   };
   const page = await mountPage(<TaskDetailPage taskId="details" />, {

@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 
 import { flock } from "fs-ext";
 
+import type { DependencyProvisioning } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
 import {
@@ -988,6 +989,7 @@ const rebuildNativeWorkspaces = async (
 export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
+  dependencyProvisioning: DependencyProvisioning,
   env: NodeJS.ProcessEnv,
   dependencies: DependencyCacheDependencies,
   options: DependencyCacheOptions = {},
@@ -995,6 +997,14 @@ export const materializeWorkspaceDependencies = async (
   const execute = dependencies.execute;
   const started = Date.now();
   const report = options.report ?? progressReporter;
+  if (dependencyProvisioning === "NONE") {
+    try {
+      report({ event: "miss", condition: "dependency-provisioning-none" });
+      return { status: "not-applicable", condition: "dependency-provisioning-none" };
+    } finally {
+      report({ event: "elapsed", elapsedMs: Date.now() - started });
+    }
+  }
   const requestedWorkspace = resolve(workspacePath);
   if (await pathKind(requestedWorkspace) !== "directory" || (await lstat(requestedWorkspace)).isSymbolicLink()) {
     throw new Error("Run workspace is not a real directory");

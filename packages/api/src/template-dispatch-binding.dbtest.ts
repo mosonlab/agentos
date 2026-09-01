@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient, TaskStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -39,6 +39,7 @@ const fixture = async (label: string) => {
       name: "repo",
       remoteUrl: "https://example.test/repo.git",
       mountPath: "/repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   await db.agentRepoAccess.create({

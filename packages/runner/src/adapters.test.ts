@@ -36,7 +36,13 @@ const claim: ClaimedTask = {
     templateStep: null,
   },
   agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement", disabledTools: [] },
-  repo: { id: "repo-1", remoteUrl: "/repo", defaultBranch: "main", mountPath: "repo" },
+  repo: {
+    id: "repo-1",
+    remoteUrl: "/repo",
+    defaultBranch: "main",
+    mountPath: "repo",
+    dependencyProvisioning: "NPM_CI",
+  },
   run: {
     id: "run-1",
     runNumber: 1,

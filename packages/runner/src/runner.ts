@@ -21,6 +21,7 @@ import {
 } from "./adapters.js";
 import {
   controlPlane as defaultControlPlane,
+  isDependencyProvisioning,
   type ClaimedTask,
   type ControlPlane,
   type SessionEventPayload,
@@ -290,8 +291,29 @@ export const executeClaim = async (
   };
 
   try {
+    // Dependency provisioning is a required claim contract. A runner build
+    // that predates this field must fail closed: treating an omitted value as
+    // either policy would silently change whether a repository's dependencies
+    // are installed. Validate before any workspace, scratch, child environment
+    // or adapter preflight/launch work can happen, and keep the condition in
+    // both terminal fields so old and new control planes can expose it.
+    if (!isDependencyProvisioning((claim.repo as { dependencyProvisioning?: unknown } | undefined)?.dependencyProvisioning)) {
+      const condition = "dependency-provisioning-missing";
+      await controlPlane.completeRun(config, claim, {
+        exitCode: null,
+        terminalEventSeen: false,
+        terminalSuccess: false,
+        terminationReason: condition,
+        failureClass: "PROTOCOL_ERROR",
+        failureReason: condition,
+        retryable: false,
+        cleanupStatus: "SUCCEEDED",
+        workspaceRetained: false,
+      });
+      return;
+    }
     // §D-P1 rule 4 — defence in depth behind the claim-side allowlist, and the
-    // FIRST thing this function does. Everything below it constructs something a
+    // FIRST execution-mode check this function performs. Everything below it constructs something a
     // merge credential must never be near: a workspace, a prompt, a child
     // environment, an adapter preflight, a spawned CLI, a delivery push. A
     // mechanical run reaching an ordinary runner means the allowlist was

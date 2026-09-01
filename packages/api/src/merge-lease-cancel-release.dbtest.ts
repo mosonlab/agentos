@@ -21,6 +21,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   DIRECT_TEMPLATE_NAME,
+  DependencyProvisioning,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TAIL_KIND,
@@ -126,7 +127,7 @@ const seedChain = async (options: { outputKind?: string; chainId?: string; chain
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/widgets.git",
-    mountPath: "/repo", defaultBranch: "master",
+    mountPath: "/repo", defaultBranch: "master", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

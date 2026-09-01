@@ -71,7 +71,13 @@ const mechanicalClaim: ClaimedTask = {
     rolePrompt: "",
     disabledTools: [],
   },
-  repo: { id: "repo-1", remoteUrl: "git@github.com:owner/name.git", defaultBranch: "master", mountPath: "/does/not/exist" },
+  repo: {
+    id: "repo-1",
+    remoteUrl: "git@github.com:owner/name.git",
+    defaultBranch: "master",
+    mountPath: "/does/not/exist",
+    dependencyProvisioning: "NPM_CI",
+  },
   run: {
     id: "run-10",
     runNumber: 1,
@@ -149,6 +155,65 @@ test("a mechanical claim is refused before any adapter, workspace or child envir
   // under the workspace root, and nothing else in this path writes there.
   assert.deepEqual(await readdir(workspaceRoot), []);
 });
+
+const malformedDependencyProvisioningClaim = (value: unknown): ClaimedTask => {
+  const repo = { ...mechanicalClaim.repo } as Record<string, unknown>;
+  if (value === undefined) delete repo.dependencyProvisioning;
+  else repo.dependencyProvisioning = value;
+  return {
+    ...mechanicalClaim,
+    executionMode: "agent",
+    repo,
+  } as unknown as ClaimedTask;
+};
+
+for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as const) {
+  test(`a ${label} dependency-provisioning claim is rejected before provisioning or adapter launch`, async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-dependency-protocol-${label}-`));
+    const commandRoot = await mkdtemp(join(tmpdir(), `runner-dependency-command-${label}-`));
+    const npmSentinel = join(commandRoot, "npm-called");
+    const npm = join(commandRoot, "npm");
+    await writeFile(npm, `#!/bin/sh\nprintf called > ${JSON.stringify(npmSentinel)}\n`);
+    await chmod(npm, 0o755);
+    const controlPlane = createControlPlaneDouble();
+    let adapterCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        adapterCalls += 1;
+        throw new Error("adapter preflight must not be reached for a malformed dependency claim");
+      },
+      start: async () => {
+        adapterCalls += 1;
+        throw new Error("adapter start must not be reached for a malformed dependency claim");
+      },
+    };
+
+    try {
+      await executeClaimProduction(
+        { ...config(workspaceRoot), path: commandRoot },
+        malformedDependencyProvisioningClaim(value),
+        { adapter, controlPlane: controlPlane.controlPlane },
+      );
+      const completion = controlPlane.completions.at(-1);
+      assert.ok(completion, "malformed claims must complete the run");
+      assert.equal(completion.failureClass, "PROTOCOL_ERROR");
+      assert.equal(completion.retryable, false);
+      assert.equal(completion.failureReason, "dependency-provisioning-missing");
+      assert.equal(completion.terminationReason, "dependency-provisioning-missing");
+      assert.equal(completion.cleanupStatus, "SUCCEEDED");
+      assert.equal(completion.workspaceRetained, false);
+      assert.equal(adapterCalls, 0, "malformed claims must not reach adapter preflight or launch");
+      assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+      await assert.rejects(access(npmSentinel), { code: "ENOENT" }, "malformed claims must not invoke npm");
+    } finally {
+      await Promise.all([
+        rm(workspaceRoot, { recursive: true, force: true }),
+        rm(commandRoot, { recursive: true, force: true }),
+      ]);
+    }
+  });
+}
 
 test("an ordinary claim is not short-circuited by the mechanical refusal", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-agent-"));
