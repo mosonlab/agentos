@@ -13,7 +13,7 @@ import { useT, type Translate } from "../lib/i18n";
 export type ChainAggregateActions = {
   onActivate: (taskId: string) => void;
   onFilter: (aggregate: ChainAggregate) => void;
-  onArchive: (aggregate: ChainAggregate, memberTaskIds: readonly string[]) => void;
+  onArchive: (aggregate: ChainAggregate) => void;
 };
 
 /** Every state that still names itself on the card. `running` is absent by
@@ -45,7 +45,6 @@ const routeFor = (representativeTaskId: string): string => `/tasks/${representat
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
-  memberTaskIds: readonly string[],
   actions: ChainAggregateActions,
   t: Translate,
 ): RowMenuEntry[] => [
@@ -55,7 +54,7 @@ const menu = (
     : []),
   { label: t("tasks.aggregate.menu.filter"), onSelect: () => actions.onFilter(aggregate) },
   ...(aggregate.activation.state === "settled"
-    ? [{ label: t("tasks.aggregate.menu.archive"), onSelect: () => actions.onArchive(aggregate, memberTaskIds) }]
+    ? [{ label: t("tasks.aggregate.menu.archive"), onSelect: () => actions.onArchive(aggregate) }]
     : []),
 ];
 
@@ -71,7 +70,6 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const position = memberPosition(aggregate, members);
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
-  const memberTaskIds = members.map((member) => member.id);
   const activeRepair = aggregate.activeRepair;
   const cost = usageCostAmount(aggregate.totalCost);
   const handlers: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
@@ -112,7 +110,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     chainId={aggregate.chainId}
     route={routeFor(representative)}
     title={title}
-    menuItems={menu(aggregate, representative, memberTaskIds, handlers, t)}
+    menuItems={menu(aggregate, representative, handlers, t)}
     menuLabel={t("tasks.aggregate.actionsFor", { name: title })}
     metaRows={metaRows}
     failure={aggregate.frontier.failureReason === null
