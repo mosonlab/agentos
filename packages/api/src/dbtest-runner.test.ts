@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { planEnvironmentVariable } from "./dbtest-plan.js";
 import { runDbtest, type RunTestsOptions, type ScratchManagerLike } from "./dbtest-runner.js";
 import { fixtureDatabaseUrl } from "./dbtest-url-fixture.js";
+
+const dbtestScript = fileURLToPath(new URL("../scripts/dbtest.mjs", import.meta.url));
+const apiRoot = fileURLToPath(new URL("..", import.meta.url));
 
 /**
  * The manager's own contract, in memory: a database exists from the moment
@@ -141,6 +146,41 @@ const run = async (h: Harness, runTests: (options: RunTestsOptions) => Promise<n
     log: (message) => h.logs.push(message),
     signals: h.signals,
   });
+
+test("DBTEST-RUNNER-SOURCE-CONDITION gives its node:test child exactly one development condition", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentos-dbtest-child-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const entry = join(directory, "child.mjs");
+  writeFileSync(entry, [
+    'import test from "node:test";',
+    'test("reports exec argv", () => {',
+    '  process.stdout.write(`DBTEST_CHILD_ARGV=${JSON.stringify(process.execArgv)}\\n`);',
+    "});",
+  ].join("\n"));
+
+  const result = spawnSync(process.execPath, ["--import", "tsx", dbtestScript, entry], {
+    cwd: apiRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      AGENTOS_DBTEST_PROVISION: "0",
+      AGENTOS_RUN_ID: undefined,
+      AGENTOS_RUN_SCOPE_BYPASS: undefined,
+      NODE_TEST_CONTEXT: undefined,
+      NODE_OPTIONS: undefined,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const match = /^DBTEST_CHILD_ARGV=(\[[^\n]*\])$/mu.exec(result.stdout);
+  assert.ok(match, `node:test child did not report its argv:\n${result.stdout}`);
+  const childArgv = JSON.parse(match[1] as string) as string[];
+  assert.equal(
+    childArgv.filter((argument) => argument === "--conditions=development").length,
+    1,
+    JSON.stringify(childArgv),
+  );
+});
 
 test("DBTEST-RUN-ISOLATION gives every file its own database and its own three roots", async (t) => {
   const h = harness(t);
