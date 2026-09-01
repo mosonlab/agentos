@@ -284,6 +284,10 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
   });
 
   for (const template of templates) {
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression);
     assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
