@@ -1068,6 +1068,67 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   -d '{"requestId":"resume-001"}'
 ```
 
+### Recovering a merge tail stopped after its repair budget
+
+When a regression verdict fails after the automatic repair budget is exhausted,
+the Regression verification task remains parked in `REVIEW`, and a stop notice
+is written to the Inbox. Its `failureReason` is exactly one of these shapes:
+
+- `semantic regression FAIL on chain head <sha> after N automatic repair attempts`
+- `merge gate FAIL on chain head <sha> after N automatic repair attempts`
+
+These are the repair ceiling, not an API defect. From this state,
+`POST /tasks/:taskId/retry` on the regression task opens a Run whose
+`regression-repair-handoff` claim fails at claim time as `handoff-invalid` with
+`no successful review-fix result binds <head> to <base>`. A
+`PATCH /tasks/:taskId` request that supplies `status` is refused with
+`Chain task statuses are controlled by chain execution`. Both refusals are
+expected behaviour; do not use them to reopen the old Chain.
+
+Carry the delivered branch forward in this order. The brief used in step (c)
+must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).
+
+1. (a) Read the regression task output and the stop notice, and confirm that
+   the last verdict identifies a real defect.
+
+   ```sh
+   curl "$BASE_URL/tasks/$REGRESSION_TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   curl "$BASE_URL/inbox/messages/$STOP_NOTICE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   ```
+
+2. (b) Hold the old Chain from any of its tasks, giving a `reason` that names
+   the successor Chain.
+
+   ```sh
+   curl -X POST "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain/hold" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d '{"requestId":"hold-merge-tail-repair-budget-exit","reason":"Continue in successor chain '$SUCCESSOR_CHAIN_ID'"}'
+   ```
+
+3. (c) Instantiate a new direct Chain on the same repository with a fresh
+   `branchName`. Set `description` to the new brief following the linked
+   pattern, with its first Change merging the delivered branch.
+
+   ```sh
+   curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$DIRECT_CHAIN_TEMPLATE_ID/instantiate" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"'$NEW_BRANCH_NAME'"},"description":"'$SUCCESSOR_BRIEF'","autoStart":true}'
+   ```
+
+4. (d) Archive every task in the old Chain, including each task ID returned
+   for that Chain. Repeat this request once per task.
+
+   ```sh
+   curl -X POST "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   ```
+
+5. (e) Never edit database rows to reopen the loop. Use the API only to inspect
+   the old Chain after the handoff; there is no supported database recovery.
+
+   ```sh
+   curl "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
+   ```
+
 ### PATCH `/tasks/:taskId`
 
 - Required path parameter: `taskId`.
