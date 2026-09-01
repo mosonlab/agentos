@@ -72,6 +72,7 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   runnerId,
   daemonVersion: "0.0.0-dbtest",
   pollIntervalMs: 1_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",

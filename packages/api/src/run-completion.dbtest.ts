@@ -431,7 +431,7 @@ test("a resolved integrator stop race rolls back the whole predecessor completio
       outcome: "stopped",
       condition: "base-drift",
       evidence: "base advanced",
-      sourceRunId: null,
+      sourceRunId: run.id,
     },
   } });
 

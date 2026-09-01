@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -13,8 +14,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { RUNTIME_TOOL_FILES } from "../../packages/runner/scripts/build-runtime-tools.mjs";
 
 import { DeployFailure } from "./quiet-window-lib.mjs";
 import {
@@ -28,6 +32,7 @@ import {
 } from "./release-directory.mjs";
 
 const revision = "a".repeat(40);
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const fixture = () => {
   const root = mkdtempSync(join(tmpdir(), "agentos-release-directory-"));
@@ -38,6 +43,7 @@ const fixture = () => {
   mkdirSync(join(stageRoot, "packages/api/dist"), { recursive: true });
   mkdirSync(join(stageRoot, "packages/db/dist"), { recursive: true });
   mkdirSync(join(stageRoot, "packages/db/prisma/migrations/001_init"), { recursive: true });
+  mkdirSync(join(stageRoot, "packages/runner/dist/runtime-tools/gate-worker"), { recursive: true });
   mkdirSync(join(stageRoot, "node_modules/.prisma/client"), { recursive: true });
   mkdirSync(join(stageRoot, "node_modules/@anneal"), { recursive: true });
   mkdirSync(join(stageRoot, "node_modules/vendor/data"), { recursive: true });
@@ -53,6 +59,14 @@ const fixture = () => {
   writeFileSync(join(stageRoot, "packages/api/package.json"), JSON.stringify({ name: "@anneal/api" }));
   writeFileSync(join(stageRoot, "packages/db/dist/index.js"), "db\n");
   writeFileSync(join(stageRoot, "packages/db/package.json"), JSON.stringify({ name: "@anneal/db" }));
+  writeFileSync(join(stageRoot, "packages/runner/dist/build-info.json"), JSON.stringify({
+    packageName: "@anneal/runner",
+    commit: revision,
+    dirty: false,
+  }));
+  for (const { source, destination } of RUNTIME_TOOL_FILES) {
+    cpSync(join(repositoryRoot, source), join(stageRoot, "packages/runner/dist/runtime-tools", destination));
+  }
   writeFileSync(join(stageRoot, "packages/db/prisma/schema.prisma"), "datasource db { provider = \"postgresql\" url = env(\"DATABASE_URL\") }\n");
   writeFileSync(join(stageRoot, "packages/db/prisma/migrations/001_init/migration.sql"), "-- migration\n");
   writeFileSync(join(stageRoot, "node_modules/.prisma/client/index.js"), "generated\n");
@@ -82,6 +96,7 @@ const artifactPaths = [
   "packages/db/dist",
   "packages/db/package.json",
   "packages/db/prisma",
+  "packages/runner/dist",
   "apps/web/dist",
   "node_modules",
 ];
@@ -119,6 +134,12 @@ test("assembles a deterministic versioned release and excludes shared/secrets", 
     assert.equal(existsSync(join(result.releaseDirectory, "shared")), false);
     assert.equal(existsSync(join(result.releaseDirectory, "packages/db/prisma/schema.prisma")), true);
     assert.equal(readFileSync(join(result.releaseDirectory, "packages/api/dist/index.js"), "utf8"), "api\n");
+    for (const { source, destination } of RUNTIME_TOOL_FILES) {
+      assert.deepEqual(
+        readFileSync(join(result.releaseDirectory, "packages/runner/dist/runtime-tools", destination)),
+        readFileSync(join(repositoryRoot, source)),
+      );
+    }
     assert.equal(readFileSync(join(result.releaseDirectory, "node_modules/vendor/data/runtime.bin"), "utf8"), "dependency-data\n");
     assert.equal(computeReleaseDigest(result.releaseDirectory), result.digest);
     assert.equal(lstatSync(result.releaseDirectory).mode & 0o222, 0);

@@ -41,6 +41,7 @@ const config = (root: string, identity: RunnerConfig["gitIdentity"] = HUMAN): Ru
   runnerId: "runner-provenance",
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: process.env.PATH ?? "/usr/bin:/bin",
@@ -134,6 +135,7 @@ const providerEnvironment = (configured: RunnerConfig, claimed: ClaimedTask, wor
     base: join(configured.workspaceRoot, "scratch"),
     workspaceRoot: join(configured.workspaceRoot, "scratch", "workspaces"),
     stateDir: join(configured.workspaceRoot, "scratch", "state"),
+    toolsDir: join(configured.workspaceRoot, "scratch", "tools"),
     configRoot: join(configured.workspaceRoot, "scratch", "config"),
   }, workspace.path, workspace.commitHooksPath);
 

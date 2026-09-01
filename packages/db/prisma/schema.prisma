@@ -1008,9 +1008,10 @@ model Run {
   /// The structured account the runner gave of this failure: phase, exit facts,
   /// channel-separated evidence and typed timeout/transient markers. The API
   /// classifies from this and stores it verbatim, so a disputed verdict can be
-  /// re-decided against what was actually observed instead of re-run. NULL on
-  /// every successful run, and on every run reported by a runner too old to
-  /// send one. See packages/db/src/failure-envelope.ts.
+  /// re-decided against what was actually observed instead of re-run. A
+  /// definitive mechanical result may settle protocol success while retaining
+  /// a later failed completion envelope as diagnostics. See
+  /// packages/db/src/failure-envelope.ts.
   failureEnvelope               Json?
   /// The raw tail of what this run produced: the agent's final output when it
   /// emitted one, otherwise the run's stdout, capped at 500k by the runner that

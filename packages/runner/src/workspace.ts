@@ -2,6 +2,7 @@ import { appendFile, chmod, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask } from "./api.js";
 import { RUNNER_DEFINITIONS } from "./adapters.js";
@@ -166,8 +167,123 @@ export type AgentScratch = {
   base: string;
   workspaceRoot: string;
   stateDir: string;
+  /** The release-local regression tool bundle, outside every project checkout. */
+  toolsDir: string;
   /** A per-session CLI config root; it is outside `base` so failures can retain it. */
   configRoot: string;
+};
+
+/** The immutable tool bundle shipped beside the compiled runner entrypoint. */
+export const runtimeToolsSourceRoot = fileURLToPath(new URL("../dist/runtime-tools", import.meta.url));
+
+const runtimeToolsMaterializationScript = String.raw`
+set -eu
+
+source_root=$1
+tools_root=$2
+
+fail() {
+  echo "runtime tools materialization: $*" >&2
+  exit 1
+}
+
+require_directory() {
+  [ -d "$1" ] && [ ! -L "$1" ] || fail "expected a regular directory: $1"
+}
+
+require_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || fail "expected a regular file: $1"
+}
+
+tool_paths='regression-verification.sh
+gate-worker/gate-dispatch.sh
+gate-worker/lib.sh
+gate-worker/mirror-push.sh
+gate-worker/remote-gate.sh'
+
+is_tool_path() {
+  for tool_path in $tool_paths; do
+    [ "$1" = "$tool_path" ] && return 0
+  done
+  return 1
+}
+
+check_destination_entries() {
+  for entry in "$tools_root"/* "$tools_root"/.[!.]* "$tools_root"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    relative_path=$(basename "$entry")
+    [ "$relative_path" = gate-worker ] || is_tool_path "$relative_path" \
+      || fail "unexpected materialized entry: $entry"
+  done
+  for entry in "$tools_root/gate-worker"/* "$tools_root/gate-worker"/.[!.]* "$tools_root/gate-worker"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    relative_path=gate-worker/$(basename "$entry")
+    is_tool_path "$relative_path" || fail "unexpected materialized entry: $entry"
+  done
+}
+
+require_directory "$source_root"
+require_directory "$source_root/gate-worker"
+for relative_path in $tool_paths; do
+  require_file "$source_root/$relative_path"
+done
+
+# The destination is deliberately exclusive. Do not merge into a directory
+# left by a previous run or follow a path supplied by a task.
+created=0
+cleanup() {
+  if [ "$created" -eq 1 ]; then
+    rm -rf "$tools_root"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -m 700 "$tools_root"
+created=1
+mkdir -m 700 "$tools_root/gate-worker"
+
+for relative_path in $tool_paths; do
+  cp "$source_root/$relative_path" "$tools_root/$relative_path"
+  chmod 500 "$tools_root/$relative_path"
+  cmp "$source_root/$relative_path" "$tools_root/$relative_path" >/dev/null
+done
+
+require_directory "$tools_root"
+require_directory "$tools_root/gate-worker"
+for relative_path in $tool_paths; do
+  require_file "$tools_root/$relative_path"
+done
+check_destination_entries
+
+# mkdir/chmod above are the only writers. These checks make a successful
+# command prove the exact access modes as well as the exact inventory.
+mode() {
+  if mode_value=$(stat -c '%a' "$1" 2>/dev/null); then
+    printf '%s' "$mode_value"
+  else
+    stat -f '%Lp' "$1"
+  fi
+}
+require_mode() {
+  actual_mode=$(mode "$1")
+  [ "$actual_mode" = "$2" ] \
+    || fail "unexpected mode on $1: got $actual_mode, expected $2"
+}
+require_mode "$tools_root" 700
+require_mode "$tools_root/gate-worker" 700
+for relative_path in $tool_paths; do
+  require_mode "$tools_root/$relative_path" 500
+done
+
+created=0
+trap - EXIT HUP INT TERM
+`;
+
+export type RuntimeToolsMaterializationOptions = {
+  /** Override only for tests that construct a release fixture. */
+  sourceRoot?: string;
+  /** Override the runner command for failure-injection tests. */
+  execute?: WorkspaceCommandExecutor;
 };
 
 export const sessionConfigBaselineRoot = defaultSessionConfigBaselineRoot;
@@ -206,23 +322,43 @@ export const sessionConfigRootExists = async (scratch: AgentScratch): Promise<bo
  * runner hands every session a throwaway root instead, and no base — however
  * old — can resolve its way back to production state.
  *
- * The two directories are siblings rather than nested: the control plane
- * refuses a state dir that overlaps its workspace root. The base is realpath'd
+ * The runner-owned directories are siblings rather than nested: the control
+ * plane refuses a state dir that overlaps its workspace root, and the tools
+ * bundle must stay outside every project checkout. The base is realpath'd
  * because the control plane also refuses aliased paths and symlinked path
  * components (on macOS os.tmpdir() sits under /var -> /private/var).
  */
 export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `anonymous-${randomUUID()}`): Promise<AgentScratch> => {
-  const base = await realpath(await mkdtemp(join(tmpdir(), "agentos-run-scratch-")));
+  const temporaryRoot = await realpath(tmpdir());
+  const base = config.runAsPrefix.length > 0
+    ? await realpath((await command(
+      config,
+      "/usr/bin/mktemp",
+      ["-d", join(temporaryRoot, "agentos-run-scratch-XXXXXX")],
+      temporaryRoot,
+      workspaceEnvironment(config),
+    )).trim())
+    : await realpath(await mkdtemp(join(temporaryRoot, "agentos-run-scratch-")));
   const workspaceRoot = join(base, "workspaces");
   const stateDir = join(base, "control-plane");
+  const toolsDir = join(base, "tools");
   // Deliberately name the root before it exists. If baseline or auth seeding
   // fails, the caller can report and retain the exact path it attempted.
   const configRoot = await sessionConfigPath(sessionId);
   if (config.runAsPrefix.length > 0) {
-    // The session runs as another principal: it has to own what it writes, so
-    // let it traverse the base and create both directories itself.
-    await chmod(base, 0o711);
-    await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], base, workspaceEnvironment(config));
+    // The session runs as another principal, so it creates and owns the 0700
+    // base as well as both roots below it. No cross-account writable or
+    // traversable scratch directory is left behind.
+    try {
+      await command(config, "/bin/chmod", ["700", base], temporaryRoot, workspaceEnvironment(config));
+      // Node enters cwd before it execs the run-as launcher. The daemon cannot
+      // enter the target principal's 0700 base, so keep cwd on the shared temp
+      // root and let the launched principal mutate the absolute child paths.
+      await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], temporaryRoot, workspaceEnvironment(config));
+    } catch (error: unknown) {
+      await command(config, "/bin/rm", ["-rf", "--", base], temporaryRoot, workspaceEnvironment(config)).catch(() => undefined);
+      throw error;
+    }
   } else {
     for (const directory of [workspaceRoot, stateDir]) {
       await mkdir(directory);
@@ -231,7 +367,35 @@ export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `a
       await chmod(directory, 0o700);
     }
   }
-  return { base, workspaceRoot, stateDir, configRoot };
+  return { base, workspaceRoot, stateDir, toolsDir, configRoot };
+};
+
+/**
+ * Copy the release-local regression bundle into the run's disposable scratch.
+ *
+ * The copy is intentionally one command rather than a collection of runner
+ * writes. Under RUNNER_RUN_AS_PREFIX every write therefore runs as the
+ * launched account, and a failed copy/chmod can remove only the destination it
+ * created. The source is never inferred from the project checkout.
+ */
+export const materializeRuntimeTools = async (
+  config: RunnerConfig,
+  scratch: AgentScratch,
+  options: RuntimeToolsMaterializationOptions = {},
+): Promise<void> => {
+  const sourceRoot = options.sourceRoot ?? runtimeToolsSourceRoot;
+  const execute = options.execute ?? command;
+  // A prefixed command changes identity only after Node has entered cwd. The
+  // target-owned 0700 base is therefore valid as an argument, but not as cwd
+  // for the daemon that launches the command.
+  const commandCwd = config.runAsPrefix.length > 0 ? await realpath(tmpdir()) : scratch.base;
+  await execute(
+    config,
+    "/bin/sh",
+    ["-c", runtimeToolsMaterializationScript, "agentos-runtime-tools", sourceRoot, scratch.toolsDir],
+    commandCwd,
+    workspaceEnvironment(config),
+  );
 };
 
 export const cleanupAgentScratch = async (
@@ -244,6 +408,7 @@ export const cleanupAgentScratch = async (
     const targetOwnedRoots = [
       scratch.workspaceRoot,
       scratch.stateDir,
+      scratch.toolsDir,
       ...(options.retainConfigRoot ? [] : [scratch.configRoot]),
     ];
     await command(
@@ -251,24 +416,25 @@ export const cleanupAgentScratch = async (
       "/bin/sh",
       [
         "-c",
-        'for root do [ ! -e "$root" ] || find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; done',
+        'for root do [ ! -e "$root" ] || rm -rf -- "$root"; done',
         "agentos-cleanup",
         ...targetOwnedRoots,
+        scratch.base,
       ],
       await realpath(tmpdir()),
       workspaceEnvironment(config),
     );
-    await Promise.all(targetOwnedRoots.map((root) => rm(root, { recursive: true, force: true })));
     if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   } else {
     await Promise.all([
       rm(scratch.workspaceRoot, { recursive: true, force: true }),
       rm(scratch.stateDir, { recursive: true, force: true }),
+      rm(scratch.toolsDir, { recursive: true, force: true }),
       ...(options.retainConfigRoot ? [] : [rm(scratch.configRoot, { recursive: true, force: true })]),
     ]);
     if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   }
-  await rm(scratch.base, { recursive: true, force: true });
+  if (config.runAsPrefix.length === 0) await rm(scratch.base, { recursive: true, force: true });
 };
 
 export const provisionSessionConfig = async (

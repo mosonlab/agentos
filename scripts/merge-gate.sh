@@ -107,7 +107,7 @@
 # How wide each group runs is not read from the core count. run-gate.sh states
 # what share of the worker this gate was given, and every fan-out below is
 # derived from that one number, so two gates on a two-slot worker still add up
-# to one machine. A gate invoked by hand states no share and has the host.
+# to one machine. A gate invoked by hand states no share and takes half the host.
 #
 # A parallel group reports every member that failed, not the first one to fail,
 # and replays each member's output under its own heading in submission order.
@@ -166,6 +166,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 # needs one writer.
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/gate-worker/lib.sh"
+if [[ -n "${AGENTOS_RUN_ID:-}" && "${AGENTOS_RUN_SCOPE_BYPASS:-}" != "regression-verification" ]]; then
+  gate_verdict_not_run "refused inside Anneal run ${AGENTOS_RUN_ID}"
+  exit "${GATE_EXIT_NO_VERDICT}"
+fi
 # What it means to run a step, to run a group of them at once, and what this
 # run's outcome is. It travels with the commit rather than being installed on
 # the worker: run-gate.sh gates a worktree checked out of the mirror, so
@@ -1053,9 +1057,10 @@ FAILED_STEP=""
 # gives each gate half the machine. Every parallel width below is derived from
 # this one number instead of each phase reading the CPU count for itself: two
 # concurrent gates then add up to one host, rather than each sizing itself for a
-# whole machine it does not have. A gate run by hand states no share and gets
-# the host, which is what it in fact has.
-GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-1}"
+# whole machine it does not have. An absent variable means half the host because
+# the shared runner host is where it is unset; a gate worker always exports its
+# own share.
+GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-2}"
 case "${GATE_HOST_SHARE}" in
   1|2) ;;
   *) die "AGENTOS_GATE_HOST_SHARE must be 1 or 2, got ${GATE_HOST_SHARE}" ;;
@@ -1297,6 +1302,7 @@ parallel_steps "static analysis, build, and the suites that need no build output
   "lint (biome + type-aware no-floating-promises)" parallel_lint :: \
   "quiet-window auto-deploy harness" npm run test:auto-deploy :: \
   "typecheck (database CLI)" npm run typecheck:cli :: \
+  "run-scope guard fixtures" npm run test:run-scope-guard :: \
   "public snapshot scanner tests" npm run test:snapshot-scan :: \
   "public snapshot closed-scope scan" npm run snapshot:scan :: \
   "release documentation executable contract" npm run test:release-docs :: \

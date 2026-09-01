@@ -49,6 +49,15 @@ runs, and a group passes only when all of its members do.
 scripts/merge-gate.sh --expect-head <oid>
 ```
 
+Inside an Anneal Run (`AGENTOS_RUN_ID` set), the root `build`, `lint`,
+`typecheck`, `test`, `test:db`, and `merge-gate` scripts refuse before doing
+work and exit **78**. Only the exact reserved value
+`AGENTOS_RUN_SCOPE_BYPASS=regression-verification`, set by the platform's
+Regression step, bypasses that guard; a direct `scripts/merge-gate.sh`
+invocation still refuses with `GATE NOT RUN:` and exits **76**. Run only the
+affected workspace checks and named test files inside a Run; the Regression
+step owns repository-wide proof and the Merge Gate.
+
 It holds a lock, so run one gate per worktree. A verdict belongs to the exact
 commit it names — not to an earlier one on the same branch, and not to "the
 branch".
@@ -69,10 +78,11 @@ upstream repository.
 
 A merge requires `MERGE GATE: PASS <oid>` for the exact integrated head being
 merged (`scripts/merge-gate.sh --expect-head <oid>`). When another gate might
-be running and remote capacity has been configured explicitly, dispatch through
-`scripts/gate-worker/gate-dispatch.sh <oid>`; otherwise run the local gate. Read
-[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
-any remote worker.
+be running and remote capacity has been configured explicitly, dispatch
+through `AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/gate-dispatch.sh <oid>`;
+otherwise run the local gate. Read
+[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before
+operating any remote worker.
 
 For one candidate, acquire `scripts/merge-lease.sh` before running the merge
 gate for the final integrated head and hold it until the merge consumes that

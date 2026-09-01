@@ -7,7 +7,7 @@
 // earlier layers, and the layers cover exactly what the root build script
 // covers.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import nodeTest from "node:test";
@@ -17,6 +17,7 @@ import { buildLayers, firstPartyDependencies, layerWorkspaces, workspacesInRootB
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const rootBuildScopeGuard = "bash scripts/run-scope-guard.sh build";
 
 const scratch = (t) => {
   const root = mkdtempSync(join(tmpdir(), "build-layers."));
@@ -29,6 +30,15 @@ const writeManifest = (root, path, manifest) => {
   writeFileSync(join(root, path, "package.json"), JSON.stringify(manifest));
 };
 
+const guardedRepository = (t) => {
+  const root = scratch(t);
+  const manifest = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
+  writeFileSync(join(root, "package.json"), JSON.stringify(manifest));
+  symlinkSync(join(repositoryRoot, "apps"), join(root, "apps"), "dir");
+  symlinkSync(join(repositoryRoot, "packages"), join(root, "packages"), "dir");
+  return root;
+};
+
 // A repository whose graph is known, so the assertions are about the layering
 // and not about whatever this repository's manifests happen to say today.
 const fixtureRepository = (t) => {
@@ -38,7 +48,7 @@ const fixtureRepository = (t) => {
     workspaces: ["packages/*"],
     scripts: {
       build:
-        "npm run build -w @anneal/leaf && npm run build -w @anneal/middle && npm run build -w @anneal/top",
+        `${rootBuildScopeGuard} && npm run build -w @anneal/leaf && npm run build -w @anneal/middle && npm run build -w @anneal/top`,
     },
   });
   writeManifest(root, "packages/leaf", { name: "@anneal/leaf" });
@@ -61,7 +71,9 @@ test("LAYERS-CONCURRENCY groups workspaces that do not depend on each other", (t
   writeManifest(root, ".", {
     name: "fixture",
     workspaces: ["packages/*"],
-    scripts: { build: "npm run build -w @anneal/one && npm run build -w @anneal/two" },
+    scripts: {
+      build: `${rootBuildScopeGuard} && npm run build -w @anneal/one && npm run build -w @anneal/two`,
+    },
   });
   writeManifest(root, "packages/one", { name: "@anneal/one" });
   writeManifest(root, "packages/two", { name: "@anneal/two" });
@@ -70,18 +82,19 @@ test("LAYERS-CONCURRENCY groups workspaces that do not depend on each other", (t
   assert.deepEqual(buildLayers(root), [["@anneal/one", "@anneal/two"]]);
 });
 
-test("LAYERS-SCOPE covers exactly the workspaces the root build script names", () => {
-  const layers = buildLayers(repositoryRoot);
+test("LAYERS-SCOPE covers exactly the workspaces the root build script names", (t) => {
+  const root = guardedRepository(t);
+  const layers = buildLayers(root);
   const layered = layers.flat();
   const expected = workspacesInRootBuild(
-    JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")),
+    JSON.parse(readFileSync(join(root, "package.json"), "utf8")),
   );
   assert.deepEqual([...layered].sort(), [...expected].sort());
   assert.equal(layered.length, new Set(layered).size, "a workspace is built twice");
 });
 
-test("LAYERS-REAL-ORDER holds for this repository's own graph", () => {
-  const layers = buildLayers(repositoryRoot);
+test("LAYERS-REAL-ORDER holds for this repository's own graph", (t) => {
+  const layers = buildLayers(guardedRepository(t));
   const placed = new Set();
   for (const layer of layers) {
     for (const name of layer) {
@@ -110,9 +123,37 @@ test("LAYERS-REAL-ORDER holds for this repository's own graph", () => {
 
 test("LAYERS-REFUSES a root build step that is not a plain workspace build", () => {
   assert.throws(
-    () => workspacesInRootBuild({ scripts: { build: "npm run build -w @anneal/one && rm -rf dist" } }),
+    () =>
+      workspacesInRootBuild({
+        scripts: { build: `${rootBuildScopeGuard} && npm run build -w @anneal/one && rm -rf dist` },
+      }),
     /not a workspace build/,
   );
+});
+
+test("LAYERS-ACCEPTS only the canonical leading root build scope guard", () => {
+  assert.deepEqual(
+    workspacesInRootBuild({
+      scripts: {
+        build: `${rootBuildScopeGuard} && npm run build -w @anneal/one && npm run build -w @anneal/two`,
+      },
+    }),
+    ["@anneal/one", "@anneal/two"],
+  );
+});
+
+test("LAYERS-REFUSES a missing, reordered, duplicated, or noncanonical root build scope guard", () => {
+  const scripts = [
+    "npm run build -w @anneal/one",
+    `npm run build -w @anneal/one && ${rootBuildScopeGuard}`,
+    `${rootBuildScopeGuard} && ${rootBuildScopeGuard} && npm run build -w @anneal/one`,
+    `${rootBuildScopeGuard} && npm run build -w @anneal/one && ${rootBuildScopeGuard}`,
+    "bash scripts/run-scope-guard.sh lint && npm run build -w @anneal/one",
+    "sh scripts/run-scope-guard.sh build && npm run build -w @anneal/one",
+  ];
+  for (const build of scripts) {
+    assert.throws(() => workspacesInRootBuild({ scripts: { build } }), /root build script/);
+  }
 });
 
 test("LAYERS-REFUSES a root manifest with no build script", () => {
