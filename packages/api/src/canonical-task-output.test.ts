@@ -120,6 +120,50 @@ test("blind-findings is a versioned immutable review output and cannot be author
   }, "run-1", headSha) ?? "", /does not match canonical kind/u);
 });
 
+test("immutable findings from a prior Run are accepted only after canonical validation", () => {
+  const headSha = "a".repeat(40);
+  const baseSha = "b".repeat(40);
+  const reviewBody = (kind: "sol-findings" | "blind-findings", overrides: Record<string, unknown> = {}) => JSON.stringify({
+    schemaVersion: 1,
+    headSha,
+    reviewedBase: baseSha,
+    reviewedHead: headSha,
+    findings: [],
+    ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+    ...overrides,
+  });
+
+  for (const kind of ["sol-findings", "blind-findings"] as const) {
+    const reviewStep = step("direct-engineer-workflow", kind === "sol-findings" ? 2 : 3, kind);
+    const output = (overrides: Partial<{
+      kind: string;
+      body: string;
+      commitSha: string;
+    }> = {}) => ({
+      runId: "run-1",
+      kind,
+      body: reviewBody(kind),
+      commitSha: headSha,
+      metadata: null,
+      ...overrides,
+    });
+
+    assert.equal(canonicalOutputRefusal(reviewStep, output(), "run-2", headSha), null);
+    assert.match(
+      canonicalOutputRefusal(reviewStep, output({ kind: "implementation" }), "run-2", headSha) ?? "",
+      /does not match canonical kind/u,
+    );
+    assert.match(
+      canonicalOutputRefusal(reviewStep, output({ commitSha: baseSha }), "run-2", headSha) ?? "",
+      /is bound to b{40}, not completion head a{40}/u,
+    );
+    assert.match(
+      canonicalOutputRefusal(reviewStep, output({ body: reviewBody(kind, { findings: "invalid" }) }), "run-2", headSha) ?? "",
+      /body violates schemaVersion 1/u,
+    );
+  }
+});
+
 test("a fixed-implementation output must close exactly the findings it adopted", () => {
   const headSha = "a".repeat(40);
   const sourceHead = "b".repeat(40);
