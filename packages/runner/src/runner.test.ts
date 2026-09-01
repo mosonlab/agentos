@@ -170,6 +170,11 @@ const malformedDependencyProvisioningClaim = (value: unknown): ClaimedTask => {
 for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as const) {
   test(`a ${label} dependency-provisioning claim is rejected before provisioning or adapter launch`, async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-dependency-protocol-${label}-`));
+    const commandRoot = await mkdtemp(join(tmpdir(), `runner-dependency-command-${label}-`));
+    const npmSentinel = join(commandRoot, "npm-called");
+    const npm = join(commandRoot, "npm");
+    await writeFile(npm, `#!/bin/sh\nprintf called > ${JSON.stringify(npmSentinel)}\n`);
+    await chmod(npm, 0o755);
     const controlPlane = createControlPlaneDouble();
     let adapterCalls = 0;
     const adapter: CliAdapter = {
@@ -186,7 +191,7 @@ for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as 
 
     try {
       await executeClaimProduction(
-        config(workspaceRoot),
+        { ...config(workspaceRoot), path: commandRoot },
         malformedDependencyProvisioningClaim(value),
         { adapter, controlPlane: controlPlane.controlPlane },
       );
@@ -200,8 +205,12 @@ for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as 
       assert.equal(completion.workspaceRetained, false);
       assert.equal(adapterCalls, 0, "malformed claims must not reach adapter preflight or launch");
       assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+      await assert.rejects(access(npmSentinel), { code: "ENOENT" }, "malformed claims must not invoke npm");
     } finally {
-      await rm(workspaceRoot, { recursive: true, force: true });
+      await Promise.all([
+        rm(workspaceRoot, { recursive: true, force: true }),
+        rm(commandRoot, { recursive: true, force: true }),
+      ]);
     }
   });
 }

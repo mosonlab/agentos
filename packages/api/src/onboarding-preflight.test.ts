@@ -83,6 +83,23 @@ test("NPM_CI checks the fetched commit for a root lockfile before dry-run push",
   assert.equal(calls.some((args) => args[0] === "push"), false);
 });
 
+test("NPM_CI reports a failed lockfile probe as a remote failure", async () => {
+  const calls: string[][] = [];
+  const run: RepositoryPreflightCommand = async (_executable, args) => {
+    calls.push(args);
+    if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+    if (args[0] === "ls-tree") return { code: 128, stdout: "" };
+    return { code: 0, stdout: "" };
+  };
+
+  await assert.rejects(
+    preflightRepository({ ...input.repo, dependencyProvisioning: "NPM_CI" }, run),
+    (error) => error instanceof RepositoryPreflightError && error.reason === "remote-unreachable",
+  );
+  assert.equal(calls.some((args) => args[0] === "push"), false);
+});
+
 test("NPM_CI accepts a regular root lockfile and NONE skips the lockfile probe", async () => {
   const calls: string[][] = [];
   const run: RepositoryPreflightCommand = async (_executable, args) => {

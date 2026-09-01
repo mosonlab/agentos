@@ -11,7 +11,11 @@ import {
 } from "@anneal/db";
 
 import { createApp } from "../test-app.js";
-import { RepositoryPreflightError } from "../onboarding-preflight.js";
+import {
+  preflightRepository,
+  RepositoryPreflightError,
+  type RepositoryPreflightCommand,
+} from "../onboarding-preflight.js";
 import { lockedAgent, untouchableDatabase, withTokens } from "./test-support.js";
 
 test("filesystem grant CRUD accepts root/canonical paths and rejects non-canonical paths", async () => {
@@ -556,6 +560,14 @@ test("Repo dependency provisioning round-trips through GET and PATCH", async () 
     });
     assert.equal(omitted.status, 200);
     assert.equal((await omitted.json() as Record<string, unknown>).dependencyProvisioning, "NPM_CI");
+    const patchedNone = await app.request("/repos/repo-1", {
+      method: "PATCH", headers, body: JSON.stringify({ dependencyProvisioning: "NONE" }),
+    });
+    assert.equal(patchedNone.status, 200);
+    assert.equal((await patchedNone.json() as Record<string, unknown>).dependencyProvisioning, "NONE");
+    const listedAfterPatch = await app.request("/projects/project-1/repos", { headers });
+    assert.equal(listedAfterPatch.status, 200);
+    assert.equal((await listedAfterPatch.json() as Array<Record<string, unknown>>)[0]?.dependencyProvisioning, "NONE");
   });
 });
 
@@ -686,6 +698,64 @@ test("POST repo maps a missing NPM_CI lockfile to the exact remedy and writes no
       remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
     });
     assert.equal(transactions, 0);
+  });
+});
+
+test("POST repo runs successful dependency-policy preflights through to creation", async () => {
+  await withTokens(async () => {
+    const remoteUrl = "https://github.com/owner/repo.git";
+    for (const dependencyProvisioning of ["NONE", "NPM_CI"] as const) {
+      const calls: Array<{ args: string[]; cwd: string }> = [];
+      const run: RepositoryPreflightCommand = async (_executable, args, cwd) => {
+        calls.push({ args, cwd });
+        if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+        if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+        if (args[0] === "ls-tree") {
+          return {
+            code: 0,
+            stdout: dependencyProvisioning === "NPM_CI"
+              ? `100644 blob ${"b".repeat(40)}\tpackage-lock.json\0`
+              : "",
+          };
+        }
+        return { code: 0, stdout: "" };
+      };
+      const created: Array<Record<string, unknown>> = [];
+      const database = {
+        $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
+          repo: { create: async ({ data }: { data: Record<string, unknown> }) => {
+            const row = { id: `repo-${dependencyProvisioning}`, ...data };
+            created.push(row);
+            return row;
+          } },
+        }),
+      } as unknown as PrismaClient;
+      const app = createApp(database, {
+        repositoryPreflight: (input) => preflightRepository(input, run),
+      });
+
+      const response = await app.request("/projects/project-1/repos", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: `app-${dependencyProvisioning}`, remoteUrl, dependencyProvisioning }),
+      });
+
+      assert.equal(response.status, 201);
+      assert.equal((await response.json() as Record<string, unknown>).dependencyProvisioning, dependencyProvisioning);
+      assert.equal(created[0]?.dependencyProvisioning, dependencyProvisioning);
+      assert.deepEqual(calls.map(({ args }) => args[0]), dependencyProvisioning === "NPM_CI"
+        ? ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]
+        : ["config", "config", "ls-remote", "init", "fetch", "push"]);
+      assert.equal(calls.filter(({ args }) => args[0] === "fetch").length, 1);
+      const lockfileProbes = calls.filter(({ args }) => args[0] === "ls-tree");
+      assert.equal(lockfileProbes.length, dependencyProvisioning === "NPM_CI" ? 1 : 0);
+      if (dependencyProvisioning === "NPM_CI") {
+        assert.notEqual(lockfileProbes[0]?.cwd, process.cwd(), "ls-tree must inspect the fetched scratch repository");
+      }
+      const pushes = calls.filter(({ args }) => args[0] === "push");
+      assert.equal(pushes.length, 1);
+      assert.deepEqual(pushes[0]?.args.slice(0, 3), ["push", "--dry-run", remoteUrl]);
+    }
   });
 });
 

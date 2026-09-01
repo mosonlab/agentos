@@ -18,6 +18,7 @@ import {
 import type {
   Agent as AgentContract,
   AgentRepoAccess as AgentRepoAccessContract,
+  DependencyProvisioning,
   FilesystemGrant as FilesystemGrantContract,
   MCPConnection as MCPConnectionContract,
   Repo as RepoContract,
@@ -30,7 +31,7 @@ import { jsonValue } from "../execution.js";
 import { filesRootGrantKey } from "../files/config.js";
 import { isCanonicalRelPath, normalizeRelPath } from "../files/paths.js";
 import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
-import { RepositoryPreflightError, type DependencyProvisioning } from "../onboarding-preflight.js";
+import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
 import { readCommitted } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
@@ -119,13 +120,10 @@ const runtimeConfigRefusal = (agent: {
   ?? codexServiceTierRefusal(agent)
 );
 
-const INVALID_DEPENDENCY_PROVISIONING = "__invalid-dependency-provisioning__";
 const isDependencyProvisioning = (value: unknown): value is DependencyProvisioning => (
   value === "NONE" || value === "NPM_CI"
 );
-const dependencyProvisioningInput = z.preprocess((value) => value === undefined ? INVALID_DEPENDENCY_PROVISIONING : value, z.unknown().transform((value) => (
-  isDependencyProvisioning(value) ? value : INVALID_DEPENDENCY_PROVISIONING
-)));
+const dependencyProvisioningInput = z.unknown().optional();
 const dependencyProvisioningInvalid = {
   error: "Repository dependency provisioning is invalid",
   code: "repository-dependency-provisioning-invalid",
@@ -541,7 +539,8 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
   app.post("/projects/:projectId/repos", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, repoCreateInput);
-    if (!isDependencyProvisioning(body.dependencyProvisioning)) return context.json(dependencyProvisioningInvalid, 400);
+    const dependencyProvisioning = body.dependencyProvisioning;
+    if (!isDependencyProvisioning(dependencyProvisioning)) return context.json(dependencyProvisioningInvalid, 400);
     const remote = parseRepoRemote(body.remoteUrl);
     if (!remote.ok) {
       return context.json({
@@ -564,7 +563,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       await deps.repositoryPreflight({
         remoteUrl: remote.remoteUrl,
         defaultBranch: body.defaultBranch,
-        dependencyProvisioning: body.dependencyProvisioning,
+        dependencyProvisioning,
       });
     } catch (error: unknown) {
       if (error instanceof RepositoryPreflightError) {
@@ -586,7 +585,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const { grantAgents, ...repoFields } = body;
     const result = await readCommitted(db, async (tx) => {
       const repo = await tx.repo.create({
-        data: { ...repoFields, dependencyProvisioning: body.dependencyProvisioning as DependencyProvisioning, projectId },
+        data: { ...repoFields, dependencyProvisioning, projectId },
       });
       if (!grantAgents) return repo;
       const agents = await tx.agent.findMany({

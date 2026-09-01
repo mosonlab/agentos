@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 
 import { flock } from "fs-ext";
 
+import type { DependencyProvisioning } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
 import {
@@ -80,9 +81,6 @@ export type DependencyCacheOptions = {
   installRetryOptions?: RetryOptions;
   report?: (progress: DependencyCacheProgress) => void;
 };
-
-/** The operator-declared policy that selects whether this runner provisions npm dependencies. */
-export type DependencyProvisioning = "NONE" | "NPM_CI";
 
 export type DependencyCacheResult = {
   status: "not-applicable" | "restored" | "installed";

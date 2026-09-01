@@ -4,10 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { DependencyProvisioning } from "@anneal/db/wire-contract";
+
 import { controlledGitEnvironment, prefixedCommand, splitRunAsPrefix } from "./git-launch.js";
 import type { OnboardingInput } from "./onboarding.js";
-
-export type DependencyProvisioning = "NONE" | "NPM_CI";
 
 export type RepositoryPreflightFailure =
   | "git-unavailable"
@@ -128,8 +128,14 @@ export const preflightRepository = async (
     await expectSuccess(run, ["init", "--bare", scratch], cwd, env, "git-unavailable");
     await expectSuccess(run, ["fetch", "--depth=1", remote, ref], scratch, env, "remote-unreachable");
     if (input.dependencyProvisioning === "NPM_CI") {
-      const lockfile = await run("git", ["ls-tree", "-z", "FETCH_HEAD", "--", "package-lock.json"], scratch, env);
-      if (lockfile.code !== 0 || !hasRootPackageLockBlob(lockfile.stdout)) {
+      const lockfile = await expectSuccess(
+        run,
+        ["ls-tree", "-z", "FETCH_HEAD", "--", "package-lock.json"],
+        scratch,
+        env,
+        "remote-unreachable",
+      );
+      if (!hasRootPackageLockBlob(lockfile.stdout)) {
         throw new RepositoryPreflightError("package-lock-missing");
       }
     }
