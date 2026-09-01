@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build",
-    "typecheck": "tsc -b --pretty false",
+    "build": "bash ../../scripts/host-proof-slot.sh build @anneal/web -- /bin/sh -c 'tsc -b && vite build'",
+    "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/web -- tsc -b --pretty false",
     "pretest": "npm run build -w @anneal/db",
-    "test": "TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/web -- /bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
     "dev": "vite",
     "preview": "vite preview"
   },
