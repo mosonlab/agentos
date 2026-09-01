@@ -82,7 +82,7 @@ const isPrDeliveryStep = (task: {
   chainId: string | null;
   chainIndex: number | null;
   templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
-}): boolean => task.chainId !== null
+}): boolean => typeof task.chainId === "string"
   && task.chainId.trim().length > 0
   && task.chainIndex !== null
   && Number.isInteger(task.chainIndex)
