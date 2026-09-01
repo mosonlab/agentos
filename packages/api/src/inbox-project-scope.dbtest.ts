@@ -25,7 +25,6 @@ after(async () => { await db.$disconnect(); });
 const request = async (path: string): Promise<Response> => createApp(db).request(path, {
   headers: { Authorization: "Bearer operator-unit-token" },
 });
-
 const seedInboxScope = async () => {
   const suffix = `${Date.now()}-${seedCounter += 1}`;
   const project = await db.project.create({ data: { name: `Inbox scope ${suffix}`, slug: `inbox-scope-${suffix}` } });
@@ -212,4 +211,3 @@ test("project-scoped Inbox summary applies needs-reply to the same project-plus-
     assert.deepEqual(await unfiltered.json(), { needsReply: 4 });
   });
 });
-
