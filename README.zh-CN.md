@@ -10,7 +10,7 @@ Anneal 在你自己的本地机器上驱动一条条 coding agent 任务链。�
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#当前状态)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](#当前状态)
+[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon%20verified-lightgrey)](#当前状态)
 [![node](https://img.shields.io/badge/node-22.17.0-brightgreen)](.nvmrc)
 
 [安装](#快速开始) · [工作原理](#工作原理) · [当前状态](#当前状态) · [English](README.md)
@@ -107,13 +107,16 @@ merge-tail 修复。</sub>
 
 ## 快速开始
 
-你需要：
+已验证的 release 路径需要：
 
 - Apple Silicon 的 Mac
 - Node.js 满足 `^20.19.0 || ^22.13.0 || >=24`；使用 `.nvmrc` 指定的
   `22.17.0`，并配合 npm 10.9.2+
 - Docker Compose 与 Git
 - 在同一 macOS 账户下已登录的官方 Codex CLI（Claude Code 与 Pi 可选）
+
+Linux 与 Intel macOS 预计可运行，但尚未完成 release-level 验证；本快速
+开始只记录已经验证的 Apple Silicon 路径。
 
 ```sh
 git clone https://github.com/mosonlab/anneal.git
@@ -133,7 +136,9 @@ npm run db:migrate:release -- --fresh
 ## 当前状态
 
 Developer Preview 6（v0.6.0）：接口与存储数据形态在 preview 之间可能
-变化，唯一升级路径是全新安装。仅支持 Apple Silicon 上的 macOS。
+变化，唯一升级路径是全新安装。已验证的目标平台是 Apple Silicon macOS；
+Linux 与 Intel macOS 预计可运行，但尚未完成 release-level 验证；Windows
+不支持。
 
 **把它指向任何你在乎的东西之前先读这段：** Anneal 以非交互的权限旁路
 方式启动 coding CLI，以你的 macOS 用户身份运行，不在沙箱内。请使用可

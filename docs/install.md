@@ -6,10 +6,12 @@ installation sequence is
 
 ## Start locally
 
-The Developer Preview targets one platform: an Apple Silicon Mac. For this
-release, use Node.js `22.17.0` from `.nvmrc`. Installation enforces Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`,
-the range shared by the locked toolchain; Node 22.12.x and 23 are refused. You
-also need
+The verified Developer Preview release path targets an Apple Silicon Mac.
+Linux and macOS on Intel are expected to work but are not yet release-verified;
+Windows is unsupported. For this release, use Node.js `22.17.0` from `.nvmrc`.
+Installation enforces Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`, the
+range shared by the locked toolchain; Node 22.12.x and 23 are refused. You also
+need
 
 - npm 10.9.2 or newer;
 - Docker with Docker Compose, for the PostgreSQL service defined here;
