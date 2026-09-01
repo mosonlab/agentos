@@ -22,6 +22,13 @@ export class RepositoryPreflightError extends Error {
   }
 }
 
+export interface RepositoryPreflightInput {
+  remoteUrl: string;
+  defaultBranch: string;
+}
+
+export type RepositoryPreflight = (input: RepositoryPreflightInput) => Promise<void>;
+
 type CommandResult = { code: number | null; stdout: string };
 export type RepositoryPreflightCommand = (
   executable: string,
@@ -83,8 +90,8 @@ const expectSuccess = async (
   return result;
 };
 
-export const preflightOnboardingRepository = async (
-  input: OnboardingInput,
+const preflightRepositoryInput = async (
+  input: RepositoryPreflightInput,
   run: RepositoryPreflightCommand = runCommand,
 ): Promise<void> => {
   const env = controlledGitEnvironment();
@@ -94,8 +101,8 @@ export const preflightOnboardingRepository = async (
     if (identity.stdout.trim() === "") throw new RepositoryPreflightError("git-identity-missing");
   }
 
-  const ref = `refs/heads/${input.repo.defaultBranch}`;
-  const remote = input.repo.remoteUrl;
+  const ref = `refs/heads/${input.defaultBranch}`;
+  const remote = input.remoteUrl;
   const read = await run("git", ["ls-remote", "--exit-code", "--heads", remote, ref], cwd, env);
   if (read.code === 2) throw new RepositoryPreflightError("default-branch-missing");
   if (read.code !== 0) throw new RepositoryPreflightError("remote-unreachable");
@@ -110,3 +117,20 @@ export const preflightOnboardingRepository = async (
     await rm(scratch, { recursive: true, force: true });
   }
 };
+
+/**
+ * Repository creation uses the same host-identity, remote, branch, fetch, and
+ * dry-run-push checks as first-run onboarding, but deliberately exposes only
+ * the two values needed by those checks. In particular, a Repo credential
+ * Secret is not part of this operation and cannot become an ambient Git
+ * credential by accident.
+ */
+export const preflightRepository: RepositoryPreflight = preflightRepositoryInput;
+
+export const preflightOnboardingRepository = async (
+  input: OnboardingInput,
+  run: RepositoryPreflightCommand = runCommand,
+): Promise<void> => preflightRepositoryInput({
+  remoteUrl: input.repo.remoteUrl,
+  defaultBranch: input.repo.defaultBranch,
+}, run);

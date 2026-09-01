@@ -11,7 +11,8 @@ import {
 } from "@anneal/db";
 
 import { createApp } from "../test-app.js";
-import { lockedAgent, withTokens } from "./test-support.js";
+import { RepositoryPreflightError } from "../onboarding-preflight.js";
+import { lockedAgent, untouchableDatabase, withTokens } from "./test-support.js";
 
 test("filesystem grant CRUD accepts root/canonical paths and rejects non-canonical paths", async () => {
   await withTokens(async () => {
@@ -452,5 +453,230 @@ test("reset-runtime-config restores canonical runtime values and refuses invalid
       runtimeConfigCustomized: false,
       runtimeConfigDriftNoticeFingerprint: null,
     }]);
+  });
+});
+
+test("POST repo validates the raw remote and branch before preflight or database access", async () => {
+  await withTokens(async () => {
+    let preflightCalls = 0;
+    const app = createApp(untouchableDatabase(), {
+      repositoryPreflight: async () => { preflightCalls += 1; },
+    });
+    const request = (body: Record<string, unknown>) => app.request("/projects/project-1/repos", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const base = { name: "app", defaultBranch: "main" };
+    for (const [remoteUrl, reason] of [
+      [" https://github.com/owner/repo.git", "whitespace"],
+      ["https://github.com/owner/repo.git\n", "control-characters"],
+      ["https://token@github.com/owner/repo.git", "embedded-credentials"],
+      ["deploy@git.example.com:owner/repo.git", "unsupported-ssh-account"],
+    ] as const) {
+      const response = await request({ ...base, remoteUrl });
+      assert.equal(response.status, 400);
+      const text = await response.text();
+      assert.deepEqual(JSON.parse(text), {
+        error: "Repository remote is invalid",
+        code: "repository-remote-invalid",
+        reason,
+      });
+      assert.equal(text.includes(remoteUrl), false);
+    }
+    const invalidBranch = await request({ ...base, remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "bad branch" });
+    assert.equal(invalidBranch.status, 400);
+    assert.deepEqual(await invalidBranch.json(), {
+      error: "Repository default branch is invalid",
+      code: "repository-default-branch-invalid",
+    });
+    assert.equal(preflightCalls, 0);
+  });
+});
+
+test("POST repo preflights the exact remote and defaulted branch before its transaction", async () => {
+  await withTokens(async () => {
+    const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string }> = [];
+    let transactions = 0;
+    const database = {
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => {
+        transactions += 1;
+        return operation({
+          repo: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "repo-1", ...data }) },
+        });
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async (input) => { preflightInputs.push(input); },
+    });
+    const request = (remoteUrl: string, defaultBranch?: string) => app.request("/projects/project-1/repos", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `app-${preflightInputs.length}`, remoteUrl, ...(defaultBranch === undefined ? {} : { defaultBranch }) }),
+    });
+    for (const [remoteUrl, defaultBranch] of [
+      ["https://github.com/owner/repo.git", "main"],
+      ["git@github.com:owner/repo.git", "release/v1"],
+      ["file:///path/to/repo.git", "main"],
+    ] as const) {
+      const response = await request(remoteUrl, defaultBranch);
+      assert.equal(response.status, 201);
+      const repo = await response.json() as Record<string, unknown>;
+      assert.equal(repo.remoteUrl, remoteUrl);
+      assert.equal(repo.defaultBranch, defaultBranch);
+      assert.equal("grantAgents" in repo, false);
+    }
+    const defaulted = await request("https://github.com/owner/other.git");
+    assert.equal(defaulted.status, 201);
+    assert.deepEqual(preflightInputs, [
+      { remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" },
+      { remoteUrl: "git@github.com:owner/repo.git", defaultBranch: "release/v1" },
+      { remoteUrl: "file:///path/to/repo.git", defaultBranch: "main" },
+      { remoteUrl: "https://github.com/owner/other.git", defaultBranch: "main" },
+    ]);
+    assert.equal(transactions, 4);
+  });
+});
+
+test("POST repo maps every preflight failure to the exact refusal and writes nothing", async () => {
+  await withTokens(async () => {
+    let transactions = 0;
+    const database = {
+      $transaction: async () => { transactions += 1; throw new Error("transaction should not open"); },
+    } as unknown as PrismaClient;
+    for (const reason of [
+      "git-unavailable",
+      "git-identity-missing",
+      "remote-unreachable",
+      "default-branch-missing",
+      "push-not-authorized",
+      "command-timeout",
+    ] as const) {
+      const app = createApp(database, {
+        repositoryPreflight: async () => { throw new RepositoryPreflightError(reason); },
+      });
+      const response = await app.request("/projects/project-1/repos", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: `app-${reason}`, remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" }),
+      });
+      assert.equal(response.status, 422);
+      assert.deepEqual(await response.json(), {
+        error: "Repository preflight failed",
+        code: "repository-preflight-failed",
+        reason,
+      });
+    }
+    assert.equal(transactions, 0);
+  });
+});
+
+test("POST repo optionally grants every active non-integrator Agent atomically", async () => {
+  await withTokens(async () => {
+    const agents = [
+      { id: "agent-1", name: "senior-dev", archivedAt: null },
+      { id: "agent-2", name: "review-coordinator-sol", archivedAt: null },
+      { id: "agent-3", name: "archived", archivedAt: new Date() },
+      { id: "agent-4", name: "merge-integrator", archivedAt: null },
+    ];
+    const createdGrants: Array<Record<string, unknown>> = [];
+    let transactionCalls = 0;
+    let agentQueries = 0;
+    const database = {
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => {
+        transactionCalls += 1;
+        return operation({
+          repo: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "repo-1", ...data }) },
+          agent: { findMany: async ({ where }: { where: Record<string, unknown> }) => {
+            agentQueries += 1;
+            assert.deepEqual(where, { projectId: "project-1", archivedAt: null, name: { not: "merge-integrator" } });
+            return agents.filter((agent) => agent.archivedAt === null && agent.name !== "merge-integrator");
+          } },
+          agentRepoAccess: { create: async ({ data }: { data: Record<string, unknown> }) => {
+            createdGrants.push(data);
+            return data;
+          } },
+        });
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, { repositoryPreflight: async () => {} });
+    const response = await app.request("/projects/project-1/repos", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "app",
+        remoteUrl: "https://github.com/owner/repo.git",
+        mountPath: "custom-repo",
+        grantAgents: true,
+      }),
+    });
+    assert.equal(response.status, 201);
+    const payload = await response.json() as { repo: Record<string, unknown>; grants: Array<Record<string, unknown>> };
+    assert.equal(payload.repo.mountPath, "custom-repo");
+    assert.deepEqual(payload.grants, createdGrants);
+    assert.deepEqual(payload.grants.map(({ agentId, permissions, mountPath }) => ({ agentId, permissions, mountPath })), [
+      { agentId: "agent-1", permissions: "GIT_WRITE", mountPath: "custom-repo" },
+      { agentId: "agent-2", permissions: "GIT_WRITE", mountPath: "custom-repo" },
+    ]);
+    assert.equal(transactionCalls, 1);
+    assert.equal(agentQueries, 1);
+  });
+});
+
+test("POST repo without grantAgents retains a bare Repo response and creates no grants", async () => {
+  await withTokens(async () => {
+    let agentQueries = 0;
+    const database = {
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
+        repo: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "repo-1", ...data }) },
+        agent: { findMany: async () => { agentQueries += 1; return []; } },
+        agentRepoAccess: { create: async () => { throw new Error("grant should not be written"); } },
+      }),
+    } as unknown as PrismaClient;
+    const app = createApp(database, { repositoryPreflight: async () => {} });
+    for (const grantAgents of [undefined, false]) {
+      const response = await app.request("/projects/project-1/repos", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: `app-${String(grantAgents)}`, remoteUrl: "https://github.com/owner/repo.git", ...(grantAgents === undefined ? {} : { grantAgents }) }),
+      });
+      assert.equal(response.status, 201);
+      const repo = await response.json() as Record<string, unknown>;
+      assert.equal(repo.id, "repo-1");
+      assert.equal("repo" in repo, false);
+      assert.equal("grants" in repo, false);
+    }
+    assert.equal(agentQueries, 0);
+  });
+});
+
+test("POST repo preserves the duplicate-name refusal and PATCH keeps its trim behavior", async () => {
+  await withTokens(async () => {
+    let preflightCalls = 0;
+    const database = {
+      $transaction: async () => {
+        throw new Prisma.PrismaClientKnownRequestError("duplicate", { code: "P2002", clientVersion: "6.19.0" });
+      },
+      repo: {
+        update: async ({ data }: { data: Record<string, unknown> }) => ({ id: "repo-1", ...data }),
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, { repositoryPreflight: async () => { preflightCalls += 1; } });
+    const duplicate = await app.request("/projects/project-1/repos", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "app", remoteUrl: "https://github.com/owner/repo.git" }),
+    });
+    assert.equal(duplicate.status, 409);
+    assert.deepEqual(await duplicate.json(), { error: "Unique constraint violated" });
+
+    const patched = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ remoteUrl: "  https://github.com/owner/repo.git  " }),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal((await patched.json() as { remoteUrl: string }).remoteUrl, "https://github.com/owner/repo.git");
+    assert.equal(preflightCalls, 1, "PATCH must not invoke the POST preflight operation");
   });
 });
