@@ -482,7 +482,7 @@ test("POST repo validates the raw remote and branch before preflight or database
         code: "repository-remote-invalid",
         reason,
       });
-      assert.equal(text.includes(remoteUrl), false);
+      assert.equal(text.includes(JSON.stringify(remoteUrl).slice(1, -1)), false);
     }
     const invalidBranch = await request({ ...base, remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "bad branch" });
     assert.equal(invalidBranch.status, 400);
@@ -535,6 +535,30 @@ test("POST repo preflights the exact remote and defaulted branch before its tran
       { remoteUrl: "https://github.com/owner/other.git", defaultBranch: "main" },
     ]);
     assert.equal(transactions, 4);
+  });
+});
+
+test("POST repo refuses an unavailable credential Secret before preflight", async () => {
+  await withTokens(async () => {
+    let preflightCalls = 0;
+    const database = {
+      secret: { findFirst: async () => null },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async () => { preflightCalls += 1; },
+    });
+    const response = await app.request("/projects/project-1/repos", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "app",
+        remoteUrl: "https://github.com/owner/repo.git",
+        credentialSecretId: "secret-1",
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "Repo credential secret is unavailable" });
+    assert.equal(preflightCalls, 0);
   });
 });
 

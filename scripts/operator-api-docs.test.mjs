@@ -165,6 +165,15 @@ test("the add-project runbook and public links cover A1 pull-request onboarding"
   assert.match(addProjectRunbook, /GET "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates"/u);
   assert.match(addProjectRunbook, /POST[\s\S]*\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/instantiate/u);
   assert.match(addProjectRunbook, /"repoId"[\s\S]*"variables"[\s\S]*"branchName"/u);
+  assert.match(addProjectRunbook, /--arg name "\$PROJECT_NAME"/u);
+  assert.match(addProjectRunbook, /--arg slug "\$PROJECT_SLUG"/u);
+  assert.match(addProjectRunbook, /--arg name "\$REPO_NAME"/u);
+  assert.match(addProjectRunbook, /--arg remoteUrl "\$REPO_REMOTE"/u);
+  assert.match(addProjectRunbook, /select\(\.name == \$name\)/u);
+  assert.match(addProjectRunbook, /gh repo view "\$REPO_REMOTE"/u);
+  assert.match(addProjectRunbook, /gh pr list --repo "\$GH_REPO"/u);
+  assert.match(addProjectRunbook, /git config --global --get user\.name/u);
+  assert.match(addProjectRunbook, /git config --global --get user\.email/u);
   assert.match(addProjectRunbook, /review[\s\S]*merge it by hand/iu);
   for (const prerequisite of [
     "supported GitHub remote",

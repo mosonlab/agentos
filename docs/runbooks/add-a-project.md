@@ -19,8 +19,10 @@ Before calling the API, have all of the following ready:
   ids returned by the API; and
 - a Git identity and GitHub Git transport available to the API host. For a
   GitHub HTTPS remote, `gh auth setup-git` configures the authenticated Git
-  helper used by the repository preflight. Confirm the identity with
-  `git config user.name` and `git config user.email`.
+  helper used by the repository preflight. Under the same account and `HOME`
+  used by the API preflight, confirm the global identity with
+  `git config --global --get user.name` and
+  `git config --global --get user.email`.
 
 Set the local values for the commands below. Keep the remote exactly as a
 supported GitHub URL; the Repo route validates the raw value and runs its
@@ -44,10 +46,14 @@ workflow Agents `senior-dev-luna`, `review-coordinator-sol`,
 `pr-engineer-workflow` TaskTemplate.
 
 ```sh
+PROJECT_BODY=$(jq -n \
+  --arg name "$PROJECT_NAME" \
+  --arg slug "$PROJECT_SLUG" \
+  '{"name":$name,"slug":$slug}')
 PROJECT_JSON=$(curl --fail-with-body -sS -X POST "$BASE_URL/projects" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Demo project","slug":"demo-project"}')
+  -d "$PROJECT_BODY")
 PROJECT_ID=$(printf '%s' "$PROJECT_JSON" | jq -r '.id')
 test -n "$PROJECT_ID" -a "$PROJECT_ID" != null
 ```
@@ -62,10 +68,14 @@ Add the GitHub repository with `grantAgents: true`. The successful response is
 access, and the mechanical integrator Agent is not granted access.
 
 ```sh
+REPO_BODY=$(jq -n \
+  --arg name "$REPO_NAME" \
+  --arg remoteUrl "$REPO_REMOTE" \
+  '{"name":$name,"remoteUrl":$remoteUrl,"defaultBranch":"main","grantAgents":true}')
 REPO_JSON=$(curl --fail-with-body -sS -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git","defaultBranch":"main","grantAgents":true}')
+  -d "$REPO_BODY")
 REPO_ID=$(printf '%s' "$REPO_JSON" | jq -r '.repo.id')
 test -n "$REPO_ID" -a "$REPO_ID" != null
 ```
@@ -76,7 +86,7 @@ Repo list:
 ```sh
 REPO_ID=$(curl --fail-with-body -sS -X GET "$BASE_URL/projects/$PROJECT_ID/repos" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
-  | jq -r '.[] | select(.name == "demo") | .id' | tail -n 1)
+  | jq -r --arg name "$REPO_NAME" '.[] | select(.name == $name) | .id' | tail -n 1)
 ```
 
 The preflight uses the API host's ambient Git identity and credentials. It
@@ -111,7 +121,8 @@ link (or inspect it with `gh`) after the four A1 roles finish:
 
 ```sh
 gh auth status
-gh pr list --repo acme/demo --head "$BRANCH_NAME"
+GH_REPO=$(gh repo view "$REPO_REMOTE" --json nameWithOwner --jq '.nameWithOwner')
+gh pr list --repo "$GH_REPO" --head "$BRANCH_NAME"
 ```
 
 Review the resulting pull request, its checks, and its diff. Merge it by hand

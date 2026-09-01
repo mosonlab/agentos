@@ -92,7 +92,7 @@ test("POST repo validates raw remotes and branches before any write or preflight
       code: "repository-remote-invalid",
       reason,
     });
-    assert.equal(JSON.stringify(refused.body).includes(remoteUrl), false);
+    assert.equal(JSON.stringify(refused.body).includes(JSON.stringify(remoteUrl).slice(1, -1)), false);
   }
   const branch = await call(app, "POST", `/projects/${project.id}/repos`, repoBody("invalid-branch", { defaultBranch: "bad branch" }));
   assert.equal(branch.status, 400);

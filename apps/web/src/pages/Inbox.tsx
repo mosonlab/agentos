@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 import { firstLine, formatDateTime, formatT, restLines, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT, useTNodes } from "../lib/i18n";
-import { useProjectScope } from "../lib/project";
+import { projectScopedPath, useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { cn } from "../lib/utils";
 import { type DeployNotice, isNotice, latestDeploy, needsReply } from "../lib/inbox";
@@ -88,9 +88,7 @@ const EMPTY: Record<InboxFilter, string> = {
 
 export const InboxPage = (): ReactNode => {
   const { projectId } = useProjectScope();
-  const messagesPath = projectId === ""
-    ? "/inbox/messages"
-    : `/inbox/messages?projectId=${encodeURIComponent(projectId)}`;
+  const messagesPath = projectScopedPath("/inbox/messages", projectId);
   const { data, loading, error, reload } = usePoll<InboxMessage[]>(messagesPath);
   const names = useAgentNames();
   const [filter, setFilter] = useState<InboxFilter>("active");
@@ -173,9 +171,7 @@ export const InboxPage = (): ReactNode => {
 
 export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode => {
   const { projectId } = useProjectScope();
-  const messagesPath = projectId === ""
-    ? "/inbox/messages"
-    : `/inbox/messages?projectId=${encodeURIComponent(projectId)}`;
+  const messagesPath = projectScopedPath("/inbox/messages", projectId);
   const { data, error, reload } = usePoll<InboxMessage[]>(messagesPath);
   const names = useAgentNames();
   const [reply, setReply] = useState("");

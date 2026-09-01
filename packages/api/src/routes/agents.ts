@@ -542,6 +542,10 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         code: "repository-default-branch-invalid",
       }, 400);
     }
+    if (body.credentialSecretId) {
+      const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
+      if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
+    }
     try {
       await deps.repositoryPreflight({ remoteUrl: remote.remoteUrl, defaultBranch: body.defaultBranch });
     } catch (error: unknown) {
@@ -554,14 +558,10 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       }
       throw error;
     }
-    if (body.credentialSecretId) {
-      const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
-      if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
-    }
-    const { grantAgents, ...repoInput } = body;
-    const result = await db.$transaction(async (tx) => {
+    const { grantAgents, ...repoFields } = body;
+    const result = await readCommitted(db, async (tx) => {
       const repo = await tx.repo.create({
-        data: { ...repoInput, remoteUrl: remote.remoteUrl, projectId },
+        data: { ...repoFields, projectId },
       });
       if (!grantAgents) return repo;
       const agents = await tx.agent.findMany({

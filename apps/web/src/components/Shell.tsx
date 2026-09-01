@@ -3,7 +3,7 @@ import { Monitor, Moon, Sun } from "lucide-react";
 
 import { usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { useProjectScope } from "../lib/project";
+import { projectScopedPath, useProjectScope } from "../lib/project";
 import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
 import type { InboxSummary } from "../lib/types";
@@ -84,9 +84,7 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
    * Detached notifications are open too, but nobody is blocked on them, and
    * counting them is what made the badge read 145 with nothing actually waiting;
    * they live in the Inbox's Notices lane instead. */
-  const summaryPath = projectId === ""
-    ? "/inbox/messages/summary"
-    : `/inbox/messages/summary?projectId=${encodeURIComponent(projectId)}`;
+  const summaryPath = projectScopedPath("/inbox/messages/summary", projectId);
   const { data: summary, error: summaryError } = usePoll<InboxSummary>(summaryPath, 5_000);
   const openCount = summary?.needsReply;
   const t = useT();

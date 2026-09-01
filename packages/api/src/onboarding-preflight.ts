@@ -90,7 +90,14 @@ const expectSuccess = async (
   return result;
 };
 
-const preflightRepositoryInput = async (
+/**
+ * Repository creation uses the same host-identity, remote, branch, fetch, and
+ * dry-run-push checks as first-run onboarding, but deliberately exposes only
+ * the two values needed by those checks. In particular, a Repo credential
+ * Secret is not part of this operation and cannot become an ambient Git
+ * credential by accident.
+ */
+export const preflightRepository = async (
   input: RepositoryPreflightInput,
   run: RepositoryPreflightCommand = runCommand,
 ): Promise<void> => {
@@ -118,19 +125,10 @@ const preflightRepositoryInput = async (
   }
 };
 
-/**
- * Repository creation uses the same host-identity, remote, branch, fetch, and
- * dry-run-push checks as first-run onboarding, but deliberately exposes only
- * the two values needed by those checks. In particular, a Repo credential
- * Secret is not part of this operation and cannot become an ambient Git
- * credential by accident.
- */
-export const preflightRepository: RepositoryPreflight = preflightRepositoryInput;
-
 export const preflightOnboardingRepository = async (
   input: OnboardingInput,
   run: RepositoryPreflightCommand = runCommand,
-): Promise<void> => preflightRepositoryInput({
+): Promise<void> => preflightRepository({
   remoteUrl: input.repo.remoteUrl,
   defaultBranch: input.repo.defaultBranch,
 }, run);
