@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { stepRole } from "@anneal/db";
 
 import type { ClaimedTask } from "./api.js";
@@ -131,7 +133,7 @@ export const buildPrompt = (claim: ClaimedTask): string => [
 ].join("\n");
 
 export const buildChildEnvironment = (
-  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
+  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
@@ -149,6 +151,8 @@ export const buildChildEnvironment = (
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
   return {
     ...taskSecrets,
+    AGENTOS_HOST_PROOF_SLOT_DIR: join(config.workspaceRoot, ".host-proof-slots"),
+    AGENTOS_HOST_PROOF_SLOTS: String(config.hostProofSlots),
     ...workspaceEnvironment(config),
     AGENTOS_API_URL: config.apiUrl,
     AGENTOS_SESSION_TOKEN: claim.sessionToken,
