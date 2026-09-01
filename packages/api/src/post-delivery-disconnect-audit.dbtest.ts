@@ -99,7 +99,11 @@ test("the audit lists a promoted explicit failure and skips a genuine recovery",
     { type: "result", is_error: true, terminal_reason: "error", result: "provider failed" },
     "provider failed",
   );
-  await seedRun("genuine-recovery", null, "Reconnecting... 2/5");
+  await seedRun(
+    "genuine-recovery",
+    { type: "result", is_error: false, terminal_reason: "completed", result: "provider completed" },
+    "Reconnecting... 2/5",
+  );
 
   const before = await db.$queryRaw<Array<{ runs: bigint; activities: bigint }>>`
     SELECT

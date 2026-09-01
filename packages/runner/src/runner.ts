@@ -687,10 +687,12 @@ export const executeClaim = async (
       });
       return;
     }
-    // A validated, fenced Regression handoff is the step's terminal product.
-    // Provider diagnostics that arrive after it must remain observable without
-    // turning the completed verification into another model retry.
+    // A validated, fenced Regression handoff is the step's terminal product
+    // only when the provider did not explicitly reject the session. Transport
+    // loss remains recoverable, but a terminal failure keeps its authority.
+    const explicitTerminalFailure = evidence.terminalEventSeen && !evidence.terminalSuccess;
     const regressionMechanicallySettled = regressionHandoffPersisted
+      && !explicitTerminalFailure
       && remediationFailureReason === null
       && budgetReason === null;
     const executionSucceeded = (adapterExecutionSucceeded(evidence)

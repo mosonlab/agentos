@@ -246,7 +246,7 @@ const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
   };
 };
 
-const regressionFailureAgent = [
+const regressionAgent = (tail: readonly string[]): string => [
   "#!/bin/sh",
   'case "$1" in',
   '  --version) echo "1.2.3-stub"; exit 0 ;;',
@@ -261,9 +261,18 @@ const regressionFailureAgent = [
   'process.stdout.write(JSON.stringify({ schemaVersion: 1, runId: process.env.AGENTOS_RUN_ID, kind: "regression-verification-v2", body, commitSha: process.env.HEAD_SHA }));',
   '\' > "$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"',
   'chmod 600 "$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"',
+  ...tail,
+].join("\n");
+
+const regressionFailureAgent = regressionAgent([
   'echo "Error: provider transport disconnected after verdict" >&2',
   "exit 1",
-].join("\n");
+]);
+
+const regressionExplicitTerminalFailureAgent = regressionAgent([
+  'echo \'{"type":"result","is_error":true,"terminal_reason":"error","result":"provider rejected regression run"}\'',
+  "exit 0",
+]);
 
 const outputStatus = (overrides: Partial<{
   outputKind: string | null;
@@ -303,7 +312,7 @@ const matchingResultOutputStatus = (root: string) => outputStatus({
 const succeedingAgentThatSignalsExit = (sentinel: string): string =>
   succeedingAgent.replace(/exit 0$/u, `touch ${sentinel}\nexit 0`);
 
-const disconnectedAfterDeliveryAgent = (
+const streamLostAfterDeliveryAgent = (
   output: "matching" | "mismatched" | "missing" | "protected",
   exitCode = 0,
   stderr = "",
@@ -323,16 +332,8 @@ const disconnectedAfterDeliveryAgent = (
     ...(output === "protected" ? ["chmod 000 .agentos/task-output-receipt.json"] : []),
   ]),
   ...(stderr ? [`echo ${JSON.stringify(stderr)} >&2`] : []),
-  'echo \'{"type":"result","is_error":true,"result":"provider stream ended before terminal completion"}\'',
   `exit ${exitCode}`,
 ].join("\n");
-
-const streamLostAfterDeliveryAgent = (
-  output: "matching" | "mismatched" | "missing" | "protected",
-  exitCode = 0,
-  stderr = "",
-): string => disconnectedAfterDeliveryAgent(output, exitCode, stderr)
-  .replace(/\necho '\{"type":"result"[^\n]+/u, "");
 
 const adapterWithTerminalFailure = (state: {
   terminalEventSeen: boolean;
@@ -525,6 +526,35 @@ test("a negative Regression verdict settles mechanically when provider transport
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
     assert.equal(
       controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Regression handoff cannot override an explicit provider terminal failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-explicit-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "regression-agent.sh");
+    await writeFile(agentBinary, regressionExplicitTerminalFailureAgent);
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble();
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      regressionOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    assert.equal(controlPlane.taskOutputs.length, 1);
+    assert.equal(controlPlane.taskOutputs[0]?.kind, REGRESSION_OUTPUT_KIND);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false, JSON.stringify(completion));
+    assert.equal(completion?.failureReason, "provider rejected regression run");
+    assert.equal(
+      controlPlane.eventBatches.flat().some(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED"),
       false,
     );
   } finally {

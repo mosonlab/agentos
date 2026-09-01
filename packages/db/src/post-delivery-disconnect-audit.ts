@@ -7,10 +7,9 @@
  * the TaskActivity line the recovery appended before completion.
  */
 
-export const POST_DELIVERY_DISCONNECT_FIX_COMMIT =
-  "0ea0a58f4a5fea910fe26338bfe252e76e201725";
+import { isCodexReconnectStatus } from "./provider-terminal.js";
 
-/** Git commit time for PR #345's exact merge commit, in UTC. */
+/** Git commit time for PR #345's merge commit 0ea0a58f4a5fea910fe26338bfe252e76e201725, in UTC. */
 export const POST_DELIVERY_DISCONNECT_FIX_MERGED_AT = "2026-08-31T16:52:56.000Z";
 
 export const POST_DELIVERY_DISCONNECT_ACTIVITY_PREFIX =
@@ -80,9 +79,6 @@ const boolField = (payload: Record<string, unknown> | null, field: string): bool
   typeof payload?.[field] === "boolean" ? payload[field] as boolean : null
 );
 
-const isReconnectMessage = (message: string | null): boolean =>
-  /^Reconnecting\.\.\. \d+\/\d+$/u.test(message?.trim() ?? "");
-
 const eventType = (event: PostDeliveryDisconnectAuditEvent): string | null =>
   stringField(providerEvent(event.payload), "type");
 
@@ -97,8 +93,7 @@ const eventError = (event: PostDeliveryDisconnectAuditEvent): string | null => {
 const itemFailure = (payload: Record<string, unknown> | null): boolean => {
   const item = providerEvent(payload?.item);
   if (!item) return false;
-  if (item.error !== undefined && item.error !== null && item.error !== false) return true;
-  return stringField(item, "status") === "failed";
+  return Boolean(item.error);
 };
 
 const codexFailureBeforeTerminal = (
@@ -106,7 +101,7 @@ const codexFailureBeforeTerminal = (
 ): boolean => events.some((event) => {
   const payload = providerEvent(event.payload);
   const type = eventType(event);
-  if (type === "error") return !isReconnectMessage(eventError(event));
+  if (type === "error") return !isCodexReconnectStatus(eventError(event));
   return itemFailure(payload);
 });
 
@@ -116,11 +111,10 @@ const piFinalAttemptFailed = (payload: Record<string, unknown> | null): boolean 
   const finalMessage = providerEvent(messages.at(-1));
   return boolField(payload, "willRetry") === true
     || stringField(finalMessage, "stopReason") === "error"
-    || nonEmptyStringField(finalMessage, "errorMessage") !== null
-    || nonEmptyStringField(payload, "errorMessage") !== null;
+    || stringField(finalMessage, "errorMessage") !== null;
 };
 
-const terminalFailureFor = (
+export const postDeliveryDisconnectTerminalFailureFor = (
   events: readonly PostDeliveryDisconnectAuditEvent[],
   terminalIndex: number,
 ): boolean => {
@@ -129,33 +123,25 @@ const terminalFailureFor = (
 
   const payload = providerEvent(terminal.payload);
   const providerType = stringField(payload, "type");
-  const priorTerminalIndex = (() => {
-    for (let index = terminalIndex - 1; index >= 0; index -= 1) {
-      if (events[index]?.type === "FINAL_OUTPUT") return index;
-    }
-    return -1;
-  })();
-  const preceding = events.slice(priorTerminalIndex + 1, terminalIndex);
+  const preceding = events.slice(0, terminalIndex);
 
   // The three adapters expose their terminal verdicts in different provider
   // payloads. Keep this classifier tied to those existing wire shapes rather
   // than guessing from the Run's eventual status (which is the bug under
   // investigation).
   if (providerType === "result") {
-    return boolField(payload, "is_error") === true
+    return boolField(payload, "is_error") !== false
       || stringField(payload, "terminal_reason") !== "completed";
   }
   if (providerType === "turn.completed") {
-    return boolField(payload, "success") === false
-      || ["failed", "error", "incomplete"].includes(stringField(payload, "status") ?? "")
-      || nonEmptyStringField(payload, "error") !== null
-      || codexFailureBeforeTerminal(preceding);
+    return codexFailureBeforeTerminal(preceding);
   }
   if (providerType === "agent_settled") {
-    return boolField(payload, "success") === false
-      || boolField(payload, "finalAttemptFailed") === true
-      || nonEmptyStringField(payload, "error") !== null
-      || preceding.some((event) => piFinalAttemptFailed(providerEvent(event.payload)));
+    const lastAgentEnd = [...preceding]
+      .reverse()
+      .find((event) => eventType(event) === "agent_end");
+    const sawError = preceding.some((event) => eventType(event)?.includes("error") === true);
+    return sawError || piFinalAttemptFailed(providerEvent(lastAgentEnd?.payload));
   }
 
   // Keep the fallback narrow: these are explicit failure fields, not absent or
@@ -206,7 +192,7 @@ const promotedFailureFor = (
       const eventAt = dateMillis(event.at);
       return event.type === "FINAL_OUTPUT" && eventAt !== null && eventAt <= activityAt ? index : latest;
     }, -1);
-    if (terminalIndex < 0 || !terminalFailureFor(events, terminalIndex)) continue;
+    if (terminalIndex < 0 || !postDeliveryDisconnectTerminalFailureFor(events, terminalIndex)) continue;
     return {
       runId: run.id,
       taskId: run.taskId,
@@ -260,7 +246,10 @@ export const auditPostDeliveryDisconnects = async (
   });
 };
 
-const tableValue = (value: string | null): string => value ?? "null";
+const tableCell = (value: string | null): string => (value ?? "null")
+  .replaceAll("\t", " ")
+  .replaceAll("\r", "\\r")
+  .replaceAll("\n", "\\n");
 
 /** Stable tab-separated table output: one header row, then one row per finding. */
 export const formatPostDeliveryDisconnectAudit = (
@@ -268,10 +257,10 @@ export const formatPostDeliveryDisconnectAudit = (
 ): string[] => [
   ["runId", "taskId", "chainId", "providerError"].join("\t"),
   ...rows.map((row) => [
-    row.runId,
-    tableValue(row.taskId),
-    tableValue(row.chainId),
-    tableValue(row.providerError)?.replaceAll("\t", " ").replaceAll("\r", "\\r").replaceAll("\n", "\\n"),
+    tableCell(row.runId),
+    tableCell(row.taskId),
+    tableCell(row.chainId),
+    tableCell(row.providerError),
   ].join("\t")),
 ];
 
