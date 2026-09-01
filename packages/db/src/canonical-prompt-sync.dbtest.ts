@@ -134,6 +134,31 @@ const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): 
   }
 };
 
+test("sync creates the pull-request template when the pre-existing canonical installation has none", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const existing = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "pr-engineer-workflow" } },
+  });
+  await prisma.taskTemplate.delete({ where: { id: existing.id } });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":1/u);
+
+  const created = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "pr-engineer-workflow" } },
+    include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
+  });
+  assert.deepEqual(created.variables, ["branchName"]);
+  assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
+    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev",
+  ]);
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdCanonicalTemplates":0/u);
+});
+
 test("sync rolls parked and not-yet-started v1 chains forward without changing them", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   // The canonical source is now eight-step for bound chains. Reconstruct the

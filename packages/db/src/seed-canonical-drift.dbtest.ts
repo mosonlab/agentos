@@ -136,7 +136,7 @@ test("seed refuses an unregistered same-length drift graph and leaves its rows u
   const templates = await prisma.taskTemplate.findMany({ where: { projectId: project.id }, select: { name: true } });
   assert.deepEqual(
     templates.map(({ name }) => name).sort(),
-    ["compound-engineer-workflow", "direct-engineer-workflow"],
+    ["compound-engineer-workflow", "direct-engineer-workflow", "pr-engineer-workflow"],
   );
 
   await prisma.taskTemplateStep.update({

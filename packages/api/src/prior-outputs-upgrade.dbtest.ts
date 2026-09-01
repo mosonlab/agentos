@@ -9,8 +9,11 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
+  DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
   LEGACY_ALL_PRIOR_OUTPUTS,
+  INTEGRATOR_TEMPLATE_NAME,
+  PR_TEMPLATE_NAME,
   loadAgentSources,
   loadAllTemplateStepSources,
   PrismaClient,
@@ -61,6 +64,15 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
     deploy();
 
     const [agentSources, templateSources] = await Promise.all([loadAgentSources(), loadAllTemplateStepSources()]);
+    // This fixture represents the schema immediately before the whitelist
+    // migration. The pull-request-only canonical template did not exist at
+    // that boundary; leave it for the post-migration sync to create.
+    const preMigrationTemplateSources = new Map(
+      [...templateSources].filter(([templateName]) => (
+        templateName === INTEGRATOR_TEMPLATE_NAME || templateName === DIRECT_TEMPLATE_NAME
+      )),
+    );
+    assert.equal(preMigrationTemplateSources.size, 2);
     const preMigration = new PrismaClient({ datasources: { db: { url } } });
     try {
       await preMigration.$executeRawUnsafe(
@@ -103,7 +115,7 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
         }
       }
 
-      for (const [templateName, steps] of templateSources) {
+      for (const [templateName, steps] of preMigrationTemplateSources) {
         const templateId = `template-${templateName}`;
         await preMigration.$executeRawUnsafe(
           `INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")
@@ -185,6 +197,9 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
     process.env.RUNNER_TOKEN = RUNNER_TOKEN;
     const db = new PrismaClient({ datasources: { db: { url } } });
     try {
+      assert.equal(await db.taskTemplate.count({
+        where: { projectId: "project-upgrade", name: PR_TEMPLATE_NAME },
+      }), 1);
       const currentPlan = await db.taskTemplateStep.findUniqueOrThrow({
         where: { taskTemplateId_stepIndex: { taskTemplateId: "template-compound-engineer-workflow", stepIndex: 2 } },
       });
