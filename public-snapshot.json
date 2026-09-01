@@ -161,6 +161,8 @@
     { "glob": "scripts/public-snapshot-scan.mjs", "purpose": "redacted safety scan" },
     { "glob": "scripts/public-snapshot-scan.test.mjs", "purpose": "scanner regression tests" },
     { "glob": "scripts/release-docs.test.mjs", "purpose": "executable release documentation contract tests" },
+    { "glob": "scripts/run-scope-guard.sh", "purpose": "refuses repository-wide root work inside an Anneal run" },
+    { "glob": "scripts/run-scope-guard.test.mjs", "purpose": "run-scope guard refusal and bypass fixtures" },
     { "glob": "scripts/setup-local.mjs", "purpose": "atomic local configuration generator" },
     { "glob": "scripts/setup-local.test.mjs", "purpose": "local configuration generator regression tests" },
     { "glob": "scripts/setup-merge-executor.sh", "purpose": "repeatable human-owned GitHub App and isolated merge-executor configuration capture wizard" },
