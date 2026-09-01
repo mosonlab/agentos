@@ -108,6 +108,7 @@
     { "glob": "packages/runner/assets/claude-platform-settings.json", "purpose": "versioned platform-owned Claude settings that exclude host configuration and auto-memory" },
     { "glob": "packages/runner/assets/session-config-baseline/codex/config.toml", "purpose": "versioned platform-owned Codex session baseline" },
     { "glob": "packages/runner/package.json", "purpose": "runner package definition" },
+    { "glob": "packages/runner/scripts/*.mjs", "purpose": "runner build tooling and its focused tests" },
     { "glob": "packages/runner/src/**/*.ts", "purpose": "runner TypeScript source and tests" },
     { "glob": "packages/runner/tsconfig.json", "purpose": "runner TypeScript configuration" },
     { "glob": "public-snapshot.json", "purpose": "closed snapshot scope" },

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { RUNTIME_TOOL_FILES } from "../../packages/runner/scripts/build-runtime-tools.mjs";
 import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
 import {
@@ -35,6 +36,7 @@ import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
+const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const DEPLOY_SCRIPT = fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url));
 const EXPECTED_PHASES = [
   "parse-arguments",
@@ -187,6 +189,16 @@ const minimalBuildTree = (root, revision) => {
   mkdirSync(source, { recursive: true });
   writeFileSync(join(prisma, "preflight.ts"), 'import { census } from "../src/schema-census.js";\nvoid census;\n');
   writeFileSync(join(source, "schema-census.ts"), "export const census = true;\n");
+  const runnerDist = join(root, "packages/runner/dist");
+  mkdirSync(join(runnerDist, "runtime-tools/gate-worker"), { recursive: true });
+  writeFileSync(join(runnerDist, "build-info.json"), `${JSON.stringify({
+    packageName: "@anneal/runner",
+    commit: revision,
+    dirty: false,
+  })}\n`);
+  for (const { source: sourcePath, destination } of RUNTIME_TOOL_FILES) {
+    cpSync(join(REPOSITORY_ROOT, sourcePath), join(runnerDist, "runtime-tools", destination));
+  }
 };
 
 const removeTree = (root) => {
@@ -597,8 +609,8 @@ test("standalone builder creates a verified exact-commit release", () => {
     gitBinary: "/git",
     nodeBinary: "/node",
     npmBinary: "/npm",
-    requiredPaths: ["packages/api/dist"],
-    artifactPaths: () => ["packages/api/dist", "packages/db/prisma", "packages/db/src"],
+    requiredPaths: ["packages/api/dist", "packages/runner/dist"],
+    artifactPaths: () => ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
     optionalArtifactPaths: () => [],
     execute: (program, args, options = {}) => {
       commands.push({ program, args });
@@ -609,6 +621,12 @@ test("standalone builder creates a verified exact-commit release", () => {
   assert.deepEqual(artifact.dbMaintenanceSourceImports, ["schema-census"]);
   assert.match(artifact.releaseName, new RegExp(`^${revisions.to}-[0-9a-f]{64}$`, "u"));
   assert.equal(findReleaseArtifact({ deployRoot, revision: revisions.to }).releaseName, artifact.releaseName);
+  for (const { source, destination } of RUNTIME_TOOL_FILES) {
+    assert.deepEqual(
+      readFileSync(join(artifact.releaseDirectory, "packages/runner/dist/runtime-tools", destination)),
+      readFileSync(join(REPOSITORY_ROOT, source)),
+    );
+  }
   assert.equal(commands.length, 4);
   assert.deepEqual(commands.slice(1).map(({ args }) => args.slice(-2)), [
     ["--detach", revisions.to], ["/npm", "ci"], ["run", "build"],

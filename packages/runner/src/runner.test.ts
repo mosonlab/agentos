@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
@@ -17,7 +18,7 @@ import {
 } from "./runner.js";
 import { createControlPlaneDouble, createRoutedControlPlaneDouble, type ControlPlaneFetchHandler } from "./test-control-plane.js";
 import {
-  cleanupAgentScratch, provisionSessionConfig, type AgentScratch,
+  cleanupAgentScratch, materializeRuntimeTools, provisionSessionConfig, type AgentScratch,
 } from "./workspace.js";
 
 const config = (workspaceRoot: string): RunnerConfig => ({
@@ -318,6 +319,32 @@ const seedPiAuth = async (root: string): Promise<void> => {
   await writeFile(join(root, ".pi", "agent", "auth.json"), '{"openai-codex":{"type":"oauth"}}\n', { mode: 0o600 });
 };
 
+const runtimeToolSources = [
+  ["regression-verification.sh", "../../../scripts/regression-verification.sh"],
+  ["gate-worker/gate-dispatch.sh", "../../../scripts/gate-worker/gate-dispatch.sh"],
+  ["gate-worker/lib.sh", "../../../scripts/gate-worker/lib.sh"],
+  ["gate-worker/mirror-push.sh", "../../../scripts/gate-worker/mirror-push.sh"],
+  ["gate-worker/remote-gate.sh", "../../../scripts/gate-worker/remote-gate.sh"],
+] as const;
+
+const createRuntimeToolsFixture = async (): Promise<string> => {
+  const root = await mkdtemp(join(tmpdir(), "runner-runtime-tools-source-"));
+  await mkdir(join(root, "gate-worker"));
+  const sourceRoot = dirname(fileURLToPath(import.meta.url));
+  await Promise.all(runtimeToolSources.map(async ([relativePath, sourcePath]) => {
+    await copyFile(resolve(sourceRoot, sourcePath), join(root, relativePath));
+  }));
+  return root;
+};
+
+const pathWithFailingCommand = async (root: string, command: "cp" | "chmod"): Promise<string> => {
+  const bin = join(root, `${command}-fails`);
+  await mkdir(bin);
+  await writeFile(join(bin, command), `#!/bin/sh\n/bin/${command} "$@"\nexit 73\n`);
+  await chmod(join(bin, command), 0o755);
+  return `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+};
+
 const removeRetainedSessionConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
   const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
   if (retained) await rm(dirname(retained), { recursive: true, force: true });
@@ -409,6 +436,110 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("runtime-tool materialization failure is PROVISION and never reaches preflight or provider start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-runtime-tools-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const configured = codexOnly(join(root, "workspaces"), root, join(root, "codex-must-not-start"));
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    let materializeCalls = 0;
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+      start: async () => { startCalls += 1; throw new Error("provider must not spawn"); },
+    };
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    }, {
+      adapter,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => {
+        materializeCalls += 1;
+        assert.equal(scratch.toolsDir, join(scratch.base, "tools"));
+        throw new Error("release-local runtime tools are absent");
+      },
+    });
+    assert.equal(materializeCalls, 1);
+    assert.equal(preflightCalls, 0);
+    assert.equal(startCalls, 0);
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    assert.match(String(completion.body.failureReason), /release-local runtime tools are absent/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const failureCase of ["collision", "missing source", "wrong source type", "copy failure", "chmod failure"] as const) {
+  test(`a runtime-tool ${failureCase} fails before adapter preflight or provider start`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "runner-runtime-tools-failure-case-"));
+    const sourceRoot = await createRuntimeToolsFixture();
+    try {
+      const remote = await seedRemote(root);
+      const configured = {
+        ...codexOnly(join(root, "workspaces"), root, join(root, "codex-must-not-start")),
+        ...(failureCase === "copy failure" || failureCase === "chmod failure"
+          ? { path: await pathWithFailingCommand(root, failureCase === "copy failure" ? "cp" : "chmod") }
+          : {}),
+      };
+      if (failureCase === "missing source") await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+      if (failureCase === "wrong source type") {
+        await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+        await mkdir(join(sourceRoot, "gate-worker", "lib.sh"));
+      }
+      const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+      setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
+        posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      });
+      let preflightCalls = 0;
+      let startCalls = 0;
+      const adapter: CliAdapter = {
+        ...adapters.CODEX,
+        preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+        start: async () => { startCalls += 1; throw new Error("provider must not spawn"); },
+      };
+      await executeClaim(configured, {
+        ...mechanicalClaim,
+        executionMode: "agent",
+        runner: "CODEX",
+        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+        session: testSession(root),
+      }, {
+        adapter,
+        materializeRuntimeTools: (runnerConfig, scratch) => {
+          if (failureCase === "collision") return mkdir(scratch.toolsDir).then(() =>
+            materializeRuntimeTools(runnerConfig, scratch, { sourceRoot }));
+          return materializeRuntimeTools(runnerConfig, scratch, { sourceRoot });
+        },
+      });
+      assert.equal(preflightCalls, 0);
+      assert.equal(startCalls, 0);
+      const completion = posts.find((post) => post.path.endsWith("/complete"));
+      assert.ok(completion);
+      assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("Codex rejects a run-as config-root symlink in PROVISION without copying host auth", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-config-symlink-"));

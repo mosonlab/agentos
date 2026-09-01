@@ -251,7 +251,7 @@ export const promptHashFor = (prompt: string): string => createHash("sha256").up
 
 const COMMON_LAUNCHER_ENVIRONMENT = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "HOME", "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER",
-  "AGENTOS_RUN_ID", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+  "AGENTOS_RUN_ID", "AGENTOS_TOOLS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 ] as const;
 
 export const launchAdapterArgv = (
