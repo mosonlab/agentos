@@ -5,7 +5,24 @@ open pull request: the operator reviews and merges that pull request by hand.
 It does not provision another workflow, create a Secret, or perform an
 automatic merge.
 
-## Prerequisites
+This is the canonical onboarding page for both tiers. Tier 0 creates a Project
+and opens a pull request. Tier 1 completes the canonical inventory and
+full-tail readiness needed by Direct and Full Assurance workflows.
+
+## Tier 0 checklist
+
+Complete these steps to add a project and open its first pull request:
+
+- [ ] Prepare the API operator credentials, GitHub remote, Git identity, and
+  provider CLIs described below.
+- [ ] Create the Project with `POST /projects`.
+- [ ] Add its repository with `POST /projects/:id/repos` and
+  `grantAgents: true`.
+- [ ] Select `pr-engineer-workflow`, instantiate it for the repository and
+  branch, and start the chain.
+- [ ] Review the resulting pull request and merge it by hand in GitHub.
+
+### Prerequisites
 
 Before calling the API, have all of the following ready:
 
@@ -130,3 +147,125 @@ gh pr list --repo "$GH_REPO" --head "$BRANCH_NAME"
 Review the resulting pull request, its checks, and its diff. Merge it by hand
 in GitHub only after you are satisfied; this runbook does not invoke an
 automatic merge.
+
+## Tier 1 checklist
+
+Complete these steps before starting a Direct or Full Assurance workflow:
+
+- [ ] Run project-scoped canonical installation with
+  `npm run db:sync-canonical-prompts -- --install-full <projectId>` when the
+  Project needs the full post-A1 inventory.
+- [ ] Run project-scoped verification with
+  `npm run db:verify-agent-template -- --project <projectId>`.
+- [ ] Confirm that the Project has an in-Project Repo and that every effective
+  template assignee has an `AgentRepoAccess` grant for that Repo.
+- [ ] Put exactly one target-repository Tier 1 file in the repository:
+  `scripts/merge-gate.sh`.
+- [ ] Provide the required model CLIs for the selected roles and their
+  runner-host authentication, plus an authenticated `gh`.
+- [ ] Provide `GITHUB_READ_TOKEN`, `RUNNER_GATE_SERVER`, and the target
+  repository's test toolchain, with an SSH-reachable gate worker.
+- [ ] Install the private merge-executor GitHub App on the target repository
+  and run its isolated executor service.
+- [ ] Treat Node on the runner and the gate-worker test toolchain as documented
+  prerequisites, not probes; provision them before starting a chain.
+- [ ] Confirm that Regression, not an in-Run agent, executes the gate.
+
+### Canonical synchronization and verification
+
+The files under [`agents/`](../../agents/) are the source of truth for
+canonical Agent and template prompts. Synchronization is per-Project and
+remains one all-or-none transaction:
+
+```sh
+npm run db:sync-canonical-prompts
+```
+
+An ordinary sync visits every Project. It restores prompts and validates
+canonical-named Agents and template rows that a Project already holds. A
+partial inventory is valid outside `agentos-example`; absent canonical Agents
+and templates are left absent. `agentos-example` remains the canonical Project
+and its complete template inventory is restored when a canonical row is
+missing.
+
+`--install-full` fills only missing canonical Agents and templates in the
+addressed Project. An unknown Project id is refused before the transaction;
+the addressed Project must have exactly one Environment, and an archived
+same-name Agent is refused. It never resurrects or overwrites an existing
+object and it creates no Repo, `AgentRepoAccess`, `AgentSecretGrant`, or
+other grant. The ordinary synchronization and the installation share the
+same transaction, so a refusal leaves every Project unchanged. A second
+successful installation is a no-op.
+
+Project-scoped verification checks exactly the canonical Agents and templates
+that are present and ignores absent and noncanonical inventory. With no
+`--project`, verification retains its complete `agentos-example` inventory
+requirement and its special Full Assurance and Direct checks.
+
+### Full-tail readiness — three categories
+
+Full-tail readiness is a contract between the repository, the control plane,
+and operator infrastructure. Keep these three categories separate; all three
+must be satisfied before a Direct or Full Assurance tail can rely on its
+mechanical checks.
+
+#### 1. Repository files (repository contract)
+
+The target repository carries exactly one repository-owned Tier 1 file,
+`scripts/merge-gate.sh`. The runner supplies the Regression verification
+tooling; the target file follows the standalone reference contract below.
+
+#### 2. Control-plane prerequisites
+
+The target Project must have an in-Project Repo. Every effective template
+assignee must have an `AgentRepoAccess` row for that Repo; synchronization
+does not create the Repo or grants for you.
+
+#### 3. Operator infrastructure
+
+The operator supplies the required model CLIs for the selected roles and their
+runner-host authentication, an authenticated `gh`, `GITHUB_READ_TOKEN`, an
+SSH-reachable gate worker selected through `RUNNER_GATE_SERVER`, and the
+target repository's test toolchain.
+The private merge-executor GitHub App installed on the target repository with
+its isolated executor service is required.
+Provider authentication is runner-host infrastructure: it is not an
+`AgentSecretGrant`, and `AgentSecretGrant` is not a full-tail readiness
+prerequisite.
+
+Node on the runner and the gate-worker test toolchain are documented prerequisites, not probes.
+Regression, not an in-Run agent, executes the gate.
+A missing prerequisite stops the chain rather than authorizing a weaker merge.
+
+### Reference merge-gate contract
+
+The target repository's sole Tier 1 file, `scripts/merge-gate.sh`, is a Bash
+implementation of the [standalone reference](../repo-contract/merge-gate.sh).
+Replace only the body of the clearly marked `run_repository_tests`
+repository-specific test-command function with that repository's test command.
+Keep the argument parsing, preconditions, verdicts, and signal handling from
+the reference unchanged. The dispatcher supplies both OIDs, so a target gate
+does not invent or infer its authoritative baseline.
+
+The reference accepts `--expect-head <full-oid>` and `--master <full-oid>`.
+It rejects malformed or incomplete usage with exit status 2 and prints no
+verdict. Before the test command it verifies a clean worktree, that HEAD is
+exactly the expected full OID, and that the stated master exists and is an
+ancestor. It repeats the clean-worktree and exact-HEAD checks after the command
+so a command cannot pass after changing the checkout.
+
+The public, color-insensitive final-line wire format is:
+
+| Result | Final line | Status |
+| --- | --- | ---: |
+| Both OID pins stated and the test command passes | `MERGE GATE: PASS <oid>` | 0 |
+| A command or precondition fails | `MERGE GATE: FAIL (<reason>)` | 1 |
+| A manual pass omits `--master` | `MERGE GATE: NOT AUTHORITATIVE (master not stated)` | 3 |
+| A run is refused inside Anneal | `GATE NOT RUN: refused inside Anneal run <id>` | 76 |
+| SIGINT interrupts the gate | `GATE NOT RUN: <reason>` | 130 |
+| SIGTERM interrupts the gate | `GATE NOT RUN: <reason>` | 143 |
+
+The Anneal-run refusal happens before `run_repository_tests` unless
+`AGENTOS_RUN_SCOPE_BYPASS=regression-verification` is set. A passing manual
+run without `--master` is never authoritative. Every completed run emits the
+corresponding line as its final line; ANSI color does not change its meaning.
