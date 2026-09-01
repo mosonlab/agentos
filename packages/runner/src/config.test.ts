@@ -114,6 +114,16 @@ test("claim load threshold rejects malformed or non-positive overrides", () => {
   }
 });
 
+test("claim load threshold fails loudly when CPU information is unavailable", () => {
+  withClaimMaxLoadAverage(undefined, () => {
+    assert.throws(
+      () => loadRunnerConfig({ cpuCount: 0 }),
+      (error: unknown) => error instanceof Error
+        && error.message === "RUNNER_CLAIM_MAX_LOAD_AVERAGE must be a positive finite number",
+    );
+  });
+});
+
 test("an explicit runner Git identity is accepted only as a complete pair", () => {
   const previousName = process.env.RUNNER_GIT_USER_NAME;
   const previousEmail = process.env.RUNNER_GIT_USER_EMAIL;

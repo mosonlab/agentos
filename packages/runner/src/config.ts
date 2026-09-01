@@ -88,15 +88,16 @@ const optionalSshDestination = (name: string, value: string | undefined): string
   return value;
 };
 
-export const loadRunnerConfig = (): RunnerConfig => {
+export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: number } = {}): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
   const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
   const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
   const home = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty";
   const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
-  const claimMaxLoadAverage = process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE === undefined
-    ? cpus().length * 1.5
-    : positiveFiniteNumber("RUNNER_CLAIM_MAX_LOAD_AVERAGE", process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE);
+  const claimMaxLoadAverage = positiveFiniteNumber(
+    "RUNNER_CLAIM_MAX_LOAD_AVERAGE",
+    process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE ?? String(cpuCount * 1.5),
+  );
   const gitName = process.env.RUNNER_GIT_USER_NAME;
   const gitEmail = process.env.RUNNER_GIT_USER_EMAIL;
   if ((gitName === undefined) !== (gitEmail === undefined)) {

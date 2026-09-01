@@ -102,3 +102,66 @@ test("zero load admits a claim without transition logs", async () => {
   assert.equal(claimCalls, 1);
   assert.deepEqual(logs, []);
 });
+
+test("a reclaim failure is reported without stopping later polls", async () => {
+  let clock = 0;
+  let reclaimCalls = 0;
+  let claimCalls = 0;
+  let stopping = false;
+  const waits: number[] = [];
+  const errors: Array<[string, unknown]> = [];
+  const failure = new Error("reclaim unavailable");
+
+  await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 1 }, {
+    readLoadAverage: () => 0,
+    now: () => clock,
+    reclaim: async () => {
+      reclaimCalls += 1;
+      if (reclaimCalls === 1) throw failure;
+    },
+    claim: async () => {
+      claimCalls += 1;
+      return false;
+    },
+    shouldStop: () => stopping,
+    wait: async (delayMs) => {
+      waits.push(delayMs);
+      clock += 1;
+      if (waits.length === 2) stopping = true;
+    },
+    error: (line, error) => errors.push([line, error]),
+  });
+
+  assert.equal(reclaimCalls, 2);
+  assert.equal(claimCalls, 2);
+  assert.deepEqual(waits, [config.pollIntervalMs, config.pollIntervalMs]);
+  assert.deepEqual(errors, [["Workspace reclaim sweep failed", failure]]);
+});
+
+test("a claim failure is reported without stopping later polls", async () => {
+  let claimCalls = 0;
+  let stopping = false;
+  const waits: number[] = [];
+  const errors: Array<[string, unknown]> = [];
+  const failure = new Error("claim unavailable");
+
+  await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 60_000 }, {
+    readLoadAverage: () => 0,
+    reclaim: async () => undefined,
+    claim: async () => {
+      claimCalls += 1;
+      if (claimCalls === 1) throw failure;
+      return false;
+    },
+    shouldStop: () => stopping,
+    wait: async (delayMs) => {
+      waits.push(delayMs);
+      if (waits.length === 2) stopping = true;
+    },
+    error: (line, error) => errors.push([line, error]),
+  });
+
+  assert.equal(claimCalls, 2);
+  assert.deepEqual(waits, [config.pollIntervalMs, config.pollIntervalMs]);
+  assert.deepEqual(errors, [["Runner poll failed", failure]]);
+});
