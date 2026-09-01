@@ -18,11 +18,11 @@ import {
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 const canonicalRuntimeTools = [
-  ["regression-verification.sh", "../../../scripts/regression-verification.sh"],
-  ["gate-worker/gate-dispatch.sh", "../../../scripts/gate-worker/gate-dispatch.sh"],
-  ["gate-worker/lib.sh", "../../../scripts/gate-worker/lib.sh"],
-  ["gate-worker/mirror-push.sh", "../../../scripts/gate-worker/mirror-push.sh"],
-  ["gate-worker/remote-gate.sh", "../../../scripts/gate-worker/remote-gate.sh"],
+  ["regression-verification.sh", "../runtime-tools/regression-verification.sh"],
+  ["gate-worker/gate-dispatch.sh", "../runtime-tools/gate-worker/gate-dispatch.sh"],
+  ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
+  ["gate-worker/mirror-push.sh", "../runtime-tools/gate-worker/mirror-push.sh"],
+  ["gate-worker/remote-gate.sh", "../runtime-tools/gate-worker/remote-gate.sh"],
 ] as const;
 
 const createRuntimeToolsFixture = async (): Promise<string> => {
@@ -837,15 +837,10 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
     } as unknown as RunnerConfig;
     const scratch = await provisionAgentScratch(config);
     try {
-      // A checkout may contain the canonical copies; the materializer still
-      // writes only into the release-local scratch directory.
+      // The materializer writes only into the release-local scratch directory;
+      // project checkout contents do not participate in this operation.
       const checkout = join(root, "checkout");
       await mkdir(checkout, { recursive: true });
-      for (const [relativePath, sourcePath] of canonicalRuntimeTools) {
-        const target = join(checkout, "scripts", relativePath);
-        await mkdir(dirname(target), { recursive: true });
-        await copyFile(resolve(dirname(fileURLToPath(import.meta.url)), sourcePath), target);
-      }
       await materializeRuntimeTools(config, scratch, { sourceRoot });
 
       assert.equal(scratch.toolsDir, join(scratch.base, "tools"));
@@ -978,11 +973,9 @@ test("runtime-tool materialization never falls back to copies in the project che
     home: root,
   } as unknown as RunnerConfig;
   await mkdir(checkout);
-  for (const [relativePath, sourcePath] of canonicalRuntimeTools) {
-    const target = join(checkout, "scripts", relativePath);
-    await mkdir(dirname(target), { recursive: true });
-    await copyFile(resolve(dirname(fileURLToPath(import.meta.url)), sourcePath), target);
-  }
+  const checkoutDecoy = join(checkout, "runtime-tools", "gate-worker", "lib.sh");
+  await mkdir(dirname(checkoutDecoy), { recursive: true });
+  await writeFile(checkoutDecoy, "checkout decoy must not be used\n");
   const scratch = await provisionAgentScratch(config);
   try {
     await rm(join(sourceRoot, "gate-worker", "lib.sh"));

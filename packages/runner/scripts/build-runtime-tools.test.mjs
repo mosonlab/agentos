@@ -87,20 +87,23 @@ test("buildRuntimeTools refuses a missing or non-regular source before replacing
   const context = fixture(t);
   buildRuntimeTools(context);
   const existing = readFileSync(join(context.outputRoot, "regression-verification.sh"));
-  rmSync(join(context.repositoryRoot, "scripts/regression-verification.sh"));
+  rmSync(join(context.repositoryRoot, "packages/runner/runtime-tools/regression-verification.sh"));
   assert.throws(
     () => buildRuntimeTools(context),
-    /runner-runtime-tools: source:scripts\/regression-verification\.sh-missing/u,
+    /runner-runtime-tools: source:packages\/runner\/runtime-tools\/regression-verification\.sh-missing/u,
   );
   assert.deepEqual(readFileSync(join(context.outputRoot, "regression-verification.sh")), existing);
 
-  writeFileSync(join(context.repositoryRoot, "scripts/regression-verification.sh"), "restored\n");
-  rmSync(join(context.repositoryRoot, "scripts/regression-verification.sh"));
+  writeFileSync(join(context.repositoryRoot, "packages/runner/runtime-tools/regression-verification.sh"), "restored\n");
+  rmSync(join(context.repositoryRoot, "packages/runner/runtime-tools/regression-verification.sh"));
   // A symlink is not a canonical regular source, even when its target exists.
-  nodeFs.symlinkSync(join(context.repositoryRoot, "scripts/gate-worker/lib.sh"), join(context.repositoryRoot, "scripts/regression-verification.sh"));
+  nodeFs.symlinkSync(
+    join(context.repositoryRoot, "packages/runner/runtime-tools/gate-worker/lib.sh"),
+    join(context.repositoryRoot, "packages/runner/runtime-tools/regression-verification.sh"),
+  );
   assert.throws(
     () => buildRuntimeTools(context),
-    /runner-runtime-tools: source:scripts\/regression-verification\.sh-not-a-regular-file/u,
+    /runner-runtime-tools: source:packages\/runner\/runtime-tools\/regression-verification\.sh-not-a-regular-file/u,
   );
 });
 
@@ -131,7 +134,7 @@ test("buildRuntimeTools turns copy and byte-integrity failures into build failur
 
 test("generated scripts retain their source modes while the tree remains regular files", (t) => {
   const context = fixture(t);
-  chmodSync(join(context.repositoryRoot, "scripts/regression-verification.sh"), 0o751);
+  chmodSync(join(context.repositoryRoot, "packages/runner/runtime-tools/regression-verification.sh"), 0o751);
   buildRuntimeTools(context);
   assert.equal(lstatSync(join(context.outputRoot, "regression-verification.sh")).mode & 0o777, 0o751);
   for (const path of inventory(context.outputRoot)) {
