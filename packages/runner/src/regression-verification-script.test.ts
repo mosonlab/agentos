@@ -78,6 +78,10 @@ printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_LEASE_LOG"
 exit "${"$"}{REGRESSION_FIXTURE_LEASE_EXIT:-0}"
 `);
   executable(join(bin, "gate-dispatch"), `#!/bin/sh
+if [ "${"$"}{AGENTOS_RUN_SCOPE_BYPASS:-}" != "regression-verification" ]; then
+  printf 'missing regression scope bypass\n' >&2
+  exit 99
+fi
 printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_GATE_LOG"
 [ -z "${"$"}{REGRESSION_FIXTURE_GATE_NOISE:-}" ] || printf '%s\\n' "$REGRESSION_FIXTURE_GATE_NOISE"
 printf '%s\\n' "${"$"}{REGRESSION_FIXTURE_GATE_PROOF:-MERGE GATE: PASS $1}"
