@@ -267,7 +267,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const templateNames = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
   const runnerResolver = '"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh"';
-  const checkoutResolver = "scripts/regression-verification.sh";
+  const retiredResolver = "fixture/retired-regression-verification.sh";
   const templates = await prisma.taskTemplate.findMany({
     where: { projectId: project.id, name: { in: [...templateNames] } },
     include: { steps: { orderBy: { stepIndex: "asc" } } },
@@ -291,7 +291,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression);
     assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
-    const outgoingPrompt = regression.prompt.replaceAll(runnerResolver, checkoutResolver);
+    const outgoingPrompt = regression.prompt.replaceAll(runnerResolver, retiredResolver);
     assert.doesNotMatch(outgoingPrompt, /AGENTOS_TOOLS/u);
     await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingPrompt } });
 
@@ -346,7 +346,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
     const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(currentRegression);
     assert.equal(currentRegression.prompt.split(runnerResolver).length - 1, 3);
-    assert.doesNotMatch(currentRegression.prompt, /`scripts\/regression-verification\.sh/u);
+    assert.doesNotMatch(currentRegression.prompt, /`fixture\/retired-regression-verification\.sh/u);
 
     const newTask = await prisma.task.create({ data: {
       projectId: project.id,
