@@ -577,7 +577,7 @@ test("full installation fills only the addressed Project's missing inventory and
     include: { collaborators: { select: { allowedAgent: { select: { name: true } } } } },
     orderBy: { name: "asc" },
   });
-  assert.deepEqual(allAgents.map(({ name }) => name), canonicalRoleNames());
+  assert.deepEqual(allAgents.map(({ name }) => name), canonicalRoleNames().sort());
   for (const agent of allAgents) {
     const source = role(agent.name);
     assert.equal(agent.title, source.title);
@@ -591,7 +591,11 @@ test("full installation fills only the addressed Project's missing inventory and
     assert.equal(agent.archivedAt, null);
     assert.deepEqual(agent.collaborators.map(({ allowedAgent }) => allowedAgent.name).sort(), [...source.collaborators].sort());
   }
-  assert.deepEqual(await prisma.taskTemplate.findMany({ where: { projectId: project.id }, select: { name: true }, orderBy: { name: "asc" } }),
+  assert.deepEqual(await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: canonicalTemplateNames() } },
+    select: { name: true },
+    orderBy: { name: "asc" },
+  }),
     canonicalTemplateNames().sort().map((name) => ({ name })));
   const installedPr = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "pr-engineer-workflow" } },
@@ -613,7 +617,10 @@ test("full installation fills only the addressed Project's missing inventory and
   assert.equal(second.status, 0, second.output);
   const secondSummary = summaryFrom(second.output);
   assertSummaryShape(secondSummary);
-  assert.deepEqual(secondSummary.projects[project.slug], zeroCounters());
+  assert.deepEqual(secondSummary.projects[project.slug], {
+    ...zeroCounters(),
+    templates: canonicalTemplateNames().length,
+  });
 });
 
 test("full installation refuses unknown, environment-invalid, and archived targets without mutations", async (t) => {

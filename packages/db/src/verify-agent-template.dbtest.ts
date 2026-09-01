@@ -14,7 +14,11 @@ import { after, before, test } from "node:test";
 import { AssigneeType, CodexServiceTier, PrismaClient, RunnerPreference } from "@prisma/client";
 
 import { loadAgentSources, type RoleSource } from "./agent-sources.js";
-import { applyCanonicalInstallation, planCanonicalInstallation } from "./canonical-template-installation.js";
+import {
+  applyCanonicalInstallation,
+  planCanonicalInstallation,
+  type CanonicalInstallationSources,
+} from "./canonical-template-installation.js";
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { loadAllTemplateStepSources } from "./template-sources.js";
 
@@ -50,6 +54,7 @@ const command = (args: string[]): CommandResult => {
 };
 
 const verify = (projectId?: string): CommandResult => command([
+  "tsx",
   "prisma/verify-agent-template.ts",
   ...(projectId === undefined ? [] : ["--project", projectId]),
 ]);
@@ -76,7 +81,7 @@ type ProjectFixture = {
 before(async () => {
   const migrated = command(["prisma", "migrate", "deploy"]);
   assert.equal(migrated.status, 0, migrated.output);
-  const seeded = command(["prisma/seed.ts"]);
+  const seeded = command(["tsx", "prisma/seed.ts"]);
   assert.equal(seeded.status, 0, seeded.output);
   agentSources = await loadAgentSources();
   templateSources = await loadAllTemplateStepSources();
@@ -140,7 +145,9 @@ const createProject = async (options: {
 
   let templateId: string | null = null;
   if (options.template) {
-    const sources = new Map([[PR_TEMPLATE_NAME, templateSources.get(PR_TEMPLATE_NAME)!]]);
+    const sources: CanonicalInstallationSources = new Map([
+      [PR_TEMPLATE_NAME, templateSources.get(PR_TEMPLATE_NAME)!],
+    ]);
     const plan = planCanonicalInstallation([], sources, [project.id]);
     await prisma.$transaction(async (tx) => {
       await applyCanonicalInstallation(tx, plan, sources);
@@ -432,7 +439,7 @@ test("default verification keeps the complete-inventory requirement and success 
     assert.notEqual(incomplete.status, 0, incomplete.output);
     assert.match(incomplete.output, /active agents differ from canonical contract/u);
   } finally {
-    const seeded = command(["prisma/seed.ts"]);
+    const seeded = command(["tsx", "prisma/seed.ts"]);
     assert.equal(seeded.status, 0, seeded.output);
   }
 });
@@ -457,8 +464,10 @@ test("default verification runs compound and direct special checks", async () =>
     assert.match(refused.output, /compound-engineer-workflow/u);
     assert.match(refused.output, /approval gate/u);
   } finally {
-    const seeded = command(["prisma/seed.ts"]);
-    assert.equal(seeded.status, 0, seeded.output);
+    await prisma.taskTemplateStep.update({
+      where: { id: compoundIntegrator.id },
+      data: { approvalGate: false },
+    });
   }
 
   await prisma.taskTemplateStep.update({ where: { id: directTail.id }, data: { approvalGate: true } });
@@ -468,8 +477,10 @@ test("default verification runs compound and direct special checks", async () =>
     assert.match(refused.output, /direct-engineer-workflow/u);
     assert.match(refused.output, /merge execution|approval gate/u);
   } finally {
-    const seeded = command(["prisma/seed.ts"]);
-    assert.equal(seeded.status, 0, seeded.output);
+    await prisma.taskTemplateStep.update({
+      where: { id: directTail.id },
+      data: { approvalGate: false },
+    });
   }
 });
 

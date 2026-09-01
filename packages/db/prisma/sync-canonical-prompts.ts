@@ -198,13 +198,10 @@ const readCanonicalTemplateRows = async (tx: Prisma.TransactionClient, name: Can
 });
 
 export const parseInstallFullProjectId = (args: readonly string[] = process.argv.slice(2)): string | null => {
-  const optionIndex = args.indexOf("--install-full");
-  if (optionIndex < 0) {
-    if (args.length > 0) throw new Error(`Unknown argument ${args[0]}`);
-    return null;
-  }
-  const projectId = args[optionIndex + 1];
-  if (!projectId || optionIndex + 2 < args.length) {
+  if (args.length === 0) return null;
+  if (args[0] !== "--install-full") throw new Error(`Unknown argument ${args[0]}`);
+  const projectId = args[1];
+  if (args.length !== 2 || !projectId) {
     throw new Error("--install-full requires exactly one Project id");
   }
   return projectId;
@@ -633,14 +630,14 @@ const syncCanonicalTemplates = async (
         if (differences.some((difference) => !adoptedDifferences.has(difference))) {
           throw projectError(
             project,
-            `Template ${templateName} (${template.id}) step ${step.stepIndex} (${persisted.id}) differs from canonical Markdown structure: ${differences.join(", ")}`,
+            `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) differs from canonical Markdown structure: ${differences.join(", ")}`,
           );
         }
         const protectInUse = (): void => {
           if (persisted._count.tasks > 0) {
             throw projectError(
               project,
-              `Template ${templateName} (${template.id}) step ${step.stepIndex} (${persisted.id}) is referenced by instantiated tasks; canonical sync will not mutate it`,
+              `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) is referenced by instantiated tasks; canonical sync will not mutate it`,
             );
           }
         };
@@ -655,7 +652,7 @@ const syncCanonicalTemplates = async (
           if (step.agentName !== null && !assignee) {
             throw projectError(
               project,
-              `Template ${templateName} (${template.id}) step ${step.stepIndex} (${persisted.id}) cannot adopt ${transition!.to}: active target Agent was not found`,
+              `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) cannot adopt ${transition!.to}: active target Agent was not found`,
             );
           }
           await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { assigneeAgentId: assignee?.id ?? null } });
@@ -687,7 +684,7 @@ const syncCanonicalTemplates = async (
         if (persisted._count.tasks > 0 && persisted.prompt !== step.prompt) {
           throw projectError(
             project,
-            `Template ${templateName} (${template.id}) step ${step.stepIndex} (${persisted.id}) is referenced by instantiated tasks; canonical sync will not mutate its prompt`,
+            `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) is referenced by instantiated tasks; canonical sync will not mutate its prompt`,
           );
         }
         if (persisted.prompt !== step.prompt) {
@@ -715,7 +712,7 @@ const migrateRegressionTasks = async (
     if (!target) {
       throw projectError(
         project,
-        `Template ${step.templateName} (${step.templateId}) step ${step.stepIndex} (${step.id}) has no active ${REGRESSION_AGENT_NAME} Agent`,
+        `Template ${step.templateName} (${step.templateId}), ${step.templateName} step ${step.stepIndex} (${step.id}) has no active ${REGRESSION_AGENT_NAME} Agent`,
       );
     }
     const tasks = await tx.task.findMany({

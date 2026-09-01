@@ -148,10 +148,11 @@ const verifyPartialTemplateStep = (
   const differences = templateStepStructureDifferences(step, expected);
   if (step.stepIndex !== expected.stepIndex) differences.unshift("stepIndex");
   if (!isTemplateRunnerInherited(step.runner)) differences.push("runner");
+  if (step.prompt !== expected.prompt) differences.push("prompt");
   if (differences.length > 0) {
     throw new Error(scopedError(
       context,
-      `${stepLabel(template, step)} differs from canonical Markdown structure: ${differences.join(", ")}`,
+      `${templateLabel(template)}, ${stepLabel(template, step)} differs from canonical Markdown structure: ${differences.join(", ")}`,
     ));
   }
 };
@@ -229,7 +230,7 @@ const verifyTemplate = (
     if (unexpected) {
       throw new Error(scopedError(
         context,
-        `${stepLabel(template, unexpected)} has an unexpected stepIndex; canonical indexes are ${[...expectedIndexes].join(", ")}`,
+        `${templateLabel(template)}, ${stepLabel(template, unexpected)} has an unexpected stepIndex; canonical indexes are ${[...expectedIndexes].join(", ")}`,
       ));
     }
   }
