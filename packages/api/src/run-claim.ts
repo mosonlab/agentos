@@ -210,6 +210,8 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         // `executionMode` is computed and where a mis-bound candidate is
         // skipped rather than handed out.
         task: { include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } } },
+        // Forward the persisted repository policy with the complete Repo row;
+        // do not derive or default dependency provisioning during claiming.
         repo: true,
         session: true,
         agent: {

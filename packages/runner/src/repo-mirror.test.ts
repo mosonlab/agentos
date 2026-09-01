@@ -54,7 +54,7 @@ const claimFor = (remote: string, id: string): WorkspaceProvisionClaim => ({
   runner: "CODEX",
   specificationMaterialization: null,
   task: { id: `task-${id}`, chainId: null, chainIndex: null, templateStep: null },
-  repo: { remoteUrl: remote, defaultBranch: "main" },
+  repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
   run: {
     id: `run-${id}`,
     runNumber: 1,

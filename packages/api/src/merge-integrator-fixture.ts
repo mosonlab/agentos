@@ -11,6 +11,7 @@
 
 import {
   AssigneeType,
+  DependencyProvisioning,
   DIRECT_INTEGRATOR_STEP_INDEX,
   DIRECT_INTEGRATOR_TEMPLATE_NAME,
   INTEGRATOR_AGENT_NAME,
@@ -81,7 +82,7 @@ export const seedIntegratorChain = async (
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/widgets.git",
-    mountPath: "/repo", defaultBranch: "master",
+    mountPath: "/repo", defaultBranch: "master", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   for (const holder of [agent, integratorAgent]) {
     await db.agentRepoAccess.create({ data: {

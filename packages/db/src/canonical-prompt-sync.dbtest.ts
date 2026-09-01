@@ -910,6 +910,7 @@ test("sync recreates a missing spec revalidator with read-only repository covera
       name: `canonical-sync-revalidator-${randomBytes(4).toString("hex")}`,
       remoteUrl: "file:///tmp/agentos-canonical-sync-revalidator.git",
       mountPath: "/workspace/canonical-sync-revalidator",
+      dependencyProvisioning: "NONE",
     },
   });
   await prisma.agentRepoAccess.create({

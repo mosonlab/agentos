@@ -3,6 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   auditPostDeliveryDisconnects,
+  DependencyProvisioning,
   formatPostDeliveryDisconnectAudit,
   PrismaClient,
   POST_DELIVERY_DISCONNECT_FIX_MERGED_AT,
@@ -37,6 +38,7 @@ const seedRun = async (label: string, terminalPayload: Record<string, unknown> |
     name: "repo",
     remoteUrl: "https://example.test/repo.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id,

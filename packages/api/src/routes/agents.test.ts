@@ -11,7 +11,11 @@ import {
 } from "@anneal/db";
 
 import { createApp } from "../test-app.js";
-import { RepositoryPreflightError } from "../onboarding-preflight.js";
+import {
+  preflightRepository,
+  RepositoryPreflightError,
+  type RepositoryPreflightCommand,
+} from "../onboarding-preflight.js";
 import { lockedAgent, untouchableDatabase, withTokens } from "./test-support.js";
 
 test("filesystem grant CRUD accepts root/canonical paths and rejects non-canonical paths", async () => {
@@ -467,7 +471,7 @@ test("POST repo validates the raw remote and branch before preflight or database
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const base = { name: "app", defaultBranch: "main" };
+    const base = { name: "app", defaultBranch: "main", dependencyProvisioning: "NONE" };
     for (const [remoteUrl, reason] of [
       [" https://github.com/owner/repo.git", "whitespace"],
       ["https://github.com/owner/repo.git\n", "control-characters"],
@@ -494,9 +498,82 @@ test("POST repo validates the raw remote and branch before preflight or database
   });
 });
 
+test("Repo dependency provisioning is required on POST and exact on invalid PATCH", async () => {
+  await withTokens(async () => {
+    let preflightCalls = 0;
+    const app = createApp(untouchableDatabase(), {
+      repositoryPreflight: async () => { preflightCalls += 1; },
+    });
+    const request = (method: "POST" | "PATCH", path: string, body: Record<string, unknown>) => app.request(path, {
+      method,
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const invalid = {
+      error: "Repository dependency provisioning is invalid",
+      code: "repository-dependency-provisioning-invalid",
+    };
+    for (const body of [
+      { name: "missing", remoteUrl: "https://github.com/owner/repo.git" },
+      { name: "unknown", remoteUrl: "https://github.com/owner/repo.git", dependencyProvisioning: "YARN" },
+    ]) {
+      const response = await request("POST", "/projects/project-1/repos", body);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), invalid);
+    }
+    const patch = await request("PATCH", "/repos/repo-1", { dependencyProvisioning: "YARN" });
+    assert.equal(patch.status, 400);
+    assert.deepEqual(await patch.json(), invalid);
+    assert.equal(preflightCalls, 0);
+  });
+});
+
+test("Repo dependency provisioning round-trips through GET and PATCH", async () => {
+  await withTokens(async () => {
+    let stored: "NONE" | "NPM_CI" = "NONE";
+    const row = () => ({
+      id: "repo-1", projectId: "project-1", credentialSecretId: null, name: "app",
+      remoteUrl: "https://github.com/owner/repo.git", mountPath: "repo", defaultBranch: "main",
+      dependencyProvisioning: stored, createdAt: new Date(0), updatedAt: new Date(0),
+    });
+    const database = {
+      repo: {
+        findMany: async () => [row()],
+        update: async ({ data }: { data: { dependencyProvisioning?: "NONE" | "NPM_CI" } }) => {
+          if (data.dependencyProvisioning !== undefined) stored = data.dependencyProvisioning;
+          return row();
+        },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const headers = { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" };
+    const listed = await app.request("/projects/project-1/repos", { headers });
+    assert.equal(listed.status, 200);
+    assert.equal((await listed.json() as Array<Record<string, unknown>>)[0]?.dependencyProvisioning, "NONE");
+    const patched = await app.request("/repos/repo-1", {
+      method: "PATCH", headers, body: JSON.stringify({ dependencyProvisioning: "NPM_CI" }),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal((await patched.json() as Record<string, unknown>).dependencyProvisioning, "NPM_CI");
+    const omitted = await app.request("/repos/repo-1", {
+      method: "PATCH", headers, body: JSON.stringify({ name: "renamed" }),
+    });
+    assert.equal(omitted.status, 200);
+    assert.equal((await omitted.json() as Record<string, unknown>).dependencyProvisioning, "NPM_CI");
+    const patchedNone = await app.request("/repos/repo-1", {
+      method: "PATCH", headers, body: JSON.stringify({ dependencyProvisioning: "NONE" }),
+    });
+    assert.equal(patchedNone.status, 200);
+    assert.equal((await patchedNone.json() as Record<string, unknown>).dependencyProvisioning, "NONE");
+    const listedAfterPatch = await app.request("/projects/project-1/repos", { headers });
+    assert.equal(listedAfterPatch.status, 200);
+    assert.equal((await listedAfterPatch.json() as Array<Record<string, unknown>>)[0]?.dependencyProvisioning, "NONE");
+  });
+});
+
 test("POST repo preflights the exact remote and defaulted branch before its transaction", async () => {
   await withTokens(async () => {
-    const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string }> = [];
+    const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string; dependencyProvisioning: "NONE" | "NPM_CI" }> = [];
     let transactions = 0;
     const database = {
       $transaction: async (operation: (client: unknown) => Promise<unknown>) => {
@@ -512,7 +589,7 @@ test("POST repo preflights the exact remote and defaulted branch before its tran
     const request = (remoteUrl: string, defaultBranch?: string) => app.request("/projects/project-1/repos", {
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ name: `app-${preflightInputs.length}`, remoteUrl, ...(defaultBranch === undefined ? {} : { defaultBranch }) }),
+      body: JSON.stringify({ name: `app-${preflightInputs.length}`, remoteUrl, dependencyProvisioning: "NONE", ...(defaultBranch === undefined ? {} : { defaultBranch }) }),
     });
     for (const [remoteUrl, defaultBranch] of [
       ["https://github.com/owner/repo.git", "main"],
@@ -524,15 +601,16 @@ test("POST repo preflights the exact remote and defaulted branch before its tran
       const repo = await response.json() as Record<string, unknown>;
       assert.equal(repo.remoteUrl, remoteUrl);
       assert.equal(repo.defaultBranch, defaultBranch);
+      assert.equal(repo.dependencyProvisioning, "NONE");
       assert.equal("grantAgents" in repo, false);
     }
     const defaulted = await request("https://github.com/owner/other.git");
     assert.equal(defaulted.status, 201);
     assert.deepEqual(preflightInputs, [
-      { remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" },
-      { remoteUrl: "git@github.com:owner/repo.git", defaultBranch: "release/v1" },
-      { remoteUrl: "file:///path/to/repo.git", defaultBranch: "main" },
-      { remoteUrl: "https://github.com/owner/other.git", defaultBranch: "main" },
+      { remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main", dependencyProvisioning: "NONE" },
+      { remoteUrl: "git@github.com:owner/repo.git", defaultBranch: "release/v1", dependencyProvisioning: "NONE" },
+      { remoteUrl: "file:///path/to/repo.git", defaultBranch: "main", dependencyProvisioning: "NONE" },
+      { remoteUrl: "https://github.com/owner/other.git", defaultBranch: "main", dependencyProvisioning: "NONE" },
     ]);
     assert.equal(transactions, 4);
   });
@@ -554,6 +632,7 @@ test("POST repo refuses an unavailable credential Secret before preflight", asyn
         name: "app",
         remoteUrl: "https://github.com/owner/repo.git",
         credentialSecretId: "secret-1",
+        dependencyProvisioning: "NONE",
       }),
     });
     assert.equal(response.status, 400);
@@ -582,7 +661,7 @@ test("POST repo maps every preflight failure to the exact refusal and writes not
       const response = await app.request("/projects/project-1/repos", {
         method: "POST",
         headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ name: `app-${reason}`, remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" }),
+        body: JSON.stringify({ name: `app-${reason}`, remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main", dependencyProvisioning: "NONE" }),
       });
       assert.equal(response.status, 422);
       assert.deepEqual(await response.json(), {
@@ -592,6 +671,91 @@ test("POST repo maps every preflight failure to the exact refusal and writes not
       });
     }
     assert.equal(transactions, 0);
+  });
+});
+
+test("POST repo maps a missing NPM_CI lockfile to the exact remedy and writes nothing", async () => {
+  await withTokens(async () => {
+    let transactions = 0;
+    const database = {
+      $transaction: async () => { transactions += 1; throw new Error("transaction should not open"); },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async () => { throw new RepositoryPreflightError("package-lock-missing"); },
+    });
+    const response = await app.request("/projects/project-1/repos", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "app", remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main",
+        dependencyProvisioning: "NPM_CI",
+      }),
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      error: "Repository preflight failed",
+      code: "repository-package-lock-missing",
+      remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
+    });
+    assert.equal(transactions, 0);
+  });
+});
+
+test("POST repo runs successful dependency-policy preflights through to creation", async () => {
+  await withTokens(async () => {
+    const remoteUrl = "https://github.com/owner/repo.git";
+    for (const dependencyProvisioning of ["NONE", "NPM_CI"] as const) {
+      const calls: Array<{ args: string[]; cwd: string }> = [];
+      const run: RepositoryPreflightCommand = async (_executable, args, cwd) => {
+        calls.push({ args, cwd });
+        if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+        if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+        if (args[0] === "ls-tree") {
+          return {
+            code: 0,
+            stdout: dependencyProvisioning === "NPM_CI"
+              ? `100644 blob ${"b".repeat(40)}\tpackage-lock.json\0`
+              : "",
+          };
+        }
+        return { code: 0, stdout: "" };
+      };
+      const created: Array<Record<string, unknown>> = [];
+      const database = {
+        $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
+          repo: { create: async ({ data }: { data: Record<string, unknown> }) => {
+            const row = { id: `repo-${dependencyProvisioning}`, ...data };
+            created.push(row);
+            return row;
+          } },
+        }),
+      } as unknown as PrismaClient;
+      const app = createApp(database, {
+        repositoryPreflight: (input) => preflightRepository(input, run),
+      });
+
+      const response = await app.request("/projects/project-1/repos", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: `app-${dependencyProvisioning}`, remoteUrl, dependencyProvisioning }),
+      });
+
+      assert.equal(response.status, 201);
+      assert.equal((await response.json() as Record<string, unknown>).dependencyProvisioning, dependencyProvisioning);
+      assert.equal(created[0]?.dependencyProvisioning, dependencyProvisioning);
+      assert.deepEqual(calls.map(({ args }) => args[0]), dependencyProvisioning === "NPM_CI"
+        ? ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]
+        : ["config", "config", "ls-remote", "init", "fetch", "push"]);
+      assert.equal(calls.filter(({ args }) => args[0] === "fetch").length, 1);
+      const lockfileProbes = calls.filter(({ args }) => args[0] === "ls-tree");
+      assert.equal(lockfileProbes.length, dependencyProvisioning === "NPM_CI" ? 1 : 0);
+      if (dependencyProvisioning === "NPM_CI") {
+        assert.notEqual(lockfileProbes[0]?.cwd, process.cwd(), "ls-tree must inspect the fetched scratch repository");
+      }
+      const pushes = calls.filter(({ args }) => args[0] === "push");
+      assert.equal(pushes.length, 1);
+      assert.deepEqual(pushes[0]?.args.slice(0, 3), ["push", "--dry-run", remoteUrl]);
+    }
   });
 });
 
@@ -631,12 +795,14 @@ test("POST repo optionally grants every active non-integrator Agent atomically",
         name: "app",
         remoteUrl: "https://github.com/owner/repo.git",
         mountPath: "custom-repo",
+        dependencyProvisioning: "NONE",
         grantAgents: true,
       }),
     });
     assert.equal(response.status, 201);
     const payload = await response.json() as { repo: Record<string, unknown>; grants: Array<Record<string, unknown>> };
     assert.equal(payload.repo.mountPath, "custom-repo");
+    assert.equal(payload.repo.dependencyProvisioning, "NONE");
     assert.deepEqual(payload.grants, createdGrants);
     assert.deepEqual(payload.grants.map(({ agentId, permissions, mountPath }) => ({ agentId, permissions, mountPath })), [
       { agentId: "agent-1", permissions: "GIT_WRITE", mountPath: "custom-repo" },
@@ -662,11 +828,12 @@ test("POST repo without grantAgents retains a bare Repo response and creates no 
       const response = await app.request("/projects/project-1/repos", {
         method: "POST",
         headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ name: `app-${String(grantAgents)}`, remoteUrl: "https://github.com/owner/repo.git", ...(grantAgents === undefined ? {} : { grantAgents }) }),
+        body: JSON.stringify({ name: `app-${String(grantAgents)}`, remoteUrl: "https://github.com/owner/repo.git", dependencyProvisioning: "NONE", ...(grantAgents === undefined ? {} : { grantAgents }) }),
       });
       assert.equal(response.status, 201);
       const repo = await response.json() as Record<string, unknown>;
       assert.equal(repo.id, "repo-1");
+      assert.equal(repo.dependencyProvisioning, "NONE");
       assert.equal("repo" in repo, false);
       assert.equal("grants" in repo, false);
     }
@@ -689,7 +856,7 @@ test("POST repo preserves the duplicate-name refusal and PATCH keeps its trim be
     const duplicate = await app.request("/projects/project-1/repos", {
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "app", remoteUrl: "https://github.com/owner/repo.git" }),
+      body: JSON.stringify({ name: "app", remoteUrl: "https://github.com/owner/repo.git", dependencyProvisioning: "NONE" }),
     });
     assert.equal(duplicate.status, 409);
     assert.deepEqual(await duplicate.json(), { error: "Unique constraint violated" });

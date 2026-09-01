@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  DependencyProvisioning,
   Prisma, PrismaClient, sessionUsageCost,
 } from "@anneal/db";
 
@@ -64,6 +65,7 @@ const seedLegacyRows = async (specs: LegacySpec[]): Promise<{ projectId: string;
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const sessionIds: string[] = [];
 

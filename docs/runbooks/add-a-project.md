@@ -71,7 +71,7 @@ access, and the mechanical integrator Agent is not granted access.
 REPO_BODY=$(jq -n \
   --arg name "$REPO_NAME" \
   --arg remoteUrl "$REPO_REMOTE" \
-  '{"name":$name,"remoteUrl":$remoteUrl,"defaultBranch":"main","grantAgents":true}')
+  '{"name":$name,"remoteUrl":$remoteUrl,"defaultBranch":"main","dependencyProvisioning":"NPM_CI","grantAgents":true}')
 REPO_JSON=$(curl --fail-with-body -sS -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
   -H "Content-Type: application/json" \
@@ -79,6 +79,8 @@ REPO_JSON=$(curl --fail-with-body -sS -X POST "$BASE_URL/projects/$PROJECT_ID/re
 REPO_ID=$(printf '%s' "$REPO_JSON" | jq -r '.repo.id')
 test -n "$REPO_ID" -a "$REPO_ID" != null
 ```
+
+Choose `NPM_CI` only for repositories whose default branch has a root `package-lock.json`; otherwise choose `NONE`.
 
 If the response was not saved, obtain the created Repo id from the Project's
 Repo list:

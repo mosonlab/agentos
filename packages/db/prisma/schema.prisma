@@ -22,6 +22,11 @@ enum RepoPermission {
   GIT_WRITE @map("git-write")
 }
 
+enum DependencyProvisioning {
+  NONE
+  NPM_CI
+}
+
 enum SecretPurpose {
   MCP     @map("mcp")
   REPO    @map("repo")
@@ -379,6 +384,7 @@ model Repo {
   remoteUrl          String
   mountPath          String
   defaultBranch      String            @default("main")
+  dependencyProvisioning DependencyProvisioning
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
   project            Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)

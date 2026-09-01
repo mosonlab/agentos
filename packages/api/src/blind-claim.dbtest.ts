@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient, RunStatus } from "@anneal/db";
+import { DependencyProvisioning, DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient, RunStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -78,6 +78,7 @@ const seedCanonicalTemplate = async (templateName: typeof DIRECT_TEMPLATE_NAME |
     remoteUrl: "https://github.com/acme/blind-claim.git",
     mountPath: "/repo",
     defaultBranch: "main",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const agentIds = [...new Set(template.steps.flatMap((step) => step.assigneeAgentId ? [step.assigneeAgentId] : []))];
   await db.agentRepoAccess.createMany({ data: agentIds.map((agentId) => ({

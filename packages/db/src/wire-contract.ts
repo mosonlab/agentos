@@ -10,6 +10,7 @@
 
 import type {
   CodexServiceTier as PrismaCodexServiceTier,
+  DependencyProvisioning as PrismaDependencyProvisioning,
   FailureClass as PrismaFailureClass,
   GoalStatus as PrismaGoalStatus,
   InboxDeliveryStatus as PrismaInboxDeliveryStatus,
@@ -34,6 +35,7 @@ export type InboxKind = PrismaInboxKind;
 export type InboxDeliveryStatus = PrismaInboxDeliveryStatus;
 export type SecretPurpose = PrismaSecretPurpose;
 export type RepoPermission = PrismaRepoPermission;
+export type DependencyProvisioning = PrismaDependencyProvisioning;
 type NetworkingMode = PrismaNetworkingMode;
 type SkillKind = PrismaSkillKind;
 
@@ -155,6 +157,7 @@ export type Repo<DateTime = string> = {
   remoteUrl: string;
   mountPath: string;
   defaultBranch: string;
+  dependencyProvisioning: DependencyProvisioning;
   createdAt: DateTime;
   updatedAt: DateTime;
 };

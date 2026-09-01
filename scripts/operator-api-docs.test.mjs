@@ -98,6 +98,9 @@ test("POST /projects documents bootstrap rows, canonical roles/template, and slu
 
 test("POST /projects/:projectId/repos documents onboarding, preflight, grants, and response shapes", () => {
   const { text } = repositoryRouteSection("POST", "/projects/:projectId/repos");
+  assert.match(text, /Required JSON fields:[\s\S]*`name`[\s\S]*`remoteUrl`[\s\S]*`dependencyProvisioning`/u);
+  assert.match(text, /`dependencyProvisioning` must be exactly `NONE` or `NPM_CI`/u);
+  assert.match(text, /\{\s*"error": "Repository dependency provisioning is invalid",\s*"code": "repository-dependency-provisioning-invalid"\s*\}/u);
   assert.match(text, /raw submitted string before any trim or\s*transform/iu);
   for (const accepted of ["HTTPS without userinfo", "scp-like SSH", "local `file:///` remotes"]) {
     assert.match(text, new RegExp(accepted.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
@@ -120,6 +123,10 @@ test("POST /projects/:projectId/repos documents onboarding, preflight, grants, a
   assert.match(text, /\{\s*"error": "Repository default branch is invalid",\s*"code": "repository-default-branch-invalid"\s*\}/u);
   assert.match(text, /\{\s*"error": "Unique constraint violated"\s*\}/u);
   assert.match(text, /\{\s*"error": "Repository preflight failed",\s*"code": "repository-preflight-failed",\s*"reason": "<existing failure reason>"\s*\}/u);
+  assert.match(text, /`NPM_CI`[\s\S]*regular root `package-lock\.json`[\s\S]*exact fetched default\s*branch commit/iu);
+  assert.match(text, /\{\s*"error": "Repository preflight failed",\s*"code": "repository-package-lock-missing",\s*"remedy": "Commit package-lock\.json at the repository root on the default branch, or choose dependencyProvisioning NONE\."\s*\}/u);
+  assert.match(text, /POST-only preflight refusal/iu);
+  assert.match(text, /For `NONE`[\s\S]*dependency-specific\s*check is omitted/iu);
   for (const reason of [
     "git-unavailable",
     "git-identity-missing",
@@ -139,6 +146,14 @@ test("POST /projects/:projectId/repos documents onboarding, preflight, grants, a
   assert.match(text, /201 Created[\s\S]*created Repo row itself[\s\S]*creates no grants/u);
   assert.match(text, /201 Created[\s\S]*\{ "repo": <created Repo row>, "grants": <created access rows> \}/u);
   assert.match(text, /rolls back the Repo and all grants/iu);
+});
+
+test("PATCH /repos/:repoId documents the optional dependency policy and exact refusal", () => {
+  const { text } = repositoryRouteSection("PATCH", "/repos/:repoId");
+  assert.match(text, /`dependencyProvisioning` is optional and patchable/iu);
+  assert.match(text, /exactly `NONE` or `NPM_CI`/u);
+  assert.match(text, /omission preserves the stored value/iu);
+  assert.match(text, /\{\s*"error": "Repository dependency provisioning is invalid",\s*"code": "repository-dependency-provisioning-invalid"\s*\}/u);
 });
 
 test("Inbox list and summary document shared Project-plus-global scope", () => {
@@ -161,6 +176,8 @@ test("the add-project runbook and public links cover A1 pull-request onboarding"
   assert.match(addProjectRunbook, /`pr-engineer-workflow`/u);
   assert.match(addProjectRunbook, /POST "\$BASE_URL\/projects\/\$PROJECT_ID\/repos"/u);
   assert.match(addProjectRunbook, /"grantAgents":true/u);
+  assert.match(addProjectRunbook, /"dependencyProvisioning":"NPM_CI"/u);
+  assert.match(addProjectRunbook, /Choose `NPM_CI` only for repositories whose default branch has a root\s*`package-lock\.json`; otherwise choose `NONE`\./u);
   assert.match(addProjectRunbook, /GET "\$BASE_URL\/projects\/\$PROJECT_ID\/repos"/u);
   assert.match(addProjectRunbook, /GET "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates"/u);
   assert.match(addProjectRunbook, /POST[\s\S]*\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/instantiate/u);

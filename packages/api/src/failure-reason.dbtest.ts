@@ -15,7 +15,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, enqueueTaskRun, PrismaClient, TaskStatus } from "@anneal/db";
 
 import { hashToken } from "./auth.js";
 import { FAILURE_REASON_LIMIT } from "./failure-reason.js";
@@ -62,7 +62,7 @@ const seedTask = async () => {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/widgets.git",
-    mountPath: "/repo", defaultBranch: "master",
+    mountPath: "/repo", defaultBranch: "master", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",

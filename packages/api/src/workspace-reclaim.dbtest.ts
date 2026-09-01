@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   lockChainRows,
   PrismaClient,
   RunStatus,
@@ -131,6 +132,7 @@ const seedRun = async (options: {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Task", description: "task", assigneeAgentId: agent.id, repoId: repo.id, status: "DOING",

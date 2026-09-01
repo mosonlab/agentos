@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AssigneeType,
+  DependencyProvisioning,
   DIRECT_TEMPLATE_NAME,
   RunStatus,
   RunnerKind,
@@ -62,6 +63,7 @@ const seedCanonicalTemplate = async () => {
       name: "authoring-repo",
       remoteUrl: "https://example.test/authoring.git",
       mountPath: "/repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   await db.agentRepoAccess.createMany({
