@@ -223,7 +223,7 @@ const requiredOutputClaim = (remoteUrl: string): ClaimedTask => {
     ...base,
     task: {
       ...base.task,
-      templateStep: { name: "Implementation", outputKind: "implementation" },
+      templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true },
     },
   };
 };
@@ -234,7 +234,7 @@ const resultOutputClaim = (remoteUrl: string): ClaimedTask => {
     ...base,
     task: {
       ...base.task,
-      templateStep: { name: "Implementation", outputKind: "result" },
+      templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true },
     },
   };
 };
@@ -248,7 +248,7 @@ const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
       ...base.task,
       chainId: "chain-1",
       chainIndex: 5,
-      templateStep: { name: "Regression verification", outputKind: REGRESSION_OUTPUT_KIND },
+      templateStep: { name: "Regression verification", outputKind: REGRESSION_OUTPUT_KIND, provisionDependencies: true },
     },
   };
 };

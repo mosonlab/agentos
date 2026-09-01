@@ -61,7 +61,7 @@ const mechanicalClaim: ClaimedTask = {
     maxDurationMin: 30,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 3,
-    templateStep: { name: "Merge execution" },
+    templateStep: { name: "Merge execution", provisionDependencies: true },
   },
   agent: {
     id: "agent-merge",
@@ -215,6 +215,163 @@ for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as 
   });
 }
 
+const malformedTemplateProvisionDependenciesClaim = (value: unknown): ClaimedTask => {
+  const templateStep = { ...mechanicalClaim.task.templateStep! } as Record<string, unknown>;
+  if (value === undefined) delete templateStep.provisionDependencies;
+  else templateStep.provisionDependencies = value;
+  return {
+    ...mechanicalClaim,
+    executionMode: "agent",
+    task: { ...mechanicalClaim.task, templateStep },
+  } as unknown as ClaimedTask;
+};
+
+for (const [label, value] of [["missing", undefined], ["unknown", "yes"]] as const) {
+  test(`a ${label} template-step dependency decision is rejected before workspace or adapter work`, async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-template-step-protocol-${label}-`));
+    const controlPlane = createControlPlaneDouble();
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        preflightCalls += 1;
+        throw new Error("adapter preflight must not be reached for a malformed template step");
+      },
+      start: async () => {
+        startCalls += 1;
+        throw new Error("provider start must not be reached for a malformed template step");
+      },
+    };
+
+    try {
+      await executeClaimProduction(
+        config(workspaceRoot),
+        malformedTemplateProvisionDependenciesClaim(value),
+        { adapter, controlPlane: controlPlane.controlPlane },
+      );
+      const completion = controlPlane.completions.at(-1);
+      assert.ok(completion, "malformed claims must complete the run");
+      assert.equal(completion.failureClass, "PROTOCOL_ERROR");
+      assert.equal(completion.retryable, false);
+      assert.equal(completion.failureReason, "template-step-provision-dependencies-missing");
+      assert.equal(completion.terminationReason, "template-step-provision-dependencies-missing");
+      assert.equal(completion.cleanupStatus, "SUCCEEDED");
+      assert.equal(completion.workspaceRetained, false);
+      assert.equal(preflightCalls, 0);
+      assert.equal(startCalls, 0);
+      assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a review step records the dependency skip before fake adapter preflight and launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-review-dependency-activity-"));
+  try {
+    const remote = await seedDependencyRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      dependencyCacheRoot: join(root, "dependency-cache"),
+    };
+    const controlPlane = createControlPlaneDouble();
+    const timeline: string[] = [];
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        timeline.push("preflight");
+        return { ok: true, cliVersion: "test", authMode: "test", capabilities: {} };
+      },
+      start: async () => {
+        timeline.push("provider");
+        const now = new Date();
+        return {
+          runId: "run-review",
+          runner: "CLAUDE",
+          child: null as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          providerState: null,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            terminalEventSeen: true,
+            terminalSuccess: true,
+            terminationReason: null,
+            finalOutput: null,
+            providerError: null,
+            stdout: "",
+            stderr: "",
+          }),
+        };
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    const claim = {
+      ...mechanicalClaim,
+      executionMode: "agent" as const,
+      runner: "CLAUDE" as const,
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      task: {
+        ...mechanicalClaim.task,
+        templateStep: { name: "Code review", provisionDependencies: false },
+      },
+      run: {
+        ...mechanicalClaim.run,
+        requiresCommit: false,
+        opensPullRequest: false,
+        targetBranch: "master",
+        maxRunsPerTask: 3,
+      },
+      session: testSession(root),
+    } satisfies ClaimedTask;
+
+    const originalAppendActivity = controlPlane.controlPlane.appendActivity;
+    controlPlane.controlPlane.appendActivity = async (...args) => {
+      timeline.push("activity");
+      await originalAppendActivity(...args);
+    };
+    await executeClaimProduction(configured, claim, {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => undefined,
+      provisionSessionConfig: async () => undefined,
+    });
+
+    assert.deepEqual(controlPlane.activities.map(({ body }) => body), [
+      "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
+    ]);
+    assert.ok(timeline.indexOf("activity") < timeline.indexOf("preflight"));
+    assert.ok(timeline.indexOf("preflight") < timeline.indexOf("provider"));
+    assert.equal(controlPlane.preflightReports.length, 0, "claim preflight is the adapter seam, not startup reporting");
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    await assert.rejects(access(join(root, "dependency-cache")), { code: "ENOENT" });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an ordinary claim is not short-circuited by the mechanical refusal", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-agent-"));
   const calls: string[] = [];
@@ -365,6 +522,34 @@ const seedRemote = async (root: string): Promise<string> => {
   git(seed, "commit", "-m", "base");
   git(seed, "remote", "add", "origin", remote);
   git(seed, "push", "-u", "origin", "master");
+  return remote;
+};
+
+const seedDependencyRemote = async (root: string): Promise<string> => {
+  const remote = await seedRemote(root);
+  const seed = join(root, "seed");
+  await mkdir(join(seed, "packages/tool"), { recursive: true });
+  await writeFile(join(seed, "package.json"), `${JSON.stringify({
+    name: "runner-dependency-fixture",
+    version: "1.0.0",
+    private: true,
+    workspaces: ["packages/*"],
+    dependencies: { "fixture-tool": "*" },
+  })}\n`);
+  await writeFile(join(seed, "packages/tool/package.json"), `${JSON.stringify({
+    name: "fixture-tool",
+    version: "1.0.0",
+    main: "index.cjs",
+  })}\n`);
+  await writeFile(join(seed, "packages/tool/index.cjs"), "module.exports = 'dependency fixture';\n");
+  execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], {
+    cwd: seed,
+    env: process.env,
+    stdio: "ignore",
+  });
+  git(seed, "add", ".");
+  git(seed, "commit", "-m", "dependency fixture");
+  git(seed, "push", "origin", "master");
   return remote;
 };
 

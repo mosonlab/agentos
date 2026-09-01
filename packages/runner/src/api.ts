@@ -80,7 +80,12 @@ export type ClaimedTask = {
     maxDurationMin: number;
     stallTimeoutMin: number;
     maxSessionsPerTask: number;
-    templateStep: { name: string; outputKind?: string } | null;
+    /**
+     * The persisted dependency-provisioning decision for this template step.
+     * It is required for every non-null template step so a runner cannot
+     * silently reinterpret a missing field as either policy.
+     */
+    templateStep: { name: string; outputKind?: string; provisionDependencies: boolean } | null;
   };
   agent: {
     id: string;

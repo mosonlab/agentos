@@ -186,7 +186,7 @@ test("delivery opens one pull request titled after the chain, not the step", asy
   };
   const chained = {
     ...claim,
-    task: { ...claim.task, name: "lines subcommand: Write spec", templateStep: { name: "Write spec" } },
+    task: { ...claim.task, name: "lines subcommand: Write spec", templateStep: { name: "Write spec", provisionDependencies: true } },
   } satisfies DeliveryClaim;
   const result = await deliverWorkspace(config, chained, workspace, { command: fake });
   assert.equal(result.pullRequestNumber, 8);
