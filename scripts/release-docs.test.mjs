@@ -20,6 +20,24 @@ const CURRENT_CLI_SURFACE_DOCS = [
   "docs/release/v0.2.0-release-notes.md",
 ];
 
+const CANONICAL_SYNC_DOCS = ["agents/README.md", "docs/install.md"];
+const CANONICAL_SYNC_COMMANDS = [
+  "db:sync-canonical-prompts",
+  "db:verify-agent-template",
+  "--install-full",
+];
+const FULL_TAIL_READINESS_CATEGORIES = [
+  "Repository files",
+  "Control-plane prerequisites",
+  "Operator infrastructure",
+];
+const FULL_TAIL_REPOSITORY_FILES = [
+  "scripts/merge-gate.sh",
+  "scripts/regression-verification.sh",
+  "scripts/gate-worker/gate-dispatch.sh",
+  "scripts/gate-worker/lib.sh",
+];
+
 test("published docs do not advertise or require the retired repository CLI", () => {
   for (const path of CURRENT_CLI_SURFACE_DOCS) {
     const text = readFileSync(path, "utf8");
@@ -63,6 +81,32 @@ test("published docs describe the executable existing-mode consumer truthfully",
     /STOP release-migrate arguments: existing-mode-requires---backup-bundle/u,
   );
   assert.match(migrationGuide, /does not ship the\n> backup producer/u);
+});
+
+test("canonical prompt docs describe project-scoped sync, verification, and full-tail readiness", () => {
+  for (const path of CANONICAL_SYNC_DOCS) {
+    const text = readFileSync(path, "utf8");
+    for (const command of CANONICAL_SYNC_COMMANDS) {
+      assert.ok(text.includes(command), `${path}: ${command}`);
+    }
+    assert.match(text, /partial (?:canonical )?inventory/u, path);
+    for (const category of FULL_TAIL_READINESS_CATEGORIES) {
+      assert.ok(text.includes(category), `${path}: ${category}`);
+    }
+    for (const repositoryFile of FULL_TAIL_REPOSITORY_FILES) {
+      assert.ok(text.includes(`\`${repositoryFile}\``), `${path}: ${repositoryFile}`);
+    }
+    assert.match(text, /in-Project Repo/u, path);
+    assert.match(text, /AgentRepoAccess[\s\S]*every\s+effective\s+template\s+assignee|every\s+effective\s+template\s+assignee[\s\S]*AgentRepoAccess/iu, path);
+    assert.match(text, /required model CLIs for the selected roles/u, path);
+    assert.match(text, /authenticated `gh`/u, path);
+    assert.match(text, /GITHUB_READ_TOKEN/u, path);
+    assert.match(text, /RUNNER_GATE_SERVER/u, path);
+    assert.match(text, /private merge-executor GitHub App installed on the target repository/u, path);
+    assert.match(text, /isolated executor service/u, path);
+    assert.match(text, /Provider authentication is runner-host\s+infrastructure/u, path);
+    assert.match(text, /AgentSecretGrant[\s\S]*not\s+(?:required|a\s+full-tail\s+readiness\s+prerequisite)/iu, path);
+  }
 });
 
 test("the documented no-bundle invocation stops at the argument boundary", () => {
