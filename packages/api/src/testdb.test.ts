@@ -25,7 +25,7 @@ test("DB-HARNESS-GUARD refuses to load without an explicit test database URL", (
   delete environment.TEST_DATABASE_URL;
   const imported = spawnSync(
     process.execPath,
-    ["--import", "tsx", "--input-type=module", "-e", `await import(${JSON.stringify(new URL("./testdb.ts", import.meta.url).href)})`],
+    ["--conditions=development", "--import", "tsx", "--input-type=module", "-e", `await import(${JSON.stringify(new URL("./testdb.ts", import.meta.url).href)})`],
     { encoding: "utf8", env: environment },
   );
   assert.notEqual(imported.status, 0);

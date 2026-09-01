@@ -21,6 +21,7 @@ test("the package publishes chain-order as an isolated subpath", () => {
   };
   assert.deepEqual(packageJson.exports["./chain-order"], {
     types: "./src/chain-order.ts",
+    development: "./src/chain-order.ts",
     import: "./dist/chain-order.js",
   });
 });

@@ -413,10 +413,13 @@ test("RP-OWN-SOURCE-ARGV source entrypoints carry exactly one development condit
   // Keep this audit coupled to the source children below. A future child that
   // reaches process.execPath directly must opt into the same canonical argv.
   const source = await readFile(new URL("./control-plane-ownership.test.ts", import.meta.url), "utf8");
-  const processSpawnCall = ["spawn", "(process", ".execPath", ","].join("");
-  assert.doesNotMatch(
-    source,
-    new RegExp(`${processSpawnCall}\\s*(?!spawnedSourceEntrypointArgv)`, "u"),
+  const sourceChildSpawns = source.match(/spawn\(process\.execPath,/gu) ?? [];
+  const canonicalSourceChildSpawns = source.match(
+    /spawn\(process\.execPath,\s*spawnedSourceEntrypointArgv\(/gu,
+  ) ?? [];
+  assert.equal(
+    canonicalSourceChildSpawns.length,
+    sourceChildSpawns.length,
     "every source child spawn must use spawnedSourceEntrypointArgv",
   );
 });
