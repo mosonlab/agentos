@@ -450,7 +450,7 @@ const mcpDeliveredDisconnectAgent = [
   "esac",
   "cat > /dev/null",
   ...committedFixtureChange,
-  `${JSON.stringify(process.execPath)} --import ${JSON.stringify(tsxModule)} --input-type=module -e ${JSON.stringify([
+  `${JSON.stringify(process.execPath)} --conditions=development --import ${JSON.stringify(tsxModule)} --input-type=module -e ${JSON.stringify([
     `import { invokeTool, readCredentials } from ${JSON.stringify(mcpServerModule)};`,
     'await invokeTool(readCredentials(process.env), "task_output", { kind: "result", body: "delivered" });',
   ].join(" "))}`,

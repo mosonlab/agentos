@@ -530,24 +530,27 @@ test("all workspace proof manifests are wrapped exactly once without changing co
   assert.equal(wrappedCount, 24);
 });
 
-test("Runner child fixtures remain audited as workspace-package-free", () => {
+test("Runner child fixtures keep their audited development-condition counts", () => {
   const audits = [
     {
       path: "packages/runner/src/regression-verification-script.test.ts",
       execPathReferences: 1,
       workspacePackageReferences: 0,
+      developmentConditions: 0,
       childMarker: "REGRESSION_FIXTURE_NODE: process.execPath",
     },
     {
       path: "packages/runner/src/adapters.test.ts",
       execPathReferences: 7,
       workspacePackageReferences: 0,
+      developmentConditions: 0,
       childMarker: 'runAsPrefix: [process.execPath, "-e", stubScript]',
     },
     {
       path: "packages/runner/src/run-output.test.ts",
       execPathReferences: 1,
       workspacePackageReferences: 1,
+      developmentConditions: 1,
       childMarker: "pathToFileURL(fileURLToPath(new URL(\"./mcp-server.ts\", import.meta.url))).href",
     },
   ];
@@ -565,6 +568,10 @@ test("Runner child fixtures remain audited as workspace-package-free", () => {
       `${audit.path} changed workspace-package imports; source children need the development condition`,
     );
     assert.match(source, new RegExp(audit.childMarker.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
-    assert.doesNotMatch(source, /--conditions=development/u, `${audit.path} child semantics changed`);
+    assert.equal(
+      source.match(/--conditions=development/gu)?.length ?? 0,
+      audit.developmentConditions,
+      `${audit.path} changed the audited child condition count`,
+    );
   }
 });

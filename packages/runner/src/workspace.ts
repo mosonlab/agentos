@@ -173,8 +173,16 @@ export type AgentScratch = {
   configRoot: string;
 };
 
-/** The immutable tool bundle shipped beside the compiled runner entrypoint. */
-export const runtimeToolsSourceRoot = fileURLToPath(new URL("../dist/runtime-tools", import.meta.url));
+/**
+ * Source-mode tests materialize the canonical repository scripts directly;
+ * the compiled runner continues to use the immutable bundle shipped beside
+ * its entrypoint.
+ */
+export const runtimeToolsSourceRoot = fileURLToPath(
+  import.meta.url.endsWith("/src/workspace.ts")
+    ? new URL("../../../scripts", import.meta.url)
+    : new URL("./runtime-tools", import.meta.url),
+);
 
 const runtimeToolsMaterializationScript = String.raw`
 set -eu

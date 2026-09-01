@@ -11,7 +11,7 @@ import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import { runCommand } from "./exec.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
-  workspaceEnvironment, writeSessionCredentials,
+  runtimeToolsSourceRoot, workspaceEnvironment, writeSessionCredentials,
   type WorkspaceCommandExecutor, type WorkspaceProvisionClaim,
 } from "./workspace.js";
 
@@ -24,6 +24,14 @@ const canonicalRuntimeTools = [
   ["gate-worker/mirror-push.sh", "../../../scripts/gate-worker/mirror-push.sh"],
   ["gate-worker/remote-gate.sh", "../../../scripts/gate-worker/remote-gate.sh"],
 ] as const;
+
+test("source execution materializes canonical runtime tools without runner dist", async () => {
+  const sourceRoot = dirname(fileURLToPath(import.meta.url));
+  assert.equal(runtimeToolsSourceRoot, resolve(sourceRoot, "../../../scripts"));
+  for (const [relativePath] of canonicalRuntimeTools) {
+    assert.equal((await stat(join(runtimeToolsSourceRoot, relativePath))).isFile(), true, relativePath);
+  }
+});
 
 const createRuntimeToolsFixture = async (): Promise<string> => {
   const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-source-"));
