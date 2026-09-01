@@ -1,9 +1,8 @@
-import { join } from "node:path";
-
 import { stepRole } from "@anneal/db";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
+import { hostProofSlotDirectory } from "./host-proof-slots.js";
 import { manifestLines, toolsFor, type SessionToolTransport } from "./session-tool-contract.js";
 import type { AgentScratch } from "./workspace.js";
 import { claudeDeclaration, claudePlatformSettingsPath } from "./adapters/claude.js";
@@ -151,7 +150,7 @@ export const buildChildEnvironment = (
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
   return {
     ...taskSecrets,
-    AGENTOS_HOST_PROOF_SLOT_DIR: join(config.workspaceRoot, ".host-proof-slots"),
+    AGENTOS_HOST_PROOF_SLOT_DIR: hostProofSlotDirectory(config),
     AGENTOS_HOST_PROOF_SLOTS: String(config.hostProofSlots),
     ...workspaceEnvironment(config),
     AGENTOS_API_URL: config.apiUrl,

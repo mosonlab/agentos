@@ -147,6 +147,38 @@ test("host and exact Regression bypass exec the child without touching a missing
   assert.equal(existsSync(missing), false);
 });
 
+test("host and exact Regression fast paths execute only builtins before exec", async () => {
+  const missing = join(testRoot, "must-not-be-probed");
+  const traceFastPath = async (environment) => {
+    const child = spawn("bash", ["-x", wrapper, "build", "@anneal/test", "--", process.execPath, "-e", "process.exit(0)"], {
+      cwd: repositoryRoot,
+      env: cleanEnvironment({
+        AGENTOS_HOST_PROOF_SLOT_DIR: missing,
+        AGENTOS_HOST_PROOF_SLOTS: "not-a-count",
+        ...environment,
+      }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let trace = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { trace += chunk; });
+    const result = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (status, signal) => resolve({ status, signal }));
+    });
+    assert.deepEqual(result, { status: 0, signal: null });
+    assert.equal(trace.includes(missing), false, "the fast path inspected the sentinel slot path");
+    assert.match(trace, /^\+ \[\[ .* \]\]\n(?:\+ \[\[ .* \]\]\n)?\+ host_proof_slot_exec_child .*\n\+ shift 3\n\+ exec /u);
+    assert.equal(existsSync(missing), false);
+  };
+
+  await traceFastPath({});
+  await traceFastPath({
+    AGENTOS_RUN_ID: "run-bypassed-trace",
+    AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
+  });
+});
+
 test("a Run with absent, empty, or wrong bypass does not skip admission", async () => {
   const missing = join(testRoot, "ordinary-run-must-not-create");
   const marker = join(testRoot, "ordinary-run.marker");
@@ -163,9 +195,29 @@ test("a Run with absent, empty, or wrong bypass does not skip admission", async 
     }).promise;
     assert.notEqual(result.status, 0, `bypass ${String(bypass)} unexpectedly ran`);
     assert.equal(result.stdout, "");
+    assert.equal(
+      result.stderr,
+      `host-proof-slot: test for workspace @anneal/test in Run run-not-bypassed cannot admit: slot directory ${missing} is not a non-symlink directory\n`,
+    );
     assert.equal(existsSync(marker), false);
     assert.equal(existsSync(missing), false);
   }
+});
+
+test("an ordinary Run rejects a slot count above the runner maximum", async () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const result = await spawnWrapper({
+    slotDirectory,
+    slotCount: 1025,
+    runId: "run-too-many-slots",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  }).promise;
+  assert.equal(result.status, 64);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr,
+    "host-proof-slot: test for workspace @anneal/test in Run run-too-many-slots cannot admit: AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than 1024\n",
+  );
 });
 
 test("the acquired slot spans the child and preserves every child status, including 75", async () => {
@@ -180,6 +232,47 @@ test("the acquired slot spans the child and preserves every child status, includ
     assert.equal(result.status, status);
     assert.equal(result.signal, null);
   }
+});
+
+test("a signal-terminated child terminates the wrapper by the same signal and releases the slot", async () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const result = await spawnWrapper({
+    slotDirectory,
+    slotCount: 1,
+    runId: "run-signal",
+    command: ["/bin/sh", "-c", "kill -TERM $$"],
+  }).promise;
+  assert.equal(result.status, null);
+  assert.equal(result.signal, "SIGTERM");
+
+  const successor = await spawnWrapper({
+    slotDirectory,
+    slotCount: 1,
+    runId: "run-after-signal",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  }).promise;
+  assert.equal(successor.status, 0);
+});
+
+test("a background grandchild cannot inherit and pin the acquired slot", async () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const orphaning = await spawnWrapper({
+    slotDirectory,
+    slotCount: 1,
+    runId: "run-orphaning",
+    command: ["/bin/sh", "-c", "/bin/sleep 2 </dev/null >/dev/null 2>&1 &"],
+  }).promise;
+  assert.equal(orphaning.status, 0);
+
+  const startedAt = Date.now();
+  const successor = await spawnWrapper({
+    slotDirectory,
+    slotCount: 1,
+    runId: "run-after-orphan",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  }).promise;
+  assert.equal(successor.status, 0);
+  assert.ok(Date.now() - startedAt < 1_000, "an orphaned descendant retained the slot descriptor");
 });
 
 test("N+1 Runs share N slots while retaining each command's exit status", async () => {
@@ -260,6 +353,44 @@ test("a source-only clock and wait seam reaches the 1,200-second timeout without
 
   process.kill(-holder.child.pid, "SIGTERM");
   await holder.promise;
+});
+
+test("the source-only clock seam enforces the timeout while scanning slots", async () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const childMarker = join(testRoot, "inner-timeout-child");
+  const sourceHarness = [
+    '. "$1"',
+    "fake_calls=0",
+    "host_proof_slot_set_now() { fake_calls=$((fake_calls + 1)); if (( fake_calls >= 3 )); then HOST_PROOF_SLOT_NOW=1200; else HOST_PROOF_SLOT_NOW=0; fi; }",
+    'host_proof_slot_main test @anneal/inner-timeout -- "$2" "$3" "$4" "$5"',
+  ].join("; ");
+  const timeout = spawn("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper, process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", childMarker], {
+    cwd: repositoryRoot,
+    env: cleanEnvironment({
+      AGENTOS_RUN_ID: "run-inner-timeout",
+      AGENTOS_HOST_PROOF_SLOT_DIR: slotDirectory,
+      AGENTOS_HOST_PROOF_SLOTS: "1",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  timeout.stdout.setEncoding("utf8");
+  timeout.stderr.setEncoding("utf8");
+  timeout.stdout.on("data", (chunk) => { stdout += chunk; });
+  timeout.stderr.on("data", (chunk) => { stderr += chunk; });
+  const result = await new Promise((resolve, reject) => {
+    timeout.once("error", reject);
+    timeout.once("close", (status, signal) => resolve({ status, signal }));
+  });
+
+  assert.deepEqual(result, { status: 75, signal: null });
+  assert.equal(stdout, "");
+  assert.equal(
+    stderr,
+    `host-proof-slot: test for workspace @anneal/inner-timeout in Run run-inner-timeout timed out after 1200s waiting in ${slotDirectory}\n`,
+  );
+  assert.equal(existsSync(childMarker), false);
 });
 
 test("a killed holder releases its descriptor, while a live holder is never reclaimed", async () => {

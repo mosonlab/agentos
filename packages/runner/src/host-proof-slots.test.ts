@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmod, chown, lstat, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,15 @@ import test from "node:test";
 import { hostProofSlotDirectory, prepareHostProofSlots } from "./host-proof-slots.js";
 
 const mode = (value: number): number => value & 0o7777;
+type SimulatedPrincipal = { uid: number; gid: number };
+
+const openAsPrincipal = async (path: string, principal: SimulatedPrincipal) => {
+  const info = await lstat(path);
+  const permissions = mode(info.mode);
+  const shift = principal.uid === info.uid ? 6 : principal.gid === info.gid ? 3 : 0;
+  assert.equal((permissions >> shift) & 0o6, 0o6, `principal ${principal.uid}:${principal.gid} cannot open ${path} read/write`);
+  return open(path, "r+");
+};
 const mkdirOwned = async (path: string): Promise<void> => {
   await mkdir(path, { mode: 0o755 });
   await chmod(path, 0o755);
@@ -39,14 +49,53 @@ test("host proof slot startup preparation is concurrent and idempotent", async (
       assert.equal(mode(info.mode) & 0o006, 0o006);
     }
 
-    // Separate run-as principals are simulated by independent clients: neither
-    // owns the shared inode, and both need read/write opens before lockf can
-    // coordinate them. Exact world permissions above are the cross-UID part.
+    // Model two distinct run-as identities which own neither the daemon inode
+    // nor its group. The permission model authorizes both before the test uses
+    // independent open-file descriptions to prove lock coordination.
     const sharedSlot = join(directory, "slot-1.lock");
-    const clients = await Promise.all([open(sharedSlot, "r+"), open(sharedSlot, "r+")]);
-    await Promise.all(clients.map(async (client) => client.close()));
+    const principals = [
+      { uid: directoryInfo.uid + 10_001, gid: directoryInfo.gid + 20_001 },
+      { uid: directoryInfo.uid + 10_002, gid: directoryInfo.gid + 20_002 },
+    ];
+    const clients = await Promise.all(principals.map(async (principal) => openAsPrincipal(sharedSlot, principal)));
+    try {
+      const stdioFor = (fd: number): Array<"ignore" | number> =>
+        ["ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", fd];
+      assert.equal(spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[0]!.fd) }).status, 0);
+      assert.equal(spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 75);
+      await clients[0]!.close();
+      assert.equal(spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 0);
+    } finally {
+      await Promise.all(clients.map(async (client) => client.close().catch(() => undefined)));
+    }
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("host proof slot startup creates a previously unprovisioned workspace root", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "host-proof-slots-parent-"));
+  const workspaceRoot = join(parent, "not-created-yet");
+  try {
+    await prepareHostProofSlots({ workspaceRoot, hostProofSlots: 1 });
+    const directory = await lstat(hostProofSlotDirectory({ workspaceRoot }));
+    assert.equal(directory.isDirectory(), true);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("host proof slot startup rejects a count above the supported maximum before creating files", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "host-proof-slots-bound-"));
+  const workspaceRoot = join(parent, "not-created");
+  try {
+    await assert.rejects(
+      prepareHostProofSlots({ workspaceRoot, hostProofSlots: 1025 }),
+      /AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than 1024/u,
+    );
+    await assert.rejects(lstat(workspaceRoot));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
   }
 });
 

@@ -31,9 +31,9 @@ host_proof_slot_wait() {
 }
 
 host_proof_slot_invalid() {
-  # Setup failures are deliberately non-zero and otherwise quiet.  The only
-  # wrapper diagnostic promised by the contract is the timeout line below;
-  # lockf and command failures retain their own status and output.
+  local reason="$1"
+  printf 'host-proof-slot: %s for workspace %s in Run %s cannot admit: %s\n' \
+    "${script_name:-}" "${workspace_name:-}" "${AGENTOS_RUN_ID:-}" "$reason" >&2
   return 64
 }
 
@@ -45,7 +45,8 @@ host_proof_slot_try() {
   # Read-only opening is intentional: it cannot create a missing file.  The
   # daemon creates all persistent files before any Run can reach this code.
   # The descriptor remains open in this shell after lockf exits, which keeps
-  # the kernel lock held while the complete child command runs.
+  # the kernel lock held while the complete child command runs. It is closed in
+  # the child so a descendant cannot outlive the wrapper and pin the slot.
   if ! exec 9<"$slot_file"; then
     return 74
   fi
@@ -58,10 +59,30 @@ host_proof_slot_try() {
   fi
 
   HOST_PROOF_SLOT_ACQUIRED=1
-  "$@"
+  "$@" 9<&-
   local child_status=$?
   exec 9<&-
+  # Bash represents a signal-terminated foreground command as 128+signal. The
+  # wrapper has already released the slot, so re-raise that signal here rather
+  # than turning it into an ordinary numeric exit.
+  if (( child_status > 128 && child_status <= 192 )); then
+    kill "-$((child_status - 128))" "$$"
+  fi
   return "$child_status"
+}
+
+host_proof_slot_check_deadline() {
+  host_proof_slot_set_now
+  local now_status=$?
+  if (( now_status != 0 )); then
+    return "$now_status"
+  fi
+  if (( HOST_PROOF_SLOT_NOW - start_seconds >= 1200 )); then
+    printf 'host-proof-slot: %s for workspace %s in Run %s timed out after 1200s waiting in %s\n' \
+      "$script_name" "$workspace_name" "$AGENTOS_RUN_ID" "$slot_directory" >&2
+    return 75
+  fi
+  return 0
 }
 
 host_proof_slot_main() {
@@ -74,15 +95,19 @@ host_proof_slot_main() {
   # only reached for an ordinary Run; host and exact Regression-bypass calls
   # have already exec'd their child above.
   if (( $# < 4 )) || [[ "$3" != "--" || -z "$script_name" || -z "$workspace_name" || -z "${4:-}" ]]; then
-    host_proof_slot_invalid
+    host_proof_slot_invalid "expected <script> <workspace> -- <command> [args...]"
     return $?
   fi
-  if [[ -z "$slot_directory" || -z "$slot_count_raw" ]]; then
-    host_proof_slot_invalid
+  if [[ -z "$slot_directory" ]]; then
+    host_proof_slot_invalid "AGENTOS_HOST_PROOF_SLOT_DIR is required"
+    return $?
+  fi
+  if [[ -z "$slot_count_raw" ]]; then
+    host_proof_slot_invalid "AGENTOS_HOST_PROOF_SLOTS is required"
     return $?
   fi
   if [[ ! "$slot_count_raw" =~ ^[0-9]+$ ]]; then
-    host_proof_slot_invalid
+    host_proof_slot_invalid "AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than 1024"
     return $?
   fi
 
@@ -93,19 +118,21 @@ host_proof_slot_main() {
   while [[ "$slot_count" == 0* && ${#slot_count} -gt 1 ]]; do
     slot_count="${slot_count#0}"
   done
-  if [[ "$slot_count" == "0" || ${#slot_count} -gt 16 ]] || ! (( 10#$slot_count > 0 )); then
-    host_proof_slot_invalid
-    return $?
-  fi
-  # Match the runner's Number.isSafeInteger boundary so an injected unsafe
-  # count cannot turn the retry loop into an unbounded arithmetic walk.
-  if (( 10#$slot_count > 9007199254740991 )); then
-    host_proof_slot_invalid
+  if [[ "$slot_count" == "0" || ${#slot_count} -gt 4 ]] || ! (( 10#$slot_count > 0 && 10#$slot_count <= 1024 )); then
+    host_proof_slot_invalid "AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than 1024"
     return $?
   fi
 
-  if [[ ! -d "$slot_directory" || -L "$slot_directory" || ! -x /usr/bin/lockf || ! -x /bin/sleep ]]; then
-    host_proof_slot_invalid
+  if [[ ! -d "$slot_directory" || -L "$slot_directory" ]]; then
+    host_proof_slot_invalid "slot directory $slot_directory is not a non-symlink directory"
+    return $?
+  fi
+  if [[ ! -x /usr/bin/lockf ]]; then
+    host_proof_slot_invalid "/usr/bin/lockf is not executable"
+    return $?
+  fi
+  if [[ ! -x /bin/sleep ]]; then
+    host_proof_slot_invalid "/bin/sleep is not executable"
     return $?
   fi
 
@@ -114,7 +141,7 @@ host_proof_slot_main() {
   while (( slot_number <= 10#$slot_count )); do
     slot_file="${slot_directory}/slot-${slot_number}.lock"
     if [[ ! -f "$slot_file" || -L "$slot_file" ]]; then
-      host_proof_slot_invalid
+      host_proof_slot_invalid "slot file $slot_file is not a non-symlink regular file"
       return $?
     fi
     slot_number=$((slot_number + 1))
@@ -124,7 +151,6 @@ host_proof_slot_main() {
   local command_status
   local now_status
   local start_seconds
-  local elapsed_seconds
   host_proof_slot_set_now
   now_status=$?
   if (( now_status != 0 )); then
@@ -133,33 +159,13 @@ host_proof_slot_main() {
   start_seconds="$HOST_PROOF_SLOT_NOW"
 
   while :; do
-    host_proof_slot_set_now
-    now_status=$?
-    if (( now_status != 0 )); then
-      return "$now_status"
-    fi
-    elapsed_seconds=$((HOST_PROOF_SLOT_NOW - start_seconds))
-    if (( elapsed_seconds >= 1200 )); then
-      printf 'host-proof-slot: %s for workspace %s in Run %s timed out after 1200s waiting in %s\n' \
-        "$script_name" "$workspace_name" "$AGENTOS_RUN_ID" "$slot_directory" >&2
-      return 75
-    fi
+    host_proof_slot_check_deadline || return $?
 
     slot_number=1
     while (( slot_number <= 10#$slot_count )); do
       # Keep even a large scan inside the same bound; nonblocking acquisition
       # is fast, but elapsed time is authoritative rather than iteration count.
-      host_proof_slot_set_now
-      now_status=$?
-      if (( now_status != 0 )); then
-        return "$now_status"
-      fi
-      elapsed_seconds=$((HOST_PROOF_SLOT_NOW - start_seconds))
-      if (( elapsed_seconds >= 1200 )); then
-        printf 'host-proof-slot: %s for workspace %s in Run %s timed out after 1200s waiting in %s\n' \
-          "$script_name" "$workspace_name" "$AGENTOS_RUN_ID" "$slot_directory" >&2
-        return 75
-      fi
+      host_proof_slot_check_deadline || return $?
       slot_file="${slot_directory}/slot-${slot_number}.lock"
       host_proof_slot_try "$slot_file" "$@"
       command_status=$?

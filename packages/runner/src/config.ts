@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RUNNER_DEFINITIONS, RUNNER_KINDS } from "./adapters.js";
+import { MAX_HOST_PROOF_SLOTS } from "./host-proof-slots.js";
 import { runnerProxyEnvironment } from "./adapters/environment.js";
 import { requireLocalApiDestination } from "./local-origin.js";
 
@@ -70,6 +71,17 @@ const positiveInteger = (name: string, value: string): number => {
   return parsed;
 };
 
+const positiveIntegerAtMost = (name: string, value: string, maximum: number): number => {
+  let parsed: number;
+  try {
+    parsed = positiveInteger(name, value);
+  } catch {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
+  if (parsed > maximum) throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  return parsed;
+};
+
 const optionalSshDestination = (name: string, value: string | undefined): string | undefined => {
   if (value === undefined) return undefined;
   if (!/^[A-Za-z0-9._@-]+$/u.test(value) || value.startsWith("-")) {
@@ -109,7 +121,9 @@ export const loadRunnerConfig = (): RunnerConfig => {
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,
-    hostProofSlots: positiveInteger("AGENTOS_HOST_PROOF_SLOTS", process.env.AGENTOS_HOST_PROOF_SLOTS ?? "3"),
+    hostProofSlots: positiveIntegerAtMost(
+      "AGENTOS_HOST_PROOF_SLOTS", process.env.AGENTOS_HOST_PROOF_SLOTS ?? "3", MAX_HOST_PROOF_SLOTS,
+    ),
     dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
     // One bare mirror per remote. Provisioning clones every workspace out of it
     // and only ever fetches incrementally from GitHub; see repo-mirror.ts for

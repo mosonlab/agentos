@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
 
-const SLOT_DIRECTORY_NAME = ".host-proof-slots";
+export const HOST_PROOF_SLOT_DIRECTORY_NAME = ".host-proof-slots";
+export const MAX_HOST_PROOF_SLOTS = 1024;
 const DIRECTORY_MODE = 0o755;
 const SLOT_MODE = 0o666;
 
@@ -12,7 +13,7 @@ type HostProofSlotConfig = Pick<RunnerConfig, "workspaceRoot" | "hostProofSlots"
 type Owner = { uid: number; gid: number };
 
 export const hostProofSlotDirectory = (config: Pick<RunnerConfig, "workspaceRoot">): string =>
-  join(config.workspaceRoot, SLOT_DIRECTORY_NAME);
+  join(config.workspaceRoot, HOST_PROOF_SLOT_DIRECTORY_NAME);
 
 const filesystemMode = (value: number): number => value & 0o7777;
 const octal = (value: number): string => filesystemMode(value).toString(8).padStart(4, "0");
@@ -108,6 +109,10 @@ const ensureSlotFile = async (directory: string, path: string, owner: Owner): Pr
 
 /** Prepare the daemon-owned, host-shared files before the runner begins polling. */
 export const prepareHostProofSlots = async (config: HostProofSlotConfig): Promise<void> => {
+  if (!Number.isSafeInteger(config.hostProofSlots) || config.hostProofSlots < 1 || config.hostProofSlots > MAX_HOST_PROOF_SLOTS) {
+    throw new Error(`AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than ${MAX_HOST_PROOF_SLOTS}`);
+  }
+  await mkdir(config.workspaceRoot, { recursive: true, mode: 0o750 });
   const directory = hostProofSlotDirectory(config);
   const owner = daemonOwner();
   await ensureDirectory(directory, owner);

@@ -17,6 +17,7 @@ import { CODEX_STARTER_MODEL, codexDeclaration, parseCodexEvent, parseCodexTrans
 import { parsePiTranscript, piDeclaration } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
+import { hostProofSlotDirectory } from "./host-proof-slots.js";
 import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
 
 const claim: ClaimedTask = {
@@ -434,9 +435,9 @@ test("host proof slot environment is runner-owned and survives each run-as adapt
       scratch,
       "/work",
     );
-    assert.equal(env.AGENTOS_HOST_PROOF_SLOT_DIR, join(workspaceRoot, ".host-proof-slots"));
+    assert.equal(env.AGENTOS_HOST_PROOF_SLOT_DIR, hostProofSlotDirectory({ workspaceRoot }));
     assert.equal(env.AGENTOS_HOST_PROOF_SLOTS, String(hostProofSlots));
-    assert.notEqual(env.AGENTOS_HOST_PROOF_SLOT_DIR, join(scratch.workspaceRoot, ".host-proof-slots"));
+    assert.notEqual(env.AGENTOS_HOST_PROOF_SLOT_DIR, hostProofSlotDirectory({ workspaceRoot: scratch.workspaceRoot }));
 
     const launch = launchArgv(
       {
@@ -447,7 +448,7 @@ test("host proof slot environment is runner-owned and survives each run-as adapt
       [],
       env,
     );
-    assert.ok(launch.args.includes(`AGENTOS_HOST_PROOF_SLOT_DIR=${join(workspaceRoot, ".host-proof-slots")}`));
+    assert.ok(launch.args.includes(`AGENTOS_HOST_PROOF_SLOT_DIR=${hostProofSlotDirectory({ workspaceRoot })}`));
     assert.ok(launch.args.includes(`AGENTOS_HOST_PROOF_SLOTS=${hostProofSlots}`));
   }
 });
@@ -1283,7 +1284,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
         assert.equal(
           report.hostProofSlotDir,
-          join(config.workspaceRoot, ".host-proof-slots"),
+          hostProofSlotDirectory(config),
           `${runner} ${mode} lost AGENTOS_HOST_PROOF_SLOT_DIR across the launcher`,
         );
         assert.equal(report.hostProofSlots, "3", `${runner} ${mode} lost AGENTOS_HOST_PROOF_SLOTS across the launcher`);

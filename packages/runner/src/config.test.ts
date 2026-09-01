@@ -40,14 +40,14 @@ test("host proof slots default to three and accept strict positive integer overr
     delete process.env.AGENTOS_HOST_PROOF_SLOTS;
     assert.equal(loadRunnerConfig().hostProofSlots, 3);
 
-    for (const [raw, expected] of [["1", 1], ["7", 7], ["9007199254740991", Number.MAX_SAFE_INTEGER]] as const) {
+    for (const [raw, expected] of [["1", 1], ["7", 7], ["1024", 1024]] as const) {
       process.env.AGENTOS_HOST_PROOF_SLOTS = raw;
       assert.equal(loadRunnerConfig().hostProofSlots, expected);
     }
 
-    for (const raw of ["", "0", "-1", "1.5", "1slot", " 3", "3 ", "9007199254740992"]) {
+    for (const raw of ["", "0", "-1", "1.5", "1slot", " 3", "3 ", "1025", "9007199254740991", "9007199254740992"]) {
       process.env.AGENTOS_HOST_PROOF_SLOTS = raw;
-      assert.throws(loadRunnerConfig, /AGENTOS_HOST_PROOF_SLOTS must be a positive integer/u);
+      assert.throws(loadRunnerConfig, /AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than 1024/u);
     }
   } finally {
     if (previous === undefined) delete process.env.AGENTOS_HOST_PROOF_SLOTS;
