@@ -117,9 +117,15 @@ test("Codex implementation steps receive the fixed native Luna child capability"
     outputKind: "implementation",
     taskTemplate: { name: "direct-engineer-workflow" },
   };
+  const pullRequestWorkflow = {
+    stepIndex: 1,
+    outputKind: "implementation",
+    taskTemplate: { name: "pr-engineer-workflow" },
+  };
   const expected = { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 };
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, compound), expected);
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, direct), expected);
+  assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, pullRequestWorkflow), null);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CLAUDE, direct), null);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, null), null);
 });
