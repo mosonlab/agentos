@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const FIRST_PARTY = "@anneal/";
+const ROOT_BUILD_SCOPE_GUARD = "bash scripts/run-scope-guard.sh build";
 
 // The root build script is the authority on scope. Anything in it that is not a
 // plain workspace build is refused rather than skipped: a build step this
@@ -24,7 +25,12 @@ const FIRST_PARTY = "@anneal/";
 export const workspacesInRootBuild = (manifest) => {
   const script = manifest.scripts?.build;
   if (typeof script !== "string") throw new Error("the root package.json has no build script");
-  return script.split("&&").map((part) => {
+  const parts = script.split("&&").map((part) => part.trim());
+  if (parts.shift() !== ROOT_BUILD_SCOPE_GUARD) {
+    throw new Error(`the root build script must begin with ${ROOT_BUILD_SCOPE_GUARD}`);
+  }
+  if (parts.length === 0) throw new Error("the root build script has no workspace build steps");
+  return parts.map((part) => {
     const match = /^npm run build -w (\S+)$/.exec(part.trim());
     if (!match) throw new Error(`the root build script has a step that is not a workspace build: ${part.trim()}`);
     return match[1];

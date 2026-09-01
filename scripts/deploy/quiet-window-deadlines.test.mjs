@@ -222,7 +222,7 @@ test("watchdog expiry during active migration retains the barrier", async () => 
       const controller = new AbortController();
       const failure = new DeployFailure(BARRIER_TIMEOUT_REASON, "fixture-watchdog");
       const watchdog = await createBarrierWatchdog({
-        timeoutMs: 20,
+        timeoutMs: 500,
         escalationPath,
         escalationRecord: { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions },
         onTimeout: () => controller.abort(),

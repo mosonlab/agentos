@@ -10,8 +10,8 @@
 // of the one it declares — which is how that suite once blocked for the
 // dispatcher's full hour instead of failing. The host's Git identity was
 // already neutralised for the same reason; behaviour belongs on the same list.
-// The dispatcher's own namespace is stripped by prefix so a variable added to
-// it later cannot reintroduce the leak.
+// The gate, dispatcher, and Anneal Run namespaces are stripped by prefix so a
+// variable added to any of them later cannot reintroduce the leak.
 //
 // This was 26 identical lines in gate-worker.test.mjs and gate-dispatch.test.mjs.
 // Three commits edited them by hand — 1a855ae, 4087264, d360238 — and 4087264
@@ -19,7 +19,7 @@
 // other file until the commit after it. That is what this module is for: not
 // that the list appeared twice, but that the reason did.
 
-export const GATE_ENV_PREFIXES = ["AGENTOS_GATE_", "GATE_DISPATCH_"];
+export const GATE_ENV_PREFIXES = ["AGENTOS_GATE_", "AGENTOS_RUN_", "GATE_DISPATCH_"];
 
 // run-gate.sh's two are not prefixed but are read the same way: GATE_HOME
 // relocates the whole gate directory a fixture built for itself — at the real
