@@ -169,7 +169,12 @@ test("claim query filters archived agents before take so active work cannot star
         chainId: archivedAt ? null : "chain-1", chainIndex: archivedAt ? null : 1,
         templateStep: null,
       },
-      repo: { id: "repo-1" },
+      // The claim must preserve the operator's persisted provisioning policy;
+      // it is part of the full Repo row returned by `repo: true` in claimRun.
+      repo: {
+        id: "repo-1",
+        dependencyProvisioning: "NPM_CI",
+      },
       agent: {
         id: archivedAt ? "agent-archived" : "agent-active",
         archivedAt,
@@ -238,11 +243,15 @@ test("claim query filters archived agents before take so active work cannot star
       body: JSON.stringify({ runnerId: "runner-1", leaseSeconds: 60 }),
     });
     assert.equal(response.status, 200);
-    const claim = await response.json() as { priorOutputs: Array<{ body: string }> };
+    const claim = await response.json() as {
+      priorOutputs: Array<{ body: string }>;
+      repo: { dependencyProvisioning: string };
+    };
     assert.ok(claimQuery);
     assert.ok(claimQuery.includes('agent."archivedAt" IS NULL'));
     assert.ok(claimQuery.indexOf('agent."archivedAt" IS NULL') < claimQuery.indexOf("LIMIT 20"));
     assert.equal(claimedId, "active");
+    assert.equal(claim.repo.dependencyProvisioning, "NPM_CI");
     assert.equal(claim.priorOutputs[0]?.body, completePriorOutput);
   });
 });

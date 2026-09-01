@@ -591,10 +591,17 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
 ### POST `/projects/:projectId/repos`
 
 - Required path parameter: `projectId`.
-- Required JSON fields: `name`, `remoteUrl`.
+- Required JSON fields: `name`, `remoteUrl`, and `dependencyProvisioning`.
 - Optional JSON fields: `mountPath` (default `repo`), `defaultBranch`
   (default `main`), `credentialSecretId` (default `null`), and `grantAgents`
   (default `false`).
+- `dependencyProvisioning` must be exactly `NONE` or `NPM_CI`; it declares
+  whether the runner provisions the repository's Node dependencies. Missing or
+  unknown values return `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
 - `remoteUrl` is validated as the raw submitted string before any trim or
   transform. The onboarding remote policy accepts HTTPS without userinfo,
   `ssh://` and scp-like SSH remotes with no account or the `git` account, and
@@ -621,8 +628,9 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
   or invokes repository preflight. A duplicate `(projectId, name)` returns
   `409 Conflict` with exactly `{ "error": "Unique constraint violated" }`.
 - After validation and before the database transaction opens, the route runs
-  repository preflight against `{ remoteUrl, defaultBranch }`. The preflight
-  uses the API host's ambient Git identity and credentials for its identity,
+  repository preflight against
+  `{ remoteUrl, defaultBranch, dependencyProvisioning }`. The preflight uses
+  the API host's ambient Git identity and credentials for its identity,
   remote/default-branch, fetch, and dry-run-push checks; it never receives,
   reads, or decrypts `credentialSecretId` (that field's existing Secret
   existence/enabled validation is unchanged). A preflight refusal returns
@@ -634,8 +642,18 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
 
   The possible reasons are `git-unavailable`, `git-identity-missing`,
   `remote-unreachable`, `default-branch-missing`, `push-not-authorized`, and
-  `command-timeout`. Other failures use the existing error path. Preflight is
-  never skipped as a success fallback.
+  `command-timeout`. When `dependencyProvisioning` is `NPM_CI`, preflight also
+  requires a regular root `package-lock.json` in the exact fetched default
+  branch commit. A missing or non-regular lockfile returns `422 Unprocessable
+  Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-package-lock-missing", "remedy": "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE." }
+  ```
+
+  This is a POST-only preflight refusal. For `NONE`, this dependency-specific
+  check is omitted; all other preflight checks still apply. Other failures use
+  the existing error path. Preflight is never skipped as a success fallback.
 - With `grantAgents: false` or when omitted, a successful request returns
   `201 Created` with the created Repo row itself (the existing response
   shape), and creates no grants. With `grantAgents: true`, the same transaction
@@ -648,14 +666,21 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git"}'
+  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git","dependencyProvisioning":"NPM_CI"}'
 ```
 
 ### PATCH `/repos/:repoId`
 
 - Required path parameter: `repoId`.
 - Required JSON: at least one of `name`, `remoteUrl`, `mountPath`,
-  `defaultBranch`, `credentialSecretId`.
+  `defaultBranch`, `credentialSecretId`, or `dependencyProvisioning`.
+- `dependencyProvisioning` is optional and patchable. When supplied, it must
+  be exactly `NONE` or `NPM_CI`; omission preserves the stored value. An
+  unknown value returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
 
 ```sh
 curl -X PATCH "$BASE_URL/repos/$REPO_ID" \

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach } from "node:test";
 
 import {
+  DependencyProvisioning,
   DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
   INTEGRATOR_TEMPLATE_NAME,
@@ -139,6 +140,7 @@ const createParallelReviewHarness = ({
         remoteUrl: "https://github.com/example/parallel-review.git",
         mountPath: "/repo",
         defaultBranch: "main",
+        dependencyProvisioning: DependencyProvisioning.NONE,
       },
     });
     const agents = await getDb().agent.findMany({

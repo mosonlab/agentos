@@ -9,6 +9,7 @@ import {
   CHAIN_AUTO_RESUME_KIND,
   MAX_AUTOMATIC_SUCCESSOR_RESUMES,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  DependencyProvisioning,
   Prisma,
   PrismaClient,
 } from "@anneal/db";
@@ -29,7 +30,7 @@ const seedExecutableChain = async () => {
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   await db.agentRepoAccess.create({ data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
   const chainId = `chain-${Date.now()}`;
   const predecessor = await db.task.create({ data: {
@@ -116,6 +117,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     name: "repo",
     remoteUrl: "https://example.test/repo.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.createMany({ data: [senior, executioner].map((agent) => ({
     projectId: project.id,
@@ -1182,7 +1184,7 @@ const seedTemplateChain = async (label: string, stepCount = 3, autoStart = true)
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   await db.agentRepoAccess.create({ data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
   const template = await db.taskTemplate.create({ data: {
     projectId: project.id, name: `${label}-template`, description: "t", variables: [],

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient, RunStatus, SessionExecutionStatus, TaskStatus } from "@anneal/db";
 
 import { suspendForInbox } from "./inbox.js";
 import type { ReleaseMergeLease } from "./merge-lease.js";
@@ -63,7 +63,7 @@ const seed = async (status: RunStatus, leaseExpiresAt = new Date(Date.now() + 60
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/repo.git",
-    mountPath: "/repo", defaultBranch: "main",
+    mountPath: "/repo", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const successor = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, name: "Successor", description: "must stay stopped",

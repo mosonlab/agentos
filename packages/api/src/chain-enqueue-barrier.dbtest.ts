@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   enqueueTaskRun,
   PrismaClient,
 } from "@anneal/db";
@@ -33,6 +34,7 @@ const seedExecutor = async () => {
     name: "repo",
     remoteUrl: "https://example.test/repo.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   return { project, agent, repo };
 };

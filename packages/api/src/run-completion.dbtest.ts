@@ -3,6 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   CleanupStatus,
+  DependencyProvisioning,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   Prisma,
@@ -45,7 +46,7 @@ const seed = async (status: RunStatus = RunStatus.RUNNING) => {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/repo.git",
-    mountPath: "/repo", defaultBranch: "main",
+    mountPath: "/repo", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, name: "Completing", description: "work",
@@ -338,6 +339,7 @@ test("a resolved integrator stop race rolls back the whole predecessor completio
     remoteUrl: "https://github.com/acme/repo.git",
     mountPath: "/repo",
     defaultBranch: "main",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const template = await db.taskTemplate.create({ data: {
     projectId: project.id,
@@ -431,7 +433,7 @@ test("a resolved integrator stop race rolls back the whole predecessor completio
       outcome: "stopped",
       condition: "base-drift",
       evidence: "base advanced",
-      sourceRunId: null,
+      sourceRunId: run.id,
     },
   } });
 

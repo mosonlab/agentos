@@ -3,7 +3,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, RunnerKind, RunnerPreference, RunStatus, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, enqueueTaskRun, PrismaClient, RunnerKind, RunnerPreference, RunStatus, TaskStatus } from "@anneal/db";
 
 import {
   projectRunnerBackend,
@@ -61,6 +61,7 @@ const seedQueuedTask = async (runnerPreference: RunnerPreference) => {
       remoteUrl: "https://github.com/acme/widgets.git",
       mountPath: "/repo",
       defaultBranch: "main",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   await db.agentRepoAccess.create({

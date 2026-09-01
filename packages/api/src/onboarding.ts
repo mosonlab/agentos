@@ -29,6 +29,7 @@
  * not exist, so this module cannot produce one.
  */
 import {
+  DependencyProvisioning,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -415,6 +416,7 @@ export const createStarterInstallation = async (
           // shape depending on a caller that reached this function directly.
           mountPath: STARTER_MOUNT_PATH,
           credentialSecretId: null,
+          dependencyProvisioning: DependencyProvisioning.NONE,
         },
         select: { id: true, name: true, defaultBranch: true, mountPath: true },
       });

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { FAILURE_ENVELOPE_VERSION, type FailureEnvelope, PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, FAILURE_ENVELOPE_VERSION, type FailureEnvelope, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -41,6 +41,7 @@ const seedRunningRun = async () => {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Rate limit the inbox poller", description: "task", assigneeAgentId: agent.id,

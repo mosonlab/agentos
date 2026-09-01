@@ -86,7 +86,13 @@ const claim = (
     rolePrompt: "implement",
     disabledTools: [],
   },
-  repo: { id: "repo-provenance", remoteUrl, defaultBranch: "main", mountPath: "repo" },
+  repo: {
+    id: "repo-provenance",
+    remoteUrl,
+    defaultBranch: "main",
+    mountPath: "repo",
+    dependencyProvisioning: "NPM_CI",
+  },
   run: {
     id: runId,
     runNumber: 1,

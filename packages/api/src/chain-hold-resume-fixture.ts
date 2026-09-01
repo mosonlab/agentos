@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   PrismaClient,
   RunStatus,
   SessionExecutionStatus,
@@ -57,6 +58,7 @@ export const seedBasicChain = async (
     name: `hold-resume-repo-${suffix}`,
     remoteUrl: "https://example.test/hold-resume.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

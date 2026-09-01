@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  DependencyProvisioning,
   PrismaClient,
   runBackfillSessionCacheUsageCli,
   type SessionCacheBackfillDatabase,
@@ -32,6 +33,7 @@ const seedSession = async (label: string, sessionId?: string) => {
     name: "repo",
     remoteUrl: "https://example.test/repo.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id,

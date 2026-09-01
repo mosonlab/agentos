@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AssigneeType,
+  DependencyProvisioning,
   DIRECT_TEMPLATE_NAME,
   legacyTemplateName,
   Prisma,
@@ -60,6 +61,7 @@ const seedTemplate = async (label: string, name = "source-template") => {
       name: "repo",
       remoteUrl: "https://example.test/repo.git",
       mountPath: "/repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   const secret = await db.secret.create({

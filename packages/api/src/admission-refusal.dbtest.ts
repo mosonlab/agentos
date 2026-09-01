@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { ChainControlState, PrismaClient } from "@anneal/db";
+import { ChainControlState, DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -50,7 +50,7 @@ const seedChain = async (label: string, count = 3) => {
     rolePrompt: "role",
   } });
   const repo = await db.repo.create({
-    data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" },
+    data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE },
   });
   await db.agentRepoAccess.create({
     data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" },

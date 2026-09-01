@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, enqueueTaskRun, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
 
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";
@@ -67,6 +67,7 @@ const seedExecutor = async () => {
     name: "ordering-repo",
     remoteUrl: "https://example.test/run-claim-ordering.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,
