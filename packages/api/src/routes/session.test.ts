@@ -66,13 +66,19 @@ test("GET /session/runs/:runId/status projects task output identity or null", as
     const commitSha = "a".repeat(40);
     const outputCases = [
       {
-        stepOutput: { runId: "run-output", kind: "implementation", commitSha },
-        expected: { runId: "run-output", kind: "implementation", commitSha },
+        stepOutput: { runId: "run-1", kind: "implementation", commitSha },
+        expected: { runId: "run-1", kind: "implementation", commitSha },
+        persisted: true,
       },
-      { stepOutput: null, expected: null },
+      { stepOutput: null, expected: null, persisted: false },
+      {
+        stepOutput: { runId: "run-prior", kind: "implementation", commitSha },
+        expected: null,
+        persisted: false,
+      },
     ] as const;
 
-    for (const { stepOutput, expected } of outputCases) {
+    for (const { stepOutput, expected, persisted } of outputCases) {
       const database = {
         run: {
           findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
@@ -104,8 +110,33 @@ test("GET /session/runs/:runId/status projects task output identity or null", as
         headers: { Authorization: "Bearer agos_session_current" },
       });
       assert.equal(response.status, 200);
-      const body = await response.json() as { task: { output: unknown } };
+      const body = await response.json() as {
+        run: { id: string; status: string };
+        task: {
+          id: string;
+          name: string;
+          status: string;
+          approvalGate: boolean;
+          chainIndex: number;
+          output: unknown;
+          outputRequired: boolean;
+          outputRemediationAllowed: boolean;
+          outputSatisfiedByPriorRun: boolean;
+          outputPersisted: boolean;
+        };
+      };
+      assert.equal(body.run.id, "run-1");
+      assert.equal(body.run.status, "RUNNING");
+      assert.equal(body.task.id, "task-1");
+      assert.equal(body.task.name, "Task");
+      assert.equal(body.task.status, "DOING");
+      assert.equal(body.task.approvalGate, false);
+      assert.equal(body.task.chainIndex, 0);
       assert.deepEqual(body.task.output, expected);
+      assert.equal(body.task.outputRequired, false);
+      assert.equal(body.task.outputRemediationAllowed, true);
+      assert.equal(body.task.outputSatisfiedByPriorRun, false);
+      assert.equal(body.task.outputPersisted, persisted);
     }
   });
 });

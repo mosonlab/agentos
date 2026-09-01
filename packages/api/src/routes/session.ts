@@ -206,12 +206,20 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     if (boundImplementationTask && "message" in boundImplementationTask) {
       return refusalJson(context, boundImplementationTask);
     }
-    const outputPersisted = run.task?.stepOutput?.runId === run.id;
+    const taskOutput = run.task?.stepOutput;
+    const outputPersisted = taskOutput?.runId === run.id;
     const outputSatisfiedByPriorRun = Boolean(
-      run.task?.stepOutput
+      taskOutput
       && !outputPersisted
       && outputIsImmutableOncePersisted(run.task.templateStep),
     );
+    const output = outputPersisted && taskOutput
+      ? {
+        runId: taskOutput.runId,
+        kind: taskOutput.kind,
+        commitSha: taskOutput.commitSha,
+      }
+      : null;
     return context.json({
       run: {
         id: run.id,
@@ -232,13 +240,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         chainIndex: run.task.chainIndex,
         stepName: run.task.templateStep?.name ?? null,
         outputKind: run.task.templateStep?.outputKind ?? null,
-        output: run.task.stepOutput
-          ? {
-            runId: run.task.stepOutput.runId,
-            kind: run.task.stepOutput.kind,
-            commitSha: run.task.stepOutput.commitSha,
-          }
-          : null,
+        output,
         outputRequired: requiredOutputKind(run.task.templateStep) !== null,
         outputRemediationAllowed:
           !isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
