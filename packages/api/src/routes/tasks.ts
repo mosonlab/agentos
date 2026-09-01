@@ -167,6 +167,91 @@ type TaskDetailResponse = TaskDetailContract<Date, Prisma.Decimal>;
 type TaskStartabilityResponse = TaskStartabilityContract;
 type TaskStepOutputResponse = TaskStepOutputContract<Date>;
 
+type LatestAgentMessage = { body: string; at: Date };
+type LatestAgentMessageEvent = { type: string; at: Date; payload: unknown };
+
+const messageRecord = (value: unknown): Record<string, unknown> | null => (
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+);
+
+const messageString = (value: unknown): string | null => typeof value === "string" ? value : null;
+
+const messageArray = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
+
+const messageContentText = (content: unknown): string => messageArray(content)
+  .map((part) => messageString(messageRecord(part)?.text))
+  .filter((part): part is string => part !== null)
+  .join("\n");
+
+const messageTextSignatureId = (content: unknown): string | null => {
+  for (const part of messageArray(content)) {
+    const signature = messageString(messageRecord(part)?.textSignature);
+    if (signature === null) continue;
+    try {
+      const id = messageString(messageRecord(JSON.parse(signature) as unknown)?.id);
+      if (id !== null) return id;
+    } catch {
+      // An unparseable provider signature contributes no deduplication key.
+    }
+  }
+  return null;
+};
+
+const visibleMessageText = (text: string): boolean => text.trim().length > 0;
+
+/** Port of the text-producing branches in `apps/web/src/lib/session-stream.ts`.
+ * MODEL_DELTA rows are included only to recover CODEX's last agent message,
+ * because its FINAL_OUTPUT payload is a turn marker without text. */
+const projectLatestAgentMessage = (
+  runner: string,
+  events: LatestAgentMessageEvent[],
+): LatestAgentMessage | null => {
+  let lastCodexAgentText = "";
+  let latest: LatestAgentMessage | null = null;
+  const piSeen = new Set<string>();
+
+  for (const event of events) {
+    const payload = messageRecord(event.payload);
+
+    if (event.type === "MODEL_DELTA" && runner === "CODEX") {
+      const item = messageRecord(payload?.item);
+      if (messageString(item?.type) === "agent_message") {
+        const text = messageString(item?.text);
+        if (text !== null && text.length > 0) lastCodexAgentText = text;
+      }
+      continue;
+    }
+
+    if (event.type === "MODEL_COMPLETED" && runner === "PI") {
+      const message = messageRecord(payload?.message);
+      if (messageString(message?.role) !== "assistant") continue;
+      const content = message?.content;
+      const text = messageContentText(content);
+      if (!visibleMessageText(text)) continue;
+      const timestamp = message?.timestamp;
+      const identity = typeof timestamp === "number" || typeof timestamp === "string"
+        ? String(timestamp)
+        : messageTextSignatureId(content);
+      if (identity !== null) {
+        if (piSeen.has(identity)) continue;
+        piSeen.add(identity);
+      }
+      latest = { body: text, at: event.at };
+      continue;
+    }
+
+    if (event.type !== "FINAL_OUTPUT") continue;
+    const text = runner === "CLAUDE"
+      ? messageString(payload?.result) ?? ""
+      : runner === "CODEX" ? lastCodexAgentText : "";
+    if (visibleMessageText(text)) latest = { body: text, at: event.at };
+  }
+
+  return latest;
+};
+
 export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   const { db } = deps;
 
@@ -296,6 +381,26 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       },
     });
     if (!task) return context.json({ error: "Task not found" }, 404);
+    const sessionIds = task.runs.flatMap((run) => run.session ? [run.session.id] : []);
+    const sessionEvents = sessionIds.length === 0
+      ? []
+      : await db.sessionEvent.findMany({
+        where: {
+          sessionId: { in: sessionIds },
+          // MODEL_DELTA is context for CODEX FINAL_OUTPUT; the other two are
+          // the only event kinds that can become a task-detail message.
+          type: { in: ["MODEL_DELTA", "MODEL_COMPLETED", "FINAL_OUTPUT"] },
+        },
+        select: { sessionId: true, type: true, at: true, payload: true },
+        orderBy: [{ sessionId: "asc" }, { seq: "asc" }],
+      });
+    const eventsBySession = new Map<string, LatestAgentMessageEvent[]>();
+    for (const event of sessionEvents) {
+      const events = eventsBySession.get(event.sessionId);
+      const projected = { type: event.type, at: event.at, payload: event.payload };
+      if (events) events.push(projected);
+      else eventsBySession.set(event.sessionId, [projected]);
+    }
     const admission = await readStepAdmission(db, task.id, { locked: false });
     if (!admission.task || !admission.verdict) {
       throw new Error(`Task ${task.id} disappeared while projecting operator move targets`);
@@ -318,6 +423,10 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       ...run,
       session: run.session === null ? null : {
         ...run.session,
+        latestAgentMessage: projectLatestAgentMessage(
+          run.session.runner,
+          eventsBySession.get(run.session.id) ?? [],
+        ),
         usageCost: serializeUsageCost(usageCosts[index] ?? null),
       },
       mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
