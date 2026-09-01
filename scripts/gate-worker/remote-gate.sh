@@ -153,8 +153,7 @@ fi
   || no_verdict "AGENTOS_WORKSPACE_PATH is not a directory: $AGENTOS_WORKSPACE_PATH"
 REPO_ROOT="$(CDPATH= cd -- "$AGENTOS_WORKSPACE_PATH" && pwd -P)" \
   || no_verdict "cannot enter AGENTOS_WORKSPACE_PATH: $AGENTOS_WORKSPACE_PATH"
-AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
-export AGENTOS_WORKSPACE_PATH
+export AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
 
 # Nothing here forms a verdict, so nothing here may exit 1: a precondition that
 # fails means no gate ran, and lib.sh's GATE_EXIT_NO_VERDICT is the code for

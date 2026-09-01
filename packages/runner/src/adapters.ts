@@ -147,13 +147,11 @@ export const buildChildEnvironment = (
     !PROTECTED_SECRET_ENVIRONMENT.has(name)
     && !name.startsWith("GIT_CONFIG_")
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
-  // AgentScratch.toolsDir is materialized by the Run before any adapter work.
-  // Keep this platform-owned assignment immediately after task secrets so a
-  // task Secret cannot redirect a model to a checkout-local tool bundle.
-  const toolsDir = (scratch as AgentScratch & { toolsDir: string }).toolsDir;
   return {
     ...taskSecrets,
-    AGENTOS_TOOLS: toolsDir,
+    // The Run materializes this platform-owned directory before adapter work.
+    // Keep it after task Secrets so a Secret cannot redirect the tool bundle.
+    AGENTOS_TOOLS: scratch.toolsDir,
     ...workspaceEnvironment(config),
     AGENTOS_API_URL: config.apiUrl,
     AGENTOS_SESSION_TOKEN: claim.sessionToken,

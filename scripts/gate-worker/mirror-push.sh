@@ -120,8 +120,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   || die "AGENTOS_WORKSPACE_PATH is not a directory: $AGENTOS_WORKSPACE_PATH"
 REPO_ROOT="$(CDPATH= cd -- "$AGENTOS_WORKSPACE_PATH" && pwd -P)" \
   || die "cannot enter AGENTOS_WORKSPACE_PATH: $AGENTOS_WORKSPACE_PATH"
-AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
-export AGENTOS_WORKSPACE_PATH
+export AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
 git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
   || die "${REPO_ROOT} is not a git repository"
 # The gate contract: what run-gate.sh executes inside the checked-out commit.

@@ -1232,16 +1232,13 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   } as unknown as RunnerConfig;
   const runScratch = await provisionAgentScratch(config);
   try {
-    // The child branch predates AgentScratch.toolsDir; keep this test fixture
-    // explicit until the workspace materialization branch supplies the field.
-    const adapterScratch = { ...runScratch, toolsDir: join(runScratch.base, "tools") };
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
       const runnerClaim = {
         ...claim,
         runner,
         secrets: { ...claim.secrets, AGENTOS_TOOLS: "/checkout/task-secret-tools" },
       };
-      const env = buildChildEnvironment(config, runnerClaim, adapterScratch, fixture);
+      const env = buildChildEnvironment(config, runnerClaim, runScratch, fixture);
       const spec = {
         config,
         claim: runnerClaim,
@@ -1274,7 +1271,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         };
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
-        assert.equal(report.toolsDir, adapterScratch.toolsDir, `${runner} ${mode} lost AGENTOS_TOOLS across the launcher`);
+        assert.equal(report.toolsDir, runScratch.toolsDir, `${runner} ${mode} lost AGENTOS_TOOLS across the launcher`);
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);

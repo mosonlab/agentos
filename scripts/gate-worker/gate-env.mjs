@@ -25,7 +25,7 @@ export const GATE_ENV_PREFIXES = ["AGENTOS_GATE_", "GATE_DISPATCH_"];
 // relocates the whole gate directory a fixture built for itself — at the real
 // worker's mirror, worktrees and logs — and STALE_WORKTREE_MINUTES decides what
 // its sweep reclaims.
-export const GATE_ENV_NAMES = ["GATE_HOME", "STALE_WORKTREE_MINUTES"];
+export const GATE_ENV_NAMES = ["AGENTOS_WORKSPACE_PATH", "GATE_HOME", "STALE_WORKTREE_MINUTES"];
 
 // The other half of the same question, and the reason for each entry. Every
 // name the gate scripts read is either stripped by isHostGateConfig or stated

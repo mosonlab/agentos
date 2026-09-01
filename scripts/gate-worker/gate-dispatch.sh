@@ -187,8 +187,7 @@ fi
   || die "AGENTOS_WORKSPACE_PATH is not a directory: $AGENTOS_WORKSPACE_PATH" "$GATE_EXIT_NO_VERDICT"
 REPO_ROOT="$(CDPATH= cd -- "$AGENTOS_WORKSPACE_PATH" && pwd -P)" \
   || die "cannot enter AGENTOS_WORKSPACE_PATH: $AGENTOS_WORKSPACE_PATH" "$GATE_EXIT_NO_VERDICT"
-AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
-export AGENTOS_WORKSPACE_PATH
+export AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
 
 [ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
   || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch and no verdict exists" "$GATE_EXIT_NO_VERDICT"

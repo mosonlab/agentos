@@ -326,6 +326,22 @@ const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
   return { root, head };
 };
 
+const externalTooling = (t, { mirrorPush, remoteGate }) => {
+  const root = scratch(t);
+  const worker = join(root, "gate-worker");
+  mkdirSync(worker);
+  cpSync(libPath, join(worker, "lib.sh"));
+  cpSync(dispatchPath, join(worker, "gate-dispatch.sh"));
+  chmodSync(join(worker, "gate-dispatch.sh"), 0o755);
+  const put = (name, body) => {
+    writeFileSync(join(worker, name), `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(join(worker, name), 0o755);
+  };
+  put("mirror-push.sh", mirrorPush ?? 'printf "MIRROR PUSH: OK external\\n"; exit 0');
+  put("remote-gate.sh", remoteGate ?? 'printf "MERGE GATE: PASS external\\n"; exit 0');
+  return { root, script: join(worker, "gate-dispatch.sh") };
+};
+
 // No fixture may block. The dispatcher's default patience is an hour, which is
 // right for an operator waiting on a real queue and absurd inside a test, and a
 // spawnSync with no timeout promotes that wait into a suite that never returns
@@ -367,10 +383,14 @@ const dispatch = (t, repo, args, env = {}, busySlots = []) =>
   runDispatch(repo, busyCache(t, busySlots), args, env);
 
 test("the dispatcher uses the named checkout when launched outside it", (t) => {
+  const calls = join(scratch(t), "external-tooling-calls.log");
+  writeFileSync(calls, "");
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: PASS local-outside %s\\n" "$(git rev-parse --show-toplevel)"; exit 0',
-    mirrorPush: 'printf "MIRROR PUSH: OK outside\\n"; exit 0',
-    remoteGate: 'printf "MERGE GATE: PASS remote-outside\\n"; exit 0',
+  });
+  const tooling = externalTooling(t, {
+    mirrorPush: 'printf "mirror:%s:%s\\n" "$AGENTOS_WORKSPACE_PATH" "$(git -C "$AGENTOS_WORKSPACE_PATH" rev-parse --show-toplevel)" >> "$GATE_FIXTURE_CALLS"; printf "MIRROR PUSH: OK outside\\n"; exit 0',
+    remoteGate: 'printf "remote:%s:%s\\n" "$AGENTOS_WORKSPACE_PATH" "$(git -C "$AGENTOS_WORKSPACE_PATH" rev-parse --show-toplevel)" >> "$GATE_FIXTURE_CALLS"; printf "MERGE GATE: PASS remote-outside\\n"; exit 0',
   });
   const outside = scratch(t);
 
@@ -382,16 +402,27 @@ test("the dispatcher uses the named checkout when launched outside it", (t) => {
       AGENTOS_GATE_PRIMARY_SERVER: "",
       AGENTOS_GATE_FALLBACK_SERVER: "",
     },
-    { cwd: outside },
+    { cwd: outside, script: tooling.script },
   );
   assert.equal(local.status, 0, local.stdout + local.stderr);
   assert.ok(local.stdout.includes(`MERGE GATE: PASS local-outside ${realpathSync(repo.root)}`), local.stdout);
 
   writeFileSync(join(repo.root, "outside-dirty.txt"), "dirty\n");
-  const remote = runDispatch(repo, busyCache(t), [repo.head], {}, { cwd: outside });
+  const remote = runDispatch(
+    repo,
+    busyCache(t),
+    [repo.head],
+    { GATE_FIXTURE_CALLS: calls },
+    { cwd: outside, script: tooling.script },
+  );
   assert.equal(remote.status, 0, remote.stdout + remote.stderr);
   assert.match(remote.stdout, /MERGE GATE: PASS remote-outside/u);
   assert.match(remote.stderr, /running on primary/u);
+  const canonical = realpathSync(repo.root);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+    `mirror:${canonical}:${canonical}`,
+    `remote:${canonical}:${canonical}`,
+  ]);
 });
 
 test("the repository-path dispatcher invocation retains its result", (t) => {
