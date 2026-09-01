@@ -504,6 +504,13 @@ test("all workspace proof manifests are wrapped exactly once without changing co
     const manifest = JSON.parse(readFileSync(join(repositoryRoot, relativePath), "utf8"));
     assert.equal(manifest.name, contract.name);
     assert.equal("lint" in manifest.scripts, false, `${contract.name} unexpectedly added lint`);
+    if ("start" in manifest.scripts) {
+      assert.doesNotMatch(
+        manifest.scripts.start,
+        /--conditions(?:=|\s+)development/u,
+        `${contract.name} production start selected development exports`,
+      );
+    }
     assert.deepEqual(
       Object.keys(manifest.scripts).filter((name) => proofNames.has(name)).sort(),
       Object.keys(contract.scripts).sort(),
@@ -521,4 +528,43 @@ test("all workspace proof manifests are wrapped exactly once without changing co
     }
   }
   assert.equal(wrappedCount, 24);
+});
+
+test("Runner child fixtures remain audited as workspace-package-free", () => {
+  const audits = [
+    {
+      path: "packages/runner/src/regression-verification-script.test.ts",
+      execPathReferences: 1,
+      workspacePackageReferences: 0,
+      childMarker: "REGRESSION_FIXTURE_NODE: process.execPath",
+    },
+    {
+      path: "packages/runner/src/adapters.test.ts",
+      execPathReferences: 7,
+      workspacePackageReferences: 0,
+      childMarker: 'runAsPrefix: [process.execPath, "-e", stubScript]',
+    },
+    {
+      path: "packages/runner/src/run-output.test.ts",
+      execPathReferences: 1,
+      workspacePackageReferences: 1,
+      childMarker: "pathToFileURL(fileURLToPath(new URL(\"./mcp-server.ts\", import.meta.url))).href",
+    },
+  ];
+
+  for (const audit of audits) {
+    const source = readFileSync(join(repositoryRoot, audit.path), "utf8");
+    assert.equal(
+      source.match(/process\.execPath/gu)?.length ?? 0,
+      audit.execPathReferences,
+      `${audit.path} added or removed a Node child; audit whether it imports a workspace package`,
+    );
+    assert.equal(
+      source.match(/from\s+["']@anneal\//gu)?.length ?? 0,
+      audit.workspacePackageReferences,
+      `${audit.path} changed workspace-package imports; source children need the development condition`,
+    );
+    assert.match(source, new RegExp(audit.childMarker.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    assert.doesNotMatch(source, /--conditions=development/u, `${audit.path} child semantics changed`);
+  }
 });
