@@ -31,6 +31,7 @@ const FIXTURE_CACHE_KEY = "4ab6d166bebd1bf6f84eb89cb02ce7cf7b610d54067157f8ecf4d
 
 const config = (root: string, runAsPrefix: string[] = []): RunnerConfig => ({
   workspaceRoot: join(root, "runs"),
+  hostProofSlots: 3,
   dependencyCacheRoot: join(root, "cache"),
   runAsPrefix,
   path: process.env.PATH ?? "/usr/bin:/bin",

@@ -41,6 +41,7 @@ const config = (root: string): RunnerConfig => ({
   home: join(root, "home"),
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot: join(root, "runs"),
+  hostProofSlots: 3,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,

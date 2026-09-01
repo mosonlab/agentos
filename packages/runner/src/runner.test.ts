@@ -32,6 +32,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   home: workspaceRoot,
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot,
+  hostProofSlots: 3,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,

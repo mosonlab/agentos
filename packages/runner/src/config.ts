@@ -44,6 +44,8 @@ export type RunnerConfig = {
   /** Repository-owned baseline used to provision Codex session config roots. */
   sessionConfigBaselineRoot?: string;
   workspaceRoot: string;
+  /** Host-wide cooperative ceiling for per-workspace proof commands. */
+  hostProofSlots: number;
   /** Runner-owned, write-once dependency snapshots. Defaults beside workspaceRoot. */
   dependencyCacheRoot?: string;
   /** Persistent bare mirrors, in the home of the account that runs tasks. */
@@ -107,6 +109,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,
+    hostProofSlots: positiveInteger("AGENTOS_HOST_PROOF_SLOTS", process.env.AGENTOS_HOST_PROOF_SLOTS ?? "3"),
     dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
     // One bare mirror per remote. Provisioning clones every workspace out of it
     // and only ever fetches incrementally from GitHub; see repo-mirror.ts for
