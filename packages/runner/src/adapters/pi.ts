@@ -84,6 +84,19 @@ const initialPiState = (): PiState => ({
   usage: { messages: 0, reported: 0, input: null, output: null, cacheRead: null, cacheWrite: null, costNanoUsd: null },
 });
 
+const PI_SUPPRESSED_PROVIDER_EVENT_TYPES = new Set([
+  "message_update",
+  "tool_execution_update",
+]);
+
+/**
+ * PI's incremental chunks are liveness-only. The runtime uses this adapter
+ * policy before emitting either the raw provider row or the parsed event;
+ * parsing still runs so the adapter can renew its stall-detector timestamps.
+ */
+export const providerEventPersistence = (event: Record<string, unknown>): boolean =>
+  !PI_SUPPRESSED_PROVIDER_EVENT_TYPES.has(stringField(event, "type") ?? "");
+
 const piState = (state: AdapterState): PiState => state.providerState as PiState;
 
 const piNumber = (value: unknown, field: string, integral: boolean): number | null => {
@@ -164,8 +177,11 @@ export const parsePiEvent = (
     state.inFlightTool = { id: toolId, name: stringField(event, "toolName") ?? "tool", startedAt: now, lastProgressAt: now };
     emitAdapterEvent(state, sink, "TOOL_STARTED", event, toolId);
   } else if (type === "tool_execution_update") {
-    if (state.inFlightTool) state.inFlightTool.lastProgressAt = new Date();
-    emitAdapterEvent(state, sink, "TOOL_PROGRESS", event, stringField(event, "toolCallId"));
+    const now = new Date();
+    if (state.inFlightTool) state.inFlightTool.lastProgressAt = now;
+    state.lastProgressEventAt = now;
+  } else if (type === "message_update") {
+    state.lastProgressEventAt = new Date();
   } else if (type === "tool_execution_end") {
     state.inFlightTool = null;
     emitAdapterEvent(state, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
@@ -216,7 +232,15 @@ export const parsePiTranscript = (
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
   const state = createAdapterState("PI", "transcript", initialPiState());
-  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parsePiEvent);
+  for (const value of transcript) {
+    processProviderEvent(
+      state,
+      asRecord(value) ?? { value },
+      sink,
+      parsePiEvent,
+      providerEventPersistence,
+    );
+  }
   return state;
 };
 
@@ -318,6 +342,7 @@ export const piDeclaration: AdapterDeclaration = Object.freeze({
     "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
   ],
   launcherEnvironmentVariables: ["PI_CODING_AGENT_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX"],
+  providerEventPersistence,
   promptSections,
   args: piArgs,
   childEnvironment: piChildEnvironment,
