@@ -142,7 +142,7 @@ export const normalizeBoardEntries = (entries: readonly (BoardEntry | BoardTask)
 export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskStatus, BoardEntry[]> => {
   const groups = new Map<TaskStatus, BoardEntry[]>(COLUMNS.map((column) => [column.status, []]));
   for (const entry of entries) groups.get(entry.status)?.push(entry);
-  for (const [status, rows] of groups) groups.set(status, orderColumn(status, rows));
+  for (const [status, rows] of groups) groups.set(status, orderColumn(rows));
   return groups;
 };
 
@@ -226,26 +226,22 @@ export const scheduleLabel = (task: ScheduleSubject): string | null => {
 };
 
 /**
- * The order one column's cards are read in.
+ * The order one column's cards are read in: newest first, every column.
  *
- * `GET /tasks` returns the whole board newest-first (`createdAt desc`), which is
- * right for every column that reports what just happened. Backlog is the one
- * column that is a queue rather than a report: it is dispatched from the top, so
- * newest-first prints the queue backwards. The explicit creation-time sort
- * preserves the API's id-ascending tiebreak when timestamps are equal; a plain
- * reverse would silently invert that stable order.
+ * `GET /tasks` answers newest-first (`createdAt desc`, ties by id ascending) and
+ * every column reports what just happened, Backlog included — Backlog was read
+ * oldest-first as a queue, which put the newest card where no other column keeps
+ * it. A chain entry carries its own creation time, so the order is stated here
+ * rather than inherited from the response; the sort is stable, which is what
+ * leaves the API's tiebreak intact for cards created in the same instant.
  */
-export const orderColumn = <T extends BoardTask | BoardEntry>(status: TaskStatus, tasks: readonly T[]): T[] => {
+export const orderColumn = <T extends BoardTask | BoardEntry>(tasks: readonly T[]): T[] => {
   const createdAt = (entry: T): string => isBoardEntry(entry)
     ? entry.kind === "task" ? entry.task.createdAt : entry.aggregate.createdAt
     : entry.createdAt;
-  return status === "BACKLOG"
-    ? [...tasks].sort((left, right) => (
-        createdAt(left) < createdAt(right) ? -1
-          : createdAt(left) > createdAt(right) ? 1
-            : left.id.localeCompare(right.id)
-      ))
-    : [...tasks];
+  return [...tasks].sort((left, right) => (
+    createdAt(left) > createdAt(right) ? -1 : createdAt(left) < createdAt(right) ? 1 : 0
+  ));
 };
 
 /* -------------------------------------------------------------- the actions */

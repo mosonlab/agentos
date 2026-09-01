@@ -1,7 +1,7 @@
 import { type ReactNode, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compactTokens, durationWithInboxWait, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
+import { compactTokens, durationWithInboxWait, formatDateTime, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
 import { useAction, usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
@@ -37,13 +37,6 @@ export const branchUrl = (remoteUrl: string | null | undefined, branch: string |
   const base = repoWebUrl(remoteUrl);
   if (base === null || !branch) return null;
   return `${base}/tree/${branch}`;
-};
-
-/** `#39` from a `/pull/39` tail; the whole URL when it does not parse, because a
- *  link with no label is worse than a long one. */
-export const pullRequestLabel = (url: string): string => {
-  const parsed = /\/pull\/(\d+)\/?$/.exec(url);
-  return parsed === null ? url : `#${parsed[1]}`;
 };
 
 const BranchCell = ({ remoteUrl, branch }: { remoteUrl: string | null | undefined; branch: string | null | undefined }): ReactNode => {
