@@ -365,7 +365,7 @@ test("an empty-string default is treated as absent, matching the required badge"
 
 // --- review fixes: a malformed body is a client error (CODE-REVIEW S3) -------
 
-test("a malformed JSON body on fire is 400, not 500", async () => {
+test("a malformed JSON body on fire is a named 400 refusal", async () => {
   const { template } = await seedTrigger("fire-bad-json");
   const response = await asOperator(() => createApp(db).request(`/task-templates/${template.id}/fire`, {
     method: "POST",
@@ -373,7 +373,10 @@ test("a malformed JSON body on fire is 400, not 500", async () => {
     body: "{not json",
   }));
   assert.equal(response.status, 400);
-  assert.equal((await response.json() as any).error, "Invalid JSON payload");
+  assert.deepEqual(await response.json(), {
+    error: "Request body must be valid JSON",
+    code: "invalid-json",
+  });
   // An empty body is still the `Fire now` happy path and must keep working.
   assert.equal((await call("POST", `/task-templates/${template.id}/fire`)).status, 201);
 });

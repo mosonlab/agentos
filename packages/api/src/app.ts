@@ -680,19 +680,8 @@ const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 }).strict();
 
-class InvalidJsonBodyError extends Error {}
-
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> => {
-  let parsed: unknown;
-  try {
-    parsed = await request.json();
-  } catch (error: unknown) {
-    // Request.json() reports an empty or malformed body as a SyntaxError. Keep
-    // other body-read failures visible to the normal 500 fallback.
-    if (error instanceof SyntaxError) throw new InvalidJsonBodyError("Request body must be valid JSON");
-    throw error;
-  }
-  return schema.parse(parsed);
+  return schema.parse(await request.json());
 };
 
 /**
@@ -932,12 +921,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // The body is read exactly once, as text: the replay key hashes the raw
     // bytes, and a Request body cannot be consumed twice.
     const raw = await context.req.text();
-    let payload: unknown;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      return context.json({ error: "Invalid JSON payload" }, 400);
-    }
+    const payload: unknown = JSON.parse(raw);
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return context.json({ error: "Webhook payload must be an object" }, 400);
     }
@@ -1940,15 +1924,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const templateId = id.parse(context.req.param("templateId"));
     // `Fire now` on a fully-defaulted trigger sends no body at all, and
     // `request.json()` throws on an empty one — hence the hand-rolled parse
-    // instead of `readJson`. It still has to answer a malformed body the way
-    // every other route does: a client error is a 400, not a 500.
+    // instead of `readJson`. A malformed non-empty body still reaches the
+    // shared SyntaxError mapping below.
     const raw = await context.req.text();
-    let parsed: unknown;
-    try {
-      parsed = raw.trim() === "" ? {} : JSON.parse(raw);
-    } catch {
-      return context.json({ error: "Invalid JSON payload" }, 400);
-    }
+    const parsed: unknown = raw.trim() === "" ? {} : JSON.parse(raw);
     const body = manualFireInput.parse(parsed);
     const trigger = await db.taskTemplate.findUnique({ where: { id: templateId }, select: triggerSelect });
     if (!trigger) return context.json({ error: "Template not found" }, 404);
@@ -3403,8 +3382,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
 
   app.onError((error, context) => {
-    if (error instanceof InvalidJsonBodyError) {
-      return refusalJson(context, refusal("invalid-request", error.message, { code: "invalid-json" }));
+    if (error instanceof SyntaxError) {
+      return refusalJson(context, refusal("invalid-request", "Request body must be valid JSON", { code: "invalid-json" }));
     }
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
     if (error instanceof SerializableTransactionExhaustedError) {
