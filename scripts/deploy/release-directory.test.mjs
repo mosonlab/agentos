@@ -33,6 +33,9 @@ import {
 
 const revision = "a".repeat(40);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const expectedRuntimePaths = RUNTIME_TOOL_FILES
+  .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
+  .sort();
 
 const fixture = () => {
   const root = mkdtempSync(join(tmpdir(), "agentos-release-directory-"));
@@ -140,6 +143,10 @@ test("assembles a deterministic versioned release and excludes shared/secrets", 
         readFileSync(join(repositoryRoot, source)),
       );
     }
+    assert.deepEqual(
+      result.files.filter(({ path }) => path.includes("runtime-tools")).map(({ path }) => path),
+      expectedRuntimePaths,
+    );
     assert.equal(readFileSync(join(result.releaseDirectory, "node_modules/vendor/data/runtime.bin"), "utf8"), "dependency-data\n");
     assert.equal(computeReleaseDigest(result.releaseDirectory), result.digest);
     assert.equal(lstatSync(result.releaseDirectory).mode & 0o222, 0);
