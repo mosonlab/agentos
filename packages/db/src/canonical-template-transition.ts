@@ -45,6 +45,9 @@ export type LegacyStepRecord = Readonly<{
  * read-only revalidation node.
  * `pre-product-rename-anneal`: the graphs whose prompts still called the
  * platform by its former product name. Prompt-only in both templates.
+ * `pre-pr-handover-quality`: the pull-request graph whose prompts still used
+ * the placeholder delivery body and left chain bookkeeping in the published
+ * tree.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
@@ -358,7 +361,23 @@ const legacyTemplateGenerations = {
       ],
     },
   ],
-  [PR_TEMPLATE_NAME]: [],
+  [PR_TEMPLATE_NAME]: [
+    {
+      // Prompt-only rollover: PR delivery now publishes the implementation
+      // evidence and cleans the tracked chain bookkeeping in the fix step.
+      // The graph is unchanged, so both prompt digests authenticate the
+      // outgoing and successor generations.
+      marker: "pre-pr-handover-quality",
+      promptDigest: "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6",
+      successorPromptDigest: "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906",
+      shape: [
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+      ],
+    },
+  ],
 } as const satisfies Readonly<Record<string, readonly LegacyTemplateGeneration[]>>;
 
 export type CanonicalTemplateRegistryName = keyof typeof legacyTemplateGenerations;
