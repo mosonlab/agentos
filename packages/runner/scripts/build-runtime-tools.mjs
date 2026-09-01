@@ -10,11 +10,11 @@ import { fileURLToPath } from "node:url";
  * gate-worker helper part of the runner's release contract by accident.
  */
 export const RUNTIME_TOOL_FILES = Object.freeze([
-  Object.freeze({ source: "scripts/regression-verification.sh", destination: "regression-verification.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/regression-verification.sh", destination: "regression-verification.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
 ]);
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));

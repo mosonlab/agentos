@@ -3,8 +3,8 @@
 # Push this repository into the gate worker's bare mirror. Runs ON THE LOCAL
 # MACHINE (issue #132):
 #
-#   scripts/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <oid>
-#   scripts/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <oid> --dry-run
+#   packages/runner/runtime-tools/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <oid>
+#   packages/runner/runtime-tools/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <oid> --dry-run
 #
 # <server> is anything ssh accepts: a Host alias from ~/.ssh/config (preferred —
 # it keeps the address, the user, the port and the key in one place that is not
@@ -29,7 +29,8 @@
 #
 #   1. the exact candidate object, retained at refs/gate/candidates/<oid>;
 #   2. the exact baseline object, retained at refs/gate/baselines/<oid>;
-#   3. scripts/gate-worker/lib.sh and scripts/gate-worker/run-gate.sh, installed
+#   3. packages/runner/runtime-tools/gate-worker/lib.sh and
+#      scripts/gate-worker/run-gate.sh, installed
 #      at ~/gate/<repo>/, so the harness on the worker is the one in this
 #      checkout. run-gate.sh sources lib.sh for the verdict's exit codes and its
 #      reader, so the pair travels together and lib.sh lands first: the name
@@ -132,7 +133,7 @@ git -C "$REPO_ROOT" cat-file -e "${CANDIDATE_OID}^{commit}" 2>/dev/null \
 git -C "$REPO_ROOT" cat-file -e "${BASELINE_OID}^{commit}" 2>/dev/null \
   || die "baseline ${BASELINE_OID} is not in ${REPO_ROOT}; refresh it before pushing"
 
-# shellcheck source=scripts/gate-worker/lib.sh
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
 # Checked before anything is sent: each of these is interpolated into a command
@@ -227,7 +228,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '   would push %s to %s\n' "$CANDIDATE_REF" "$REMOTE_MIRROR"
     printf '   would push %s to %s\n' "$BASELINE_REF" "$REMOTE_MIRROR"
   fi
-  printf '\n   would also install scripts/gate-worker/lib.sh then scripts/gate-worker/run-gate.sh\n   under %s (copy to a temporary name in the same directory, then rename into\n   place)\n' "${SERVER}:${REPO_HOME}"
+  printf '\n   would also install packages/runner/runtime-tools/gate-worker/lib.sh then scripts/gate-worker/run-gate.sh\n   under %s (copy to a temporary name in the same directory, then rename into\n   place)\n' "${SERVER}:${REPO_HOME}"
   printf '\nMIRROR PUSH: DRY RUN OK\n'
   exit 0
 fi
@@ -276,6 +277,11 @@ printf '\n== Installing the gate harness\n'
 # keeps the installed harness runnable at every instant of an install rather
 # than only at the end of one.
 for harness_file in lib.sh run-gate.sh; do
+  if [ "$harness_file" = "lib.sh" ]; then
+    harness_source="${SCRIPT_DIR}/lib.sh"
+  else
+    harness_source="${REPO_ROOT}/scripts/gate-worker/run-gate.sh"
+  fi
   harness_tmp_name="${harness_file}.tmp.$$.${RANDOM}"
   remote_harness_tmp="${SERVER}:${REPO_HOME}/${harness_tmp_name}"
 
@@ -284,7 +290,7 @@ for harness_file in lib.sh run-gate.sh; do
       "rm -f ${REPO_HOME}/${harness_tmp_name}" >/dev/null 2>&1 || true
   }
 
-  scp ${SCP_OPTS[@]+"${SCP_OPTS[@]}"} -q "${SCRIPT_DIR}/${harness_file}" "$remote_harness_tmp" || {
+  scp ${SCP_OPTS[@]+"${SCP_OPTS[@]}"} -q "$harness_source" "$remote_harness_tmp" || {
     remove_harness_tmp
     die "could not copy ${harness_file} to ${remote_harness_tmp}"
   }
@@ -315,4 +321,4 @@ for named_ref in "candidate:${CANDIDATE_OID}:${CANDIDATE_REF}" "baseline:${BASEL
 done
 
 printf '\nMIRROR PUSH: OK\n'
-printf 'Next: scripts/gate-worker/remote-gate.sh %s %s --master %s\n' "$SERVER" "$CANDIDATE_OID" "$BASELINE_OID"
+printf 'Next: packages/runner/runtime-tools/gate-worker/remote-gate.sh %s %s --master %s\n' "$SERVER" "$CANDIDATE_OID" "$BASELINE_OID"
