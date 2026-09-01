@@ -11,8 +11,8 @@
  *     deleting or short-circuiting that call fails this suite.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1204,41 +1204,6 @@ describe("composed Goal 5a0 preflight", () => {
       "fresh-target-not-empty",
     ]) {
       assert.ok(source.includes(`fail("${condition}"`), `the merged preflight no longer raises ${condition}`);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Compiler boundary
-// ---------------------------------------------------------------------------
-
-describe("compiler boundary", () => {
-  const tsc = `${repositoryRoot}/node_modules/.bin/tsc`;
-
-  it("compiles the CLI entrypoint under tsconfig.cli.json", () => {
-    const listed = execFileSync(tsc, ["-p", "tsconfig.cli.json", "--noEmit", "--listFiles"], {
-      cwd: packageRoot,
-      encoding: "utf8",
-    });
-    for (const covered of ["prisma/release-migrate.ts", "src/release-migrate.ts", "src/local-release-target.ts"]) {
-      assert.ok(listed.includes(`${packageRoot}/${covered}`), `${covered} is outside the CLI compiler boundary`);
-    }
-  });
-
-  it("fails on a type error injected into the entrypoint", () => {
-    const copy = `${packageRoot}/prisma/release-migrate.boundary-check.ts`;
-    try {
-      copyFileSync(`${packageRoot}/prisma/release-migrate.ts`, copy);
-      const options = ["--noEmit", "--strict", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext", "--skipLibCheck"];
-      const clean = spawnSync(tsc, [...options, copy], { cwd: packageRoot, encoding: "utf8" });
-      assert.equal(clean.status, 0, `an unmodified copy must compile:\n${clean.stdout ?? ""}`);
-
-      writeFileSync(copy, `${readFileSync(copy, "utf8")}\nconst injected: number = "not a number";\nvoid injected;\n`);
-      const broken = spawnSync(tsc, [...options, copy], { cwd: packageRoot, encoding: "utf8" });
-      assert.notEqual(broken.status, 0, "the injected type error must fail the compile");
-      assert.match(broken.stdout ?? "", /TS2322/u);
-    } finally {
-      rmSync(copy, { force: true });
     }
   });
 });

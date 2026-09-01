@@ -431,26 +431,23 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "/bin/sh -c 'tsc -b && vite build'",
         typecheck: "tsc -b --pretty false",
-        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
+        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --conditions=development --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
       },
-      hooks: { pretest: "npm run build -w @anneal/db" },
+      hooks: {},
     },
     "packages/api/package.json": {
       name: "@anneal/api",
       scripts: {
         build: "/bin/sh -c 'tsc -p tsconfig.json && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
-        "test:db": "node --import tsx scripts/dbtest.mjs",
+        test: "node --conditions=development --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
+        "test:db": "node --conditions=development --import tsx scripts/dbtest.mjs",
       },
-      hooks: {
-        pretest: "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
-        "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner && npm run build -w @anneal/api",
-      },
+      hooks: {},
     },
     "packages/build-info/package.json": {
       name: "@anneal/build-info",
-      scripts: { test: "node --test *.test.mjs" },
+      scripts: { test: "node --conditions=development --test *.test.mjs" },
       hooks: {},
     },
     "packages/db/package.json": {
@@ -458,19 +455,17 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "/bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
-        test: "node --import tsx --test prisma/*.test.ts src/*.test.ts",
-        "test:db": "node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
+        test: "node --conditions=development --import tsx --test prisma/*.test.ts src/*.test.ts",
+        "test:db": "node --conditions=development --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
       },
-      hooks: {
-        "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner",
-      },
+      hooks: {},
     },
     "packages/github-client/package.json": {
       name: "@anneal/github-client",
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
       hooks: {},
     },
@@ -479,27 +474,27 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
-      hooks: { pretest: "npm run build -w @anneal/db" },
+      hooks: {},
     },
     "packages/merge-executor/package.json": {
       name: "@anneal/merge-executor",
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
-      hooks: { pretest: "npm run build -w @anneal/github-client && npm run build -w @anneal/db" },
+      hooks: {},
     },
     "packages/runner/package.json": {
       name: "@anneal/runner",
       scripts: {
         build: "/bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
+        test: "node --conditions=development --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
       },
-      hooks: { pretest: "npm run build -w @anneal/github-client" },
+      hooks: {},
     },
   };
 
