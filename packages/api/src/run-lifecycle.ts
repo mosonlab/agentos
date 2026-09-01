@@ -1,7 +1,9 @@
 import {
   CleanupStatus,
   executionModeFor,
+  landIntegratorStop,
   MERGE_INTEGRATOR_KIND,
+  parseStoppedResultMetadata,
   Prisma,
   type PrismaClient,
   recomputeSessionUsage,
@@ -376,6 +378,8 @@ export const appendRunActivity = async (
   const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
     taskId: true,
     leaseGeneration: true,
+    agentId: true,
+    session: { select: { id: true } },
     task: { select: { templateStep: { select: {
       stepIndex: true,
       outputKind: true,
@@ -396,7 +400,18 @@ export const appendRunActivity = async (
             : {}),
         }
       : undefined;
-    return tx.taskActivity.create({
+    const mechanicalResultPrincipal = input.principal.kind === "session" || input.principal.kind === "merge-executor";
+    const mechanical = executionModeFor(run.task?.templateStep ?? null) === "mechanical";
+    const stopped = mechanicalResultPrincipal && mechanical
+      ? parseStoppedResultMetadata(metadata)
+      : null;
+    const metadataRecord = metadata as Record<string, unknown> | undefined;
+    const declaredStoppedResult = metadataRecord?.kind === MERGE_INTEGRATOR_KIND.result
+      && metadataRecord.outcome === "stopped";
+    if (mechanicalResultPrincipal && mechanical && declaredStoppedResult && stopped?.sourceRunId !== input.runId) {
+      return refused("Stopped merge result metadata is malformed");
+    }
+    const activity = await tx.taskActivity.create({
       data: {
         taskId: run.taskId,
         actorType: input.principal.kind,
@@ -405,6 +420,23 @@ export const appendRunActivity = async (
         ...(metadata ? { metadata: jsonValue(metadata) } : {}),
       },
     });
+    // A mechanical executor writes its replaceable output and append-only
+    // result through separate fenced calls. Land a valid stopped result from
+    // either of its authenticated principals while this activity transaction
+    // is still open, so a committed result can never become a guard-visible
+    // stop without its condition-specific Inbox question. `landIntegratorStop`
+    // adopts this exact activity id; its Task lock and unique dedupe key
+    // serialize replays and concurrent repair.
+    if (stopped) {
+      await landIntegratorStop(tx, {
+        integratorTaskId: run.taskId,
+        resultActivityId: activity.id,
+        condition: stopped.condition,
+        evidence: stopped.evidence,
+        sourceRunId: stopped.sourceRunId,
+      });
+    }
+    return activity;
   }));
   return isFenceRefusalResponse(result) ? runFenceRefusal(result.reason) : result;
 };
