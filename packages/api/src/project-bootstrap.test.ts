@@ -49,6 +49,7 @@ const templateSteps = (): TemplateStepSource[] => PROJECT_BOOTSTRAP_ROLE_NAMES.m
   priorOutputKinds: [],
   opensPullRequest: false,
   requiresCommit: false,
+  provisionDependencies: true,
   baseFromStepIndex: null,
   spawnPolicy: null,
   prompt: `Prompt ${index + 1}`,
