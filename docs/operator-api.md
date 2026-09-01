@@ -1234,6 +1234,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATO
 ### POST `/tasks/:taskId/archive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, archives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1242,6 +1243,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERA
 ### POST `/tasks/:taskId/unarchive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, unarchives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/unarchive" -H "Authorization: Bearer $OPERATOR_TOKEN"
