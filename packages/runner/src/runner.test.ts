@@ -121,7 +121,13 @@ const setControlPlane = (handler: ControlPlaneFetchHandler): void => {
 };
 const executeClaim = (
   ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
-) => executeClaimProduction(runnerConfig, claim, { ...dependencies, controlPlane: injectedControlPlane });
+) => executeClaimProduction(runnerConfig, claim, {
+  materializeRuntimeTools: (config, scratch) => materializeRuntimeTools(config, scratch, {
+    sourceRoot: fileURLToPath(new URL("../../../scripts/", import.meta.url)),
+  }),
+  ...dependencies,
+  controlPlane: injectedControlPlane,
+});
 const runStartupPreflight = (
   runnerConfig: Parameters<typeof runStartupPreflightProduction>[0],
   options: Parameters<typeof runStartupPreflightProduction>[1] = {},

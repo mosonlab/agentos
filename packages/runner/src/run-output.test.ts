@@ -18,10 +18,20 @@ import { parseCodexTranscript } from "./adapters/codex.js";
 import { parsePiTranscript } from "./adapters/pi.js";
 import type { RunnerConfig } from "./config.js";
 import { RUNNER_EXCEPTION_REASON, summarizeEvidence } from "./envelope.js";
-import { executeClaim } from "./runner.js";
+import { executeClaim as executeClaimProduction } from "./runner.js";
 import { createControlPlaneDouble } from "./test-control-plane.js";
+import { materializeRuntimeTools } from "./workspace.js";
 
 const REGRESSION_OUTPUT_KIND = "regression-verification-v2";
+
+const executeClaim = (
+  ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
+) => executeClaimProduction(runnerConfig, claim, {
+  materializeRuntimeTools: (config, scratch) => materializeRuntimeTools(config, scratch, {
+    sourceRoot: fileURLToPath(new URL("../../../scripts/", import.meta.url)),
+  }),
+  ...dependencies,
+});
 
 const committedFixtureChange = [
   'printf "delivered fixture change\\n" > runner-fixture.txt',
@@ -450,7 +460,7 @@ const mcpDeliveredDisconnectAgent = [
   "esac",
   "cat > /dev/null",
   ...committedFixtureChange,
-  `${JSON.stringify(process.execPath)} --import ${JSON.stringify(tsxModule)} --input-type=module -e ${JSON.stringify([
+  `${JSON.stringify(process.execPath)} --conditions=development --import ${JSON.stringify(tsxModule)} --input-type=module -e ${JSON.stringify([
     `import { invokeTool, readCredentials } from ${JSON.stringify(mcpServerModule)};`,
     'await invokeTool(readCredentials(process.env), "task_output", { kind: "result", body: "delivered" });',
   ].join(" "))}`,

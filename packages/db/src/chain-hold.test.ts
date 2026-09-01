@@ -34,6 +34,7 @@ test("the package publishes the Chain hold decider as an isolated subpath", () =
   };
   assert.deepEqual(packageJson.exports["./chain-hold"], {
     types: "./src/chain-hold.ts",
+    development: "./src/chain-hold.ts",
     import: "./dist/chain-hold.js",
   });
 });

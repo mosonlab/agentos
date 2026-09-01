@@ -172,10 +172,10 @@ npm run snapshot:scan
 ```
 
 `npm test` runs every workspace's unit tests and needs no database and no
-running service. It does need `npm run build` to have run first: the web CSS
-regression test reads the built stylesheet out of `apps/web/dist/`, and without
-it that one file fails with `Build apps/web before running CSS regression
-tests`.
+running service. It requires installed dependencies and a generated Prisma
+client, but no prior build. Until the Merge Gate's build has run, the web CSS
+and bundle artifact assertions report `Merge Gate build required` skips while
+their source and fixture assertions continue to run.
 
 `npm run test:db` is separate on purpose and is **not** part of `npm test`. It
 runs the API's database tests against a live PostgreSQL that the caller

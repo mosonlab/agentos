@@ -17,10 +17,10 @@ import { ScratchDatabaseManager } from "./testdb.js";
  * should. None of them would notice if the stamp step were quietly dropped from
  * the API's own `build` script, because none of them run it.
  *
- * This one starts from the artefacts the real build produced — `pretest:db`
- * runs `npm run build -w @anneal/api` and `-w @anneal/runner` before this
- * file is loaded — and follows the commit all the way to a real process
- * answering a real port:
+ * This one starts from the artefacts the Merge Gate's preceding full build
+ * produced — that build runs `npm run build -w @anneal/api` and
+ * `-w @anneal/runner` before this file is loaded — and follows the commit all
+ * the way to a real process answering a real port:
  *
  *   real build script -> dist/build-info.json -> deployment check ->
  *   node dist/index.js -> GET /version
