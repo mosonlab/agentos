@@ -314,7 +314,8 @@ export const defenseListReason = (path: string): string | null => {
   if (path.startsWith("packages/db/prisma/migrations/")) return "database-migration";
   if (path.startsWith("packages/merge-executor/")) return "merge-execution";
   if (path.startsWith("agents/templates/direct-engineer-workflow/")
-    || path.startsWith("agents/templates/compound-engineer-workflow/")) return "template-step-set";
+    || path.startsWith("agents/templates/compound-engineer-workflow/")
+    || path.startsWith("agents/templates/pr-engineer-workflow/")) return "template-step-set";
   return null;
 };
 

@@ -60,6 +60,7 @@ const section = (heading) => {
 
 const tasks = section("## Tasks");
 const templates = section("## Task templates");
+const projects = section("## Projects and environments");
 
 const routeIn = (source, method, path) => {
   const marker = `### ${method} \`${path}\``;
@@ -71,6 +72,21 @@ const routeIn = (source, method, path) => {
 
 const routeSection = (method, path) => routeIn(tasks, method, path);
 const templateRouteSection = (method, path) => routeIn(templates, method, path);
+
+test("POST /projects documents bootstrap rows, canonical roles/template, and slug refusal", () => {
+  const { text } = routeIn(projects, "POST", "/projects");
+  assert.match(text, /one\s+`local`\s+Environment[\s\S]*`OPEN`[\s\S]*`allowedHosts`/u);
+  for (const role of [
+    "senior-dev-luna",
+    "review-coordinator-sol",
+    "review-coordinator-opus",
+    "senior-dev",
+  ]) {
+    assert.match(text, new RegExp("`" + role + "`", "u"));
+  }
+  assert.match(text, /canonical\s+`pr-engineer-workflow`\s+TaskTemplate/u);
+  assert.match(text, /409\s+Conflict[\s\S]*`project-slug-taken`/u);
+});
 
 test("the template clone route documents its contract, refusals, and example", () => {
   const { text } = templateRouteSection("POST", "/projects/:projectId/task-templates/:templateId/clone");

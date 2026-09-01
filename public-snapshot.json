@@ -26,6 +26,7 @@
     { "glob": "agents/roles/*.md", "purpose": "reviewed agent role definitions" },
     { "glob": "agents/templates/compound-engineer-workflow/*.md", "purpose": "reviewed step prompts for the twelve-step compound engineering chain: spec, plan, plan review, revision, implementation, two review passes, fix application, regression verification, librarian, human PR review and merge execution" },
     { "glob": "agents/templates/direct-engineer-workflow/*.md", "purpose": "reviewed step prompts for the eight-step direct engineering chain, which carries no spec or plan phase and takes the feature brief as its specification of record" },
+    { "glob": "agents/templates/pr-engineer-workflow/*.md", "purpose": "reviewed step prompts for the four-step pull-request engineering chain, which ends at an open pull request without regression verification or merge execution" },
     { "glob": "apps/web/components.json", "purpose": "web component configuration" },
     { "glob": "apps/web/index.html", "purpose": "web application entry document" },
     { "glob": "apps/web/package.json", "purpose": "web package definition" },

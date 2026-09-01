@@ -163,6 +163,12 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 
 - Required JSON fields: `name`, `slug` (lowercase hyphenated form).
 - Optional JSON field: `yamlDocument` (default `""`).
+- A successful request creates the Project and, in the same transaction, one
+  `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
+  Agents (`senior-dev-luna`, `review-coordinator-sol`,
+  `review-coordinator-opus`, and `senior-dev`) bound to that Environment, and
+  the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
+- A duplicate slug returns `409 Conflict` with code `project-slug-taken`.
 
 ```sh
 curl -X POST "$BASE_URL/projects" \
