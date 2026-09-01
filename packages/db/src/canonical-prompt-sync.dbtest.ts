@@ -994,7 +994,10 @@ test("sync refuses an eight-step canonical shape with structural drift before mu
   const beforeLegacyCount = await prisma.taskTemplate.count({ where: { projectId: project.id, name: { startsWith: "direct-engineer-workflow-legacy" } } });
   const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refused.status, 0, refused.output);
-  assert.match(refused.output, /direct-engineer-workflow has structural drift: step 7 differs from the canonical source in outputKind/u);
+  assert.match(
+    refused.output,
+    new RegExp(`Project ${project.slug}: Template direct-engineer-workflow \\(${template.id}\\), direct-engineer-workflow step 7 \\(${step.id}\\) differs from the canonical source in outputKind`, "u"),
+  );
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: project.id, name: { startsWith: "direct-engineer-workflow-legacy" } } }), beforeLegacyCount);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } })).outputKind, "drifted-output");
 });

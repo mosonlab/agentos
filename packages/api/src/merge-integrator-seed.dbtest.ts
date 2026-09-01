@@ -37,10 +37,12 @@ import {
   loadAgentSources,
   loadTemplateStepSources,
   PrismaClient,
+  RunnerPreference,
   type Task,
   TaskStatus,
 } from "@anneal/db";
 
+import { PROJECT_BOOTSTRAP_ROLE_NAMES } from "./project-bootstrap.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 const execFileAsync = promisify(execFile);
@@ -76,6 +78,113 @@ const integratorStep = async () => db.taskTemplateStep.findFirstOrThrow({
 const directTemplate = async () => db.taskTemplate.findUniqueOrThrow({
   where: { projectId_name: { projectId: (await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } })).id, name: DIRECT_TEMPLATE_NAME } },
   include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+});
+
+/** Build the shape POST /projects creates without exercising the HTTP route. */
+const createA1Project = async (slug: string) => {
+  const [canonicalProject, sources] = await Promise.all([
+    db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } }),
+    loadAgentSources(),
+  ]);
+  const canonicalTemplate = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: PR_TEMPLATE_NAME } },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+  const project = await db.project.create({
+    data: { name: "A1-shaped Project", slug, yamlDocument: "# A1-shaped fixture\n" },
+  });
+  const environment = await db.environment.create({
+    data: { projectId: project.id, name: "local", networking: "OPEN", allowedHosts: [] },
+  });
+  const agents = new Map<string, { id: string }>();
+  for (const name of PROJECT_BOOTSTRAP_ROLE_NAMES) {
+    const role = rolesByName.get(name);
+    assert.ok(role, `A1 fixture role source must contain ${name}`);
+    const agent = await db.agent.create({
+      data: {
+        projectId: project.id,
+        environmentId: environment.id,
+        name: role.name,
+        title: role.title,
+        model: role.model,
+        runnerPreference: role.runnerPreference,
+        inboxAccess: role.inboxAccess,
+        foundationalPrompt: sources.foundationalPrompt,
+        rolePrompt: role.rolePrompt,
+        runtimeConfigCustomized: false,
+        runtimeConfigDriftNoticeFingerprint: null,
+        disabledTools: [],
+      },
+      select: { id: true },
+    });
+    agents.set(name, agent);
+  }
+  for (const name of PROJECT_BOOTSTRAP_ROLE_NAMES) {
+    const role = rolesByName.get(name)!;
+    for (const collaboratorName of role.collaborators) {
+      const collaborator = agents.get(collaboratorName);
+      assert.ok(collaborator, `A1 fixture collaborator ${collaboratorName} must be in the bootstrap role set`);
+      await db.agentCollaboration.create({
+        data: { agentId: agents.get(name)!.id, allowedAgentId: collaborator.id, projectId: project.id },
+      });
+    }
+  }
+  const template = await db.taskTemplate.create({
+    data: {
+      projectId: project.id,
+      name: canonicalTemplate.name,
+      description: canonicalTemplate.description,
+      variables: canonicalTemplate.variables,
+    },
+  });
+  for (const step of canonicalTemplate.steps) {
+    const assignee = step.assigneeAgent ? agents.get(step.assigneeAgent.name) : null;
+    if (step.assigneeAgent) assert.ok(assignee, `A1 fixture is missing ${step.assigneeAgent.name}`);
+    await db.taskTemplateStep.create({
+      data: {
+        taskTemplateId: template.id,
+        assigneeAgentId: assignee?.id ?? null,
+        stepIndex: step.stepIndex,
+        name: step.name,
+        assigneeType: step.assigneeType,
+        prompt: step.prompt,
+        approvalGate: step.approvalGate,
+        attachmentsFromPrevious: step.attachmentsFromPrevious,
+        priorOutputKinds: step.priorOutputKinds,
+        ...(step.spawnPolicy === null ? {} : { spawnPolicy: step.spawnPolicy }),
+        runner: step.runner,
+        outputKind: step.outputKind,
+        opensPullRequest: step.opensPullRequest,
+        requiresCommit: step.requiresCommit,
+        baseFromStepIndex: step.baseFromStepIndex,
+        layer: step.layer,
+      },
+    });
+  }
+  return { project, environment, agents };
+};
+
+const agentSnapshot = async (projectIds: string[]) => db.agent.findMany({
+  where: { projectId: { in: projectIds } },
+  select: {
+    id: true,
+    projectId: true,
+    environmentId: true,
+    name: true,
+    title: true,
+    model: true,
+    runtimeConfigCustomized: true,
+    runtimeConfigDriftNoticeFingerprint: true,
+    codexServiceTier: true,
+    foundationalPrompt: true,
+    rolePrompt: true,
+    runnerPreference: true,
+    inboxAccess: true,
+    disabledTools: true,
+    archivedAt: true,
+  },
+  orderBy: [{ projectId: "asc" }, { name: "asc" }],
 });
 
 /* ------------------------------------------------------ the fresh-seed negative */
@@ -438,43 +547,153 @@ test("canonical sync rejects role structure drift without applying its prompts",
   assert.equal(persisted.rolePrompt, "role drift");
 });
 
-test("canonical sync ignores a customized same-name agent outside the canonical project", async () => {
+test("canonical sync restores Agent prompts in every Project and preserves customized runtime choices", async () => {
   assert.equal((await seed()).code, 0);
-  const canonical = await db.agent.findFirstOrThrow({
-    where: { name: "default", project: { slug: "agentos-example" } },
+  const sources = await loadAgentSources();
+  const canonicalProject = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const second = await createA1Project("custom");
+  const sourceByName = new Map(sources.roles.map((role) => [role.name, role]));
+  const canonicalDefault = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
   });
-  const customProject = await db.project.create({
-    data: { name: "Custom", slug: "custom", yamlDocument: "# custom\n" },
+  const uncustomized = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna" } },
   });
-  const customEnvironment = await db.environment.create({
-    data: { projectId: customProject.id, name: "local", networking: "OPEN", allowedHosts: [] },
+  const customized = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: second.project.id, name: "review-coordinator-sol" } },
   });
-  const custom = await db.agent.create({
+  const uncustomizedSource = sourceByName.get(uncustomized.name)!;
+  const customizedSource = sourceByName.get(customized.name)!;
+
+  await db.agent.update({
+    where: { id: canonicalDefault.id },
+    data: { foundationalPrompt: "canonical foundational prompt drift", rolePrompt: "canonical role prompt drift" },
+  });
+  await db.agent.update({
+    where: { id: uncustomized.id },
     data: {
-      projectId: customProject.id,
-      environmentId: customEnvironment.id,
-      name: "default",
-      title: "Custom Default",
-      model: "custom-model",
-      runnerPreference: "CODEX",
-      inboxAccess: false,
-      foundationalPrompt: "custom foundation",
-      rolePrompt: "custom role",
+      model: "gpt-5.6-sol:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      runtimeConfigCustomized: false,
+      runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",
+      foundationalPrompt: "second foundational prompt drift",
+      rolePrompt: "second role prompt drift",
     },
   });
-  await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role drift" } });
+  await db.agent.update({
+    where: { id: customized.id },
+    data: {
+      model: "claude-opus-5:medium",
+      runnerPreference: RunnerPreference.CLAUDE,
+      runtimeConfigCustomized: true,
+      runtimeConfigDriftNoticeFingerprint: null,
+      foundationalPrompt: "custom foundational prompt drift",
+      rolePrompt: "custom role prompt drift",
+    },
+  });
 
   const synced = await sync();
   assert.equal(synced.code, 0, synced.output);
-  const expected = (await loadAgentSources()).roles.find(({ name }) => name === "default")!;
-  const [persistedCanonical, persistedCustom] = await Promise.all([
-    db.agent.findUniqueOrThrow({ where: { id: canonical.id } }),
-    db.agent.findUniqueOrThrow({ where: { id: custom.id } }),
+
+  const [persistedCanonical, persistedUncustomized, persistedCustomized] = await Promise.all([
+    db.agent.findUniqueOrThrow({ where: { id: canonicalDefault.id } }),
+    db.agent.findUniqueOrThrow({ where: { id: uncustomized.id } }),
+    db.agent.findUniqueOrThrow({ where: { id: customized.id } }),
   ]);
-  assert.equal(persistedCanonical.rolePrompt, expected.rolePrompt);
-  assert.equal(persistedCustom.title, "Custom Default");
-  assert.equal(persistedCustom.foundationalPrompt, "custom foundation");
-  assert.equal(persistedCustom.rolePrompt, "custom role");
+  assert.equal(persistedCanonical.foundationalPrompt, sources.foundationalPrompt);
+  assert.equal(persistedCanonical.rolePrompt, sourceByName.get("default")!.rolePrompt);
+  assert.deepEqual({
+    foundationalPrompt: persistedUncustomized.foundationalPrompt,
+    rolePrompt: persistedUncustomized.rolePrompt,
+    model: persistedUncustomized.model,
+    runnerPreference: persistedUncustomized.runnerPreference,
+    runtimeConfigCustomized: persistedUncustomized.runtimeConfigCustomized,
+    runtimeConfigDriftNoticeFingerprint: persistedUncustomized.runtimeConfigDriftNoticeFingerprint,
+  }, {
+    foundationalPrompt: sources.foundationalPrompt,
+    rolePrompt: uncustomizedSource.rolePrompt,
+    model: uncustomizedSource.model,
+    runnerPreference: uncustomizedSource.runnerPreference,
+    runtimeConfigCustomized: false,
+    runtimeConfigDriftNoticeFingerprint: null,
+  });
+  assert.deepEqual({
+    foundationalPrompt: persistedCustomized.foundationalPrompt,
+    rolePrompt: persistedCustomized.rolePrompt,
+    model: persistedCustomized.model,
+    runnerPreference: persistedCustomized.runnerPreference,
+    runtimeConfigCustomized: persistedCustomized.runtimeConfigCustomized,
+    runtimeConfigDriftNoticeFingerprint: persistedCustomized.runtimeConfigDriftNoticeFingerprint,
+  }, {
+    foundationalPrompt: sources.foundationalPrompt,
+    rolePrompt: customizedSource.rolePrompt,
+    model: "claude-opus-5:medium",
+    runnerPreference: RunnerPreference.CLAUDE,
+    runtimeConfigCustomized: true,
+    runtimeConfigDriftNoticeFingerprint: JSON.stringify({
+      canonical: { model: customizedSource.model, runnerPreference: customizedSource.runnerPreference },
+      production: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+    }),
+  });
+
+  assert.deepEqual(
+    (await db.agent.findMany({ where: { projectId: second.project.id }, select: { name: true }, orderBy: { name: "asc" } }))
+      .map(({ name }) => name),
+    [...PROJECT_BOOTSTRAP_ROLE_NAMES].sort(),
+    "ordinary sync does not fill absent canonical roles in a noncanonical Project",
+  );
+});
+
+test("canonical sync rejects Agent structure drift across Projects without partial prompt updates", async () => {
+  assert.equal((await seed()).code, 0);
+  const canonicalProject = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const second = await createA1Project("custom");
+  const canonical = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
+  });
+  const foreign = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna" } },
+  });
+  await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role prompt drift" } });
+  await db.agent.update({
+    where: { id: foreign.id },
+    data: { inboxAccess: !foreign.inboxAccess },
+  });
+  const before = await agentSnapshot([canonicalProject.id, second.project.id]);
+
+  const refused = await sync();
+  assert.notEqual(refused.code, 0, refused.output);
+  assert.match(refused.output, /Project custom:/u);
+  assert.match(refused.output, new RegExp(`Agent ${foreign.name} \\(${foreign.id}\\)`, "u"));
+  assert.deepEqual(await agentSnapshot([canonicalProject.id, second.project.id]), before);
+});
+
+test("canonical sync rejects an invalid runtime pair in any Project atomically", async () => {
+  assert.equal((await seed()).code, 0);
+  const canonicalProject = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const second = await createA1Project("custom");
+  const canonical = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
+  });
+  const foreign = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna" } },
+  });
+  await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role prompt drift" } });
+  await db.agent.update({
+    where: { id: foreign.id },
+    data: {
+      model: "claude-opus-5:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      runtimeConfigCustomized: false,
+    },
+  });
+  const before = await agentSnapshot([canonicalProject.id, second.project.id]);
+
+  const refused = await sync();
+  assert.notEqual(refused.code, 0, refused.output);
+  assert.match(refused.output, /Project custom:/u);
+  assert.match(refused.output, new RegExp(`Agent ${foreign.name} \\(${foreign.id}\\)`, "u"));
+  assert.deepEqual(await agentSnapshot([canonicalProject.id, second.project.id]), before);
 });
 
 /* ------------------------------------------------------- the verifier negatives */
