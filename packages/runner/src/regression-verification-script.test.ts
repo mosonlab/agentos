@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/regression-verification.sh");
+const workerLib = resolve(dirname(script), "gate-worker/lib.sh");
 const SHA = /^[0-9a-f]{40}$/u;
 
 type Fixture = {
@@ -112,11 +113,13 @@ exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
   };
 };
 
-const run = (seeded: Fixture, ...args: string[]) => spawnSync("bash", [script, ...args], {
-  cwd: seeded.work,
+const runScript = (seeded: Fixture, scriptPath: string, cwd: string, ...args: string[]) => spawnSync("bash", [scriptPath, ...args], {
+  cwd,
   env: seeded.env,
   encoding: "utf8",
 });
+
+const run = (seeded: Fixture, ...args: string[]) => runScript(seeded, script, seeded.work, ...args);
 
 type Handoff = {
   schemaVersion: number;
@@ -128,6 +131,52 @@ type Handoff = {
 
 const handoff = (seeded: Fixture): Handoff =>
   JSON.parse(readFileSync(seeded.output, "utf8")) as Handoff;
+
+const adjacentTooling = (seeded: Fixture): { root: string; dispatchLog: string } => {
+  const root = join(seeded.root, "runtime-tools");
+  const worker = join(root, "gate-worker");
+  const dispatchLog = join(seeded.root, "adjacent-dispatch.log");
+  mkdirSync(worker, { recursive: true });
+  cpSync(script, join(root, "regression-verification.sh"));
+  cpSync(workerLib, join(worker, "lib.sh"));
+  executable(join(worker, "gate-dispatch.sh"), `#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${"$"}{BASH_SOURCE[0]}")" && pwd -P)"
+. "$SCRIPT_DIR/lib.sh"
+declare -F gate_verdict_read >/dev/null || exit 19
+printf 'adjacent-dispatch\\n' >> "$REGRESSION_FIXTURE_ADJACENT_DISPATCH_LOG"
+printf 'MERGE GATE: PASS %s\\n' "$1"
+`);
+  return { root, dispatchLog };
+};
+
+test("the script uses adjacent tooling when copied outside the checkout", () => {
+  const seeded = fixture();
+  const tooling = adjacentTooling(seeded);
+  delete seeded.env.REGRESSION_GATE_DISPATCH;
+  seeded.env.REGRESSION_FIXTURE_ADJACENT_DISPATCH_LOG = tooling.dispatchLog;
+
+  const prepared = runScript(seeded, join(tooling.root, "regression-verification.sh"), tooling.root, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.match(prepared.stdout, /^REGRESSION PREPARE: ready [0-9a-f]{40} [0-9a-f]{40}\n$/u);
+
+  const finalized = runScript(seeded, join(tooling.root, "regression-verification.sh"), tooling.root, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  assert.match(finalized.stdout, /^REGRESSION FINALIZE: pass [0-9a-f]{40}\n$/u);
+  assert.equal(readFileSync(tooling.dispatchLog, "utf8"), "adjacent-dispatch\n");
+  assert.equal(JSON.parse(handoff(seeded).body).outcome, "pass");
+});
+
+test("the repository-path command still uses its adjacent gate worker", () => {
+  const seeded = fixture();
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  assert.match(finalized.stdout, /^REGRESSION FINALIZE: pass [0-9a-f]{40}\n$/u);
+  assert.match(readFileSync(seeded.gateLog, "utf8"), /^[0-9a-f]{40} --master [0-9a-f]{40}\n$/u);
+  assert.equal(JSON.parse(handoff(seeded).body).outcome, "pass");
+});
 
 test("prepare refreshes before semantic review without acquiring the merge lease", () => {
   const seeded = fixture();
