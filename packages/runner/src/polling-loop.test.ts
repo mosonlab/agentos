@@ -21,21 +21,27 @@ test("overload skips claims, waits, reclaims on schedule, and recovers once", as
   let finishFirstClaim: (() => void) | undefined;
   const waits: number[] = [];
   const logs: string[] = [];
+  const events: string[] = [];
 
   const loop = runPollingLoop(config, {
     readLoadAverage: () => {
       loadReads += 1;
-      return loads.shift() ?? 10;
+      const load = loads.shift() ?? 10;
+      events.push(`load:${load}`);
+      return load;
     },
     now: () => clock,
     wait: async (delayMs) => {
+      events.push("wait");
       waits.push(delayMs);
       clock += 1;
     },
     reclaim: async () => {
+      events.push("reclaim");
       reclaimCalls += 1;
     },
     claim: async () => {
+      events.push("claim");
       claimCalls += 1;
       if (claimCalls === 1) {
         await new Promise<void>((resolve) => { finishFirstClaim = resolve; });
@@ -53,6 +59,12 @@ test("overload skips claims, waits, reclaims on schedule, and recovers once", as
   assert.equal(loadReads, 4, "the first claim is reached only after three overload reads");
   assert.equal(reclaimCalls, 2, "reclaim runs on both due iterations while overloaded");
   assert.deepEqual(waits, [100, 100, 100]);
+  assert.deepEqual(events, [
+    "reclaim", "load:11", "wait",
+    "load:11", "wait",
+    "reclaim", "load:11", "wait",
+    "load:10", "claim",
+  ], "each due reclaim finishes before that iteration's admission decision");
   assert.deepEqual(logs, ["Runner claim overloaded: load=11 threshold=10", "Runner claim recovered: load=10 threshold=10"]);
   assert.equal(firstClaimFinished, false, "the claim's execution remains awaited");
 
