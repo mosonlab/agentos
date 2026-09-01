@@ -9,6 +9,7 @@ import {
   capturePreflight,
   createAdapterState,
   emitAdapterEvent,
+  markInFlightToolProgress,
   modelSpec,
   PREFLIGHT_REASONS,
   preflightFailure,
@@ -177,11 +178,10 @@ export const parsePiEvent = (
     state.inFlightTool = { id: toolId, name: stringField(event, "toolName") ?? "tool", startedAt: now, lastProgressAt: now };
     emitAdapterEvent(state, sink, "TOOL_STARTED", event, toolId);
   } else if (type === "tool_execution_update") {
-    const now = new Date();
-    if (state.inFlightTool) state.inFlightTool.lastProgressAt = now;
-    state.lastProgressEventAt = now;
+    markInFlightToolProgress(state);
+    emitAdapterEvent(state, sink, "TOOL_PROGRESS", event, stringField(event, "toolCallId"));
   } else if (type === "message_update") {
-    state.lastProgressEventAt = new Date();
+    emitAdapterEvent(state, sink, "MODEL_DELTA", event);
   } else if (type === "tool_execution_end") {
     state.inFlightTool = null;
     emitAdapterEvent(state, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));

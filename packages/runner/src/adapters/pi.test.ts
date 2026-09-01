@@ -9,16 +9,17 @@ const CAPTURE = new URL("../../../../spikes/cli-capabilities/samples/pi-openai-c
 type RecordedEvent = { type: string; payload: Record<string, unknown> };
 
 const CHUNK_TYPES = new Set(["message_update", "tool_execution_update"]);
+const UNCLASSIFIED_PROVIDER_TYPE = Symbol("unclassified-provider-type");
 
 const capturedTranscript = async (): Promise<unknown[]> => (await readFile(CAPTURE, "utf8"))
   .trim()
   .split("\n")
   .map((line) => JSON.parse(line) as unknown);
 
-const providerTypeOf = (value: unknown): string | null => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+const providerTypeOf = (value: unknown): string | typeof UNCLASSIFIED_PROVIDER_TYPE => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return UNCLASSIFIED_PROVIDER_TYPE;
   const type = (value as { type?: unknown }).type;
-  return typeof type === "string" ? type : null;
+  return typeof type === "string" ? type : UNCLASSIFIED_PROVIDER_TYPE;
 };
 
 const finalOutputOf = (events: RecordedEvent[]): Record<string, unknown> => {
@@ -30,6 +31,8 @@ const finalOutputOf = (events: RecordedEvent[]): Record<string, unknown> => {
 const preservedEventCounts = (events: RecordedEvent[]) => {
   const count = (type: string): number => events.filter((event) => event.type === type).length;
   return {
+    MODEL_STARTED: count("MODEL_STARTED"),
+    MODEL_DELTA: count("MODEL_DELTA"),
     MODEL_COMPLETED: count("MODEL_COMPLETED"),
     TOOL_STARTED: count("TOOL_STARTED"),
     TOOL_COMPLETED: count("TOOL_COMPLETED"),
@@ -39,6 +42,8 @@ const preservedEventCounts = (events: RecordedEvent[]) => {
 };
 
 const CAPTURED_PRESERVED_EVENT_COUNTS = {
+  MODEL_STARTED: 1,
+  MODEL_DELTA: 2,
   MODEL_COMPLETED: 3,
   TOOL_STARTED: 0,
   TOOL_COMPLETED: 0,
@@ -58,10 +63,12 @@ const assertNoPersistedChunks = (events: RecordedEvent[]): void => {
 const assertPreservedRawEvents = (transcript: readonly unknown[], events: RecordedEvent[]): void => {
   const expectedRawTypes = transcript
     .map(providerTypeOf)
-    .filter((type): type is string => type !== null && !CHUNK_TYPES.has(type));
+    .filter((type) => typeof type !== "string" || !CHUNK_TYPES.has(type));
   const actualRawTypes = events
     .filter((event) => event.type === "PROVIDER_RAW")
-    .map((event) => event.payload.type);
+    .map((event) => typeof event.payload.type === "string"
+      ? event.payload.type
+      : UNCLASSIFIED_PROVIDER_TYPE);
   assert.deepEqual(actualRawTypes, expectedRawTypes);
 };
 
@@ -88,6 +95,8 @@ test("PI harvests one fresh openai-codex Luna message despite provisional and re
 test("PI drops streaming chunks while preserving terminal and tool events", async () => {
   const transcript = await capturedTranscript();
   assert.ok(transcript.some((event) => providerTypeOf(event) === "message_update"));
+  assert.equal(transcript.some((event) => providerTypeOf(event) === "tool_execution_update"), false,
+    "the captured fixture needs a synthetic tool update to cover chunk suppression");
   transcript.splice(-1, 0,
     { type: "tool_execution_start", toolCallId: "tool-1", toolName: "bash" },
     { type: "tool_execution_update", toolCallId: "tool-1", output: "hello" },
@@ -96,7 +105,6 @@ test("PI drops streaming chunks while preserving terminal and tool events", asyn
   const events: RecordedEvent[] = [];
   parsePiTranscript(transcript, (event) => { events.push(event); });
 
-  assert.ok(transcript.some((event) => providerTypeOf(event) === "tool_execution_update"));
   assertNoPersistedChunks(events);
   assertPreservedRawEvents(transcript, events);
   assert.deepEqual(preservedEventCounts(events), {
@@ -123,13 +131,15 @@ test("PI streaming chunks still renew both adapter progress clocks", () => {
   const messageState = parsePiTranscript([]);
   const messageBefore = new Date(0);
   messageState.lastProgressEventAt = messageBefore;
+  const messageEvents: RecordedEvent[] = [];
 
   parsePiEvent(messageState, {
     type: "message_update",
     assistantMessageEvent: { type: "text_delta", delta: "still working" },
-  }, () => undefined);
+  }, (event) => { messageEvents.push(event); });
 
   assert.ok(messageState.lastProgressEventAt.getTime() > messageBefore.getTime());
+  assert.deepEqual(messageEvents.map((event) => event.type), ["MODEL_DELTA"]);
 
   const toolState = parsePiTranscript([
     { type: "tool_execution_start", toolCallId: "tool-1", toolName: "bash" },
@@ -139,16 +149,28 @@ test("PI streaming chunks still renew both adapter progress clocks", () => {
   const toolBefore = new Date(0);
   toolState.lastProgressEventAt = toolBefore;
   inFlightTool.lastProgressAt = toolBefore;
+  const toolEvents: RecordedEvent[] = [];
 
   parsePiEvent(toolState, {
     type: "tool_execution_update",
     toolCallId: "tool-1",
     output: "still working",
-  }, () => undefined);
+  }, (event) => { toolEvents.push(event); });
 
   assert.ok(toolState.lastProgressEventAt.getTime() > toolBefore.getTime());
   assert.equal(toolState.inFlightTool, inFlightTool);
   assert.ok(inFlightTool.lastProgressAt.getTime() > toolBefore.getTime());
+  assert.deepEqual(toolEvents.map((event) => event.type), ["TOOL_PROGRESS"]);
+});
+
+test("PI preserves raw provider events without a string type", () => {
+  const transcript: unknown[] = [42, { payload: "missing type" }, { type: "message_update" }];
+  const events: RecordedEvent[] = [];
+
+  parsePiTranscript(transcript, (event) => { events.push(event); });
+
+  assertPreservedRawEvents(transcript, events);
+  assertNoPersistedChunks(events);
 });
 
 test("PI treats cache-only usage as tokens when diagnosing a missing cost", () => {
