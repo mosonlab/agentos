@@ -6,11 +6,10 @@ import {
   isTerminalDisposition,
   MERGE_INTEGRATOR_KIND,
 } from "./merge-integrator.js";
-import * as mergeIntegratorDb from "./merge-integrator-db.js";
 import {
+  landIntegratorStop,
   latestRecordedStop,
   loadIntegratorTask,
-  openStopQuestion,
   stopAnswerDispositions,
   stopQuestionKey,
   taskIsIntegratorStep,
@@ -62,11 +61,6 @@ type RepairOutcome =
   | "deferred-ordinary-base-drift"
   | "skipped";
 
-type SharedStopLanding = (
-  tx: Tx,
-  input: { integratorTaskId: string; resultActivityId?: string | null },
-) => Promise<{ questionId?: string | null } | unknown>;
-
 /**
  * Repair one Task while holding the same Task-row mutex as stop landing and
  * task archival. The latest result and its dispositions are read after the
@@ -101,39 +95,13 @@ const repairTask = async (tx: Tx, taskId: string): Promise<RepairOutcome> => {
     return "deferred-ordinary-base-drift";
   }
 
-  // The starting commit predates the shared landing operation. Keep this
-  // narrow compatibility branch only so the maintenance module remains
-  // type-checkable on that commit; integrated production code always resolves
-  // `landIntegratorStop` and therefore shares its identity/transaction rules.
-  const sharedLanding = (mergeIntegratorDb as unknown as { landIntegratorStop?: SharedStopLanding }).landIntegratorStop;
-  if (sharedLanding) {
-    const landed = await sharedLanding(tx, { integratorTaskId: taskId, resultActivityId: stop.stopId });
-    // A second writer that already won the Inbox dedupe race is a successful
-    // no-op, not a newly-created card. The Task lock normally makes this
-    // branch unreachable, but the result contract keeps the counter truthful
-    // if another legacy writer is still draining during a deployment.
-    if (typeof landed === "object" && landed !== null && "questionId" in landed && landed.questionId === null) {
-      return "already-present";
-    }
-  } else {
-    const sourceRun = stop.sourceRunId
-      ? await tx.run.findUnique({
-        where: { id: stop.sourceRunId },
-        select: { agentId: true, session: { select: { id: true } } },
-      })
-      : null;
-    const agentId = sourceRun?.agentId ?? task.assigneeAgentId;
-    if (!agentId) throw new Error(`Cannot repair merge stop ${stop.stopId}: no Agent identity is available`);
-    const question = await openStopQuestion(tx, {
-      integratorTaskId: taskId,
-      stopId: stop.stopId,
-      condition: stop.condition,
-      evidence: stop.evidence,
-      agentId,
-      sessionId: sourceRun?.session?.id ?? null,
-    });
-    if (!question) return "already-present";
-  }
+  const landed = await landIntegratorStop(tx, {
+    integratorTaskId: taskId,
+    resultActivityId: stop.stopId,
+  });
+  // A second writer that already won before this Task lock was acquired is a
+  // successful no-op, not a repair failure.
+  if (landed.questionId === null) return "already-present";
   return "created";
 };
 

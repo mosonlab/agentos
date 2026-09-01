@@ -22,6 +22,7 @@ import {
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
 } from "./merge-integrator.js";
+import { landIntegratorStop } from "./merge-integrator-db.js";
 import {
   backfillMergeStopQuestions,
   type MergeStopQuestionBackfillDatabase,
@@ -220,3 +221,62 @@ test("repairs one active incident, then remains idempotent while skipping protec
   assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `merge-stop:${active.stop.id}` } }), 1);
 });
 
+test("stop landing rolls back an Inbox failure and concurrent replay observes one winner", async () => {
+  const fixture = await createStop({ label: "transaction boundary", condition: "base-drift-post-merge" });
+  await db.taskActivity.delete({ where: { id: fixture.stop.id } });
+  await db.task.update({
+    where: { id: fixture.task.id },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  });
+
+  await assert.rejects(
+    db.$transaction(async (tx) => {
+      const failingInbox = new Proxy(tx.inboxMessage, {
+        get(target, property, receiver) {
+          if (property === "create") return async () => { throw new Error("forced Inbox insert failure"); };
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const failingTx = new Proxy(tx, {
+        get(target, property, receiver) {
+          if (property === "inboxMessage") return failingInbox;
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      return landIntegratorStop(failingTx, {
+        integratorTaskId: fixture.task.id,
+        condition: "base-drift-post-merge",
+        evidence: "merge commit 8bfa2f08 landed",
+        sourceRunId: fixture.run.id,
+      });
+    }),
+    /forced Inbox insert failure/u,
+  );
+  assert.equal(await db.taskActivity.count({ where: { taskId: fixture.task.id } }), 0);
+  const rolledBackTask = await db.task.findUniqueOrThrow({ where: { id: fixture.task.id } });
+  assert.equal(rolledBackTask.status, TaskStatus.TODO);
+  assert.equal(rolledBackTask.failureReason, null);
+
+  const landed = await db.$transaction((tx) => landIntegratorStop(tx, {
+    integratorTaskId: fixture.task.id,
+    condition: "base-drift-post-merge",
+    evidence: "merge commit 8bfa2f08 landed",
+    sourceRunId: fixture.run.id,
+  }));
+  assert.ok(landed.questionId);
+  assert.equal(await db.taskActivity.count({ where: { taskId: fixture.task.id } }), 1);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `merge-stop:${landed.stopId}` } }), 1);
+
+  await db.inboxMessage.delete({ where: { dedupeKey: `merge-stop:${landed.stopId}` } });
+  const concurrent = await Promise.all(Array.from({ length: 6 }, () =>
+    db.$transaction((tx) => landIntegratorStop(tx, {
+      integratorTaskId: fixture.task.id,
+      resultActivityId: landed.stopId,
+    })),
+  ));
+  assert.equal(concurrent.filter((result) => result.questionId !== null).length, 1);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `merge-stop:${landed.stopId}` } }), 1);
+  assert.equal(await db.taskActivity.count({ where: { taskId: fixture.task.id } }), 1);
+});
