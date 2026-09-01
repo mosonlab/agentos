@@ -210,6 +210,113 @@ test("canonical sync restores step, merge-resolver role, and foundational prompt
   assert.equal(persistedAgent.rolePrompt, expectedRole.rolePrompt);
 });
 
+test("canonical sync installs the reviewed PR prompt generation while instantiated chains stay pinned", async () => {
+  assert.equal((await seed()).code, 0);
+  const project = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const template = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: PR_TEMPLATE_NAME } },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  const fixed = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
+  const reviewedPrompt = fixed.prompt.replace(
+    "git ls-tree -r --name-only HEAD -- .chain",
+    "git ls-files -- .chain",
+  );
+  assert.notEqual(reviewedPrompt, fixed.prompt);
+  await db.taskTemplateStep.update({ where: { id: fixed.id }, data: { prompt: reviewedPrompt } });
+  const reviewedSteps = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: template.id },
+    include: { assigneeAgent: true },
+    orderBy: { stepIndex: "asc" },
+  });
+  const chainId = "pinned-pr-chain";
+  const tasks = await Promise.all(reviewedSteps.map((step) => db.task.create({ data: {
+    projectId: project.id,
+    templateId: template.id,
+    templateStepId: step.id,
+    name: `Pinned PR step ${String(step.stepIndex)}`,
+    description: "pinned reviewed-generation prompt",
+    assigneeType: step.assigneeType,
+    assigneeAgentId: step.assigneeAgentId,
+    status: TaskStatus.TODO,
+    chainId,
+    chainIndex: step.stepIndex,
+    chainLayer: step.layer,
+  } })));
+  const snapshot = reviewedSteps.map((step) => ({
+    id: step.id,
+    prompt: step.prompt,
+    name: step.name,
+    layer: step.layer,
+    outputKind: step.outputKind,
+    attachmentsFromPrevious: step.attachmentsFromPrevious,
+    opensPullRequest: step.opensPullRequest,
+    requiresCommit: step.requiresCommit,
+    baseFromStepIndex: step.baseFromStepIndex,
+  }));
+
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  const [retired, successor, pinnedTasks, sources] = await Promise.all([
+    db.taskTemplate.findUniqueOrThrow({
+      where: { id: template.id },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    }),
+    db.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: PR_TEMPLATE_NAME } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    }),
+    db.task.findMany({
+      where: { id: { in: tasks.map(({ id }) => id) } },
+      include: { templateStep: true },
+      orderBy: { chainIndex: "asc" },
+    }),
+    loadTemplateStepSources(PR_TEMPLATE_NAME),
+  ]);
+  assert.match(retired.name, /pre-pr-head-tree-check/u);
+  assert.notEqual(successor.id, retired.id);
+  assert.deepEqual(
+    pinnedTasks.map(({ templateStep }) => templateStep?.id),
+    snapshot.map(({ id }) => id),
+  );
+  assert.deepEqual(
+    pinnedTasks.map(({ templateStep }) => templateStep?.prompt),
+    snapshot.map(({ prompt }) => prompt),
+  );
+  assert.deepEqual(
+    successor.steps.map((step) => ({
+      name: step.name,
+      layer: step.layer,
+      outputKind: step.outputKind,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      baseFromStepIndex: step.baseFromStepIndex,
+    })),
+    sources.map((step) => ({
+      name: step.name,
+      layer: step.layer,
+      outputKind: step.outputKind,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      baseFromStepIndex: step.baseFromStepIndex,
+    })),
+  );
+  assert.deepEqual(
+    snapshot.map(({ id: _id, prompt: _prompt, ...shape }) => shape),
+    successor.steps.map((step) => ({
+      name: step.name,
+      layer: step.layer,
+      outputKind: step.outputKind,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      baseFromStepIndex: step.baseFromStepIndex,
+    })),
+  );
+});
+
 test("canonical sync rolls quiescent adjudication-era graphs only after active Runs settle", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();

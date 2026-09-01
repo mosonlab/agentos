@@ -269,7 +269,7 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   assert.ok(current);
   const generation = generationOf(PR_TEMPLATE_NAME, "pre-pr-handover-quality");
   assert.equal(generation.promptDigest, "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6");
-  assert.equal(generation.successorPromptDigest, "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906");
+  assert.equal(generation.successorPromptDigest, "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8");
   assert.equal(generation.shape.length, 4);
   assert.deepEqual(
     generation.shape,
@@ -294,6 +294,10 @@ test("the pull-request workflow has a registered prompt-only generation and curr
     "blind-findings": 3,
     "fixed-implementation": 4,
   });
+  const reviewedGeneration = generationOf(PR_TEMPLATE_NAME, "pre-pr-head-tree-check");
+  assert.equal(reviewedGeneration.promptDigest, "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906");
+  assert.equal(reviewedGeneration.successorPromptDigest, templatePromptGenerationDigest(current));
+  assert.deepEqual(reviewedGeneration.shape, generation.shape);
 });
 
 test("the internal npm scope rename is a registered prompt-only rollover", async () => {

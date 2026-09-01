@@ -730,6 +730,37 @@ test("canonical PR evidence handoff failures are flushed before completion", asy
   }
 });
 
+test("canonical PR evidence handoff does not overwrite an earlier terminal failure reason", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pr-first-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, succeedingAgent);
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({
+        outputPersisted: false,
+        outputRemediationAllowed: false,
+      }).task,
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      canonicalPrImplementationClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion);
+    assert.equal(completion.terminalSuccess, false);
+    assert.match(String(completion.failureReason), /Task output remediation unavailable/u);
+    assert.doesNotMatch(String(completion.failureReason), /Canonical PR workflow evidence handoff failed/u);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an immutable output satisfied by a prior Run skips remediation", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-remediation-immutable-"));
   try {

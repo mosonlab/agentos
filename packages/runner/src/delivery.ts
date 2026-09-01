@@ -265,10 +265,40 @@ const isCanonicalPrFinal = (claim: DeliveryClaim): boolean => (
   canonicalPrOutputKind(claim) === PR_FIXED_IMPLEMENTATION_KIND
 );
 
-const firstDescriptionLine = (claim: DeliveryClaim): string | null => {
-  if (typeof claim.task.description !== "string") return null;
-  return claim.task.description.split(/\r?\n/u)[0] ?? "";
+const BRIEF_HEADER_PREFIX = "\n<!-- agentos:task-brief:v1 length=";
+const BRIEF_HEADER_SUFFIX = " -->\n";
+const BRIEF_FOOTER = "\n<!-- /agentos:task-brief:v1 -->";
+
+/** The task description contains the canonical step prompt followed by the
+ * operator-authored brief. The pull request goal belongs to the latter. */
+const taskGoal = (claim: DeliveryClaim): string => {
+  const description = claim.task.description;
+  if (typeof description !== "string") throw new Error("canonical PR workflow task description is unavailable");
+  const headerStart = description.indexOf(BRIEF_HEADER_PREFIX);
+  if (headerStart < 0) throw new Error("canonical PR workflow task brief fence is missing");
+  const lengthStart = headerStart + BRIEF_HEADER_PREFIX.length;
+  const headerEnd = description.indexOf(BRIEF_HEADER_SUFFIX, lengthStart);
+  const encodedLength = headerEnd < 0 ? "" : description.slice(lengthStart, headerEnd);
+  if (!/^\d+$/u.test(encodedLength)) throw new Error("canonical PR workflow task brief fence is malformed");
+  const briefLength = Number(encodedLength);
+  if (!Number.isSafeInteger(briefLength)) throw new Error("canonical PR workflow task brief length is unsafe");
+  const briefStart = headerEnd + BRIEF_HEADER_SUFFIX.length;
+  const briefEnd = briefStart + briefLength;
+  if (description.slice(briefEnd, briefEnd + BRIEF_FOOTER.length) !== BRIEF_FOOTER) {
+    throw new Error("canonical PR workflow task brief fence does not match its declared length");
+  }
+  return description.slice(briefStart, briefEnd).split(/\r?\n/u)[0] ?? "";
 };
+
+const isWellFormedPrOutput = (output: PrWorkflowOutput | undefined): output is PrWorkflowOutput & { commitSha: string } => (
+  output !== undefined
+  && typeof output.taskId === "string"
+  && output.taskId.trim().length > 0
+  && Number.isInteger(output.chainIndex)
+  && output.chainIndex > 0
+  && typeof output.body === "string"
+  && typeof output.commitSha === "string"
+);
 
 const parsePrOutput = <T>(
   output: PrWorkflowOutput | undefined,
@@ -277,8 +307,7 @@ const parsePrOutput = <T>(
   if (!output || output.kind !== expectedKind) {
     throw new Error(`missing required ${expectedKind} canonical output evidence`);
   }
-  if (typeof output.taskId !== "string" || !Number.isInteger(output.chainIndex)
-    || typeof output.body !== "string" || typeof output.commitSha !== "string") {
+  if (!isWellFormedPrOutput(output)) {
     throw new Error(`malformed ${expectedKind} canonical output evidence`);
   }
   let value: unknown;
@@ -353,9 +382,7 @@ const requiredPrOutputs = (
     if (!output || output.kind !== expectedKind) {
       throw new Error(`canonical PR workflow output evidence is missing or out of order at ${expectedKind}`);
     }
-    if (typeof output.taskId !== "string" || output.taskId.trim().length === 0
-      || !Number.isInteger(output.chainIndex) || output.chainIndex <= 0
-      || typeof output.body !== "string" || typeof output.commitSha !== "string") {
+    if (!isWellFormedPrOutput(output)) {
       throw new Error(`malformed ${expectedKind} canonical output evidence`);
     }
     if (index > 0 && output.chainIndex <= outputs[index - 1]!.chainIndex) {
@@ -376,8 +403,7 @@ const requiredPrOutputs = (
     || !Number.isInteger(claim.task.chainIndex) || claim.task.chainIndex <= 0) {
     throw new Error("canonical PR workflow requires a non-null chain index");
   }
-  if (claim.task.chainIndex !== undefined && claim.task.chainIndex !== null
-    && current.chainIndex !== claim.task.chainIndex) {
+  if (current.chainIndex !== claim.task.chainIndex) {
     throw new Error(`${current.kind} canonical output evidence is not for the current chain index`);
   }
   return outputs;
@@ -391,8 +417,7 @@ const initialPullRequestBody = (
   claim: DeliveryClaim,
   implementation: PrImplementationArtifact,
 ): string => {
-  const goal = firstDescriptionLine(claim);
-  if (goal === null) throw new Error("canonical PR workflow task description is unavailable");
+  const goal = taskGoal(claim);
   if (!claim.task.chainId) throw new Error("canonical PR workflow requires a non-null chain identity");
   return [
     "## Goal",
@@ -416,8 +441,7 @@ const finalPullRequestBody = (
   blind: PrReviewArtifact,
   fixed: PrFixedArtifact,
 ): string => {
-  const goal = firstDescriptionLine(claim);
-  if (goal === null) throw new Error("canonical PR workflow task description is unavailable");
+  const goal = taskGoal(claim);
   if (!claim.task.chainId) throw new Error("canonical PR workflow requires a non-null chain identity");
   const adoptedFixes = fixed.closedFindings;
   const summary = [
@@ -554,8 +578,8 @@ export const deliverWorkspace = async (
   // instead of to the expensive failure (never open one again, silently). Read
   // from `run`, not `task`: the run carries the snapshot taken when it was
   // created, so an operator's PATCH cannot change a run that is already queued.
-  // No step name, output kind or task name is consulted here or anywhere in
-  // this package.
+  // This ordinary delivery decision remains run-snapshot driven; the exact
+  // canonical template/output-kind checks above govern only PR handover.
   const opensPullRequest = claim.run.opensPullRequest !== false;
   // Missing means required for compatibility with an older API claim. The
   // explicit false belongs to the immutable Run snapshot, never to a Step-name
@@ -586,7 +610,7 @@ export const deliverWorkspace = async (
     // head was already published. Such a retry must be able to repair the PR
     // body without inventing a second commit; ordinary required-commit Runs
     // retain the no-change refusal.
-    if (head === workspace.baseSha && requiresCommit && !canonicalPr) {
+    if (head === workspace.baseSha && requiresCommit && !canonicalFinal) {
       return noChangesProduced(workspace.branch, remote);
     }
   } catch (error: unknown) {
@@ -601,7 +625,7 @@ export const deliverWorkspace = async (
   }
   if (canonicalFinal) {
     try {
-      const trackedChain = await command("git", ["ls-files", "--", ".chain"], workspace.path, env,
+      const trackedChain = await command("git", ["ls-tree", "-r", "--name-only", "HEAD", "--", ".chain"], workspace.path, env,
         { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
       if (trackedChain.trim().length > 0) {
         const reason = "canonical PR final delivery requires a clean tracked .chain tree";
@@ -611,7 +635,7 @@ export const deliverWorkspace = async (
           pushRemote: remote,
           pushError: error.message,
           failureClass: failureClassFor(error.message),
-          failure: { operation: "git ls-files -- .chain", message: error.message, error },
+          failure: { operation: "git ls-tree HEAD -- .chain", message: error.message, error },
         };
       }
     } catch (error: unknown) {
@@ -621,7 +645,7 @@ export const deliverWorkspace = async (
         pushRemote: remote,
         pushError: message,
         failureClass: failureClassFor(message),
-        failure: { operation: "git ls-files -- .chain", message, error },
+        failure: { operation: "git ls-tree HEAD -- .chain", message, error },
       };
     }
   }
@@ -654,6 +678,18 @@ export const deliverWorkspace = async (
   await recordPublication(workspace.branch).catch(() => undefined);
   const repo = githubRepo(remote);
   if (!repo) {
+    if (canonicalFinal) {
+      const reason = "canonical PR final delivery requires a GitHub remote";
+      const error = new Error(reason);
+      return failedPullRequestDelivery(
+        workspace.branch,
+        remote,
+        "GitHub remote validation",
+        error,
+        reason,
+        `Branch '${workspace.branch}' was pushed, but the final pull request could not be updated because the remote is not hosted on GitHub.`,
+      );
+    }
     return opensPullRequest
       ? manual(workspace.branch, remote, "Remote is not hosted on GitHub.")
       : noPullRequest(workspace.branch, remote);
@@ -768,7 +804,7 @@ export const deliverWorkspace = async (
         `Branch '${workspace.branch}' was pushed, but no open pull request was found for the final handover.`,
       );
     }
-    if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
+    if (!opensPullRequest && !canonicalFinal) return noPullRequest(workspace.branch, remote);
     const createArguments = [
       "pr", "create", "--repo", repo,
       "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
@@ -906,7 +942,7 @@ export const deliverWorkspace = async (
     // already on the remote. Reporting FAILED here would fail a documentation
     // step *after* its push, and the runner marks a delivery failure with a
     // failureClass non-retryable.
-    if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
+    if (!opensPullRequest && !canonicalFinal) return noPullRequest(workspace.branch, remote);
     return failedPullRequestDelivery(
       workspace.branch,
       remote,

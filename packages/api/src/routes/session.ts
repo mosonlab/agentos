@@ -75,7 +75,7 @@ type PrWorkflowOutputProjection = {
   chainIndex: number;
   kind: string;
   body: string;
-  commitSha: string | null;
+  commitSha: string;
 };
 
 const isPrDeliveryStep = (task: {
@@ -146,6 +146,7 @@ const prWorkflowOutputsFor = async (
 
   return rows.flatMap((row) => (
     row.chainIndex === null || row.stepOutput === null || row.templateStep === null
+      || typeof row.stepOutput.commitSha !== "string"
       ? []
       : [{
         taskId: row.id,

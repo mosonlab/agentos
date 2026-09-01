@@ -243,7 +243,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
     finalPrompt,
     /After using the review evidence[\s\S]*remove the complete tracked `\.chain\/` directory[\s\S]*commit that deletion together with any adopted fixes[\s\S]*fixed-implementation/u,
   );
-  assert.match(finalPrompt, /Before persisting the output, verify that `git ls-files -- \.chain` has no entries/u);
+  assert.match(finalPrompt, /Before persisting the output, verify that `git ls-tree -r --name-only HEAD -- \.chain` has no entries/u);
   assert.match(finalPrompt, /only after that cleanup commit/u);
   assert.match(finalPrompt, /`testsRun` entry[s]? [^\.]*exact command and its observed exit\/result summary/u);
   assert.match(finalPrompt, /retry starts at the already-clean cleanup commit[\s\S]*preserve that head[\s\S]*do not recreate bookkeeping or invent another commit/u);
