@@ -17,6 +17,7 @@ import { CODEX_STARTER_MODEL, codexDeclaration, parseCodexEvent, parseCodexTrans
 import { parsePiTranscript, piDeclaration } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
+import { hostProofSlotDirectory } from "./host-proof-slots.js";
 import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
 
 const claim: ClaimedTask = {
@@ -376,7 +377,7 @@ test("Claude excludes host settings and auto-memory with the versioned platform 
   assert.equal(claude[settingsIndex + 1], claudePlatformSettingsPath());
   assert.deepEqual(JSON.parse(await readFile(claudePlatformSettingsPath(), "utf8")), { autoMemoryEnabled: false });
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     { ...claim, runner: "CLAUDE", secrets: { ...claim.secrets, CLAUDE_CONFIG_DIR: "/host/.claude" } },
     scratch,
     "/work",
@@ -400,7 +401,7 @@ test("Claude's staged platform settings path is overridable and published", () =
 
 test("runner proxy environment wins over task secrets for Claude, Codex, and Pi", () => {
   const config = {
-    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [],
+    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3,
     proxyEnvironment: { HTTP_PROXY: "http://runner-http", HTTPS_PROXY: "http://runner-https", NO_PROXY: "localhost" },
   };
   for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
@@ -416,8 +417,58 @@ test("runner proxy environment wins over task secrets for Claude, Codex, and Pi"
   }
 });
 
+test("host proof slot environment is runner-owned and survives each run-as adapter", () => {
+  const workspaceRoot = "/shared/runner-workspaces";
+  const hostProofSlots = 7;
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const env = buildChildEnvironment(
+      {
+        path: "/bin",
+        home: "/runner",
+        apiUrl: "http://api",
+        runAsPrefix: [],
+        workspaceRoot,
+        hostProofSlots,
+      },
+      {
+        ...claim,
+        runner,
+        secrets: {
+          ...claim.secrets,
+          AGENTOS_HOST_PROOF_SLOT_DIR: "/task-controlled/slots",
+          AGENTOS_HOST_PROOF_SLOTS: "99",
+        },
+      },
+      scratch,
+      "/work",
+    );
+    assert.equal(env.AGENTOS_HOST_PROOF_SLOT_DIR, hostProofSlotDirectory({ workspaceRoot }));
+    assert.equal(env.AGENTOS_HOST_PROOF_SLOTS, String(hostProofSlots));
+    assert.notEqual(env.AGENTOS_HOST_PROOF_SLOT_DIR, hostProofSlotDirectory({ workspaceRoot: scratch.workspaceRoot }));
+
+    const launch = launchArgv(
+      {
+        binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+        runAsPrefix: ["/usr/bin/env", "-i"],
+      },
+      runner,
+      [],
+      env,
+    );
+    assert.ok(launch.args.includes(`AGENTOS_HOST_PROOF_SLOT_DIR=${hostProofSlotDirectory({ workspaceRoot })}`));
+    assert.ok(launch.args.includes(`AGENTOS_HOST_PROOF_SLOTS=${hostProofSlots}`));
+  }
+});
+
 test("AGENTOS_TOOLS is platform-owned for ordinary and regression steps across every adapter", () => {
-  const config = { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] };
+  const config = {
+    path: "/bin",
+    home: "/runner",
+    apiUrl: "http://api",
+    runAsPrefix: [],
+    workspaceRoot: productionRoot,
+    hostProofSlots: 3,
+  };
   const secrets = {
     ...claim.secrets,
     AGENTOS_TOOLS: "/checkout/task-secret-tools",
@@ -455,7 +506,7 @@ test("only regression steps reserve platform-owned chain and base coordinates", 
     AGENTOS_PULL_REQUEST_BASE: "task-secret-base",
   };
   const regressionEnv = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     {
       ...claim,
       task: { ...claim.task, templateStep: { name: "Regression", outputKind: "regression-verification-v2" } },
@@ -467,7 +518,7 @@ test("only regression steps reserve platform-owned chain and base coordinates", 
   assert.equal(regressionEnv.AGENTOS_CHAIN_ID, "chain-1");
   assert.equal(regressionEnv.AGENTOS_PULL_REQUEST_BASE, "main");
   assert.throws(() => buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     {
       ...claim,
       task: { ...claim.task, chainId: null, templateStep: { name: "Regression", outputKind: "regression-verification-v2" } },
@@ -478,7 +529,7 @@ test("only regression steps reserve platform-owned chain and base coordinates", 
   ), /regression-verification task is missing its platform chain id/u);
 
   const ordinaryEnv = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     { ...claim, secrets },
     scratch,
     "/work",
@@ -490,7 +541,7 @@ test("only regression steps reserve platform-owned chain and base coordinates", 
 test("a credential-bearing runner proxy stays in env and out of run-as argv", () => {
   const proxyUrl = ["http://proxy-user:", "proxy-pass@", "proxy.invalid:7897"].join("");
   const config = {
-    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["sudo", "-E", "--"],
+    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["sudo", "-E", "--"], workspaceRoot: productionRoot, hostProofSlots: 3,
     binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
     proxyEnvironment: { HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl },
   };
@@ -582,7 +633,7 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
     assert.ok(args.includes("gpt-5.6-luna"));
   }
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     fast.claim,
     scratch,
     "/work",
@@ -697,7 +748,7 @@ test("the PI extension injects the explicit tier only into openai-codex requests
 
 test("PI runtime preflight rejects an openai-codex Run whose explicit service tier is absent", async () => {
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     {
       ...claim,
       runner: "PI",
@@ -1063,7 +1114,7 @@ test("one unusable PI usage field is dropped without taking its siblings with it
 // production wipes were old checkouts resolving the production default.
 test("agent session environment pins both roots inside the run's disposable scratch", () => {
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     // A task secret must not be able to aim a session at the production root.
     { ...claim, secrets: { ...claim.secrets, RUNNER_WORKSPACE_ROOT: productionRoot, CONTROL_PLANE_STATE_DIR: productionRoot } },
     scratch,
@@ -1077,7 +1128,7 @@ test("agent session environment pins both roots inside the run's disposable scra
 
 test("PI config overrides are stripped and the isolated config root is runner-pinned", () => {
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     {
       ...claim,
       runner: "PI",
@@ -1112,7 +1163,7 @@ test("Codex and PI child environments preserve the configured runner Git identit
       await mkdir(repository, { recursive: true });
       await mkdir(runnerScratch.configRoot, { recursive: true });
       const env = buildChildEnvironment(
-        { path: process.env.PATH ?? "/usr/bin:/bin", home: runnerHome, apiUrl: "http://api", runAsPrefix: [] },
+        { path: process.env.PATH ?? "/usr/bin:/bin", home: runnerHome, apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
         { ...claim, runner, secrets: { ...claim.secrets, GIT_CONFIG_GLOBAL: "/hostile/.gitconfig" } },
         runnerScratch,
         repository,
@@ -1137,7 +1188,7 @@ test("child environment is an explicit allowlist and excludes host variables", (
   const previous = process.env.HOST_ONLY_CREDENTIAL;
   process.env.HOST_ONLY_CREDENTIAL = "must-not-leak";
   try {
-    const env = buildChildEnvironment({ path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] }, claim, scratch, "/work");
+    const env = buildChildEnvironment({ path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 }, claim, scratch, "/work");
     assert.equal(env.HOST_ONLY_CREDENTIAL, undefined);
     assert.equal(env.ALLOWED_SECRET, "secret");
     assert.equal(env.AGENTOS_SESSION_TOKEN, "agos_session_secret");
@@ -1150,7 +1201,7 @@ test("child environment is an explicit allowlist and excludes host variables", (
 
 test("the runner pins its configured gate destination over task secrets", () => {
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], gateServer: "agentos-gate" },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3, gateServer: "agentos-gate" },
     { ...claim, secrets: { ...claim.secrets, AGENTOS_GATE_SERVER: "ci-desktop-worker" } },
     scratch,
     "/work",
@@ -1160,7 +1211,7 @@ test("the runner pins its configured gate destination over task secrets", () => 
 
 test("a run-as launcher cannot strip the operator-selected gate destination", () => {
   const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"], gateServer: "agentos-gate" },
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"], workspaceRoot: productionRoot, hostProofSlots: 3, gateServer: "agentos-gate" },
     claim,
     scratch,
     "/work",
@@ -1214,7 +1265,7 @@ const rootReportingStub = [
   'fi',
   // Drain the prompt so the parent never sees EPIPE instead of the report.
   "while read -r _line; do :; done",
-  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","toolsDir":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$AGENTOS_TOOLS" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
+  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","toolsDir":"%s","hostProofSlotDir":"%s","hostProofSlots":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$AGENTOS_TOOLS" "$AGENTOS_HOST_PROOF_SLOT_DIR" "$AGENTOS_HOST_PROOF_SLOTS" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
   "",
 ].join("\n");
 
@@ -1234,6 +1285,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
     // sudoers policy would for anything it has not been told to preserve.
     runAsPrefix: ["/usr/bin/env", "-i"],
     workspaceRoot: productionRoot,
+    hostProofSlots: 3,
     path: "/bin",
     home: fixture,
     apiUrl: "http://api",
@@ -1269,6 +1321,8 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
           workspaceRoot?: string;
           stateDir?: string;
           toolsDir?: string;
+          hostProofSlotDir?: string;
+          hostProofSlots?: string;
           home?: string;
           gitConfigGlobal?: string;
           codexConfigRoot?: string;
@@ -1280,6 +1334,12 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
         assert.equal(report.toolsDir, runScratch.toolsDir, `${runner} ${mode} lost AGENTOS_TOOLS across the launcher`);
+        assert.equal(
+          report.hostProofSlotDir,
+          hostProofSlotDirectory(config),
+          `${runner} ${mode} lost AGENTOS_HOST_PROOF_SLOT_DIR across the launcher`,
+        );
+        assert.equal(report.hostProofSlots, "3", `${runner} ${mode} lost AGENTOS_HOST_PROOF_SLOTS across the launcher`);
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);

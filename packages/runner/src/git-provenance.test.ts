@@ -48,6 +48,7 @@ const config = (root: string, identity: RunnerConfig["gitIdentity"] = HUMAN): Ru
   home: join(root, "home"),
   gitIdentity: identity,
   workspaceRoot: join(root, "runs"),
+  hostProofSlots: 3,
   failedWorkspaceRetention: 0,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,

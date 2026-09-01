@@ -14,11 +14,12 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // one of them being stale while the other was current (issue #140).
 console.log(`Anneal runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
-const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }, { runPollingLoop }] = await Promise.all([
+const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }] = await Promise.all([
   import("./config.js"),
   import("./adapters.js"),
   import("./runner.js"),
   import("./reclaim.js"),
+  import("./host-proof-slots.js"),
   import("./polling-loop.js"),
 ]);
 
@@ -35,6 +36,7 @@ if (process.env.RUNNER_NODE_BINARY) {
 // run-as account has to be able to reach, and they are not derivable from the
 // operator's own shell. scripts/os-isolation/verify.sh reads this line.
 console.log(runtimeDescriptor(config.runnerId, config.runAsPrefix));
+await prepareHostProofSlots(config);
 
 let stopping = false;
 let stopExitCode = 0;

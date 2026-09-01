@@ -1219,6 +1219,7 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
       home: join(root, "home"),
       gitIdentity: { name: "Human Maintainer", email: "maintainer@example.invalid" },
       workspaceRoot: join(root, "runs"),
+      hostProofSlots: 3,
       failedWorkspaceRetention: 0,
       workspaceReclaimIntervalMs: 300_000,
       toolDeadlineMs: 60_000,
