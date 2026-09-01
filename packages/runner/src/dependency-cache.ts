@@ -81,6 +81,9 @@ export type DependencyCacheOptions = {
   report?: (progress: DependencyCacheProgress) => void;
 };
 
+/** The operator-declared policy that selects whether this runner provisions npm dependencies. */
+export type DependencyProvisioning = "NONE" | "NPM_CI";
+
 export type DependencyCacheResult = {
   status: "not-applicable" | "restored" | "installed";
   key?: string;
@@ -988,6 +991,7 @@ const rebuildNativeWorkspaces = async (
 export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
+  dependencyProvisioning: DependencyProvisioning,
   env: NodeJS.ProcessEnv,
   dependencies: DependencyCacheDependencies,
   options: DependencyCacheOptions = {},
@@ -995,6 +999,14 @@ export const materializeWorkspaceDependencies = async (
   const execute = dependencies.execute;
   const started = Date.now();
   const report = options.report ?? progressReporter;
+  if (dependencyProvisioning === "NONE") {
+    try {
+      report({ event: "miss", condition: "dependency-provisioning-none" });
+      return { status: "not-applicable", condition: "dependency-provisioning-none" };
+    } finally {
+      report({ event: "elapsed", elapsedMs: Date.now() - started });
+    }
+  }
   const requestedWorkspace = resolve(workspacePath);
   if (await pathKind(requestedWorkspace) !== "directory" || (await lstat(requestedWorkspace)).isSymbolicLink()) {
     throw new Error("Run workspace is not a real directory");
