@@ -33,6 +33,7 @@ priorOutputKinds: []         # Prior TaskStepOutput kinds required by this promp
 attachmentsFromPrevious: true
 opensPullRequest: true
 requiresCommit: true          # false when a valid Step outcome may leave HEAD unchanged
+provisionDependencies: true   # false only when this step must skip workspace dependency materialization
 baseFromStepIndex: null                # null or a step in a strictly earlier layer
 spawnPolicy: null                      # null or an inline JSON object
 ```

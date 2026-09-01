@@ -40,8 +40,7 @@ The smell baseline is a fixed set of Fowler code smells (_Refactoring_, ch.3) th
 
 In this one session, make two sequential explicit passes over the same reviewed range: first complete the Standards pass (correctness, security, repository conventions, and the smell baseline) and close its full findings list; only then start a separate Spec pass (requirement-by-requirement tracing with quoted governing text), and merge both passes into one persisted report. Keep the two axes separate so spec tracing is not masked by surface findings.
 
-Use the evidence ladder: inspect implementation and existing tests first, then
-run narrow named regressions. During a review round the repository merge gate
+During a review round the repository merge gate
 is not yours to run: it is chain-level regression evidence a later step
 produces on a dedicated worker slot through the repository's gate dispatcher.
 Running it here spends the review on a verdict this step cannot use, and a gate

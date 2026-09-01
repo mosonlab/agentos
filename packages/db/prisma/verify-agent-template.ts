@@ -102,6 +102,9 @@ const main = async (): Promise<void> => {
       if (step.requiresCommit !== expected.requiresCommit) {
         throw new Error(`${templateName} step ${step.stepIndex} requiresCommit must be ${expected.requiresCommit}; found ${step.requiresCommit}`);
       }
+      if (step.provisionDependencies !== expected.provisionDependencies) {
+        throw new Error(`${templateName} step ${step.stepIndex} provisionDependencies must be ${expected.provisionDependencies}; found ${step.provisionDependencies}`);
+      }
       if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
         throw new Error(`${templateName} step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
       }

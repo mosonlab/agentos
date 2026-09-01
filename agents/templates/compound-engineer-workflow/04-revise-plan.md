@@ -8,6 +8,7 @@ priorOutputKinds: [spec, plan, plan-review]
 attachmentsFromPrevious: true
 opensPullRequest: false
 requiresCommit: false
+provisionDependencies: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---

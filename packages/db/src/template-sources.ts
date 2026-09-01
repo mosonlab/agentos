@@ -61,6 +61,7 @@ const STRUCTURAL_FIELDS = [
   "priorOutputKinds",
   "opensPullRequest",
   "requiresCommit",
+  "provisionDependencies",
   "baseFromStepIndex",
   "spawnPolicy",
 ] as const;
@@ -76,6 +77,7 @@ export type TemplateStepSource = {
   priorOutputKinds: string[];
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.InputJsonObject | null;
   prompt: string;
@@ -97,6 +99,7 @@ export type PersistedTemplateStepStructure = {
   priorOutputKinds: string[];
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
 };
@@ -117,6 +120,7 @@ export const templateStepStructureDifferences = (
     ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
     ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
     ["requiresCommit", actual.requiresCommit, expected.requiresCommit],
+    ["provisionDependencies", actual.provisionDependencies, expected.provisionDependencies],
     ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
     ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
   ] as const;
@@ -197,6 +201,7 @@ export const loadTemplateStepSources = async (
       priorOutputKinds: parseInlineList(document.attributes.priorOutputKinds, filePath, "priorOutputKinds"),
       opensPullRequest: parseBoolean(requiredFrontmatter(document, "opensPullRequest", filePath), filePath, "opensPullRequest"),
       requiresCommit: parseBoolean(requiredFrontmatter(document, "requiresCommit", filePath), filePath, "requiresCommit"),
+      provisionDependencies: parseBoolean(requiredFrontmatter(document, "provisionDependencies", filePath), filePath, "provisionDependencies"),
       baseFromStepIndex: parseOptionalStepIndex(requiredFrontmatter(document, "baseFromStepIndex", filePath), filePath),
       spawnPolicy: parseSpawnPolicy(requiredFrontmatter(document, "spawnPolicy", filePath), filePath),
       prompt: document.body,

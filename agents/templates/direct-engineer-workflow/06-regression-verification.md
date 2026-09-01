@@ -8,6 +8,7 @@ priorOutputKinds: [implementation, sol-findings, blind-findings, fixed-implement
 attachmentsFromPrevious: true
 opensPullRequest: false
 requiresCommit: false
+provisionDependencies: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---

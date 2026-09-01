@@ -525,6 +525,7 @@ model TaskTemplateStep {
   /// Whether a successful Run must advance the workspace commit. False still
   /// publishes the branch, because a later Chain Step may need to clone it.
   requiresCommit          Boolean      @default(true)
+  provisionDependencies   Boolean      @default(true)
   baseFromStepIndex       Int?
   layer                   Int
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
