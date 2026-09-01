@@ -195,12 +195,30 @@ const claim = async () => {
       implementationBaseSha: string | null;
       implementationHeadSha: string | null;
     };
+    task: {
+      templateStep: { provisionDependencies: boolean } | null;
+    };
     priorOutputs: Array<{ kind: string; body: string }>;
     operatorNotes: string[];
     sessionToken: string;
     fencingToken: string;
   }>;
 };
+
+test("review claims carry the stored dependency-provisioning policy", async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const reviewStep = template.steps.find((step) => step.stepIndex === 7);
+  assert.ok(reviewStep, "canonical blind review step must exist");
+  await db.taskTemplateStep.update({
+    where: { id: reviewStep.id },
+    data: { provisionDependencies: false },
+  });
+
+  const review = await queueCanonicalStep(template, repo.id, 7);
+  const claimed = await claim();
+  assert.equal(claimed.run.id, review.run.id);
+  assert.equal(claimed.task.templateStep?.provisionDependencies, false);
+});
 
 const reviewReport = (kind: "sol-findings" | "blind-findings", headSha: string, baseSha = "b".repeat(40)) => JSON.stringify({
   schemaVersion: 1,
