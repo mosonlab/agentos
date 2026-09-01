@@ -192,6 +192,35 @@ export type RecordedStop = {
 };
 
 /**
+ * One validity predicate for durable stopped-result history and stop landing.
+ * Activity ingestion may accept arbitrary progress metadata, but an entry only
+ * becomes guard-visible merge state when it satisfies the versioned result
+ * contract in full. Keeping evidence and source ownership strict here prevents
+ * a malformed SESSION activity from becoming a stop that ingestion correctly
+ * declined to land.
+ */
+const stoppedResultMetadata = (
+  row: { metadata: Prisma.JsonValue | null },
+): { condition: StopCondition; evidence: string; sourceRunId: string | null } | null => {
+  const metadata = asRecord(row.metadata);
+  if (
+    metadata?.kind !== MERGE_INTEGRATOR_KIND.result
+    || metadata.schemaVersion !== MERGE_INTEGRATOR_SCHEMA_VERSION
+    || metadata.outcome !== "stopped"
+    || !isStopCondition(metadata.condition)
+    || typeof metadata.evidence !== "string"
+    || !(metadata.sourceRunId === undefined
+      || metadata.sourceRunId === null
+      || typeof metadata.sourceRunId === "string")
+  ) return null;
+  return {
+    condition: metadata.condition,
+    evidence: metadata.evidence,
+    sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
+  };
+};
+
+/**
  * The latest entry of the append-only `mergeIntegrator.result` history, but
  * only when it is a stop. Reading the history rather than the replaceable
  * `TaskStepOutput` is what stops a re-authorized run from erasing the stop the
@@ -207,14 +236,14 @@ export const latestRecordedStop = async (tx: Tx, integratorTaskId: string): Prom
     const metadata = asRecord(row.metadata);
     if (metadata?.kind !== MERGE_INTEGRATOR_KIND.result) continue;
     // The newest result decides. A later `merged` closes the chain even though
-    // an older stop is still in the history.
-    if (metadata.outcome !== "stopped") return null;
-    if (!isStopCondition(metadata.condition)) return null;
+    // an older stop is still in the history. A malformed newest result is not
+    // a recorded stop either; completion owns landing its fail-loud malformed
+    // output condition, while arbitrary activity metadata gains no authority.
+    const stopped = stoppedResultMetadata(row);
+    if (!stopped) return null;
     return {
       stopId: row.id,
-      condition: metadata.condition,
-      evidence: typeof metadata.evidence === "string" ? metadata.evidence : "",
-      sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
+      ...stopped,
       createdAt: row.createdAt,
     };
   }
@@ -478,19 +507,6 @@ type StopResultActivity = {
   actorType: string;
   actorId: string | null;
   metadata: Prisma.JsonValue | null;
-};
-
-const stoppedResultMetadata = (
-  row: Pick<StopResultActivity, "metadata">,
-): { condition: StopCondition; evidence: string; sourceRunId: string | null } | null => {
-  const metadata = asRecord(row.metadata);
-  if (metadata?.kind !== MERGE_INTEGRATOR_KIND.result || metadata.outcome !== "stopped") return null;
-  if (!isStopCondition(metadata.condition)) return null;
-  return {
-    condition: metadata.condition,
-    evidence: typeof metadata.evidence === "string" ? metadata.evidence : "",
-    sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
-  };
 };
 
 /**

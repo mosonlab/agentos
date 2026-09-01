@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 
 import {
   landIntegratorStop,
+  latestRecordedStop,
   recordIntegratorStop,
   type IntegratorStopLandingInput,
 } from "./merge-integrator-db.js";
@@ -212,4 +213,44 @@ test("canonical ordinary base drift lands REVIEW but defers its abandon question
   assert.equal(landed.questionId, null);
   assert.equal(questions.length, 0);
   assert.equal(task.status, "REVIEW");
+});
+
+test("malformed result metadata never becomes a guard-visible recorded stop", async () => {
+  const base = {
+    taskId: "integrator-task",
+    actorType: "session",
+    actorId: "merge-executor-1",
+    body: "stopped",
+    createdAt: new Date(2026, 8, 1),
+  };
+  for (const [id, metadata] of [
+    ["wrong-schema", {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 2,
+      outcome: "stopped",
+      condition: "base-drift-post-merge",
+      evidence: "landed commit 8bfa2f08",
+      sourceRunId: "source-run",
+    }],
+    ["missing-evidence", {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "stopped",
+      condition: "base-drift-post-merge",
+      sourceRunId: "source-run",
+    }],
+    ["malformed-source-run", {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "stopped",
+      condition: "base-drift-post-merge",
+      evidence: "landed commit 8bfa2f08",
+      sourceRunId: 42,
+    }],
+  ] as const) {
+    const { tx } = makeTransaction({
+      activities: [{ ...base, id, metadata } as Activity],
+    });
+    assert.equal(await latestRecordedStop(tx, "integrator-task"), null, id);
+  }
 });

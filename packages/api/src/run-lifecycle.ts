@@ -446,12 +446,13 @@ export const appendRunActivity = async (
       },
     });
     // A mechanical executor writes its replaceable output and append-only
-    // result through separate fenced SESSION calls. Land a valid stopped result
-    // while this activity transaction is still open, so a committed result can
-    // never become a guard-visible stop without its condition-specific Inbox
-    // question. `landIntegratorStop` adopts this exact activity id; its Task
-    // lock and unique dedupe key serialize replays and concurrent repair.
-    const stopped = input.principal.kind === "session"
+    // result through separate fenced calls. Land a valid stopped result from
+    // either of its authenticated principals while this activity transaction
+    // is still open, so a committed result can never become a guard-visible
+    // stop without its condition-specific Inbox question. `landIntegratorStop`
+    // adopts this exact activity id; its Task lock and unique dedupe key
+    // serialize replays and concurrent repair.
+    const stopped = (input.principal.kind === "session" || input.principal.kind === "merge-executor")
       && executionModeFor(run.task?.templateStep ?? null) === "mechanical"
       ? stoppedResultMetadataFor(metadata, input.runId)
       : null;

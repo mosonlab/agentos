@@ -680,10 +680,11 @@ export const parseMergeResult = (
   }
   if (value.outcome === "stopped") {
     if (!isStopCondition(value.condition)) return malformed("stopped outcome without a known condition");
+    if (typeof value.evidence !== "string") return malformed("stopped outcome without string evidence");
     return {
       outcome: "stopped",
       condition: value.condition,
-      evidence: typeof value.evidence === "string" ? value.evidence : "",
+      evidence: value.evidence,
     };
   }
   return malformed("outcome is neither merged nor stopped");

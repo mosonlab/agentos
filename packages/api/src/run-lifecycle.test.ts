@@ -541,7 +541,7 @@ test("activity persists the authenticated principal through the lifecycle interf
   });
 });
 
-test("a fenced SESSION stopped result lands its question in the activity transaction", async () => {
+test("a fenced SESSION or merge-executor stopped result lands its question in the activity transaction", async () => {
   const taskUpdates: Array<Record<string, unknown>> = [];
   const questions: Array<Record<string, unknown>> = [];
   let runRead = 0;
@@ -622,4 +622,23 @@ test("a fenced SESSION stopped result lands its question in the activity transac
   assert.equal(questions.length, 1);
   assert.equal(questions[0]?.dedupeKey, "merge-stop:session-result-1");
   assert.deepEqual((questions[0]?.choices as Array<{ id: string }>).map((choice) => choice.id), ["accept", "revert"]);
+
+  taskUpdates.length = 0;
+  questions.length = 0;
+  runRead = 0;
+  const executorResult = await appendRunActivity(databaseFor(tx), {
+    runId: "run-1",
+    now,
+    principal: { kind: "merge-executor" },
+    body: {
+      actorType: "operator",
+      actorId: "merge-executor-1",
+      fencingToken: "fence-1",
+      body: "Mechanical merge stopped: base-drift-post-merge",
+      metadata,
+    },
+  });
+  assert.equal("message" in executorResult, false);
+  assert.equal(taskUpdates.length, 1);
+  assert.equal(questions.length, 1);
 });

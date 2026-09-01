@@ -220,7 +220,10 @@ test("a SESSION stop and definitive output outrank a later failed completion env
     failureClass: null,
   });
 
-  const settledRun = await db.run.findUniqueOrThrow({ where: { id: claimed.runId } });
+  const settledRun = await db.run.findUniqueOrThrow({
+    where: { id: claimed.runId },
+    include: { session: { select: { id: true } } },
+  });
   assert.equal(settledRun.status, "SUCCEEDED");
   assert.equal(settledRun.failureClass, null);
   assert.equal(settledRun.retryable, false);
@@ -235,6 +238,8 @@ test("a SESSION stop and definitive output outrank a later failed completion env
   });
   assert.equal(cards.length, 1);
   assert.equal(cards[0]!.dedupeKey, `merge-stop:${resultActivity.body.id}`);
+  assert.equal(cards[0]!.agentId, settledRun.agentId);
+  assert.equal(cards[0]!.sessionId, settledRun.session!.id);
   assert.deepEqual((cards[0]!.choices as Array<{ id: string }>).map((choice) => choice.id), ["accept", "revert"]);
   assert.equal(await db.inboxMessage.count({ where: { taskId: task.id, kind: "TEXT" } }), 0);
   assert.equal(await db.taskActivity.count({ where: {
@@ -299,6 +304,35 @@ test("completion creates and lands one stop when output committed but result act
     kind: "MULTIPLE_CHOICE",
     status: "OPEN",
   } }), 1);
+});
+
+test("a stopped output without string evidence cannot override a failed completion", async () => {
+  const chain = await seedIntegratorChain(db, { label: "malformed-stop-no-precedence" });
+  const claimed = await claimIntegratorRun(chain);
+  const output = await call("PUT", `/session/runs/${claimed.runId}/output`, {
+    fencingToken: claimed.fencingToken,
+    kind: "merge-result",
+    body: JSON.stringify({ outcome: "stopped", condition: "base-drift-post-merge" }),
+  }, claimed.sessionToken);
+  assert.equal(output.status, 200, JSON.stringify(output.body));
+
+  const completion = await call(
+    "POST",
+    `/runner/runs/${claimed.runId}/complete`,
+    failedProtocolCompletion(claimed.fencingToken),
+    EXECUTOR,
+  );
+  assert.equal(completion.status, 200, JSON.stringify(completion.body));
+  assert.deepEqual(completion.body, {
+    taskId: chain.integratorTask!.id,
+    succeeded: false,
+    retryCreated: true,
+    failureClass: "PROTOCOL_ERROR",
+  });
+  const failedRun = await db.run.findUniqueOrThrow({ where: { id: claimed.runId } });
+  assert.equal(failedRun.status, "FAILED");
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 2);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: chain.integratorTask!.id } }), 0);
 });
 
 test("a failed mechanical completion keeps the existing lease across its retry", async () => {
