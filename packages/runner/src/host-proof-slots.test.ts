@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, chown, lstat, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +49,27 @@ test("host proof slot startup preparation is concurrent and idempotent", async (
       // principals open the persistent inode without either owning its parent.
       assert.equal(mode(info.mode) & 0o006, 0o006);
     }
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+// /usr/bin/lockf is the tool the wrapper itself requires, and it ships with
+// macOS rather than with Linux. The merge gate runs on a Linux worker, where
+// spawnSync reports a null status because the binary does not exist. The
+// coordination proof therefore stands on its own and names the host it needs,
+// instead of being restated against a different tool whose contention exit
+// status is not the 75 the wrapper reads.
+const LOCKF = "/usr/bin/lockf";
+const lockfSkip = existsSync(LOCKF) ? false : `${LOCKF} is absent on this host`;
+
+test("two unrelated principals coordinate through one persistent slot inode", { skip: lockfSkip }, async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "host-proof-slots-lock-"));
+  try {
+    const config = { workspaceRoot, hostProofSlots: 1 };
+    await prepareHostProofSlots(config);
+    const directory = hostProofSlotDirectory(config);
+    const directoryInfo = await lstat(directory);
 
     // Model two distinct run-as identities which own neither the daemon inode
     // nor its group. The permission model authorizes both before the test uses
@@ -61,10 +83,10 @@ test("host proof slot startup preparation is concurrent and idempotent", async (
     try {
       const stdioFor = (fd: number): Array<"ignore" | number> =>
         ["ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", fd];
-      assert.equal(spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[0]!.fd) }).status, 0);
-      assert.equal(spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 75);
+      assert.equal(spawnSync(LOCKF, ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[0]!.fd) }).status, 0);
+      assert.equal(spawnSync(LOCKF, ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 75);
       await clients[0]!.close();
-      assert.equal(spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 0);
+      assert.equal(spawnSync(LOCKF, ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 0);
     } finally {
       await Promise.all(clients.map(async (client) => client.close().catch(() => undefined)));
     }
