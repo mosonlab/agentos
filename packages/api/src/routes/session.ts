@@ -232,6 +232,13 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         chainIndex: run.task.chainIndex,
         stepName: run.task.templateStep?.name ?? null,
         outputKind: run.task.templateStep?.outputKind ?? null,
+        output: run.task.stepOutput
+          ? {
+            runId: run.task.stepOutput.runId,
+            kind: run.task.stepOutput.kind,
+            commitSha: run.task.stepOutput.commitSha,
+          }
+          : null,
         outputRequired: requiredOutputKind(run.task.templateStep) !== null,
         outputRemediationAllowed:
           !isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)

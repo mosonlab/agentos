@@ -61,6 +61,55 @@ test("session output authorization cannot introduce a second fence instant", asy
   ).in === activeRunStatuses));
 });
 
+test("GET /session/runs/:runId/status projects task output identity or null", async () => {
+  await withTokens(async () => {
+    const commitSha = "a".repeat(40);
+    const outputCases = [
+      {
+        stepOutput: { runId: "run-output", kind: "implementation", commitSha },
+        expected: { runId: "run-output", kind: "implementation", commitSha },
+      },
+      { stepOutput: null, expected: null },
+    ] as const;
+
+    for (const { stepOutput, expected } of outputCases) {
+      const database = {
+        run: {
+          findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+          findUnique: async () => ({
+            id: "run-1",
+            runNumber: 1,
+            maxRunsPerTask: 5,
+            status: "RUNNING",
+            startedAt: new Date("2026-08-31T00:00:00.000Z"),
+            maxDurationMin: 240,
+            stallTimeoutMin: 10,
+            branch: "agent/task-1",
+            targetBranch: "main",
+            agent: { name: "agent" },
+            task: {
+              id: "task-1",
+              name: "Task",
+              status: "DOING",
+              approvalGate: false,
+              chainIndex: 0,
+              templateStep: null,
+              stepOutput,
+            },
+          }),
+        },
+      } as unknown as PrismaClient;
+
+      const response = await createApp(database).request("/session/runs/run-1/status", {
+        headers: { Authorization: "Bearer agos_session_current" },
+      });
+      assert.equal(response.status, 200);
+      const body = await response.json() as { task: { output: unknown } };
+      assert.deepEqual(body.task.output, expected);
+    }
+  });
+});
+
 test("GET /sessions is project-scoped, clamped, cursored, and reachable by the operator", async () => {
   await withTokens(async () => {
     const calls: Array<Record<string, unknown>> = [];
