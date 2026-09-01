@@ -77,6 +77,10 @@ const finalPair = (sessionId: string, payloads: unknown[], summary: SessionCache
         { ...summary, failed: summary.failed + 1 },
       );
     }
+    // `none` is a usage-bearing event with no input evidence (for example an
+    // output-only terminal or a cost-only breakdown), so it must not poison a
+    // complete split established by another retained event. Only the shared
+    // decoder's input-bearing `unknown` result makes the session unpriceable.
     if (parsed.kind === "unknown") unknown = true;
     if (parsed.kind === "known") {
       pair = pair ?? { cachedInputTokens: 0, cacheCreationInputTokens: 0 };
