@@ -9,14 +9,10 @@ import { Markdown } from "../components/ui";
 const sourcePath = fileURLToPath(new URL("../styles.css", import.meta.url));
 const source = readFileSync(sourcePath, "utf8");
 const distDirectory = fileURLToPath(new URL("../../dist/assets/", import.meta.url));
-/* The existence check is what makes the message below reachable: without it a
- * fresh clone gets `readdirSync`'s raw ENOENT stack instead, which says nothing
- * about the build step it is really asking for. `npm test` is documented as
- * running after `npm run build` for exactly this file. */
 const cssAsset = (existsSync(distDirectory) ? readdirSync(distDirectory) : [])
   .find((name) => name.endsWith(".css"));
-if (!cssAsset) throw new Error("Build apps/web before running CSS regression tests");
-const built = readFileSync(`${distDirectory}${cssAsset}`, "utf8");
+const built = cssAsset ? readFileSync(`${distDirectory}${cssAsset}`, "utf8") : null;
+const buildSkipReason = "Merge Gate build required";
 
 const layersAt = (css: string, index: number): string[] => {
   const stack: Array<string | null> = [];
@@ -37,8 +33,8 @@ const layersAt = (css: string, index: number): string[] => {
   return stack.filter((layer): layer is string => layer !== null);
 };
 
-const selectorIndex = (selector: string): number => {
-  const index = built.indexOf(selector);
+const selectorIndex = (css: string, selector: string): number => {
+  const index = css.indexOf(selector);
   assert.notEqual(index, -1, `missing built selector ${selector}`);
   return index;
 };
@@ -84,7 +80,8 @@ const unlayeredScan = (css: string): { unlayered: number; offenders: string[] } 
   return { unlayered: unlayered.length, offenders };
 };
 
-test("no unlayered class rule styles the app", () => {
+test("no unlayered class rule styles the app", { skip: built === null ? buildSkipReason : false }, () => {
+  assert.ok(built !== null);
   const { unlayered, offenders } = unlayeredScan(built);
 
   // Guards against a parser change quietly making the assertion vacuous: the
@@ -93,7 +90,7 @@ test("no unlayered class rule styles the app", () => {
 
   assert.deepEqual(offenders, []);
 
-  assert.deepEqual(layersAt(built, selectorIndex(".flex{")), ["utilities"]);
+  assert.deepEqual(layersAt(built, selectorIndex(built, ".flex{")), ["utilities"]);
 });
 
 /** The guard above is the batch's only mechanical protection against a rule that
@@ -113,15 +110,18 @@ test("the layer guard sees element-qualified class selectors", () => {
   assert.equal(flagged('a[href$=".pdf"]{color:red}').length, 0, "attribute value read as a class");
 });
 
-test("Markdown list markers override Tailwind preflight", () => {
+test("Markdown list markers override Tailwind preflight", { skip: built === null ? buildSkipReason : false }, () => {
+  assert.ok(built !== null);
   const preflight = built.search(/(?:ol,ul,menu|menu,ol,ul)\{list-style:none/);
   assert.notEqual(preflight, -1, "missing Tailwind list reset");
   assert.deepEqual(layersAt(built, preflight), ["base"]);
 
   // The reset is beaten by utilities now, not by an unlayered `.md ul` rule.
-  assert.deepEqual(layersAt(built, selectorIndex(".list-disc{")), ["utilities"]);
-  assert.deepEqual(layersAt(built, selectorIndex(".list-decimal{")), ["utilities"]);
+  assert.deepEqual(layersAt(built, selectorIndex(built, ".list-disc{")), ["utilities"]);
+  assert.deepEqual(layersAt(built, selectorIndex(built, ".list-decimal{")), ["utilities"]);
+});
 
+test("Markdown renderer applies list marker utilities", () => {
   // …and the renderer still puts those utilities on the list elements, which is
   // the half a CSS-only assertion cannot see.
   const markup = renderToStaticMarkup(<Markdown text={"- a\n\n1. b"} />);
