@@ -7,12 +7,15 @@ import { join } from "node:path";
 import { controlledGitEnvironment, prefixedCommand, splitRunAsPrefix } from "./git-launch.js";
 import type { OnboardingInput } from "./onboarding.js";
 
+export type DependencyProvisioning = "NONE" | "NPM_CI";
+
 export type RepositoryPreflightFailure =
   | "git-unavailable"
   | "git-identity-missing"
   | "remote-unreachable"
   | "default-branch-missing"
   | "push-not-authorized"
+  | "package-lock-missing"
   | "command-timeout";
 
 export class RepositoryPreflightError extends Error {
@@ -25,6 +28,7 @@ export class RepositoryPreflightError extends Error {
 export interface RepositoryPreflightInput {
   remoteUrl: string;
   defaultBranch: string;
+  dependencyProvisioning: DependencyProvisioning;
 }
 
 export type RepositoryPreflight = (input: RepositoryPreflightInput) => Promise<void>;
@@ -90,10 +94,15 @@ const expectSuccess = async (
   return result;
 };
 
+const hasRootPackageLockBlob = (stdout: string): boolean => stdout.split("\0").some((entry) => {
+  const match = /^(100644|100755) blob [0-9a-f]+\tpackage-lock\.json$/u.exec(entry.trim());
+  return match !== null;
+});
+
 /**
  * Repository creation uses the same host-identity, remote, branch, fetch, and
  * dry-run-push checks as first-run onboarding, but deliberately exposes only
- * the two values needed by those checks. In particular, a Repo credential
+ * the values needed by those checks. In particular, a Repo credential
  * Secret is not part of this operation and cannot become an ambient Git
  * credential by accident.
  */
@@ -118,6 +127,12 @@ export const preflightRepository = async (
   try {
     await expectSuccess(run, ["init", "--bare", scratch], cwd, env, "git-unavailable");
     await expectSuccess(run, ["fetch", "--depth=1", remote, ref], scratch, env, "remote-unreachable");
+    if (input.dependencyProvisioning === "NPM_CI") {
+      const lockfile = await run("git", ["ls-tree", "-z", "FETCH_HEAD", "--", "package-lock.json"], scratch, env);
+      if (lockfile.code !== 0 || !hasRootPackageLockBlob(lockfile.stdout)) {
+        throw new RepositoryPreflightError("package-lock-missing");
+      }
+    }
     const probeRef = `refs/heads/agentos-preflight-${randomBytes(8).toString("hex")}`;
     await expectSuccess(run, ["push", "--dry-run", remote, `FETCH_HEAD:${probeRef}`], scratch, env, "push-not-authorized");
   } finally {
@@ -131,4 +146,5 @@ export const preflightOnboardingRepository = async (
 ): Promise<void> => preflightRepository({
   remoteUrl: input.repo.remoteUrl,
   defaultBranch: input.repo.defaultBranch,
+  dependencyProvisioning: "NONE",
 }, run);

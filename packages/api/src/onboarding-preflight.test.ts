@@ -4,6 +4,7 @@ import test from "node:test";
 import type { OnboardingInput } from "./onboarding.js";
 import {
   preflightOnboardingRepository,
+  preflightRepository,
   RepositoryPreflightError,
   type RepositoryPreflightCommand,
 } from "./onboarding-preflight.js";
@@ -61,4 +62,41 @@ test("repository preflight refuses missing Git identity before touching the remo
     (error) => error instanceof RepositoryPreflightError && error.reason === "git-identity-missing",
   );
   assert.deepEqual(calls.map((args) => args[0]), ["config"]);
+});
+
+test("NPM_CI checks the fetched commit for a root lockfile before dry-run push", async () => {
+  const calls: string[][] = [];
+  const run: RepositoryPreflightCommand = async (_executable, args) => {
+    calls.push(args);
+    if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+    if (args[0] === "ls-tree") return { code: 0, stdout: "" };
+    return { code: 0, stdout: "" };
+  };
+
+  await assert.rejects(
+    preflightRepository({ ...input.repo, dependencyProvisioning: "NPM_CI" }, run),
+    (error) => error instanceof RepositoryPreflightError && error.reason === "package-lock-missing",
+  );
+  assert.deepEqual(calls.map((args) => args[0]), ["config", "config", "ls-remote", "init", "fetch", "ls-tree"]);
+  assert.equal(calls.filter((args) => args[0] === "fetch").length, 1);
+  assert.equal(calls.some((args) => args[0] === "push"), false);
+});
+
+test("NPM_CI accepts a regular root lockfile and NONE skips the lockfile probe", async () => {
+  const calls: string[][] = [];
+  const run: RepositoryPreflightCommand = async (_executable, args) => {
+    calls.push(args);
+    if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+    if (args[0] === "ls-tree") return { code: 0, stdout: `100644 blob ${"b".repeat(40)}\tpackage-lock.json\0` };
+    return { code: 0, stdout: "" };
+  };
+  await preflightRepository({ ...input.repo, dependencyProvisioning: "NPM_CI" }, run);
+  assert.equal(calls.some((args) => args[0] === "push"), true);
+
+  calls.length = 0;
+  await preflightRepository({ ...input.repo, dependencyProvisioning: "NONE" }, run);
+  assert.equal(calls.some((args) => args[0] === "ls-tree"), false);
+  assert.equal(calls.some((args) => args[0] === "push"), true);
 });

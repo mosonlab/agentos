@@ -34,6 +34,7 @@ export type InboxKind = PrismaInboxKind;
 export type InboxDeliveryStatus = PrismaInboxDeliveryStatus;
 export type SecretPurpose = PrismaSecretPurpose;
 export type RepoPermission = PrismaRepoPermission;
+export type DependencyProvisioning = "NONE" | "NPM_CI";
 type NetworkingMode = PrismaNetworkingMode;
 type SkillKind = PrismaSkillKind;
 
@@ -155,6 +156,7 @@ export type Repo<DateTime = string> = {
   remoteUrl: string;
   mountPath: string;
   defaultBranch: string;
+  dependencyProvisioning: DependencyProvisioning;
   createdAt: DateTime;
   updatedAt: DateTime;
 };

@@ -47,6 +47,7 @@ const repoBody = (name: string, overrides: Record<string, unknown> = {}): Record
   name,
   remoteUrl: "https://github.com/owner/repo.git",
   defaultBranch: "main",
+  dependencyProvisioning: "NONE",
   ...overrides,
 });
 
@@ -106,7 +107,7 @@ test("POST repo validates raw remotes and branches before any write or preflight
 
 test("POST repo preflights exact inputs and maps every preflight refusal", async () => {
   const project = await createProject("repo-preflight");
-  const inputs: Array<{ remoteUrl: string; defaultBranch: string }> = [];
+  const inputs: Array<{ remoteUrl: string; defaultBranch: string; dependencyProvisioning: "NONE" | "NPM_CI" }> = [];
   const app = createApp(db, { repositoryPreflight: async (input) => { inputs.push(input); } });
   for (const [remoteUrl, defaultBranch] of [
     ["https://github.com/owner/repo.git", "main"],
@@ -124,10 +125,10 @@ test("POST repo preflights exact inputs and maps every preflight refusal", async
   }));
   assert.equal(defaulted.status, 201);
   assert.deepEqual(inputs, [
-    { remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" },
-    { remoteUrl: "git@github.com:owner/repo.git", defaultBranch: "release/v1" },
-    { remoteUrl: "file:///path/to/repo.git", defaultBranch: "main" },
-    { remoteUrl: "https://github.com/owner/other.git", defaultBranch: "main" },
+    { remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main", dependencyProvisioning: "NONE" },
+    { remoteUrl: "git@github.com:owner/repo.git", defaultBranch: "release/v1", dependencyProvisioning: "NONE" },
+    { remoteUrl: "file:///path/to/repo.git", defaultBranch: "main", dependencyProvisioning: "NONE" },
+    { remoteUrl: "https://github.com/owner/other.git", defaultBranch: "main", dependencyProvisioning: "NONE" },
   ]);
 
   for (const reason of [
@@ -253,7 +254,7 @@ test("Repo and every grant roll back together, while duplicate and PATCH contrac
   assert.equal(await db.repo.count(), 0);
   assert.equal(await db.agentRepoAccess.count(), 0);
 
-  const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string }> = [];
+  const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string; dependencyProvisioning: "NONE" | "NPM_CI" }> = [];
   const app = createApp(db, { repositoryPreflight: async (input) => { preflightInputs.push(input); } });
   const first = await call(app, "POST", `/projects/${project.id}/repos`, repoBody("duplicate"));
   assert.equal(first.status, 201);

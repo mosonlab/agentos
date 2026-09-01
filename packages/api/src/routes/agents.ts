@@ -30,7 +30,7 @@ import { jsonValue } from "../execution.js";
 import { filesRootGrantKey } from "../files/config.js";
 import { isCanonicalRelPath, normalizeRelPath } from "../files/paths.js";
 import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
-import { RepositoryPreflightError } from "../onboarding-preflight.js";
+import { RepositoryPreflightError, type DependencyProvisioning } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
 import { readCommitted } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
@@ -119,12 +119,25 @@ const runtimeConfigRefusal = (agent: {
   ?? codexServiceTierRefusal(agent)
 );
 
+const INVALID_DEPENDENCY_PROVISIONING = "__invalid-dependency-provisioning__";
+const isDependencyProvisioning = (value: unknown): value is DependencyProvisioning => (
+  value === "NONE" || value === "NPM_CI"
+);
+const dependencyProvisioningInput = z.preprocess((value) => value === undefined ? INVALID_DEPENDENCY_PROVISIONING : value, z.unknown().transform((value) => (
+  isDependencyProvisioning(value) ? value : INVALID_DEPENDENCY_PROVISIONING
+)));
+const dependencyProvisioningInvalid = {
+  error: "Repository dependency provisioning is invalid",
+  code: "repository-dependency-provisioning-invalid",
+} as const;
+
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
   mountPath: z.string().trim().min(1).default("repo"),
   defaultBranch: z.string().trim().min(1).default("main"),
   credentialSecretId: id.nullable().default(null),
+  dependencyProvisioning: dependencyProvisioningInput,
 });
 // Keep remoteUrl raw for POST /projects/:projectId/repos. The onboarding remote
 // policy must see exactly what the operator submitted; PATCH continues to use
@@ -528,6 +541,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
   app.post("/projects/:projectId/repos", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, repoCreateInput);
+    if (!isDependencyProvisioning(body.dependencyProvisioning)) return context.json(dependencyProvisioningInvalid, 400);
     const remote = parseRepoRemote(body.remoteUrl);
     if (!remote.ok) {
       return context.json({
@@ -547,9 +561,20 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
     try {
-      await deps.repositoryPreflight({ remoteUrl: remote.remoteUrl, defaultBranch: body.defaultBranch });
+      await deps.repositoryPreflight({
+        remoteUrl: remote.remoteUrl,
+        defaultBranch: body.defaultBranch,
+        dependencyProvisioning: body.dependencyProvisioning,
+      });
     } catch (error: unknown) {
       if (error instanceof RepositoryPreflightError) {
+        if (error.reason === "package-lock-missing") {
+          return context.json({
+            error: "Repository preflight failed",
+            code: "repository-package-lock-missing",
+            remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
+          }, 422);
+        }
         return context.json({
           error: "Repository preflight failed",
           code: "repository-preflight-failed",
@@ -561,7 +586,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const { grantAgents, ...repoFields } = body;
     const result = await readCommitted(db, async (tx) => {
       const repo = await tx.repo.create({
-        data: { ...repoFields, projectId },
+        data: { ...repoFields, dependencyProvisioning: body.dependencyProvisioning as DependencyProvisioning, projectId },
       });
       if (!grantAgents) return repo;
       const agents = await tx.agent.findMany({
@@ -586,6 +611,9 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
   });
   app.patch("/repos/:repoId", async (context) => {
     const body = await readJson(context.req.raw, repoPatch);
+    if (body.dependencyProvisioning !== undefined && !isDependencyProvisioning(body.dependencyProvisioning)) {
+      return context.json(dependencyProvisioningInvalid, 400);
+    }
     if (body.credentialSecretId) {
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
