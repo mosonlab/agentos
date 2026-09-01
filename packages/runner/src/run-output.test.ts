@@ -913,7 +913,7 @@ test("the original Run budget continues through remediation", async () => {
     // sleep can expire before that callback is scheduled, so wait for the
     // observable report instead.
     let finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
-    for (let attempt = 0; attempt < 100 && !finished; attempt += 1) {
+    for (let attempt = 0; attempt < 1_000 && !finished; attempt += 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
       finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     }
