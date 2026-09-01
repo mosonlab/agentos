@@ -208,7 +208,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.assigneeAgentId,
     (await db.agent.findFirstOrThrow({ where: { name: "librarian" } })).id);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.attachmentsFromPrevious, true);
-  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /regression-verification\.sh prepare/u);
+  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   // The fix step reads both reports itself; no node authors must-fix any more.
   assert.equal(step.taskTemplate.steps.some((candidate) => candidate.outputKind === "must-fix"), false);
@@ -242,7 +242,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(direct.steps[6]?.outputKind, "merge-authorization");
   assert.equal(direct.steps[7]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(direct.steps[7]?.outputKind, INTEGRATOR_OUTPUT_KIND);
-  assert.match(direct.steps[5]?.prompt ?? "", /regression-verification\.sh finalize/u);
+  assert.match(direct.steps[5]?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
   assert.equal(resolver.model, "gpt-5.6-sol:high");
   assert.equal(resolver.runnerPreference, "CODEX");

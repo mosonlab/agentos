@@ -261,6 +261,116 @@ test("sync creates the canonical-project PR template when a same-name row exists
   await prisma.project.delete({ where: { id: foreignProject.id } });
 });
 
+test("sync rolls the checkout Regression prompt generation once and preserves chain prompt lineage", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const templateNames = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
+  const runnerResolver = '"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh"';
+  const checkoutResolver = "scripts/regression-verification.sh";
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...templateNames] } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
+  });
+  assert.equal(templates.length, templateNames.length);
+
+  const taskIds: string[] = [];
+  const legacyTemplateIds: string[] = [];
+  const retired = new Map<string, { templateId: string; regressionTaskId: string; prompt: string }>();
+  t.after(async () => {
+    await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
+    await prisma.taskTemplate.deleteMany({ where: { id: { in: legacyTemplateIds } } });
+  });
+
+  for (const template of templates) {
+    const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(regression);
+    assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
+    const outgoingPrompt = regression.prompt.replaceAll(runnerResolver, checkoutResolver);
+    assert.doesNotMatch(outgoingPrompt, /AGENTOS_TOOLS/u);
+    await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingPrompt } });
+
+    const chainId = `pre-runner-tools-${template.name}-${randomBytes(4).toString("hex")}`;
+    let regressionTaskId = "";
+    for (const step of template.steps) {
+      const task = await prisma.task.create({ data: {
+        projectId: project.id,
+        templateId: template.id,
+        templateStepId: step.id,
+        name: `retired tooling ${template.name} ${step.stepIndex}`,
+        description: "prompt-generation rollover fixture",
+        assigneeAgentId: step.assigneeAgentId,
+        assigneeType: step.assigneeType,
+        status: TaskStatus.DONE,
+        chainId,
+        chainIndex: step.stepIndex,
+        chainLayer: step.layer,
+      } });
+      taskIds.push(task.id);
+      if (step.id === regression.id) regressionTaskId = task.id;
+    }
+    assert.notEqual(regressionTaskId, "");
+    retired.set(template.name, { templateId: template.id, regressionTaskId, prompt: outgoingPrompt });
+  }
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":2/u);
+
+  for (const templateName of templateNames) {
+    const old = retired.get(templateName)!;
+    const legacyName = `${templateName}-legacy-pre-runner-provided-regression-tooling-${old.templateId}`;
+    const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: legacyName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(legacy.id, old.templateId);
+    legacyTemplateIds.push(legacy.id);
+    assert.equal(legacy.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")?.prompt, old.prompt);
+    const oldTask = await prisma.task.findUniqueOrThrow({
+      where: { id: old.regressionTaskId },
+      include: { templateStep: true },
+    });
+    assert.equal(oldTask.templateStep?.prompt, old.prompt);
+
+    const current = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: templateName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.notEqual(current.id, old.templateId);
+    const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(currentRegression);
+    assert.equal(currentRegression.prompt.split(runnerResolver).length - 1, 3);
+    assert.doesNotMatch(currentRegression.prompt, /`scripts\/regression-verification\.sh/u);
+
+    const newTask = await prisma.task.create({ data: {
+      projectId: project.id,
+      templateId: current.id,
+      templateStepId: currentRegression.id,
+      name: `current tooling ${templateName}`,
+      description: "successor prompt fixture",
+      assigneeAgentId: currentRegression.assigneeAgentId,
+      assigneeType: currentRegression.assigneeType,
+      status: TaskStatus.DONE,
+      chainId: `runner-tools-current-${templateName}-${randomBytes(4).toString("hex")}`,
+      chainIndex: currentRegression.stepIndex,
+      chainLayer: currentRegression.layer,
+    } });
+    taskIds.push(newTask.id);
+    const instantiated = await prisma.task.findUniqueOrThrow({
+      where: { id: newTask.id },
+      include: { templateStep: true },
+    });
+    assert.equal(instantiated.templateStep?.prompt, currentRegression.prompt);
+  }
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdCanonicalTemplates":0/u);
+  assert.equal(await prisma.taskTemplate.count({
+    where: { projectId: project.id, name: { contains: "legacy-pre-runner-provided-regression-tooling" } },
+  }), 2);
+});
+
 test("sync rolls parked and not-yet-started v1 chains forward without changing them", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   // The canonical source is now eight-step for bound chains. Reconstruct the
@@ -359,7 +469,8 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
     });
     assert.notEqual(current.id, template.id);
     const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
-    assert.match(currentRegression.prompt, /regression-verification\.sh prepare/u);
+    assert.match(currentRegression.prompt, /AGENTOS_TOOLS:\?AGENTOS_TOOLS is required/u);
+    assert.doesNotMatch(currentRegression.prompt, /Run `scripts\/regression-verification\.sh/u);
     assert.match(currentRegression.prompt, /script persists the one allowed v2 outcome/u);
   }
 
