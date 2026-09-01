@@ -86,6 +86,9 @@ exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
   const inheritedEnvironment = { ...process.env };
   delete inheritedEnvironment.AGENTOS_SESSION_TOKEN;
   delete inheritedEnvironment.AGENTOS_FENCING_TOKEN;
+  for (const name of Object.keys(inheritedEnvironment)) {
+    if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/u.test(name)) delete inheritedEnvironment[name];
+  }
   return {
     root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog,
     env: {

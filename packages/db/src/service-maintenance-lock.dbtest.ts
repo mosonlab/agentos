@@ -268,16 +268,24 @@ describe("the shipped runner and the shared lock", () => {
     const runner = await spawnRunner(target.url);
     await waitForOutput(runner.child, /Anneal local runner .* polling/u, runner.output);
 
-    await terminateSharedBackend(target);
-    const maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
-    assert.equal(maintenance.ok, true, JSON.stringify(maintenance));
-    if (!maintenance.ok) return;
+    // This case specifies which participant wins the recovery race. Pause the
+    // service before removing its backend so a loaded gate cannot let its
+    // 250 ms retention tick reacquire shared ahead of the maintenance client.
+    assert.equal(runner.child.kill("SIGSTOP"), true);
+    let maintenance: Awaited<ReturnType<typeof acquireMaintenanceLock>> | undefined;
     try {
+      await terminateSharedBackend(target);
+      maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
+      assert.equal(maintenance.ok, true, JSON.stringify(maintenance));
+      if (!maintenance.ok) return;
+      assert.equal(runner.child.kill("SIGCONT"), true);
+
       await waitForOutput(runner.child, /result=reacquire-strike .*reason=exclusive-maintenance-lock-held-by-another-session/u, runner.output);
       await waitForOutput(runner.child, /Shared maintenance lock lost/u, runner.output);
       assert.equal(await exited(runner.child), SERVICE_LOCK_CONTENTION_EXIT_CODE);
     } finally {
-      await maintenance.lock.release();
+      if (runner.child.exitCode === null && runner.child.signalCode === null) runner.child.kill("SIGCONT");
+      if (maintenance?.ok) await maintenance.lock.release();
     }
   });
 });
