@@ -315,6 +315,17 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.equal(done.frontier.taskId, "step-2");
 });
 
+test("chainAggregate opens the frontier Step, not the first one", () => {
+  const midChain = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
+    member({ id: "step-2", status: "DONE", chainIndex: 1, chainLayer: 1 }),
+    member({ id: "step-3", status: "DOING", chainIndex: 2, chainLayer: 2 }),
+    member({ id: "step-4", status: "TODO", chainIndex: 3, chainLayer: 3 }),
+  ], []);
+  assert.equal(midChain.frontier.taskId, "step-3");
+  assert.equal(midChain.detailTaskId, midChain.frontier.taskId);
+});
+
 test("chainAggregate returns the exact board contract keys", () => {
   const aggregate = chainAggregate("c1", "Release", [member()], []);
 
@@ -712,7 +723,7 @@ test("readBoard carries one aggregate for visible chain members and repair", asy
   assert.equal(projection.status, "TODO");
   assert.equal(detachedRepair.repairOf?.chainId, "c1");
   assert.equal(projection.frontier.taskId, repair.id);
-  assert.equal(projection.detailTaskId, regression.id);
+  assert.equal(projection.detailTaskId, repair.id);
 });
 
 test("readBoard projects an active repair kind and latest Run without replacing the frontier", async () => {
@@ -808,7 +819,7 @@ test("readBoard restores partly archived primary facts when only a detached repa
   assert.deepEqual(projection.statusCounts, { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 2 });
   assert.equal(projection.totalCost?.costUsd, "2");
   assert.equal(projection.frontier.taskId, repair.id);
-  assert.equal(projection.detailTaskId, implementation.id);
+  assert.equal(projection.detailTaskId, repair.id);
 });
 
 test("readBoard keeps an archived repair bound when its primary chain remains live", async () => {

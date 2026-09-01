@@ -24,7 +24,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
 
 const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => ({
   chainId: "chain-1", chainName: "Release", stepCount: 12,
-  detailTaskId: "step-1",
+  detailTaskId: "step-3",
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
   activeRepair: null,
@@ -79,8 +79,40 @@ test("one aggregate entry owns chain steps and a detached repair, while standalo
   const entries = boardEntries(rows);
   assert.deepEqual(entries.map((entry) => entry.kind), ["chain", "task"]);
   assert.equal(entries[0]?.kind === "chain" ? entries[0].members.length : 0, 3);
-  assert.equal(entries[0]?.kind === "chain" ? entries[0].representativeTaskId : "", "step-1");
+  assert.equal(entries[0]?.kind === "chain" ? entries[0].representativeTaskId : "", "step-3");
   assert.equal(entries[1]?.kind === "task" ? entries[1].task.id : "", "standalone");
+});
+
+test("clicking an aggregate card opens the frontier Step, not the first one", async () => {
+  // The API sets `detailTaskId` to the frontier; the board carries it through as
+  // the representative, so the operator lands on the Step that is actually
+  // moving instead of walking the chain list down from Step 1.
+  const projection = aggregate();
+  const entries = boardEntries([
+    chainStep("step-1", 1, "DONE", projection),
+    chainStep("step-2", 2, "DONE", projection),
+    chainStep("step-3", 3, "TODO", projection),
+  ]);
+  const entry = entries[0];
+  assert.ok(entry?.kind === "chain");
+  assert.equal(entry.representativeTaskId, projection.frontier.taskId);
+
+  const { dom, container } = installDom();
+  Object.defineProperty(dom.window, "getSelection", { configurable: true, value: () => ({ toString: () => "" }) });
+  const root = (await reactDom()).createRoot(container);
+  try {
+    dom.window.location.hash = "#/tasks/origin";
+    await act(async () => root.render(
+      <ChainAggregateCard aggregate={entry.aggregate} members={entry.members} representativeTaskId={entry.representativeTaskId} />,
+    ));
+    const card = container.querySelector("[data-chain-card]");
+    assert.ok(card);
+    await act(async () => card.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.equal(dom.window.location.hash, "#/tasks/step-3");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
 });
 
 test("aggregate placement follows API-derived frontier status and counts entries, not raw steps", () => {
