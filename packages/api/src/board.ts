@@ -138,9 +138,11 @@ export type BoardRow = {
     codexServiceTier: BoardContractLatestRun["codexServiceTier"];
     subagentModel?: string | null;
     budgetGrants: number;
-    /** Optional like `subagentModel`: `readBoard` always selects it, and the
-     *  fixtures that build a row by hand do not all publish a pull request. */
-    pullRequestUrl?: string | null;
+    /** Required, unlike `subagentModel`: this one reaches the board contract,
+     *  where `BoardLatestRun.pullRequestUrl` is required. Optional here would
+     *  let a select that forgets it type-check and project null, dropping the
+     *  card's pull request link with no compile error. */
+    pullRequestUrl: string | null;
     session: {
       nativeChildUsed: boolean;
       costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
