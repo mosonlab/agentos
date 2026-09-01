@@ -44,6 +44,9 @@ including its filesystem, port, runner identity and repository preflights. Then
 start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`, in that
 order, in three terminals, and open `http://127.0.0.1:5173`.
 
+Once the installation is running, follow [Add a project](runbooks/add-a-project.md)
+to add a GitHub repository and run A1's pull-request workflow.
+
 `npm ci` must be allowed to run the lockfile's lifecycle scripts — this
 repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
 is not supported. The Inbox service is optional. No launchd definition is
