@@ -144,9 +144,10 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
     // component as zero merely because another model reported a creation
     // count. An explicitly invalid value is unknown as well, while output- or
     // cost-only entries do not make the input split ambiguous.
-    const modelHasInput = model.inputTokens !== undefined
-      || model.cacheReadInputTokens !== undefined
-      || model.cacheCreationInputTokens !== undefined;
+    // `null` is the JSON spelling of an omitted provider component. It still
+    // earns an ingestion diagnostic, but it must not make an output-only model
+    // sibling look input-bearing for cache-split completeness.
+    const modelHasInput = input !== null || cacheRead !== null || cacheCreation !== null;
     if (modelHasInput && cacheCreation === null) cacheCreationUnknown = true;
     const cost = costAmount(model.costUSD, "modelUsage.costUSD");
     if (cost !== null) totals.costUsd = (totals.costUsd ?? new Prisma.Decimal(0)).plus(cost);
@@ -239,6 +240,41 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
   return Object.keys(result).length === 0 ? null : result;
 };
 
+export type ExtractedCacheSplit =
+  | { kind: "none" }
+  | { kind: "unknown" }
+  | {
+      kind: "known";
+      cachedInputTokens: number;
+      cacheCreationInputTokens: number;
+    };
+
+type DecodedUsage = {
+  usage: SessionUsage;
+  cacheSplit: ExtractedCacheSplit;
+};
+
+/**
+ * Cache-split completeness is a projection of the canonical usage that
+ * ingestion actually stores. Only input-bearing fields participate: an
+ * output-only or cost-only payload carries no evidence that a split is
+ * incomplete, so it is `none` and can never poison a known sibling event.
+ */
+const cacheSplitFromUsage = (usage: SessionUsage): ExtractedCacheSplit => {
+  const hasInput = usage.inputTokens !== undefined
+    || usage.cachedInputTokens !== undefined
+    || usage.cacheCreationInputTokens !== undefined;
+  if (!hasInput) return { kind: "none" };
+  if (usage.cachedInputTokens === undefined || usage.cacheCreationInputTokens === undefined) {
+    return { kind: "unknown" };
+  }
+  return {
+    kind: "known",
+    cachedInputTokens: usage.cachedInputTokens,
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+  };
+};
+
 /**
  * One event payload → whatever usage it carries. Shape-driven rather than
  * runner-driven, and total over `unknown`: any payload that does not match
@@ -262,14 +298,19 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
  *   provider vocabularies above and carries its own caliber. See
  *   `extractPiUsage`.
  */
-export const extractUsage = (payload: unknown): SessionUsage => {
+const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): DecodedUsage => {
   const event = asRecord(payload);
-  if (!event) return {};
+  if (!event) {
+    if (options.strict) throw new Error("payload is not an object");
+    return { usage: {}, cacheSplit: { kind: "none" } };
+  }
+  if (options.strict) validateProviderShapes(event);
+
   // Exclusive and first: an `agentosPiUsage` payload is already a whole
   // session's totals, cost included, and PI's terminal event carries no other
   // usage vocabulary for the branches below to add to it.
   const pi = extractPiUsage(event.agentosPiUsage);
-  if (pi) return pi;
+  if (pi) return { usage: pi, cacheSplit: cacheSplitFromUsage(pi) };
   const usage = asRecord(event.usage);
   const result: SessionUsage = {};
 
@@ -324,69 +365,52 @@ export const extractUsage = (payload: unknown): SessionUsage => {
   // A reported terminal total remains authoritative when both sources exist.
   const cost = costAmount(event.total_cost_usd) ?? models?.costUsd ?? null;
   if (cost !== null) result.costUsd = cost;
-  return result;
+  return { usage: result, cacheSplit: cacheSplitFromUsage(result) };
 };
 
-export type ExtractedCacheSplit =
-  | { kind: "none" }
-  | { kind: "unknown" }
-  | {
-      kind: "known";
-      cachedInputTokens: number;
-      cacheCreationInputTokens: number;
-    };
-
-const strictToken = (value: unknown, field: string): void => {
-  if (value === undefined) return;
+function strictToken(value: unknown, field: string): void {
+  // Providers serialize an omitted component as either an absent property or
+  // JSON null. Ingestion drops both from the canonical usage; strict backfill
+  // must preserve that same meaning while still rejecting non-null junk.
+  if (value === undefined || value === null) return;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_INT4) {
     throw new Error(`${field} is not a storable non-negative integer`);
   }
-};
+}
 
-const strictRecord = (value: unknown, field: string): Record<string, unknown> => {
+function strictRecord(value: unknown, field: string): Record<string, unknown> {
   const record = asRecord(value);
   if (record === null) throw new Error(`${field} is not an object`);
   return record;
-};
+}
 
-/**
- * Read the cache pair through the exact provider precedence and completeness
- * rules used by live ingestion. The backfill enables strict validation so a
- * malformed retained payload stops the scan; ingestion remains diagnostic and
- * tolerant. Both policies still share `extractUsage` as the only decoder.
- */
-export const extractCacheSplit = (
-  payload: unknown,
-  options: { strict?: boolean } = {},
-): ExtractedCacheSplit => {
-  const event = asRecord(payload);
-  if (event === null) {
-    if (options.strict) throw new Error("payload is not an object");
-    return { kind: "none" };
-  }
-
-  const providerKeys = ["agentosPiUsage", "modelUsage", "usage"] as const;
-  const hasProviderUsage = providerKeys.some((key) => Object.prototype.hasOwnProperty.call(event, key));
-  if (!hasProviderUsage) return { kind: "none" };
-
-  if (options.strict) {
-    if (Object.prototype.hasOwnProperty.call(event, "agentosPiUsage")) {
-      const pi = strictRecord(event.agentosPiUsage, "agentosPiUsage");
+/** Validate the provider fields decoded by `decodeUsage`. */
+function validateProviderShapes(event: Record<string, unknown>): void {
+  if (Object.prototype.hasOwnProperty.call(event, "agentosPiUsage")) {
+    const value = event.agentosPiUsage;
+    if (value !== undefined && value !== null) {
+      const pi = strictRecord(value, "agentosPiUsage");
       for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
         strictToken(pi[key], `agentosPiUsage.${key}`);
       }
     }
-    if (Object.prototype.hasOwnProperty.call(event, "modelUsage")) {
-      const models = strictRecord(event.modelUsage, "modelUsage");
-      for (const [modelName, value] of Object.entries(models)) {
-        const model = strictRecord(value, `modelUsage.${modelName}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(event, "modelUsage")) {
+    const value = event.modelUsage;
+    if (value !== undefined && value !== null) {
+      const models = strictRecord(value, "modelUsage");
+      for (const [modelName, rawModel] of Object.entries(models)) {
+        const model = strictRecord(rawModel, `modelUsage.${modelName}`);
         for (const key of ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const) {
           strictToken(model[key], `modelUsage.${modelName}.${key}`);
         }
       }
     }
-    if (Object.prototype.hasOwnProperty.call(event, "usage")) {
-      const usage = strictRecord(event.usage, "usage");
+  }
+  if (Object.prototype.hasOwnProperty.call(event, "usage")) {
+    const value = event.usage;
+    if (value !== undefined && value !== null) {
+      const usage = strictRecord(value, "usage");
       for (const key of [
         "input_tokens",
         "output_tokens",
@@ -399,16 +423,20 @@ export const extractCacheSplit = (
       }
     }
   }
+}
 
-  const usage = extractUsage(payload);
-  return usage.cachedInputTokens === undefined || usage.cacheCreationInputTokens === undefined
-    ? { kind: "unknown" }
-    : {
-        kind: "known",
-        cachedInputTokens: usage.cachedInputTokens,
-        cacheCreationInputTokens: usage.cacheCreationInputTokens,
-      };
-};
+export const extractUsage = (payload: unknown): SessionUsage => decodeUsage(payload).usage;
+
+/**
+ * Read the cache pair through the exact provider precedence and completeness
+ * rules used by live ingestion. The backfill enables strict validation so a
+ * malformed retained payload stops the scan; ingestion remains diagnostic and
+ * tolerant. Both policies share `decodeUsage` and differ only in that policy.
+ */
+export const extractCacheSplit = (
+  payload: unknown,
+  options: { strict?: boolean } = {},
+): ExtractedCacheSplit => decodeUsage(payload, options).cacheSplit;
 
 /**
  * Fold many payloads' usage into one absolute total. A field stays absent

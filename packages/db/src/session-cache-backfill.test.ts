@@ -5,6 +5,7 @@ import {
   runBackfillSessionCacheUsageCli,
   type SessionCacheBackfillDatabase,
 } from "./session-cache-backfill.js";
+import { extractCacheSplit, extractUsage } from "./usage.js";
 
 type MemorySession = {
   id: string;
@@ -142,5 +143,83 @@ test("an output-only model sibling does not make a complete modelUsage cache spl
     id: "output-sibling",
     cacheCreationInputTokens: 50,
     cachedInputTokens: 100,
+  });
+});
+
+test("the BF-004 modelUsage payload has the same split in ingestion and backfill decoding", () => {
+  const payload = {
+    type: "result",
+    modelUsage: {
+      a: { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 50 },
+      b: { outputTokens: 7 },
+    },
+  };
+
+  assert.deepEqual(extractUsage(payload), {
+    inputTokens: 160,
+    outputTokens: 7,
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+  assert.deepEqual(extractCacheSplit(payload), {
+    kind: "known",
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+  assert.deepEqual(extractCacheSplit(payload, { strict: true }), {
+    kind: "known",
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+});
+
+test("a complete split stays known across output-only and cost-only retained events", async () => {
+  const sessions: MemorySession[] = [
+    { id: "output-and-cost-only", cacheCreationInputTokens: null, cachedInputTokens: 150 },
+  ];
+  const exit = await runBackfillSessionCacheUsageCli({
+    db: memoryDatabase(sessions, {
+      "output-and-cost-only": [
+        {
+          type: "result",
+          modelUsage: {
+            a: { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 50 },
+          },
+        },
+        { type: "result", usage: { output_tokens: 7 } },
+        { type: "result", total_cost_usd: 0.01 },
+      ],
+    }),
+  });
+
+  assert.equal(exit, 0);
+  assert.deepEqual(sessions[0], {
+    id: "output-and-cost-only",
+    cacheCreationInputTokens: 50,
+    cachedInputTokens: 100,
+  });
+});
+
+test("a JSON null input field has the same cache-split classification as absence", () => {
+  const payload = {
+    type: "result",
+    modelUsage: {
+      a: { inputTokens: null, cacheReadInputTokens: 100, cacheCreationInputTokens: 50 },
+    },
+  };
+
+  assert.deepEqual(extractUsage(payload), {
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+  assert.deepEqual(extractCacheSplit(payload), {
+    kind: "known",
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
+  });
+  assert.deepEqual(extractCacheSplit(payload, { strict: true }), {
+    kind: "known",
+    cachedInputTokens: 100,
+    cacheCreationInputTokens: 50,
   });
 });
