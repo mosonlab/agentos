@@ -557,9 +557,10 @@ export const completeRun = async (
       failedRegressionVerdict?.status === "ok"
       && failedRegressionVerdict.verdict.outcome !== "pass",
     );
-    // One reason for the Run, the Session and — unless the budget replaces it
-    // with its own — the parked Task.
-    const failureReason = succeeded ? null : missingOutputReason ?? body.failureReason ?? "Execution failed";
+    // Preserve a failed completion's diagnostic reason even when a definitive
+    // mechanical result overrides its protocol classification. Ordinary
+    // reported success still carries no failure reason.
+    const failureReason = reportedSuccess ? null : missingOutputReason ?? body.failureReason ?? "Execution failed";
     // §D-P5 / MF-5. For the integrator step that compensation is switched off
     // entirely, so the answer transaction is the *only* writer of a ceiling
     // above the task's original. Otherwise a run authorized once could buy
@@ -697,7 +698,7 @@ export const completeRun = async (
         // Stored whether or not this API understood it: an envelope from a
         // future runner is still the evidence of what happened, and the
         // reason a verdict can be re-decided later instead of re-run.
-        failureEnvelope: succeeded || !body.failureEnvelope ? Prisma.DbNull : jsonValue(body.failureEnvelope),
+        failureEnvelope: reportedSuccess || !body.failureEnvelope ? Prisma.DbNull : jsonValue(body.failureEnvelope),
         // Kept on the run that produced it, whatever became of that run. The
         // same tail used to reach this route on every completion and be read
         // only by the step-output synthesis below, which runs for successful
@@ -775,8 +776,6 @@ export const completeRun = async (
             integratorTaskId: run.taskId,
             condition: outcome.outcome === "stopped" ? outcome.condition : "missing-or-malformed-result",
             evidence: outcome.outcome === "stopped" ? outcome.evidence : outcome.reason,
-            agentId: run.agentId,
-            sessionId: run.session.id,
             sourceRunId: run.id,
           });
         }

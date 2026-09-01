@@ -14,6 +14,7 @@ import {
   InboxSender,
   InboxStatus,
   Prisma,
+  RunStatus,
   TaskStatus,
 } from "@prisma/client";
 
@@ -48,7 +49,7 @@ export const evidenceDeadlineMs = (): number => {
   return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
 };
 
-const asRecord = (value: Prisma.JsonValue | null | undefined): Record<string, unknown> | null =>
+const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
 // ---------------------------------------------------------------------------
@@ -187,7 +188,7 @@ export type RecordedStop = {
   stopId: string;
   condition: StopCondition;
   evidence: string;
-  sourceRunId: string | null;
+  sourceRunId: string;
   createdAt: Date;
 };
 
@@ -199,25 +200,46 @@ export type RecordedStop = {
  * a malformed SESSION activity from becoming a stop that ingestion correctly
  * declined to land.
  */
-const stoppedResultMetadata = (
-  row: { metadata: Prisma.JsonValue | null },
-): { condition: StopCondition; evidence: string; sourceRunId: string | null } | null => {
-  const metadata = asRecord(row.metadata);
+export type StoppedResultMetadata = {
+  condition: StopCondition;
+  evidence: string;
+  sourceRunId: string;
+};
+
+export const parseStoppedResultMetadata = (value: unknown): StoppedResultMetadata | null => {
+  const metadata = asRecord(value);
   if (
     metadata?.kind !== MERGE_INTEGRATOR_KIND.result
     || metadata.schemaVersion !== MERGE_INTEGRATOR_SCHEMA_VERSION
     || metadata.outcome !== "stopped"
     || !isStopCondition(metadata.condition)
     || typeof metadata.evidence !== "string"
-    || !(metadata.sourceRunId === undefined
-      || metadata.sourceRunId === null
-      || typeof metadata.sourceRunId === "string")
+    || typeof metadata.sourceRunId !== "string"
   ) return null;
   return {
     condition: metadata.condition,
     evidence: metadata.evidence,
-    sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
+    sourceRunId: metadata.sourceRunId,
   };
+};
+
+const RESULT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+const ACTIVE_SOURCE_RUN_STATUSES = new Set<RunStatus>([
+  RunStatus.QUEUED,
+  RunStatus.CLAIMED,
+  RunStatus.PROVISIONING,
+  RunStatus.RUNNING,
+  RunStatus.WAITING_INBOX,
+]);
+
+const isMergedResultMetadata = (value: unknown): boolean => {
+  const metadata = asRecord(value);
+  return metadata?.kind === MERGE_INTEGRATOR_KIND.result
+    && metadata.schemaVersion === MERGE_INTEGRATOR_SCHEMA_VERSION
+    && metadata.outcome === "merged"
+    && typeof metadata.sourceRunId === "string"
+    && typeof metadata.mergeCommitSha === "string"
+    && RESULT_SHA_PATTERN.test(metadata.mergeCommitSha);
 };
 
 /**
@@ -235,17 +257,11 @@ export const latestRecordedStop = async (tx: Tx, integratorTaskId: string): Prom
   for (const row of rows) {
     const metadata = asRecord(row.metadata);
     if (metadata?.kind !== MERGE_INTEGRATOR_KIND.result) continue;
-    // The newest result decides. A later `merged` closes the chain even though
-    // an older stop is still in the history. A malformed newest result is not
-    // a recorded stop either; completion owns landing its fail-loud malformed
-    // output condition, while arbitrary activity metadata gains no authority.
-    const stopped = stoppedResultMetadata(row);
-    if (!stopped) return null;
-    return {
-      stopId: row.id,
-      ...stopped,
-      createdAt: row.createdAt,
-    };
+    const stopped = parseStoppedResultMetadata(row.metadata);
+    if (stopped) return { stopId: row.id, ...stopped, createdAt: row.createdAt };
+    // A valid merged result intentionally terminates an older stop. Malformed
+    // rows have no authority and cannot erase the latest valid state.
+    if (isMergedResultMetadata(row.metadata)) return null;
   }
   return null;
 };
@@ -510,45 +526,39 @@ type StopResultActivity = {
 };
 
 /**
- * The newest result activity on a Task. A later result is authoritative even
- * when it is a merged result, so a prior stopped result must never be adopted
- * after the chain has recorded a newer outcome.
+ * The newest valid result activity for one source Run. Malformed rows and
+ * results owned by another Run have no authority over this Run's completion;
+ * a valid merged result for the same Run intentionally terminates its stop.
  */
-const latestResultActivity = async (
+const latestValidResultActivity = async (
   tx: Tx,
   integratorTaskId: string,
+  sourceRunId: string,
 ): Promise<StopResultActivity | null> => {
   const rows = await tx.taskActivity.findMany({
     where: { taskId: integratorTaskId },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     select: { id: true, taskId: true, createdAt: true, actorType: true, actorId: true, metadata: true },
   });
-  return rows.find((row) => asRecord(row.metadata)?.kind === MERGE_INTEGRATOR_KIND.result) ?? null;
+  for (const row of rows) {
+    const stopped = parseStoppedResultMetadata(row.metadata);
+    if (stopped?.sourceRunId === sourceRunId) return row;
+    const metadata = asRecord(row.metadata);
+    if (isMergedResultMetadata(row.metadata) && metadata?.sourceRunId === sourceRunId) return null;
+  }
+  return null;
 };
 
 /**
  * Resolve the identities attached to a stop question. A source Run is the
- * durable owner of the Agent and Session, not caller-supplied strings. The
- * fallback values are for historical control-plane results whose source Run
- * was not recorded; new fenced callers always have the Run row available.
+ * durable owner of the Agent and Session, not caller-supplied strings. Every
+ * production result writer stamps the source Run before the activity commits.
  */
 const stopQuestionIdentity = async (
   tx: Tx,
   task: IntegratorTask,
-  stop: { sourceRunId: string | null },
-  input: { agentId?: string | null; sessionId?: string | null },
+  stop: { sourceRunId: string },
 ): Promise<{ agentId: string; sessionId: string }> => {
-  if (!stop.sourceRunId) {
-    // A question without a Session cannot be answered through the normal Inbox
-    // decision transaction. Historical source-less stops therefore need an
-    // explicit identity supplied by the repair caller; guessing the Task's
-    // assignee is not enough to bind the decision's Run.
-    if (!input.agentId || !input.sessionId) {
-      throw new Error(`Merge stop ${task.id} has no source Run; an explicit Agent and Session are required`);
-    }
-    return { agentId: input.agentId, sessionId: input.sessionId };
-  }
-
   const sourceRun = await tx.run.findUnique({
     where: { id: stop.sourceRunId },
     select: { taskId: true, agentId: true, session: { select: { id: true } } },
@@ -571,8 +581,6 @@ export type IntegratorStopLandingInput = {
   condition?: StopCondition;
   evidence?: string;
   sourceRunId?: string | null;
-  agentId?: string | null;
-  sessionId?: string | null;
 };
 
 export type IntegratorStopLandingResult = {
@@ -626,8 +634,8 @@ export const landIntegratorStop = async (
       throw new Error(`Merge stop result activity ${input.resultActivityId} belongs to another task`);
     }
   } else if (input.sourceRunId) {
-    const latest = await latestResultActivity(tx, task.id);
-    const parsed = latest ? stoppedResultMetadata(latest) : null;
+    const latest = await latestValidResultActivity(tx, task.id, input.sourceRunId);
+    const parsed = latest ? parseStoppedResultMetadata(latest.metadata) : null;
     if (latest && parsed?.sourceRunId === input.sourceRunId) activity = latest;
   }
 
@@ -638,7 +646,10 @@ export const landIntegratorStop = async (
     if (typeof input.evidence !== "string") {
       throw new Error(`Cannot record merge stop ${input.condition} without evidence`);
     }
-    const sourceRunId = input.sourceRunId ?? null;
+    if (!input.sourceRunId) {
+      throw new Error(`Cannot record merge stop ${input.condition} without a source Run`);
+    }
+    const sourceRunId = input.sourceRunId;
     const created = await tx.taskActivity.create({ data: {
       taskId: task.id,
       actorType: "control-plane",
@@ -663,7 +674,7 @@ export const landIntegratorStop = async (
     resultCreated = true;
   }
 
-  const stopped = stoppedResultMetadata(activity);
+  const stopped = parseStoppedResultMetadata(activity.metadata);
   if (!stopped) {
     throw new Error(`Merge result activity ${activity.id} is not a valid stopped result`);
   }
@@ -680,13 +691,25 @@ export const landIntegratorStop = async (
     };
   }
   const questionDeferred = stopped.condition === "base-drift" && isCanonicalIntegratorStep(task.templateStep);
-  await tx.task.update({
-    where: { id: task.id },
-    data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${stopped.condition}` },
-  });
+  const sourceRunIsActive = questionDeferred
+    ? await tx.run.findUnique({ where: { id: stopped.sourceRunId }, select: { taskId: true, status: true } })
+      .then((sourceRun) => {
+        if (!sourceRun) throw new Error(`Merge stop source Run ${stopped.sourceRunId} no longer exists`);
+        if (sourceRun.taskId !== task.id) {
+          throw new Error(`Merge stop ${stopped.sourceRunId} is not owned by integrator task ${task.id}`);
+        }
+        return ACTIVE_SOURCE_RUN_STATUSES.has(sourceRun.status);
+      })
+    : false;
+  if (!sourceRunIsActive) {
+    await tx.task.update({
+      where: { id: task.id },
+      data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${stopped.condition}` },
+    });
+  }
 
   const question = questionDeferred ? null : await (async () => {
-    const identity = await stopQuestionIdentity(tx, task, stopped, input);
+    const identity = await stopQuestionIdentity(tx, task, stopped);
     return openStopQuestion(tx, {
       integratorTaskId: task.id,
       stopId: activity.id,
@@ -953,8 +976,6 @@ export const recordIntegratorStop = async (
     integratorTaskId: string;
     condition: StopCondition;
     evidence: string;
-    agentId: string;
-    sessionId: string | null;
     sourceRunId: string;
   },
 ): Promise<{ stopId: string; questionId: string | null }> => {

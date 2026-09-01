@@ -1,17 +1,15 @@
 import {
   CleanupStatus,
   executionModeFor,
-  isStopCondition,
   landIntegratorStop,
   MERGE_INTEGRATOR_KIND,
-  MERGE_INTEGRATOR_SCHEMA_VERSION,
+  parseStoppedResultMetadata,
   Prisma,
   type PrismaClient,
   recomputeSessionUsage,
   RunStatus,
   SessionEventSource,
   SessionExecutionStatus,
-  type StopCondition,
 } from "@anneal/db";
 import { z } from "zod";
 
@@ -112,40 +110,6 @@ export type EventsBody = z.infer<typeof eventsInput>;
 export type ActivityBody = z.infer<typeof fencedActivityInput>;
 
 const refused = (message: string): Refusal => ({ reason: "conflict", message });
-
-type StoppedResultMetadata = {
-  condition: StopCondition;
-  evidence: string;
-  sourceRunId: string;
-};
-
-/**
- * The SESSION activity endpoint receives an append-only result before the
- * completion endpoint in the mechanical executor's normal sequence. Keep the
- * validation here deliberately narrow: only a result stamped for this exact
- * fenced Run may enter the shared stop-landing operation. The DB operation
- * re-validates the activity while holding the integrator Task lock.
- */
-const stoppedResultMetadataFor = (
-  metadata: unknown,
-  runId: string,
-): StoppedResultMetadata | null => {
-  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return null;
-  const value = metadata as Record<string, unknown>;
-  if (
-    value.kind !== MERGE_INTEGRATOR_KIND.result
-    || value.schemaVersion !== MERGE_INTEGRATOR_SCHEMA_VERSION
-    || value.outcome !== "stopped"
-    || value.sourceRunId !== runId
-    || !isStopCondition(value.condition)
-    || typeof value.evidence !== "string"
-  ) return null;
-  return {
-    condition: value.condition,
-    evidence: value.evidence,
-    sourceRunId: runId,
-  };
-};
 
 export const startRun = async (
   db: PrismaClient,
@@ -436,6 +400,17 @@ export const appendRunActivity = async (
             : {}),
         }
       : undefined;
+    const mechanicalResultPrincipal = input.principal.kind === "session" || input.principal.kind === "merge-executor";
+    const mechanical = executionModeFor(run.task?.templateStep ?? null) === "mechanical";
+    const stopped = mechanicalResultPrincipal && mechanical
+      ? parseStoppedResultMetadata(metadata)
+      : null;
+    const metadataRecord = metadata as Record<string, unknown> | undefined;
+    const declaredStoppedResult = metadataRecord?.kind === MERGE_INTEGRATOR_KIND.result
+      && metadataRecord.outcome === "stopped";
+    if (mechanicalResultPrincipal && mechanical && declaredStoppedResult && stopped?.sourceRunId !== input.runId) {
+      return refused("Stopped merge result metadata is malformed");
+    }
     const activity = await tx.taskActivity.create({
       data: {
         taskId: run.taskId,
@@ -452,18 +427,12 @@ export const appendRunActivity = async (
     // stop without its condition-specific Inbox question. `landIntegratorStop`
     // adopts this exact activity id; its Task lock and unique dedupe key
     // serialize replays and concurrent repair.
-    const stopped = (input.principal.kind === "session" || input.principal.kind === "merge-executor")
-      && executionModeFor(run.task?.templateStep ?? null) === "mechanical"
-      ? stoppedResultMetadataFor(metadata, input.runId)
-      : null;
     if (stopped) {
       await landIntegratorStop(tx, {
         integratorTaskId: run.taskId,
         resultActivityId: activity.id,
         condition: stopped.condition,
         evidence: stopped.evidence,
-        agentId: run.agentId,
-        sessionId: run.session?.id ?? null,
         sourceRunId: stopped.sourceRunId,
       });
     }

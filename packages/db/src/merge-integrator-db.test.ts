@@ -33,7 +33,7 @@ type Question = {
 
 const makeTransaction = (overrides: {
   templateOutputKind?: string;
-  sourceRun?: { taskId: string | null; agentId: string; session: { id: string } | null } | null;
+  sourceRun?: { taskId: string | null; agentId: string; status?: string; session: { id: string } | null } | null;
   activities?: Activity[];
 } = {}) => {
   const task = {
@@ -106,8 +106,6 @@ const stopInput = (overrides: Partial<IntegratorStopLandingInput> = {}): Integra
   condition: "base-drift-post-merge",
   evidence: "landed commit 8bfa2f08",
   sourceRunId: "source-run",
-  agentId: "caller-agent",
-  sessionId: "caller-session",
   ...overrides,
 });
 
@@ -133,8 +131,6 @@ test("landing creates one result and one condition-specific question, then adopt
     resultActivityId: landed.stopId,
     condition: "head-drift",
     evidence: "must not replace the recorded evidence",
-    agentId: "wrong-agent",
-    sessionId: "wrong-session",
   }));
   assert.equal(replay.stopId, landed.stopId);
   assert.equal(replay.resultCreated, false);
@@ -152,8 +148,6 @@ test("recordIntegratorStop adopts the newest same-source stopped result", async 
     integratorTaskId: "integrator-task",
     condition: "head-drift",
     evidence: "different completion envelope",
-    agentId: "caller-agent",
-    sessionId: "caller-session",
     sourceRunId: "source-run",
   });
   assert.deepEqual(replay, { stopId: first.stopId, questionId: null });
@@ -161,6 +155,88 @@ test("recordIntegratorStop adopts the newest same-source stopped result", async 
   assert.equal(questions.length, 1);
   assert.equal((activities[0]!.metadata as Record<string, unknown>).condition, "base-drift-post-merge");
   assert.equal((activities[0]!.metadata as Record<string, unknown>).evidence, "landed commit 8bfa2f08");
+});
+
+test("a newer malformed result does not erase or duplicate the newest valid stop", async () => {
+  const valid: Activity = {
+    id: "valid-stop",
+    taskId: "integrator-task",
+    actorType: "session",
+    actorId: "merge-executor-1",
+    body: "stopped",
+    metadata: {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "stopped",
+      condition: "base-drift-post-merge",
+      evidence: "landed commit 8bfa2f08",
+      sourceRunId: "source-run",
+    },
+    createdAt: new Date(2026, 8, 1, 0, 0, 1),
+  };
+  const malformed: Activity = {
+    ...valid,
+    id: "malformed-result",
+    metadata: {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "stopped",
+      condition: "base-drift-post-merge",
+      sourceRunId: "source-run",
+    },
+    createdAt: new Date(2026, 8, 1, 0, 0, 2),
+  };
+  const { tx, activities, questions } = makeTransaction({
+    activities: [valid, malformed],
+    sourceRun: { taskId: "integrator-task", agentId: "run-agent", session: { id: "run-session" } },
+  });
+
+  assert.equal((await latestRecordedStop(tx, "integrator-task"))?.stopId, valid.id);
+  const replay = await recordIntegratorStop(tx, {
+    integratorTaskId: "integrator-task",
+    condition: "base-drift-post-merge",
+    evidence: "landed commit 8bfa2f08",
+    sourceRunId: "source-run",
+  });
+  assert.equal(replay.stopId, valid.id);
+  assert.equal(activities.length, 2);
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0]!.dedupeKey, `merge-stop:${valid.id}`);
+});
+
+test("a newer valid merged result intentionally terminates an older stop", async () => {
+  const base = {
+    taskId: "integrator-task",
+    actorType: "session",
+    actorId: "merge-executor-1",
+    body: "result",
+  };
+  const { tx } = makeTransaction({ activities: [{
+    ...base,
+    id: "valid-stop",
+    metadata: {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "stopped",
+      condition: "head-drift",
+      evidence: "head moved",
+      sourceRunId: "source-run-1",
+    },
+    createdAt: new Date(2026, 8, 1, 0, 0, 1),
+  }, {
+    ...base,
+    id: "valid-merged",
+    metadata: {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "merged",
+      mergeCommitSha: "a".repeat(40),
+      sourceRunId: "source-run-2",
+    },
+    createdAt: new Date(2026, 8, 1, 0, 0, 2),
+  }] });
+
+  assert.equal(await latestRecordedStop(tx, "integrator-task"), null);
 });
 
 test("a terminally answered stop is not reopened by a replay", async () => {
@@ -213,6 +289,23 @@ test("canonical ordinary base drift lands REVIEW but defers its abandon question
   assert.equal(landed.questionId, null);
   assert.equal(questions.length, 0);
   assert.equal(task.status, "REVIEW");
+});
+
+test("canonical ordinary base drift does not publish REVIEW while its source Run is active", async () => {
+  const { tx, task, questions } = makeTransaction({
+    sourceRun: {
+      taskId: "integrator-task",
+      agentId: "run-agent",
+      status: "RUNNING",
+      session: { id: "run-session" },
+    },
+  });
+  const landed = await landIntegratorStop(tx, stopInput({ condition: "base-drift" }));
+  assert.equal(landed.questionDeferred, true);
+  assert.equal(landed.questionId, null);
+  assert.equal(questions.length, 0);
+  assert.equal(task.status, "TODO");
+  assert.equal(task.failureReason, undefined);
 });
 
 test("malformed result metadata never becomes a guard-visible recorded stop", async () => {

@@ -25,6 +25,7 @@ import {
 
 import { type PullRequestSnapshot } from "./github-read.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
+import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
 import { recordMergeLeaseHold } from "./merge-lease-hold.js";
 import { createApp } from "./test-app.js";
@@ -205,7 +206,26 @@ test("a SESSION stop and definitive output outrank a later failed completion env
   }, claimed.sessionToken);
   assert.equal(resultActivity.status, 201, JSON.stringify(resultActivity.body));
 
-  const completionBody = failedProtocolCompletion(claimed.fencingToken);
+  const completionBody = {
+    ...failedProtocolCompletion(claimed.fencingToken),
+    failureEnvelope: {
+      version: 1,
+      phase: "COMPLETE",
+      runnerClass: "PROTOCOL_ERROR",
+      exitCode: 1,
+      signal: null,
+      terminationReason: null,
+      terminalEventSeen: true,
+      terminalSuccess: false,
+      agentExited: false,
+      providerError: "completion request lost connectivity",
+      stderrSummary: "completion transport failed",
+      stdoutSummary: null,
+      timedOut: false,
+      transient: true,
+      timeoutMs: null,
+    },
+  };
   const completion = await call(
     "POST",
     `/runner/runs/${claimed.runId}/complete`,
@@ -226,6 +246,8 @@ test("a SESSION stop and definitive output outrank a later failed completion env
   });
   assert.equal(settledRun.status, "SUCCEEDED");
   assert.equal(settledRun.failureClass, null);
+  assert.equal(settledRun.failureReason, "merge completion transport failed");
+  assert.deepEqual(settledRun.failureEnvelope, completionBody.failureEnvelope);
   assert.equal(settledRun.retryable, false);
   assert.equal(settledRun.retryAt, null);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1);
@@ -270,6 +292,83 @@ test("a SESSION stop and definitive output outrank a later failed completion env
   const done = await db.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(done.status, "DONE");
   assert.equal(done.failureReason, null);
+});
+
+test("an ordinary base-drift activity cannot expose a RUNNING source Run to recovery", async () => {
+  const chain = await seedIntegratorChain(db, { label: "active-base-drift-deferral" });
+  const claimed = await claimIntegratorRun(chain);
+  const evidence = JSON.stringify({ observed: "c".repeat(40), authorized: "b".repeat(40) });
+  const output = await call("PUT", `/session/runs/${claimed.runId}/output`, {
+    fencingToken: claimed.fencingToken,
+    kind: "merge-result",
+    body: JSON.stringify({ outcome: "stopped", condition: "base-drift", evidence }),
+  }, claimed.sessionToken);
+  assert.equal(output.status, 200, JSON.stringify(output.body));
+
+  const activity = await call("POST", `/session/runs/${claimed.runId}/activity`, {
+    fencingToken: claimed.fencingToken,
+    actorType: "session",
+    actorId: "merge-executor-1",
+    body: "Mechanical merge stopped: base-drift",
+    metadata: {
+      kind: MERGE_INTEGRATOR_KIND.result,
+      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+      outcome: "stopped",
+      condition: "base-drift",
+      evidence,
+    },
+  }, claimed.sessionToken);
+  assert.equal(activity.status, 201, JSON.stringify(activity.body));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, "DOING");
+
+  assert.deepEqual(await baseDriftRecoveryTick(db, null), {
+    examined: 0,
+    recovered: 0,
+    exhausted: 0,
+    ineligible: 0,
+  });
+  assert.equal(await db.mergeRecoveryAttempt.count({ where: { integratorTaskId: chain.integratorTask!.id } }), 0);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: chain.integratorTask!.id } }), 0);
+});
+
+test("a valid merge-result owned by another Run cannot override failed completion", async () => {
+  const chain = await seedIntegratorChain(db, { label: "foreign-output-no-precedence" });
+  const claimed = await claimIntegratorRun(chain);
+  const foreignChain = await seedIntegratorChain(db, { label: "foreign-output-owner" });
+  const foreignRun = await liveIntegratorRun(foreignChain);
+  await db.taskStepOutput.upsert({
+    where: { taskId: chain.integratorTask!.id },
+    create: {
+      taskId: chain.integratorTask!.id,
+      runId: foreignRun.id,
+      kind: "merge-result",
+      body: JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) }),
+    },
+    update: {
+      runId: foreignRun.id,
+      kind: "merge-result",
+      body: JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) }),
+    },
+  });
+
+  const completion = await call(
+    "POST",
+    `/runner/runs/${claimed.runId}/complete`,
+    failedProtocolCompletion(claimed.fencingToken),
+    EXECUTOR,
+  );
+  assert.equal(completion.status, 200, JSON.stringify(completion.body));
+  assert.deepEqual(completion.body, {
+    taskId: chain.integratorTask!.id,
+    succeeded: false,
+    retryCreated: true,
+    failureClass: "PROTOCOL_ERROR",
+  });
+  const failedRun = await db.run.findUniqueOrThrow({ where: { id: claimed.runId } });
+  assert.equal(failedRun.status, "FAILED");
+  assert.equal(failedRun.failureClass, "PROTOCOL_ERROR");
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 2);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: chain.integratorTask!.id } }), 0);
 });
 
 test("completion creates and lands one stop when output committed but result activity did not", async () => {

@@ -642,3 +642,39 @@ test("a fenced SESSION or merge-executor stopped result lands its question in th
   assert.equal(taskUpdates.length, 1);
   assert.equal(questions.length, 1);
 });
+
+test("a fenced mechanical stopped result with malformed evidence is rejected before append", async () => {
+  let activityWrites = 0;
+  const tx = {
+    $queryRaw: async () => [{ id: "run-1" }],
+    run: { findFirst: async () => ({
+      taskId: "task-1",
+      leaseGeneration: 1,
+      agentId: "agent-1",
+      session: { id: "session-1" },
+      task: { templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } },
+    }) },
+    taskActivity: { create: async () => { activityWrites += 1; return {}; } },
+  };
+  const result = await appendRunActivity(databaseFor(tx), {
+    runId: "run-1",
+    now,
+    principal: { kind: "session", runId: "run-1", leaseGeneration: 1 },
+    body: {
+      actorType: "operator",
+      fencingToken: "fence-1",
+      body: "malformed stopped result",
+      metadata: {
+        kind: MERGE_INTEGRATOR_KIND.result,
+        schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+        outcome: "stopped",
+        condition: "base-drift-post-merge",
+      },
+    },
+  });
+  assert.deepEqual(result, {
+    reason: "conflict",
+    message: "Stopped merge result metadata is malformed",
+  });
+  assert.equal(activityWrites, 0);
+});
