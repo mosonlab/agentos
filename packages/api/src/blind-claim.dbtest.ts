@@ -245,7 +245,7 @@ const prepareFixedImplementation = async () => {
   const { template, repo } = await seedCanonicalTemplate();
   const fix = await queueCanonicalStep(template, repo.id, 8);
   const sol = await prepareReviewReport(fix.chain, 6, "sol-findings", REVIEWED_HEAD);
-  const blind = await prepareReviewReport(fix.chain, 7, "blind-findings", REVIEWED_HEAD);
+  await prepareReviewReport(fix.chain, 7, "blind-findings", REVIEWED_HEAD);
   const claimed = await claim();
   assert.equal(claimed.run.id, fix.run.id);
   const fixedHead = "a".repeat(40);
@@ -277,7 +277,7 @@ const prepareFixedImplementation = async () => {
       commitSha: fixedHead,
     }),
   });
-  return { fix, sol, blind, write };
+  return { sol, write };
 };
 
 const addSuccessfulReviewRetry = async (
@@ -295,7 +295,6 @@ const addSuccessfulReviewRetry = async (
     endedAt: now,
   } });
   await db.task.update({ where: { id: review.task.id }, data: { status: "DONE" } });
-  return retry;
 };
 
 test("blind session cannot read Sol evidence before or after its immutable report", async () => {

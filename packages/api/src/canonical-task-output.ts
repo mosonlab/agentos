@@ -232,6 +232,9 @@ const fixedImplementationPersistenceRefusal = async (
       } },
     },
   });
+  // Review reports are immutable and stay bound to their authoring Run, so a
+  // later successful Run of the sibling task may validate the same commit.
+  // This mirrors the prior-Run reuse rule in canonicalOutputRefusal below.
   const successfulSiblingRuns = await tx.run.findMany({
     where: {
       taskId: { in: reviewTasks.map(({ id }) => id) },
