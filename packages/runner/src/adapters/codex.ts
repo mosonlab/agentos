@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isCodexReconnectStatus } from "@anneal/db";
+
 import type { ClaimedTask } from "../api.js";
 import type { RunnerConfig, RunnerKind } from "../config.js";
 import type { AgentScratch } from "../workspace.js";
@@ -115,9 +117,6 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     ];
 };
 
-const isReconnectStatus = (message: string | null): boolean =>
-  /^Reconnecting\.\.\. \d+\/\d+$/u.test(message?.trim() ?? "");
-
 const observedNativeChild = (item: Record<string, unknown> | null): boolean => {
   if (!item) return false;
   const itemType = stringField(item, "type");
@@ -175,7 +174,7 @@ export const parseCodexEvent = (
     // the stream is disconnected, but do not make it an irreversible verdict:
     // a later turn.completed proves the reconnect recovered. Every other error
     // remains latched, including an unrecognised error with no message.
-    if (!isReconnectStatus(message)) state.sawError = true;
+    if (!isCodexReconnectStatus(message)) state.sawError = true;
     state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
   } else if (type === "turn.completed") {
