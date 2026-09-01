@@ -176,6 +176,7 @@
     { "glob": "scripts/templates-release-demo.test.mjs", "purpose": "templates release-demo regression tests" },
     { "glob": "scripts/verify-secret-hygiene.mjs", "purpose": "bundle and tracked-file secret hygiene scan" },
     { "glob": "scripts/verify-secret-hygiene.test.mjs", "purpose": "secret hygiene scan regression tests" },
+    { "glob": "scripts/verify-test-no-build.mjs", "purpose": "source-test proof that workspace tests neither invoke TypeScript compilation nor create build artifacts" },
     { "glob": "tsconfig.base.json", "purpose": "shared TypeScript configuration" }
   ],
   "deny": [
