@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RUNNER_DEFINITIONS, RUNNER_KINDS } from "./adapters.js";
+import { MAX_HOST_PROOF_SLOTS } from "./host-proof-slots.js";
 import { runnerProxyEnvironment } from "./adapters/environment.js";
 import { requireLocalApiDestination } from "./local-origin.js";
 
@@ -45,6 +46,8 @@ export type RunnerConfig = {
   /** Repository-owned baseline used to provision Codex session config roots. */
   sessionConfigBaselineRoot?: string;
   workspaceRoot: string;
+  /** Host-wide cooperative ceiling for per-workspace proof commands. */
+  hostProofSlots: number;
   /** Runner-owned, write-once dependency snapshots. Defaults beside workspaceRoot. */
   dependencyCacheRoot?: string;
   /** Persistent bare mirrors, in the home of the account that runs tasks. */
@@ -66,6 +69,17 @@ const positiveInteger = (name: string, value: string): number => {
   if (!/^\d+$/u.test(value)) throw new Error(`${name} must be a positive integer`);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+  return parsed;
+};
+
+const positiveIntegerAtMost = (name: string, value: string, maximum: number): number => {
+  let parsed: number;
+  try {
+    parsed = positiveInteger(name, value);
+  } catch {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
+  if (parsed > maximum) throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
   return parsed;
 };
 
@@ -124,6 +138,9 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,
+    hostProofSlots: positiveIntegerAtMost(
+      "AGENTOS_HOST_PROOF_SLOTS", process.env.AGENTOS_HOST_PROOF_SLOTS ?? "3", MAX_HOST_PROOF_SLOTS,
+    ),
     dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
     // One bare mirror per remote. Provisioning clones every workspace out of it
     // and only ever fetches incrementally from GitHub; see repo-mirror.ts for

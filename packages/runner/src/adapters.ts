@@ -2,6 +2,7 @@ import { stepRole } from "@anneal/db";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
+import { hostProofSlotDirectory } from "./host-proof-slots.js";
 import { manifestLines, toolsFor, type SessionToolTransport } from "./session-tool-contract.js";
 import type { AgentScratch } from "./workspace.js";
 import { claudeDeclaration, claudePlatformSettingsPath } from "./adapters/claude.js";
@@ -131,7 +132,7 @@ export const buildPrompt = (claim: ClaimedTask): string => [
 ].join("\n");
 
 export const buildChildEnvironment = (
-  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
+  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
@@ -149,9 +150,10 @@ export const buildChildEnvironment = (
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
   return {
     ...taskSecrets,
-    // The Run materializes this platform-owned directory before adapter work.
-    // Keep it after task Secrets so a Secret cannot redirect the tool bundle.
+    // The runner owns all three paths/counts and sets them after task Secrets.
     AGENTOS_TOOLS: scratch.toolsDir,
+    AGENTOS_HOST_PROOF_SLOT_DIR: hostProofSlotDirectory(config),
+    AGENTOS_HOST_PROOF_SLOTS: String(config.hostProofSlots),
     ...workspaceEnvironment(config),
     AGENTOS_API_URL: config.apiUrl,
     AGENTOS_SESSION_TOKEN: claim.sessionToken,

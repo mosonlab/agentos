@@ -90,7 +90,7 @@ test("installation planning decides successor drift, half migrations, and spawnP
         name: "half-migrated current row",
         plan: planCanonicalInstallation([row(halfMigrated)], sources(loaded)),
         kind: "refused",
-        reason: /structural drift: step 1/u,
+        reason: /Template direct-engineer-workflow \(template\), direct-engineer-workflow step 1 \(step-1\) differs from the canonical source in approvalGate/u,
       },
       {
         name: "current row with a named spawnPolicy",

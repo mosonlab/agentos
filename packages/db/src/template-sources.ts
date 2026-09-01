@@ -101,6 +101,27 @@ export type PersistedTemplateStepStructure = {
   spawnPolicy: Prisma.JsonValue;
 };
 
+export type PersistedTemplateMetadata = {
+  name: string;
+  description: string;
+  variables: string[];
+};
+
+export const templateMetadataDifferences = (
+  actual: PersistedTemplateMetadata,
+  templateName: CanonicalTemplateName,
+): string[] => {
+  const expected = canonicalTemplateSourceSpec(templateName);
+  const fields = [
+    ["name", actual.name, templateName],
+    ["description", actual.description, expected.description],
+    ["variables", actual.variables, ["branchName"]],
+  ] as const;
+  return fields
+    .filter(([, actualValue, expectedValue]) => !isDeepStrictEqual(actualValue, expectedValue))
+    .map(([field]) => field);
+};
+
 export const templateStepStructureDifferences = (
   actual: PersistedTemplateStepStructure,
   expected: TemplateStepSource,

@@ -384,6 +384,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
 test("canonical prompt sync can detect every role frontmatter field", async () => {
   const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian")!;
   const persisted: PersistedRoleStructure = {
+    name: role.name,
     title: role.title,
     model: role.model,
     runnerPreference: role.runnerPreference,
@@ -392,6 +393,7 @@ test("canonical prompt sync can detect every role frontmatter field", async () =
   };
   assert.deepEqual(roleSourceStructureDifferences(persisted, role), []);
   const mutations: Array<[string, PersistedRoleStructure]> = [
+    ["name", { ...persisted, name: "different-name" }],
     ["title", { ...persisted, title: "Different title" }],
     ["model", { ...persisted, model: "different-model" }],
     ["runnerPreference", { ...persisted, runnerPreference: RunnerPreference.CLAUDE }],
