@@ -34,6 +34,18 @@ const STEP_BASE_TRANSITIONS = new Map([
   ["direct-engineer-workflow:3", { from: null, to: 2 }],
 ]);
 
+const CANONICAL_REVIEW_STEP_IDENTITIES = new Set([
+  "compound-engineer-workflow:6",
+  "compound-engineer-workflow:7",
+  "direct-engineer-workflow:3",
+  "direct-engineer-workflow:4",
+  "pr-engineer-workflow:2",
+  "pr-engineer-workflow:3",
+]);
+
+const isCanonicalReviewStep = (templateName: string, stepIndex: number): boolean =>
+  CANONICAL_REVIEW_STEP_IDENTITIES.has(`${templateName}:${stepIndex}`);
+
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
   const expected = catalogRunnerForModel(agent.model);
   if (!expected || agent.runnerPreference === RunnerPreference.AUTO || agent.runnerPreference === RunnerPreference.INHERIT
@@ -191,6 +203,7 @@ const main = async (): Promise<void> => {
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;
       let adoptedPriorOutputDeclarations = 0;
+      let adoptedDependencyProvisioning = 0;
       let renamedSteps = 0;
       let templateCount = 0;
       const regressionSteps: Array<{ id: string; projectId: string }> = [];
@@ -226,6 +239,7 @@ const main = async (): Promise<void> => {
               priorOutputKinds: true,
               opensPullRequest: true,
               requiresCommit: true,
+              provisionDependencies: true,
               baseFromStepIndex: true,
               spawnPolicy: true,
               _count: { select: { tasks: true } },
@@ -251,6 +265,11 @@ const main = async (): Promise<void> => {
                 && persisted.priorOutputKinds.length === 1
                 && persisted.priorOutputKinds[0] === LEGACY_ALL_PRIOR_OUTPUTS
                 ? ["priorOutputKinds"] : []),
+              ...(differences.includes("provisionDependencies")
+                && isCanonicalReviewStep(templateName, step.stepIndex)
+                && persisted.provisionDependencies === true
+                && step.provisionDependencies === false
+                ? ["provisionDependencies"] : []),
             ]);
             if (differences.some((difference) => !adoptedDifferences.has(difference))) {
               throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
@@ -291,6 +310,13 @@ const main = async (): Promise<void> => {
                 data: { priorOutputKinds: step.priorOutputKinds },
               });
               adoptedPriorOutputDeclarations += 1;
+            }
+            if (adoptedDifferences.has("provisionDependencies")) {
+              await tx.taskTemplateStep.update({
+                where: { id: persisted.id },
+                data: { provisionDependencies: step.provisionDependencies },
+              });
+              adoptedDependencyProvisioning += 1;
             }
             const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             if (nameTransition?.from === persisted.name) {
@@ -530,6 +556,7 @@ const main = async (): Promise<void> => {
         adoptedAssignees,
         adoptedStepBases,
         adoptedPriorOutputDeclarations,
+        adoptedDependencyProvisioning,
         renamedSteps,
         migratedTasks,
         preservedTaskAssignments,
@@ -541,7 +568,7 @@ const main = async (): Promise<void> => {
       };
     }, { timeout: 120_000 });
     const updated = result.createdCanonicalTemplates + result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
-      + result.adoptedPriorOutputDeclarations
+      + result.adoptedPriorOutputDeclarations + result.adoptedDependencyProvisioning
       + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + result.runtimeDriftNotices + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)

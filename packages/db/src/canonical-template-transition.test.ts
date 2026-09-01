@@ -48,6 +48,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     priorOutputKinds: step.priorOutputKinds,
     opensPullRequest: step.opensPullRequest,
     requiresCommit: step.requiresCommit,
+    provisionDependencies: step.provisionDependencies,
     baseFromStepIndex: step.baseFromStepIndex,
     spawnPolicy: step.spawnPolicy as PersistedTransitionStep["spawnPolicy"],
     prompt: step.prompt,
@@ -58,6 +59,29 @@ const generationOf = (templateName: CanonicalTemplateRegistryName, marker: strin
   assert.ok(generation, `${templateName} must register ${marker}`);
   return generation;
 };
+
+const persistedGeneration = (
+  generation: ReturnType<typeof generationOf>,
+  provisionDependencies: unknown,
+): PersistedTransitionStep[] => generation.shape.map((step, index) => ({
+  id: `legacy-${String(index + 1)}`,
+  taskTemplateId: "template",
+  stepIndex: index + 1,
+  name: step.name,
+  assigneeAgent: step.agentName === null ? null : { name: step.agentName },
+  assigneeType: step.assigneeType,
+  layer: step.layer,
+  approvalGate: step.approvalGate,
+  outputKind: step.outputKind,
+  attachmentsFromPrevious: step.attachmentsFromPrevious,
+  priorOutputKinds: [],
+  opensPullRequest: step.opensPullRequest,
+  requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+  provisionDependencies,
+  baseFromStepIndex: step.baseFromStepIndex,
+  spawnPolicy: step.spawnPolicy,
+  prompt: "retired",
+})) as unknown as PersistedTransitionStep[];
 
 const PROMPT_ROLLOVER_TEMPLATES = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
 
@@ -73,6 +97,18 @@ test("canonical identity parses current names and every registered generation", 
   }
   assert.equal(canonicalTemplateIdentity("compound-engineer-workflow-legacy-pre-zero-gate-"), null);
   assert.equal(canonicalTemplateIdentity("unregistered-workflow"), null);
+});
+
+test("registered generations require an explicit true dependency-provisioning value", () => {
+  const generation = generationOf("direct-engineer-workflow", "pre-adjudication");
+  assert.equal(legacyGenerationMatches(generation, persistedGeneration(generation, true)), true);
+  for (const value of [false, undefined, "true"]) {
+    assert.equal(
+      legacyGenerationMatches(generation, persistedGeneration(generation, value)),
+      false,
+      `historical field ${String(value)} must not match`,
+    );
+  }
 });
 
 test("every registered compound generation derives its repair Step ordinals", () => {
@@ -129,7 +165,8 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
     priorOutputKinds: [],
-    opensPullRequest: true, requiresCommit: true, baseFromStepIndex: null, spawnPolicy: null, prompt,
+    opensPullRequest: true, requiresCommit: true, provisionDependencies: true,
+    baseFromStepIndex: null, spawnPolicy: null, prompt,
   }];
   const outgoing = stepsWith("the retired instruction");
   const successor = stepsWith("the replacement instruction");
@@ -166,12 +203,12 @@ test("the regression step split is registered as a prompt-only rollover that can
     assert.ok(current, `${templateName} must load from source`);
     const successor = asPersisted(current);
 
-    // Compound remains structure-identical. Direct's later revalidation
-    // rollover intentionally changed its shape, but the old prompt generation
-    // must still target the current source digest.
+    // The explicit dependency-provisioning field makes the review rows
+    // structurally different from every pre-field generation, so neither
+    // current source graph can match the retired shape by fallback.
     assert.equal(
       legacyGenerationMatches({ marker: generation.marker, shape: generation.shape }, successor),
-      templateName === "compound-engineer-workflow",
+      false,
       `${templateName} rollover shape expectation`,
     );
     // But not the generation, because the prompts moved on.
@@ -253,6 +290,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       opensPullRequest: step.opensPullRequest,
       requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+      provisionDependencies: true,
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy,
       priorOutputKinds: [],

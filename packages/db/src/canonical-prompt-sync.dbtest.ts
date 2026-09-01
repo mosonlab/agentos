@@ -948,6 +948,65 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
 });
 
+test("sync adopts review dependency provisioning across current templates with referenced tasks", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const reviewSteps = new Map([
+    ["compound-engineer-workflow", new Set([6, 7])],
+    ["direct-engineer-workflow", new Set([3, 4])],
+    ["pr-engineer-workflow", new Set([2, 3])],
+  ]);
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...reviewSteps.keys()] } },
+    include: { steps: true },
+  });
+  assert.equal(templates.length, reviewSteps.size);
+  const taskIds: string[] = [];
+  try {
+    for (const template of templates) {
+      const indexes = reviewSteps.get(template.name)!;
+      for (const step of template.steps.filter(({ stepIndex }) => indexes.has(stepIndex))) {
+        await prisma.taskTemplateStep.update({
+          where: { id: step.id },
+          data: { provisionDependencies: true },
+        });
+        const task = await prisma.task.create({ data: {
+          projectId: project.id,
+          templateId: template.id,
+          templateStepId: step.id,
+          name: `dependency-provisioning-review-${template.name}-${step.stepIndex}`,
+          description: "dependency-provisioning canonical sync fixture",
+          assigneeAgentId: step.assigneeAgentId,
+          assigneeType: step.assigneeType,
+          status: TaskStatus.TODO,
+        } });
+        taskIds.push(task.id);
+      }
+    }
+
+    const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+    assert.equal(synced.status, 0, synced.output);
+    assert.match(synced.output, /"adoptedDependencyProvisioning":6/u);
+
+    const current = await prisma.taskTemplate.findMany({
+      where: { projectId: project.id, name: { in: [...reviewSteps.keys()] } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    for (const template of current) {
+      const indexes = reviewSteps.get(template.name)!;
+      assert.ok(template.steps.filter(({ stepIndex }) => indexes.has(stepIndex))
+        .every(({ provisionDependencies }) => provisionDependencies === false));
+      assert.ok(template.steps.filter(({ stepIndex }) => !indexes.has(stepIndex))
+        .every(({ provisionDependencies }) => provisionDependencies === true));
+    }
+
+    const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+    assert.equal(second.status, 0, second.output);
+    assert.match(second.output, /"adoptedDependencyProvisioning":0/u);
+  } finally {
+    await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
+  }
+});
+
 test("sync refuses canonical step drift when instantiated tasks would be mutated", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const source = await prisma.agent.findUniqueOrThrow({

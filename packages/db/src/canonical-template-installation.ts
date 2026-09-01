@@ -48,6 +48,18 @@ export type CanonicalInstallationAction =
 export type CanonicalInstallationPlan = readonly CanonicalInstallationAction[];
 export type CanonicalInstallationSources = ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>;
 
+const CANONICAL_REVIEW_STEP_IDENTITIES = new Set([
+  "compound-engineer-workflow:6",
+  "compound-engineer-workflow:7",
+  "direct-engineer-workflow:3",
+  "direct-engineer-workflow:4",
+  "pr-engineer-workflow:2",
+  "pr-engineer-workflow:3",
+]);
+
+const isCanonicalReviewStep = (templateName: CanonicalTemplateName, stepIndex: number): boolean =>
+  CANONICAL_REVIEW_STEP_IDENTITIES.has(`${templateName}:${stepIndex}`);
+
 const adoptionDifferenceAllowed = (
   templateName: CanonicalTemplateName,
   actual: PersistedTransitionStep,
@@ -71,6 +83,11 @@ const adoptionDifferenceAllowed = (
     return actual.baseFromStepIndex === null
       && ((templateName === "compound-engineer-workflow" && actual.stepIndex === 6 && source.baseFromStepIndex === 5)
         || (templateName === "direct-engineer-workflow" && actual.stepIndex === 3 && source.baseFromStepIndex === 2));
+  }
+  if (difference === "provisionDependencies") {
+    return isCanonicalReviewStep(templateName, actual.stepIndex)
+      && actual.provisionDependencies === true
+      && source.provisionDependencies === false;
   }
   return false;
 };
@@ -197,6 +214,7 @@ const writeCanonicalTemplate = async (
       priorOutputKinds: step.priorOutputKinds,
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy ?? Prisma.JsonNull,
+      provisionDependencies: step.provisionDependencies,
     } as const;
     await tx.taskTemplateStep.upsert({
       where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: step.stepIndex } },

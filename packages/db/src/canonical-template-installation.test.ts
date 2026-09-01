@@ -27,6 +27,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
   priorOutputKinds: step.priorOutputKinds,
   opensPullRequest: step.opensPullRequest,
   requiresCommit: step.requiresCommit,
+  provisionDependencies: step.provisionDependencies,
   baseFromStepIndex: step.baseFromStepIndex,
   spawnPolicy: step.spawnPolicy as PersistedTransitionStep["spawnPolicy"],
   prompt: step.prompt,
@@ -47,6 +48,7 @@ const generationAsPersisted = (generation: LegacyTemplateGeneration): PersistedT
     priorOutputKinds: [],
     opensPullRequest: step.opensPullRequest,
     requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+    provisionDependencies: true,
     baseFromStepIndex: step.baseFromStepIndex,
     spawnPolicy: step.spawnPolicy,
     prompt: `retired prompt ${String(index + 1)}`,
@@ -114,4 +116,38 @@ test("installation planning decides successor drift, half migrations, and spawnP
     if (originalSuccessorDigest === undefined) delete mutableGeneration.successorPromptDigest;
     else mutableGeneration.successorPromptDigest = originalSuccessorDigest;
   }
+});
+
+test("current installation adopts dependency provisioning only on the six review steps", async () => {
+  const sources = await loadTemplateStepSources("direct-engineer-workflow");
+  const sourceMap: CanonicalInstallationSources = new Map([
+    ["direct-engineer-workflow", sources],
+  ]);
+  const allTrue = asPersisted(sources).map((step) => ({ ...step, provisionDependencies: true }));
+  assert.deepEqual(planCanonicalInstallation([row(allTrue)], sourceMap), [{
+    kind: "current",
+    templateName: "direct-engineer-workflow",
+    projectId: "project",
+    rowId: "template",
+  }]);
+
+  const nonReviewFalse = allTrue.map((step) => step.stepIndex === 2
+    ? { ...step, provisionDependencies: false }
+    : step);
+  const refused = planCanonicalInstallation([row(nonReviewFalse)], sourceMap);
+  assert.equal(refused[0]?.kind, "refused");
+  assert.match(
+    refused[0]?.kind === "refused" ? refused[0].reason : "",
+    /provisionDependencies/u,
+  );
+
+  const missingReviewValue = allTrue.map((step) => step.stepIndex === 3
+    ? ({ ...step, provisionDependencies: undefined } as unknown as PersistedTransitionStep)
+    : step);
+  const missing = planCanonicalInstallation([row(missingReviewValue)], sourceMap);
+  assert.equal(missing[0]?.kind, "refused");
+  assert.match(
+    missing[0]?.kind === "refused" ? missing[0].reason : "",
+    /provisionDependencies/u,
+  );
 });
