@@ -112,13 +112,10 @@ const codexFailureBeforeTerminal = (
 
 const piFinalAttemptFailed = (payload: Record<string, unknown> | null): boolean => {
   if (!payload || stringField(payload, "type") !== "agent_end") return false;
-  // `willRetry: true` describes an intermediate failed provider attempt. It
-  // must not make a later successful `agent_settled` look like a promoted
-  // failure.
-  if (boolField(payload, "willRetry") === true) return false;
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const finalMessage = providerEvent(messages.at(-1));
-  return stringField(finalMessage, "stopReason") === "error"
+  return boolField(payload, "willRetry") === true
+    || stringField(finalMessage, "stopReason") === "error"
     || nonEmptyStringField(finalMessage, "errorMessage") !== null
     || nonEmptyStringField(payload, "errorMessage") !== null;
 };
@@ -146,8 +143,7 @@ const terminalFailureFor = (
   // investigation).
   if (providerType === "result") {
     return boolField(payload, "is_error") === true
-      || (stringField(payload, "terminal_reason") !== null
-        && stringField(payload, "terminal_reason") !== "completed");
+      || stringField(payload, "terminal_reason") !== "completed";
   }
   if (providerType === "turn.completed") {
     return boolField(payload, "success") === false
