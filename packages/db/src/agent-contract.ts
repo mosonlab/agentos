@@ -9,6 +9,7 @@ import { catalogRunnerForModel } from "./model-routing.js";
  * contract presumes an existing reviewed plan.
  */
 export const DIRECT_TEMPLATE_NAME = "direct-engineer-workflow";
+/** The pull-request workflow installs only through an open pull request. */
 export const PR_TEMPLATE_NAME = "pr-engineer-workflow";
 export const IMPLEMENTATION_PLAN_OUTPUT_KINDS = ["plan", "revised-plan"] as const;
 

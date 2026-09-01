@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { AssigneeType, Prisma, RunStatus } from "@prisma/client";
 
+import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { stepRole, type StepRole } from "./step-role.js";
 
 export type LegacyStepRecord = Readonly<{
@@ -357,6 +358,7 @@ const legacyTemplateGenerations = {
       ],
     },
   ],
+  [PR_TEMPLATE_NAME]: [],
 } as const satisfies Readonly<Record<string, readonly LegacyTemplateGeneration[]>>;
 
 export type CanonicalTemplateRegistryName = keyof typeof legacyTemplateGenerations;
@@ -371,6 +373,23 @@ export type CanonicalTemplateIdentity = Readonly<{
 }>;
 
 export type CanonicalStepOrdinals = Readonly<Partial<Record<StepRole, number>>>;
+
+/**
+ * Current graphs are deliberately kept apart from retired generations. A
+ * canonical template may be introduced with no history at all, so deriving
+ * its ordinals from `LEGACY_TEMPLATE_GENERATIONS` would incorrectly make it
+ * unaddressable by repair routing.
+ */
+export const CURRENT_CANONICAL_STEP_ORDINALS: Readonly<
+  Partial<Record<CanonicalTemplateRegistryName, CanonicalStepOrdinals>>
+> = {
+  [PR_TEMPLATE_NAME]: {
+    implementation: 1,
+    "sol-findings": 2,
+    "blind-findings": 3,
+    "fixed-implementation": 4,
+  },
+};
 
 const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGeneration[] | null =>
   Object.hasOwn(LEGACY_TEMPLATE_GENERATIONS, canonicalName)
@@ -409,7 +428,9 @@ export const canonicalStepOrdinals = (
   const registered = generation === null
     ? generations.at(-1)
     : generations.find((candidate) => candidate.marker === generation);
-  if (!registered) return null;
+  if (!registered) {
+    return generation === null ? CURRENT_CANONICAL_STEP_ORDINALS[canonicalName] ?? null : null;
+  }
   if (generation === null && registered.successorStepOrdinals !== undefined) return registered.successorStepOrdinals;
   if (generation === null && (registered.promptDigest === undefined || registered.successorPromptDigest === undefined)) {
     throw new Error(`Current ${canonicalName} Step ordinals are not derivable from its latest structural transition`);
