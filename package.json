@@ -62,6 +62,7 @@
     "db:export-goal-lineage": "npm run db:export-goal-lineage -w @anneal/db",
     "db:backfill-session-usage": "npm run db:backfill-session-usage -w @anneal/db",
     "db:backfill-session-cache": "npm run db:backfill-session-cache -w @anneal/db",
+    "db:backfill-merge-stop-questions": "npm run db:backfill-merge-stop-questions -w @anneal/db",
     "db:audit-post-delivery-disconnect": "npm run db:audit-post-delivery-disconnect -w @anneal/db",
     "db:backfill-task-source": "npm run db:backfill-task-source -w @anneal/db",
     "postinstall": "npm run db:generate"
