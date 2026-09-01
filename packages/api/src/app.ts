@@ -14,6 +14,7 @@ import {
 } from "./auth.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { releaseMergeLease } from "./merge-lease.js";
+import { preflightRepository } from "./onboarding-preflight.js";
 import { createArchivedRunNoticeScheduler } from "./reconcile.js";
 import { refusalFor } from "./refusal.js";
 import { revalidationCancelRequestId } from "./revalidation.js";
@@ -107,6 +108,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const routeDeps: RouteDeps = {
     db,
     options,
+    repositoryPreflight: options.repositoryPreflight ?? preflightRepository,
     projectBootstrapLoaders: {
       ...defaultProjectBootstrapLoaders,
       ...options.projectBootstrapLoaders,

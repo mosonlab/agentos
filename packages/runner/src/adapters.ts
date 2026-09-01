@@ -149,6 +149,9 @@ export const buildChildEnvironment = (
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
   return {
     ...taskSecrets,
+    // The Run materializes this platform-owned directory before adapter work.
+    // Keep it after task Secrets so a Secret cannot redirect the tool bundle.
+    AGENTOS_TOOLS: scratch.toolsDir,
     ...workspaceEnvironment(config),
     AGENTOS_API_URL: config.apiUrl,
     AGENTOS_SESSION_TOKEN: claim.sessionToken,

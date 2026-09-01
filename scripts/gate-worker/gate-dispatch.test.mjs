@@ -31,6 +31,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -325,6 +326,22 @@ const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
   return { root, head };
 };
 
+const externalTooling = (t, { mirrorPush, remoteGate }) => {
+  const root = scratch(t);
+  const worker = join(root, "gate-worker");
+  mkdirSync(worker);
+  cpSync(libPath, join(worker, "lib.sh"));
+  cpSync(dispatchPath, join(worker, "gate-dispatch.sh"));
+  chmodSync(join(worker, "gate-dispatch.sh"), 0o755);
+  const put = (name, body) => {
+    writeFileSync(join(worker, name), `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(join(worker, name), 0o755);
+  };
+  put("mirror-push.sh", mirrorPush ?? 'printf "MIRROR PUSH: OK external\\n"; exit 0');
+  put("remote-gate.sh", remoteGate ?? 'printf "MERGE GATE: PASS external\\n"; exit 0');
+  return { root, script: join(worker, "gate-dispatch.sh") };
+};
+
 // No fixture may block. The dispatcher's default patience is an hour, which is
 // right for an operator waiting on a real queue and absurd inside a test, and a
 // spawnSync with no timeout promotes that wait into a suite that never returns
@@ -335,13 +352,14 @@ const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
 // are about the wait itself pass their own --timeout-minutes, which wins.
 const DISPATCH_KILL_MS = 120_000;
 
-const runDispatch = (repo, cache, args, env = {}) =>
-  spawnSync("bash", [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), ...args], {
-    cwd: repo.root,
+const runDispatch = (repo, cache, args, env = {}, { cwd = repo.root, script = join(repo.root, "scripts/gate-worker/gate-dispatch.sh") } = {}) =>
+  spawnSync("bash", [script, ...args], {
+    cwd,
     encoding: "utf8",
     timeout: DISPATCH_KILL_MS,
     env: {
       ...FIXTURE_ENV,
+      AGENTOS_WORKSPACE_PATH: repo.root,
       XDG_CACHE_HOME: cache,
       GATE_DISPATCH_POLL_SECONDS: "1",
       GATE_DISPATCH_TIMEOUT_MINUTES: "1",
@@ -364,6 +382,95 @@ const busyCache = (t, busySlots = []) => {
 const dispatch = (t, repo, args, env = {}, busySlots = []) =>
   runDispatch(repo, busyCache(t, busySlots), args, env);
 
+test("the dispatcher uses the named checkout when launched outside it", (t) => {
+  const calls = join(scratch(t), "external-tooling-calls.log");
+  writeFileSync(calls, "");
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "MERGE GATE: PASS local-outside %s\\n" "$(git rev-parse --show-toplevel)"; exit 0',
+  });
+  const tooling = externalTooling(t, {
+    mirrorPush: 'printf "mirror:%s:%s\\n" "$AGENTOS_WORKSPACE_PATH" "$(git -C "$AGENTOS_WORKSPACE_PATH" rev-parse --show-toplevel)" >> "$GATE_FIXTURE_CALLS"; printf "MIRROR PUSH: OK outside\\n"; exit 0',
+    remoteGate: 'printf "remote:%s:%s\\n" "$AGENTOS_WORKSPACE_PATH" "$(git -C "$AGENTOS_WORKSPACE_PATH" rev-parse --show-toplevel)" >> "$GATE_FIXTURE_CALLS"; printf "MERGE GATE: PASS remote-outside\\n"; exit 0',
+  });
+  const outside = scratch(t);
+
+  const local = runDispatch(
+    repo,
+    busyCache(t),
+    [repo.head, "--allow-local"],
+    {
+      AGENTOS_GATE_PRIMARY_SERVER: "",
+      AGENTOS_GATE_FALLBACK_SERVER: "",
+    },
+    { cwd: outside, script: tooling.script },
+  );
+  assert.equal(local.status, 0, local.stdout + local.stderr);
+  assert.ok(local.stdout.includes(`MERGE GATE: PASS local-outside ${realpathSync(repo.root)}`), local.stdout);
+
+  writeFileSync(join(repo.root, "outside-dirty.txt"), "dirty\n");
+  const remote = runDispatch(
+    repo,
+    busyCache(t),
+    [repo.head],
+    { GATE_FIXTURE_CALLS: calls },
+    { cwd: outside, script: tooling.script },
+  );
+  assert.equal(remote.status, 0, remote.stdout + remote.stderr);
+  assert.match(remote.stdout, /MERGE GATE: PASS remote-outside/u);
+  assert.match(remote.stderr, /running on primary/u);
+  const canonical = realpathSync(repo.root);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+    `mirror:${canonical}:${canonical}`,
+    `remote:${canonical}:${canonical}`,
+  ]);
+});
+
+test("the repository-path dispatcher invocation retains its result", (t) => {
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "MERGE GATE: PASS repository-path\\n"; exit 0',
+  });
+  const result = dispatch(t, repo, [repo.head, "--allow-local"], {
+    AGENTOS_GATE_PRIMARY_SERVER: "",
+    AGENTOS_GATE_FALLBACK_SERVER: "",
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS repository-path/u);
+});
+
+test("an absent or invalid workspace path fails before any gate-worker child", (t) => {
+  const calls = join(scratch(t), "calls.log");
+  writeFileSync(calls, "");
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "merge-gate\\n" >> "$GATE_FIXTURE_CALLS"; exit 0',
+    mirrorPush: 'printf "mirror-push\\n" >> "$GATE_FIXTURE_CALLS"; exit 0',
+    remoteGate: 'printf "remote-gate\\n" >> "$GATE_FIXTURE_CALLS"; exit 0',
+  });
+  const outside = scratch(t);
+  const cases = [
+    { name: "unset", env: { AGENTOS_WORKSPACE_PATH: undefined } },
+    { name: "empty", env: { AGENTOS_WORKSPACE_PATH: "" } },
+    { name: "missing", env: { AGENTOS_WORKSPACE_PATH: join(outside, "missing") } },
+  ];
+  for (const { name, env } of cases) {
+    const result = runDispatch(
+      repo,
+      busyCache(t),
+      [repo.head, "--allow-local"],
+      {
+        ...env,
+        AGENTOS_GATE_PRIMARY_SERVER: "",
+        AGENTOS_GATE_FALLBACK_SERVER: "",
+        GATE_FIXTURE_CALLS: calls,
+      },
+      { cwd: outside },
+    );
+    assert.equal(result.status, 76, `${name}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /AGENTOS_WORKSPACE_PATH/u, name);
+    assert.doesNotMatch(result.stdout + result.stderr, /MERGE GATE|MIRROR PUSH|remote-gate/u, name);
+  }
+  assert.equal(readFileSync(calls, "utf8"), "");
+});
+
 test("an unconfigured dispatcher refuses instead of guessing a private topology", (t) => {
   const repo = fixtureRepo(t, {});
   const result = dispatch(t, repo, [repo.head], {
@@ -376,10 +483,15 @@ test("an unconfigured dispatcher refuses instead of guessing a private topology"
 });
 
 test("an unconfigured dispatcher runs local-only after explicit opt-in", (t) => {
-  const repo = fixtureRepo(t, { mergeGate: 'printf "MERGE GATE: PASS local-only\\n"; exit 0' });
+  const repo = fixtureRepo(t, {
+    mergeGate:
+      'test "$AGENTOS_RUN_ID" = local-regression-run && test "$AGENTOS_RUN_SCOPE_BYPASS" = regression-verification && printf "MERGE GATE: PASS local-only\\n"',
+  });
   const result = dispatch(t, repo, [repo.head, "--allow-local"], {
     AGENTOS_GATE_PRIMARY_SERVER: "",
     AGENTOS_GATE_FALLBACK_SERVER: "",
+    AGENTOS_RUN_ID: "local-regression-run",
+    AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS local-only/u);
@@ -668,4 +780,27 @@ test("a destination that is not an ssh destination is refused before anything is
   const result = dispatch(t, repo, [repo.head, "--server", "host; rm -rf /"]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /not a usable primary ssh destination/);
+});
+
+test("documented gate-worker invocations name their checkout explicitly", () => {
+  const workspacePrefix = 'AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)"';
+  const commandPath = "scripts/(?:gate-worker/)?(?:gate-dispatch|mirror-push|remote-gate|regression-verification)\\.sh";
+  const files = [
+    join(here, "..", "..", "docs", "runbooks", "gate-worker.md"),
+    join(here, "..", "..", "CONTRIBUTING.md"),
+  ];
+
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    const codeBlocks = [...source.matchAll(/```sh\n([\s\S]*?)```/gu)].map((match) => match[1]);
+    const inlineCommands = [...source.matchAll(/`([^`]*scripts\/(?:gate-worker\/)?[^`]+)`/gu)].map((match) => match[1]);
+    const commands = [...codeBlocks, ...inlineCommands]
+      .flatMap((block) => block.replace(/\\\r?\n[ \t]*/gu, " ").split(/\r?\n/gu))
+      .filter((line) => new RegExp(commandPath, "u").test(line));
+
+    assert.ok(commands.length > 0, `${file} has no documented gate-worker invocations`);
+    for (const command of commands) {
+      assert.ok(command.trim().startsWith(workspacePrefix), command);
+    }
+  }
 });

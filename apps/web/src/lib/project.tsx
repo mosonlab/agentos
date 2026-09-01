@@ -18,6 +18,10 @@ export type ProjectScope = {
 
 const ProjectContext = createContext<ProjectScope | null>(null);
 
+export const projectScopedPath = (path: string, projectId: string): string => projectId === ""
+  ? path
+  : `${path}?projectId=${encodeURIComponent(projectId)}`;
+
 export const ProjectProvider = ({ children, initialProjects }: {
   children: ReactNode;
   /** What `StartupGate` already fetched. The provider still polls, but seeding it

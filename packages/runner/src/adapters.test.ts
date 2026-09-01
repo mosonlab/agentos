@@ -75,6 +75,7 @@ const claim: ClaimedTask = {
 
 const scratch = {
   base: "/scratch/run-1",
+  toolsDir: "/scratch/run-1/tools",
   workspaceRoot: "/scratch/run-1/workspaces",
   stateDir: "/scratch/run-1/control-plane",
   configRoot: "/scratch/run-1/codex-config",
@@ -409,6 +410,38 @@ test("runner proxy environment wins over task secrets for Claude, Codex, and Pi"
   }
 });
 
+test("AGENTOS_TOOLS is platform-owned for ordinary and regression steps across every adapter", () => {
+  const config = { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] };
+  const secrets = {
+    ...claim.secrets,
+    AGENTOS_TOOLS: "/checkout/task-secret-tools",
+    AGENTOS_CHAIN_ID: "task-secret-chain",
+    AGENTOS_PULL_REQUEST_BASE: "task-secret-base",
+  };
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const ordinaryEnv = buildChildEnvironment(config, { ...claim, runner, secrets }, scratch, "/work");
+    assert.equal(ordinaryEnv.AGENTOS_TOOLS, scratch.toolsDir, `${runner} ordinary step accepted a task-owned tools path`);
+    // Keep the existing behavior for non-regression task secrets unchanged.
+    assert.equal(ordinaryEnv.AGENTOS_CHAIN_ID, "task-secret-chain");
+    assert.equal(ordinaryEnv.AGENTOS_PULL_REQUEST_BASE, "task-secret-base");
+
+    const regressionEnv = buildChildEnvironment(
+      config,
+      {
+        ...claim,
+        runner,
+        task: { ...claim.task, templateStep: { name: "Regression", outputKind: "regression-verification-v2" } },
+        secrets,
+      },
+      scratch,
+      "/work",
+    );
+    assert.equal(regressionEnv.AGENTOS_TOOLS, scratch.toolsDir, `${runner} regression step accepted a task-owned tools path`);
+    assert.equal(regressionEnv.AGENTOS_CHAIN_ID, "chain-1");
+    assert.equal(regressionEnv.AGENTOS_PULL_REQUEST_BASE, "main");
+  }
+});
+
 test("only regression steps reserve platform-owned chain and base coordinates", () => {
   const secrets = {
     ...claim.secrets,
@@ -576,10 +609,12 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
     assert.ok(args.includes('agents.default_subagent_reasoning_effort="max"'));
     assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
   }
-  assert.match(buildPrompt(executioner), /maximum concurrent child threads: 8 \(root excluded\)/u);
-  assert.match(buildPrompt(executioner), /do not launch nested Codex CLI processes/u);
-  assert.match(buildPrompt(executioner), /one affected-workspace compile or typecheck after integration/u);
-  assert.match(buildPrompt(executioner), /Do not run repository-wide suites or the repository Merge Gate in Implementation/u);
+  const prompt = buildPrompt(executioner);
+  assert.match(prompt, /maximum concurrent child threads: 8 \(root excluded\)/u);
+  assert.match(prompt, /do not launch nested Codex CLI processes/u);
+  assert.match(prompt, /The runner enforces the same child model and concurrency snapshot on fresh starts and resumes/u);
+  assert.doesNotMatch(prompt, /Implementation proof is limited/u);
+  assert.doesNotMatch(prompt, /repository-wide suites/u);
   assert.throws(
     () => buildPrompt({
       ...executioner,
@@ -1173,7 +1208,7 @@ const rootReportingStub = [
   'fi',
   // Drain the prompt so the parent never sees EPIPE instead of the report.
   "while read -r _line; do :; done",
-  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
+  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","toolsDir":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$AGENTOS_TOOLS" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
   "",
 ].join("\n");
 
@@ -1200,7 +1235,11 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   const runScratch = await provisionAgentScratch(config);
   try {
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
-      const runnerClaim = { ...claim, runner };
+      const runnerClaim = {
+        ...claim,
+        runner,
+        secrets: { ...claim.secrets, AGENTOS_TOOLS: "/checkout/task-secret-tools" },
+      };
       const env = buildChildEnvironment(config, runnerClaim, runScratch, fixture);
       const spec = {
         config,
@@ -1223,6 +1262,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         const report = JSON.parse(evidence.stdout.trim().split("\n").at(-1) ?? "{}") as {
           workspaceRoot?: string;
           stateDir?: string;
+          toolsDir?: string;
           home?: string;
           gitConfigGlobal?: string;
           codexConfigRoot?: string;
@@ -1233,6 +1273,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         };
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
+        assert.equal(report.toolsDir, runScratch.toolsDir, `${runner} ${mode} lost AGENTOS_TOOLS across the launcher`);
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);
