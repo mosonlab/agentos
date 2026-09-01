@@ -83,7 +83,10 @@ const isPrDeliveryStep = (task: {
   chainIndex: number | null;
   templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
 }): boolean => task.chainId !== null
+  && task.chainId.trim().length > 0
   && task.chainIndex !== null
+  && Number.isInteger(task.chainIndex)
+  && task.chainIndex > 0
   && task.templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
   && PR_DELIVERY_OUTPUT_KINDS.includes(task.templateStep.outputKind as (typeof PR_DELIVERY_OUTPUT_KINDS)[number]);
 
@@ -100,32 +103,37 @@ const isPrDeliveryStep = (task: {
  */
 const prWorkflowOutputsFor = async (
   db: PrismaClient,
-  run: {
+  runId: string,
+  task: {
     id: string;
-    task: {
-      projectId: string;
-      chainId: string | null;
-      chainIndex: number | null;
-      templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
-    };
+    projectId: string;
+    chainId: string | null;
+    chainIndex: number | null;
+    templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
   },
 ): Promise<PrWorkflowOutputProjection[] | undefined> => {
-  const { task } = run;
   if (!isPrDeliveryStep(task)) return undefined;
-  const implementationDelivery = task.templateStep?.outputKind === "implementation";
 
   const rows = await db.task.findMany({
     where: {
       projectId: task.projectId,
       chainId: task.chainId,
-      chainIndex: implementationDelivery ? task.chainIndex! : { lte: task.chainIndex! },
+      chainIndex: task.templateStep?.outputKind === "implementation"
+        ? task.chainIndex!
+        : { lte: task.chainIndex! },
       templateStep: {
         outputKind: { in: [...PR_WORKFLOW_OUTPUT_KINDS] },
         taskTemplate: { name: PR_TEMPLATE_NAME },
       },
-      stepOutput: implementationDelivery
-        ? { is: { runId: run.id, kind: "implementation" } }
+      stepOutput: task.templateStep?.outputKind === "implementation"
+        ? { is: { runId, kind: "implementation" } }
         : { isNot: null },
+      ...(task.templateStep?.outputKind === "implementation" ? {} : {
+        OR: [
+          { id: { not: task.id } },
+          { id: task.id, stepOutput: { is: { runId } } },
+        ],
+      }),
     },
     orderBy: { chainIndex: "asc" },
     select: {
@@ -309,7 +317,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       }
       : null;
     const prWorkflowOutputs = run.task
-      ? await prWorkflowOutputsFor(db, { id: run.id, task: run.task })
+      ? await prWorkflowOutputsFor(db, run.id, run.task)
       : undefined;
     return context.json({
       run: {

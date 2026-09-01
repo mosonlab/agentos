@@ -231,6 +231,10 @@ test("PR workflow status projects same-chain canonical output bodies through the
       taskTemplate: { name: "pr-engineer-workflow" },
     });
     assert.deepEqual(where.stepOutput, { isNot: null });
+    assert.deepEqual(where.OR, [
+      { id: { not: "task-fixed" } },
+      { id: "task-fixed", stepOutput: { is: { runId: "run-1" } } },
+    ]);
   });
 });
 
