@@ -431,26 +431,23 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "/bin/sh -c 'tsc -b && vite build'",
         typecheck: "tsc -b --pretty false",
-        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
+        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --conditions=development --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
       },
-      hooks: { pretest: "npm run build -w @anneal/db" },
+      hooks: {},
     },
     "packages/api/package.json": {
       name: "@anneal/api",
       scripts: {
         build: "/bin/sh -c 'tsc -p tsconfig.json && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
-        "test:db": "node --import tsx scripts/dbtest.mjs",
+        test: "node --conditions=development --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
+        "test:db": "node --conditions=development --import tsx scripts/dbtest.mjs",
       },
-      hooks: {
-        pretest: "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
-        "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner && npm run build -w @anneal/api",
-      },
+      hooks: {},
     },
     "packages/build-info/package.json": {
       name: "@anneal/build-info",
-      scripts: { test: "node --test *.test.mjs" },
+      scripts: { test: "node --conditions=development --test *.test.mjs" },
       hooks: {},
     },
     "packages/db/package.json": {
@@ -458,19 +455,17 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "/bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
-        test: "node --import tsx --test prisma/*.test.ts src/*.test.ts",
-        "test:db": "node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
+        test: "node --conditions=development --import tsx --test prisma/*.test.ts src/*.test.ts",
+        "test:db": "node --conditions=development --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
       },
-      hooks: {
-        "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner",
-      },
+      hooks: {},
     },
     "packages/github-client/package.json": {
       name: "@anneal/github-client",
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
       hooks: {},
     },
@@ -479,27 +474,27 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
-      hooks: { pretest: "npm run build -w @anneal/db" },
+      hooks: {},
     },
     "packages/merge-executor/package.json": {
       name: "@anneal/merge-executor",
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
-      hooks: { pretest: "npm run build -w @anneal/github-client && npm run build -w @anneal/db" },
+      hooks: {},
     },
     "packages/runner/package.json": {
       name: "@anneal/runner",
       scripts: {
         build: "/bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
-        test: "node --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
+        test: "node --conditions=development --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
       },
-      hooks: { pretest: "npm run build -w @anneal/github-client" },
+      hooks: {},
     },
   };
 
@@ -509,6 +504,13 @@ test("all workspace proof manifests are wrapped exactly once without changing co
     const manifest = JSON.parse(readFileSync(join(repositoryRoot, relativePath), "utf8"));
     assert.equal(manifest.name, contract.name);
     assert.equal("lint" in manifest.scripts, false, `${contract.name} unexpectedly added lint`);
+    if ("start" in manifest.scripts) {
+      assert.doesNotMatch(
+        manifest.scripts.start,
+        /--conditions(?:=|\s+)development/u,
+        `${contract.name} production start selected development exports`,
+      );
+    }
     assert.deepEqual(
       Object.keys(manifest.scripts).filter((name) => proofNames.has(name)).sort(),
       Object.keys(contract.scripts).sort(),
@@ -526,4 +528,42 @@ test("all workspace proof manifests are wrapped exactly once without changing co
     }
   }
   assert.equal(wrappedCount, 24);
+});
+
+test("Runner child fixtures keep their audited development-condition counts", () => {
+  const audits = [
+    {
+      path: "packages/runner/src/regression-verification-script.test.ts",
+      execPathReferences: 1,
+      developmentConditions: 0,
+      childMarker: "REGRESSION_FIXTURE_NODE: process.execPath",
+    },
+    {
+      path: "packages/runner/src/adapters.test.ts",
+      execPathReferences: 7,
+      developmentConditions: 0,
+      childMarker: 'runAsPrefix: [process.execPath, "-e", stubScript]',
+    },
+    {
+      path: "packages/runner/src/run-output.test.ts",
+      execPathReferences: 1,
+      developmentConditions: 1,
+      childMarker: "pathToFileURL(fileURLToPath(new URL(\"./mcp-server.ts\", import.meta.url))).href",
+    },
+  ];
+
+  for (const audit of audits) {
+    const source = readFileSync(join(repositoryRoot, audit.path), "utf8");
+    assert.equal(
+      source.match(/process\.execPath/gu)?.length ?? 0,
+      audit.execPathReferences,
+      `${audit.path} added or removed a Node child; audit its transitive graph and select development exports if it reaches repository source`,
+    );
+    assert.match(source, new RegExp(audit.childMarker.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    assert.equal(
+      source.match(/--conditions=development/gu)?.length ?? 0,
+      audit.developmentConditions,
+      `${audit.path} changed the audited child condition count`,
+    );
+  }
 });

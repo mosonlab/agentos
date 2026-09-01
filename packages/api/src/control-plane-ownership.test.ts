@@ -16,7 +16,7 @@ import {
   controlPlaneIdFilename,
   controlPlaneOwnerFilename,
 } from "./control-plane-state.js";
-import { spawnedStartupEnvironment } from "./test-startup-environment.js";
+import { spawnedSourceEntrypointArgv, spawnedStartupEnvironment } from "./test-startup-environment.js";
 import { canonicalizeWorkspaceRoot } from "./workspace-root.js";
 
 const allowedFilesystem = async (): Promise<number> => 0x1a;
@@ -401,12 +401,35 @@ const startupConfiguration = spawnedStartupEnvironment({
   DATABASE_URL: "postgresql://invalid:invalid-fixture-password-000000@127.0.0.1:1/never-contact?schema=public",
 });
 
+test("RP-OWN-SOURCE-ARGV source entrypoints carry exactly one development condition", async () => {
+  for (const entrypoint of ["index.ts", "control-plane-ownership-probe.ts"]) {
+    const argv = spawnedSourceEntrypointArgv(entrypoint);
+    assert.deepEqual(
+      argv.filter((argument) => argument === "--conditions=development"),
+      ["--conditions=development"],
+      `${entrypoint} must select source resolution exactly once`,
+    );
+  }
+  // Keep this audit coupled to the source children below. A future child that
+  // reaches process.execPath directly must opt into the same canonical argv.
+  const source = await readFile(new URL("./control-plane-ownership.test.ts", import.meta.url), "utf8");
+  const sourceChildSpawns = source.match(/spawn\(process\.execPath,/gu) ?? [];
+  const canonicalSourceChildSpawns = source.match(
+    /spawn\(process\.execPath,\s*spawnedSourceEntrypointArgv\(/gu,
+  ) ?? [];
+  assert.equal(
+    canonicalSourceChildSpawns.length,
+    sourceChildSpawns.length,
+    "every source child spawn must use spawnedSourceEntrypointArgv",
+  );
+});
+
 test("RP-OWN-FILES-ALIAS production entrypoint refuses Files/state alias before database import", async (t) => {
   const paths = await fixture();
   t.after(() => rm(paths.container, { recursive: true, force: true }));
   await rm(paths.files, { recursive: true });
   await symlink(paths.state, paths.files);
-  const child = trackChild(t, "Files/state alias entrypoint", spawn(process.execPath, ["--import", "tsx", "index.ts"], {
+  const child = trackChild(t, "Files/state alias entrypoint", spawn(process.execPath, spawnedSourceEntrypointArgv("index.ts"), {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: {
       ...process.env,
@@ -596,11 +619,11 @@ test("RP-OWN-SAME-ALIAS production loser exits 75 before database import, reconc
     FILES_ROOT: paths.files,
     CONTROL_PLANE_STATE_DIR: paths.state,
   };
-  const owner = trackChild(t, "same-alias owner probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const owner = trackChild(t, "same-alias owner probe", spawn(process.execPath, spawnedSourceEntrypointArgv("control-plane-ownership-probe.ts"), {
     cwd: dirname(new URL(import.meta.url).pathname), env, stdio: ["ignore", "pipe", "pipe"],
   }), true);
   await waitForLine(owner, /OWNERSHIP_PROBE_READY/u);
-  const loser = trackChild(t, "same-alias loser entrypoint", spawn(process.execPath, ["--import", "tsx", "index.ts"], {
+  const loser = trackChild(t, "same-alias loser entrypoint", spawn(process.execPath, spawnedSourceEntrypointArgv("index.ts"), {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: {
       ...env,
@@ -627,7 +650,7 @@ test("RP-OWN-RECOVERY-DESCENDANT recovers after SIGKILL while execed descendant 
     CONTROL_PLANE_STATE_DIR: paths.state,
     OWNERSHIP_PROBE_DESCENDANT: "1",
   };
-  const owner = trackChild(t, "recovery owner probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const owner = trackChild(t, "recovery owner probe", spawn(process.execPath, spawnedSourceEntrypointArgv("control-plane-ownership-probe.ts"), {
     cwd: dirname(new URL(import.meta.url).pathname), env, stdio: ["ignore", "pipe", "pipe"],
   }), true);
   const ready = await waitForLine(owner, /OWNERSHIP_PROBE_READY/u);
@@ -636,7 +659,7 @@ test("RP-OWN-RECOVERY-DESCENDANT recovers after SIGKILL while execed descendant 
   assert.equal((await terminateChild(owner, "SIGKILL")).signal, "SIGKILL", owner.output);
   assert.doesNotThrow(() => process.kill(descendantPid, 0));
 
-  const successor = trackChild(t, "recovery successor probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const successor = trackChild(t, "recovery successor probe", spawn(process.execPath, spawnedSourceEntrypointArgv("control-plane-ownership-probe.ts"), {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: { ...env, OWNERSHIP_PROBE_DESCENDANT: "0" },
     stdio: ["ignore", "pipe", "pipe"],
@@ -651,7 +674,7 @@ test("RP-OWN-RECOVERY-DESCENDANT recovers after SIGKILL while execed descendant 
 test("RP-OWN-RECOVERY-CLEANUP readiness timeout removes the owner and unknown descendant", async (t) => {
   const paths = await fixture();
   t.after(() => rm(paths.container, { recursive: true, force: true }));
-  const owner = trackChild(t, "readiness-timeout owner probe", spawn(process.execPath, ["--import", "tsx", "control-plane-ownership-probe.ts"], {
+  const owner = trackChild(t, "readiness-timeout owner probe", spawn(process.execPath, spawnedSourceEntrypointArgv("control-plane-ownership-probe.ts"), {
     cwd: dirname(new URL(import.meta.url).pathname),
     env: {
       ...process.env,

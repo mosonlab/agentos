@@ -6,26 +6,29 @@
   "exports": {
     "./adapters": {
       "types": "./src/adapters.ts",
+      "development": "./src/adapters.ts",
       "import": "./dist/adapters.js"
     },
     "./api": {
       "types": "./src/api.ts",
+      "development": "./src/api.ts",
       "import": "./dist/api.js"
     },
     "./reclaim": {
       "types": "./src/reclaim.ts",
+      "development": "./src/reclaim.ts",
       "import": "./dist/reclaim.js"
     },
     "./config": {
       "types": "./src/config.ts",
+      "development": "./src/config.ts",
       "import": "./dist/config.js"
     }
   },
   "scripts": {
     "build": "bash ../../scripts/host-proof-slot.sh build @anneal/runner -- /bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
     "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/runner -- tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build -w @anneal/github-client",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/runner -- node --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/runner -- node --conditions=development --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

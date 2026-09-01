@@ -165,9 +165,10 @@ something outside the checkout.
 - A checkout named by a loaded Anneal service is an appliance checkout. Follow
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
-  use a separate worktree for development. A fresh worktree needs
-  `npm install && npm run db:generate && npm run build -w @anneal/db` before
-  anything else works.
+  use a separate worktree for development. In a fresh worktree, workspace
+  typecheck, unit-test, and focused API database-test commands need `npm install`
+  and `npm run db:generate`, but no prior workspace build. Workflows that execute
+  built artifacts run after the Merge Gate's preceding full build.
 
 ### Development database bootstrap
 

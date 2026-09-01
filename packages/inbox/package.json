@@ -6,8 +6,7 @@
   "scripts": {
     "build": "bash ../../scripts/host-proof-slot.sh build @anneal/inbox -- tsc -p tsconfig.json",
     "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/inbox -- tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build -w @anneal/db",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/inbox -- node --import tsx --test src/*.test.ts",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/inbox -- node --conditions=development --import tsx --test src/*.test.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

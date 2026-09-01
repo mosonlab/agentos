@@ -31,6 +31,7 @@ test("the package publishes it as a subpath resolving to built output", () => {
   const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
   assert.deepEqual(manifest.exports["./model-routing"], {
     types: "./src/model-routing.ts",
+    development: "./src/model-routing.ts",
     import: "./dist/model-routing.js",
   });
 });

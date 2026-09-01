@@ -8,38 +8,47 @@
   "exports": {
     ".": {
       "types": "./src/index.ts",
+      "development": "./src/index.ts",
       "import": "./dist/index.js"
     },
     "./merge-integrator": {
       "types": "./src/merge-integrator.ts",
+      "development": "./src/merge-integrator.ts",
       "import": "./dist/merge-integrator.js"
     },
     "./model-routing": {
       "types": "./src/model-routing.ts",
+      "development": "./src/model-routing.ts",
       "import": "./dist/model-routing.js"
     },
     "./agent-message": {
       "types": "./src/agent-message.ts",
+      "development": "./src/agent-message.ts",
       "import": "./dist/agent-message.js"
     },
     "./board-contract": {
       "types": "./src/board-contract.ts",
+      "development": "./src/board-contract.ts",
       "import": "./dist/board-contract.js"
     },
     "./chain-order": {
       "types": "./src/chain-order.ts",
+      "development": "./src/chain-order.ts",
       "import": "./dist/chain-order.js"
     },
     "./chain-hold": {
       "types": "./src/chain-hold.ts",
+      "development": "./src/chain-hold.ts",
       "import": "./dist/chain-hold.js"
     },
     "./wire-contract": {
       "types": "./src/wire-contract.ts",
+      "development": "./src/wire-contract.ts",
       "import": "./dist/wire-contract.js"
     },
     "./service-lock": {
       "types": "./src/service-maintenance-lock.ts",
+      "development": "./src/service-maintenance-lock.ts",
       "import": "./dist/service-maintenance-lock.js"
     }
   },
@@ -47,9 +56,8 @@
     "build": "bash ../../scripts/host-proof-slot.sh build @anneal/db -- tsc -p tsconfig.json",
     "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/db -- /bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
     "typecheck:cli": "tsc -p tsconfig.cli.json --noEmit",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/db -- node --import tsx --test prisma/*.test.ts src/*.test.ts",
-    "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner",
-    "test:db": "bash ../../scripts/host-proof-slot.sh test:db @anneal/db -- node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/db -- node --conditions=development --import tsx --test prisma/*.test.ts src/*.test.ts",
+    "test:db": "bash ../../scripts/host-proof-slot.sh test:db @anneal/db -- node --conditions=development --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "db:migrate:release": "tsx prisma/release-migrate.ts",

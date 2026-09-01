@@ -62,7 +62,7 @@ const testFiles = () => {
  * them has to run.
  */
 const runNodeTest = ({ files, concurrency, environment, signal }) => new Promise((resolveRun) => {
-  const args = ["--import", "tsx"];
+  const args = ["--conditions=development", "--import", "tsx"];
   if (environment[planEnvironmentVariable]) args.push("--import", preamble);
   args.push("--test", `--test-concurrency=${concurrency}`, ...files);
   const child = spawn(process.execPath, args, { cwd: packageRoot, stdio: "inherit", env: environment });
