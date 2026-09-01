@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+import { PR_TEMPLATE_NAME, REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
 
 import {
   ADAPTER_VERSION,
@@ -34,7 +34,7 @@ import {
 } from "./availability.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { deliverWorkspace } from "./delivery.js";
+import { deliverWorkspace, type PrWorkflowOutput } from "./delivery.js";
 import { disposeWorkspace, type WorkspaceDisposal } from "./dispose-workspace.js";
 import {
   buildFailureEnvelope,
@@ -170,7 +170,7 @@ export const executeClaim = async (
   let handle: RuntimeHandle | null = null;
   let sessionConfigLease: SessionConfigLease | null = null;
   let budgetReason: string | null = null;
-  let remediationFailureReason: string | null = null;
+  let terminalFailureReason: string | null = null;
   let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
@@ -490,7 +490,7 @@ export const executeClaim = async (
           });
         }
       } catch (error: unknown) {
-        remediationFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        terminalFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
         sink({
           source: "RUNNER",
           type: "REGRESSION_OUTPUT_HANDOFF_FAILED",
@@ -501,7 +501,7 @@ export const executeClaim = async (
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
       && runLease.held
-      && remediationFailureReason === null) {
+      && terminalFailureReason === null) {
       let outputStatus: SessionTaskOutputStatus | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
@@ -516,7 +516,7 @@ export const executeClaim = async (
         const outputKind = outputStatus.outputKind;
         const providerConversationId = completedHandle.providerConversationId;
         if (claim.task.templateStep.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND) {
-          remediationFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
+          terminalFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
@@ -575,9 +575,9 @@ export const executeClaim = async (
               }
               if (workspaceChanged) {
                 workspacePublicationForbidden = true;
-                remediationFailureReason = `Task output remediation changed workspace HEAD or tree for Run ${claim.run.id}`;
+                terminalFailureReason = `Task output remediation changed workspace HEAD or tree for Run ${claim.run.id}`;
               } else if (!remediated) {
-                remediationFailureReason = statusCheckError
+                terminalFailureReason = statusCheckError
                   ? `Task output remediation status check failed for Run ${claim.run.id}: ${statusCheckError}`
                   : `Task output remediation finished without persisting ${outputKind} output for Run ${claim.run.id}`;
               }
@@ -600,7 +600,7 @@ export const executeClaim = async (
             }
           }
         } else {
-          remediationFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
+          terminalFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
             !outputStatus.outputRemediationAllowed ? "remediation is not allowed"
               : !outputKind ? "output kind is unavailable"
                 : "provider conversation id is unavailable"
@@ -647,7 +647,7 @@ export const executeClaim = async (
       && evidence.signal === null
       && evidence.terminationReason === null
       && evidence.terminalEventSeen === false
-      && remediationFailureReason === null
+      && terminalFailureReason === null
       && budgetReason === null
       && runLease.held;
     if (disconnectCandidate) {
@@ -700,6 +700,36 @@ export const executeClaim = async (
         });
       }
     }
+    let prWorkflowOutputs: readonly PrWorkflowOutput[] | undefined;
+    const templateStep = claim.task.templateStep as (NonNullable<ClaimedTask["task"]["templateStep"]> & {
+      taskTemplate?: { name?: string };
+    }) | null;
+    const canonicalPrDelivery = templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
+      && (templateStep.outputKind === "implementation" || templateStep.outputKind === "fixed-implementation");
+    if (canonicalPrDelivery && runLease.held) {
+      try {
+        const status = await controlPlane.readSessionTaskOutputStatus(config, claim) as (
+          SessionTaskOutputStatus & { prWorkflowOutputs?: readonly PrWorkflowOutput[] }
+        ) | null;
+        if (!status || !Array.isArray(status.prWorkflowOutputs)) {
+          throw new Error("session status omitted canonical PR workflow output evidence");
+        }
+        prWorkflowOutputs = status.prWorkflowOutputs;
+      } catch (error: unknown) {
+        if (terminalFailureReason === null) {
+          terminalFailureReason = `Canonical PR workflow evidence handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        }
+        sink({
+          source: "RUNNER",
+          type: "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED",
+          payload: { message: errorMessage(error) },
+        });
+      }
+    }
+    // Flush the handoff failure (if any) before checking authority or entering
+    // delivery. This status read happens after the provider's final events, so
+    // placing it after the existing drain would leave the new diagnostic event
+    // queued and then lose it when the run completes.
     await drainEventsUnderLease(runLease);
     if (!runLease.held) {
       const authority = await runLease.checkpoint();
@@ -717,12 +747,12 @@ export const executeClaim = async (
     const explicitTerminalFailure = evidence.terminalEventSeen && !evidence.terminalSuccess;
     const regressionMechanicallySettled = regressionHandoffPersisted
       && !explicitTerminalFailure
-      && remediationFailureReason === null
+      && terminalFailureReason === null
       && budgetReason === null;
     const executionSucceeded = (adapterExecutionSucceeded(evidence)
       || regressionMechanicallySettled
       || postDeliveryDisconnectTolerated)
-      && remediationFailureReason === null
+      && terminalFailureReason === null
       && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     // Bound outside the closures below: `workspace` is nullable at the top of
@@ -745,6 +775,7 @@ export const executeClaim = async (
           delivered,
           {
             ...(capturedHeadSha ? { headSha: capturedHeadSha } : {}),
+            ...(prWorkflowOutputs ? { prWorkflowOutputs } : {}),
             recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
             retryOptions,
           },
@@ -797,7 +828,7 @@ export const executeClaim = async (
     const classified = succeeded ? null
       : budgetReason
         ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
-        : remediationFailureReason
+        : terminalFailureReason
           ? { failureClass: "PROTOCOL_ERROR" as const, retryable: true }
           : primaryDelivery?.failureClass
             ? { failureClass: primaryDelivery.failureClass, retryable: false }
@@ -837,7 +868,7 @@ export const executeClaim = async (
     // the structured envelope too; otherwise the API correctly distrusts the
     // runner's asserted class and would classify the clean primary evidence as
     // TASK_FAILED instead of PROTOCOL_ERROR.
-    const completionEvidence = remediationFailureReason
+    const completionEvidence = terminalFailureReason
       ? { ...acceptedEvidence, terminalSuccess: false }
       : acceptedEvidence;
     await controlPlane.completeRun(config, claim, {
@@ -851,7 +882,7 @@ export const executeClaim = async (
       ...(!succeeded ? {
         failureReason: appendRetainedSessionConfig(
           budgetReason
-            ?? remediationFailureReason
+            ?? terminalFailureReason
             ?? (executionSucceeded ? primaryDelivery?.pushError : null)
             ?? failureReasonFromEvidence(evidence),
           retainedPath,
