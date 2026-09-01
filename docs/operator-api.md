@@ -1097,12 +1097,13 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
    ```
 
 2. (b) Hold the old Chain from any of its tasks, giving a `reason` that names
-   the successor Chain.
+   the successor Chain you plan to create (for example, by its planned
+   branch).
 
    ```sh
    curl -X POST "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain/hold" \
      -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-     -d '{"requestId":"hold-merge-tail-repair-budget-exit","reason":"Continue in successor chain '$SUCCESSOR_CHAIN_ID'"}'
+     -d '{"requestId":"hold-merge-tail-repair-budget-exit","reason":"Continue in successor chain for branch '$NEW_BRANCH_NAME'"}'
    ```
 
 3. (c) Instantiate a new direct Chain on the same repository with a fresh
