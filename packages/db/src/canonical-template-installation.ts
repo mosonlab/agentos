@@ -162,7 +162,12 @@ const writeCanonicalTemplate = async (
   templateName: CanonicalTemplateName,
   steps: readonly TemplateStepSource[],
   currentRowId: string | null = null,
+  projectLabel?: (projectId: string) => string | undefined,
 ): Promise<void> => {
+  const scopedError = (message: string): Error => {
+    const slug = projectLabel?.(projectId);
+    return new Error(slug ? `Project ${slug}: ${message}` : message);
+  };
   const metadata = canonicalTemplateSourceSpec(templateName);
   const template = currentRowId === null
     ? await tx.taskTemplate.create({
@@ -180,7 +185,7 @@ const writeCanonicalTemplate = async (
         select: { id: true },
       }))?.id ?? null;
     if (step.agentName !== null && assigneeAgentId === null) {
-      throw new Error(`Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found in project ${projectId}`);
+      throw scopedError(`Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found`);
     }
     const data = {
       layer: step.layer,
@@ -211,16 +216,27 @@ export const applyCanonicalInstallation = async (
   tx: Prisma.TransactionClient,
   plan: CanonicalInstallationPlan,
   sources: CanonicalInstallationSources,
-  options: Readonly<{ synchronizeCurrent?: boolean }> = {},
+  options: Readonly<{
+    synchronizeCurrent?: boolean;
+    projectLabel?: (projectId: string) => string | undefined;
+  }> = {},
 ): Promise<{ created: number }> => {
   const refusal = plan.find((action) => action.kind === "refused");
-  if (refusal?.kind === "refused") throw new Error(refusal.reason);
+  if (refusal?.kind === "refused") {
+    const slug = options.projectLabel?.(refusal.projectId);
+    throw new Error(slug ? `Project ${slug}: ${refusal.reason}` : refusal.reason);
+  }
 
   let created = 0;
   for (const action of plan) {
     if (action.kind === "refused") continue;
     const sourceSteps = sources.get(action.templateName);
-    if (!sourceSteps) throw new Error(`No canonical source is loaded for ${action.templateName}`);
+    if (!sourceSteps) {
+      const slug = options.projectLabel?.(action.projectId);
+      throw new Error(slug
+        ? `Project ${slug}: No canonical source is loaded for ${action.templateName}`
+        : `No canonical source is loaded for ${action.templateName}`);
+    }
     if (action.kind === "current") {
       if (options.synchronizeCurrent) {
         await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps, action.rowId);
@@ -246,24 +262,39 @@ export const applyCanonicalInstallation = async (
         activeRunCount: task._count.runs,
       })));
       if (blockers > 0) {
-        throw new Error(`${action.templateName} ${action.rowId} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
+        const slug = options.projectLabel?.(action.projectId);
+        throw new Error(slug
+          ? `Project ${slug}: Template ${action.templateName} (${action.rowId}) still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`
+          : `${action.templateName} ${action.rowId} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
       }
-      const row = await tx.taskTemplate.findUniqueOrThrow({ where: { id: action.rowId } });
+      const row = await tx.taskTemplate.findUnique({ where: { id: action.rowId } });
+      if (!row) {
+        const slug = options.projectLabel?.(action.projectId);
+        throw new Error(slug
+          ? `Project ${slug}: Template ${action.templateName} (${action.rowId}) was not found`
+          : `Template ${action.templateName} (${action.rowId}) was not found`);
+      }
       if (row.webhookSecretId !== null || row.webhookRepoId !== null
         || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
         || row.webhookReplayWindowSec !== null) {
-        throw new Error(`${action.templateName} ${action.rowId} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+        const slug = options.projectLabel?.(action.projectId);
+        throw new Error(slug
+          ? `Project ${slug}: Template ${action.templateName} (${action.rowId}) has webhook configuration; canonical rollover will not move operator-owned trigger state`
+          : `${action.templateName} ${action.rowId} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
       }
       const collision = await tx.taskTemplate.findUnique({
         where: { projectId_name: { projectId: action.projectId, name: action.legacyName } },
         select: { id: true },
       });
       if (collision) {
-        throw new Error(`Canonical template ${action.templateName} on project ${action.projectId} cannot rename to ${action.legacyName}: target already exists`);
+        const slug = options.projectLabel?.(action.projectId);
+        throw new Error(slug
+          ? `Project ${slug}: Template ${action.templateName} (${action.rowId}) cannot rename to ${action.legacyName}: target template already exists (${collision.id})`
+          : `Canonical template ${action.templateName} on project ${action.projectId} cannot rename to ${action.legacyName}: target already exists`);
       }
       await tx.taskTemplate.update({ where: { id: action.rowId }, data: { name: action.legacyName } });
     }
-    await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps);
+    await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps, null, options.projectLabel);
     created += 1;
   }
   return { created };
