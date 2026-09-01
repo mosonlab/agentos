@@ -319,6 +319,16 @@ export type SessionTaskOutputStatus = {
     kind: string;
     commitSha: string | null;
   } | null;
+  /** Persisted canonical PR handoff bodies projected by the session route. */
+  prWorkflowOutputs?: SessionPrWorkflowOutput[];
+};
+
+export type SessionPrWorkflowOutput = {
+  taskId: string;
+  chainIndex: number;
+  kind: "implementation" | "sol-findings" | "blind-findings" | "fixed-implementation";
+  body: string;
+  commitSha: string;
 };
 
 export type SessionTaskOutput = {
@@ -361,9 +371,11 @@ export const readSessionTaskOutputStatus = async (
       outputSatisfiedByPriorRun?: unknown;
       outputPersisted?: unknown;
       output?: unknown;
+      prWorkflowOutputs?: unknown;
     } | null;
   };
   const output = payload.task?.output;
+  const prWorkflowOutputs = payload.task?.prWorkflowOutputs;
   const validOutput = output === null || (
     typeof output === "object"
     && !Array.isArray(output)
@@ -372,6 +384,38 @@ export const readSessionTaskOutputStatus = async (
     && (typeof (output as Record<string, unknown>).commitSha === "string"
       || (output as Record<string, unknown>).commitSha === null)
   );
+  // Canonical repositories may use SHA-1 (40 hex) or SHA-256 (64 hex).
+  const isCanonicalCommitSha = (value: unknown): value is string => (
+    typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)
+  );
+  const validPrWorkflowOutputs = prWorkflowOutputs === undefined || (
+    Array.isArray(prWorkflowOutputs)
+    && prWorkflowOutputs.every((entry: unknown, index: number, entries: unknown[]) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const value = entry as Record<string, unknown>;
+      const previous = entries[index - 1];
+      const previousIndex = previous && typeof previous === "object" && !Array.isArray(previous)
+        ? (previous as Record<string, unknown>).chainIndex
+        : undefined;
+      return typeof value.taskId === "string"
+        && value.taskId.trim().length > 0
+        && Number.isInteger(value.chainIndex)
+        && (value.chainIndex as number) > 0
+        && typeof value.body === "string"
+        && value.body.trim().length > 0
+        && isCanonicalCommitSha(value.commitSha)
+        && (value.kind === "implementation"
+          || value.kind === "sol-findings"
+          || value.kind === "blind-findings"
+          || value.kind === "fixed-implementation")
+        && (index === 0 || (Number.isInteger(previousIndex)
+          && (value.chainIndex as number) > (previousIndex as number)))
+        && entries.findIndex((candidate) => candidate
+          && typeof candidate === "object"
+          && !Array.isArray(candidate)
+          && (candidate as Record<string, unknown>).taskId === value.taskId) === index;
+    })
+  );
   if (payload.task === null) return null;
   if (!payload.task
     || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
@@ -379,7 +423,8 @@ export const readSessionTaskOutputStatus = async (
     || typeof payload.task.outputRemediationAllowed !== "boolean"
     || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
     || typeof payload.task.outputPersisted !== "boolean"
-    || !validOutput) {
+    || !validOutput
+    || !validPrWorkflowOutputs) {
     throw new Error(`Anneal API returned an invalid task output status for Run ${claim.run.id}`);
   }
   return {
@@ -389,6 +434,9 @@ export const readSessionTaskOutputStatus = async (
     outputSatisfiedByPriorRun: payload.task.outputSatisfiedByPriorRun,
     outputPersisted: payload.task.outputPersisted,
     output: output as SessionTaskOutputStatus["output"],
+    ...(prWorkflowOutputs === undefined ? {} : {
+      prWorkflowOutputs: prWorkflowOutputs as SessionPrWorkflowOutput[],
+    }),
   };
 };
 

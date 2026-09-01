@@ -218,9 +218,12 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
   );
 
   const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
+  // The two review prompts remain shared with the direct workflow. The PR
+  // fix prompt is intentionally different: only this workflow cleans its
+  // chain bookkeeping before publishing the pull request.
   assert.deepEqual(
-    steps.slice(1).map(({ prompt }) => prompt),
-    direct.slice(2, 5).map(({ prompt }) => prompt),
+    steps.slice(1, 3).map(({ prompt }) => prompt),
+    direct.slice(2, 4).map(({ prompt }) => prompt),
   );
 
   const implementationPrompt = steps[0]!.prompt;
@@ -228,12 +231,29 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
   assert.match(implementationPrompt, /\.chain\/\{\{branchName\}\}\/spec\.md/u);
   assert.match(implementationPrompt, /leaves that file untouched/u);
   assert.match(implementationPrompt, /commit/u);
+  assert.match(implementationPrompt, /Every `testsRun` entry must record the exact command and its observed exit\/result summary/u);
   for (const field of ["schemaVersion", "headSha", "baseSha", "summary", "testsRun"]) {
     assert.match(implementationPrompt, new RegExp(field, "u"));
   }
   assert.match(implementationPrompt, /exactly one.*implementation.*JSON output object/u);
   assert.match(implementationPrompt, /publication and pull-request creation to the platform/u);
   assert.doesNotMatch(implementationPrompt, /child|Route|revalidat/u);
+
+  const reviewPrompts = steps.slice(1, 3).map(({ prompt }) => prompt);
+  for (const prompt of [implementationPrompt, ...reviewPrompts]) {
+    assert.doesNotMatch(prompt, /remove the complete tracked `\.chain\/` directory[\s\S]*fixed-implementation/u);
+  }
+
+  const finalPrompt = steps[3]!.prompt;
+  assert.match(
+    finalPrompt,
+    /After using the review evidence[\s\S]*remove the complete tracked `\.chain\/` directory[\s\S]*commit that deletion together with any adopted fixes[\s\S]*fixed-implementation/u,
+  );
+  assert.match(finalPrompt, /Before persisting the output, verify that `git ls-tree -r --name-only HEAD -- \.chain` has no entries/u);
+  assert.match(finalPrompt, /only after that cleanup commit/u);
+  assert.match(finalPrompt, /`testsRun` entry[s]? [^\.]*exact command and its observed exit\/result summary/u);
+  assert.match(finalPrompt, /retry starts at the already-clean cleanup commit[\s\S]*preserve that head[\s\S]*do not recreate bookkeeping or invent another commit/u);
+  assert.notEqual(finalPrompt, direct[4]!.prompt);
 
   const source = await readFile(join(templatesRoot, PR_TEMPLATE_NAME, "01-implementation.md"), "utf8");
   assert.equal(implementationPrompt, source.slice(source.indexOf("\n---\n", 4) + 5).trim());

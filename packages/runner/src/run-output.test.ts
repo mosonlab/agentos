@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { PR_TEMPLATE_NAME } from "@anneal/db";
+
 import { ControlPlaneError, type ClaimedTask } from "./api.js";
 import { adapters, type RuntimeHandle } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
@@ -146,6 +148,7 @@ const config = (workspaceRoot: string, agentBinary: string): RunnerConfig => ({
   home: join(workspaceRoot, "..", "home"),
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot,
+  hostProofSlots: 3,
   failedWorkspaceRetention: 0,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,
@@ -236,6 +239,23 @@ const resultOutputClaim = (remoteUrl: string): ClaimedTask => {
       ...base.task,
       templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true },
     },
+  };
+};
+
+const canonicalPrImplementationClaim = (remoteUrl: string): ClaimedTask => {
+  const base = requiredOutputClaim(remoteUrl);
+  return {
+    ...base,
+    task: {
+      ...base.task,
+      chainId: "chain-pr",
+      chainIndex: 1,
+      templateStep: {
+        ...base.task.templateStep!,
+        taskTemplate: { name: PR_TEMPLATE_NAME },
+      } as ClaimedTask["task"]["templateStep"],
+    },
+    run: { ...base.run, opensPullRequest: true },
   };
 };
 
@@ -679,6 +699,71 @@ test("a successful run remediates its missing required output in the same provid
     assert.equal(completion.terminalSuccess, true);
     assert.equal(completion.pushStatus, "SUCCEEDED");
     assert.equal(completion.output, "implemented the requested change");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("canonical PR evidence handoff failures are flushed before completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pr-evidence-handoff-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, succeedingAgent);
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      // The regular required-output check succeeds. The canonical PR projection
+      // is deliberately absent, which must fail closed and leave a durable
+      // diagnostic event rather than silently proceeding with generic delivery.
+      readSessionTaskOutputStatus: async () => outputStatus({ outputPersisted: true }).task,
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      canonicalPrImplementationClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion);
+    assert.equal(completion.terminalSuccess, false);
+    assert.equal(completion.failureClass, "PROTOCOL_ERROR");
+    assert.match(String(completion.failureReason), /Canonical PR workflow evidence handoff failed/u);
+    const events = controlPlane.eventBatches.flat();
+    const handoffFailure = events.find(({ type }) => type === "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED");
+    assert.ok(handoffFailure, "the handoff failure must be appended before terminal completion");
+    assert.match(String(handoffFailure.payload.message), /omitted canonical PR workflow output evidence/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("canonical PR evidence handoff does not overwrite an earlier terminal failure reason", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pr-first-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const agentBinary = join(root, "agent.sh");
+    await writeFile(agentBinary, succeedingAgent);
+    await chmod(agentBinary, 0o755);
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({
+        outputPersisted: false,
+        outputRemediationAllowed: false,
+      }).task,
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      canonicalPrImplementationClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
+
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion);
+    assert.equal(completion.terminalSuccess, false);
+    assert.match(String(completion.failureReason), /Task output remediation unavailable/u);
+    assert.doesNotMatch(String(completion.failureReason), /Canonical PR workflow evidence handoff failed/u);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

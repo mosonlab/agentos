@@ -127,6 +127,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 
   assert.match(firstReview, /implementation step's persisted output/u);
   assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
+  assert.match(firstReview, /approved specification at\s+`\.chain\/<chain branch>\/spec\.md`/u);
   assert.match(firstReview, /only as the Anneal task output/u);
   assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
@@ -146,6 +147,8 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   assert.match(firstReview, /exact fixed head/u);
 
   assert.match(blindReview, /independent blind Opus review coordinator/u);
+  assert.match(blindReview, /Read the approved specification from `\.chain\/<chain branch>\/spec\.md`/u);
+  assert.match(blindReview, /reachable in the tree at `head`/u);
   assert.match(blindReview, /immutable `blind-findings` task output/u);
   assert.match(blindReview, /Do not read predecessor task outputs, sibling\s+task outputs/u);
   assert.match(blindReview, /entire task and provider\s+session, both before and after/u);
@@ -407,6 +410,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
 test("canonical prompt sync can detect every role frontmatter field", async () => {
   const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian")!;
   const persisted: PersistedRoleStructure = {
+    name: role.name,
     title: role.title,
     model: role.model,
     runnerPreference: role.runnerPreference,
@@ -415,6 +419,7 @@ test("canonical prompt sync can detect every role frontmatter field", async () =
   };
   assert.deepEqual(roleSourceStructureDifferences(persisted, role), []);
   const mutations: Array<[string, PersistedRoleStructure]> = [
+    ["name", { ...persisted, name: "different-name" }],
     ["title", { ...persisted, title: "Different title" }],
     ["model", { ...persisted, model: "different-model" }],
     ["runnerPreference", { ...persisted, runnerPreference: RunnerPreference.CLAUDE }],

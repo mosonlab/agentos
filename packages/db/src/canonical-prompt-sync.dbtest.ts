@@ -129,6 +129,7 @@ const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): 
         stepIndex: step.stepIndex - 1,
         layer: step.layer - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+        provisionDependencies: true,
       },
     });
   }
@@ -276,6 +277,10 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
   const legacyTaskIds: string[] = [];
   for (const template of templates) {
     await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
+    await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
       data: { outputKind: "regression-verification", prompt: oldPrompt },
     });
@@ -397,6 +402,10 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
   for (const template of templates) {
     legacyNames.set(template.name, `${template.name}-legacy-pre-adjudication-${template.id}`);
     const adjudication = ADJUDICATION_STEPS[template.name as keyof typeof ADJUDICATION_STEPS];
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
     // Walk down so the (template, stepIndex) unique never collides while the
     // hole opens; every step the adjudication node preceded also sat one layer
     // later than it does now.
@@ -533,6 +542,10 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
   });
   // Regate spec and revise-plan: that is exactly the graph that preceded the
   // zero-gate transition, and nothing else about it moved.
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: full.id },
+    data: { provisionDependencies: true },
+  });
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },
     data: { approvalGate: true },
@@ -1161,7 +1174,10 @@ test("sync refuses an eight-step canonical shape with structural drift before mu
   const beforeLegacyCount = await prisma.taskTemplate.count({ where: { projectId: project.id, name: { startsWith: "direct-engineer-workflow-legacy" } } });
   const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refused.status, 0, refused.output);
-  assert.match(refused.output, /direct-engineer-workflow has structural drift: step 7 differs from the canonical source in outputKind/u);
+  assert.match(
+    refused.output,
+    new RegExp(`Project ${project.slug}: Template direct-engineer-workflow \\(${template.id}\\), direct-engineer-workflow step 7 \\(${step.id}\\) differs from the canonical source in outputKind`, "u"),
+  );
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: project.id, name: { startsWith: "direct-engineer-workflow-legacy" } } }), beforeLegacyCount);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } })).outputKind, "drifted-output");
 });

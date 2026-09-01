@@ -44,12 +44,12 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck:cli",
+    "build": "bash ../../scripts/host-proof-slot.sh build @anneal/db -- tsc -p tsconfig.json",
+    "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/db -- /bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
     "typecheck:cli": "tsc -p tsconfig.cli.json --noEmit",
-    "test": "node --import tsx --test prisma/*.test.ts src/*.test.ts",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/db -- node --import tsx --test prisma/*.test.ts src/*.test.ts",
     "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner",
-    "test:db": "node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
+    "test:db": "bash ../../scripts/host-proof-slot.sh test:db @anneal/db -- node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "db:migrate:release": "tsx prisma/release-migrate.ts",

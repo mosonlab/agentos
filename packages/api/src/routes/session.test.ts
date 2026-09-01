@@ -141,6 +141,240 @@ test("GET /session/runs/:runId/status projects task output identity or null", as
   });
 });
 
+test("PR workflow status projects same-chain canonical output bodies through the current step", async () => {
+  await withTokens(async () => {
+    const outputs = [
+      {
+        id: "task-implementation",
+        chainIndex: 1,
+        templateStep: { outputKind: "implementation" },
+        stepOutput: { kind: "implementation", body: "implementation body", commitSha: "1".repeat(40) },
+      },
+      {
+        id: "task-sol",
+        chainIndex: 2,
+        templateStep: { outputKind: "sol-findings" },
+        stepOutput: { kind: "sol-findings", body: "sol body", commitSha: "2".repeat(40) },
+      },
+      {
+        id: "task-blind",
+        chainIndex: 3,
+        templateStep: { outputKind: "blind-findings" },
+        stepOutput: { kind: "blind-findings", body: "blind body", commitSha: "3".repeat(40) },
+      },
+      {
+        id: "task-fixed",
+        chainIndex: 4,
+        templateStep: { outputKind: "fixed-implementation" },
+        stepOutput: { kind: "fixed-implementation", body: "fixed body", commitSha: "4".repeat(40) },
+      },
+    ];
+    const calls: Array<Record<string, unknown>> = [];
+    const database = {
+      run: {
+        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+        findUnique: async () => ({
+          id: "run-1",
+          runNumber: 1,
+          maxRunsPerTask: 5,
+          status: "RUNNING",
+          startedAt: new Date("2026-08-31T00:00:00.000Z"),
+          maxDurationMin: 240,
+          stallTimeoutMin: 10,
+          branch: "feature/pr-workflow",
+          targetBranch: "main",
+          agent: { name: "agent" },
+          task: {
+            id: "task-fixed",
+            projectId: "project-1",
+            chainId: "chain-1",
+            name: "Task",
+            status: "DOING",
+            approvalGate: false,
+            chainIndex: 4,
+            templateStep: {
+              outputKind: "fixed-implementation",
+              taskTemplate: { name: "pr-engineer-workflow" },
+            },
+            stepOutput: outputs[3]!.stepOutput,
+          },
+        }),
+      },
+      task: {
+        findMany: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return outputs;
+        },
+      },
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request("/session/runs/run-1/status", {
+      headers: { Authorization: "Bearer agos_session_current" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      task: { prWorkflowOutputs?: unknown };
+    };
+    assert.deepEqual(body.task.prWorkflowOutputs, outputs.map(({ id, chainIndex, stepOutput }) => ({
+      taskId: id,
+      chainIndex,
+      kind: stepOutput.kind,
+      body: stepOutput.body,
+      commitSha: stepOutput.commitSha,
+    })));
+    const where = (calls[0] as { where: Record<string, unknown> }).where;
+    assert.equal(where.projectId, "project-1");
+    assert.equal(where.chainId, "chain-1");
+    assert.deepEqual(where.chainIndex, { lte: 4 });
+    assert.deepEqual(where.templateStep, {
+      outputKind: { in: ["implementation", "sol-findings", "blind-findings", "fixed-implementation"] },
+      taskTemplate: { name: "pr-engineer-workflow" },
+    });
+    assert.deepEqual(where.stepOutput, { isNot: null });
+    assert.deepEqual(where.OR, [
+      { id: { not: "task-fixed" } },
+      { id: "task-fixed", stepOutput: { is: { runId: "run-1" } } },
+    ]);
+  });
+});
+
+test("PR implementation status projects only the current Run's implementation evidence", async () => {
+  await withTokens(async () => {
+    const current = {
+      id: "task-implementation",
+      chainIndex: 1,
+      templateStep: { outputKind: "implementation" },
+      stepOutput: { runId: "run-1", kind: "implementation", body: "implementation body", commitSha: "a".repeat(40) },
+    };
+    let query: Record<string, unknown> | undefined;
+    const database = {
+      run: {
+        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+        findUnique: async () => ({
+          id: "run-1",
+          runNumber: 1,
+          maxRunsPerTask: 5,
+          status: "RUNNING",
+          startedAt: new Date("2026-08-31T00:00:00.000Z"),
+          maxDurationMin: 240,
+          stallTimeoutMin: 10,
+          branch: "feature/pr-workflow",
+          targetBranch: "main",
+          agent: { name: "agent" },
+          task: {
+            id: current.id,
+            projectId: "project-current",
+            chainId: "chain-current",
+            name: "Task",
+            status: "DOING",
+            approvalGate: false,
+            chainIndex: current.chainIndex,
+            templateStep: {
+              outputKind: "implementation",
+              taskTemplate: { name: "pr-engineer-workflow" },
+            },
+            stepOutput: current.stepOutput,
+          },
+        }),
+      },
+      task: { findMany: async (args: Record<string, unknown>) => { query = args; return [current]; } },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/session/runs/run-1/status", {
+      headers: { Authorization: "Bearer agos_session_current" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { task: { prWorkflowOutputs: unknown } };
+    assert.deepEqual(body.task.prWorkflowOutputs, [{
+      taskId: current.id,
+      chainIndex: 1,
+      kind: "implementation",
+      body: "implementation body",
+      commitSha: "a".repeat(40),
+    }]);
+    const where = (query as { where: Record<string, unknown> }).where;
+    assert.equal(where.projectId, "project-current");
+    assert.equal(where.chainId, "chain-current");
+    assert.equal(where.chainIndex, 1);
+    assert.deepEqual(where.stepOutput, { is: { runId: "run-1", kind: "implementation" } });
+  });
+});
+
+test("PR workflow status omits nullable output rows so required evidence is refused downstream", async () => {
+  await withTokens(async () => {
+    const database = {
+      run: {
+        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+        findUnique: async () => ({
+          id: "run-1", runNumber: 1, maxRunsPerTask: 5, status: "RUNNING",
+          startedAt: new Date("2026-08-31T00:00:00.000Z"), maxDurationMin: 240, stallTimeoutMin: 10,
+          branch: "feature/pr-workflow", targetBranch: "main", agent: { name: "agent" },
+          task: {
+            id: "task-fixed", projectId: "project-1", chainId: "chain-1", chainIndex: 4,
+            name: "Task", status: "DOING", approvalGate: false,
+            templateStep: { outputKind: "fixed-implementation", taskTemplate: { name: "pr-engineer-workflow" } },
+            stepOutput: { runId: "run-1", kind: "fixed-implementation", commitSha: null },
+          },
+        }),
+      },
+      task: { findMany: async () => [{
+        id: "task-fixed", chainIndex: 4, templateStep: { outputKind: "fixed-implementation" },
+        stepOutput: { kind: "fixed-implementation", body: "{}", commitSha: null },
+      }] },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/session/runs/run-1/status", {
+      headers: { Authorization: "Bearer agos_session_current" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { task: { prWorkflowOutputs: unknown } };
+    assert.deepEqual(body.task.prWorkflowOutputs, []);
+  });
+});
+
+test("non-PR session status does not expose the PR evidence projection", async () => {
+  await withTokens(async () => {
+    let queried = false;
+    const database = {
+      run: {
+        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+        findUnique: async () => ({
+          id: "run-1",
+          runNumber: 1,
+          maxRunsPerTask: 5,
+          status: "RUNNING",
+          startedAt: new Date("2026-08-31T00:00:00.000Z"),
+          maxDurationMin: 240,
+          stallTimeoutMin: 10,
+          branch: "feature/task",
+          targetBranch: "main",
+          agent: { name: "agent" },
+          task: {
+            id: "task-1",
+            projectId: "project-1",
+            chainId: "chain-1",
+            chainIndex: 1,
+            name: "Task",
+            status: "DOING",
+            approvalGate: false,
+            templateStep: {
+              outputKind: "implementation",
+              taskTemplate: { name: "direct-engineer-workflow" },
+            },
+            stepOutput: null,
+          },
+        }),
+      },
+      task: { findMany: async () => { queried = true; return []; } },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/session/runs/run-1/status", {
+      headers: { Authorization: "Bearer agos_session_current" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { task: Record<string, unknown> };
+    assert.equal("prWorkflowOutputs" in body.task, false);
+    assert.equal(queried, false);
+  });
+});
+
 test("GET /sessions is project-scoped, clamped, cursored, and reachable by the operator", async () => {
   await withTokens(async () => {
     const calls: Array<Record<string, unknown>> = [];

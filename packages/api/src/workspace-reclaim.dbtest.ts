@@ -80,6 +80,7 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   home: root,
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot: root,
+  hostProofSlots: 3,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,

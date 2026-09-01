@@ -18,14 +18,16 @@ const testScript = (): string => {
 };
 
 /** The argument list the test runner is actually handed, reproduced the way npm
- *  produces it: npm runs the script through `sh`, so the operands after `--test`
- *  are word-split and glob-expanded by the shell *before* Node ever sees them.
- *  That step is the whole bug this file guards — a quoted operand survives it and
- *  reaches Node's own recursive matcher, an unquoted one is flattened by a shell
- *  whose `**` means `*`. Reproducing it means running a shell, not parsing one. */
+ *  produces it. The host-proof wrapper passes the Node invocation as a quoted
+ *  `sh -c` payload, so inspect that payload rather than treating its closing quote
+ *  as part of Node's arguments. The payload's shell still performs the word
+ *  splitting this regression guards: a quoted glob reaches Node's recursive
+ *  matcher while an unquoted one is flattened by a shell whose `**` means `*`. */
 const runnerOperands = (script: string): string[] => {
-  const tail = script.slice(script.indexOf("--test") + "--test".length);
-  assert.notEqual(tail, script, "test script does not invoke node --test");
+  const command = /\/bin\/sh -c '([^']*)'$/u.exec(script)?.[1] ?? script;
+  const testFlag = command.indexOf("--test");
+  assert.notEqual(testFlag, -1, "test script does not invoke node --test");
+  const tail = command.slice(testFlag + "--test".length);
   return execFileSync("sh", ["-c", `printf '%s\\n' ${tail}`], { cwd: packageRoot })
     .toString("utf8")
     .split("\n")
