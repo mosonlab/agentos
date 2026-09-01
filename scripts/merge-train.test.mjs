@@ -226,8 +226,8 @@ test("an unknown publication read-back retains the lease", async (t) => {
 test("the default adapter locally dispatches from a clean exact-prefix checkout", async () => {
   const fixture = await makeFixture();
   try {
-    const dispatcher = await readFile(new URL("./gate-worker/gate-dispatch.sh", import.meta.url), "utf8");
-    const gateLibrary = await readFile(new URL("./gate-worker/lib.sh", import.meta.url), "utf8");
+    const dispatcher = await readFile(new URL("../packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", import.meta.url), "utf8");
+    const gateLibrary = await readFile(new URL("../packages/runner/runtime-tools/gate-worker/lib.sh", import.meta.url), "utf8");
     const wrapper = `#!/usr/bin/env bash
 set -eu
 unset AGENTOS_GATE_SERVER AGENTOS_GATE_PRIMARY_SERVER AGENTOS_GATE_FALLBACK_SERVER
@@ -248,9 +248,9 @@ printf 'FIXTURE GATE: cwd=%s head=%s clean=yes\\n' "$PWD" "$head"
 printf 'MERGE GATE: PASS %s\\n' "$head"
 `;
     const candidate = await fixture.candidate(300, {
-      "scripts/gate-worker/gate-dispatch.sh": wrapper,
-      "scripts/gate-worker/gate-dispatch-real.sh": dispatcher,
-      "scripts/gate-worker/lib.sh": gateLibrary,
+      "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh": wrapper,
+      "packages/runner/runtime-tools/gate-worker/gate-dispatch-real.sh": dispatcher,
+      "packages/runner/runtime-tools/gate-worker/lib.sh": gateLibrary,
       "scripts/merge-gate.sh": mergeGate,
     });
     const result = await coordinateMergeTrain({
