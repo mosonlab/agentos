@@ -150,8 +150,6 @@ test("canonical regression commands require runner tools without a checkout fall
       .find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression, `${templateName} must contain a v2 regression step`);
     const invocations = [...regression.prompt.matchAll(regressionCommandPattern)].map(([invocation]) => invocation);
-    assert.deepEqual(invocations, regressionInvocations, `${templateName} must use only the runner-owned invocations`);
-    assert.doesNotMatch(regression.prompt, /scripts\/regression-verification\.sh/u);
 
     const root = await mkdtemp(join(tmpdir(), "agentos-regression-prompt-test-"));
     const checkoutCopy = join(root, "scripts", "regression-verification.sh");
@@ -172,13 +170,15 @@ test("canonical regression commands require runner tools without a checkout fall
           const result = spawnSync("bash", ["-c", invocation], { cwd: root, encoding: "utf8", env });
           const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
           assert.notEqual(result.status, 0, `${templateName} ${invocation} unexpectedly succeeded`);
-          assert.match(output, /AGENTOS_TOOLS is required/u, `${templateName} ${invocation}: ${output}`);
           assert.equal(existsSync(marker), false, `${templateName} ${invocation} invoked a checkout copy`);
+          assert.match(output, /AGENTOS_TOOLS is required/u, `${templateName} ${invocation}: ${output}`);
         }
       }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+    assert.deepEqual(invocations, regressionInvocations, `${templateName} must use only the runner-owned invocations`);
+    assert.doesNotMatch(regression.prompt, /scripts\/regression-verification\.sh/u);
   }
 });
 
