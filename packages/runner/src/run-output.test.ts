@@ -905,7 +905,9 @@ test("the original Run budget continues through remediation", async () => {
     });
     const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
     const claimed = requiredOutputClaim(remote);
-    claimed.run.maxDurationMin = 0.002;
+    // Leave enough budget for setup under full-gate contention; the resumed
+    // 30-second command still has to be stopped by this Run's 12-second limit.
+    claimed.run.maxDurationMin = 0.2;
 
     await executeClaim(configured, claimed, { controlPlane: controlPlane.controlPlane });
     // The heartbeat callback that performs the budget kill finishes its
