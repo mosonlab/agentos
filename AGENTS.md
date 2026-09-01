@@ -35,9 +35,9 @@ acceptance criterion or caller requires it.
   while a local run is capped at four lanes on real storage; the hand-run is
   several times slower and proves less. When the operator has explicitly
   configured remote capacity, dispatch the gate with
-  `scripts/gate-worker/gate-dispatch.sh <oid>`; otherwise run the exact local
-  gate with `scripts/merge-gate.sh --expect-head <oid>`. Never infer or invent a
-  worker hostname.
+  `AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/gate-dispatch.sh <oid>`;
+  otherwise run the exact local gate with `scripts/merge-gate.sh --expect-head
+  <oid>`. Never infer or invent a worker hostname.
 - Spawn the real API entrypoint in tests through
   `packages/api/src/test-startup-environment.ts`: the entrypoint loads the root
   `.env`, and dotenv restores omitted credentials unless the helper pins them

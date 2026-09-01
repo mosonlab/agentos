@@ -44,6 +44,14 @@ const pathWithFailingCommand = async (root: string, command: "cp" | "chmod"): Pr
   return `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
 };
 
+const pathWithNoopCommand = async (root: string, command: "chmod"): Promise<string> => {
+  const bin = join(root, `${command}-noops`);
+  await mkdir(bin);
+  await writeFile(join(bin, command), "#!/bin/sh\nexit 0\n");
+  await chmod(join(bin, command), 0o755);
+  return `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+};
+
 /**
  * Faking git means faking a repository, but the mirror's bookkeeping — its
  * root, its lock, its staging directory — is real filesystem work in a
@@ -671,6 +679,25 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
   });
 }
 
+test("a run-as principal creates and removes its own scratch base", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-run-as-scratch-owner-"));
+  const log = join(root, "launcher.log");
+  const launcher = join(root, "run-as.sh");
+  await writeFile(launcher, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec "$@"\n`, { mode: 0o755 });
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: [launcher],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home: root,
+  } as unknown as RunnerConfig;
+
+  const scratch = await provisionAgentScratch(config);
+  assert.match((await readFile(log, "utf8")).split("\n")[0] ?? "", /mktemp -d/u);
+  await cleanupAgentScratch(config, scratch);
+  await assert.rejects(stat(scratch.base), /ENOENT/u);
+  await rm(root, { recursive: true, force: true });
+});
+
 for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
   const label = runAsPrefix.length > 0 ? "behind a run-as launcher" : "directly";
   test(`materializes the release-local runtime tools outside the checkout ${label}`, async () => {
@@ -836,6 +863,50 @@ test("runtime-tool materialization never falls back to copies in the project che
     await assert.rejects(
       materializeRuntimeTools(config, scratch, { sourceRoot }),
       /expected a regular file/u,
+    );
+    await assert.rejects(stat(scratch.toolsDir), /ENOENT/u);
+  } finally {
+    await cleanupAgentScratch(config, scratch);
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime-tool materialization ignores unrelated release-source entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-extra-source-"));
+  const sourceRoot = await createRuntimeToolsFixture();
+  const config = {
+    workspaceRoot: join(root, "checkout"),
+    runAsPrefix: [],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home: root,
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config);
+  try {
+    await writeFile(join(sourceRoot, ".incidental"), "not part of the bundle\n");
+    await materializeRuntimeTools(config, scratch, { sourceRoot });
+    assert.deepEqual((await readdir(scratch.toolsDir)).sort(), ["gate-worker", "regression-verification.sh"]);
+  } finally {
+    await cleanupAgentScratch(config, scratch);
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime-tool materialization reports an exact-mode mismatch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-mode-mismatch-"));
+  const sourceRoot = await createRuntimeToolsFixture();
+  const config = {
+    workspaceRoot: join(root, "checkout"),
+    runAsPrefix: [],
+    path: await pathWithNoopCommand(root, "chmod"),
+    home: root,
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config);
+  try {
+    await assert.rejects(
+      materializeRuntimeTools(config, scratch, { sourceRoot }),
+      /runtime tools materialization: unexpected mode on .*expected 500/u,
     );
     await assert.rejects(stat(scratch.toolsDir), /ENOENT/u);
   } finally {

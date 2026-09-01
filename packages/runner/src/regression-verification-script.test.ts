@@ -156,11 +156,11 @@ test("the script uses adjacent tooling when copied outside the checkout", () => 
   delete seeded.env.REGRESSION_GATE_DISPATCH;
   seeded.env.REGRESSION_FIXTURE_ADJACENT_DISPATCH_LOG = tooling.dispatchLog;
 
-  const prepared = runScript(seeded, join(tooling.root, "regression-verification.sh"), tooling.root, "prepare");
+  const prepared = runScript(seeded, "./regression-verification.sh", tooling.root, "prepare");
   assert.equal(prepared.status, 0, prepared.stderr);
   assert.match(prepared.stdout, /^REGRESSION PREPARE: ready [0-9a-f]{40} [0-9a-f]{40}\n$/u);
 
-  const finalized = runScript(seeded, join(tooling.root, "regression-verification.sh"), tooling.root, "finalize");
+  const finalized = runScript(seeded, "./regression-verification.sh", tooling.root, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
   assert.match(finalized.stdout, /^REGRESSION FINALIZE: pass [0-9a-f]{40}\n$/u);
   assert.equal(readFileSync(tooling.dispatchLog, "utf8"), "adjacent-dispatch\n");

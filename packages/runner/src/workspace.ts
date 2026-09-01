@@ -195,48 +195,38 @@ require_file() {
   [ -f "$1" ] && [ ! -L "$1" ] || fail "expected a regular file: $1"
 }
 
-check_source_entries() {
-  for entry in "$source_root"/* "$source_root"/.[!.]* "$source_root"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    case "$entry" in
-      "$source_root/regression-verification.sh"|"$source_root/gate-worker") ;;
-      *) fail "unexpected source entry: $entry" ;;
-    esac
+tool_paths='regression-verification.sh
+gate-worker/gate-dispatch.sh
+gate-worker/lib.sh
+gate-worker/mirror-push.sh
+gate-worker/remote-gate.sh'
+
+is_tool_path() {
+  for tool_path in $tool_paths; do
+    [ "$1" = "$tool_path" ] && return 0
   done
-  for entry in "$source_root/gate-worker"/* "$source_root/gate-worker"/.[!.]* "$source_root/gate-worker"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    case "$entry" in
-      "$source_root/gate-worker/gate-dispatch.sh"|"$source_root/gate-worker/lib.sh"|"$source_root/gate-worker/mirror-push.sh"|"$source_root/gate-worker/remote-gate.sh") ;;
-      *) fail "unexpected source entry: $entry" ;;
-    esac
-  done
+  return 1
 }
 
 check_destination_entries() {
   for entry in "$tools_root"/* "$tools_root"/.[!.]* "$tools_root"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
-    case "$entry" in
-      "$tools_root/regression-verification.sh"|"$tools_root/gate-worker") ;;
-      *) fail "unexpected materialized entry: $entry" ;;
-    esac
+    relative_path=$(basename "$entry")
+    [ "$relative_path" = gate-worker ] || is_tool_path "$relative_path" \
+      || fail "unexpected materialized entry: $entry"
   done
   for entry in "$tools_root/gate-worker"/* "$tools_root/gate-worker"/.[!.]* "$tools_root/gate-worker"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
-    case "$entry" in
-      "$tools_root/gate-worker/gate-dispatch.sh"|"$tools_root/gate-worker/lib.sh"|"$tools_root/gate-worker/mirror-push.sh"|"$tools_root/gate-worker/remote-gate.sh") ;;
-      *) fail "unexpected materialized entry: $entry" ;;
-    esac
+    relative_path=gate-worker/$(basename "$entry")
+    is_tool_path "$relative_path" || fail "unexpected materialized entry: $entry"
   done
 }
 
 require_directory "$source_root"
-require_file "$source_root/regression-verification.sh"
 require_directory "$source_root/gate-worker"
-require_file "$source_root/gate-worker/gate-dispatch.sh"
-require_file "$source_root/gate-worker/lib.sh"
-require_file "$source_root/gate-worker/mirror-push.sh"
-require_file "$source_root/gate-worker/remote-gate.sh"
-check_source_entries
+for relative_path in $tool_paths; do
+  require_file "$source_root/$relative_path"
+done
 
 # The destination is deliberately exclusive. Do not merge into a directory
 # left by a previous run or follow a path supplied by a task.
@@ -252,12 +242,7 @@ mkdir -m 700 "$tools_root"
 created=1
 mkdir -m 700 "$tools_root/gate-worker"
 
-for relative_path in \
-  regression-verification.sh \
-  gate-worker/gate-dispatch.sh \
-  gate-worker/lib.sh \
-  gate-worker/mirror-push.sh \
-  gate-worker/remote-gate.sh; do
+for relative_path in $tool_paths; do
   cp "$source_root/$relative_path" "$tools_root/$relative_path"
   chmod 500 "$tools_root/$relative_path"
   cmp "$source_root/$relative_path" "$tools_root/$relative_path" >/dev/null
@@ -265,11 +250,9 @@ done
 
 require_directory "$tools_root"
 require_directory "$tools_root/gate-worker"
-require_file "$tools_root/regression-verification.sh"
-require_file "$tools_root/gate-worker/gate-dispatch.sh"
-require_file "$tools_root/gate-worker/lib.sh"
-require_file "$tools_root/gate-worker/mirror-push.sh"
-require_file "$tools_root/gate-worker/remote-gate.sh"
+for relative_path in $tool_paths; do
+  require_file "$tools_root/$relative_path"
+done
 check_destination_entries
 
 # mkdir/chmod above are the only writers. These checks make a successful
@@ -281,13 +264,16 @@ mode() {
     stat -f '%Lp' "$1"
   fi
 }
-[ "$(mode "$tools_root")" = 700 ]
-[ "$(mode "$tools_root/gate-worker")" = 700 ]
-[ "$(mode "$tools_root/regression-verification.sh")" = 500 ]
-[ "$(mode "$tools_root/gate-worker/gate-dispatch.sh")" = 500 ]
-[ "$(mode "$tools_root/gate-worker/lib.sh")" = 500 ]
-[ "$(mode "$tools_root/gate-worker/mirror-push.sh")" = 500 ]
-[ "$(mode "$tools_root/gate-worker/remote-gate.sh")" = 500 ]
+require_mode() {
+  actual_mode=$(mode "$1")
+  [ "$actual_mode" = "$2" ] \
+    || fail "unexpected mode on $1: got $actual_mode, expected $2"
+}
+require_mode "$tools_root" 700
+require_mode "$tools_root/gate-worker" 700
+for relative_path in $tool_paths; do
+  require_mode "$tools_root/$relative_path" 500
+done
 
 created=0
 trap - EXIT HUP INT TERM
@@ -343,7 +329,16 @@ export const sessionConfigRootExists = async (scratch: AgentScratch): Promise<bo
  * components (on macOS os.tmpdir() sits under /var -> /private/var).
  */
 export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `anonymous-${randomUUID()}`): Promise<AgentScratch> => {
-  const base = await realpath(await mkdtemp(join(tmpdir(), "agentos-run-scratch-")));
+  const temporaryRoot = await realpath(tmpdir());
+  const base = config.runAsPrefix.length > 0
+    ? await realpath((await command(
+      config,
+      "/usr/bin/mktemp",
+      ["-d", join(temporaryRoot, "agentos-run-scratch-XXXXXX")],
+      temporaryRoot,
+      workspaceEnvironment(config),
+    )).trim())
+    : await realpath(await mkdtemp(join(temporaryRoot, "agentos-run-scratch-")));
   const workspaceRoot = join(base, "workspaces");
   const stateDir = join(base, "control-plane");
   const toolsDir = join(base, "tools");
@@ -351,10 +346,16 @@ export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `a
   // fails, the caller can report and retain the exact path it attempted.
   const configRoot = await sessionConfigPath(sessionId);
   if (config.runAsPrefix.length > 0) {
-    // The session runs as another principal: it has to own what it writes, so
-    // let it traverse the base and create both runner-owned directories itself.
-    await chmod(base, 0o711);
-    await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], base, workspaceEnvironment(config));
+    // The session runs as another principal, so it creates and owns the 0700
+    // base as well as both roots below it. No cross-account writable or
+    // traversable scratch directory is left behind.
+    try {
+      await command(config, "/bin/chmod", ["700", base], temporaryRoot, workspaceEnvironment(config));
+      await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], base, workspaceEnvironment(config));
+    } catch (error: unknown) {
+      await command(config, "/bin/rm", ["-rf", "--", base], temporaryRoot, workspaceEnvironment(config)).catch(() => undefined);
+      throw error;
+    }
   } else {
     for (const directory of [workspaceRoot, stateDir]) {
       await mkdir(directory);
@@ -408,14 +409,14 @@ export const cleanupAgentScratch = async (
       "/bin/sh",
       [
         "-c",
-        'for root do [ ! -e "$root" ] || find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; done',
+        'for root do [ ! -e "$root" ] || rm -rf -- "$root"; done',
         "agentos-cleanup",
         ...targetOwnedRoots,
+        scratch.base,
       ],
       await realpath(tmpdir()),
       workspaceEnvironment(config),
     );
-    await Promise.all(targetOwnedRoots.map((root) => rm(root, { recursive: true, force: true })));
     if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   } else {
     await Promise.all([
@@ -426,7 +427,7 @@ export const cleanupAgentScratch = async (
     ]);
     if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   }
-  await rm(scratch.base, { recursive: true, force: true });
+  if (config.runAsPrefix.length === 0) await rm(scratch.base, { recursive: true, force: true });
 };
 
 export const provisionSessionConfig = async (

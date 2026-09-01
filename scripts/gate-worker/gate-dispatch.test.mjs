@@ -779,19 +779,20 @@ test("a destination that is not an ssh destination is refused before anything is
 
 test("documented gate-worker invocations name their checkout explicitly", () => {
   const workspacePrefix = 'AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)"';
-  const commandNames = "(?:gate-dispatch|mirror-push|remote-gate|regression-verification)\\.sh";
+  const commandPath = "scripts/(?:gate-worker/)?(?:gate-dispatch|mirror-push|remote-gate|regression-verification)\\.sh";
   const files = [
     join(here, "..", "..", "docs", "runbooks", "gate-worker.md"),
     join(here, "..", "..", "CONTRIBUTING.md"),
+    join(here, "..", "..", "AGENTS.md"),
   ];
 
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const codeBlocks = [...source.matchAll(/```sh\n([\s\S]*?)```/gu)].map((match) => match[1]);
-    const inlineCommands = [...source.matchAll(/`([^`]*scripts\/gate-worker\/[^`]+)`/gu)].map((match) => match[1]);
+    const inlineCommands = [...source.matchAll(/`([^`]*scripts\/(?:gate-worker\/)?[^`]+)`/gu)].map((match) => match[1]);
     const commands = [...codeBlocks, ...inlineCommands]
       .flatMap((block) => block.replace(/\\\r?\n[ \t]*/gu, " ").split(/\r?\n/gu))
-      .filter((line) => new RegExp(`scripts/gate-worker/${commandNames}`, "u").test(line));
+      .filter((line) => new RegExp(commandPath, "u").test(line));
 
     assert.ok(commands.length > 0, `${file} has no documented gate-worker invocations`);
     for (const command of commands) {

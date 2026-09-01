@@ -26,11 +26,12 @@ for required in AGENTOS_RUN_ID AGENTOS_WORKSPACE_PATH AGENTOS_PULL_REQUEST_BASE;
   require_env "$required"
 done
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" \
+  || die "cannot resolve the regression tooling directory"
 cd "$AGENTOS_WORKSPACE_PATH" || die "cannot enter AGENTOS_WORKSPACE_PATH"
 git check-ref-format --branch "$AGENTOS_PULL_REQUEST_BASE" >/dev/null 2>&1 \
   || die "AGENTOS_PULL_REQUEST_BASE is not a valid branch"
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 STATE_FILE="${AGENTOS_REGRESSION_STATE:-$AGENTOS_WORKSPACE_PATH/.git/agentos-regression-state}"
 OUTPUT_FILE="$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"
 GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_DIR/gate-worker/gate-dispatch.sh}"
