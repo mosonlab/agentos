@@ -353,7 +353,6 @@ export const TasksPage = (): ReactNode => {
     pendingFocus.current = {
       id: task.id,
       before: orderColumn(
-        task.status,
         latest.current.filter((candidate) => candidate.status === task.status),
       ).map((candidate) => candidate.id),
     };

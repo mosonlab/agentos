@@ -17,7 +17,7 @@ import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, TasksPage, activateAllNotice, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
-import { installDom, mountPage, reactDom } from "./dom-harness";
+import { type PageHarness, installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
 
@@ -42,10 +42,27 @@ const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}):
   <LocaleProvider initialLocale={locale}><TaskCard task={task(overrides)} actions={ACTIONS} /></LocaleProvider>,
 ).replace(/<[^>]*>/gu, "");
 
-test("a card marks estimated cumulative dollars and falls back to token counts", () => {
-  assert.match(card({
+test("a member card links its newest run's pull request, after the assignee", () => {
+  const withPr = card({
+    latestRun: {
+      id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT",
+      costUsd: "0.42", startedAt: null, endedAt: null, pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
+    },
+  });
+  assert.match(withPr, /data-card-assignee=[\s\S]*data-card-pull-request/u);
+  assert.match(withPr, /href="https:\/\/github\.com\/mosonlab\/anneal\/pull\/351"/u);
+  assert.match(withPr.replace(/<[^>]*>/gu, ""), /#351/u);
+  assert.doesNotMatch(card(), /data-card-pull-request/u);
+});
+
+test("a card shows cumulative dollars bare and falls back to token counts", () => {
+  // The footer has room for the number and nothing else: whether the total is
+  // an estimate is a question the detail page answers.
+  const estimated = card({
     taskCost: { costUsd: "1.45", estimated: true, inputTokens: 1_000, cachedInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 50 },
-  }), /\$1\.45 est\./);
+  });
+  assert.match(estimated, /\$1\.45/);
+  assert.doesNotMatch(estimated, /est\./u);
   const tokens = card({
     taskCost: { costUsd: null, estimated: false, inputTokens: 1_000, cachedInputTokens: 100, cacheCreationInputTokens: null, outputTokens: 50 },
   });
@@ -331,6 +348,24 @@ test("a non-template chain uses the API-derived badge and short card title", () 
   assert.doesNotMatch(markup, />Release: Build<\/a>/);
 });
 
+/** Opens a card's row menu and selects one entry.
+ *
+ *  The menu is a Radix dropdown: it opens on `pointerdown` (which jsdom has no
+ *  constructor for, so the global is the MouseEvent the harness installs) and
+ *  it portals its items outside the mounted container. */
+const selectRowMenuItem = async (page: PageHarness, menuLabel: string, itemLabel: string): Promise<void> => {
+  Object.defineProperty(globalThis, "PointerEvent", { configurable: true, writable: true, value: page.dom.window.MouseEvent });
+  const trigger = [...page.container.querySelectorAll("button")]
+    .find((node) => node.getAttribute("aria-label") === menuLabel);
+  assert.ok(trigger, `missing row menu ${menuLabel}`);
+  await act(async () => trigger.dispatchEvent(new page.dom.window.MouseEvent("pointerdown", { bubbles: true, button: 0 })));
+  const item = [...page.dom.window.document.querySelectorAll("[role='menuitem']")]
+    .find((node) => node.textContent?.trim() === itemLabel);
+  assert.ok(item, `missing menu item ${itemLabel}: ${page.dom.window.document.body.innerHTML}`);
+  await act(async () => item.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true, button: 0 })));
+  await page.settle();
+};
+
 test("Archive All confirms the project-wide Done scope even while one chain is visible", async () => {
   storage.set("agentos.projectId", "p1");
   const settledAggregate = (chainId: string, chainName: string, taskId: string) => ({
@@ -364,7 +399,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
   });
   Object.defineProperty(page.dom.window, "confirm", { configurable: true, value: (message: string) => { confirmations.push(message); return true; } });
   try {
-    await page.press("Show only chain Alpha");
+    await selectRowMenuItem(page, en("tasks.aggregate.actionsFor", { name: "Alpha" }), en("tasks.aggregate.menu.filter"));
     assert.ok(page.container.querySelector('[data-card="visible"]'));
     assert.equal(page.container.querySelector('[data-card="hidden"]'), null);
     await page.press("Archive All");
@@ -376,7 +411,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
   }
 });
 
-test("the board renders Backlog oldest first and leaves every other column in the API's order", async () => {
+test("the board renders every column newest first, Backlog included", async () => {
   storage.set("agentos.projectId", "p1");
   // As `GET /tasks` answers: newest first, for every column.
   const rows = [
@@ -393,9 +428,9 @@ test("the board renders Backlog oldest first and leaves every other column in th
   });
   try {
     const rendered = [...page.container.querySelectorAll("[data-card]")].map((node) => node.getAttribute("data-card"));
-    // Backlog is a queue dispatched from the top, so a numbered queue has to
-    // read top-to-bottom in dispatch order; Done reports what just happened.
-    assert.deepEqual(rendered, ["backlog-old", "backlog-mid", "backlog-new", "done-new", "done-old"]);
+    // One reading rule for the whole board: the newest card is at the top of
+    // the column, wherever the operator looks.
+    assert.deepEqual(rendered, ["backlog-new", "backlog-mid", "backlog-old", "done-new", "done-old"]);
   } finally {
     await page.dispose();
     storage.remove("agentos.projectId");
@@ -406,11 +441,10 @@ test("running, ended, and absent runs render only durations their timestamps pro
   const originalNow = Date.now;
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
   try {
-    const t = (key: string, vars?: Record<string, string | number>): string => key === "tasks.card.runningDuration" ? `running ${vars?.duration}` : key;
-    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null } }), t), "running 12m 0s");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" } }), t), "8m 0s · 3h ago");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" }), t), "3h ago");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
+    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z", pullRequestUrl: null } })), "8m 0s · 3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" })), "3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null } })), "3h ago");
   } finally {
     Date.now = originalNow;
   }
@@ -431,15 +465,15 @@ test("a mounted running card advances elapsed time while its props stay unchange
   const root = (await reactDom()).createRoot(container);
   const running = task({ latestRun: {
     id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null,
-    startedAt: "2026-08-16T00:00:00.000Z", endedAt: null,
+    startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null,
   } });
   try {
     await act(async () => root.render(<TaskCard task={running} actions={ACTIONS} />));
-    assert.match(container.textContent ?? "", /running 12m 0s/);
+    assert.match(container.textContent ?? "", /12m 0s/);
     now += 60_000;
     assert.ok(tick);
     await act(async () => tick?.());
-    assert.match(container.textContent ?? "", /running 13m 0s/);
+    assert.match(container.textContent ?? "", /13m 0s/);
   } finally {
     await act(async () => root.unmount());
     Date.now = originalNow;
@@ -483,7 +517,10 @@ test("every free-text field on the card is bounded", () => {
     name: "A ".repeat(120),
     failureReason: `${"/very/long/path/segment".repeat(90)} failed`,
   });
-  assert.equal((markup.match(/line-clamp-3/g) ?? []).length, 2, "title and failure both clamp");
+  // The title wraps in full — a card named by its first three lines is a card
+  // whose name is missing — and the failure keeps the clamp it was written for.
+  assert.equal((markup.match(/line-clamp-3/g) ?? []).length, 1, "the failure clamps");
+  assert.doesNotMatch(markup.slice(0, markup.indexOf("</h3>")), /line-clamp/u);
   assert.match(markup, /overflow-wrap:anywhere/);
 });
 
@@ -535,7 +572,7 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
   // claude-opus-5:medium showed as gpt-5.6-sol:high.
   const markup = card({
     assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" },
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null },
+    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.doesNotMatch(markup, /gpt-5\.6-sol:high/);
@@ -545,7 +582,7 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
 test("a FAST run adds a fast marker to the single-task model line, but DEFAULT does not", () => {
   const run = (codexServiceTier: "DEFAULT" | "FAST") => ({
     id: "r1", runNumber: 1, status: "SUCCEEDED" as const, model: "gpt-5.6-sol:high", codexServiceTier,
-    costUsd: null, startedAt: null, endedAt: null,
+    costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null,
   } as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" });
 
   const fast = card({ latestRun: run("FAST") });
@@ -557,21 +594,23 @@ test("a FAST run adds a fast marker to the single-task model line, but DEFAULT d
   assert.doesNotMatch(standard, /fast/u);
 });
 
-test("a running single-task card keeps localized elapsed copy without a redundant run status", () => {
+test("a running single-task card shows the elapsed time alone, in both locales", () => {
   const latestRun = {
     id: "r1", runNumber: 1, status: "RUNNING" as const, model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT" as const,
-    costUsd: null, startedAt: new Date(Date.now() - 4 * 60_000).toISOString(), endedAt: null,
+    costUsd: null, startedAt: new Date(Date.now() - 4 * 60_000).toISOString(), endedAt: null, pullRequestUrl: null,
   };
 
+  // The run line's amber dot is what says a run is live; the footer says how
+  // long, and neither locale spends a word repeating the other.
   const chinese = localizedCard("zh", { status: "DOING", latestRun });
   assert.doesNotMatch(chinese, /运行中/u);
-  assert.match(chinese, /已运行 \d+ 分/u);
+  assert.match(chinese, /\d+ 分 \d+ 秒/u);
 
   // Render English last because the test i18n adapter retains the latest
   // requested locale for helpers exercised later in this process.
   const english = localizedCard("en", { status: "DOING", latestRun });
-  assert.equal((english.match(/running/gu) ?? []).length, 1, english);
-  assert.match(english, /running \d+m/u);
+  assert.doesNotMatch(english, /running/u);
+  assert.match(english, /\d+m \d+s/u);
 });
 
 test("a task with no runs still shows the agent's configured model", () => {
@@ -582,7 +621,7 @@ test("a task with no runs still shows the agent's configured model", () => {
 test("an unassigned task with a run still shows the run's model snapshot", () => {
   const markup = card({
     assigneeAgent: null,
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null },
+    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
@@ -628,7 +667,7 @@ test("a NOW card carries no schedule row, and every informative schedule still d
 test("a card with no runs has no run row, and a card with a run reads exactly as before", () => {
   assert.doesNotMatch(card(), /no runs/);
   const withRun = card({
-    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null },
+    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
   });
   assert.match(withRun, new RegExp(en("tasks.card.run", { n: 3 })));
   assert.match(withRun, new RegExp(en("status.run.SUCCEEDED")));
