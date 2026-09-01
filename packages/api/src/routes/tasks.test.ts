@@ -628,7 +628,7 @@ test("GET /tasks?view=board answers with the card projection, not the whole row"
     // The fields the board reads survive...
     assert.equal(body[0]!.name, "Ship the thing");
     assert.equal(body[0]!.displayName, "Ship the thing");
-    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.42", startedAt: null, endedAt: null });
+    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.42", startedAt: null, endedAt: null, pullRequestUrl: null });
     assert.deepEqual(body[0]!.taskCost, {
       costUsd: "0.42", estimated: false, inputTokens: null, cachedInputTokens: null,
       cacheCreationInputTokens: null, outputTokens: null,

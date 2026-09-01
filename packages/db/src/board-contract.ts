@@ -324,6 +324,9 @@ export type BoardLatestRun<DateTime = string> = {
   costUsd: string | null;
   startedAt: DateTime | null;
   endedAt: DateTime | null;
+  /** The pull request the Run published, or null when it opened none. Cards
+   *  link it; nothing on the board derives anything else from it. */
+  pullRequestUrl: string | null;
 };
 
 export type RepairBinding = {

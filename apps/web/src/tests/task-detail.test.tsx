@@ -5,7 +5,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { StartabilityChecklist, StepOutput, TaskPrompt, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
+import { pullRequestLabel } from "../lib/format";
+import { StartabilityChecklist, StepOutput, TaskPrompt, branchUrl } from "../pages/TaskDetail";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { TaskStartability, TaskStepOutput } from "../lib/types";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";

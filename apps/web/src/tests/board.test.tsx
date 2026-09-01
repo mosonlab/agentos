@@ -139,26 +139,24 @@ test("counts cover every status, including the empty ones", () => {
 
 /* ------------------------------------------------------------ the ordering */
 
-test("Backlog reads oldest first, and every other column keeps the API's order", () => {
-  // The API answers newest-first, which is what a column reporting what just
-  // happened wants. Backlog is a queue dispatched from the top, so read in that
-  // order it prints backwards: card 1 of the numbered queue sat at the bottom.
+test("every column reads newest first, Backlog included", () => {
+  // Backlog used to be the one column read oldest-first. It is the same board:
+  // the operator reads what arrived last at the top of every column.
   const newest = task({ id: "new", createdAt: "2026-08-18T00:00:00.000Z" });
   const middle = task({ id: "mid", createdAt: "2026-08-17T00:00:00.000Z" });
   const oldest = task({ id: "old", createdAt: "2026-08-16T00:00:00.000Z" });
-  const asDelivered = [newest, middle, oldest];
-  assert.deepEqual(orderColumn("BACKLOG", asDelivered).map((row) => row.id), ["old", "mid", "new"]);
-  for (const status of ["TODO", "DOING", "REVIEW", "DONE"] as const) {
-    assert.deepEqual(orderColumn(status, asDelivered).map((row) => row.id), ["new", "mid", "old"]);
-  }
+  const shuffled = [middle, oldest, newest];
+  assert.deepEqual(orderColumn(shuffled).map((row) => row.id), ["new", "mid", "old"]);
   // Never in place: the page holds the polled rows and reorders a copy.
-  assert.deepEqual(asDelivered.map((row) => row.id), ["new", "mid", "old"]);
+  assert.deepEqual(shuffled.map((row) => row.id), ["mid", "old", "new"]);
 });
 
-test("Backlog preserves the API's id-ascending tiebreak within one creation time", () => {
+test("a column preserves the API's id-ascending tiebreak within one creation time", () => {
+  // The sort is stable, so cards created in the same instant stay in the order
+  // the API delivered them, which is id ascending.
   const createdAt = "2026-08-16T00:00:00.000Z";
   const asDelivered = [task({ id: "a", createdAt }), task({ id: "b", createdAt })];
-  assert.deepEqual(orderColumn("BACKLOG", asDelivered).map((row) => row.id), ["a", "b"]);
+  assert.deepEqual(orderColumn(asDelivered).map((row) => row.id), ["a", "b"]);
 });
 
 /* ------------------------------------------------------------ the actions */
@@ -194,14 +192,14 @@ test("focus lands on the next card when the moved one leaves the list", () => {
   assert.equal(focusAfterMove(["a", "c"], "b", ["a", "b", "c"]), "c");
 });
 
-test("focus after a Backlog move follows the rendered oldest-first order", () => {
+test("focus after a Backlog move follows the rendered newest-first order", () => {
   const asDelivered = [
-    task({ id: "new", status: "BACKLOG", createdAt: "2026-08-18T00:00:00.000Z" }),
-    task({ id: "mid", status: "BACKLOG", createdAt: "2026-08-17T00:00:00.000Z" }),
     task({ id: "old", status: "BACKLOG", createdAt: "2026-08-16T00:00:00.000Z" }),
+    task({ id: "mid", status: "BACKLOG", createdAt: "2026-08-17T00:00:00.000Z" }),
+    task({ id: "new", status: "BACKLOG", createdAt: "2026-08-18T00:00:00.000Z" }),
   ];
-  const renderedBefore = orderColumn("BACKLOG", asDelivered).map((row) => row.id);
-  assert.equal(focusAfterMove(["old", "new"], "mid", renderedBefore), "new");
+  const renderedBefore = orderColumn(asDelivered).map((row) => row.id);
+  assert.equal(focusAfterMove(["new", "old"], "mid", renderedBefore), "old");
 });
 
 test("focus falls back upwards when the moved card was last", () => {

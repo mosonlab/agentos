@@ -79,11 +79,11 @@ type ExactKeys<Left, Right> = [
 ] extends [never, never] ? true : false;
 type ContractCheck<
   Projection extends BoardContractCard,
-  Proof extends [true, true, true, false, false],
-> = Proof extends [true, true, true, false, false] ? Projection : never;
+  Proof extends [true, true, true, true, false, false],
+> = Proof extends [true, true, true, true, false, false] ? Projection : never;
 /** Compile-time proof that JSON serialization turns the native projection into
- * the exact shared browser contract, including every nested aggregate and
- * frontier key. The final two checks prove missing and surplus adapter keys
+ * the exact shared browser contract, including every nested aggregate, frontier
+ * and latest-run key. The final two checks prove missing and surplus adapter keys
  * both fail the bidirectional key comparison. */
 export type SerializedBoardCardProjection = ContractCheck<
   JsonSerialized<BoardCard>,
@@ -91,6 +91,7 @@ export type SerializedBoardCardProjection = ContractCheck<
     ExactKeys<JsonSerialized<BoardCard>, BoardContractCard>,
     ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>, BoardContractChainAggregate>,
     ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>["frontier"], BoardContractChainFrontier>,
+    ExactKeys<NonNullable<JsonSerialized<BoardCard>["latestRun"]>, BoardContractLatestRun>,
     ExactKeys<Omit<JsonSerialized<BoardCard>, "id">, BoardContractCard>,
     ExactKeys<JsonSerialized<BoardCard> & { surplus: never }, BoardContractCard>,
   ]
@@ -137,6 +138,9 @@ export type BoardRow = {
     codexServiceTier: BoardContractLatestRun["codexServiceTier"];
     subagentModel?: string | null;
     budgetGrants: number;
+    /** Optional like `subagentModel`: `readBoard` always selects it, and the
+     *  fixtures that build a row by hand do not all publish a pull request. */
+    pullRequestUrl?: string | null;
     session: {
       nativeChildUsed: boolean;
       costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
@@ -274,6 +278,7 @@ const latestRunProjectionFromRun = (run: BoardRow["runs"][number]): BoardLatestR
   costUsd: decimal(run.session?.costUsd),
   startedAt: run.session?.startedAt ?? null,
   endedAt: run.session?.endedAt ?? null,
+  pullRequestUrl: run.pullRequestUrl ?? null,
 });
 
 /** Bind a merge result to the newest Run displayed beside it. */
@@ -830,6 +835,7 @@ const boardChainRows = async (
           codexServiceTier: true,
           subagentModel: true,
           budgetGrants: true,
+          pullRequestUrl: true,
           session: {
             select: {
               nativeChildUsed: true,
@@ -873,7 +879,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         orderBy: { runNumber: "desc" },
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
-          codexServiceTier: true,
+          codexServiceTier: true, pullRequestUrl: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,

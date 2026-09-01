@@ -165,6 +165,12 @@ export const usageCostLabel = (value: import("./types").UsageCost | null | undef
   return parts.length === 0 ? "—" : parts.join(" · ");
 };
 
+/** A card's one-number reading of a usage cost, or `null` when the cost carries
+ *  no money value. A card has room for the amount and nothing else: the
+ *  estimated qualifier and the token breakdown belong to the detail page. */
+export const usageCostAmount = (value: import("./types").UsageCost | null | undefined): string | null =>
+  value === null || value === undefined || value.costUsd === null ? null : usageMoney(value.costUsd);
+
 /** A repo remote as a browsable GitHub URL, or `null` when it is anything else.
  *  No other forge is recognised: a wrong guess would render a broken link. */
 export const repoWebUrl = (remoteUrl: string | null | undefined): string | null => {
@@ -179,6 +185,13 @@ export const repoWebUrl = (remoteUrl: string | null | undefined): string | null 
   const sshUrl = /^ssh:\/\/git@github\.com\/([^/\s?#]+)\/([^/\s?#]+?)(?:\.git)?$/.exec(remoteUrl);
   if (sshUrl) return `https://github.com/${sshUrl[1]}/${sshUrl[2]}`;
   return null;
+};
+
+/** `#39` from a `/pull/39` tail; the whole URL when it does not parse, because a
+ *  link with no label is worse than a long one. */
+export const pullRequestLabel = (url: string): string => {
+  const parsed = /\/pull\/(\d+)\/?$/.exec(url);
+  return parsed === null ? url : `#${parsed[1]}`;
 };
 
 export const compact = (value: unknown, max = 160): string => {

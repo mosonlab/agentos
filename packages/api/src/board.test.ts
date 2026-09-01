@@ -400,7 +400,7 @@ test("chainAggregate sums member usage and groups a detached repair without infl
   assert.equal(aggregate.status, "TODO");
   assert.deepEqual(aggregate.frontier, {
     taskId: "repair", title: "Merge-tail repair", status: "TODO", latestRun: {
-      id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.50", startedAt: null, endedAt: null,
+      id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "0.50", startedAt: null, endedAt: null, pullRequestUrl: null,
     }, mergeOutcome: null, failureReason: null,
   });
   assert.equal(aggregate.activation.state, "idle");
@@ -425,7 +425,7 @@ test("chainAggregate projects an active detached repair without moving the front
     repairKind: "gate-fix",
     latestRun: {
       id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST",
-      costUsd: null, startedAt, endedAt: null,
+      costUsd: null, startedAt, endedAt: null, pullRequestUrl: null,
     },
   });
 });
@@ -526,7 +526,7 @@ test("the projection drops the Run and Session columns the board never reads", (
   }), null, moveContext);
   assert.deepEqual(card.latestRun, {
     id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", codexServiceTier: "DEFAULT", costUsd: "1.25",
-    startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"),
+    startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"), pullRequestUrl: null,
   });
   assert.equal(card.taskCost?.costUsd, "1.25");
 });
@@ -548,6 +548,19 @@ test("the latest run carries its claimed Codex service tier", () => {
     session: null,
   }] }), null, moveContext);
   assert.equal(card.latestRun?.codexServiceTier, "FAST");
+});
+
+test("the latest run carries the pull request it published, and null when it published none", () => {
+  // The card's footer links this; the board reads no other delivery column.
+  const run = (pullRequestUrl: string | null) => ({
+    id: "r1", runNumber: 1, status: "SUCCEEDED" as const, model: "gpt-5.6-sol:high",
+    codexServiceTier: "DEFAULT" as const, budgetGrants: 0, pullRequestUrl, session: null,
+  });
+  assert.equal(
+    boardCard(row({ runs: [run("https://github.com/o/r/pull/39")] }), null, moveContext).latestRun?.pullRequestUrl,
+    "https://github.com/o/r/pull/39",
+  );
+  assert.equal(boardCard(row({ runs: [run(null)] }), null, moveContext).latestRun?.pullRequestUrl, null);
 });
 
 test("a task with no runs reports no latest run rather than an empty one", () => {
@@ -577,7 +590,7 @@ test("task cost sums every run including failures and marks an estimated summand
     }) },
     { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", codexServiceTier: "DEFAULT", budgetGrants: 0, session: session({ costUsd: "1.25" }) },
   ] }), null, moveContext);
-  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null });
+  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
 });
@@ -744,7 +757,7 @@ test("readBoard projects an active repair kind and latest Run without replacing 
     repairKind: "gate-fix",
     latestRun: {
       id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST",
-      costUsd: null, startedAt, endedAt: null,
+      costUsd: null, startedAt, endedAt: null, pullRequestUrl: null,
     },
   });
 });
