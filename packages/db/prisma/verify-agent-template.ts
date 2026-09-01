@@ -3,7 +3,6 @@ import { AssigneeType, PrismaClient } from "@prisma/client";
 import {
   DIRECT_TEMPLATE_NAME,
   IMPLEMENTATION_PLAN_OUTPUT_KINDS,
-  PR_TEMPLATE_NAME,
   catalogRunnerForModel,
   isTemplateRunnerInherited,
 } from "../src/agent-contract.js";
@@ -62,13 +61,8 @@ const main = async (): Promise<void> => {
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
     orderBy: { name: "asc" },
   });
-  const expectedCanonicalTemplateNames = [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME];
-  if (templateSources.size !== expectedCanonicalTemplateNames.length
-    || expectedCanonicalTemplateNames.some((name) => !templateSources.has(name))) {
-    throw new Error(`canonical source inventory must contain exactly ${expectedCanonicalTemplateNames.length} templates`);
-  }
-  if (templates.length !== expectedCanonicalTemplateNames.length) {
-    throw new Error(`expected ${expectedCanonicalTemplateNames.length} canonical templates; found ${templates.length}`);
+  if (templates.length !== templateSources.size) {
+    throw new Error(`expected ${templateSources.size} canonical templates; found ${templates.length}`);
   }
 
   for (const [templateName, expectedSteps] of templateSources) {

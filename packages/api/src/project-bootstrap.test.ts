@@ -15,6 +15,7 @@ import {
 
 import {
   createProjectBootstrap,
+  defaultProjectBootstrapLoaders,
   type ProjectBootstrapLoaders,
   PROJECT_BOOTSTRAP_ROLE_NAMES,
   PROJECT_SLUG_TAKEN,
@@ -37,7 +38,21 @@ const agentSources = (): AgentSources => ({
   })),
 });
 
-const templateSteps = (): TemplateStepSource[] => [];
+const templateSteps = (): TemplateStepSource[] => PROJECT_BOOTSTRAP_ROLE_NAMES.map((agentName, index) => ({
+  stepIndex: index + 1,
+  name: `Step ${index + 1}`,
+  layer: index + 1,
+  agentName,
+  approvalGate: false,
+  outputKind: `output-${index + 1}`,
+  attachmentsFromPrevious: false,
+  priorOutputKinds: [],
+  opensPullRequest: false,
+  requiresCommit: false,
+  baseFromStepIndex: null,
+  spawnPolicy: null,
+  prompt: `Prompt ${index + 1}`,
+}));
 
 const loaders = (overrides: Partial<ProjectBootstrapLoaders> = {}): ProjectBootstrapLoaders => ({
   loadAgentSources: async () => agentSources(),
@@ -51,6 +66,12 @@ const transactionOnly = (error?: unknown): PrismaClient => ({
     throw new Error("transaction must not be opened");
   },
 } as unknown as PrismaClient);
+
+test("the release template loader reads only the PR workflow needed by project bootstrap", async () => {
+  const sources = await defaultProjectBootstrapLoaders.loadAllTemplateStepSources();
+  assert.deepEqual([...sources.keys()], [PR_TEMPLATE_NAME]);
+  assert.equal(sources.get(PR_TEMPLATE_NAME)?.length, 4);
+});
 
 test("project input validation runs before source loaders and the transaction", async () => {
   let loaderCalls = 0;
@@ -94,6 +115,16 @@ test("project bootstrap validates source inventories before opening its transact
       loadAllTemplateStepSources: async () => new Map(),
     })),
     /pr-engineer-workflow/u,
+  );
+  assert.equal(transactionCalls, 0);
+
+  await assert.rejects(
+    () => createProjectBootstrap(database, input, loaders({
+      loadAllTemplateStepSources: async () => new Map([[PR_TEMPLATE_NAME, templateSteps().map((step, index) => (
+        index === 3 ? { ...step, agentName: "replacement-review-fixer" } : step
+      ))]]),
+    })),
+    /role set/u,
   );
   assert.equal(transactionCalls, 0);
 });

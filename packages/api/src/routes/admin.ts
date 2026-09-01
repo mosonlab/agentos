@@ -11,7 +11,7 @@ import type {
 import { z } from "zod";
 
 import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts } from "../costs.js";
-import { createProjectBootstrap, projectInput } from "../project-bootstrap.js";
+import { createProjectBootstrap, projectFields, projectInput } from "../project-bootstrap.js";
 import { encryptSecret } from "../secrets.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
@@ -23,11 +23,6 @@ import {
   type RouteDeps,
 } from "./support.js";
 
-const projectFields = {
-  name: z.string().trim().min(1).max(120),
-  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  yamlDocument: z.string(),
-};
 const projectPatch = z.object(projectFields).partial().refine((value) => Object.keys(value).length > 0);
 
 const environmentFields = {

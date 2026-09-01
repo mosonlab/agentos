@@ -1,7 +1,7 @@
 import {
   applyCanonicalInstallation,
   loadAgentSources,
-  loadAllTemplateStepSources,
+  loadTemplateStepSources,
   NetworkingMode,
   planCanonicalInstallation,
   Prisma,
@@ -15,7 +15,7 @@ import {
 import { z } from "zod";
 
 /** The public fields accepted by `POST /projects`. */
-const projectFields = {
+export const projectFields = {
   name: z.string().trim().min(1).max(120),
   slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
   yamlDocument: z.string(),
@@ -28,11 +28,7 @@ export const projectInput = z.object({
 
 export type ProjectInput = z.infer<typeof projectInput>;
 
-/**
- * Only these canonical roles are installed in a newly created Project. The
- * source loader still reads and validates the complete agents/ contract, but
- * a Project bootstrap must not silently broaden its installed role set.
- */
+/** The exact role set the canonical PR workflow is allowed to install. */
 export const PROJECT_BOOTSTRAP_ROLE_NAMES = [
   "senior-dev-luna",
   "review-coordinator-sol",
@@ -54,7 +50,9 @@ export type ProjectBootstrapLoaders = Readonly<{
 
 export const defaultProjectBootstrapLoaders: ProjectBootstrapLoaders = {
   loadAgentSources,
-  loadAllTemplateStepSources,
+  loadAllTemplateStepSources: async () => new Map([
+    [PR_TEMPLATE_NAME, await loadTemplateStepSources(PR_TEMPLATE_NAME)],
+  ]),
 };
 
 export const PROJECT_SLUG_TAKEN = "project-slug-taken" as const;
@@ -67,9 +65,12 @@ export type CreateProjectResult =
 const isProjectSlugTaken = (error: unknown): boolean =>
   error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034");
 
-const requireRoleSources = (sources: AgentSources): Map<string, AgentSources["roles"][number]> => {
+const requireRoleSources = (
+  sources: AgentSources,
+  requiredRoleNames: readonly string[],
+): Map<string, AgentSources["roles"][number]> => {
   const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
-  for (const roleName of PROJECT_BOOTSTRAP_ROLE_NAMES) {
+  for (const roleName of requiredRoleNames) {
     if (!rolesByName.has(roleName)) {
       throw new Error(`Canonical role ${roleName} was not found`);
     }
@@ -83,6 +84,20 @@ const requireTemplateSource = (
   const steps = sources.get(PR_TEMPLATE_NAME);
   if (!steps) throw new Error(`Canonical template source ${PR_TEMPLATE_NAME} was not found`);
   return steps;
+};
+
+const requireTemplateRoleNames = (steps: readonly TemplateStepSource[]): readonly string[] => {
+  const roleNames = [...new Set(steps.flatMap((step) => step.agentName === null ? [] : [step.agentName]))];
+  const expected = new Set<string>(PROJECT_BOOTSTRAP_ROLE_NAMES);
+  const missing = PROJECT_BOOTSTRAP_ROLE_NAMES.filter((name) => !roleNames.includes(name));
+  const unexpected = roleNames.filter((name) => !expected.has(name));
+  if (missing.length > 0 || unexpected.length > 0) {
+    throw new Error(
+      `Canonical template ${PR_TEMPLATE_NAME} role set must be exactly ${PROJECT_BOOTSTRAP_ROLE_NAMES.join(", ")}; `
+      + `missing ${missing.join(", ") || "none"}; unexpected ${unexpected.join(", ") || "none"}`,
+    );
+  }
+  return roleNames;
 };
 
 /**
@@ -107,11 +122,11 @@ export const createProjectBootstrap = async (
     sourceLoaders.loadAgentSources(),
     sourceLoaders.loadAllTemplateStepSources(),
   ]);
-  const rolesByName = requireRoleSources(agentSources);
   const templateSteps = requireTemplateSource(allTemplateSources);
-  // The installer receives a one-entry map deliberately: this operation owns
-  // only the PR workflow, while the complete source loader remains useful for
-  // contract validation and future canonical installation paths.
+  const roleNames = requireTemplateRoleNames(templateSteps);
+  const rolesByName = requireRoleSources(agentSources, roleNames);
+  // The operation owns only the PR workflow, so the installer receives only
+  // that template even when an injected loader returns a wider source map.
   const templateSources = new Map<CanonicalTemplateName, readonly TemplateStepSource[]>([
     [PR_TEMPLATE_NAME, templateSteps],
   ]);
@@ -128,7 +143,7 @@ export const createProjectBootstrap = async (
         },
       });
 
-      for (const roleName of PROJECT_BOOTSTRAP_ROLE_NAMES) {
+      for (const roleName of roleNames) {
         const role = rolesByName.get(roleName)!;
         await tx.agent.create({
           data: {
