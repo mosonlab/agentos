@@ -471,6 +471,223 @@ export const openStopQuestion = async (
   return { id: card.id };
 };
 
+type StopResultActivity = {
+  id: string;
+  taskId: string;
+  createdAt: Date;
+  actorType: string;
+  actorId: string | null;
+  metadata: Prisma.JsonValue | null;
+};
+
+const stoppedResultMetadata = (
+  row: Pick<StopResultActivity, "metadata">,
+): { condition: StopCondition; evidence: string; sourceRunId: string | null } | null => {
+  const metadata = asRecord(row.metadata);
+  if (metadata?.kind !== MERGE_INTEGRATOR_KIND.result || metadata.outcome !== "stopped") return null;
+  if (!isStopCondition(metadata.condition)) return null;
+  return {
+    condition: metadata.condition,
+    evidence: typeof metadata.evidence === "string" ? metadata.evidence : "",
+    sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
+  };
+};
+
+/**
+ * The newest result activity on a Task. A later result is authoritative even
+ * when it is a merged result, so a prior stopped result must never be adopted
+ * after the chain has recorded a newer outcome.
+ */
+const latestResultActivity = async (
+  tx: Tx,
+  integratorTaskId: string,
+): Promise<StopResultActivity | null> => {
+  const rows = await tx.taskActivity.findMany({
+    where: { taskId: integratorTaskId },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, taskId: true, createdAt: true, actorType: true, actorId: true, metadata: true },
+  });
+  return rows.find((row) => asRecord(row.metadata)?.kind === MERGE_INTEGRATOR_KIND.result) ?? null;
+};
+
+/**
+ * Resolve the identities attached to a stop question. A source Run is the
+ * durable owner of the Agent and Session, not caller-supplied strings. The
+ * fallback values are for historical control-plane results whose source Run
+ * was not recorded; new fenced callers always have the Run row available.
+ */
+const stopQuestionIdentity = async (
+  tx: Tx,
+  task: IntegratorTask,
+  stop: { sourceRunId: string | null },
+  input: { agentId?: string | null; sessionId?: string | null },
+): Promise<{ agentId: string; sessionId: string }> => {
+  if (!stop.sourceRunId) {
+    // A question without a Session cannot be answered through the normal Inbox
+    // decision transaction. Historical source-less stops therefore need an
+    // explicit identity supplied by the repair caller; guessing the Task's
+    // assignee is not enough to bind the decision's Run.
+    if (!input.agentId || !input.sessionId) {
+      throw new Error(`Merge stop ${task.id} has no source Run; an explicit Agent and Session are required`);
+    }
+    return { agentId: input.agentId, sessionId: input.sessionId };
+  }
+
+  const sourceRun = await tx.run.findUnique({
+    where: { id: stop.sourceRunId },
+    select: { taskId: true, agentId: true, session: { select: { id: true } } },
+  });
+  if (!sourceRun) throw new Error(`Merge stop source Run ${stop.sourceRunId} no longer exists`);
+  if (sourceRun.taskId !== task.id) {
+    throw new Error(`Merge stop ${stop.sourceRunId} is not owned by integrator task ${task.id}`);
+  }
+  if (!sourceRun.session) {
+    throw new Error(`Merge stop source Run ${stop.sourceRunId} has no Session identity`);
+  }
+  return { agentId: sourceRun.agentId, sessionId: sourceRun.session.id };
+};
+
+export type IntegratorStopLandingInput = {
+  integratorTaskId: string;
+  /** Existing append-only result activity to adopt. */
+  resultActivityId?: string | null;
+  /** Required only when creating a result activity. */
+  condition?: StopCondition;
+  evidence?: string;
+  sourceRunId?: string | null;
+  agentId?: string | null;
+  sessionId?: string | null;
+};
+
+export type IntegratorStopLandingResult = {
+  stopId: string;
+  /** Non-null only when this call inserted the question. */
+  questionId: string | null;
+  /** True when this call created the result activity rather than adopting one. */
+  resultCreated: boolean;
+  /** True when this is the ordinary canonical base-drift worker handoff. */
+  questionDeferred: boolean;
+};
+
+/**
+ * Land one stopped `mergeIntegrator.result` under the integrator Task mutex.
+ *
+ * The caller supplies a transaction client, and this function takes the Task
+ * row lock before reading or writing anything else. It accepts either the
+ * exact append-only activity already written by a fenced Session or no activity
+ * (in which case it adopts the newest same-Run stopped result, or creates the
+ * control-plane result). The activity's condition/evidence/sourceRunId remain
+ * authoritative; only the new-result branch uses the input payload.
+ *
+ * For a canonical ordinary `base-drift`, the Task transition still lands here,
+ * but the question remains deferred to the existing recovery worker. Every
+ * other condition gets its condition-specific question before this transaction
+ * may commit. Consequently an Inbox failure rolls back a newly-created result
+ * and the REVIEW transition together with the caller's transaction.
+ */
+export const landIntegratorStop = async (
+  tx: Tx,
+  input: IntegratorStopLandingInput,
+): Promise<IntegratorStopLandingResult> => {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${input.integratorTaskId} FOR UPDATE
+  `;
+  if (!locked[0]) throw new Error(`Merge integrator task ${input.integratorTaskId} no longer exists`);
+  const task = await loadIntegratorTask(tx, input.integratorTaskId);
+  if (!task || !taskIsIntegratorStep(task)) {
+    throw new Error(`Task ${input.integratorTaskId} is not a merge integrator step`);
+  }
+
+  let activity: StopResultActivity | null = null;
+  let resultCreated = false;
+  if (input.resultActivityId) {
+    activity = await tx.taskActivity.findUnique({
+      where: { id: input.resultActivityId },
+      select: { id: true, taskId: true, createdAt: true, actorType: true, actorId: true, metadata: true },
+    });
+    if (!activity) throw new Error(`Merge stop result activity ${input.resultActivityId} no longer exists`);
+    if (activity.taskId !== task.id) {
+      throw new Error(`Merge stop result activity ${input.resultActivityId} belongs to another task`);
+    }
+  } else if (input.sourceRunId) {
+    const latest = await latestResultActivity(tx, task.id);
+    const parsed = latest ? stoppedResultMetadata(latest) : null;
+    if (latest && parsed?.sourceRunId === input.sourceRunId) activity = latest;
+  }
+
+  if (!activity) {
+    if (!isStopCondition(input.condition)) {
+      throw new Error(`Cannot record merge stop without a known condition for task ${task.id}`);
+    }
+    if (typeof input.evidence !== "string") {
+      throw new Error(`Cannot record merge stop ${input.condition} without evidence`);
+    }
+    const sourceRunId = input.sourceRunId ?? null;
+    const created = await tx.taskActivity.create({ data: {
+      taskId: task.id,
+      actorType: "control-plane",
+      body: `Mechanical merge stopped: ${input.condition}`,
+      metadata: {
+        kind: MERGE_INTEGRATOR_KIND.result,
+        schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+        outcome: "stopped",
+        condition: input.condition,
+        evidence: input.evidence,
+        sourceRunId,
+      },
+    } });
+    activity = {
+      id: created.id,
+      taskId: task.id,
+      createdAt: created.createdAt,
+      actorType: created.actorType,
+      actorId: created.actorId,
+      metadata: created.metadata,
+    };
+    resultCreated = true;
+  }
+
+  const stopped = stoppedResultMetadata(activity);
+  if (!stopped) {
+    throw new Error(`Merge result activity ${activity.id} is not a valid stopped result`);
+  }
+  // A terminal answer is the state-machine's durable idempotency marker. A
+  // replay must not reopen the Task or manufacture a second question after
+  // the operator has already closed this stop.
+  const dispositions = await stopAnswerDispositions(tx, task.id, activity.id);
+  if (dispositions.some((disposition) => isTerminalDisposition(disposition))) {
+    return {
+      stopId: activity.id,
+      questionId: null,
+      resultCreated,
+      questionDeferred: stopped.condition === "base-drift" && isCanonicalIntegratorStep(task.templateStep),
+    };
+  }
+  const questionDeferred = stopped.condition === "base-drift" && isCanonicalIntegratorStep(task.templateStep);
+  await tx.task.update({
+    where: { id: task.id },
+    data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${stopped.condition}` },
+  });
+
+  const question = questionDeferred ? null : await (async () => {
+    const identity = await stopQuestionIdentity(tx, task, stopped, input);
+    return openStopQuestion(tx, {
+      integratorTaskId: task.id,
+      stopId: activity.id,
+      condition: stopped.condition,
+      evidence: stopped.evidence,
+      agentId: identity.agentId,
+      sessionId: identity.sessionId,
+    });
+  })();
+  return {
+    stopId: activity.id,
+    questionId: question?.id ?? null,
+    resultCreated,
+    questionDeferred,
+  };
+};
+
 export type StopAnswerOutcome = {
   disposition: Disposition;
   condition: StopCondition;
@@ -725,35 +942,8 @@ export const recordIntegratorStop = async (
     sourceRunId: string;
   },
 ): Promise<{ stopId: string; questionId: string | null }> => {
-  const stop = await tx.taskActivity.create({ data: {
-    taskId: input.integratorTaskId,
-    actorType: "control-plane",
-    body: `Mechanical merge stopped: ${input.condition}`,
-    metadata: {
-      kind: MERGE_INTEGRATOR_KIND.result,
-      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
-      outcome: "stopped",
-      condition: input.condition,
-      evidence: input.evidence,
-      sourceRunId: input.sourceRunId,
-    },
-  } });
-  await tx.task.update({
-    where: { id: input.integratorTaskId },
-    data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${input.condition}` },
-  });
-  const task = await loadIntegratorTask(tx, input.integratorTaskId);
-  const automaticBaseDriftCandidate = input.condition === "base-drift"
-    && isCanonicalIntegratorStep(task?.templateStep);
-  const question = automaticBaseDriftCandidate ? null : await openStopQuestion(tx, {
-    integratorTaskId: input.integratorTaskId,
-    stopId: stop.id,
-    condition: input.condition,
-    evidence: input.evidence,
-    agentId: input.agentId,
-    sessionId: input.sessionId,
-  });
-  return { stopId: stop.id, questionId: question?.id ?? null };
+  const landed = await landIntegratorStop(tx, input);
+  return { stopId: landed.stopId, questionId: landed.questionId };
 };
 
 // ---------------------------------------------------------------------------
