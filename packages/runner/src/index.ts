@@ -6,6 +6,8 @@ import {
 } from "@anneal/db/service-lock";
 import { config as loadEnvironment } from "dotenv";
 
+import type { RunnerConfig } from "./config.js";
+
 loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true });
 
 // Before the config, the token check and the adapters: whichever of those fails,
@@ -14,11 +16,12 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // one of them being stale while the other was current (issue #140).
 console.log(`Anneal runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
-const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }] = await Promise.all([
+const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }, { runPollingLoop }] = await Promise.all([
   import("./config.js"),
   import("./adapters.js"),
   import("./runner.js"),
   import("./reclaim.js"),
+  import("./polling-loop.js"),
 ]);
 
 const config = loadRunnerConfig();
@@ -86,32 +89,21 @@ console.log(`Anneal local runner ${config.runnerId} polling ${config.apiUrl}`);
 // Workspace disposal belongs to this process, because it is the one that owns
 // the root (issue #115). The control plane only publishes intents; if nobody
 // sweeps, directories accumulate and nothing is ever wrongly deleted.
-let nextReclaimAt = 0;
-const sweepWorkspaces = async (): Promise<void> => {
-  if (Date.now() < nextReclaimAt) return;
-  nextReclaimAt = Date.now() + config.workspaceReclaimIntervalMs;
-  try {
-    const sweep = await reclaimWorkspaces(config);
-    if (sweep.offered > 0 || sweep.settled > 0) {
-      console.log(`Workspace reclaim: ${sweep.removed} removed, ${sweep.refused} refused, ${sweep.failed} failed of ${sweep.offered} offered; ${sweep.settled} stale intent(s) settled`);
-    }
-  } catch (error: unknown) {
-    // Never fatal, and never a reason to skip a poll: a control plane that
-    // cannot answer the reclaim question can still hand out work.
-    console.error("Workspace reclaim sweep failed", error);
+const reclaim = async (): Promise<void> => {
+  const sweep = await reclaimWorkspaces(config);
+  if (sweep.offered > 0 || sweep.settled > 0) {
+    console.log(`Workspace reclaim: ${sweep.removed} removed, ${sweep.refused} refused, ${sweep.failed} failed of ${sweep.offered} offered; ${sweep.settled} stale intent(s) settled`);
   }
 };
 
-while (!stopping) {
-  await sweepWorkspaces();
-  try {
-    const ranTask = await pollForTask(config);
-    if (ranTask) continue;
-  } catch (error: unknown) {
-    console.error("Runner poll failed", error);
-  }
-  await new Promise<void>((resolve) => setTimeout(resolve, config.pollIntervalMs));
-}
+// `claimMaxLoadAverage` is added to RunnerConfig by the configuration change
+// in this chain. Keep this adapter buildable against the starting snapshot so
+// the polling-loop change can be integrated independently.
+await runPollingLoop(config as RunnerConfig & { claimMaxLoadAverage: number }, {
+  reclaim,
+  claim: () => pollForTask(config),
+  shouldStop: () => stopping,
+});
 
 // The lock outlives the loop and nothing else: released here, on the ordinary
 // stop path, so the key is free the moment this runner is no longer polling.
