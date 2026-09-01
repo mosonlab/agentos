@@ -228,10 +228,27 @@ const fixedImplementationPersistenceRefusal = async (
         body: true,
         commitSha: true,
         runId: true,
-        run: { select: { taskId: true, status: true } },
+        run: { select: { taskId: true } },
       } },
     },
   });
+  // Review reports are immutable and stay bound to their authoring Run, so a
+  // later successful Run of the sibling task may validate the same commit.
+  // This mirrors the prior-Run reuse rule in canonicalOutputRefusal below.
+  const successfulSiblingRuns = await tx.run.findMany({
+    where: {
+      taskId: { in: reviewTasks.map(({ id }) => id) },
+      status: RunStatus.SUCCEEDED,
+    },
+    select: { taskId: true, headSha: true },
+  });
+  const successfulSiblingHeads = new Map<string, Set<string>>();
+  for (const run of successfulSiblingRuns) {
+    if (run.taskId === null || run.headSha === null) continue;
+    const heads = successfulSiblingHeads.get(run.taskId) ?? new Set<string>();
+    heads.add(run.headSha);
+    successfulSiblingHeads.set(run.taskId, heads);
+  }
   const reports: ReviewArtifact[] = [];
   for (const kind of ["sol-findings", "blind-findings"] as const) {
     const matches = reviewTasks.filter((candidate) => (
@@ -243,7 +260,10 @@ const fixedImplementationPersistenceRefusal = async (
       return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
     }
     const output = matches[0]!.stepOutput!;
-    if (output.runId === null || output.run?.taskId !== matches[0]!.id || output.run.status !== RunStatus.SUCCEEDED) {
+    if (output.runId === null
+      || output.run?.taskId !== matches[0]!.id
+      || output.commitSha === null
+      || !successfulSiblingHeads.get(matches[0]!.id)?.has(output.commitSha)) {
       return `fixed-implementation ${kind} sibling output is not backed by a successful completed Run`;
     }
     let reportValue: unknown;

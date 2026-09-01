@@ -132,6 +132,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   registerSessionTail();
 
   app.onError((error, context) => {
+    if (error instanceof SyntaxError) {
+      return refusalJson(context, refusal("invalid-request", "Request body must be valid JSON", { code: "invalid-json" }));
+    }
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
     if (error instanceof SerializableTransactionExhaustedError) {
       return context.json({ error: "Transaction is busy; retry later" }, 503);
