@@ -87,7 +87,7 @@ const isPrDeliveryStep = (task: {
   && task.chainIndex !== null
   && Number.isInteger(task.chainIndex)
   && task.chainIndex > 0
-  && task.templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
+  && task.templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
   && PR_DELIVERY_OUTPUT_KINDS.includes(task.templateStep.outputKind as (typeof PR_DELIVERY_OUTPUT_KINDS)[number]);
 
 /**
