@@ -87,7 +87,8 @@ const main = async (): Promise<void> => {
       const prSource = templateSources.get(PR_TEMPLATE_NAME);
       if (!prSource) throw new Error(`Template ${PR_TEMPLATE_NAME} source was not loaded`);
       const prRows = installationRows.filter((row) => row.name === PR_TEMPLATE_NAME);
-      const missingPullRequestTemplatePlan = prRows.length === 0
+      const canonicalPrRowPresent = prRows.some((row) => row.projectId === canonicalProject.id);
+      const missingPullRequestTemplatePlan = !canonicalPrRowPresent
         ? planCanonicalInstallation(
           [],
           new Map([[PR_TEMPLATE_NAME, prSource]]),

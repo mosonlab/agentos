@@ -7,7 +7,6 @@ import {
   loadAgentSources,
   loadAllTemplateStepSources,
   NetworkingMode,
-  Prisma,
   PR_TEMPLATE_NAME,
   type PrismaClient,
   type Project,
@@ -89,12 +88,50 @@ const bindFailureAfterAgents = (real: PrismaClient): PrismaClient => {
   }) as PrismaClient;
 };
 
+type BootstrapAgentResponse = {
+  name: string;
+  environmentId: string;
+  title: string;
+  model: string;
+  runnerPreference: string;
+  inboxAccess: boolean;
+  foundationalPrompt: string;
+  rolePrompt: string;
+  disabledTools: string[];
+};
+
+type BootstrapTemplateResponse = {
+  name: string;
+  variables: string[];
+  steps: Array<{
+    name: string;
+    stepIndex: number;
+    layer: number;
+    assigneeAgent: { name: string } | null;
+    approvalGate: boolean;
+    outputKind: string;
+    priorOutputKinds: string[];
+    attachmentsFromPrevious: boolean;
+    opensPullRequest: boolean;
+    requiresCommit: boolean;
+    baseFromStepIndex: number | null;
+    spawnPolicy: unknown;
+  }>;
+};
+
 test("POST /projects creates the workflow-ready Project shape", async () => {
   const created = await call("POST", "/projects", body());
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const project = created.body as Project;
 
-  const environment = await db.environment.findMany({ where: { projectId: project.id } });
+  const environmentResponse = await call("GET", `/projects/${project.id}/environments`);
+  assert.equal(environmentResponse.status, 200, JSON.stringify(environmentResponse.body));
+  const environment = environmentResponse.body as Array<{
+    id: string;
+    name: string;
+    networking: NetworkingMode;
+    allowedHosts: string[];
+  }>;
   assert.equal(environment.length, 1);
   assert.deepEqual(environment.map(({ name, networking, allowedHosts }) => ({ name, networking, allowedHosts })), [{
     name: "local",
@@ -106,7 +143,10 @@ test("POST /projects creates the workflow-ready Project shape", async () => {
   const expectedRoles = new Map(roles.roles
     .filter(({ name }) => (PROJECT_BOOTSTRAP_ROLE_NAMES as readonly string[]).includes(name))
     .map((role) => [role.name, role]));
-  const agents = await db.agent.findMany({ where: { projectId: project.id }, orderBy: { name: "asc" } });
+  const agentResponse = await call("GET", `/projects/${project.id}/agents`);
+  assert.equal(agentResponse.status, 200, JSON.stringify(agentResponse.body));
+  const agents = (agentResponse.body as BootstrapAgentResponse[])
+    .sort((left, right) => left.name.localeCompare(right.name));
   assert.deepEqual(agents.map(({ name }) => name), [...PROJECT_BOOTSTRAP_ROLE_NAMES].sort());
   for (const agent of agents) {
     const role = expectedRoles.get(agent.name)!;
@@ -130,10 +170,9 @@ test("POST /projects creates the workflow-ready Project shape", async () => {
     });
   }
 
-  const templates = await db.taskTemplate.findMany({
-    where: { projectId: project.id },
-    include: { steps: { orderBy: { stepIndex: "asc" }, include: { assigneeAgent: { select: { id: true, name: true } } } } },
-  });
+  const templateResponse = await call("GET", `/projects/${project.id}/task-templates`);
+  assert.equal(templateResponse.status, 200, JSON.stringify(templateResponse.body));
+  const templates = templateResponse.body as BootstrapTemplateResponse[];
   assert.equal(templates.length, 1);
   const template = templates[0]!;
   assert.equal(template.name, PR_TEMPLATE_NAME);
@@ -216,9 +255,8 @@ test("role and template source failures happen before any Project row is written
     },
   ];
   for (const { slug, loaders } of cases) {
-    const failed = await call("POST", "/projects", body(slug), db, loaders);
+    const failed = await call("POST", "/projects", body(slug), db, { projectBootstrapLoaders: loaders });
     assert.ok(failed.status >= 500, `${slug}: ${failed.status}`);
     assert.equal(await db.project.count({ where: { slug } }), 0, slug);
   }
 });
-
