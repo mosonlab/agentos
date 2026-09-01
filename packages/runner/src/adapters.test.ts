@@ -10,7 +10,8 @@ import test from "node:test";
 import {
   adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
-  PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
+  IMPLEMENTATION_PROOF_BOUNDARY, PREFLIGHT_REASONS, promptHashFor, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor,
+  type AdapterState, type ExitEvidence,
 } from "./adapters.js";
 import { claudeDeclaration, parseClaudeTranscript } from "./adapters/claude.js";
 import { CODEX_STARTER_MODEL, codexDeclaration, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
@@ -80,6 +81,16 @@ const scratch = {
   configRoot: "/scratch/run-1/codex-config",
 };
 const productionRoot = join(homedir(), ".agentos", "runs");
+
+const proofBoundaryHeading = "Platform-pinned Implementation proof boundary";
+const proofBoundaryFrom = (input: string): string => {
+  const start = input.indexOf(proofBoundaryHeading);
+  assert.notEqual(start, -1, "proof boundary heading is absent");
+  const end = input.indexOf("\n\n", start);
+  return input.slice(start, end === -1 ? input.length : end);
+};
+
+const countProofBoundaries = (input: string): number => input.split(proofBoundaryHeading).length - 1;
 
 const runSpec = (disabledTools: string[] = []) => ({
   config: { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: [] } as unknown as RunnerConfig,
@@ -165,6 +176,56 @@ test("buildPrompt injects runner-owned worktree containment into every session",
     assert.match(prompt, /Any git worktree this session creates must live inside the run workspace using a relative path/u);
     assert.match(prompt, /\.\/\.agentos\/worktrees\/<name>/u);
     assert.match(prompt, /This rule overrides any contrary repository documentation/u);
+  }
+});
+
+test("every model-executed step receives one byte-identical proof boundary on fresh start and resume", { timeout: 60_000 }, async () => {
+  const outputKinds = [
+    "spec",
+    "plan",
+    "plan-review",
+    "revised-plan",
+    "revalidation",
+    "implementation",
+    "sol-findings",
+    "blind-findings",
+    "fixed-implementation",
+    "documentation",
+    "regression-verification-v2",
+  ] as const;
+  const runners = ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[];
+  for (const outputKind of outputKinds) {
+    for (const runner of runners) {
+      const claimed: ClaimedTask = {
+        ...claim,
+        runner,
+        task: { ...claim.task, templateStep: { name: outputKind, outputKind } },
+      };
+      const spec = { ...runSpec(), claim: claimed, prompt: buildPrompt(claimed) };
+      const resume = { ...spec, providerConversationId: `thread-${runner}`, input: `continue ${outputKind}` };
+      for (const input of [inputForRunner(spec), inputForRunner(spec, resume)]) {
+        assert.equal(countProofBoundaries(input), 1, `${runner} ${outputKind} duplicated the proof boundary`);
+        assert.equal(proofBoundaryFrom(input), IMPLEMENTATION_PROOF_BOUNDARY);
+        assert.equal(promptHashFor(input), sha256(input));
+      }
+      const started = await launch(runner, claimed);
+      const startedInput = inputForRunner(spec);
+      assert.equal(started.report.sha256, sha256(startedInput));
+      assert.equal(
+        started.events.find((event) => event.type === "PROCESS_STARTED")?.payload.promptHash,
+        promptHashFor(startedInput),
+      );
+      const resumed = await launch(runner, claimed, {
+        providerConversationId: resume.providerConversationId,
+        input: resume.input,
+      });
+      const resumedInput = inputForRunner(spec, resume);
+      assert.equal(resumed.report.sha256, sha256(resumedInput));
+      assert.equal(
+        resumed.events.find((event) => event.type === "PROCESS_STARTED")?.payload.promptHash,
+        promptHashFor(resumedInput),
+      );
+    }
   }
 });
 
@@ -576,10 +637,21 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
     assert.ok(args.includes('agents.default_subagent_reasoning_effort="max"'));
     assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
   }
-  assert.match(buildPrompt(executioner), /maximum concurrent child threads: 8 \(root excluded\)/u);
-  assert.match(buildPrompt(executioner), /do not launch nested Codex CLI processes/u);
-  assert.match(buildPrompt(executioner), /one affected-workspace compile or typecheck after integration/u);
-  assert.match(buildPrompt(executioner), /Do not run repository-wide suites or the repository Merge Gate in Implementation/u);
+  const executionerPrompt = buildPrompt(executioner);
+  assert.equal(countProofBoundaries(executionerPrompt), 1);
+  assert.equal(proofBoundaryFrom(executionerPrompt), IMPLEMENTATION_PROOF_BOUNDARY);
+  const nativeSection = executionerPrompt.slice(
+    executionerPrompt.indexOf("Platform-pinned native implementation subagents:"),
+    executionerPrompt.indexOf("\n\nTask:"),
+  );
+  assert.match(nativeSection, /model: gpt-5\.6-luna/u);
+  assert.match(nativeSection, /reasoning effort: max/u);
+  assert.match(nativeSection, /maximum concurrent child threads: 8 \(root excluded\)/u);
+  assert.match(nativeSection, /do not launch nested Codex CLI processes/u);
+  assert.match(nativeSection, /same child model and concurrency snapshot on fresh starts and resumes/u);
+  assert.match(nativeSection, /Do not select or escalate a child model/u);
+  assert.doesNotMatch(nativeSection, /Implementation proof is limited/u);
+  assert.doesNotMatch(nativeSection, /Do not run repository-wide suites or the repository Merge Gate in Implementation/u);
   assert.throws(
     () => buildPrompt({
       ...executioner,
@@ -706,7 +778,7 @@ test("no runner carries the prompt or the resume input in argv", () => {
   assert.deepEqual(argsForRunner("CODEX", spec, resume).slice(0, 2), ["exec", "resume"]);
   assert.equal(argsForRunner("CODEX", spec, resume).includes("thread-1"), true);
   assert.equal(inputForRunner(spec), "prompt");
-  assert.equal(inputForRunner(spec, resume), "again");
+  assert.equal(inputForRunner(spec, resume), `${IMPLEMENTATION_PROOF_BOUNDARY}\n\nagain`);
 });
 
 test("denied tools map in canonical order without consuming the prompt", () => {
@@ -836,6 +908,7 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
   // of its own is outside this boundary and outside what Anneal controls.
   const prompt = buildPrompt(claim);
   const resumeInput = "operator answered: approve";
+  const resumedSessionInput = `${IMPLEMENTATION_PROOF_BOUNDARY}\n\n${resumeInput}`;
   // What makes the tolerance above safe, kept checkable instead of asserted in a
   // comment: if a prompt ever grows outer whitespace, a CLI trimming it would be
   // dropping something Anneal meant to send.
@@ -854,10 +927,10 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
 
     const resumed = await launch(runner, claim, { providerConversationId: "thread-1", input: resumeInput });
     assert.equal(resumed.evidence.exitCode, 0);
-    assert.equal(resumed.report.bytes, Buffer.byteLength(resumeInput));
-    assert.equal(resumed.report.sha256, sha256(resumeInput), `${runner} altered the resume input on the way to stdin`);
+    assert.equal(resumed.report.bytes, Buffer.byteLength(resumedSessionInput));
+    assert.equal(resumed.report.sha256, sha256(resumedSessionInput), `${runner} altered the resume input on the way to stdin`);
     const resumedProcessStarted = resumed.events.find((event) => event.type === "PROCESS_STARTED");
-    assert.equal(resumedProcessStarted?.payload.promptHash, sha256(resumeInput));
+    assert.equal(resumedProcessStarted?.payload.promptHash, sha256(resumedSessionInput));
   }
 });
 

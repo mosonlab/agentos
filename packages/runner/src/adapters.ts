@@ -10,6 +10,7 @@ import { workspaceEnvironment } from "./adapters/environment.js";
 import { piDeclaration, piExtensionPath } from "./adapters/pi.js";
 import {
   createCliAdapter,
+  IMPLEMENTATION_PROOF_BOUNDARY,
   launchAdapterArgv,
   mcpServerPath,
   nodeBinaryPath,
@@ -75,6 +76,8 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     `- implementationBaseSha: ${claim.run.implementationBaseSha}`,
     `- implementationHeadSha: ${claim.run.implementationHeadSha}`,
   ] : []),
+  "",
+  IMPLEMENTATION_PROOF_BOUNDARY,
   ...ADAPTER_DECLARATIONS[claim.runner].promptSections(claim),
   "",
   `Task: ${claim.task.name}`,

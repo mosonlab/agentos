@@ -41,6 +41,13 @@ export type ClassifiedFailure = {
   operatorAction?: string;
 };
 
+export const IMPLEMENTATION_PROOF_BOUNDARY = [
+  "Platform-pinned Implementation proof boundary",
+  "Inside an Anneal Run, verification is limited to the affected workspace or workspaces: use `npm run <script> -w <workspace>` or the workspace-local equivalent, run `eslint` and `tsc` only over changed paths or one affected workspace, and run focused test files.",
+  "Do not run root `npm run build`, root `npm run lint`, root `npm run typecheck`, root `npm run test`, `eslint .`, or the repository Merge Gate inside a Run.",
+  "Repository-wide proof belongs to the Regression step and gate worker. Review steps verify claims by reading and workspace-scoped checks only.",
+].join("\n");
+
 export type HeartbeatSnapshot = {
   processAlive: boolean;
   lastProcessAliveAt: Date;
@@ -245,7 +252,9 @@ export const modelSpec = (raw: string): { model: string; effort: string | null }
  * The prompt or resume input is stdin, never argv. Persisted predecessor
  * outputs can exceed operating-system argv limits, and argv is visible in ps.
  */
-export const inputForRunner = (spec: RunSpec, resume?: ResumeSpec): string => resume?.input ?? spec.prompt;
+export const inputForRunner = (spec: RunSpec, resume?: ResumeSpec): string => resume
+  ? `${IMPLEMENTATION_PROOF_BOUNDARY}\n\n${resume.input}`
+  : spec.prompt;
 
 export const promptHashFor = (prompt: string): string => createHash("sha256").update(prompt).digest("hex");
 

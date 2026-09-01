@@ -9,6 +9,7 @@ import {
   buildChildEnvironment,
   buildPrompt,
   failureReasonFromEvidence,
+  inputForRunner,
   manifestFor,
   outputTail,
   PREFLIGHT_CLASS,
@@ -389,8 +390,9 @@ export const executeClaim = async (
       return;
     }
     const spec = { config, claim, workingDirectory: workspace.path, env, prompt, credentialsPath };
-    const launchedHandle = await runLease.launch(() => claim.resume
-      ? adapter.resume({ ...spec, ...claim.resume }, sink)
+    const resumeSpec = claim.resume ? { ...spec, ...claim.resume } : undefined;
+    const launchedHandle = await runLease.launch(() => resumeSpec
+      ? adapter.resume(resumeSpec, sink)
       : adapter.start(spec, sink));
     if (!launchedHandle) return;
     handle = launchedHandle;
@@ -431,7 +433,7 @@ export const executeClaim = async (
     // A resume dispatches its continuation input rather than the fresh prompt.
     // Keep the launch manifest and durable Run hash tied to the bytes that this
     // invocation actually handed to the provider.
-    const dispatchedPrompt = claim.resume?.input ?? prompt;
+    const dispatchedPrompt = inputForRunner(spec, resumeSpec);
     const manifest = manifestFor(spec, dispatchedPrompt);
     await controlPlane.startRun(config, claim, {
       adapterVersion: ADAPTER_VERSION,
