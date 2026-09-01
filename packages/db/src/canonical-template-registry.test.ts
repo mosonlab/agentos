@@ -15,13 +15,28 @@ import {
 } from "./canonical-template-installation.js";
 import type { TemplateStepSource } from "./template-sources.js";
 
-test("the pull-request template has current identity and explicit repair ordinals", () => {
+test("the pull-request template has current identity, prompt history, and explicit repair ordinals", () => {
   assert.equal(PR_TEMPLATE_NAME, "pr-engineer-workflow");
   assert.deepEqual(canonicalTemplateIdentity(PR_TEMPLATE_NAME), {
     canonicalName: PR_TEMPLATE_NAME,
     generation: null,
   });
-  assert.deepEqual(LEGACY_TEMPLATE_GENERATIONS[PR_TEMPLATE_NAME], []);
+  assert.deepEqual(
+    LEGACY_TEMPLATE_GENERATIONS[PR_TEMPLATE_NAME].map(({ marker, promptDigest, successorPromptDigest }) => ({
+      marker,
+      promptDigest,
+      successorPromptDigest,
+    })),
+    [{
+      marker: "pre-pr-handover-quality",
+      promptDigest: "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6",
+      successorPromptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+    }, {
+      marker: "pre-pr-head-tree-check",
+      promptDigest: "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906",
+      successorPromptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+    }],
+  );
   assert.deepEqual(CURRENT_CANONICAL_STEP_ORDINALS[PR_TEMPLATE_NAME], {
     implementation: 1,
     "sol-findings": 2,

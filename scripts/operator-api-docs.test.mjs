@@ -219,6 +219,61 @@ test("the template clone route documents its contract, refusals, and example", (
   assert.match(text, /curl -X POST "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/clone"/u);
 });
 
+test("the canonical PR workflow documents its clean-tree and five-section handover", () => {
+  const marker = "### Canonical `pr-engineer-workflow` pull-request handover\n";
+  const start = handbook.indexOf(marker);
+  assert.notEqual(start, -1, "operator handbook must document the canonical PR workflow handover");
+  const end = handbook.indexOf("\n### GET ", start + marker.length);
+  const text = handbook.slice(start, end === -1 ? handbook.length : end);
+
+  assert.match(text, /exact-name scoped[\s\S]*custom and retired[\s\S]*direct or compound/u);
+  assert.match(text, /\.chain\/<branchName>\/spec\.md[\s\S]*pinned specification/u);
+  assert.match(text, /complete tracked `\.chain\/` directory[\s\S]*commits[\s\S]*on top of the reviewed history/u);
+  assert.match(text, /persists `fixed-implementation`[\s\S]*refuses to publish[\s\S]*tracked[\s\S]*`\.chain\/`/u);
+  assert.match(text, /retry[\s\S]*already-clean[\s\S]*without creating another cleanup commit/u);
+  assert.match(text, /final\s+Task output, completion head, pushed head, and pull-request\s+head[\s\S]*same cleanup commit/u);
+
+  const sectionHeadings = ["Goal", "Summary", "Verification", "Review outcomes", "Anneal"];
+  let previous = -1;
+  for (const heading of sectionHeadings) {
+    const position = text.indexOf(`\`${heading}\``);
+    assert.ok(position > previous, `handover body sections must list ${heading} in order`);
+    previous = position;
+  }
+  assert.match(text, /Goal` is exactly the first line of the Task description/u);
+  assert.match(text, /Summary` uses the implementation output's `summary`/u);
+  assert.match(text, /closedFindings\.codeEvidence/u);
+  assert.match(text, /Verification` renders the implementation and fixed-step `testsRun` entries\s+verbatim/u);
+  assert.match(text, /exact command and its observed exit\/result\s+summary/u);
+  assert.match(text, /`No commands reported in the task\s+output\.`/u);
+  assert.match(text, /`Not available at this step\.`/u);
+  assert.match(text, /Review outcomes`\s+initially[\s\S]*Sol and blind finding[\s\S]*id,\s+severity,\s+and\s+title/u);
+  assert.match(text, /fixed output's `residualRisks`/u);
+  assert.match(text, /Anneal` contains the current Task id and non-null Chain id/u);
+  assert.match(text, /already-open[\s\S]*same initial body[\s\S]*reads the body back exactly/u);
+  assert.match(text, /exactly these\s+five sections, in order[\s\S]*no provider-generated or activity-log prose/u);
+});
+
+test("the handbook documents the machine-only, run-bound PR evidence projection", () => {
+  const marker = "The machine-only `/session/runs/:runId/status` projection used by PR-workflow";
+  const start = handbook.indexOf(marker);
+  assert.notEqual(start, -1, "operator handbook must document the PR evidence projection");
+  const end = handbook.indexOf("\nThe machine-only `POST /runner/runs/:runId/complete`", start + marker.length);
+  const text = handbook.slice(start, end === -1 ? handbook.length : end);
+
+  assert.match(text, /run-bound and is not an operator read route/u);
+  assert.match(text, /persisted output bodies only for the current[\s\S]*`implementation` or `fixed-implementation`/u);
+  for (const field of ["Task id", "chain index", "output kind", "body", "commit SHA", "projectId", "chainId"]) {
+    assert.match(text, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  }
+  assert.match(text, /implementation\s+delivery receives only its\s+current `implementation` entry/u);
+  assert.match(text, /final\s+delivery receives exactly\s+`implementation`, `sol-findings`,\s+`blind-findings`, and `fixed-implementation`,\s+in chain order/u);
+  assert.match(text, /does not widen prompt `priorOutputs`, expose\s+sibling evidence to a blind\s+review/u);
+  assert.match(text, /derive text from provider output,\s+activity prose, or repository\s+contents/u);
+  assert.match(text, /source is persisted task output[\s\S]*claimed session\/run identity/u);
+  assert.match(text, /Malformed, foreign-chain, or missing required evidence is rejected rather than\s+silently omitted or guessed/u);
+});
+
 test("the template step replace route documents its contract, refusals, warnings, and example", () => {
   const { text } = templateRouteSection("PUT", "/projects/:projectId/task-templates/:templateId/steps");
   assert.match(text, /Required path parameters: `projectId`, `templateId`/u);
