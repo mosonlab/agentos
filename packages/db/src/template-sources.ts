@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import type { Prisma } from "@prisma/client";
 
-import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
+import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
@@ -33,6 +33,15 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
       "Revalidate specification", "Implementation", "Code review (Sol)",
       "Code review (Opus blind)", "Apply review fixes", "Regression verification",
       "Merge authorization", "Merge execution",
+    ],
+  },
+  {
+    name: PR_TEMPLATE_NAME,
+    description: "Four-step pull-request workflow: implement the task, run parallel independent code review, and apply review fixes before leaving an open pull request for the platform.",
+    stepCount: 4,
+    layers: [1, 2, 2, 3],
+    stepNames: [
+      "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
     ],
   },
 ] as const;

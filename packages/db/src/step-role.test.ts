@@ -13,6 +13,7 @@ import {
 import { isIntegratorStep } from "./merge-integrator.js";
 import { isMergeReadinessStep, REGRESSION_VERIFICATION_OUTPUT_KIND } from "./merge-tail.js";
 import { stepGeneration, stepRole, type StepRole } from "./step-role.js";
+import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { loadTemplateStepSources, type CanonicalTemplateName } from "./template-sources.js";
 import { isCompoundImplementationStep, isDirectImplementationStep } from "./run-open.js";
 
@@ -50,7 +51,7 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
   }
 }
 
-for (const templateName of ["compound-engineer-workflow", "direct-engineer-workflow"] as const) {
+for (const templateName of ["compound-engineer-workflow", "direct-engineer-workflow", PR_TEMPLATE_NAME] as const) {
   test(`${templateName} source exposes every current Step role`, async () => {
     const steps = await loadTemplateStepSources(templateName as CanonicalTemplateName);
     for (const step of steps) {
