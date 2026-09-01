@@ -799,7 +799,7 @@ Task output, completion head, pushed head, and pull-request head identify that
 same cleanup commit; delivery uses the ordinary non-force branch push.
 
 The pull-request body is one deterministic Markdown document with exactly these
-five sections, in order:
+five sections, in order; no provider-generated or activity-log prose is added:
 
 - `Goal` is exactly the first line of the Task description.
 - `Summary` uses the implementation output's `summary`; after review it also
@@ -1473,14 +1473,15 @@ delivery is run-bound and is not an operator read route. For the current
 canonical template, it carries persisted output bodies only for the current
 `implementation` or `fixed-implementation` Run at its chain index. Each entry
 contains the Task id, chain index, output kind, body, and commit SHA, and is
-accepted only when its `projectId` and `chainId` match the claimed Run. The
-implementation delivery receives only its current `implementation` entry; the
-final delivery receives exactly `implementation`, `sol-findings`,
-`blind-findings`, and `fixed-implementation`, in chain order. This projection
-does not widen prompt `priorOutputs`, expose sibling evidence to a blind
-review, or derive text from provider output, activity prose, or repository
-contents. Its source is persisted task output and its authentication is the
-claimed session/run identity.
+accepted only when its `projectId` and `chainId` match the claimed Run.
+Malformed, foreign-chain, or missing required evidence is rejected rather than
+silently omitted or guessed. The implementation delivery receives only its
+current `implementation` entry; the final delivery receives exactly
+`implementation`, `sol-findings`, `blind-findings`, and `fixed-implementation`,
+in chain order. This projection does not widen prompt `priorOutputs`, expose
+sibling evidence to a blind review, or derive text from provider output,
+activity prose, or repository contents. Its source is persisted task output
+and its authentication is the claimed session/run identity.
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree

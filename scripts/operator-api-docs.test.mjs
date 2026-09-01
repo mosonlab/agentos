@@ -132,6 +132,7 @@ test("the canonical PR workflow documents its clean-tree and five-section handov
   assert.match(text, /fixed output's `residualRisks`/u);
   assert.match(text, /Anneal` contains the current Task id and non-null Chain id/u);
   assert.match(text, /already-open[\s\S]*same initial body[\s\S]*reads the body back exactly/u);
+  assert.match(text, /exactly these\s+five sections, in order[\s\S]*no provider-generated or activity-log prose/u);
 });
 
 test("the handbook documents the machine-only, run-bound PR evidence projection", () => {
@@ -146,11 +147,12 @@ test("the handbook documents the machine-only, run-bound PR evidence projection"
   for (const field of ["Task id", "chain index", "output kind", "body", "commit SHA", "projectId", "chainId"]) {
     assert.match(text, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   }
-  assert.match(text, /implementation delivery receives only its current `implementation` entry/u);
-  assert.match(text, /final delivery receives exactly `implementation`, `sol-findings`,\s+`blind-findings`, and `fixed-implementation`, in chain order/u);
-  assert.match(text, /does not widen prompt `priorOutputs`, expose sibling evidence to a blind\s+review/u);
-  assert.match(text, /derive text from provider output, activity prose, or repository\s+contents/u);
+  assert.match(text, /implementation\s+delivery receives only its\s+current `implementation` entry/u);
+  assert.match(text, /final\s+delivery receives exactly\s+`implementation`, `sol-findings`,\s+`blind-findings`, and `fixed-implementation`,\s+in chain order/u);
+  assert.match(text, /does not widen prompt `priorOutputs`, expose\s+sibling evidence to a blind\s+review/u);
+  assert.match(text, /derive text from provider output,\s+activity prose, or repository\s+contents/u);
   assert.match(text, /source is persisted task output[\s\S]*claimed session\/run identity/u);
+  assert.match(text, /Malformed, foreign-chain, or missing required evidence is rejected rather than\s+silently omitted or guessed/u);
 });
 
 test("the template step replace route documents its contract, refusals, warnings, and example", () => {
