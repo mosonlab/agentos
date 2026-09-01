@@ -993,6 +993,10 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
 ### GET `/tasks/:taskId`
 
 - Required path parameter: `taskId`.
+- Each returned Run's `session.latestAgentMessage` is either `null` when the
+  session has no non-empty `MODEL_COMPLETED` or `FINAL_OUTPUT` text event, or
+  `{body, at}` containing the newest qualifying event's plain-text body and
+  timestamp. This is a derived read from the session event stream.
 - Each returned Run includes the report-only `worktreeContainmentViolations`
   fact: absolute worktree paths from that Run's checkout found outside its run
   workspace, or `null` when no observation was reported.
