@@ -778,6 +778,52 @@ webhook configuration, or instantiated. Cloning copies the description,
 variables, and complete Step graph, but clears webhook configuration; Tasks
 and trigger fires are never copied.
 
+### Canonical `pr-engineer-workflow` pull-request handover
+
+The current canonical `pr-engineer-workflow` is a four-step, GitHub pull-request
+workflow. Its handover rules are exact-name scoped: custom and retired
+templates, and direct or compound workflows, retain their own delivery
+behavior.
+
+The implementation Run leaves `.chain/<branchName>/spec.md` in the reviewed
+implementation commit. Both review Runs read that pinned specification before
+the final step. `Apply review fixes` uses the two review reports, adopts any
+requested fixes, removes the complete tracked `.chain/` directory, and commits
+the removal together with those fixes on top of the reviewed history. It then
+persists `fixed-implementation`; delivery refuses to publish while any tracked
+`.chain/` entry remains. The implementation commit remains immutable and
+reviewable, while the cleanup commit is the human-mergeable head. A retry after
+a successful push and failed pull-request edit may begin at that already-clean
+commit and must preserve it without creating another cleanup commit. The final
+Task output, completion head, pushed head, and pull-request head identify that
+same cleanup commit; delivery uses the ordinary non-force branch push.
+
+The pull-request body is one deterministic Markdown document with exactly these
+five sections, in order:
+
+- `Goal` is exactly the first line of the Task description.
+- `Summary` uses the implementation output's `summary`; after review it also
+  lists every adopted `closedFindings.codeEvidence` fix, or says that no
+  review-driven code change was required when the adopted set is empty.
+- `Verification` renders the implementation and fixed-step `testsRun` entries
+  verbatim. Each entry includes the exact command and its observed exit/result
+  summary. An empty reported list says `No commands reported in the task
+  output.`; a section not reached yet says exactly `Not available at this step.`.
+  Delivery never invents `PASS`.
+- `Review outcomes` initially says `Not available at this step.`. The final
+  body reports every Sol and blind finding with its existing id, severity, and
+  title, then its final disposition and reason, closed evidence when present,
+  and the fixed output's `residualRisks`.
+- `Anneal` contains the current Task id and non-null Chain id.
+
+Step 1 uses this body when it creates a pull request, and edits an already-open
+pull request on the shared head to the same initial body. After the final
+cleanup push, delivery looks up the open pull request, edits it with the
+complete post-review body, and reads the body back exactly. A missing or
+malformed canonical output, absent Chain id or final pull request, failed edit,
+unreadable read-back, body mismatch, failed cleanup, or retained tracked
+`.chain/` content is a delivery failure.
+
 ### GET `/projects/:projectId/task-templates`
 
 - Required path parameter: `projectId`.
@@ -1422,6 +1468,19 @@ The two revalidation routes below are session-only capabilities; they are
 listed here so their authorization boundary is explicit even though operators
 cannot call them directly. A `spec-revalidator` session on a bound direct chain
 is the only caller accepted.
+The machine-only `/session/runs/:runId/status` projection used by PR-workflow
+delivery is run-bound and is not an operator read route. For the current
+canonical template, it carries persisted output bodies only for the current
+`implementation` or `fixed-implementation` Run at its chain index. Each entry
+contains the Task id, chain index, output kind, body, and commit SHA, and is
+accepted only when its `projectId` and `chainId` match the claimed Run. The
+implementation delivery receives only its current `implementation` entry; the
+final delivery receives exactly `implementation`, `sol-findings`,
+`blind-findings`, and `fixed-implementation`, in chain order. This projection
+does not widen prompt `priorOutputs`, expose sibling evidence to a blind
+review, or derive text from provider output, activity prose, or repository
+contents. Its source is persisted task output and its authentication is the
+claimed session/run identity.
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree
