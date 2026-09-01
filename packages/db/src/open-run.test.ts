@@ -54,6 +54,7 @@ const priorRun = (overrides: Record<string, unknown> = {}) => ({
   subagentMaxConcurrent: null,
   targetBranch: "main",
   branch: "agentos/task-1/run-3",
+  pushedBranch: null,
   promptHash: "snapshot-hash",
   maxDurationMin: 90,
   stallTimeoutMin: 12,
@@ -115,6 +116,7 @@ const fakeTx = (
   options: {
     chainControlRows?: Array<Record<string, unknown>>;
     lockedAgent?: ReturnType<typeof agent> | null;
+    publishedRuns?: Array<{ taskId: string; repoId: string; pushedBranch: string | null }>;
     stopRows?: Array<Record<string, unknown>>;
   } = {},
 ) => {
@@ -141,7 +143,15 @@ const fakeTx = (
     },
     taskTemplateStep: { findUnique: async () => null },
     run: {
-      findFirst: async () => null,
+      findFirst: async ({ where }: { where: Record<string, any> }) => {
+        const rows = options.publishedRuns ?? [];
+        return rows.find((row) => (
+          (typeof where.taskId !== "string" || row.taskId === where.taskId)
+          && (typeof where.repoId !== "string" || row.repoId === where.repoId)
+          && (typeof where.pushedBranch !== "string" || row.pushedBranch === where.pushedBranch)
+          && (typeof where.task?.id !== "string" || row.taskId === where.task.id)
+        )) ?? null;
+      },
       create: async ({ data }: { data: Record<string, unknown> }) => {
         creates.push(data);
         return { id: "opened-run", ...data };
@@ -215,6 +225,73 @@ test("a retry snapshots the current Step commit contract instead of inheriting i
 
   assert.equal(opened.ok, true);
   assert.equal(creates[0]?.requiresCommit, false);
+});
+
+test("a Run based on its own Task's prior publication does not require another commit", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const salvage = "agentos/task-1/run-1";
+  const publishedRuns = [{ taskId: "task-1", repoId: repo.id, pushedBranch: salvage }];
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ repoId: repo.id, branch: salvage, pushedBranch: salvage })],
+  });
+  const { tx, creates } = fakeTx(task, { publishedRuns });
+
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, salvage);
+  assert.equal(creates[0]?.requiresCommit, false);
+});
+
+test("ordinary and other-Task bases keep the configured commit contract", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const otherTaskBranch = "agentos/task-2/run-1";
+  const fixtures = [
+    { name: "target branch", targetBranch: repo.defaultBranch, publishedRuns: [] },
+    {
+      name: "another Task's publication",
+      targetBranch: otherTaskBranch,
+      publishedRuns: [{ taskId: "task-2", repoId: repo.id, pushedBranch: otherTaskBranch }],
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const task = taskRow({ repoId: repo.id, repo, targetBranch: fixture.targetBranch });
+    const { tx, creates } = fakeTx(task, { publishedRuns: fixture.publishedRuns });
+    const opened = await openRun(tx, task.id, { kind: "task-created", readyAt: now });
+    assert.equal(opened.ok, true, fixture.name);
+    assert.equal(creates[0]?.targetBranch, fixture.targetBranch, fixture.name);
+    assert.equal(creates[0]?.requiresCommit, true, fixture.name);
+  }
+});
+
+test("a null resolved base cannot match an unpublished prior Run", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const prior = priorRun({ repoId: repo.id, branch: null, targetBranch: null });
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    targetBranch: null,
+    runs: [prior],
+  });
+  const { tx, creates } = fakeTx(task, {
+    publishedRuns: [{ taskId: task.id, repoId: repo.id, pushedBranch: null }],
+  });
+
+  const opened = await openRun(tx, task.id, {
+    kind: "retry-after-completion",
+    readyAt: now,
+    sourceRunId: prior.id,
+    sourceMaxRunsPerTask: prior.maxRunsPerTask,
+    sourceBudgetGrants: prior.budgetGrants,
+    budgetGrant: 1,
+  });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, null);
+  assert.equal(creates[0]?.requiresCommit, true);
 });
 
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {

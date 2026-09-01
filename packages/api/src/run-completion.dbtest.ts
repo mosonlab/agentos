@@ -63,7 +63,7 @@ const seed = async (status: RunStatus = RunStatus.RUNNING) => {
     runId: run.id, projectId: project.id, taskId: task.id, agentId: agent.id, runner: "CODEX",
     executionStatus: SessionExecutionStatus.RUNNING,
   } });
-  return { project, task, run };
+  return { project, agent, task, run };
 };
 
 const completion = (fencingToken: string) => ({
@@ -77,6 +77,68 @@ const completion = (fencingToken: string) => ({
   cleanupStatus: CleanupStatus.SUCCEEDED,
   workspaceRetained: false,
 });
+
+const seedCanonicalImplementationContinuation = async () => {
+  const seeded = await seed();
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seeded.project.id,
+    name: "direct-engineer-workflow",
+    description: "Canonical completion evidence",
+    variables: [],
+  } });
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: seeded.agent.id,
+    stepIndex: 2,
+    name: "Implementation",
+    assigneeType: "AGENT",
+    prompt: "Implement the brief",
+    outputKind: "implementation",
+    requiresCommit: true,
+    opensPullRequest: true,
+    layer: 2,
+  } });
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+  const baseSha = "5".repeat(40);
+  await db.task.update({ where: { id: seeded.task.id }, data: {
+    templateId: template.id,
+    templateStepId: step.id,
+    chainId: `continuation-${seeded.task.id}`,
+    chainIndex: 2,
+    chainLayer: 2,
+    opensPullRequest: true,
+  } });
+  const run = await db.run.update({ where: { id: seeded.run.id }, data: {
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    branch: salvage,
+    pushedBranch: null,
+    targetBranch: salvage,
+    baseSha,
+    requiresCommit: false,
+    maxRunsPerTask: 2,
+  } });
+  await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: run.repoId,
+    runNumber: 1,
+    dedupeKey: `task:${seeded.task.id}:run:1`,
+    status: RunStatus.LOST,
+    runner: "CODEX",
+    model: seeded.agent.model,
+    promptHash: "prior-hash",
+    branch: salvage,
+    pushedBranch: salvage,
+    targetBranch: "main",
+    baseSha: "4".repeat(40),
+    headSha: baseSha,
+    maxRunsPerTask: 2,
+    endedAt: new Date(),
+  } });
+  return { ...seeded, step, run, baseSha };
+};
 
 test("the merge-executor principal on an ordinary run is refused before anything is written", async () => {
   const { run } = await seed();
@@ -139,6 +201,108 @@ test("an accepted completion returns what it did rather than a response", async 
     failureClass: null,
   });
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.SUCCEEDED);
+});
+
+test("a no-change salvage continuation succeeds only with canonical implementation evidence at its base", async () => {
+  for (const withOutput of [true, false]) {
+    const { task, run, baseSha } = await seedCanonicalImplementationContinuation();
+    if (withOutput) {
+      await db.taskStepOutput.create({ data: {
+        taskId: task.id,
+        runId: run.id,
+        kind: "implementation",
+        body: JSON.stringify({
+          schemaVersion: 1,
+          headSha: baseSha,
+          baseSha,
+          summary: "The salvaged base already delivers the brief.",
+          testsRun: ["focused"],
+        }),
+        commitSha: baseSha,
+        metadata: {},
+      } });
+    }
+
+    const result = await completeRun(db, {
+      runId: run.id,
+      body: {
+        ...completion(run.fencingToken!),
+        branch: run.branch,
+        pushedBranch: run.pushedBranch,
+        baseSha,
+        headSha: baseSha,
+      },
+      claimantClass: "runner",
+    });
+    const stored = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+
+    assert.equal((result as { succeeded: boolean }).succeeded, withOutput);
+    assert.equal(stored.status, withOutput ? RunStatus.SUCCEEDED : RunStatus.FAILED);
+    assert.equal(stored.failureReason, withOutput
+      ? null
+      : `missing implementation task output for current Run ${run.id}`);
+  }
+});
+
+test("a manual no-change continuation rejects missing or non-implementation evidence", async () => {
+  for (const wrongKind of [false, true]) {
+    const { task, run, baseSha } = await seedCanonicalImplementationContinuation();
+    await db.task.update({ where: { id: task.id }, data: {
+      templateId: null,
+      templateStepId: null,
+    } });
+    if (wrongKind) {
+      await db.taskStepOutput.create({ data: {
+        taskId: task.id,
+        runId: run.id,
+        kind: "result",
+        body: "finished",
+        commitSha: baseSha,
+        metadata: {},
+      } });
+    }
+
+    const result = await completeRun(db, {
+      runId: run.id,
+      body: {
+        ...completion(run.fencingToken!),
+        branch: run.branch,
+        baseSha,
+        headSha: baseSha,
+      },
+      claimantClass: "runner",
+    });
+    const stored = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+
+    assert.equal("succeeded" in result && result.succeeded, false);
+    assert.equal(stored.status, RunStatus.FAILED);
+    assert.equal(stored.failureReason, wrongKind
+      ? "task output kind result does not match canonical kind implementation"
+      : `missing implementation task output for current Run ${run.id}`);
+  }
+});
+
+test("a configured non-committing Step at its ceiling is not treated as a relaxed continuation", async () => {
+  const { step, run, baseSha } = await seedCanonicalImplementationContinuation();
+  await db.taskTemplateStep.update({
+    where: { id: step.id },
+    data: { outputKind: "documentation", requiresCommit: false },
+  });
+
+  const result = await completeRun(db, {
+    runId: run.id,
+    body: {
+      ...completion(run.fencingToken!),
+      branch: run.branch,
+      baseSha,
+      headSha: baseSha,
+    },
+    claimantClass: "runner",
+  });
+  const stored = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+
+  assert.equal("succeeded" in result && result.succeeded, true);
+  assert.equal(stored.status, RunStatus.SUCCEEDED);
 });
 
 test("a resolved integrator stop race rolls back the whole predecessor completion", async () => {
