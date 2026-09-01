@@ -3,7 +3,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, FailureClass, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, enqueueTaskRun, FailureClass, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
 import { buildPrompt } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
 
@@ -55,6 +55,7 @@ const createFixture = async (steps: Array<{ outputKind: string; priorOutputKinds
     name: "prior-output-whitelist-repo",
     remoteUrl: "https://example.test/prior-output-whitelist.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

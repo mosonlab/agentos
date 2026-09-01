@@ -11,6 +11,7 @@ const scratch: AgentScratch = {
   base: "/scratch/base",
   workspaceRoot: "/scratch/workspaces",
   stateDir: "/scratch/control-plane",
+  toolsDir: "/scratch/tools",
   configRoot: "/sessions/session-1/config",
 };
 

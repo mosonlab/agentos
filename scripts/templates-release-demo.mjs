@@ -296,6 +296,7 @@ export async function runSetup(
     remoteUrl: config.targetRemote,
     mountPath: config.targetMountPath,
     defaultBranch: config.targetDefaultBranch,
+    dependencyProvisioning: "NONE",
   });
   const agents = [...new Map(steps.flatMap((step) => step.assigneeAgent ? [[step.assigneeAgent.id, step.assigneeAgent]] : [])).values()];
   for (const agent of agents) {

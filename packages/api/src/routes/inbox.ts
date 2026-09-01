@@ -82,10 +82,31 @@ const inboxCloseInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 });
 
+/**
+ * Project scope for Inbox rows. Relation ids are nullable because deleting
+ * the related history leaves the message behind; once all four nullable
+ * relations are gone, the row is global and remains visible in every
+ * project's Inbox.
+ */
+const inboxProjectPredicate = (projectId: string): Prisma.InboxMessageWhereInput => ({
+  OR: [
+    { agent: { projectId } },
+    { task: { projectId } },
+    { goal: { projectId } },
+    { session: { projectId } },
+    { agentId: null, taskId: null, goalId: null, sessionId: null },
+  ],
+});
+
 export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
   app.get("/inbox/messages/summary", async (context) => {
+    const projectId = context.req.query("projectId");
     const messages = await db.inboxMessage.findMany({
-      where: { status: InboxStatus.OPEN, replyToMessageId: null },
+      where: {
+        status: InboxStatus.OPEN,
+        replyToMessageId: null,
+        ...(projectId ? inboxProjectPredicate(projectId) : {}),
+      },
       select: { id: true, status: true, from: true, kind: true, gateTaskId: true, replyToMessageId: true },
     });
     const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
@@ -97,17 +118,12 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
   app.get("/inbox/messages", async (context) => {
     const projectId = context.req.query("projectId");
     const messages = await db.inboxMessage.findMany({
-    where: {
-      replyToMessageId: null,
-      ...(projectId ? { OR: [
-        { agent: { projectId } },
-        { task: { projectId } },
-        { goal: { projectId } },
-        { session: { projectId } },
-      ] } : {}),
-    },
-    include: { decisions: true, replies: { orderBy: { createdAt: "asc" } }, session: { select: { taskId: true } } },
-    orderBy: { createdAt: "desc" },
+      where: {
+        replyToMessageId: null,
+        ...(projectId ? inboxProjectPredicate(projectId) : {}),
+      },
+      include: { decisions: true, replies: { orderBy: { createdAt: "asc" } }, session: { select: { taskId: true } } },
+      orderBy: { createdAt: "desc" },
     });
     const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
     return validated(context, messages.map((message) => withDismissible(withArtifactTask(message), blocked)));

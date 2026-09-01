@@ -87,8 +87,6 @@ const codexPromptSections = (claim: ClaimedTask): string[] => {
     `- maximum concurrent child threads: ${profile.maxConcurrent} (root excluded)`,
     "- multi_agent_v2 is enabled by the runner. Spawn, message, wait for, and close native children through the session collaboration tools; do not launch nested Codex CLI processes.",
     "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
-    "- Implementation proof is limited to each assignment's focused tests, one affected-workspace compile or typecheck after integration, and tests for seams crossed by multiple assignments.",
-    "- Do not run repository-wide suites or the repository Merge Gate in Implementation; the later Regression step owns the formal Gate.",
   ];
 };
 
@@ -189,7 +187,7 @@ export const parseCodexTranscript = (
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
   const state = createAdapterState("CODEX", "transcript");
-  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent);
+  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent, () => true);
   return state;
 };
 
@@ -276,6 +274,7 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   childEnvironment: codexChildEnvironment,
   provisionSessionConfig: provisionCodexSessionConfig,
   initialProviderState: () => undefined,
+  providerEventPersistence: () => true,
   parseEvent: parseCodexEvent,
   preflight,
 });

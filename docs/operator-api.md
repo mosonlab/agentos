@@ -591,21 +591,96 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
 ### POST `/projects/:projectId/repos`
 
 - Required path parameter: `projectId`.
-- Required JSON fields: `name`, `remoteUrl`.
+- Required JSON fields: `name`, `remoteUrl`, and `dependencyProvisioning`.
 - Optional JSON fields: `mountPath` (default `repo`), `defaultBranch`
-  (default `main`), `credentialSecretId` (default `null`).
+  (default `main`), `credentialSecretId` (default `null`), and `grantAgents`
+  (default `false`).
+- `dependencyProvisioning` must be exactly `NONE` or `NPM_CI`; it declares
+  whether the runner provisions the repository's Node dependencies. Missing or
+  unknown values return `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
+- `remoteUrl` is validated as the raw submitted string before any trim or
+  transform. The onboarding remote policy accepts HTTPS without userinfo,
+  `ssh://` and scp-like SSH remotes with no account or the `git` account, and
+  local `file:///` remotes. It rejects whitespace, control characters,
+  query/fragment data, option-like values, unsupported schemes or SSH
+  accounts, missing hosts or paths, and values over the maximum length. This
+  ordinary Repo route deliberately applies onboarding's SSH-account
+  restriction too.
+- `defaultBranch` is defaulted to `main` and must pass the API's
+  `isValidBranchName` policy. A rejected remote returns `400 Bad Request`
+  with exactly:
+
+  ```json
+  { "error": "Repository remote is invalid", "code": "repository-remote-invalid", "reason": "<parseRepoRemote rejection reason>" }
+  ```
+
+  A rejected branch returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository default branch is invalid", "code": "repository-default-branch-invalid" }
+  ```
+
+  Neither refusal echoes the rejected value, opens the Repo/grant transaction,
+  or invokes repository preflight. A duplicate `(projectId, name)` returns
+  `409 Conflict` with exactly `{ "error": "Unique constraint violated" }`.
+- After validation and before the database transaction opens, the route runs
+  repository preflight against
+  `{ remoteUrl, defaultBranch, dependencyProvisioning }`. The preflight uses
+  the API host's ambient Git identity and credentials for its identity,
+  remote/default-branch, fetch, and dry-run-push checks; it never receives,
+  reads, or decrypts `credentialSecretId` (that field's existing Secret
+  existence/enabled validation is unchanged). A preflight refusal returns
+  `422 Unprocessable Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-preflight-failed", "reason": "<existing failure reason>" }
+  ```
+
+  The possible reasons are `git-unavailable`, `git-identity-missing`,
+  `remote-unreachable`, `default-branch-missing`, `push-not-authorized`, and
+  `command-timeout`. When `dependencyProvisioning` is `NPM_CI`, preflight also
+  requires a regular root `package-lock.json` in the exact fetched default
+  branch commit. A missing or non-regular lockfile returns `422 Unprocessable
+  Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-package-lock-missing", "remedy": "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE." }
+  ```
+
+  This is a POST-only preflight refusal. For `NONE`, this dependency-specific
+  check is omitted; all other preflight checks still apply. Other failures use
+  the existing error path. Preflight is never skipped as a success fallback.
+- With `grantAgents: false` or when omitted, a successful request returns
+  `201 Created` with the created Repo row itself (the existing response
+  shape), and creates no grants. With `grantAgents: true`, the same transaction
+  creates one `GIT_WRITE` `AgentRepoAccess` for every active Project Agent
+  (`archivedAt: null`) except `INTEGRATOR_AGENT_NAME`; each grant uses the
+  created Repo's `mountPath`. The response is `201 Created` with exactly
+  `{ "repo": <created Repo row>, "grants": <created access rows> }`. Any
+  Repo or grant write failure rolls back the Repo and all grants.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git"}'
+  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git","dependencyProvisioning":"NPM_CI"}'
 ```
 
 ### PATCH `/repos/:repoId`
 
 - Required path parameter: `repoId`.
 - Required JSON: at least one of `name`, `remoteUrl`, `mountPath`,
-  `defaultBranch`, `credentialSecretId`.
+  `defaultBranch`, `credentialSecretId`, or `dependencyProvisioning`.
+- `dependencyProvisioning` is optional and patchable. When supplied, it must
+  be exactly `NONE` or `NPM_CI`; omission preserves the stored value. An
+  unknown value returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
 
 ```sh
 curl -X PATCH "$BASE_URL/repos/$REPO_ID" \
@@ -1280,6 +1355,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATO
 ### POST `/tasks/:taskId/archive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, archives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1288,6 +1364,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERA
 ### POST `/tasks/:taskId/unarchive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, unarchives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/unarchive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1391,7 +1468,13 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
 ### GET `/inbox/messages`
 
 - Required parameters: none.
-- Optional query: `projectId`.
+- Optional query parameter: `projectId`.
+- With `projectId`, the list includes messages whose Agent, Task, Goal, or
+  Session belongs to that Project, plus global messages whose
+  `agentId`, `taskId`, `goalId`, and `sessionId` are all `null` (including
+  history whose nullable relation was removed; all four relation ids are
+  `null` for these global rows). It retains top-level-message
+  behavior. With no `projectId`, the list remains unfiltered by Project.
 
 ```sh
 curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1400,7 +1483,12 @@ curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer 
 ### GET `/inbox/messages/summary`
 
 - Required parameters: none.
-- Returns the small global count used by the sidebar: `{ "needsReply": number }`.
+- Optional query parameter: `projectId`.
+- With `projectId`, the summary applies its existing open, top-level,
+  needs-reply rule to the same Project-plus-global scope as the list: a
+  related Agent, Task, Goal, or Session belongs to that Project, or all four
+  relation ids are `null`. With no `projectId`, it remains unfiltered by
+  Project. The response is `{ "needsReply": number }`.
 
 ```sh
 curl "$BASE_URL/inbox/messages/summary" -H "Authorization: Bearer $OPERATOR_TOKEN"

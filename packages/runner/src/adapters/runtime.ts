@@ -117,6 +117,9 @@ export type AdapterEventParser = (
   sink: SessionEventSink,
 ) => void;
 
+/** Decides whether a provider line and its parsed adapter events are persisted. */
+export type ProviderEventPersistencePredicate = (event: Record<string, unknown>) => boolean;
+
 /**
  * Everything provider-specific that the runner needs, declared by the provider
  * module that owns it. The hub derives its public registry and environment
@@ -146,6 +149,7 @@ export type AdapterDeclaration = {
     options?: SessionConfigOptions,
   ): Promise<void>;
   initialProviderState(): unknown;
+  providerEventPersistence: ProviderEventPersistencePredicate;
   parseEvent: AdapterEventParser;
   preflight(spec: PreflightSpec): Promise<PreflightResult>;
 };
@@ -197,14 +201,18 @@ export const markInFlightToolProgress = (state: AdapterState): void => {
   if (state.inFlightTool) state.inFlightTool.lastProgressAt = new Date();
 };
 
+const discardAdapterEvent: SessionEventSink = () => undefined;
+
 export const processProviderEvent = (
   state: AdapterState,
   event: Record<string, unknown>,
   sink: SessionEventSink,
   parseEvent: AdapterEventParser,
+  providerEventPersistence: ProviderEventPersistencePredicate,
 ): void => {
-  sink({ source: sourceFor(state.runner), type: "PROVIDER_RAW", payload: event });
-  parseEvent(state, event, sink);
+  const shouldPersist = providerEventPersistence(event);
+  if (shouldPersist) sink({ source: sourceFor(state.runner), type: "PROVIDER_RAW", payload: event });
+  parseEvent(state, event, shouldPersist ? sink : discardAdapterEvent);
 };
 
 const processLine = (
@@ -212,6 +220,7 @@ const processLine = (
   line: string,
   sink: SessionEventSink,
   parseEvent: AdapterEventParser,
+  providerEventPersistence: ProviderEventPersistencePredicate,
 ): void => {
   if (!line.trim()) return;
   let event: Record<string, unknown>;
@@ -223,7 +232,7 @@ const processLine = (
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", { error: "invalid-json", line });
     return;
   }
-  processProviderEvent(state, event, sink, parseEvent);
+  processProviderEvent(state, event, sink, parseEvent, providerEventPersistence);
 };
 
 // Run.model carries an optional reasoning-effort suffix: "<model>[:<effort>]".
@@ -242,7 +251,7 @@ export const promptHashFor = (prompt: string): string => createHash("sha256").up
 
 const COMMON_LAUNCHER_ENVIRONMENT = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "HOME", "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER",
-  "AGENTOS_RUN_ID", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+  "AGENTOS_RUN_ID", "AGENTOS_TOOLS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 ] as const;
 
 export const launchAdapterArgv = (
@@ -298,7 +307,7 @@ export const spawnAdapterRuntime = (
     buffer += chunk;
     const lines = buffer.split(/\r?\n/u);
     buffer = lines.pop() ?? "";
-    for (const line of lines) processLine(handle, line, sink, declaration.parseEvent);
+    for (const line of lines) processLine(handle, line, sink, declaration.parseEvent, declaration.providerEventPersistence);
   });
   child.stderr!.on("data", (chunk: string) => {
     handle.stderr = cap(handle.stderr + chunk);
@@ -309,7 +318,7 @@ export const spawnAdapterRuntime = (
     const finish = (exitCode: number | null, signal: string | null): void => {
       if (settled) return;
       settled = true;
-      if (buffer.trim()) processLine(handle, buffer, sink, declaration.parseEvent);
+      if (buffer.trim()) processLine(handle, buffer, sink, declaration.parseEvent, declaration.providerEventPersistence);
       resolvePromise({
         exitCode,
         signal,

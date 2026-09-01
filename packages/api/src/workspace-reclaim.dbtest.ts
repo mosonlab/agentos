@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   lockChainRows,
   PrismaClient,
   RunStatus,
@@ -72,6 +73,7 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   runnerId,
   daemonVersion: "0.0.0-dbtest",
   pollIntervalMs: 1_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
@@ -130,6 +132,7 @@ const seedRun = async (options: {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Task", description: "task", assigneeAgentId: agent.id, repoId: repo.id, status: "DOING",

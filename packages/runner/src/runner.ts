@@ -21,6 +21,7 @@ import {
 } from "./adapters.js";
 import {
   controlPlane as defaultControlPlane,
+  isDependencyProvisioning,
   type ClaimedTask,
   type ControlPlane,
   type SessionEventPayload,
@@ -48,7 +49,7 @@ import { openSessionConfig, type SessionConfigLease } from "./session-config-lea
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
-  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
+  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
   type AgentScratch, type Workspace, type WorkspaceSnapshot,
 } from "./workspace.js";
@@ -148,6 +149,7 @@ const preflightEvidence = (message: string): ExitEvidence => ({
 });
 
 export type ExecuteClaimDependencies = {
+  materializeRuntimeTools?: typeof materializeRuntimeTools;
   provisionSessionConfig?: typeof provisionSessionConfig;
   cleanupAgentScratch?: typeof cleanupAgentScratch;
   writeSessionCredentials?: typeof writeSessionCredentials;
@@ -289,8 +291,29 @@ export const executeClaim = async (
   };
 
   try {
+    // Dependency provisioning is a required claim contract. A runner build
+    // that predates this field must fail closed: treating an omitted value as
+    // either policy would silently change whether a repository's dependencies
+    // are installed. Validate before any workspace, scratch, child environment
+    // or adapter preflight/launch work can happen, and keep the condition in
+    // both terminal fields so old and new control planes can expose it.
+    if (!isDependencyProvisioning((claim.repo as { dependencyProvisioning?: unknown } | undefined)?.dependencyProvisioning)) {
+      const condition = "dependency-provisioning-missing";
+      await controlPlane.completeRun(config, claim, {
+        exitCode: null,
+        terminalEventSeen: false,
+        terminalSuccess: false,
+        terminationReason: condition,
+        failureClass: "PROTOCOL_ERROR",
+        failureReason: condition,
+        retryable: false,
+        cleanupStatus: "SUCCEEDED",
+        workspaceRetained: false,
+      });
+      return;
+    }
     // §D-P1 rule 4 — defence in depth behind the claim-side allowlist, and the
-    // FIRST thing this function does. Everything below it constructs something a
+    // FIRST execution-mode check this function performs. Everything below it constructs something a
     // merge credential must never be near: a workspace, a prompt, a child
     // environment, an adapter preflight, a spawned CLI, a delivery push. A
     // mechanical run reaching an ordinary runner means the allowlist was
@@ -337,6 +360,7 @@ export const executeClaim = async (
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
+    await (dependencies.materializeRuntimeTools ?? materializeRuntimeTools)(config, scratch);
     sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies);
     await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
       reuse: claim.resume !== null,

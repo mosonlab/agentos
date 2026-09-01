@@ -35,6 +35,7 @@ const config = (root: string): RunnerConfig => ({
   runnerId: "runner-1",
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
@@ -72,7 +73,13 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   agent: {
     id: "agent-1", name: "agent", model: "claude", foundationalPrompt: "f", rolePrompt: "r", disabledTools: [],
   },
-  repo: { id: "repo-1", remoteUrl, defaultBranch: "master", mountPath: "/does/not/exist" },
+  repo: {
+    id: "repo-1",
+    remoteUrl,
+    defaultBranch: "master",
+    mountPath: "/does/not/exist",
+    dependencyProvisioning: "NPM_CI",
+  },
   run: {
     id: "run-113",
     runNumber: 1,

@@ -4,6 +4,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 const handbook = readFileSync("docs/operator-api.md", "utf8");
+const installDocument = readFileSync("docs/install.md", "utf8");
+const readme = readFileSync("README.md", "utf8");
+const addProjectRunbook = readFileSync("docs/runbooks/add-a-project.md", "utf8");
+const snapshotManifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
 const routeSourceDirectory = "packages/api/src/routes";
 const routeSourcePaths = [
   "packages/api/src/app.ts",
@@ -61,6 +65,8 @@ const section = (heading) => {
 const tasks = section("## Tasks");
 const templates = section("## Task templates");
 const projects = section("## Projects and environments");
+const repositories = section("## Repositories");
+const inbox = section("## Inbox");
 
 const routeIn = (source, method, path) => {
   const marker = `### ${method} \`${path}\``;
@@ -72,6 +78,8 @@ const routeIn = (source, method, path) => {
 
 const routeSection = (method, path) => routeIn(tasks, method, path);
 const templateRouteSection = (method, path) => routeIn(templates, method, path);
+const repositoryRouteSection = (method, path) => routeIn(repositories, method, path);
+const inboxRouteSection = (method, path) => routeIn(inbox, method, path);
 
 test("POST /projects documents bootstrap rows, canonical roles/template, and slug refusal", () => {
   const { text } = routeIn(projects, "POST", "/projects");
@@ -86,6 +94,117 @@ test("POST /projects documents bootstrap rows, canonical roles/template, and slu
   }
   assert.match(text, /canonical\s+`pr-engineer-workflow`\s+TaskTemplate/u);
   assert.match(text, /409\s+Conflict[\s\S]*`project-slug-taken`/u);
+});
+
+test("POST /projects/:projectId/repos documents onboarding, preflight, grants, and response shapes", () => {
+  const { text } = repositoryRouteSection("POST", "/projects/:projectId/repos");
+  assert.match(text, /Required JSON fields:[\s\S]*`name`[\s\S]*`remoteUrl`[\s\S]*`dependencyProvisioning`/u);
+  assert.match(text, /`dependencyProvisioning` must be exactly `NONE` or `NPM_CI`/u);
+  assert.match(text, /\{\s*"error": "Repository dependency provisioning is invalid",\s*"code": "repository-dependency-provisioning-invalid"\s*\}/u);
+  assert.match(text, /raw submitted string before any trim or\s*transform/iu);
+  for (const accepted of ["HTTPS without userinfo", "scp-like SSH", "local `file:///` remotes"]) {
+    assert.match(text, new RegExp(accepted.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  }
+  for (const rejected of [
+    "whitespace",
+    "control characters",
+    "query/fragment data",
+    "option-like values",
+    "unsupported schemes",
+    "SSH accounts",
+    "missing hosts or paths",
+    "values over the maximum length",
+  ]) {
+    assert.match(text, new RegExp(rejected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&").replace(/ /gu, "\\s*"), "u"));
+  }
+  assert.match(text, /onboarding's SSH-account\s*restriction/iu);
+  assert.match(text, /`defaultBranch` is defaulted to `main`[\s\S]*`isValidBranchName`/u);
+  assert.match(text, /\{\s*"error": "Repository remote is invalid",\s*"code": "repository-remote-invalid",\s*"reason": "<parseRepoRemote rejection reason>"\s*\}/u);
+  assert.match(text, /\{\s*"error": "Repository default branch is invalid",\s*"code": "repository-default-branch-invalid"\s*\}/u);
+  assert.match(text, /\{\s*"error": "Unique constraint violated"\s*\}/u);
+  assert.match(text, /\{\s*"error": "Repository preflight failed",\s*"code": "repository-preflight-failed",\s*"reason": "<existing failure reason>"\s*\}/u);
+  assert.match(text, /`NPM_CI`[\s\S]*regular root `package-lock\.json`[\s\S]*exact fetched default\s*branch commit/iu);
+  assert.match(text, /\{\s*"error": "Repository preflight failed",\s*"code": "repository-package-lock-missing",\s*"remedy": "Commit package-lock\.json at the repository root on the default branch, or choose dependencyProvisioning NONE\."\s*\}/u);
+  assert.match(text, /POST-only preflight refusal/iu);
+  assert.match(text, /For `NONE`[\s\S]*dependency-specific\s*check is omitted/iu);
+  for (const reason of [
+    "git-unavailable",
+    "git-identity-missing",
+    "remote-unreachable",
+    "default-branch-missing",
+    "push-not-authorized",
+    "command-timeout",
+  ]) {
+    assert.match(text, new RegExp("`" + reason + "`", "u"));
+  }
+  assert.match(text, /before the database transaction opens/iu);
+  assert.match(text, /API host's ambient Git identity and credentials/iu);
+  assert.match(text, /never receives,\s*reads, or decrypts `credentialSecretId`/iu);
+  assert.match(text, /`grantAgents`/u);
+  assert.match(text, /one `GIT_WRITE` `AgentRepoAccess`[\s\S]*active Project Agent/u);
+  assert.match(text, /except `INTEGRATOR_AGENT_NAME`/u);
+  assert.match(text, /201 Created[\s\S]*created Repo row itself[\s\S]*creates no grants/u);
+  assert.match(text, /201 Created[\s\S]*\{ "repo": <created Repo row>, "grants": <created access rows> \}/u);
+  assert.match(text, /rolls back the Repo and all grants/iu);
+});
+
+test("PATCH /repos/:repoId documents the optional dependency policy and exact refusal", () => {
+  const { text } = repositoryRouteSection("PATCH", "/repos/:repoId");
+  assert.match(text, /`dependencyProvisioning` is optional and patchable/iu);
+  assert.match(text, /exactly `NONE` or `NPM_CI`/u);
+  assert.match(text, /omission preserves the stored value/iu);
+  assert.match(text, /\{\s*"error": "Repository dependency provisioning is invalid",\s*"code": "repository-dependency-provisioning-invalid"\s*\}/u);
+});
+
+test("Inbox list and summary document shared Project-plus-global scope", () => {
+  const list = inboxRouteSection("GET", "/inbox/messages").text;
+  const summary = inboxRouteSection("GET", "/inbox/messages/summary").text;
+  for (const text of [list, summary]) {
+    assert.match(text, /Optional query parameter: `projectId`/u);
+    assert.match(text, /Agent, Task, Goal, or\s*Session belongs to that Project/iu);
+    assert.match(text, /relation ids are\s*all\s*`null`|all four[\s\S]*relation ids are\s*`null`/iu);
+    assert.match(text, /(?:no|with\s*no)\s*`projectId`[\s\S]*unfiltered by\s*Project/iu);
+  }
+  assert.match(list, /retains top-level-message\s*behavior/iu);
+  assert.match(summary, /open, top-level,\s*needs-reply rule/iu);
+  assert.match(summary, /\{ "needsReply": number \}/u);
+});
+
+test("the add-project runbook and public links cover A1 pull-request onboarding", () => {
+  assert.match(addProjectRunbook, /POST "\$BASE_URL\/projects"/u);
+  assert.match(addProjectRunbook, /`local` Environment[\s\S]*four[\s\S]*`senior-dev-luna`[\s\S]*`review-coordinator-sol`[\s\S]*`review-coordinator-opus`[\s\S]*`senior-dev`/u);
+  assert.match(addProjectRunbook, /`pr-engineer-workflow`/u);
+  assert.match(addProjectRunbook, /POST "\$BASE_URL\/projects\/\$PROJECT_ID\/repos"/u);
+  assert.match(addProjectRunbook, /"grantAgents":true/u);
+  assert.match(addProjectRunbook, /"dependencyProvisioning":"NPM_CI"/u);
+  assert.match(addProjectRunbook, /Choose `NPM_CI` only for repositories whose default branch has a root\s*`package-lock\.json`; otherwise choose `NONE`\./u);
+  assert.match(addProjectRunbook, /GET "\$BASE_URL\/projects\/\$PROJECT_ID\/repos"/u);
+  assert.match(addProjectRunbook, /GET "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates"/u);
+  assert.match(addProjectRunbook, /POST[\s\S]*\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/instantiate/u);
+  assert.match(addProjectRunbook, /"repoId"[\s\S]*"variables"[\s\S]*"branchName"/u);
+  assert.match(addProjectRunbook, /--arg name "\$PROJECT_NAME"/u);
+  assert.match(addProjectRunbook, /--arg slug "\$PROJECT_SLUG"/u);
+  assert.match(addProjectRunbook, /--arg name "\$REPO_NAME"/u);
+  assert.match(addProjectRunbook, /--arg remoteUrl "\$REPO_REMOTE"/u);
+  assert.match(addProjectRunbook, /select\(\.name == \$name\)/u);
+  assert.match(addProjectRunbook, /gh repo view "\$REPO_REMOTE"/u);
+  assert.match(addProjectRunbook, /gh pr list --repo "\$GH_REPO"/u);
+  assert.match(addProjectRunbook, /git config --global --get user\.name/u);
+  assert.match(addProjectRunbook, /git config --global --get user\.email/u);
+  assert.match(addProjectRunbook, /review[\s\S]*merge it by hand/iu);
+  for (const prerequisite of [
+    "supported GitHub remote",
+    "GitHub CLI \(`gh`\) installed and authenticated",
+    "Codex, Pi, and Claude Code runtimes installed and authenticated",
+  ]) {
+    assert.match(addProjectRunbook, new RegExp(prerequisite.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  }
+  assert.match(readme, /\[Add a project\]\(docs\/runbooks\/add-a-project\.md\)/u);
+  assert.match(installDocument, /\[Add a project\]\(runbooks\/add-a-project\.md\)/u);
+  assert.ok(
+    snapshotManifest.include.some((entry) => entry.glob === "docs/runbooks/add-a-project.md"),
+    "public-snapshot.json must include the add-project runbook by exact name",
+  );
 });
 
 test("the template clone route documents its contract, refusals, and example", () => {

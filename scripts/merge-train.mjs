@@ -95,7 +95,10 @@ const defaultFetchCandidate = async (repoRoot, candidate) => {
 
 const defaultGate = async (_repoRoot, prefix, checkout) => {
   const script = path.join(checkout, "scripts", "gate-worker", "gate-dispatch.sh");
-  const result = await runProcess("bash", [script, prefix.oid, "--master", prefix.predecessor], { cwd: checkout });
+  const result = await runProcess("bash", [script, prefix.oid, "--master", prefix.predecessor], {
+    cwd: checkout,
+    env: { ...process.env, AGENTOS_WORKSPACE_PATH: checkout },
+  });
   const output = `${result.stdout}${result.stderr}`;
   const exactPass = new RegExp(`(?:^|\\n)MERGE GATE: PASS ${prefix.oid}(?:\\r?$|\\n)`, "u").test(
     output.replaceAll("\u001b[32m", "").replaceAll("\u001b[0m", ""),

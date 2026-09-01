@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -49,6 +49,7 @@ const fixture = async (label: string) => {
       name: `dispatch-repo-${suffix}`,
       remoteUrl: "https://example.test/dispatch-lifecycle.git",
       mountPath: "/repo",
+      dependencyProvisioning: DependencyProvisioning.NONE,
     },
   });
   await db.agentRepoAccess.create({
