@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { copyFile, cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -17,6 +19,13 @@ import {
 } from "./template-sources.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
+const regressionToolPrefix = '"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh"';
+const regressionInvocations = [
+  `${regressionToolPrefix} prepare`,
+  `${regressionToolPrefix} review-fail '<concise finding IDs or defect>'`,
+  `${regressionToolPrefix} finalize`,
+];
+const regressionInvocationPattern = /"\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" (?:prepare|review-fail '[^']+'|finalize)/gu;
 
 const withTemplateCopy = async (
   templateName: CanonicalTemplateName,
@@ -123,14 +132,52 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
     assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
     const regression = steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
-    assert.match(regression.prompt, /regression-verification\.sh prepare/u);
-    assert.match(regression.prompt, /regression-verification\.sh review-fail/u);
-    assert.match(regression.prompt, /regression-verification\.sh finalize/u);
+    assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
+    assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
+    assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
     assert.match(regression.prompt, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
     assert.match(regression.prompt, /finalize exit 0[\s\S]*`pass`, `gate-fail`,\s+or `refresh-conflict`/u);
     assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
+  }
+});
+
+test("canonical regression commands require runner tools without a checkout fallback", async () => {
+  for (const templateName of [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME]) {
+    const regression = (await loadTemplateStepSources(templateName))
+      .find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(regression, `${templateName} must contain a v2 regression step`);
+    const invocations = [...regression.prompt.matchAll(regressionInvocationPattern)].map(([invocation]) => invocation);
+    assert.deepEqual(invocations, regressionInvocations, `${templateName} must use only the runner-owned invocations`);
+    assert.doesNotMatch(regression.prompt, /scripts\/regression-verification\.sh/u);
+
+    const root = await mkdtemp(join(tmpdir(), "agentos-regression-prompt-test-"));
+    const checkoutCopy = join(root, "scripts", "regression-verification.sh");
+    const marker = join(root, "checkout-copy-invoked");
+    try {
+      await mkdir(join(root, "scripts"), { recursive: true });
+      await writeFile(
+        checkoutCopy,
+        `#!/usr/bin/env bash\nprintf 'checkout copy invoked\\n' > ${JSON.stringify(marker)}\nexit 99\n`,
+        { mode: 0o755 },
+      );
+
+      for (const invocation of invocations) {
+        for (const toolsValue of ["unset", ""]) {
+          const env = { ...process.env };
+          if (toolsValue === "unset") delete env.AGENTOS_TOOLS;
+          else env.AGENTOS_TOOLS = toolsValue;
+          const result = spawnSync("bash", ["-c", invocation], { cwd: root, encoding: "utf8", env });
+          const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+          assert.notEqual(result.status, 0, `${templateName} ${invocation} unexpectedly succeeded`);
+          assert.match(output, /AGENTOS_TOOLS is required/u, `${templateName} ${invocation}: ${output}`);
+          assert.equal(existsSync(marker), false, `${templateName} ${invocation} invoked a checkout copy`);
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
