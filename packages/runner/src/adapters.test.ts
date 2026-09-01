@@ -1218,7 +1218,7 @@ const rootReportingStub = [
   'fi',
   // Drain the prompt so the parent never sees EPIPE instead of the report.
   "while read -r _line; do :; done",
-  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
+  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","hostProofSlotDir":"%s","hostProofSlots":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$AGENTOS_HOST_PROOF_SLOT_DIR" "$AGENTOS_HOST_PROOF_SLOTS" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
   "",
 ].join("\n");
 
@@ -1269,6 +1269,8 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         const report = JSON.parse(evidence.stdout.trim().split("\n").at(-1) ?? "{}") as {
           workspaceRoot?: string;
           stateDir?: string;
+          hostProofSlotDir?: string;
+          hostProofSlots?: string;
           home?: string;
           gitConfigGlobal?: string;
           codexConfigRoot?: string;
@@ -1279,6 +1281,12 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         };
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
+        assert.equal(
+          report.hostProofSlotDir,
+          join(config.workspaceRoot, ".host-proof-slots"),
+          `${runner} ${mode} lost AGENTOS_HOST_PROOF_SLOT_DIR across the launcher`,
+        );
+        assert.equal(report.hostProofSlots, "3", `${runner} ${mode} lost AGENTOS_HOST_PROOF_SLOTS across the launcher`);
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);

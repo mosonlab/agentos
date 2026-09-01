@@ -17,12 +17,13 @@ if [[ -z "${AGENTOS_RUN_ID:-}" || "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression
   host_proof_slot_exec_child "$@"
 fi
 
-# These two functions are intentionally small source seams.  Production uses
-# the target macOS utilities; the standalone test sources this file and
-# replaces them with a deterministic clock and wait, without adding a
-# production environment switch or a dependency to the wrapper.
+# These two functions are intentionally small source seams.  Bash's SECONDS is
+# monotonic for the life of this shell, so a wall-clock correction cannot
+# extend admission beyond the production bound.  The standalone test sources
+# this file and replaces both seams without adding a production environment
+# switch or dependency.
 host_proof_slot_set_now() {
-  HOST_PROOF_SLOT_NOW=$(/bin/date +%s) || return $?
+  HOST_PROOF_SLOT_NOW=$SECONDS
 }
 
 host_proof_slot_wait() {
@@ -146,6 +147,19 @@ host_proof_slot_main() {
 
     slot_number=1
     while (( slot_number <= 10#$slot_count )); do
+      # Keep even a large scan inside the same bound; nonblocking acquisition
+      # is fast, but elapsed time is authoritative rather than iteration count.
+      host_proof_slot_set_now
+      now_status=$?
+      if (( now_status != 0 )); then
+        return "$now_status"
+      fi
+      elapsed_seconds=$((HOST_PROOF_SLOT_NOW - start_seconds))
+      if (( elapsed_seconds >= 1200 )); then
+        printf 'host-proof-slot: %s for workspace %s in Run %s timed out after 1200s waiting in %s\n' \
+          "$script_name" "$workspace_name" "$AGENTOS_RUN_ID" "$slot_directory" >&2
+        return 75
+      fi
       slot_file="${slot_directory}/slot-${slot_number}.lock"
       host_proof_slot_try "$slot_file" "$@"
       command_status=$?

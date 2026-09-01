@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  readFileSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -290,4 +291,108 @@ test("a killed holder releases its descriptor, while a live holder is never recl
   assert.equal(waiterResult.status, 0);
   assert.equal(waiterResult.stdout, "");
   assert.equal(waiterResult.stderr, "");
+});
+
+test("all workspace proof manifests are wrapped exactly once without changing commands or lifecycle hooks", () => {
+  const expected = {
+    "apps/web/package.json": {
+      name: "@anneal/web",
+      scripts: {
+        build: "/bin/sh -c 'tsc -b && vite build'",
+        typecheck: "tsc -b --pretty false",
+        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
+      },
+      hooks: { pretest: "npm run build -w @anneal/db" },
+    },
+    "packages/api/package.json": {
+      name: "@anneal/api",
+      scripts: {
+        build: "/bin/sh -c 'tsc -p tsconfig.json && node ../build-info/stamp.mjs dist'",
+        typecheck: "tsc -p tsconfig.json --noEmit",
+        test: "node --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
+        "test:db": "node --import tsx scripts/dbtest.mjs",
+      },
+      hooks: {
+        pretest: "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
+        "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner && npm run build -w @anneal/api",
+      },
+    },
+    "packages/build-info/package.json": {
+      name: "@anneal/build-info",
+      scripts: { test: "node --test *.test.mjs" },
+      hooks: {},
+    },
+    "packages/db/package.json": {
+      name: "@anneal/db",
+      scripts: {
+        build: "tsc -p tsconfig.json",
+        typecheck: "/bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
+        test: "node --import tsx --test prisma/*.test.ts src/*.test.ts",
+        "test:db": "node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
+      },
+      hooks: {
+        "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner",
+      },
+    },
+    "packages/github-client/package.json": {
+      name: "@anneal/github-client",
+      scripts: {
+        build: "tsc -p tsconfig.json",
+        typecheck: "tsc -p tsconfig.json --noEmit",
+        test: "node --import tsx --test src/*.test.ts",
+      },
+      hooks: {},
+    },
+    "packages/inbox/package.json": {
+      name: "@anneal/inbox",
+      scripts: {
+        build: "tsc -p tsconfig.json",
+        typecheck: "tsc -p tsconfig.json --noEmit",
+        test: "node --import tsx --test src/*.test.ts",
+      },
+      hooks: { pretest: "npm run build -w @anneal/db" },
+    },
+    "packages/merge-executor/package.json": {
+      name: "@anneal/merge-executor",
+      scripts: {
+        build: "tsc -p tsconfig.json",
+        typecheck: "tsc -p tsconfig.json --noEmit",
+        test: "node --import tsx --test src/*.test.ts",
+      },
+      hooks: { pretest: "npm run build -w @anneal/github-client && npm run build -w @anneal/db" },
+    },
+    "packages/runner/package.json": {
+      name: "@anneal/runner",
+      scripts: {
+        build: "/bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
+        typecheck: "tsc -p tsconfig.json --noEmit",
+        test: "node --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
+      },
+      hooks: { pretest: "npm run build -w @anneal/github-client" },
+    },
+  };
+
+  const proofNames = new Set(["build", "typecheck", "lint", "test", "test:db"]);
+  let wrappedCount = 0;
+  for (const [relativePath, contract] of Object.entries(expected)) {
+    const manifest = JSON.parse(readFileSync(join(repositoryRoot, relativePath), "utf8"));
+    assert.equal(manifest.name, contract.name);
+    assert.equal("lint" in manifest.scripts, false, `${contract.name} unexpectedly added lint`);
+    assert.deepEqual(
+      Object.keys(manifest.scripts).filter((name) => proofNames.has(name)).sort(),
+      Object.keys(contract.scripts).sort(),
+      `${contract.name} changed the exact proof-script surface`,
+    );
+    for (const [scriptName, innerCommand] of Object.entries(contract.scripts)) {
+      const prefix = `bash ../../scripts/host-proof-slot.sh ${scriptName} ${contract.name} -- `;
+      assert.equal(manifest.scripts[scriptName], `${prefix}${innerCommand}`);
+      assert.equal(manifest.scripts[scriptName].split("scripts/host-proof-slot.sh").length - 1, 1);
+      wrappedCount += 1;
+    }
+    for (const [hookName, command] of Object.entries(contract.hooks)) {
+      assert.equal(manifest.scripts[hookName], command, `${contract.name} changed ${hookName}`);
+      assert.equal(manifest.scripts[hookName].includes("host-proof-slot.sh"), false);
+    }
+  }
+  assert.equal(wrappedCount, 24);
 });

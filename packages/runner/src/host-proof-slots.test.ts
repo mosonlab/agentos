@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, chown, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,6 +38,13 @@ test("host proof slot startup preparation is concurrent and idempotent", async (
       // principals open the persistent inode without either owning its parent.
       assert.equal(mode(info.mode) & 0o006, 0o006);
     }
+
+    // Separate run-as principals are simulated by independent clients: neither
+    // owns the shared inode, and both need read/write opens before lockf can
+    // coordinate them. Exact world permissions above are the cross-UID part.
+    const sharedSlot = join(directory, "slot-1.lock");
+    const clients = await Promise.all([open(sharedSlot, "r+"), open(sharedSlot, "r+")]);
+    await Promise.all(clients.map(async (client) => client.close()));
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
