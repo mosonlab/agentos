@@ -49,7 +49,7 @@ const canonicalClaim = (
       name: outputKind === "implementation" ? "Implementation" : "Apply review fixes",
       outputKind,
       taskTemplate: { name: PR_TEMPLATE_NAME },
-    },
+    } as unknown as DeliveryClaim["task"]["templateStep"],
   },
   repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
   run: { opensPullRequest: outputKind === "implementation", requiresCommit: true },
