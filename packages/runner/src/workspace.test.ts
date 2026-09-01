@@ -928,7 +928,7 @@ test("PI auth provisioning fails loudly without falling back to host settings", 
   }
 });
 
-test("a distinct run-as uid can create and read its Codex config root", {
+test("a distinct run-as uid owns and can use its runtime tools and Codex config root", {
   skip: typeof process.getuid !== "function" || process.getuid() !== 0
     ? "requires root to exercise a genuinely distinct uid"
     : false,
@@ -953,7 +953,27 @@ test("a distinct run-as uid can create and read its Codex config root", {
   } as unknown as RunnerConfig;
   const scratch = await provisionAgentScratch(config, "session-codex-distinct-uid");
   const configParent = dirname(scratch.configRoot);
+  const sourceRoot = await createRuntimeToolsFixture();
   try {
+    await chmod(sourceRoot, 0o755);
+    await chmod(join(sourceRoot, "gate-worker"), 0o755);
+    for (const [relativePath] of canonicalRuntimeTools) {
+      await chmod(join(sourceRoot, relativePath), 0o644);
+    }
+    await materializeRuntimeTools(config, scratch, { sourceRoot });
+    for (const directory of [scratch.toolsDir, join(scratch.toolsDir, "gate-worker")]) {
+      const info = await stat(directory);
+      assert.equal(info.uid, targetUid);
+      assert.equal(info.mode & 0o777, 0o700);
+    }
+    for (const [relativePath] of canonicalRuntimeTools) {
+      const materializedPath = join(scratch.toolsDir, relativePath);
+      const info = await stat(materializedPath);
+      assert.equal(info.uid, targetUid);
+      assert.equal(info.mode & 0o777, 0o500);
+      execFileSync("/usr/bin/sudo", ["-n", "-u", targetUser, "--", "/usr/bin/test", "-r", materializedPath]);
+      execFileSync("/usr/bin/sudo", ["-n", "-u", targetUser, "--", "/usr/bin/test", "-x", materializedPath]);
+    }
     await provisionSessionConfig(config, "CODEX", scratch);
     assert.equal((await stat(scratch.configRoot)).uid, targetUid);
     assert.equal((await stat(join(scratch.configRoot, "auth.json"))).uid, targetUid);
@@ -965,6 +985,7 @@ test("a distinct run-as uid can create and read its Codex config root", {
   } finally {
     await rm(scratch.base, { recursive: true, force: true });
     await rm(configParent, { recursive: true, force: true });
+    await rm(sourceRoot, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
