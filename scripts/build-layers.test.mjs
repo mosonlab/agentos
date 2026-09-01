@@ -30,17 +30,9 @@ const writeManifest = (root, path, manifest) => {
   writeFileSync(join(root, path, "package.json"), JSON.stringify(manifest));
 };
 
-// The checked-out package.json is intentionally still unprefixed on branches
-// that have not integrated the root-script change yet. Keep these tests about
-// the real seven-workspace graph while giving buildLayers the post-change root
-// manifest it requires.
 const guardedRepository = (t) => {
   const root = scratch(t);
   const manifest = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
-  const build = manifest.scripts.build;
-  if (!build.startsWith(rootBuildScopeGuard)) {
-    manifest.scripts.build = `${rootBuildScopeGuard} && ${build}`;
-  }
   writeFileSync(join(root, "package.json"), JSON.stringify(manifest));
   symlinkSync(join(repositoryRoot, "apps"), join(root, "apps"), "dir");
   symlinkSync(join(repositoryRoot, "packages"), join(root, "packages"), "dir");

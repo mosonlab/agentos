@@ -35,43 +35,15 @@ import {
   planEnvironmentVariable,
   provisioningAvailable,
   provisioningRequested,
-  resolveConcurrency,
 } from "../src/dbtest-plan.ts";
 import { runDbtest } from "../src/dbtest-runner.ts";
+import { dbtestInvocationDecision } from "../src/dbtest-scope.ts";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const sourceDirectory = join(packageRoot, "src");
 const preamble = pathToFileURL(join(packageRoot, "scripts", "dbtest-preamble.mjs")).href;
 
 const say = (message) => process.stdout.write(`dbtest: ${message}\n`);
-
-export const regressionVerificationBypass = "regression-verification";
-export const runScopeRefusalExitCode = 78;
-
-export const runScopeRefusalMessage = (script, runId) =>
-  `run-scope-guard: ${script} refused for Run ${runId}: inside an Anneal Run, verify only the affected workspace using npm run ${script} -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.`;
-
-export const dbtestInvocationDecision = ({ args, environment, cpuCount }) => {
-  const runId = environment.AGENTOS_RUN_ID;
-  const nonBypassedRun = Boolean(runId) && environment.AGENTOS_RUN_SCOPE_BYPASS !== regressionVerificationBypass;
-  if (nonBypassedRun && args.length === 0) {
-    return {
-      exitCode: runScopeRefusalExitCode,
-      refusal: runScopeRefusalMessage("test:db -w @anneal/api", runId),
-    };
-  }
-
-  const requestedConcurrency = resolveConcurrency(environment, cpuCount);
-  const concurrency = nonBypassedRun ? Math.min(requestedConcurrency, 2) : requestedConcurrency;
-  return {
-    exitCode: null,
-    refusal: null,
-    concurrency,
-    capLog: concurrency < requestedConcurrency
-      ? `capped concurrency from ${requestedConcurrency} to ${concurrency} inside Anneal Run ${runId}`
-      : null,
-  };
-};
 
 const testFiles = () => {
   const requested = process.argv.slice(2);
@@ -155,4 +127,4 @@ const main = async () => {
   });
 };
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+await main();

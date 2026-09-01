@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,8 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   dbtestInvocationDecision,
   regressionVerificationBypass,
-  runScopeRefusalMessage,
-} from "../packages/api/scripts/dbtest.mjs";
+} from "../packages/api/src/dbtest-scope.ts";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const guard = join(repositoryRoot, "scripts", "run-scope-guard.sh");
@@ -29,7 +28,8 @@ const run = (command, args, overrides = {}) => spawnSync(command, args, {
   env: environment(overrides),
 });
 
-const expectedRefusal = (script, runId) => `${runScopeRefusalMessage(script, runId)}\n`;
+const expectedRefusal = (script, runId) =>
+  `run-scope-guard: ${script} refused for Run ${runId}: inside an Anneal Run, verify only the affected workspace using npm run ${script} -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.\n`;
 
 test("RUN-SCOPE-GUARD host fast path and exact Regression bypass are silent", () => {
   for (const overrides of [{}, {
@@ -72,7 +72,8 @@ test("DBTEST-SCOPE refuses only an unscoped non-bypassed Run invocation", () => 
   });
   assert.deepEqual(refused, {
     exitCode: 78,
-    refusal: runScopeRefusalMessage("test:db -w @anneal/api", "db-run"),
+    refusal:
+      "run-scope-guard: test:db -w @anneal/api refused for Run db-run: inside an Anneal Run, verify only the affected workspace using npm run test:db -w @anneal/api -- src/<file>.dbtest.ts; the Regression step owns repository-wide proof and the Merge Gate.",
   });
 
   const focused = dbtestInvocationDecision({
@@ -82,6 +83,24 @@ test("DBTEST-SCOPE refuses only an unscoped non-bypassed Run invocation", () => 
   });
   assert.equal(focused.exitCode, null);
   assert.equal(focused.concurrency, 2);
+});
+
+test("DBTEST-SCOPE executes through a symlinked repository path", (t) => {
+  const stubDirectory = mkdtempSync(join(tmpdir(), "run-scope-dbtest."));
+  t.after(() => rmSync(stubDirectory, { recursive: true, force: true }));
+  const linkedRepository = join(stubDirectory, "repository");
+  symlinkSync(repositoryRoot, linkedRepository, "dir");
+
+  const result = run(
+    process.execPath,
+    ["--import", "tsx", join(linkedRepository, "packages", "api", "scripts", "dbtest.mjs")],
+    { AGENTOS_RUN_ID: "symlink-run" },
+  );
+  assert.equal(result.status, 78, result.stderr);
+  assert.equal(
+    result.stderr,
+    "run-scope-guard: test:db -w @anneal/api refused for Run symlink-run: inside an Anneal Run, verify only the affected workspace using npm run test:db -w @anneal/api -- src/<file>.dbtest.ts; the Regression step owns repository-wide proof and the Merge Gate.\n",
+  );
 });
 
 test("DBTEST-SCOPE preserves host and bypass concurrency and caps Runs at two", () => {
@@ -136,7 +155,7 @@ test("MERGE-GATE-SCOPE writes a no-verdict refusal before Docker", (t) => {
   t.after(() => rmSync(stubDirectory, { recursive: true, force: true }));
   const sentinel = join(stubDirectory, "docker-reached");
   const docker = join(stubDirectory, "docker");
-  writeFileSync(docker, `#!/bin/sh\nprintf reached > '${sentinel}'\n+exit 99\n`);
+  writeFileSync(docker, `#!/bin/sh\nprintf reached > '${sentinel}'\nexit 99\n`);
   const chmod = spawnSync("chmod", ["+x", docker]);
   assert.equal(chmod.status, 0);
 
