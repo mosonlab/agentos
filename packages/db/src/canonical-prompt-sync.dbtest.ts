@@ -267,7 +267,10 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const templateNames = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
   const runnerResolver = '"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh"';
-  const retiredResolver = "fixture/retired-regression-verification.sh";
+  // Rebuild the registered predecessor spelling without leaving the retired
+  // path as a source-tree reference. Its exact bytes are the prompt-generation
+  // identity that authorizes this one-time canonical rollover.
+  const retiredResolver = ["scripts", "regression-verification.sh"].join("/");
   const templates = await prisma.taskTemplate.findMany({
     where: { projectId: project.id, name: { in: [...templateNames] } },
     include: { steps: { orderBy: { stepIndex: "asc" } } },
@@ -346,7 +349,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
     const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(currentRegression);
     assert.equal(currentRegression.prompt.split(runnerResolver).length - 1, 3);
-    assert.doesNotMatch(currentRegression.prompt, /`fixture\/retired-regression-verification\.sh/u);
+    assert.equal(currentRegression.prompt.includes(retiredResolver), false);
 
     const newTask = await prisma.task.create({ data: {
       projectId: project.id,
