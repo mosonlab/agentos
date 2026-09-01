@@ -99,6 +99,7 @@ const retryRequest = async (
       },
       run: {
         count: async () => 0,
+        findFirst: async () => null,
         groupBy: async () => [{
           taskId: "task-1",
           status: "FAILED",

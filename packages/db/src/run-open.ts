@@ -817,7 +817,7 @@ export const openRun = async (
   // the persisted Task/repo/ref relation that resolved as this Run's base.
   // This is evaluated once, before Run birth; later salvage repair may not
   // rewrite a Run's snapshotted commit contract.
-  const continuesOwnPublication = task.repoId
+  const continuesOwnPublication = task.repoId && branches.targetBranch
     ? await tx.run.findFirst({
       where: {
         taskId: task.id,

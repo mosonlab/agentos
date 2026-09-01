@@ -137,7 +137,7 @@ const seedCanonicalImplementationContinuation = async () => {
     maxRunsPerTask: 2,
     endedAt: new Date(),
   } });
-  return { ...seeded, run, baseSha };
+  return { ...seeded, step, run, baseSha };
 };
 
 test("the merge-executor principal on an ordinary run is refused before anything is written", async () => {
@@ -242,6 +242,67 @@ test("a no-change salvage continuation succeeds only with canonical implementati
       ? null
       : `missing implementation task output for current Run ${run.id}`);
   }
+});
+
+test("a manual no-change continuation rejects missing or non-implementation evidence", async () => {
+  for (const wrongKind of [false, true]) {
+    const { task, run, baseSha } = await seedCanonicalImplementationContinuation();
+    await db.task.update({ where: { id: task.id }, data: {
+      templateId: null,
+      templateStepId: null,
+    } });
+    if (wrongKind) {
+      await db.taskStepOutput.create({ data: {
+        taskId: task.id,
+        runId: run.id,
+        kind: "result",
+        body: "finished",
+        commitSha: baseSha,
+        metadata: {},
+      } });
+    }
+
+    const result = await completeRun(db, {
+      runId: run.id,
+      body: {
+        ...completion(run.fencingToken!),
+        branch: run.branch,
+        baseSha,
+        headSha: baseSha,
+      },
+      claimantClass: "runner",
+    });
+    const stored = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+
+    assert.equal("succeeded" in result && result.succeeded, false);
+    assert.equal(stored.status, RunStatus.FAILED);
+    assert.equal(stored.failureReason, wrongKind
+      ? "task output kind result does not match canonical kind implementation"
+      : `missing implementation task output for current Run ${run.id}`);
+  }
+});
+
+test("a configured non-committing Step at its ceiling is not treated as a relaxed continuation", async () => {
+  const { step, run, baseSha } = await seedCanonicalImplementationContinuation();
+  await db.taskTemplateStep.update({
+    where: { id: step.id },
+    data: { outputKind: "documentation", requiresCommit: false },
+  });
+
+  const result = await completeRun(db, {
+    runId: run.id,
+    body: {
+      ...completion(run.fencingToken!),
+      branch: run.branch,
+      baseSha,
+      headSha: baseSha,
+    },
+    claimantClass: "runner",
+  });
+  const stored = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+
+  assert.equal("succeeded" in result && result.succeeded, true);
+  assert.equal(stored.status, RunStatus.SUCCEEDED);
 });
 
 test("a resolved integrator stop race rolls back the whole predecessor completion", async () => {

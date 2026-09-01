@@ -116,7 +116,7 @@ const fakeTx = (
   options: {
     chainControlRows?: Array<Record<string, unknown>>;
     lockedAgent?: ReturnType<typeof agent> | null;
-    publishedRuns?: Array<{ taskId: string; repoId: string; pushedBranch: string }>;
+    publishedRuns?: Array<{ taskId: string; repoId: string; pushedBranch: string | null }>;
     stopRows?: Array<Record<string, unknown>>;
   } = {},
 ) => {
@@ -265,6 +265,33 @@ test("ordinary and other-Task bases keep the configured commit contract", async 
     assert.equal(creates[0]?.targetBranch, fixture.targetBranch, fixture.name);
     assert.equal(creates[0]?.requiresCommit, true, fixture.name);
   }
+});
+
+test("a null resolved base cannot match an unpublished prior Run", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const prior = priorRun({ repoId: repo.id, branch: null, targetBranch: null });
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    targetBranch: null,
+    runs: [prior],
+  });
+  const { tx, creates } = fakeTx(task, {
+    publishedRuns: [{ taskId: task.id, repoId: repo.id, pushedBranch: null }],
+  });
+
+  const opened = await openRun(tx, task.id, {
+    kind: "retry-after-completion",
+    readyAt: now,
+    sourceRunId: prior.id,
+    sourceMaxRunsPerTask: prior.maxRunsPerTask,
+    sourceBudgetGrants: prior.budgetGrants,
+    budgetGrant: 1,
+  });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, null);
+  assert.equal(creates[0]?.requiresCommit, true);
 });
 
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
