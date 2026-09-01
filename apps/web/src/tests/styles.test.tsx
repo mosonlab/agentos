@@ -8,10 +8,11 @@ import { Markdown } from "../components/ui";
 
 const sourcePath = fileURLToPath(new URL("../styles.css", import.meta.url));
 const source = readFileSync(sourcePath, "utf8");
-const distDirectory = fileURLToPath(new URL("../../dist/assets/", import.meta.url));
-const cssAsset = (existsSync(distDirectory) ? readdirSync(distDirectory) : [])
+const distDirectory = fileURLToPath(new URL("../../dist/", import.meta.url));
+const assetsDirectory = fileURLToPath(new URL("../../dist/assets/", import.meta.url));
+const cssAsset = (existsSync(assetsDirectory) ? readdirSync(assetsDirectory) : [])
   .find((name) => name.endsWith(".css"));
-const built = cssAsset ? readFileSync(`${distDirectory}${cssAsset}`, "utf8") : null;
+const built = cssAsset ? readFileSync(`${assetsDirectory}${cssAsset}`, "utf8") : null;
 const buildSkipReason = "Merge Gate build required";
 
 const layersAt = (css: string, index: number): string[] => {
@@ -80,8 +81,8 @@ const unlayeredScan = (css: string): { unlayered: number; offenders: string[] } 
   return { unlayered: unlayered.length, offenders };
 };
 
-test("no unlayered class rule styles the app", { skip: built === null ? buildSkipReason : false }, () => {
-  assert.ok(built !== null);
+test("no unlayered class rule styles the app", { skip: !existsSync(distDirectory) && buildSkipReason }, () => {
+  assert.ok(built !== null, "built web assets contain no stylesheet");
   const { unlayered, offenders } = unlayeredScan(built);
 
   // Guards against a parser change quietly making the assertion vacuous: the
@@ -110,8 +111,8 @@ test("the layer guard sees element-qualified class selectors", () => {
   assert.equal(flagged('a[href$=".pdf"]{color:red}').length, 0, "attribute value read as a class");
 });
 
-test("Markdown list markers override Tailwind preflight", { skip: built === null ? buildSkipReason : false }, () => {
-  assert.ok(built !== null);
+test("Markdown list markers override Tailwind preflight", { skip: !existsSync(distDirectory) && buildSkipReason }, () => {
+  assert.ok(built !== null, "built web assets contain no stylesheet");
   const preflight = built.search(/(?:ol,ul,menu|menu,ol,ul)\{list-style:none/);
   assert.notEqual(preflight, -1, "missing Tailwind list reset");
   assert.deepEqual(layersAt(built, preflight), ["base"]);

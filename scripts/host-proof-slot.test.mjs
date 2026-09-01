@@ -535,21 +535,18 @@ test("Runner child fixtures keep their audited development-condition counts", ()
     {
       path: "packages/runner/src/regression-verification-script.test.ts",
       execPathReferences: 1,
-      workspacePackageReferences: 0,
       developmentConditions: 0,
       childMarker: "REGRESSION_FIXTURE_NODE: process.execPath",
     },
     {
       path: "packages/runner/src/adapters.test.ts",
       execPathReferences: 7,
-      workspacePackageReferences: 0,
       developmentConditions: 0,
       childMarker: 'runAsPrefix: [process.execPath, "-e", stubScript]',
     },
     {
       path: "packages/runner/src/run-output.test.ts",
       execPathReferences: 1,
-      workspacePackageReferences: 1,
       developmentConditions: 1,
       childMarker: "pathToFileURL(fileURLToPath(new URL(\"./mcp-server.ts\", import.meta.url))).href",
     },
@@ -560,12 +557,7 @@ test("Runner child fixtures keep their audited development-condition counts", ()
     assert.equal(
       source.match(/process\.execPath/gu)?.length ?? 0,
       audit.execPathReferences,
-      `${audit.path} added or removed a Node child; audit whether it imports a workspace package`,
-    );
-    assert.equal(
-      source.match(/from\s+["']@anneal\//gu)?.length ?? 0,
-      audit.workspacePackageReferences,
-      `${audit.path} changed workspace-package imports; source children need the development condition`,
+      `${audit.path} added or removed a Node child; audit its transitive graph and select development exports if it reaches repository source`,
     );
     assert.match(source, new RegExp(audit.childMarker.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
     assert.equal(

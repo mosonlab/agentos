@@ -1059,6 +1059,13 @@ describe("releaseMigrate --existing", () => {
 // ---------------------------------------------------------------------------
 
 describe("composition integrity", () => {
+  it("keeps the release entrypoint inside the CLI typecheck boundary", () => {
+    const config = readFileSync(`${packageRoot}/tsconfig.cli.json`, "utf8");
+    const include = config.match(/"include"\s*:\s*\[([^\]]*)\]/u)?.[1];
+    assert.ok(include, "tsconfig.cli.json must declare its entrypoints");
+    assert.match(include, /"prisma\/release-migrate\.ts"/u, "release-migrate.ts is outside the CLI typecheck boundary");
+  });
+
   it("names the exact command OSS-F0 Decision 7 requires", () => {
     assert.deepEqual([...RELEASE_MIGRATION_COMMAND], ["npm", "run", "db:migrate-goal-execution"]);
   });
