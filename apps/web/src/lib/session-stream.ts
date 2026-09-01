@@ -1,4 +1,5 @@
 import type { RunnerKind, SessionEvent } from "./types";
+import { asArray, asRecord, asString, contentText, textSignatureId } from "@anneal/db/agent-message";
 
 /* Pure normalizer: raw SessionEvent rows in, stream items out. No React, no
  * network, no imports from components/. It feeds both the stat bar and the
@@ -65,39 +66,8 @@ export const RESUME_MARKER_TEXT = "sessions.stream.resumed";
 const PRIMARY_ARG_MAX = 120;
 const ERROR_MESSAGE_MAX = 500;
 
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
-
-const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
-
-const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
-
-/** The `text` parts of a content array, joined. Returns "" when there are none —
- *  a tool-only assistant message and PI's `[thinking, toolCall]` turn both land
- *  here, and both must produce no item. */
-const contentText = (content: unknown): string =>
-  asArray(content)
-    .map((part) => asString(asRecord(part)?.text))
-    .filter((part): part is string => part !== null)
-    .join("\n");
-
 const truncate = (value: string, max: number): string =>
   value.length > max ? `${value.slice(0, max)}…` : value;
-
-/** PI's textSignature is a JSON *string* carrying `{v, id, phase}`. */
-const textSignatureId = (content: unknown): string | null => {
-  for (const part of asArray(content)) {
-    const signature = asString(asRecord(part)?.textSignature);
-    if (signature === null) continue;
-    try {
-      const id = asString(asRecord(JSON.parse(signature) as unknown)?.id);
-      if (id !== null) return id;
-    } catch {
-      // A signature we cannot parse simply yields no identity.
-    }
-  }
-  return null;
-};
 
 /** Mirrors the adapter's own eventErrorMessage, so the stream shows the same
  *  text the run's providerError recorded. */

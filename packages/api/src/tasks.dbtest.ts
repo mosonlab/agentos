@@ -95,11 +95,13 @@ test("task detail projects the newest non-empty agent message, preferring FINAL_
   await db.sessionEvent.createMany({ data: [
     {
       sessionId: session.id, runId: run.id, seq: 1, at: new Date("2026-08-31T18:01:00.000Z"),
-      source: "CLAUDE", type: "MODEL_COMPLETED", payload: { result: "intermediate one" },
+      source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { message: { content: [{ type: "text", text: "intermediate one" }] } },
     },
     {
       sessionId: session.id, runId: run.id, seq: 2, at: new Date("2026-08-31T18:02:00.000Z"),
-      source: "CLAUDE", type: "MODEL_COMPLETED", payload: { result: "intermediate two" },
+      source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { message: { content: [{ type: "text", text: "intermediate two" }] } },
     },
     {
       sessionId: session.id, runId: run.id, seq: 3, at: finalAt,

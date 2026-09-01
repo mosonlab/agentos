@@ -18,6 +18,10 @@
       "types": "./src/model-routing.ts",
       "import": "./dist/model-routing.js"
     },
+    "./agent-message": {
+      "types": "./src/agent-message.ts",
+      "import": "./dist/agent-message.js"
+    },
     "./board-contract": {
       "types": "./src/board-contract.ts",
       "import": "./dist/board-contract.js"

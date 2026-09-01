@@ -68,21 +68,13 @@ const SessionCell = ({ session }: { session: Run["session"] }): ReactNode => {
   );
 };
 
-type LatestAgentMessage = { body: string; at: string };
-type RunSessionWithLatestMessage = NonNullable<Run["session"]> & {
-  latestAgentMessage?: LatestAgentMessage | null;
-};
-
-const latestAgentMessage = (run: Run): LatestAgentMessage | null =>
-  (run.session as RunSessionWithLatestMessage | null | undefined)?.latestAgentMessage ?? null;
-
 /** The operator's answer to "what is the run doing now?" The message remains
  * plain text even when it contains markdown-looking characters; agent text is
  * data, not an instruction to build another document here. */
 export const NowBlock = ({ run }: { run: Run }): ReactNode => {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
-  const message = latestAgentMessage(run);
+  const message = run.session?.latestAgentMessage ?? null;
   const body = message?.body ?? t("taskDetail.now.noMessage");
   // Task-detail Runs carry cost on their nested Session, while RunLine's
   // shared board projection keeps it at the top level. The line only needs the
@@ -101,7 +93,7 @@ export const NowBlock = ({ run }: { run: Run }): ReactNode => {
               <button
                 type="button"
                 aria-expanded={expanded}
-                aria-label={t(expanded ? "taskDetail.now.collapse" : "taskDetail.now.expand")}
+                title={t(expanded ? "taskDetail.now.collapse" : "taskDetail.now.expand")}
                 className={cn(
                   "min-w-0 border-0 bg-transparent p-0 text-left text-secondary-foreground hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]",
                   expanded ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "line-clamp-3 whitespace-pre-wrap [overflow-wrap:anywhere]",
