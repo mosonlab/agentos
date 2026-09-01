@@ -335,7 +335,7 @@ export const canonicalOutputRefusal = (
   // all other canonical outputs retain the original ownership refusal (and its
   // position before the remaining validation checks).
   const priorRun = output.runId !== runId;
-  if (priorRun && !outputIsImmutableOncePersisted(step)) {
+  if (priorRun && (output.runId === null || !outputIsImmutableOncePersisted(step))) {
     return `${step.outputKind} task output belongs to prior Run ${output.runId ?? "none"}, not current Run ${runId}`;
   }
   if (output.kind !== step.outputKind) return `task output kind ${output.kind} does not match canonical kind ${step.outputKind}`;

@@ -136,6 +136,7 @@ test("immutable findings from a prior Run are accepted only after canonical vali
   for (const kind of ["sol-findings", "blind-findings"] as const) {
     const reviewStep = step("direct-engineer-workflow", kind === "sol-findings" ? 2 : 3, kind);
     const output = (overrides: Partial<{
+      runId: string | null;
       kind: string;
       body: string;
       commitSha: string;
@@ -149,6 +150,10 @@ test("immutable findings from a prior Run are accepted only after canonical vali
     });
 
     assert.equal(canonicalOutputRefusal(reviewStep, output(), "run-2", headSha), null);
+    assert.match(
+      canonicalOutputRefusal(reviewStep, output({ runId: null }), "run-2", headSha) ?? "",
+      /belongs to prior Run none, not current Run run-2/u,
+    );
     assert.match(
       canonicalOutputRefusal(reviewStep, output({ kind: "implementation" }), "run-2", headSha) ?? "",
       /does not match canonical kind/u,
