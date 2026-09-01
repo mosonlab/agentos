@@ -11,6 +11,7 @@ import {
   FailureClass,
   failurePhases,
   gateQuestion,
+  INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_TEMPLATE_NAME,
   isIntegratorStep,
   isMergeReadinessStep,
@@ -425,6 +426,7 @@ export const completeRun = async (
       },
     });
     if (!run?.session) return null;
+    const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
     const reportedSuccess = completionSucceeded({
       exitCode: body.exitCode,
       signal: body.signal ?? null,
@@ -432,6 +434,27 @@ export const completeRun = async (
       terminalSuccess: body.terminalSuccess,
       terminationReason: body.terminationReason ?? null,
     });
+    // Mechanical output is the executor's durable account of whether it
+    // merged. It may be committed immediately before a transport failure in
+    // the separate completion request, so inspect it before classifying that
+    // request as a protocol failure. Ownership is exact: an output from any
+    // other Run (or an operator-created row without runId) is not evidence for
+    // this completion and must retain fail-loud behavior.
+    const persistedMechanicalOutput = mechanical && run.taskId
+      ? await tx.taskStepOutput.findUnique({
+          where: { taskId: run.taskId },
+          select: { runId: true, kind: true, body: true },
+        })
+      : null;
+    const persistedMechanicalOutcome = persistedMechanicalOutput?.runId === run.id
+      && persistedMechanicalOutput.kind === INTEGRATOR_OUTPUT_KIND
+      ? parseMergeResult(persistedMechanicalOutput)
+      : null;
+    const authoritativeMechanicalOutcome = !reportedSuccess
+      && persistedMechanicalOutcome
+      && persistedMechanicalOutcome.outcome !== "malformed"
+      ? persistedMechanicalOutcome
+      : null;
     // A step whose deliverable only its own agent can author is not done
     // because its session ended. An adapter reads the end of a turn as the end
     // of the session, so a step that parked on a background wait — a merge
@@ -472,7 +495,11 @@ export const completeRun = async (
       body.headSha ?? null,
       persistedOutput,
     );
-    const succeeded = reportedSuccess && !missingOutputReason;
+    // A valid, same-Run mechanical result is terminal protocol success even
+    // when the later completion envelope says exit 1/PROTOCOL_ERROR. This is
+    // deliberately narrower than trusting the envelope: malformed, foreign,
+    // non-mechanical, or absent output remains a failure.
+    const succeeded = (reportedSuccess || authoritativeMechanicalOutcome !== null) && !missingOutputReason;
     // The runner is on the untrusted side of this boundary. When it reports a
     // structured envelope, the API classifies from the facts in it and
     // ignores the runner's own `failureClass`/`retryable`/`externalFailure`
@@ -487,7 +514,7 @@ export const completeRun = async (
     const known = body.failureEnvelope?.version === FAILURE_ENVELOPE_VERSION
       ? failureEnvelopeV1Input.safeParse(body.failureEnvelope)
       : null;
-    const envelope = !reportedSuccess && known?.success ? known.data : null;
+    const envelope = !succeeded && known?.success ? known.data : null;
     const verdict = envelope ? classifyEnvelope(envelope) : null;
     const failureClass = succeeded
       ? null
@@ -541,7 +568,6 @@ export const completeRun = async (
     // reachable interleaving rather than merely hard to reach. The failure
     // envelope's verdict decides *whether* the failure was external; it does
     // not get to raise the ceiling on this step either.
-    const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
     const refunded = external && !mechanical ? 1 : 0;
     const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, refunded);
     // One marker read for both completion outcomes; this handler used to
@@ -737,10 +763,11 @@ export const completeRun = async (
       // may touch it, because a synthesized body would read as a merge that
       // never happened.
       if (succeeded && mechanical && run.task) {
-        const persisted = await tx.taskStepOutput.findUnique({
-          where: { taskId: run.taskId }, select: { kind: true, body: true },
-        });
-        const outcome = parseMergeResult(persisted);
+        // Reuse the ownership-checked output read performed before completion
+        // classification. A foreign output is intentionally represented as a
+        // malformed result so a retry cannot advance the chain on another
+        // Run's merge.
+        const outcome = persistedMechanicalOutcome ?? parseMergeResult(null);
         if (outcome.outcome === "merged") {
           await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
         } else {

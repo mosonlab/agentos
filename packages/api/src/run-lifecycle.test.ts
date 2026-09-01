@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type PrismaClient, RunStatus } from "@anneal/db";
+import {
+  MERGE_INTEGRATOR_KIND,
+  MERGE_INTEGRATOR_SCHEMA_VERSION,
+  type PrismaClient,
+  RunStatus,
+} from "@anneal/db";
 
 import {
   appendRunActivity,
@@ -534,4 +539,86 @@ test("activity persists the authenticated principal through the lifecycle interf
     actorId: null,
     body: "progress",
   });
+});
+
+test("a fenced SESSION stopped result lands its question in the activity transaction", async () => {
+  const taskUpdates: Array<Record<string, unknown>> = [];
+  const questions: Array<Record<string, unknown>> = [];
+  let runRead = 0;
+  const metadata = {
+    kind: MERGE_INTEGRATOR_KIND.result,
+    schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+    outcome: "stopped",
+    condition: "base-drift-post-merge",
+    evidence: "merge commit landed before base verification",
+  };
+  const resultActivity = {
+    id: "session-result-1",
+    taskId: "task-1",
+    createdAt: now,
+    actorType: "session",
+    actorId: "merge-executor-1",
+    metadata: { ...metadata, sourceRunId: "run-1" },
+  };
+  const tx = {
+    $queryRaw: async () => [{ id: "task-1" }],
+    run: {
+      findFirst: async () => {
+        runRead += 1;
+        return runRead === 1
+          ? { taskId: "task-1" }
+          : {
+              taskId: "task-1",
+              leaseGeneration: 1,
+              agentId: "agent-1",
+              session: { id: "session-1" },
+              task: { templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } },
+            };
+      },
+      findUnique: async () => ({ taskId: "task-1", agentId: "agent-1", session: { id: "session-1" } }),
+    },
+    task: {
+      findUnique: async () => ({
+        id: "task-1",
+        assigneeAgentId: "agent-1",
+        chainId: "chain-1",
+        chainIndex: 7,
+        templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } },
+      }),
+      update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return {}; },
+    },
+    taskActivity: {
+      create: async () => resultActivity,
+      findUnique: async () => resultActivity,
+    },
+    inboxMessage: {
+      findFirst: async () => null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        questions.push(data);
+        return { id: "question-1" };
+      },
+    },
+  };
+
+  const result = await appendRunActivity(databaseFor(tx), {
+    runId: "run-1",
+    now,
+    principal: { kind: "session", runId: "run-1", leaseGeneration: 1 },
+    body: {
+      actorType: "operator",
+      actorId: "merge-executor-1",
+      fencingToken: "fence-1",
+      body: "Mechanical merge stopped: base-drift-post-merge",
+      metadata,
+    },
+  });
+
+  assert.equal("message" in result, false);
+  assert.deepEqual(taskUpdates, [{
+    status: "REVIEW",
+    failureReason: "Mechanical merge stopped: base-drift-post-merge",
+  }]);
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0]?.dedupeKey, "merge-stop:session-result-1");
+  assert.deepEqual((questions[0]?.choices as Array<{ id: string }>).map((choice) => choice.id), ["accept", "revert"]);
 });
