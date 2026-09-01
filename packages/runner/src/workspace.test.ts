@@ -679,11 +679,11 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
   });
 }
 
-test("a run-as principal creates and removes its own scratch base", async () => {
+test("run-as scratch commands start outside the target-owned base", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-run-as-scratch-owner-"));
   const log = join(root, "launcher.log");
   const launcher = join(root, "run-as.sh");
-  await writeFile(launcher, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec "$@"\n`, { mode: 0o755 });
+  await writeFile(launcher, `#!/bin/sh\nprintf '%s\\n' "$PWD" >> ${log}\nexec "$@"\n`, { mode: 0o755 });
   const config = {
     workspaceRoot: join(root, "workspaces"),
     runAsPrefix: [launcher],
@@ -692,10 +692,20 @@ test("a run-as principal creates and removes its own scratch base", async () => 
   } as unknown as RunnerConfig;
 
   const scratch = await provisionAgentScratch(config);
-  assert.match((await readFile(log, "utf8")).split("\n")[0] ?? "", /mktemp -d/u);
-  await cleanupAgentScratch(config, scratch);
-  await assert.rejects(stat(scratch.base), /ENOENT/u);
-  await rm(root, { recursive: true, force: true });
+  const sourceRoot = await createRuntimeToolsFixture();
+  try {
+    await materializeRuntimeTools(config, scratch, { sourceRoot });
+    const commandCwds = (await readFile(log, "utf8")).trim().split("\n");
+    for (const cwd of commandCwds) {
+      assert.equal(cwd, await realpath(tmpdir()), "the daemon must be able to enter cwd before the launcher changes uid");
+    }
+    await cleanupAgentScratch(config, scratch);
+    await assert.rejects(stat(scratch.base), /ENOENT/u);
+  } finally {
+    await rm(scratch.base, { recursive: true, force: true });
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {

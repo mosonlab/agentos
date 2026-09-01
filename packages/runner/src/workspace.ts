@@ -351,7 +351,10 @@ export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `a
     // traversable scratch directory is left behind.
     try {
       await command(config, "/bin/chmod", ["700", base], temporaryRoot, workspaceEnvironment(config));
-      await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], base, workspaceEnvironment(config));
+      // Node enters cwd before it execs the run-as launcher. The daemon cannot
+      // enter the target principal's 0700 base, so keep cwd on the shared temp
+      // root and let the launched principal mutate the absolute child paths.
+      await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], temporaryRoot, workspaceEnvironment(config));
     } catch (error: unknown) {
       await command(config, "/bin/rm", ["-rf", "--", base], temporaryRoot, workspaceEnvironment(config)).catch(() => undefined);
       throw error;
@@ -382,11 +385,15 @@ export const materializeRuntimeTools = async (
 ): Promise<void> => {
   const sourceRoot = options.sourceRoot ?? runtimeToolsSourceRoot;
   const execute = options.execute ?? command;
+  // A prefixed command changes identity only after Node has entered cwd. The
+  // target-owned 0700 base is therefore valid as an argument, but not as cwd
+  // for the daemon that launches the command.
+  const commandCwd = config.runAsPrefix.length > 0 ? await realpath(tmpdir()) : scratch.base;
   await execute(
     config,
     "/bin/sh",
     ["-c", runtimeToolsMaterializationScript, "agentos-runtime-tools", sourceRoot, scratch.toolsDir],
-    scratch.base,
+    commandCwd,
     workspaceEnvironment(config),
   );
 };
