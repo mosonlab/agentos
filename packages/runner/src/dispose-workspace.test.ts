@@ -17,6 +17,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   runnerId: "runner-1",
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 1_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",

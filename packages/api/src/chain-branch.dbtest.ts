@@ -1210,6 +1210,7 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
       runnerId: "runner-1",
       daemonVersion: "0.0.0-dbtest",
       pollIntervalMs: 1_000,
+      claimMaxLoadAverage: 1.5,
       leaseSeconds: 60,
       heartbeatIntervalMs: 5_000,
       path: process.env.PATH ?? "/usr/bin:/bin",

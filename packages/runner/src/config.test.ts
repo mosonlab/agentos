@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
+import { cpus, homedir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -96,6 +96,53 @@ test("the repository mirror defaults into the task account's home and accepts an
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
+});
+
+const withClaimMaxLoadAverage = (value: string | undefined, body: () => void): void => {
+  const previous = process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE;
+  if (value === undefined) delete process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE;
+  else process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE = value;
+  try {
+    body();
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE;
+    else process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE = previous;
+  }
+};
+
+test("claim load threshold defaults from CPU count and accepts integer or decimal overrides", () => {
+  withClaimMaxLoadAverage(undefined, () => {
+    assert.equal(loadRunnerConfig().claimMaxLoadAverage, cpus().length * 1.5);
+  });
+  withClaimMaxLoadAverage("12", () => {
+    assert.equal(loadRunnerConfig().claimMaxLoadAverage, 12);
+  });
+  withClaimMaxLoadAverage("2.75", () => {
+    assert.equal(loadRunnerConfig().claimMaxLoadAverage, 2.75);
+  });
+});
+
+test("claim load threshold rejects malformed or non-positive overrides", () => {
+  for (const value of ["0", "-1", "", "NaN", "Infinity", "2.5x"]) {
+    withClaimMaxLoadAverage(value, () => {
+      assert.throws(
+        () => loadRunnerConfig(),
+        (error: unknown) => error instanceof Error
+          && error.message === "RUNNER_CLAIM_MAX_LOAD_AVERAGE must be a positive finite number",
+        `${value || "empty"} was accepted`,
+      );
+    });
+  }
+});
+
+test("claim load threshold fails loudly when CPU information is unavailable", () => {
+  withClaimMaxLoadAverage(undefined, () => {
+    assert.throws(
+      () => loadRunnerConfig({ cpuCount: 0 }),
+      (error: unknown) => error instanceof Error
+        && error.message === "RUNNER_CLAIM_MAX_LOAD_AVERAGE must be a positive finite number",
+    );
+  });
 });
 
 test("an explicit runner Git identity is accepted only as a complete pair", () => {
