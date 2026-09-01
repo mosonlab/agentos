@@ -81,6 +81,68 @@ const seedRun = async (
   promptHash: "hash", status, maxRunsPerTask: context.task.maxSessionsPerTask,
 } });
 
+test("task detail projects the newest non-empty agent message, preferring FINAL_OUTPUT", async () => {
+  const context = await seedTask("task-detail-latest-agent-message");
+  const run = await seedRun(context, 1, "SUCCEEDED");
+  const session = await db.session.create({ data: {
+    runId: run.id,
+    projectId: context.project.id,
+    agentId: context.agent.id,
+    taskId: context.task.id,
+    runner: "CLAUDE",
+  } });
+  const finalAt = new Date("2026-08-31T18:03:00.000Z");
+  await db.sessionEvent.createMany({ data: [
+    {
+      sessionId: session.id, runId: run.id, seq: 1, at: new Date("2026-08-31T18:01:00.000Z"),
+      source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { message: { content: [{ type: "text", text: "intermediate one" }] } },
+    },
+    {
+      sessionId: session.id, runId: run.id, seq: 2, at: new Date("2026-08-31T18:02:00.000Z"),
+      source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { message: { content: [{ type: "text", text: "intermediate two" }] } },
+    },
+    {
+      sessionId: session.id, runId: run.id, seq: 3, at: finalAt,
+      source: "CLAUDE", type: "FINAL_OUTPUT", payload: { type: "result", result: "The final output" },
+    },
+  ] });
+
+  const response = await call("GET", `/tasks/${context.task.id}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.runs[0].session.latestAgentMessage, {
+    body: "The final output",
+    at: finalAt.toISOString(),
+  });
+});
+
+test("task detail returns null when a session has no text events", async () => {
+  const context = await seedTask("task-detail-no-agent-message");
+  const run = await seedRun(context, 1, "SUCCEEDED");
+  const session = await db.session.create({ data: {
+    runId: run.id,
+    projectId: context.project.id,
+    agentId: context.agent.id,
+    taskId: context.task.id,
+    runner: "CLAUDE",
+  } });
+  await db.sessionEvent.createMany({ data: [
+    {
+      sessionId: session.id, runId: run.id, seq: 1,
+      source: "CLAUDE", type: "MODEL_COMPLETED", payload: { status: "completed" },
+    },
+    {
+      sessionId: session.id, runId: run.id, seq: 2,
+      source: "CLAUDE", type: "FINAL_OUTPUT", payload: { type: "result" },
+    },
+  ] });
+
+  const response = await call("GET", `/tasks/${context.task.id}`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.runs[0].session.latestAgentMessage, null);
+});
+
 // --- POST /runs/:runId/cancel ----------------------------------------------
 
 test("operator cancellation terminates an unclaimed queued run and lands its task in Review", async () => {

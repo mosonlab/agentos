@@ -53,6 +53,12 @@ import {
   type TaskReadScope,
 } from "../board.js";
 import { chainExecutionOwner } from "../chain-execution-owner.js";
+import {
+  LATEST_AGENT_MESSAGE_EVENT_LIMIT,
+  latestAgentMessageEventTypes,
+  projectLatestAgentMessage,
+  type LatestAgentMessageEvent,
+} from "../latest-agent-message.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import {
   isCanonicalBlindFindingsStep,
@@ -296,6 +302,19 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       },
     });
     if (!task) return context.json({ error: "Task not found" }, 404);
+    const latestSession = task.runs[0]?.session ?? null;
+    const sessionEvents = latestSession === null
+      ? []
+      : await db.sessionEvent.findMany({
+        where: {
+          sessionId: latestSession.id,
+          type: { in: latestAgentMessageEventTypes(latestSession.runner) },
+        },
+        select: { type: true, at: true, payload: true },
+        orderBy: { seq: "desc" },
+        take: LATEST_AGENT_MESSAGE_EVENT_LIMIT,
+      });
+    const latestSessionEvents: LatestAgentMessageEvent[] = sessionEvents.reverse();
     const admission = await readStepAdmission(db, task.id, { locked: false });
     if (!admission.task || !admission.verdict) {
       throw new Error(`Task ${task.id} disappeared while projecting operator move targets`);
@@ -318,6 +337,9 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       ...run,
       session: run.session === null ? null : {
         ...run.session,
+        latestAgentMessage: run.session.id === latestSession?.id
+          ? projectLatestAgentMessage(run.session.runner, latestSessionEvents)
+          : null,
         usageCost: serializeUsageCost(usageCosts[index] ?? null),
       },
       mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
