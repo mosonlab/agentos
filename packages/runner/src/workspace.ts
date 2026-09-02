@@ -570,6 +570,18 @@ export const provisionWorkspace = async (
         // Delivery pushes to `origin`; the mirror is a provisioning detail and
         // must never become the run's publication target.
         await execute(config, "git", ["remote", "set-url", "origin", claim.repo.remoteUrl], workspace, env);
+        // `clone --single-branch` writes one fetch refspec, covering only the
+        // branch it cloned. When that branch is the run's own published head,
+        // nothing in the workspace resolves `origin/<target>`: an agent asking
+        // for the merge base against its baseline gets `unknown revision`, and
+        // `git fetch origin <target>` cannot repair it because the refspec that
+        // would create the remote-tracking ref is not there. Add it, then fill
+        // it from the mirror so the ref exists before the agent starts.
+        if (cloneTarget !== target) {
+          const targetRefspec = `+refs/heads/${target}:refs/remotes/origin/${target}`;
+          await execute(config, "git", ["config", "--add", "remote.origin.fetch", targetRefspec], workspace, env);
+          await execute(config, "git", ["fetch", "--no-tags", mirror, targetRefspec], workspace, env);
+        }
         const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
         if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
         return { path: workspace, branch, baseSha, ...(commitHooksPath ? { commitHooksPath } : {}) };

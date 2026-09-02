@@ -195,6 +195,67 @@ test("an explicit true template step keeps the repository dependency policy path
   }
 });
 
+test("a workspace cloned from its own published head still resolves the target branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-target-refspec-"));
+  try {
+    const remote = join(root, "origin.git");
+    const seed = join(root, "seed");
+    // Not `main`: the target branch comes from the run, and every project on
+    // the platform names its baseline itself.
+    const target = "trunk";
+    git(root, "init", "--bare", `--initial-branch=${target}`, remote);
+    git(root, "init", `--initial-branch=${target}`, seed);
+    git(seed, "config", "user.name", "Anneal Test");
+    git(seed, "config", "user.email", "runner@agentos.local");
+    await writeFile(join(seed, "tree.txt"), "base\n");
+    git(seed, "add", "tree.txt");
+    git(seed, "commit", "-m", "base");
+    git(seed, "remote", "add", "origin", remote);
+    git(seed, "push", "-u", "origin", target);
+    const targetSha = git(seed, "rev-parse", "HEAD");
+    const branch = "agentos/chain/target-refspec";
+    git(seed, "switch", "-c", branch);
+    await writeFile(join(seed, "tree.txt"), "published\n");
+    git(seed, "commit", "-am", "published before ACK loss");
+    git(seed, "push", "-u", "origin", branch);
+
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
+    } as unknown as RunnerConfig;
+    const claim = workspaceClaim({
+      task: { id: "task-target-refspec" },
+      repo: { remoteUrl: remote, defaultBranch: target, dependencyProvisioning: "NONE" },
+      run: { id: "run-target-refspec", runNumber: 2, targetBranch: target, branch },
+    });
+
+    const workspace = await provisionWorkspace(config, claim);
+    assert.equal(git(workspace.path, "rev-parse", `origin/${target}`), targetSha);
+    assert.deepEqual(
+      git(workspace.path, "config", "--get-all", "remote.origin.fetch").split("\n"),
+      [
+        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+        `+refs/heads/${target}:refs/remotes/origin/${target}`,
+      ],
+    );
+
+    // The refspec has to survive provisioning: an agent fetching the baseline
+    // mid-run must move the remote-tracking ref, not just FETCH_HEAD.
+    git(seed, "switch", target);
+    await writeFile(join(seed, "tree.txt"), "advanced\n");
+    git(seed, "commit", "-am", "advanced baseline");
+    git(seed, "push", "origin", target);
+    const advancedSha = git(seed, "rev-parse", "HEAD");
+    git(workspace.path, "fetch", "origin", target);
+    assert.equal(git(workspace.path, "rev-parse", `origin/${target}`), advancedSha);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("provisioning trusts an already-published intended head after its database ACK was lost", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-publication-"));
   try {
