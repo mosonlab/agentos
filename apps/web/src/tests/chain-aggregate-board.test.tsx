@@ -148,9 +148,8 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
 });
 
-test("aggregate card mirrors Hold and Resume across running and held states", () => {
+test("the hold pill and Resume follow the persisted hold, running or held", () => {
   const running = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
-  assert.match(running, /data-chain-hold=""/u);
   assert.match(running, />Stop after current step<\/button>/u);
 
   const held = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
@@ -171,7 +170,42 @@ test("aggregate card mirrors Hold and Resume across running and held states", ()
   })} />);
   assert.match(runningHeld, /data-slot="badge"[^>]*>Stops after step/u);
   assert.match(runningHeld, /data-chain-resume=""/u);
-  assert.doesNotMatch(runningHeld, /data-chain-hold=""/u);
+});
+
+/** The Doing column head, which is the only other surface that decides whether
+ *  a chain can be held. `onHoldAll` is what makes the head offer the wave at
+ *  all, so a column rendered without it proves nothing. */
+const holdColumn = (entries: readonly BoardEntry[]): string => {
+  const definition = COLUMNS.find((candidate) => candidate.status === "DOING")!;
+  return renderToStaticMarkup(<BoardColumn column={definition} tasks={entries} loading={false} dragOver={null} onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} onActivateAll={noop} onHoldAll={noop} actions={actions} />);
+};
+
+const offersButton = (markup: string, label: string): boolean =>
+  [...new JSDOM(`<!doctype html><html><body>${markup}</body></html>`).window.document.querySelectorAll("button")]
+    .some((button) => button.textContent === label);
+
+test("the card and the Doing column head offer Hold for exactly the same chains", () => {
+  // Both surfaces used to restate the rule, and they disagreed: the column head
+  // read only the persisted hold, so a `settled` or `idle` chain carrying an
+  // activation task id joined the wave while its own card offered no button.
+  const cases: Array<[ChainAggregate["activation"], boolean]> = [
+    [{ state: "running", predecessor: null, taskId: "step-1", hold: null }, true],
+    [{ state: "waiting-on-predecessor", predecessor: { taskId: "previous", taskName: "Prepare release" }, taskId: "step-1", hold: null }, true],
+    [{ state: "running", predecessor: null, taskId: "step-1", hold: { heldLayer: 2, heldAt: "2026-08-28T01:00:00.000Z", holdReason: null } }, false],
+    [{ state: "held", predecessor: null, taskId: "step-1", hold: { heldLayer: 2, heldAt: "2026-08-28T01:00:00.000Z", holdReason: null } }, false],
+    [{ state: "settled", predecessor: null, taskId: "step-1", hold: null }, false],
+    [{ state: "idle", predecessor: null, taskId: "step-1", hold: null }, false],
+    [{ state: "parked-unactivated", predecessor: null, taskId: "step-1", hold: null }, false],
+    [{ state: "running", predecessor: null, taskId: null, hold: null }, false],
+  ];
+  for (const [activation, offered] of cases) {
+    const projection = aggregate({ activation, status: "DOING" });
+    const card = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} />);
+    const head = holdColumn(boardEntries([chainStep("step-3", 3, "DOING", projection)]));
+    const onCard = offersButton(card, translate("en", activation.state === "running" ? "tasks.aggregate.stopAfter" : "tasks.aggregate.hold"));
+    assert.equal(onCard, offered, `card, ${activation.state}`);
+    assert.equal(offersButton(head, translate("en", "tasks.holdAll")), offered, `column head, ${activation.state}`);
+  }
 });
 
 const element = (markup: string, selector: string): Element => {

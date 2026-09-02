@@ -1,3 +1,4 @@
+import { type ChainControlActionKind, chainControlAction } from "./chain-aggregate";
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
 import type { BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
@@ -156,40 +157,33 @@ export type ParkedChain = { chainId: string; name: string; stepCount: number; ta
  * board can keep one small, named projection for both column-head waves. */
 export type HoldableChain = ParkedChain;
 
-const chainHold = (aggregate: ChainAggregate): ChainAggregate["activation"]["hold"] =>
-  aggregate.activation.hold;
-
-/**
- * The chains a column would activate, in the order they are read.
- *
- * Only `parked-unactivated` aggregates: a `waiting-on-predecessor` chain
- * dispatches itself when its predecessor completes, so offering to start it
- * would be offering to do something the control plane already owns. Single-task
- * cards are not chains and are not included either.
- */
-export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): ParkedChain[] =>
+/** Every chain in these entries whose admissible action is `kind`, in the order
+ * they are read. Single-task cards are not chains and never appear. The rule
+ * itself lives in `chain-aggregate.ts`, so a column head and the card it sits
+ * above can never answer differently. */
+const chainWave = (
+  entries: readonly (BoardEntry | BoardTask)[],
+  kind: ChainControlActionKind,
+): ParkedChain[] =>
   normalizeBoardEntries(entries).flatMap((entry) => {
     if (entry.kind !== "chain") return [];
-    const { activation, chainId, chainName, stepCount } = entry.aggregate;
-    if (activation.state !== "parked-unactivated" || activation.taskId === null || chainHold(entry.aggregate) !== null) return [];
-    return [{ chainId, name: chainBindingLabel({ id: chainId, name: chainName }), stepCount, taskId: activation.taskId }];
+    const { chainId, chainName, stepCount } = entry.aggregate;
+    const action = chainControlAction(entry.aggregate.activation);
+    if (action?.kind !== kind) return [];
+    return [{ chainId, name: chainBindingLabel({ id: chainId, name: chainName }), stepCount, taskId: action.taskId }];
   });
 
-/** The chains a Doing column can hold in one operator wave. A persisted hold is
- * the source of truth, so a stale card already marked held never gets sent a
- * second request by the column head. */
+/** The chains the Todo column head would activate: a `waiting-on-predecessor`
+ * chain dispatches itself when its predecessor completes, so offering to start
+ * it would be offering to do something the control plane already owns. */
+export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): ParkedChain[] =>
+  chainWave(entries, "activate");
+
+/** The chains the Doing column head can hold in one operator wave. A chain
+ * already carrying a persisted hold is offered Resume instead, so the column
+ * head never sends a second hold request to one. */
 export const heldChains = (entries: readonly (BoardEntry | BoardTask)[]): HoldableChain[] =>
-  normalizeBoardEntries(entries).flatMap((entry) => {
-    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null) return [];
-    const { activation, chainId, chainName, stepCount } = entry.aggregate;
-    if (activation.taskId === null) return [];
-    return [{
-      chainId,
-      name: chainBindingLabel({ id: chainId, name: chainName }),
-      stepCount,
-      taskId: activation.taskId,
-    }];
-  });
+  chainWave(entries, "hold");
 
 /* ------------------------------------------------------------- the schedule */
 

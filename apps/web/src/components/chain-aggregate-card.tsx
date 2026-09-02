@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { type ChainControlAction, chainControlAction, chainStepPosition } from "../lib/chain-aggregate";
 import { timeAgo, usageCostAmount } from "../lib/format";
 import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
 import { navigate } from "../lib/router";
@@ -34,49 +35,20 @@ const STATE_TONE: Record<Exclude<ChainAggregateState, "running">, "green" | "amb
 
 const chainName = (aggregate: ChainAggregate): string => aggregate.chainName ?? aggregate.chainId.slice(0, 8);
 
-const memberPosition = (aggregate: ChainAggregate, members: readonly BoardTask[]): number => {
-  const fromFrontier = aggregate.frontier.position;
-  if (fromFrontier !== null && fromFrontier !== undefined) return fromFrontier;
-  const frontier = members.find((member) => member.id === aggregate.frontier.taskId);
-  const fromMember = frontier === undefined
-    ? null
-    : frontier.chainProgress?.position ?? (frontier.chainIndex === null ? null : frontier.chainIndex + 1);
-  if (fromMember !== null && fromMember !== undefined) return fromMember;
-  const done = aggregate.statusCounts.DONE;
-  return aggregate.stepCount === 0 ? 0 : Math.min(aggregate.stepCount, done + 1);
-};
-
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
-
-type ChainControlAction = { kind: "hold" | "resume"; taskId: string } | null;
-
-/** One action decision feeds both the visible control and its menu mirror. */
-const controlActionFor = (activation: ChainAggregate["activation"]): ChainControlAction => {
-  if (activation.taskId === null) return null;
-  if (activation.hold === null
-    && (activation.state === "waiting-on-predecessor" || activation.state === "running")) {
-    return { kind: "hold", taskId: activation.taskId };
-  }
-  if (activation.state === "held" || (activation.state === "running" && activation.hold !== null)) {
-    return { kind: "resume", taskId: activation.taskId };
-  }
-  return null;
-};
 
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
   actions: ChainAggregateActions,
   t: Translate,
-  controlAction: ChainControlAction,
+  controlAction: ChainControlAction | null,
 ): RowMenuEntry[] => {
-  const activation = aggregate.activation;
-  const state = activation.state;
-  const controlTaskId = activation.taskId;
+  const state = aggregate.activation.state;
   return [
     { label: t("tasks.aggregate.menu.open"), onSelect: () => navigate(routeFor(representativeTaskId)) },
-    ...(state === "parked-unactivated" && controlTaskId !== null
-      ? [{ label: t("tasks.aggregate.menu.activate"), onSelect: () => actions.onActivate(controlTaskId) }]
+    ...(controlAction?.kind === "activate"
+      ? [{ label: t("tasks.aggregate.menu.activate"), onSelect: () => actions.onActivate(controlAction.taskId) }]
       : []),
     ...(controlAction?.kind === "hold"
       ? [{ label: t("tasks.aggregate.menu.hold"), onSelect: () => actions.onHold(controlAction.taskId) }]
@@ -100,7 +72,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const t = useT();
   const representative = representativeTaskId ?? aggregate.frontier.taskId;
   const title = chainName(aggregate);
-  const position = memberPosition(aggregate, members);
+  const position = chainStepPosition(aggregate, members);
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
   const hold = aggregate.activation.hold;
@@ -113,7 +85,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     onFilter: () => undefined,
     onArchive: () => undefined,
   };
-  const controlAction = controlActionFor(aggregate.activation);
+  const controlAction = chainControlAction(aggregate.activation);
   const holdPill = state === "running" && hold !== null
     ? <Pill tone="amber" data-chain-hold-state="pending">{t("tasks.aggregate.state.stopsAfter")}</Pill>
     : state === "held" && hold !== null
@@ -145,8 +117,8 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
           <RunLine run={activeRepair.latestRun} showElapsed showModel />
         </span>,
       ]),
-      ...(state === "parked-unactivated" && aggregate.activation.taskId !== null ? [
-          <Button type="button" variant="legacyPrimary" size="legacySmall" onClick={(event) => { event.stopPropagation(); handlers.onActivate(aggregate.activation.taskId!); }}>
+      ...(controlAction?.kind === "activate" ? [
+          <Button type="button" variant="legacyPrimary" size="legacySmall" onClick={(event) => { event.stopPropagation(); handlers.onActivate(controlAction.taskId); }}>
             {t("tasks.aggregate.activate")}
           </Button>,
       ] : state === "waiting-on-predecessor" && predecessor !== null ? [
