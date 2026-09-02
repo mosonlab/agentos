@@ -4,10 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  checkExistingEscalation,
-  resolveRemoteMainTarget,
-} from "./quiet-window-escalation.mjs";
+import { checkExistingEscalation } from "./quiet-window-escalation.mjs";
 import {
   clearEscalationRecord,
   ESCALATION_RETRY_CAP,
@@ -112,42 +109,6 @@ test("an escalation outside the shipped allowlist stays latched", async (t) => {
   assert.deepEqual(result, { active: true });
   assert.equal(existsSync(state.escalationPath), true);
   assert.equal(state.retryCalls(), 1);
-});
-
-test("two startup invocations serialize target reads while leaving self-clear to full-run success", async (t) => {
-  const state = fixture(t);
-  let held = false;
-  let releaseRead;
-  let signalReadStarted;
-  const readStarted = new Promise((resolve) => { signalReadStarted = resolve; });
-  const readReleased = new Promise((resolve) => { releaseRead = resolve; });
-  const acquireLock = async () => {
-    if (held) return null;
-    held = true;
-    return { release: async () => { held = false; } };
-  };
-  const options = {
-    acquireLock,
-    log: state.options.log,
-    checkEscalation: () => checkExistingEscalation(state.options),
-    readRemoteMain: async () => {
-      signalReadStarted();
-      await readReleased;
-      return revision;
-    },
-    persistFailure: async () => assert.fail("a successful target read must not persist a failure"),
-  };
-
-  const first = resolveRemoteMainTarget(options);
-  await readStarted;
-  const second = await resolveRemoteMainTarget(options);
-  releaseRead();
-  const firstResult = await first;
-
-  assert.deepEqual(firstResult, { targetCommit: revision });
-  assert.deepEqual(second, { ok: true, skipped: "lock-held" });
-  assert.equal(existsSync(state.escalationPath), true);
-  assert.equal(state.logs.filter((line) => line.startsWith("SKIP concurrent-run")).length, 1);
 });
 
 const markerFixture = (t) => {

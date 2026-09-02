@@ -13,7 +13,7 @@ const card = (overrides: Partial<InboxMessage> & Pick<InboxMessage, "id" | "body
   taskId: "task-1", goalId: null, gateTaskId: null, acceptsFreeText: true, dismissible: false,
   artifactTaskId: null, threadId: "thread-1", replyToMessageId: null, kind: "MULTIPLE_CHOICE",
   choices: [{ id: "continue", label: "Continue" }, { id: "revise", label: "Revise" }],
-  selectedChoiceId: null, status: "OPEN", channel: "WEB", deliveryStatus: "DELIVERED",
+  selectedChoiceId: null, status: "OPEN", channel: "FEISHU", deliveryStatus: "DELIVERED",
   deliveryAttempts: 1, lastDeliveryError: null, createdAt: now, answeredAt: null, decisions: [], replies: [],
   ...overrides,
 });

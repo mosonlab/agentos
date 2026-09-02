@@ -1,4 +1,11 @@
 import { RunnerKind } from "@anneal/db";
+import type {
+  Health,
+  OnboardingInstallation,
+  OnboardingStatus,
+  RunnersResponse,
+  VersionInfo,
+} from "@anneal/db/console-contract";
 import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
@@ -41,17 +48,20 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
   app.get("/health", async (context) => {
     try {
       await db.$queryRaw`SELECT 1`;
-      return context.json({ status: "ok", database: "connected", checkedAt: new Date().toISOString() });
+      return context.json({ status: "ok", database: "connected", checkedAt: new Date().toISOString() } satisfies Health);
     } catch (error: unknown) {
       console.error("Health check failed", error);
-      return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
+      return context.json(
+        { status: "error", database: "disconnected", checkedAt: new Date().toISOString() } satisfies Health,
+        503,
+      );
     }
   });
   // Provenance, not status: which commit this dist was built from (issue #140).
   // Unauthenticated and free of state so that whoever is checking whether a
   // restart took the new build can ask the running process directly instead of
   // hashing artefacts by hand, which is what the 2026-08-17 incident cost.
-  app.get("/version", (context) => context.json(versionPayload()));
+  app.get("/version", (context) => context.json(versionPayload() satisfies VersionInfo));
   app.get("/runners", async (context) => {
     const now = new Date();
     const daemons = runners.snapshot(now);
@@ -76,7 +86,7 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
       }),
       backends: Object.values(RunnerKind).map((runner) =>
         projectRunnerBackend(runner, backendsByRunner.get(runner) ?? null)),
-    });
+    } satisfies RunnersResponse);
   });
 
   // registerTemplateRoutes registers the webhook route between /runners and the
@@ -159,7 +169,7 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
     // auth.ts. Everything these routes decide lives in onboarding.ts.
     app.get("/onboarding", async (context) => {
       if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
-      return context.json(await onboardingStatus(db));
+      return context.json(await onboardingStatus(db) satisfies OnboardingStatus);
     });
     app.post("/onboarding", async (context) => {
       if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
@@ -180,7 +190,7 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
       if (!result.ok) {
         return refusalJson(context, refusal("conflict", "An installation already exists", { code: result.code }));
       }
-      return context.json(result.installation, 201);
+      return context.json(result.installation satisfies OnboardingInstallation, 201);
     });
   };
 };

@@ -68,6 +68,73 @@ const resourceReleaseFailureOf = (error) => {
   return deployFailure ?? failureOf(error);
 };
 
+const DEPLOY_MODE_ARGUMENTS = Object.freeze(["--dry-run", "--clear-escalation", "--prune-history"]);
+
+/** The requested mode, read from argv exactly once per process. */
+export const parseDeployArguments = (args) => {
+  const allowed = new Set(DEPLOY_MODE_ARGUMENTS);
+  const unknown = args.find((argument) => !allowed.has(argument));
+  if (unknown) throw new DeployFailure("usage", `unknown-argument-${unknown}`);
+  const modes = DEPLOY_MODE_ARGUMENTS.filter((mode) => args.includes(mode));
+  if (modes.length > 1) throw new DeployFailure("usage", "modes-are-mutually-exclusive");
+  return modes.length === 0 ? "upgrade" : modes[0].slice("--".length);
+};
+
+/** Decide the whole invocation before any deployment host exists: the mode,
+ * the commit it targets, the retryable escalation the run may self-clear, and
+ * the one process lock a locked mode holds until its resources are released.
+ * The environment, the binaries, the escalation check and the lock are each
+ * reached once per process. An invocation carrying `exitCode` is already
+ * finished and opens no attempt; otherwise it carries the lock it acquired,
+ * and its caller owns releasing it. */
+export const decideInvocation = async (startup, mode) => {
+  if (!Number.isSafeInteger(startup.pollIntervalMs) || startup.pollIntervalMs < 1_000) {
+    throw new DeployFailure("environment-invalid", "QUIET_WINDOW_POLL_SECONDS-must-be-a-positive-integer");
+  }
+  if (mode === "clear-escalation") {
+    // Clearing an absent marker stays exit 0: it is idempotent, not an error.
+    startup.clearEscalation();
+    return { mode, exitCode: 0 };
+  }
+  // Retention runs against the filesystem alone and must stay usable while the
+  // operator configuration the other modes require is being repaired.
+  if (mode !== "prune-history") await startup.loadEnvironment();
+  startup.loadBinaries();
+  if (mode === "dry-run") {
+    return { mode, targetCommit: await startup.readRemoteMain(), lock: null, retryEscalation: null };
+  }
+  const lock = await startup.acquireLock();
+  if (lock === null) {
+    // A held lock is an observable skip, not a second failed attempt: the
+    // owner is still responsible for the eventual outcome.
+    startup.log("SKIP concurrent-run lock-held");
+    return { mode, exitCode: 0 };
+  }
+  try {
+    if (lock.recovered) {
+      throw new DeployFailure("stale-deploy-owner-recovered", `pid-${lock.recovered.pid ?? "unknown"}`);
+    }
+    if (mode === "prune-history") return { mode, lock, retryEscalation: null };
+    const escalation = await startup.checkEscalation();
+    if (escalation.active) {
+      await lock.release();
+      return { mode, exitCode: 2 };
+    }
+    let targetCommit;
+    try {
+      targetCommit = await startup.readRemoteMain();
+    } catch (error) {
+      await startup.persistFailure(failureOf(error));
+      await lock.release();
+      return { mode, exitCode: 1 };
+    }
+    return { mode, targetCommit, lock, retryEscalation: escalation.retryEscalation ?? null };
+  } catch (error) {
+    await lock.release();
+    throw error;
+  }
+};
+
 /** Execute the full deployment attempt through the host seam. Every phase
  * receives the attempt and establishes facts for the phases that follow. */
 export const executeUpgrade = async (host, attempt) => {
@@ -199,34 +266,13 @@ export const executeUpgrade = async (host, attempt) => {
   }
 };
 
-/** One process owns the lock. A held lock is an observable skip, not a second
- * failed attempt: the owner is still responsible for the eventual outcome. */
-export const runLocked = async (host, work) => {
-  const lock = await host.acquireLock();
-  if (lock === null) {
-    host.log("SKIP concurrent-run lock-held");
-    return { ok: true, skipped: "lock-held" };
-  }
-  if (lock.recovered) {
-    await lock.release();
-    throw new DeployFailure(
-      "stale-deploy-owner-recovered",
-      `pid-${lock.recovered.pid ?? "unknown"}`,
-    );
-  }
-  try {
-    return await work();
-  } finally {
-    await lock.release();
-  }
-};
-
-/** Dry-run deliberately has no mutating host methods in its interface. */
-export const dryRunDecision = async (host) => {
-  const [revisions, runs, artifact, services, backup] = await Promise.all([
-    host.revisions(),
+/** Dry-run reads the deployment host every upgrade uses, calling only the
+ * methods that establish no facts and mutate nothing. */
+export const dryRunDecision = async (host, attempt) => {
+  const [{ revisions }, runs, artifact, services, backup] = await Promise.all([
+    host.readRevisions(attempt),
     host.blockingRuns(),
-    host.artifactState(),
+    host.artifactState(attempt),
     host.serviceState(),
     host.backupState(),
   ]);

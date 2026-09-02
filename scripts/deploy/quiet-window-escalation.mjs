@@ -1,4 +1,4 @@
-import { DeployFailure, failureOf, runLocked } from "./quiet-window-lib.mjs";
+import { DeployFailure, failureOf } from "./quiet-window-lib.mjs";
 import {
   clearEscalationRecord,
   ESCALATION_RETRY_CAP,
@@ -105,25 +105,6 @@ export const selfClearEscalation = async ({
     return false;
   }
 };
-
-/** Serialize escalation recovery and the target read under the deploy process
- * lock. A concurrent invocation observes the normal lock-held skip. */
-export const resolveRemoteMainTarget = async ({
-  acquireLock,
-  log,
-  checkEscalation,
-  readRemoteMain,
-  persistFailure,
-}) => runLocked({ acquireLock, log }, async () => {
-  const escalation = await checkEscalation();
-  if (escalation.active) return { exitCode: 2 };
-  try {
-    return { targetCommit: await readRemoteMain() };
-  } catch (error) {
-    await persistFailure(failureOf(error));
-    return { exitCode: 1 };
-  }
-});
 
 /** Compute the next one-based attempt count from the marker being replaced. */
 export const escalationAttemptCount = ({ record, previous, retryableReasons }) => {

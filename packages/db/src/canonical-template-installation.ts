@@ -1,5 +1,6 @@
 import { AssigneeType, Prisma, RunStatus, TaskStatus } from "@prisma/client";
 
+import { canonicalStepDrift } from "./canonical-step-adoption.js";
 import {
   legacyTemplateName,
   LEGACY_TEMPLATE_GENERATIONS,
@@ -9,9 +10,7 @@ import {
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
 import {
-  LEGACY_ALL_PRIOR_OUTPUTS,
   canonicalTemplateSourceSpec,
-  templateStepStructureDifferences,
   type CanonicalTemplateName,
   type TemplateStepSource,
 } from "./template-sources.js";
@@ -48,50 +47,6 @@ export type CanonicalInstallationAction =
 export type CanonicalInstallationPlan = readonly CanonicalInstallationAction[];
 export type CanonicalInstallationSources = ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>;
 
-export const CANONICAL_REVIEW_STEP_IDENTITIES: ReadonlySet<string> = new Set([
-  "compound-engineer-workflow:6",
-  "compound-engineer-workflow:7",
-  "direct-engineer-workflow:3",
-  "direct-engineer-workflow:4",
-  "pr-engineer-workflow:2",
-  "pr-engineer-workflow:3",
-]);
-
-export const isCanonicalReviewStep = (templateName: CanonicalTemplateName, stepIndex: number): boolean =>
-  CANONICAL_REVIEW_STEP_IDENTITIES.has(`${templateName}:${stepIndex}`);
-
-const adoptionDifferenceAllowed = (
-  templateName: CanonicalTemplateName,
-  actual: PersistedTransitionStep,
-  source: TemplateStepSource,
-  difference: string,
-): boolean => {
-  if (difference === "name") return actual.name === "Merge readiness" && source.name === "Merge authorization";
-  if (difference === "priorOutputKinds") {
-    return actual.priorOutputKinds.length === 1 && actual.priorOutputKinds[0] === LEGACY_ALL_PRIOR_OUTPUTS;
-  }
-  if (difference === "agent") {
-    const from = actual.assigneeAgent?.name;
-    return (source.agentName === "regression-verifier"
-      && (from === "review-coordinator-opus" || from === "review-coordinator-sol"))
-      || (templateName === "direct-engineer-workflow"
-        && actual.stepIndex === 1
-        && from === undefined
-        && source.agentName === "spec-revalidator");
-  }
-  if (difference === "baseFromStepIndex") {
-    return actual.baseFromStepIndex === null
-      && ((templateName === "compound-engineer-workflow" && actual.stepIndex === 6 && source.baseFromStepIndex === 5)
-        || (templateName === "direct-engineer-workflow" && actual.stepIndex === 3 && source.baseFromStepIndex === 2));
-  }
-  if (difference === "provisionDependencies") {
-    return isCanonicalReviewStep(templateName, actual.stepIndex)
-      && actual.provisionDependencies === true
-      && source.provisionDependencies === false;
-  }
-  return false;
-};
-
 const currentGraphRefusal = (
   templateName: CanonicalTemplateName,
   templateId: string,
@@ -108,8 +63,7 @@ const currentGraphRefusal = (
   }
   for (const [index, step] of ordered.entries()) {
     const source = sources[index]!;
-    const differences = templateStepStructureDifferences(step, source)
-      .filter((difference) => !adoptionDifferenceAllowed(templateName, step, source, difference));
+    const differences = canonicalStepDrift(templateName, step, source, "adopt");
     if (differences.length > 0) {
       return `Template ${templateName} (${templateId}), ${templateName} step ${step.stepIndex} (${step.id}) differs from the canonical source in ${differences.join(", ")}`;
     }
