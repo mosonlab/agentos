@@ -1,0 +1,22 @@
+A Run whose required-output status cannot be read or validated ends as a protocol error instead of completing as if no output were required, and the remediation budget test no longer depends on wall-clock timing.
+
+Route: implementation=senior-dev-luna
+
+Background: This brief is based on `origin/main` at `d2314b91b02937b88b9af22279cfae122a3efe61`. After the provider finishes, `packages/runner/src/runner.ts:537-550` reads the task output status through `controlPlane.readSessionTaskOutputStatus`; on any thrown error it records `TASK_OUTPUT_REMEDIATION_CHECK_FAILED` and leaves `outputStatus` as `null`. Every decision that follows is guarded by `outputStatus?.outputRequired` (`:550`), so a read or schema-validation failure skips the Regression missing-handoff terminal failure (`:553-564`) and the remediation path alike: the Run then completes on the adapter's own success. `packages/runner/src/api.ts:391-428` throws on a malformed `prWorkflowOutputs` projection, which is one such failure; a control-plane read error is another. `packages/runner/src/run-output.test.ts` at `a failed output status read is diagnosed without attempting remediation` (`:835`) currently pins only that the failure is logged (card cmtjd7ht105ehmp604pmpjzpx, Sol verification 2026-09-02).
+
+In the same file, `the original Run budget continues through remediation` gives the Run a 0.2-minute budget and expects it to stop a resumed `sleep 30`; under gate contention the remediated Run has died of setup before the budget fires and the assertion sees `PROTOCOL_ERROR` instead of `BUDGET_EXCEEDED` (PASS 12.6 s versus FAIL 2.9 s on the same worker within one hour, card cmtj1qy6x07fxmpqfdz4qxk0e). Two earlier patches widened the margin; the dependence on timing remains.
+
+Changes:
+1. In `runner.ts`, a failure to read or validate the required-output status for a step that has an `outputKind` becomes a terminal failure of the Run: `terminalFailureReason` names the step's output kind and the error, the event `TASK_OUTPUT_REMEDIATION_CHECK_FAILED` keeps its payload, and the Run's failure class is the non-retryable protocol error already used for a missing regression handoff. No code path may proceed to a successful completion with `outputStatus === null` for such a step. Steps without an `outputKind` are unaffected.
+2. Rewrite `a failed output status read is diagnosed without attempting remediation` to assert the terminal outcome (failure class, reason text, no remediation launched, event still recorded).
+3. Make `the original Run budget continues through remediation` deterministic: drive the budget expiry from a controllable clock or an explicit signal in the test double instead of a real 12-second wall-clock budget racing a real `sleep`, and make the assertion distinguish "budget fired" from "the remediated Run died first" so a slow setup fails with a message naming the setup, not a wrong failure class. Keep the property under test: the original Run's budget continues to apply through remediation.
+
+Out of scope: `packages/runner/src/api.ts` schema contents (the projection remains as it is; only the runner's reaction changes), `packages/runner/src/delivery.ts`, the remediation prompt, the merge-integrator completion semantics in `packages/api`, `packages/runner/src/dependency-cache.ts`, `packages/runner/runtime-tools/**`, `packages/runner/scripts/build-runtime-tools.mjs`, `packages/db/**`, `scripts/**`, `package.json` and `CONTRIBUTING.md`; other chains own those concurrently.
+
+Constraints: Fail loudly with no silent fallback: a status that cannot be established is a failure, never a permission to complete. Existing successful paths (status read, output present, output satisfied by a prior Run, remediation launched) keep their events and outcomes unchanged. Tests must not sleep for real time to observe a budget.
+
+Acceptance:
+1. `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test -w @anneal/runner -- src/run-output.test.ts` exits 0; run it five times consecutively under `AGENTOS_HOST_PROOF_SLOTS=1` with `npm run test -w @anneal/api` running concurrently, and all five exit 0.
+2. `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test -w @anneal/runner -- src/runner.test.ts` exits 0.
+3. `npm run typecheck -w @anneal/runner` and `npm run lint` exit 0.
+4. `scripts/merge-gate.sh --expect-head <exact-implementation-oid>` exits 0 and prints `MERGE GATE: PASS <exact-implementation-oid>` for the implementation commit being delivered.
