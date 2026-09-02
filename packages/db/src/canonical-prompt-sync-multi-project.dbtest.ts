@@ -429,41 +429,125 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   assert.equal(summary.projects[canonicalProject.slug]!.updatedRoles.default, 1);
 });
 
-test("structural or invalid runtime drift in one Project refuses and rolls back every Project", async (t) => {
-  const project = await createProject(`a2-agent-refusal-${randomBytes(4).toString("hex")}`);
-  await createAgents(project, ["default", "senior-dev"]);
-  const defaultAgent = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "default" } },
+test("foreign structural drift refuses only that Project and still syncs canonical and healthy Projects", async (t) => {
+  const refusedProject = await createProject(`a2-agent-refusal-${randomBytes(4).toString("hex")}`);
+  await createAgents(refusedProject, ["default"]);
+  const refusedAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: refusedProject.id, name: "default" } },
   });
-  const seniorAgent = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "senior-dev" } },
+  const healthyProject = await createProject(`a2-agent-healthy-${randomBytes(4).toString("hex")}`);
+  await createAgents(healthyProject, ["default"]);
+  const healthyAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: healthyProject.id, name: "default" } },
   });
-  const before = JSON.stringify(await prisma.agent.findMany({
-    where: { projectId: { in: [canonicalProject.id, project.id] }, name: { in: ["default", "senior-dev"] } },
-    select: { id: true, projectId: true, name: true, title: true, model: true, runnerPreference: true, foundationalPrompt: true, rolePrompt: true },
-    orderBy: [{ projectId: "asc" }, { name: "asc" }],
-  }));
-  t.after(async () => deleteProject(project.id));
-  await prisma.agent.update({ where: { id: defaultAgent.id }, data: { title: "operator structural drift" } });
+  const canonicalAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
+  });
+  t.after(async () => {
+    await deleteProject(refusedProject.id);
+    await deleteProject(healthyProject.id);
+    await prisma.agent.update({
+      where: { id: canonicalAgent.id },
+      data: { foundationalPrompt: canonicalAgent.foundationalPrompt, rolePrompt: canonicalAgent.rolePrompt, title: canonicalAgent.title },
+    });
+  });
+
   await prisma.agent.update({
-    where: { id: seniorAgent.id },
-    data: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CLAUDE },
+    where: { id: refusedAgent.id },
+    data: {
+      title: "operator structural drift",
+      foundationalPrompt: "foreign foundational drift",
+      rolePrompt: "foreign role drift",
+    },
   });
-  const driftedBefore = JSON.stringify(await prisma.agent.findMany({
-    where: { projectId: { in: [canonicalProject.id, project.id] }, name: { in: ["default", "senior-dev"] } },
-    select: { id: true, projectId: true, name: true, title: true, model: true, runnerPreference: true, foundationalPrompt: true, rolePrompt: true },
-    orderBy: [{ projectId: "asc" }, { name: "asc" }],
+  await prisma.agent.update({
+    where: { id: healthyAgent.id },
+    data: { foundationalPrompt: "healthy Project foundational drift", rolePrompt: "healthy Project role drift" },
+  });
+  await prisma.agent.update({
+    where: { id: canonicalAgent.id },
+    data: { foundationalPrompt: "canonical foundational drift", rolePrompt: "canonical default drift" },
+  });
+  const refusedBefore = JSON.stringify(await prisma.agent.findMany({
+    where: { projectId: refusedProject.id },
+    orderBy: { name: "asc" },
   }));
+
+  const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(refused.status, 0, refused.output);
+  assert.match(refused.output, new RegExp(`^REFUSED ${refusedProject.slug}: .+$`, "mu"));
+  assert.match(refused.output, new RegExp(`Agent default \\(${refusedAgent.id}\\)`, "u"));
+  assert.equal(
+    JSON.stringify(await prisma.agent.findMany({ where: { projectId: refusedProject.id }, orderBy: { name: "asc" } })),
+    refusedBefore,
+  );
+  assert.deepEqual(
+    await prisma.agent.findUniqueOrThrow({
+      where: { id: canonicalAgent.id },
+      select: { foundationalPrompt: true, rolePrompt: true },
+    }),
+    { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role("default").rolePrompt },
+  );
+  assert.deepEqual(
+    await prisma.agent.findUniqueOrThrow({
+      where: { id: healthyAgent.id },
+      select: { foundationalPrompt: true, rolePrompt: true },
+    }),
+    { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role("default").rolePrompt },
+  );
+});
+
+test("canonical Project structural drift remains fatal and writes nothing", async (t) => {
+  const healthyProject = await createProject(`a2-canonical-fatal-healthy-${randomBytes(4).toString("hex")}`);
+  await createAgents(healthyProject, ["default"]);
+  const healthyAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: healthyProject.id, name: "default" } },
+  });
+  const canonicalAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
+  });
+  t.after(async () => {
+    await deleteProject(healthyProject.id);
+    await prisma.agent.update({
+      where: { id: canonicalAgent.id },
+      data: { title: canonicalAgent.title },
+    });
+  });
+
+  await prisma.agent.update({ where: { id: canonicalAgent.id }, data: { title: "canonical structural drift" } });
+  await prisma.agent.update({
+    where: { id: healthyAgent.id },
+    data: { foundationalPrompt: "healthy Project prompt drift", rolePrompt: "healthy Project role drift" },
+  });
+  const canonicalBefore = await prisma.agent.findUniqueOrThrow({
+    where: { id: canonicalAgent.id },
+    select: { title: true, foundationalPrompt: true, rolePrompt: true },
+  });
+  const healthyBefore = await prisma.agent.findUniqueOrThrow({
+    where: { id: healthyAgent.id },
+    select: { foundationalPrompt: true, rolePrompt: true },
+  });
+
   const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refused.status, 0, refused.output);
-  assert.match(refused.output, new RegExp(`Agent default \\(${defaultAgent.id}\\)|Agent senior-dev \\(${seniorAgent.id}\\)`));
-  const after = JSON.stringify(await prisma.agent.findMany({
-    where: { projectId: { in: [canonicalProject.id, project.id] }, name: { in: ["default", "senior-dev"] } },
-    select: { id: true, projectId: true, name: true, title: true, model: true, runnerPreference: true, foundationalPrompt: true, rolePrompt: true },
-    orderBy: [{ projectId: "asc" }, { name: "asc" }],
-  }));
-  assert.equal(after, driftedBefore);
-  assert.notEqual(driftedBefore, before);
+  assert.match(
+    refused.output,
+    new RegExp(`Project ${canonicalProject.slug}: Agent default \\(${canonicalAgent.id}\\)`, "u"),
+  );
+  assert.deepEqual(
+    await prisma.agent.findUniqueOrThrow({
+      where: { id: canonicalAgent.id },
+      select: { title: true, foundationalPrompt: true, rolePrompt: true },
+    }),
+    canonicalBefore,
+  );
+  assert.deepEqual(
+    await prisma.agent.findUniqueOrThrow({
+      where: { id: healthyAgent.id },
+      select: { foundationalPrompt: true, rolePrompt: true },
+    }),
+    healthyBefore,
+  );
 });
 
 test("ordinary sync identifies an archived canonical-Project Agent by name and id", async () => {
@@ -722,7 +806,7 @@ test("full installation fills only the addressed Project's missing inventory and
   });
 });
 
-test("full installation refuses unknown, environment-invalid, and archived targets without mutations", async (t) => {
+test("full installation reports foreign invalid targets without mutations", async (t) => {
   const unknownId = `missing-project-${randomBytes(4).toString("hex")}`;
   const unknown = command(["tsx", "prisma/sync-canonical-prompts.ts", "--install-full", unknownId]);
   assert.notEqual(unknown.status, 0, unknown.output);
@@ -750,8 +834,9 @@ test("full installation refuses unknown, environment-invalid, and archived targe
   });
   for (const projectId of projectIds) {
     const refused = command(["tsx", "prisma/sync-canonical-prompts.ts", "--install-full", projectId]);
-    assert.notEqual(refused.status, 0, refused.output);
-    assert.match(refused.output, new RegExp(`Project ${projectId === noEnvironment.id ? noEnvironment.slug : projectId === twoEnvironments.id ? twoEnvironments.slug : archived.slug}:`));
+    assert.equal(refused.status, 0, refused.output);
+    const slug = projectId === noEnvironment.id ? noEnvironment.slug : projectId === twoEnvironments.id ? twoEnvironments.slug : archived.slug;
+    assert.match(refused.output, new RegExp(`REFUSED ${slug}:`, "u"));
   }
   assert.equal((await prisma.agent.findUniqueOrThrow({ where: { id: archivedAgent.id } })).archivedAt !== null, true);
   const after = JSON.stringify(await prisma.project.findMany({
@@ -801,7 +886,7 @@ test("sync refusal classes include every available Project and object identifier
         await prisma.agent.update({ where: { id: agentId }, data: { title: "structural drift" } });
         return {
           args: [],
-          expected: [new RegExp(`Project ${project.slug}:`, "u"), new RegExp(`Agent default \\(${agentId}\\)`, "u")],
+          expected: [new RegExp(`REFUSED ${project.slug}:`, "u"), new RegExp(`Agent default \\(${agentId}\\)`, "u")],
           cleanup: async () => deleteProject(project.id),
         };
       },
@@ -820,7 +905,7 @@ test("sync refusal classes include every available Project and object identifier
         return {
           args: [],
           expected: [
-            new RegExp(`Project ${project.slug}:`, "u"),
+            new RegExp(`REFUSED ${project.slug}:`, "u"),
             new RegExp(`Template pr-engineer-workflow \\(${template.id}\\)`, "u"),
           ],
           cleanup: async () => deleteProject(project.id),
@@ -840,7 +925,7 @@ test("sync refusal classes include every available Project and object identifier
         return {
           args: [],
           expected: [
-            new RegExp(`Project ${project.slug}:`, "u"),
+            new RegExp(`REFUSED ${project.slug}:`, "u"),
             new RegExp(`Template pr-engineer-workflow \\(${template.id}\\)`, "u"),
             new RegExp(`pr-engineer-workflow step 1 \\(${step.id}\\)`, "u"),
           ],
@@ -854,7 +939,7 @@ test("sync refusal classes include every available Project and object identifier
         const project = await createProject(`a2-refusal-environment-${randomBytes(4).toString("hex")}`, false);
         return {
           args: ["--install-full", project.id],
-          expected: [new RegExp(`Project ${project.slug}: Project has no Environment`, "u")],
+          expected: [new RegExp(`REFUSED ${project.slug}:`, "u"), new RegExp("Project has no Environment", "u")],
           cleanup: async () => deleteProject(project.id),
         };
       },
@@ -867,7 +952,7 @@ test("sync refusal classes include every available Project and object identifier
         return {
           args: ["--install-full", project.id],
           expected: [
-            new RegExp(`Project ${project.slug}:`, "u"),
+            new RegExp(`REFUSED ${project.slug}:`, "u"),
             new RegExp(`Agent default \\(${agent.id}\\) is archived`, "u"),
           ],
           cleanup: async () => deleteProject(project.id),
@@ -880,7 +965,7 @@ test("sync refusal classes include every available Project and object identifier
     const fixture = await refusalCase.setup();
     try {
       const refused = command(["tsx", "prisma/sync-canonical-prompts.ts", ...fixture.args]);
-      assert.notEqual(refused.status, 0, `${refusalCase.name}: ${refused.output}`);
+      assert.equal(refused.status, 0, `${refusalCase.name}: ${refused.output}`);
       for (const expected of fixture.expected) assert.match(refused.output, expected, refusalCase.name);
     } finally {
       await fixture.cleanup();
