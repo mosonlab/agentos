@@ -21,6 +21,7 @@ import {
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
   PrismaClient,
+  TaskStatus,
 } from "@anneal/db";
 
 import { type PullRequestSnapshot } from "./github-read.js";
@@ -136,8 +137,15 @@ const stoppedChain = async (
   shape: "twelve-step" | "twelve-step-readiness" | "legacy-seven-step-direct" = "twelve-step",
   runNumber = 1,
   maxRuns = 5,
+  gatedReadiness = false,
 ) => {
-  const chain = await seedIntegratorChain(db, { label, shape });
+  const chain = await seedIntegratorChain(db, { label, shape, gatedReadiness });
+  if (gatedReadiness && chain.readinessTask) {
+    await db.task.update({
+      where: { id: chain.readinessTask.id },
+      data: { status: TaskStatus.DONE },
+    });
+  }
   const run = await liveIntegratorRun(chain, runNumber, maxRuns);
   await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
     outcome: "stopped", condition, evidence: "authorized head a…, live head c…",
@@ -873,9 +881,9 @@ test("safe replay repairs refresh-requested without a card exactly once under co
   );
 });
 
-test("recovered confirmation approval renews authorization through real seven- and twelve-step readiness tails", async () => {
+test("recovered confirmation approval renews authorization through gated seven- and twelve-step readiness tails", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
-    const { chain } = await stoppedChain(`renew-${shape}`, "head-drift", shape, 5, 5);
+    const { chain } = await stoppedChain(`renew-${shape}`, "head-drift", shape, 5, 5, true);
     assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
     const question = await stopQuestionFor(chain.integratorTask!.id);
     await db.$transaction((tx) => applyInboxDecisionTx(tx, {
@@ -952,9 +960,58 @@ test("recovered confirmation approval renews authorization through real seven- a
   }
 });
 
-test("fresh confirmation rejection reruns regression, never server-owned readiness, for seven- and twelve-step tails", async () => {
+test("task PATCH renews a stopped integrator from confirmation bound to gated readiness", async () => {
+  const { chain } = await stoppedChain(
+    "renew-gated-readiness-patch",
+    "head-drift",
+    "twelve-step-readiness",
+    5,
+    5,
+    true,
+  );
+  assert.ok(chain.readinessTask, "the readiness tail has a server-owned gate");
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question!.id,
+    externalEventId: "evt-renew-gated-readiness-patch-request",
+    decision: "re-authorize",
+  }));
+  const request = await db.taskActivity.findFirstOrThrow({
+    where: {
+      taskId: chain.readinessTask.id,
+      metadata: { path: ["purpose"], equals: "confirmation" },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const card = await db.inboxMessage.findUniqueOrThrow({
+    where: { id: (request.metadata as any).cardId as string },
+  });
+  assert.equal((await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date())).filled, 1);
+
+  const approved = await call("PATCH", `/tasks/${chain.readinessTask.id}`, { status: "DONE" });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "ANSWERED");
+  assert.equal(
+    await db.taskActivity.count({
+      where: {
+        taskId: chain.readinessTask.id,
+        metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
+      },
+    }),
+    1,
+  );
+  const runs = await db.run.findMany({
+    where: { taskId: chain.integratorTask!.id },
+    orderBy: { runNumber: "asc" },
+  });
+  assert.equal(runs.length, 2);
+  assert.equal(runs[1]!.runNumber, 6);
+  assert.equal(runs[1]!.status, "QUEUED");
+});
+
+test("fresh confirmation rejection reruns regression, never gated readiness, for seven- and twelve-step tails", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
-    const { chain } = await stoppedChain(`reject-${shape}`, "head-drift", shape);
+    const { chain } = await stoppedChain(`reject-${shape}`, "head-drift", shape, 1, 5, true);
     assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
     const question = await stopQuestionFor(chain.integratorTask!.id);
     await db.$transaction((tx) => applyInboxDecisionTx(tx, {

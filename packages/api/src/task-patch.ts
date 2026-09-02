@@ -10,6 +10,7 @@ import {
   InboxStatus,
   integratorBindingRefusalFor,
   isGatedMergeReadinessTask,
+  MERGE_INTEGRATOR_KIND,
   Prisma,
   type PrismaClient,
   produceMergeAuthorization,
@@ -379,9 +380,22 @@ export const patchTask = async (
               return refuse("Gate card has no session run to bind a decision to");
             }
             gate = { card: winningGateCard, runId: session.runId };
+            const confirmationRequest = isGatedMergeReadinessTask(locked)
+              ? await tx.taskActivity.findFirst({
+                where: {
+                  taskId,
+                  AND: [
+                    { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.evidenceRequest } },
+                    { metadata: { path: ["cardId"], equals: winningGateCard.id } },
+                    { metadata: { path: ["purpose"], equals: "confirmation" } },
+                  ],
+                },
+                select: { id: true },
+              })
+              : null;
             mergeGateApproval = nextStatus === TaskStatus.DONE
               && isGatedMergeReadinessTask(locked)
-              && locked.status !== TaskStatus.DONE;
+              && confirmationRequest === null;
             mergeGateRejection = mergeGateRejectionRequested;
           } else {
             // A gate exists but none is OPEN only after another channel won or
@@ -466,11 +480,13 @@ export const patchTask = async (
       // This OPEN row is the gate-decision CAS. It deliberately depends on
       // neither templateId nor approvalGate: gate creation records the
       // relationship in gateTaskId, and that is the only authority here.
-      const gateDecision = plan.mergeGateApproval
-        ? "approve" as const
-        : plan.mergeGateRejection
+      const gateDecision = plan.gate
+        ? plan.mergeGateRejection
           ? "reject" as const
-          : null;
+          : nextStatus === TaskStatus.DONE
+            ? "approve" as const
+            : null
+        : null;
       if (gateDecision !== null) {
         if (plan.gate) {
           await tx.inboxMessage.update({

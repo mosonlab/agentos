@@ -14,6 +14,7 @@ import {
 import { activateChainSuccessor } from "./chain-activation.js";
 import { lockChainRows, lockTaskRow } from "./locks.js";
 import { produceMergeAuthorization } from "./merge-authorization.js";
+import { MERGE_INTEGRATOR_KIND } from "./merge-integrator.js";
 import { applyStopAnswer, parseStopQuestionKey, recoverRefreshRequestedConfirmationCard } from "./merge-integrator-db.js";
 import {
   isGatedMergeReadinessTask,
@@ -186,8 +187,28 @@ export const applyInboxDecisionTx = async (
       chainId: question.gateTask.chainId,
     });
   }
+  // A confirmation card created for a stopped integrator is bound to the same
+  // readiness task as the initial gate. Its durable evidence-request purpose,
+  // rather than the task's persistent approvalGate flag, decides which
+  // disposition owns the answer.
+  const confirmationRequest = gateDecision && question.gateTask
+    && isGatedMergeReadinessTask(question.gateTask)
+    ? await tx.taskActivity.findFirst({
+      where: {
+        taskId: question.gateTask.id,
+        AND: [
+          { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.evidenceRequest } },
+          { metadata: { path: ["cardId"], equals: question.id } },
+          { metadata: { path: ["purpose"], equals: "confirmation" } },
+        ],
+      },
+      select: { id: true },
+    })
+    : null;
+  const initialMergeGate = isGatedMergeReadinessTask(question.gateTask)
+    && confirmationRequest === null;
   if (gateDecision && question.gateTask && input.decision === "reject"
-    && !isGatedMergeReadinessTask(question.gateTask)) {
+    && !initialMergeGate) {
     const readiness = isMergeReadinessStep(question.gateTask.templateStep);
     rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT && !readiness
       ? question.gateTask
@@ -275,7 +296,7 @@ export const applyInboxDecisionTx = async (
 
   if (gateDecision && question.gateTask) {
     if (input.decision === "approve") {
-      if (isGatedMergeReadinessTask(question.gateTask)) {
+      if (initialMergeGate) {
         await tx.taskActivity.create({ data: {
           taskId: question.gateTask.id,
           actorType: "operator",
@@ -329,7 +350,7 @@ export const applyInboxDecisionTx = async (
       }
       return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
     }
-    if (isGatedMergeReadinessTask(question.gateTask)) {
+    if (initialMergeGate) {
       await rejectMergeReadinessGate(tx, {
         task: question.gateTask,
         choice: input.decision,
