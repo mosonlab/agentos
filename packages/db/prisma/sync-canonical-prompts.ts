@@ -76,7 +76,6 @@ type ProjectCounters = {
 };
 
 type ProjectRow = { id: string; slug: string };
-type ProjectMap = Map<string, ProjectRow>;
 
 const mutationCounterNames = [
   "createdCanonicalTemplates",
@@ -131,12 +130,6 @@ const finalizeUpdated = (counters: ProjectCounters): void => {
 };
 
 const projectError = (project: ProjectRow, message: string): Error => new Error(`Project ${project.slug}: ${message}`);
-
-const projectFor = (projects: ProjectMap, projectId: string): ProjectRow => {
-  const project = projects.get(projectId);
-  if (!project) throw new Error(`Project ${projectId} was not found`);
-  return project;
-};
 
 const increment = <K extends keyof ProjectCounters>(
   countersByProject: Map<string, ProjectCounters>,
@@ -196,18 +189,23 @@ const transitionStepInclude = {
   _count: { select: { tasks: true } },
 } as const;
 
-const readCanonicalTemplateRows = async (tx: Prisma.TransactionClient, name: CanonicalTemplateName) => tx.taskTemplate.findMany({
-  where: { name },
+const readCanonicalTemplateRows = async (
+  tx: Prisma.TransactionClient,
+  projectId: string,
+  name: CanonicalTemplateName,
+) => tx.taskTemplate.findMany({
+  where: { projectId, name },
   include: { steps: { orderBy: { stepIndex: "asc" }, include: transitionStepInclude } },
 });
 
 const readCanonicalInstallationRows = async (
   tx: Prisma.TransactionClient,
+  projectId: string,
   templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
 ): Promise<CanonicalInstallationRow[]> => {
   const installationRows: CanonicalInstallationRow[] = [];
   for (const templateName of templateSources.keys()) {
-    const rows = await readCanonicalTemplateRows(tx, templateName);
+    const rows = await readCanonicalTemplateRows(tx, projectId, templateName);
     installationRows.push(...rows.map((row) => ({
       ...row,
       name: templateName,
@@ -413,24 +411,10 @@ const installMissingAgents = async (
   }
 };
 
-type PersistedCanonicalAgent = {
-  id: string;
-  projectId: string;
-  name: string;
-  archivedAt: Date | null;
-  title: string;
-  model: string;
-  runtimeConfigCustomized: boolean;
-  runtimeConfigDriftNoticeFingerprint: string | null;
-  runnerPreference: RunnerPreference;
-  inboxAccess: boolean;
-  collaborators: { allowedAgent: { name: string } }[];
-};
-
 const synchronizeAgents = async (
   tx: Prisma.TransactionClient,
-  projects: ProjectMap,
-  canonicalProject: ProjectRow,
+  project: ProjectRow,
+  requireCompleteInventory: boolean,
   sources: AgentSources,
   rolesByName: ReadonlyMap<string, RoleSource>,
   roleNames: readonly string[],
@@ -442,7 +426,7 @@ const synchronizeAgents = async (
   }>,
 ): Promise<void> => {
   const canonicalAgentRows = await tx.agent.findMany({
-    where: { name: { in: [...roleNames] } },
+    where: { projectId: project.id, name: { in: [...roleNames] } },
     select: {
       id: true,
       projectId: true,
@@ -458,25 +442,17 @@ const synchronizeAgents = async (
     },
   });
   const presentAgents = canonicalAgentRows.filter((agent) => agent.archivedAt === null);
-  const byProject = new Map<string, PersistedCanonicalAgent[]>();
-  for (const agent of presentAgents) {
-    const list = byProject.get(agent.projectId) ?? [];
-    list.push(agent);
-    byProject.set(agent.projectId, list);
-  }
-  const canonicalAgents = byProject.get(canonicalProject.id) ?? [];
-  const canonicalNames = new Set(canonicalAgents.map(({ name }) => name));
-  for (const name of roleNames) {
-    if (canonicalNames.has(name)) continue;
-    const archived = canonicalAgentRows.find((agent) => (
-      agent.projectId === canonicalProject.id && agent.name === name && agent.archivedAt !== null
-    ));
-    if (archived) throw projectError(canonicalProject, `Agent ${name} (${archived.id}) is archived`);
-    throw projectError(canonicalProject, `Agent ${name} was not found`);
+  if (requireCompleteInventory) {
+    const canonicalNames = new Set(presentAgents.map(({ name }) => name));
+    for (const name of roleNames) {
+      if (canonicalNames.has(name)) continue;
+      const archived = canonicalAgentRows.find((agent) => agent.name === name && agent.archivedAt !== null);
+      if (archived) throw projectError(project, `Agent ${name} (${archived.id}) is archived`);
+      throw projectError(project, `Agent ${name} was not found`);
+    }
   }
 
   for (const agent of presentAgents) {
-    const project = projectFor(projects, agent.projectId);
     const role = rolesByName.get(agent.name);
     if (!role) continue;
     const differences = roleSourceStructureDifferences(agent, role);
@@ -585,21 +561,17 @@ type RegressionStep = { id: string; projectId: string; templateName: CanonicalTe
 
 const syncCanonicalTemplates = async (
   tx: Prisma.TransactionClient,
-  projects: ProjectMap,
+  project: ProjectRow,
   templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
   countersByProject: Map<string, ProjectCounters>,
 ): Promise<RegressionStep[]> => {
   const regressionSteps: RegressionStep[] = [];
   for (const [templateName, steps] of templateSources) {
     const templates = await tx.taskTemplate.findMany({
-      where: { name: templateName },
+      where: { projectId: project.id, name: templateName },
       select: { id: true, projectId: true },
     });
-    if (templates.length === 0) {
-      throw new Error(`Template ${templateName} was not found`);
-    }
     for (const template of templates) {
-      const project = projectFor(projects, template.projectId);
       increment(countersByProject, project.id, "templates");
       const persistedSteps = await tx.taskTemplateStep.findMany({
         where: { taskTemplateId: template.id },
@@ -749,12 +721,11 @@ const syncCanonicalTemplates = async (
 
 const migrateRegressionTasks = async (
   tx: Prisma.TransactionClient,
-  projects: ProjectMap,
+  project: ProjectRow,
   regressionSteps: readonly RegressionStep[],
   countersByProject: Map<string, ProjectCounters>,
 ): Promise<void> => {
   for (const step of regressionSteps) {
-    const project = projectFor(projects, step.projectId);
     const target = await tx.agent.findFirst({
       where: { projectId: step.projectId, name: REGRESSION_AGENT_NAME, archivedAt: null },
       select: { id: true },
@@ -872,99 +843,121 @@ export const main = async (
       if (!requested) throw new Error(`Project ${installFullProjectId} was not found`);
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      // This read is intentionally first in the transaction. The full-install
-      // target and its complete Environment set are re-read after outer
-      // preflight and before any write, so deletion or topology drift fails
-      // closed without a partial installation.
-      const fullInstallTarget = installFullProjectId === null
-        ? null
-        : await preflightFullInstallTarget(tx, installFullProjectId, roleNames);
-      const projectRows = sortedProjectRows(await tx.project.findMany({
-        select: { id: true, slug: true },
-        orderBy: { slug: "asc" },
-      }));
-      const projects = new Map(projectRows.map((project) => [project.id, project]));
-      const canonicalProject = projectRows.find(({ slug }) => slug === "agentos-example");
-      if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
-      if (fullInstallTarget && !projects.has(fullInstallTarget.id)) {
-        throw new Error(`Project ${installFullProjectId} was not found`);
-      }
-      const countersByProject = new Map(projectRows.map((project) => [
-        project.id,
-        emptyProjectCounters(templateSources, roleNames),
-      ]));
+    const projectRows = sortedProjectRows(await prisma.project.findMany({
+      select: { id: true, slug: true },
+      orderBy: { slug: "asc" },
+    }));
+    const canonicalProject = projectRows.find(({ slug }) => slug === "agentos-example");
+    if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
+    const orderedProjects = [
+      canonicalProject,
+      ...projectRows.filter(({ id }) => id !== canonicalProject.id),
+    ];
+    const countersByProject = new Map<string, ProjectCounters>();
+    const runtimeConfigAdoptions: Array<{
+      name: string;
+      from: { model: string; runnerPreference: RunnerPreference };
+      to: { model: string; runnerPreference: RunnerPreference };
+    }> = [];
+    const refusals = new Map<string, string>();
 
-      const installationRows = await readCanonicalInstallationRows(tx, templateSources);
-      const installationPlan = planCanonicalInstallation(installationRows, templateSources, [canonicalProject.id]);
-      const plannedRefusal = installationPlan.find((action): action is Extract<CanonicalInstallationAction, { kind: "refused" }> => action.kind === "refused");
-      if (plannedRefusal) {
-        const project = projectFor(projects, plannedRefusal.projectId);
-        throw projectError(project, plannedRefusal.reason);
-      }
-      for (const action of installationPlan) {
-        if (action.kind === "create" || action.kind === "rollover") {
-          increment(countersByProject, action.projectId, "createdCanonicalTemplates");
-        }
-      }
-
-      await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByName, countersByProject);
-
-      const runtimeConfigAdoptions: Array<{
-        name: string;
-        from: { model: string; runnerPreference: RunnerPreference };
-        to: { model: string; runnerPreference: RunnerPreference };
-      }> = [];
-      await synchronizeAgents(
-        tx,
-        projects,
-        canonicalProject,
-        sources,
-        rolesByName,
-        roleNames,
-        countersByProject,
-        runtimeConfigAdoptions,
-      );
-
-      await applyCanonicalInstallation(tx, installationPlan, templateSources, {
-        projectLabel: (projectId) => projects.get(projectId)?.slug,
-      });
-      const regressionSteps = await syncCanonicalTemplates(tx, projects, templateSources, countersByProject);
-      await migrateRegressionTasks(tx, projects, regressionSteps, countersByProject);
-
-      if (fullInstallTarget) {
-        await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, countersByProject);
-        const postSyncRows = await readCanonicalInstallationRows(tx, templateSources);
-        const fullInstallationPlan = planCanonicalInstallation(
-          postSyncRows,
-          templateSources,
-          [fullInstallTarget.id],
-        );
-        for (const action of fullInstallationPlan) {
-          if (action.kind === "create" || action.kind === "rollover") {
-            increment(countersByProject, action.projectId, "createdCanonicalTemplates");
+    for (const project of orderedProjects) {
+      try {
+        const result = await prisma.$transaction(async (tx) => {
+          // For a full installation, this must remain the first transaction
+          // read so target deletion or Environment drift fails without writes.
+          const fullInstallTarget = installFullProjectId === project.id
+            ? await preflightFullInstallTarget(tx, project.id, roleNames)
+            : null;
+          if (!fullInstallTarget) {
+            const present = await tx.project.findUnique({
+              where: { id: project.id },
+              select: { id: true },
+            });
+            if (!present) throw projectError(project, "Project was not found");
           }
-        }
-        await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
-          projectLabel: (projectId) => projects.get(projectId)?.slug,
-        });
-      }
-      for (const counters of countersByProject.values()) finalizeUpdated(counters);
-      return { projectRows, countersByProject, runtimeConfigAdoptions };
-    }, { timeout: 120_000 });
 
-    for (const adoption of result.runtimeConfigAdoptions) {
+          const projects = new Map([[project.id, project]]);
+          const projectCounters = emptyProjectCounters(templateSources, roleNames);
+          const transactionCounters = new Map([[project.id, projectCounters]]);
+          const transactionAdoptions: typeof runtimeConfigAdoptions = [];
+          const installationRows = await readCanonicalInstallationRows(tx, project.id, templateSources);
+          const installationPlan = planCanonicalInstallation(
+            installationRows,
+            templateSources,
+            project.id === canonicalProject.id ? [project.id] : [],
+          );
+          const plannedRefusal = installationPlan.find((action): action is Extract<CanonicalInstallationAction, { kind: "refused" }> => action.kind === "refused");
+          if (plannedRefusal) throw projectError(project, plannedRefusal.reason);
+          for (const action of installationPlan) {
+            if (action.kind === "create" || action.kind === "rollover") {
+              increment(transactionCounters, action.projectId, "createdCanonicalTemplates");
+            }
+          }
+
+          if (project.id === canonicalProject.id) {
+            await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByName, transactionCounters);
+          }
+          await synchronizeAgents(
+            tx,
+            project,
+            project.id === canonicalProject.id,
+            sources,
+            rolesByName,
+            roleNames,
+            transactionCounters,
+            transactionAdoptions,
+          );
+
+          await applyCanonicalInstallation(tx, installationPlan, templateSources, {
+            projectLabel: (projectId) => projects.get(projectId)?.slug,
+          });
+          const regressionSteps = await syncCanonicalTemplates(tx, project, templateSources, transactionCounters);
+          await migrateRegressionTasks(tx, project, regressionSteps, transactionCounters);
+
+          if (fullInstallTarget) {
+            await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, transactionCounters);
+            const postSyncRows = await readCanonicalInstallationRows(tx, project.id, templateSources);
+            const fullInstallationPlan = planCanonicalInstallation(postSyncRows, templateSources, [project.id]);
+            for (const action of fullInstallationPlan) {
+              if (action.kind === "create" || action.kind === "rollover") {
+                increment(transactionCounters, action.projectId, "createdCanonicalTemplates");
+              }
+            }
+            await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
+              projectLabel: (projectId) => projects.get(projectId)?.slug,
+            });
+          }
+          finalizeUpdated(projectCounters);
+          return { counters: projectCounters, runtimeConfigAdoptions: transactionAdoptions };
+        }, { timeout: 120_000 });
+        countersByProject.set(project.id, result.counters);
+        runtimeConfigAdoptions.push(...result.runtimeConfigAdoptions);
+      } catch (error) {
+        if (project.id === canonicalProject.id) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        const prefix = `Project ${project.slug}: `;
+        refusals.set(project.id, message.startsWith(prefix) ? message.slice(prefix.length) : message);
+      }
+    }
+
+    for (const adoption of runtimeConfigAdoptions) {
       console.log(
         `Canonical runtime config adopted for Agent ${adoption.name}: `
         + `from model=${adoption.from.model}, runnerPreference=${adoption.from.runnerPreference} `
         + `to model=${adoption.to.model}, runnerPreference=${adoption.to.runnerPreference}`,
       );
     }
-    const projects = Object.fromEntries(sortedProjectRows(result.projectRows).map((project) => [
+    for (const project of orderedProjects) {
+      const refusal = refusals.get(project.id);
+      if (refusal !== undefined) console.log(`REFUSED ${project.slug}: ${refusal}`);
+      else console.log(`SYNCED ${project.slug}: ${JSON.stringify(countersByProject.get(project.id)!)}`);
+    }
+    const projects = Object.fromEntries(projectRows.map((project) => [
       project.slug,
-      result.countersByProject.get(project.id)!,
+      countersByProject.get(project.id) ?? emptyProjectCounters(templateSources, roleNames),
     ]));
-    const totals = sumCounters(result.projectRows, result.countersByProject, templateSources, roleNames);
+    const totals = sumCounters(projectRows, countersByProject, templateSources, roleNames);
     console.log(JSON.stringify({ projects, totals }));
   } finally {
     if (ownsPrisma) await prisma.$disconnect();
