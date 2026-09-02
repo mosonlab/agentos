@@ -3,6 +3,7 @@ import {
   InboxKind,
   InboxSender,
   InboxStatus,
+  parseStopQuestionKey,
   Prisma,
   type PrismaClient,
 } from "@anneal/db";
@@ -12,6 +13,7 @@ import { supersedeTaskInboxMessage } from "../inbox.js";
 import {
   id,
   readJson,
+  refusal,
   refusalJson,
   type RouteApp,
   type RouteDeps,
@@ -36,6 +38,27 @@ const withArtifactTask = <T extends { gateTaskId: string | null; session: { task
 };
 
 /**
+ * Whether an Inbox card can accept an operator's free-text answer. This is a
+ * read-model property rather than a browser policy: only an open question
+ * which can resume a suspended agent session, or an open approval gate, may
+ * offer the text field. Stop questions are machine-state prompts and must
+ * remain choice-only even when their body happens to be text.
+ */
+const acceptsFreeText = (message: {
+  id: string;
+  status: InboxStatus;
+  from: InboxSender;
+  kind: InboxKind;
+  gateTaskId: string | null;
+  dedupeKey: string | null;
+}, waiting: ReadonlySet<string>): boolean => {
+  if (message.status !== InboxStatus.OPEN || parseStopQuestionKey(message.dedupeKey)) return false;
+  if (message.from !== InboxSender.AGENT) return false;
+  if (message.gateTaskId !== null) return true;
+  return (message.kind === InboxKind.TEXT || message.kind === InboxKind.MULTIPLE_CHOICE) && waiting.has(message.id);
+};
+
+/**
  * A card nobody is blocked on, so archiving it strands nothing.
  *
  * The rule used to be "attached to no task, goal, or session", which was a
@@ -57,6 +80,20 @@ const withDismissible = <T extends {
     && !blocked.has(message.id),
 });
 
+const withInboxReadModel = <T extends {
+  id: string;
+  status: InboxStatus;
+  from: InboxSender;
+  kind: InboxKind;
+  gateTaskId: string | null;
+  dedupeKey: string | null;
+  replyToMessageId: string | null;
+  session: { taskId: string | null } | null;
+}>(message: T, blocked: ReadonlySet<string>) => withDismissible({
+  ...withArtifactTask(message),
+  acceptsFreeText: acceptsFreeText(message, blocked),
+}, blocked);
+
 /** The cards a suspended session will resume on. A session only ever waits on a
  *  message its own suspension created, so this set cannot grow for a card that
  *  already exists — which is why the close route may check it before its
@@ -73,6 +110,7 @@ const blockedMessageIds = async (db: PrismaClient, ids: string[]): Promise<Reado
 const inboxDecisionInput = z.object({
   decision: z.string().trim().min(1).max(8000),
   requestId: z.string().trim().min(1).max(200),
+  note: z.string().trim().min(1).max(8000).optional(),
 });
 const inboxReplyInput = z.object({
   body: z.string().trim().min(1).max(8000),
@@ -126,7 +164,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
       orderBy: { createdAt: "desc" },
     });
     const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
-    return validated(context, messages.map((message) => withDismissible(withArtifactTask(message), blocked)));
+    return validated(context, messages.map((message) => withInboxReadModel(message, blocked)));
   });
   app.get("/inbox/messages/:messageId", async (context) => {
     const message = await db.inboxMessage.findUnique({
@@ -139,16 +177,32 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
       },
     });
     if (!message) return context.json({ error: "Inbox message not found" }, 404);
-    return context.json(withDismissible(withArtifactTask(message), await blockedMessageIds(db, [message.id])));
+    return context.json(withInboxReadModel(message, await blockedMessageIds(db, [message.id])));
   });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const body = await readJson(context.req.raw, inboxDecisionInput);
+    const messageId = id.parse(context.req.param("messageId"));
+    // The DB transaction repeats this invariant while claiming the card. This
+    // early read gives malformed note usage its 400 validation response before
+    // a non-gate decision can be interpreted as a choice or a free-text reply.
+    // gateTaskId is immutable, so the read cannot race a gate/non-gate change.
+    if (body.note !== undefined) {
+      const message = await db.inboxMessage.findUnique({ where: { id: messageId }, select: { gateTaskId: true } });
+      if (message?.gateTaskId === null) {
+        return refusalJson(context, refusal(
+          "invalid-request",
+          "A decision note is only supported for an approval-gate card",
+          { code: "inbox-note-not-allowed" },
+        ));
+      }
+    }
     try {
       const result = await applyInboxDecision(db, {
-        inboxMessageId: id.parse(context.req.param("messageId")),
+        inboxMessageId: messageId,
         externalEventId: `web:${body.requestId}`,
         decision: body.decision,
         actorOpenId: "web-operator",
+        note: body.note,
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
