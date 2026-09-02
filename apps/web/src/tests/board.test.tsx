@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ACTIVE_RUN_STATUSES, chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
-  focusAfterMove, isActiveRunStatus, orderColumn, parseStatus, retryable, sameEdges, scheduleLabel, storedScroll,
+  chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
+  focusAfterMove, orderColumn, parseStatus, retryable, runLiveness, sameEdges, scheduleLabel, storedScroll,
 } from "../lib/board";
-import type { BoardTask, ChainProgress } from "../lib/types";
+import type { BoardTask, ChainProgress, RunStatus } from "../lib/types";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", moveTargets: [], failureReason: null,
@@ -172,11 +172,38 @@ test("a retry waits for the last run to be terminal", () => {
   assert.equal(retryable(task({ status: "REVIEW" }), { status: "SUCCEEDED" }), true);
 });
 
-test("the active Run statuses include suspended Inbox work and exclude every terminal status", () => {
-  assert.deepEqual(ACTIVE_RUN_STATUSES, ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"]);
-  for (const status of ACTIVE_RUN_STATUSES) assert.equal(isActiveRunStatus(status), true, status);
-  for (const status of ["SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "LOST"] as const) {
-    assert.equal(isActiveRunStatus(status), false, status);
+/* ------------------------------------------------------------- run liveness */
+
+const STARTED = "2026-08-16T00:00:00.000Z";
+
+test("one liveness rule answers the clock, the live state and the suppressed status word", () => {
+  // Every Run status, started and not, with the answer stated rather than
+  // recomputed. Suspended Inbox work is live; every terminal status is not, and
+  // a terminal run's `startedAt` belongs to a duration that already ended.
+  const rows: Array<{
+    status: RunStatus; startedAt: string | null;
+    live: boolean; elapsedSince: string | null; statusSuppressed: boolean;
+  }> = [
+    { status: "QUEUED", startedAt: null, live: true, elapsedSince: null, statusSuppressed: false },
+    { status: "QUEUED", startedAt: STARTED, live: true, elapsedSince: STARTED, statusSuppressed: false },
+    { status: "CLAIMED", startedAt: null, live: true, elapsedSince: null, statusSuppressed: false },
+    // The divergence this rule exists to close: a CLAIMED run with a start took
+    // an elapsed clock from one card and a `timeAgo` from another.
+    { status: "CLAIMED", startedAt: STARTED, live: true, elapsedSince: STARTED, statusSuppressed: false },
+    { status: "PROVISIONING", startedAt: null, live: true, elapsedSince: null, statusSuppressed: false },
+    { status: "PROVISIONING", startedAt: STARTED, live: true, elapsedSince: STARTED, statusSuppressed: false },
+    { status: "RUNNING", startedAt: null, live: true, elapsedSince: null, statusSuppressed: false },
+    { status: "RUNNING", startedAt: STARTED, live: true, elapsedSince: STARTED, statusSuppressed: true },
+    { status: "WAITING_INBOX", startedAt: null, live: true, elapsedSince: null, statusSuppressed: false },
+    { status: "WAITING_INBOX", startedAt: STARTED, live: true, elapsedSince: STARTED, statusSuppressed: false },
+    { status: "SUCCEEDED", startedAt: STARTED, live: false, elapsedSince: null, statusSuppressed: false },
+    { status: "FAILED", startedAt: STARTED, live: false, elapsedSince: null, statusSuppressed: false },
+    { status: "TIMED_OUT", startedAt: STARTED, live: false, elapsedSince: null, statusSuppressed: false },
+    { status: "CANCELLED", startedAt: STARTED, live: false, elapsedSince: null, statusSuppressed: false },
+    { status: "LOST", startedAt: STARTED, live: false, elapsedSince: null, statusSuppressed: false },
+  ];
+  for (const { status, startedAt, ...expected } of rows) {
+    assert.deepEqual(runLiveness({ status, startedAt }), expected, `${status} startedAt=${startedAt}`);
   }
 });
 
