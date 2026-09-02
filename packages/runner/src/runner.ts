@@ -171,6 +171,7 @@ export const executeClaim = async (
   let sessionConfigLease: SessionConfigLease | null = null;
   let budgetReason: string | null = null;
   let terminalFailureReason: string | null = null;
+  let terminalFailureRetryable = true;
   let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
@@ -537,15 +538,30 @@ export const executeClaim = async (
       && claim.task.templateStep?.outputKind
       && runLease.held
       && terminalFailureReason === null) {
+      const requiredOutputKind = claim.task.templateStep.outputKind;
       let outputStatus: SessionTaskOutputStatus | null = null;
+      let outputStatusError: string | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
       } catch (error: unknown) {
+        outputStatusError = errorMessage(error);
         sink({
           source: "RUNNER",
           type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
-          payload: { message: errorMessage(error) },
+          payload: { message: outputStatusError },
         });
+      }
+      if (outputStatus === null) {
+        const message = outputStatusError ?? "Anneal API returned no task output status";
+        if (outputStatusError === null) {
+          sink({
+            source: "RUNNER",
+            type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
+            payload: { message },
+          });
+        }
+        terminalFailureRetryable = false;
+        terminalFailureReason = `Task output status check failed for required '${requiredOutputKind}' output for Run ${claim.run.id}: ${message}`;
       }
       if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
         const outputKind = outputStatus.outputKind;
@@ -864,7 +880,7 @@ export const executeClaim = async (
       : budgetReason
         ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
         : terminalFailureReason
-          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: true }
+          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: terminalFailureRetryable }
           : primaryDelivery?.failureClass
             ? { failureClass: primaryDelivery.failureClass, retryable: false }
             : adapter.classifyError(evidence);
