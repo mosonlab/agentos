@@ -3,6 +3,7 @@ import {
   type ClaimantClass,
   ACTIVE_RUN_STATUSES,
   advanceTemplateTask,
+  attemptRunBirth,
   budgetGates,
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
@@ -222,76 +223,52 @@ const activateMergeTailTarget = async (
     data: { status: TaskStatus.TODO, failureReason: null },
   });
   if (claimed.count !== 1) return;
-  const rawTx = tx as Prisma.TransactionClient & { $executeRawUnsafe?: (query: string) => Promise<number> };
-  const savepoint = "merge_tail_enqueue";
-  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
-  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
-  try {
-    const opened = await openRun(tx, taskId, { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 });
-    if (!opened.ok) {
-      if (hasSavepoint) {
-        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-      }
-      const refusal = opened.refusal;
-      switch (refusal.code) {
-        case "chain-held":
-          await tx.taskActivity.create({ data: {
-            taskId,
-            actorType: "control-plane",
-            body: `Merge-tail target remains queued because ${refusal.message}`,
-          } });
-          return;
-        case "assignee-archived":
-        case "compound-implementation-assignee":
-        case "initial-run-already-exists":
-        case "integrator-binding-invalid":
-        case "integrator-stopped":
-        case "prior-run-required":
-        case "repo-required":
-        case "run-budget-exhausted":
-        case "source-run-stale":
-        case "task-archived":
-        case "task-assignee-missing":
-        case "task-assignee-type-invalid":
-        case "task-not-found":
-        case "task-not-integrator":
-          await tx.task.update({
-            where: { id: taskId },
-            data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
-          });
-          await tx.taskActivity.create({ data: {
-            taskId,
-            actorType: "control-plane",
-            body: `Merge-tail target was not queued: ${refusal.message}`,
-            metadata: { refusal: refusal.code },
-          } });
-          return;
-        default: {
-          const unhandled: never = refusal;
-          return unhandled;
-        }
+  const attempt = await attemptRunBirth(tx, (tx) => openRun(
+    tx,
+    taskId,
+    { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+  ));
+  if (attempt.outcome === "already-queued") {
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: "Merge-tail target already has the run created by a concurrent activation",
+    } });
+    return;
+  }
+  if (attempt.outcome === "refused") {
+    const refusal = attempt.refusal;
+    switch (refusal.disposition) {
+      case "held":
+        await tx.taskActivity.create({ data: {
+          taskId,
+          actorType: "control-plane",
+          body: `Merge-tail target remains queued because ${refusal.message}`,
+        } });
+        return;
+      // A merge-tail target owns no stop record of its own, so a stop reads
+      // here exactly as any other fault: the target is surfaced for an operator.
+      case "stopped":
+      case "fault":
+        await tx.task.update({
+          where: { id: taskId },
+          data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+        });
+        await tx.taskActivity.create({ data: {
+          taskId,
+          actorType: "control-plane",
+          body: `Merge-tail target was not queued: ${refusal.message}`,
+          metadata: { refusal: refusal.code },
+        } });
+        return;
+      default: {
+        const unhandled: never = refusal.disposition;
+        return unhandled;
       }
     }
-    if (isDocumentationStep(target.templateStep)) {
-      await recordMergeTailRequeue(tx, { taskId, runId: opened.run.id });
-    }
-    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-  } catch (error: unknown) {
-    if (hasSavepoint) {
-      await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-      await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    }
-    const duplicateRun = error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
-    if (!duplicateRun) throw error;
-    if (duplicateRun) {
-      await tx.taskActivity.create({ data: {
-        taskId,
-        actorType: "control-plane",
-        body: "Merge-tail target already has the run created by a concurrent activation",
-      } });
-      return;
-    }
+  }
+  if (isDocumentationStep(target.templateStep)) {
+    await recordMergeTailRequeue(tx, { taskId, runId: attempt.run.id });
   }
   await tx.taskActivity.create({ data: {
     taskId,

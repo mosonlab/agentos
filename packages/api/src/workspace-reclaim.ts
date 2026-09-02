@@ -488,26 +488,14 @@ export const repairReplacementAfterSalvage = async (
     const opened = await openRun(tx, run.taskId, { kind: "enqueue", readyAt: revokedAt });
     if (!opened.ok) {
       const refusal = opened.refusal;
-      switch (refusal.code) {
-        case "chain-held":
+      switch (refusal.disposition) {
+        case "held":
           // The stale clone is revoked, but Hold owns when the next Run may
           // exist. Ordinary completion/Resume activation will enqueue from the
           // durable salvage base after the barrier is released.
           return "repaired";
-        case "assignee-archived":
-        case "compound-implementation-assignee":
-        case "initial-run-already-exists":
-        case "integrator-binding-invalid":
-        case "integrator-stopped":
-        case "prior-run-required":
-        case "repo-required":
-        case "run-budget-exhausted":
-        case "source-run-stale":
-        case "task-archived":
-        case "task-assignee-missing":
-        case "task-assignee-type-invalid":
-        case "task-not-found":
-        case "task-not-integrator":
+        case "stopped":
+        case "fault":
           await tx.task.update({
             where: { id: run.taskId },
             data: { status: "REVIEW", failureReason: refusal.message },
@@ -520,7 +508,7 @@ export const repairReplacementAfterSalvage = async (
           } });
           return "repaired";
         default: {
-          const unhandled: never = refusal;
+          const unhandled: never = refusal.disposition;
           return unhandled;
         }
       }

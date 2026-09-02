@@ -345,7 +345,7 @@ export const applyInboxDecisionTx = async (
         await activateChainSuccessor(tx, question.gateTask, {
           sourceRunId: question.session.run.id,
           chatId: question.thread?.externalChatId ?? null,
-          archivedAssignee: "throw",
+          onRefusal: "raise",
         }, now);
       }
       return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
