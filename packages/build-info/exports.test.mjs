@@ -15,6 +15,7 @@ const mappings = [
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./model-routing", source: "./src/model-routing.ts", dist: "./dist/model-routing.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./agent-message", source: "./src/agent-message.ts", dist: "./dist/agent-message.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./board-contract", source: "./src/board-contract.ts", dist: "./dist/board-contract.js" },
+  { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./console-contract", source: "./src/console-contract.ts", dist: "./dist/console-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./chain-order", source: "./src/chain-order.ts", dist: "./dist/chain-order.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./chain-hold", source: "./src/chain-hold.ts", dist: "./dist/chain-hold.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./gate-toggle", source: "./src/gate-toggle.ts", dist: "./dist/gate-toggle.js" },
@@ -28,7 +29,7 @@ const mappings = [
   { packageName: "@anneal/github-client", packageDirectory: "packages/github-client", subpath: ".", source: "./src/index.ts", dist: "./dist/index.js" },
 ];
 
-assert.equal(mappings.length, 16);
+assert.equal(mappings.length, 17);
 
 const packageSpecifier = ({ packageName, subpath }) =>
   subpath === "." ? packageName : `${packageName}/${subpath.slice(2)}`;
@@ -77,7 +78,7 @@ const resolveInChild = (conditions) => {
   return JSON.parse(execFileSync(process.execPath, args, { cwd: repositoryRoot, encoding: "utf8" }));
 };
 
-test("all sixteen source-backed exports have ordered development targets", () => {
+test("all seventeen source-backed exports have ordered development targets", () => {
   const entriesByPackage = new Map();
   for (const mapping of mappings) {
     const manifest = readManifest(mapping.packageDirectory);
