@@ -485,6 +485,72 @@ test("an implementation step provisions dependencies without recording the revie
   }
 });
 
+test("NPM_CI manifest failure reaches the Run outcome as a non-retryable protocol error before provider launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-implementation-manifest-missing-"));
+  try {
+    const remote = await seedRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      dependencyCacheRoot: join(root, "dependency-cache"),
+    };
+    const controlPlane = createControlPlaneDouble();
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        preflightCalls += 1;
+        throw new Error("provider preflight must not be reached after dependency provisioning failure");
+      },
+      start: async () => {
+        startCalls += 1;
+        throw new Error("provider start must not be reached after dependency provisioning failure");
+      },
+    };
+    const claim = {
+      ...mechanicalClaim,
+      executionMode: "agent" as const,
+      runner: "CLAUDE" as const,
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master", dependencyProvisioning: "NPM_CI" as const },
+      task: {
+        ...mechanicalClaim.task,
+        templateStep: { name: "Implementation", provisionDependencies: true },
+      },
+      run: {
+        ...mechanicalClaim.run,
+        requiresCommit: false,
+        opensPullRequest: false,
+        targetBranch: "master",
+        maxRunsPerTask: 3,
+      },
+      session: testSession(root),
+    } satisfies ClaimedTask;
+
+    await executeClaimProduction(configured, claim, {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => { throw new Error("runtime tools must not be materialized after provisioning failure"); },
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion, "manifest failure must complete the run");
+    assert.equal(completion.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion.retryable, false);
+    assert.equal(completion.failureReason, "dependency-provisioning-manifest-missing");
+    assert.equal(completion.externalFailure, true);
+    assert.equal((completion.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    assert.equal((completion.failureEnvelope as { agentExited?: boolean }).agentExited, false);
+    assert.equal((completion.failureEnvelope as { runnerClass?: string }).runnerClass, "PROTOCOL_ERROR");
+    assert.equal(preflightCalls, 0, "dependency provisioning must fail before adapter preflight");
+    assert.equal(startCalls, 0, "dependency provisioning must fail before provider launch");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an ordinary claim is not short-circuited by the mechanical refusal", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-agent-"));
   const calls: string[] = [];
