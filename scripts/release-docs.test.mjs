@@ -93,6 +93,9 @@ test("the add-project runbook owns canonical sync and full-tail onboarding", () 
     assert.ok(onboarding.includes(command), `${CANONICAL_ONBOARDING_DOC}: ${command}`);
   }
   assert.match(onboarding, /partial (?:canonical )?inventory/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /canonical Project first[\s\S]*slug order/iu, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /REFUSED <slug>: <reason>/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /--install-full[\s\S]*exits non-zero/iu, CANONICAL_ONBOARDING_DOC);
   for (const category of FULL_TAIL_READINESS_CATEGORIES) {
     assert.ok(onboarding.includes(category), `${CANONICAL_ONBOARDING_DOC}: ${category}`);
   }

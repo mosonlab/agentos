@@ -3,7 +3,15 @@ import { test } from "node:test";
 
 import type { PrismaClient } from "@prisma/client";
 
-import { main, parseInstallFullProjectId } from "./sync-canonical-prompts.js";
+type SyncModule = {
+  main: (database?: PrismaClient, installFullProjectId?: string | null) => Promise<void>;
+  parseInstallFullProjectId: (args?: readonly string[]) => string | null;
+};
+
+// Keep the acceptance test under src/ without pulling the prisma CLI entrypoint
+// under src/'s TypeScript rootDir during the library typecheck.
+const syncModulePath: string = "../prisma/sync-canonical-prompts.js";
+const { main, parseInstallFullProjectId } = await import(syncModulePath) as SyncModule;
 
 const asPrisma = (value: unknown): PrismaClient => value as PrismaClient;
 
@@ -18,7 +26,7 @@ test("--install-full parsing accepts only the exact optional argument pair", () 
 test("an unknown full-install target is refused before a transaction opens", async () => {
   let transactions = 0;
   const database = asPrisma({
-    project: { findUnique: async () => null },
+    project: { findMany: async () => [] },
     $transaction: async () => {
       transactions += 1;
       throw new Error("transaction-must-not-open");
@@ -62,10 +70,6 @@ test("full installation re-reads the target inside the transaction before any mu
   };
   const database = asPrisma({
     project: {
-      findUnique: async () => {
-        events.push("outer.project.findUnique");
-        return { id: "deleted-project" };
-      },
       findMany: async () => {
         events.push("outer.project.findMany");
         return [{ id: "deleted-project", slug: "agentos-example" }];
@@ -78,7 +82,7 @@ test("full installation re-reads the target inside the transaction before any mu
   });
 
   await assert.rejects(main(database, "deleted-project"), /Project deleted-project was not found/u);
-  assert.deepEqual(events, ["outer.project.findUnique", "outer.project.findMany", "transaction", "tx.project.findUnique"]);
+  assert.deepEqual(events, ["outer.project.findMany", "transaction", "tx.project.findUnique"]);
 });
 
 for (const fixture of [
@@ -89,7 +93,6 @@ for (const fixture of [
     const events: string[] = [];
     const database = asPrisma({
       project: {
-        findUnique: async () => ({ id: "project-1" }),
         findMany: async () => [{ id: "project-1", slug: "agentos-example" }],
       },
       $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
@@ -111,7 +114,6 @@ test("full installation refuses an archived canonical Agent before observing a m
   const events: string[] = [];
   const database = asPrisma({
     project: {
-      findUnique: async () => ({ id: "project-1" }),
       findMany: async () => [{ id: "project-1", slug: "agentos-example" }],
     },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
@@ -120,7 +122,7 @@ test("full installation refuses an archived canonical Agent before observing a m
           events.push("project-read");
           return {
             id: "project-1",
-          slug: "agentos-example",
+            slug: "agentos-example",
             environments: [{ id: "environment-1", name: "local" }],
           };
         },

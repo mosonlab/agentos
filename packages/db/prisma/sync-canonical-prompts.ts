@@ -557,7 +557,7 @@ const synchronizeAgents = async (
   }
 };
 
-type RegressionStep = { id: string; projectId: string; templateName: CanonicalTemplateName; stepIndex: number; templateId: string };
+type RegressionStep = { id: string; templateName: CanonicalTemplateName; stepIndex: number; templateId: string };
 
 const syncCanonicalTemplates = async (
   tx: Prisma.TransactionClient,
@@ -697,7 +697,6 @@ const syncCanonicalTemplates = async (
         if (step.agentName === REGRESSION_AGENT_NAME) {
           regressionSteps.push({
             id: persisted.id,
-            projectId: template.projectId,
             templateName,
             stepIndex: step.stepIndex,
             templateId: template.id,
@@ -727,7 +726,7 @@ const migrateRegressionTasks = async (
 ): Promise<void> => {
   for (const step of regressionSteps) {
     const target = await tx.agent.findFirst({
-      where: { projectId: step.projectId, name: REGRESSION_AGENT_NAME, archivedAt: null },
+      where: { projectId: project.id, name: REGRESSION_AGENT_NAME, archivedAt: null },
       select: { id: true },
     });
     if (!target) {
@@ -752,19 +751,19 @@ const migrateRegressionTasks = async (
     });
     for (const task of tasks) {
       if (task.archivedAt) {
-        addPreserved(countersByProject, step.projectId, "archived");
+        addPreserved(countersByProject, project.id, "archived");
         continue;
       }
       if (task.status !== TaskStatus.TODO) {
-        addPreserved(countersByProject, step.projectId, "nonTodo");
+        addPreserved(countersByProject, project.id, "nonTodo");
         continue;
       }
       if (task._count.runs > 0 || task._count.sessions > 0) {
-        addPreserved(countersByProject, step.projectId, "started");
+        addPreserved(countersByProject, project.id, "started");
         continue;
       }
       if (task.stepOutput) {
-        addPreserved(countersByProject, step.projectId, "output");
+        addPreserved(countersByProject, project.id, "output");
         continue;
       }
       const adopted = await tx.task.updateMany({
@@ -793,7 +792,7 @@ const migrateRegressionTasks = async (
           toAgentId: target.id,
         },
       } });
-      increment(countersByProject, step.projectId, "migratedTasks");
+      increment(countersByProject, project.id, "migratedTasks");
     }
   }
 };
@@ -838,11 +837,6 @@ export const main = async (
   const prisma = database ?? new PrismaClient();
   const ownsPrisma = database === undefined;
   try {
-    if (installFullProjectId !== null) {
-      const requested = await prisma.project.findUnique({ where: { id: installFullProjectId }, select: { id: true } });
-      if (!requested) throw new Error(`Project ${installFullProjectId} was not found`);
-    }
-
     const projectRows = sortedProjectRows(await prisma.project.findMany({
       select: { id: true, slug: true },
       orderBy: { slug: "asc" },
@@ -880,7 +874,6 @@ export const main = async (
             if (!present) throw projectError(project, "Project was not found");
           }
 
-          const projects = new Map([[project.id, project]]);
           const projectCounters = emptyProjectCounters(templateSources, roleNames);
           const transactionCounters = new Map([[project.id, projectCounters]]);
           const transactionAdoptions: typeof runtimeConfigAdoptions = [];
@@ -913,7 +906,7 @@ export const main = async (
           );
 
           await applyCanonicalInstallation(tx, installationPlan, templateSources, {
-            projectLabel: (projectId) => projects.get(projectId)?.slug,
+            projectLabel: () => project.slug,
           });
           const regressionSteps = await syncCanonicalTemplates(tx, project, templateSources, transactionCounters);
           await migrateRegressionTasks(tx, project, regressionSteps, transactionCounters);
@@ -928,7 +921,7 @@ export const main = async (
               }
             }
             await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
-              projectLabel: (projectId) => projects.get(projectId)?.slug,
+              projectLabel: () => project.slug,
             });
           }
           finalizeUpdated(projectCounters);
@@ -937,7 +930,7 @@ export const main = async (
         countersByProject.set(project.id, result.counters);
         runtimeConfigAdoptions.push(...result.runtimeConfigAdoptions);
       } catch (error) {
-        if (project.id === canonicalProject.id) throw error;
+        if (project.id === canonicalProject.id || project.id === installFullProjectId) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const prefix = `Project ${project.slug}: `;
         const reason = message.startsWith(prefix) ? message.slice(prefix.length) : message;
@@ -957,12 +950,16 @@ export const main = async (
       if (refusal !== undefined) console.log(`REFUSED ${project.slug}: ${refusal}`);
       else console.log(`SYNCED ${project.slug}: ${JSON.stringify(countersByProject.get(project.id)!)}`);
     }
-    const projects = Object.fromEntries(projectRows.map((project) => [
-      project.slug,
-      countersByProject.get(project.id) ?? emptyProjectCounters(templateSources, roleNames),
-    ]));
+    const projects = Object.fromEntries(projectRows.flatMap((project) => {
+      const counters = countersByProject.get(project.id);
+      return counters ? [[project.slug, counters]] : [];
+    }));
+    const refused = Object.fromEntries(projectRows.flatMap((project) => {
+      const reason = refusals.get(project.id);
+      return reason === undefined ? [] : [[project.slug, reason]];
+    }));
     const totals = sumCounters(projectRows, countersByProject, templateSources, roleNames);
-    console.log(JSON.stringify({ projects, totals }));
+    console.log(JSON.stringify({ projects, refused, totals }));
   } finally {
     if (ownsPrisma) await prisma.$disconnect();
   }

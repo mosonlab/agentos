@@ -452,6 +452,32 @@ test("--clear-escalation reports the path it looked at when no marker exists", (
   assert.match(result.stdout, new RegExp(`path=${root.replaceAll("\\", "\\\\")}`, "u"));
 });
 
+test("--clear-escalation runs when invoked through the production current symlink", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-current-entrypoint-"));
+  const release = join(root, "releases", "reviewed");
+  mkdirSync(join(root, "releases"));
+  symlinkSync(REPOSITORY_ROOT, release);
+  symlinkSync("releases/reviewed", join(root, "current"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const result = spawnSync(process.execPath, [
+    join(root, "current", "scripts", "deploy", "quiet-window-deploy.mjs"),
+    "--clear-escalation",
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      AGENTOS_REPOSITORY_ROOT: root,
+      QUIET_WINDOW_POLL_SECONDS: "60",
+      DATABASE_URL: "",
+      FEISHU_DEFAULT_CHAT_ID: "",
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /NO-ESCALATION-TO-CLEAR path=/u);
+});
+
 test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.length, 13);
   assert.equal(SERVICE_LABELS[0], "com.agentos.api");

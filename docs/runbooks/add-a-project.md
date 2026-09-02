@@ -174,8 +174,9 @@ Complete these steps before starting a Direct or Full Assurance workflow:
 ### Canonical synchronization and verification
 
 The files under [`agents/`](../../agents/) are the source of truth for
-canonical Agent and template prompts. Synchronization is per-Project and
-remains one all-or-none transaction:
+canonical Agent and template prompts. Synchronization uses one all-or-none
+transaction per Project. It visits the canonical Project first, then every
+other Project in slug order:
 
 ```sh
 npm run db:sync-canonical-prompts
@@ -188,14 +189,20 @@ and templates are left absent. `agentos-example` remains the canonical Project
 and its complete template inventory is restored when a canonical row is
 missing.
 
+A refusal in `agentos-example` is fatal and prevents every other Project from
+being attempted. A refusal in another Project rolls back only that Project,
+prints `REFUSED <slug>: <reason>`, and continues; successfully synchronized
+Projects keep their commits and print their counters.
+
 `--install-full` fills only missing canonical Agents and templates in the
 addressed Project. An unknown Project id is refused before the transaction;
 the addressed Project must have exactly one Environment, and an archived
 same-name Agent is refused. It never resurrects or overwrites an existing
 object and it creates no Repo, `AgentRepoAccess`, `AgentSecretGrant`, or
 other grant. The ordinary synchronization and the installation share the
-same transaction, so a refusal leaves every Project unchanged. A second
-successful installation is a no-op.
+addressed Project's transaction. If the explicitly requested Project refuses,
+`--install-full` exits non-zero; Projects committed before that refusal remain
+committed. A second successful installation is a no-op.
 
 Project-scoped verification checks exactly the canonical Agents and templates
 that are present and ignores absent and noncanonical inventory. With no

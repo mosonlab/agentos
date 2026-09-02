@@ -10,6 +10,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -822,6 +823,7 @@ const createDeployHost = () => {
         timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
         timeoutReason: "canonical-prompt-sync-timeout",
       });
+      if (result.stdout) process.stdout.write(result.stdout);
       canonicalSyncRefusals = canonicalSyncRefusedLines(result.stdout);
       return undefined;
     },
@@ -977,7 +979,14 @@ const main = async () => {
   return result.ok ? (attempt.fact("exitCode") ?? 0) : 1;
 };
 
-const entrypoint = process.argv[1] ? resolve(process.argv[1]) === fileURLToPath(import.meta.url) : false;
+const entrypoint = (() => {
+  try {
+    return process.argv[1] !== undefined
+      && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
 if (entrypoint) {
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
     process.on(signal, () => {
