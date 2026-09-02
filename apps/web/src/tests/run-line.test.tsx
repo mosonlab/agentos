@@ -26,7 +26,7 @@ test("the aggregate run line renders its full details without an ellipsis or a n
     <LocaleProvider initialLocale="en">
       <RunLine
         run={run({ model: "claude-opus-5-with-a-very-long-identifier:high", status: "WAITING_INBOX" })}
-        showElapsed
+        elapsed="line"
         showModel
       />
     </LocaleProvider>,
@@ -69,7 +69,7 @@ test("an active run reads as a duration alone, and the model drops its provider 
   // model name does not: both were the same fact printed twice.
   const line = parse(renderToStaticMarkup(
     <LocaleProvider initialLocale="en">
-      <RunLine run={run({ model: "openai-codex/gpt-5.6-luna:max" })} showElapsed showModel />
+      <RunLine run={run({ model: "openai-codex/gpt-5.6-luna:max" })} elapsed="line" showModel />
     </LocaleProvider>,
   ));
   const text = visibleText(line);
@@ -80,15 +80,25 @@ test("an active run reads as a duration alone, and the model drops its provider 
 
 test("a task-card run line keeps its text and gains no ellipsis", () => {
   const line = parse(renderToStaticMarkup(
-    <LocaleProvider initialLocale="en"><RunLine run={run({ status: "SUCCEEDED" })} /></LocaleProvider>,
+    <LocaleProvider initialLocale="en"><RunLine run={run({ status: "SUCCEEDED" })} elapsed="caller" /></LocaleProvider>,
   ));
   assert.equal(visibleText(line), "run 7 · succeeded");
   assert.doesNotMatch(line.innerHTML, /text-ellipsis/u);
 });
 
+test("a caller-owned clock leaves the line with neither the duration nor the word", () => {
+  // The task card's footer counts this run up; the line would otherwise print
+  // the same fact twice, once as a word and once as a second clock.
+  const line = parse(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><RunLine run={run()} elapsed="caller" /></LocaleProvider>,
+  ));
+  assert.equal(visibleText(line), "run 7");
+  assert.doesNotMatch(visibleText(line), /running|\d+m/u);
+});
+
 test("the zh run line wraps under the same rules", () => {
   const line = parse(renderToStaticMarkup(
-    <LocaleProvider initialLocale="zh"><RunLine run={run()} showElapsed showModel /></LocaleProvider>,
+    <LocaleProvider initialLocale="zh"><RunLine run={run()} elapsed="line" showModel /></LocaleProvider>,
   ));
   assert.match(visibleText(line), /claude-opus-5 · high/u);
   const details = line.querySelector("[data-run-line-details]");

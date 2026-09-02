@@ -2,7 +2,7 @@ import { type ReactNode, memo, useEffect, useState } from "react";
 
 import { chainPositionMarker } from "../lib/chain";
 import { duration, money, timeAgo, usageCostAmount, usageCostLabel } from "../lib/format";
-import { chainBinding, chainBindingLabel, retryable, scheduleLabel, statusLabel } from "../lib/board";
+import { chainBinding, chainBindingLabel, retryable, runLiveness, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -78,7 +78,8 @@ export const cardTime = (task: BoardTask, now = Date.now()): string => {
   if (!run) return timeAgo(task.updatedAt);
   // A live run says so with the run line's amber dot; the footer is left with
   // the one thing the dot cannot say, which is how long it has been running.
-  if (run.status === "RUNNING" && run.startedAt !== null) return duration(run.startedAt, null, now);
+  const { elapsedSince } = runLiveness(run);
+  if (elapsedSince !== null) return duration(elapsedSince, null, now);
   if (run.startedAt !== null && run.endedAt !== null) {
     return `${duration(run.startedAt, run.endedAt)} · ${timeAgo(task.updatedAt)}`;
   }
@@ -121,6 +122,9 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
   const model = cardModel(task);
   const modelLine = model === null ? null : cardModelFast(task, model);
+  // The footer owns this card's clock, so the run line never renders one and
+  // never repeats the RUNNING word beside it.
+  const elapsedSince = task.latestRun === null ? null : runLiveness(task.latestRun).elapsedSince;
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   // The task's own total where there is one, and the newest run's spend where
@@ -173,11 +177,9 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </span>,
     ]),
-    ...(task.latestRun === null ? [] : [<RunLine
-      run={task.latestRun}
-      mergeOutcome={task.mergeOutcome}
-      suppressRunningStatus={task.latestRun.status === "RUNNING" && task.latestRun.startedAt !== null}
-    />]),
+    ...(task.latestRun === null ? [] : [
+      <RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} elapsed="caller" />,
+    ]),
     ...(modelLine === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: modelLine })}>
       {modelLine}
     </span>]),
@@ -199,9 +201,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <span className="flex-1" />
       <span className="whitespace-nowrap">
         {costAmount === null ? null : `${costAmount} · `}
-        {task.latestRun?.status === "RUNNING" && task.latestRun.startedAt !== null
-          ? <RunningCardTime task={task} />
-          : cardTime(task)}
+        {elapsedSince === null ? cardTime(task) : <RunningCardTime task={task} />}
       </span>
   </>;
   const after = hasTokenFallback ? (

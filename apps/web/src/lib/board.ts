@@ -262,14 +262,54 @@ export const orderColumn = <T extends BoardTask | BoardEntry>(tasks: readonly T[
   ));
 };
 
-/* -------------------------------------------------------------- the actions */
+/* ------------------------------------------------------------- run liveness */
 
-export const ACTIVE_RUN_STATUSES = [
+/** The statuses under which the control plane still owns a Run. The same five
+ *  the server fences on (`packages/api/src/run-fence.ts`), suspended Inbox work
+ *  included; everything else is terminal. */
+const ACTIVE_RUN_STATUSES = [
   "QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX",
 ] as const satisfies readonly RunStatus[];
 
-export const isActiveRunStatus = (status: RunStatus): boolean =>
+const isActiveRunStatus = (status: RunStatus): boolean =>
   ACTIVE_RUN_STATUSES.includes(status as (typeof ACTIVE_RUN_STATUSES)[number]);
+
+/** The run fields the rule reads. Both projections carry them, so a caller
+ *  hands over whichever it holds: the board's `BoardLatestRun` or the detail
+ *  page's `Run`. */
+export type RunLivenessSubject = { status: RunStatus; startedAt: string | null };
+
+/** Everything a card says about a run's liveness. */
+export type RunLiveness = {
+  /** The control plane still owns this run. Cancellation is offered on it, and
+   *  a retry is not. */
+  live: boolean;
+  /** The instant an elapsed clock counts from, or null where no clock runs. A
+   *  run that has not started has nothing to count from, and a terminal run's
+   *  `startedAt` belongs to a duration that already ended. */
+  elapsedSince: string | null;
+  /** RUNNING is the one status word a clock replaces: the amber dot already
+   *  says the run is live and the elapsed time says more than the word. Every
+   *  other status still names itself, because nothing else on a card
+   *  distinguishes queued from waiting inbox. */
+  statusSuppressed: boolean;
+};
+
+/**
+ * The single answer to "is this run live, and whose clock shows".
+ *
+ * Stated once because the board card, the aggregate card and the detail page
+ * all ask it: a CLAIMED run with a `startedAt` used to take an elapsed clock
+ * from the aggregate card's run line and a `timeAgo` from the task card's
+ * footer, which are two answers to one question about one run.
+ */
+export const runLiveness = (run: RunLivenessSubject): RunLiveness => {
+  const live = isActiveRunStatus(run.status);
+  const elapsedSince = live && run.startedAt !== null ? run.startedAt : null;
+  return { live, elapsedSince, statusSuppressed: run.status === "RUNNING" && elapsedSince !== null };
+};
+
+/* -------------------------------------------------------------- the actions */
 
 /**
  * A retry only lands once the last run is terminal; the API rejects the rest.

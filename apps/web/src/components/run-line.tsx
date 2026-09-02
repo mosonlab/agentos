@@ -5,8 +5,8 @@ import { splitModel } from "@anneal/db/model-routing";
 import { duration } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
-import { isActiveRunStatus } from "../lib/board";
-import type { BoardLatestRun, MergeOutcome, RunStatus } from "../lib/types";
+import { type RunLivenessSubject, runLiveness } from "../lib/board";
+import type { CodexServiceTier, MergeOutcome, RunStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Badge } from "./ui/badge";
 
@@ -48,42 +48,50 @@ const dotTone = (status: RunStatus, mergeOutcome?: MergeOutcome | null | undefin
  *  say it twice. The detail page keeps the full identifier. */
 const cardModelName = (model: string): string => model.slice(model.lastIndexOf("/") + 1);
 
+/** Everything the line reads off a run. Both projections satisfy it, so the
+ *  detail page hands over its `Run` and the board its `BoardLatestRun`. */
+export type RunLineSubject = RunLivenessSubject & {
+  runNumber: number;
+  model: string;
+  codexServiceTier: CodexServiceTier;
+};
+
+/** Which element draws the run's elapsed clock. `caller` is the task card,
+ *  whose footer owns a ticking clock of its own. Stated rather than defaulted,
+ *  because the answer is never "nobody": the line drops the RUNNING word on the
+ *  strength of a clock showing somewhere. */
+export type ElapsedOwner = "line" | "caller";
+
 /** The sole board rendering of a Run: number, dot tone, status word, and merge override. */
 export const RunLine = ({
   run,
   mergeOutcome,
-  showElapsed = false,
+  elapsed: elapsedOwner,
   showModel = false,
-  suppressRunningStatus = false,
 }: {
-  run: BoardLatestRun;
+  run: RunLineSubject;
   mergeOutcome?: MergeOutcome | null | undefined;
-  showElapsed?: boolean;
+  elapsed: ElapsedOwner;
   /** Aggregate cards put the claimed model beside the run; task cards retain
    * their dedicated model row and leave this off. */
   showModel?: boolean;
-  /** Task cards render a live RUNNING duration in their footer. */
-  suppressRunningStatus?: boolean;
 }): ReactNode => {
   const t = useT();
+  const liveness = runLiveness(run);
   const presentation = runPresentation(run.status, mergeOutcome);
-  const elapsed = showElapsed && isActiveRunStatus(run.status) && run.startedAt !== null
-    ? duration(run.startedAt, null)
+  const elapsed = elapsedOwner === "line" && liveness.elapsedSince !== null
+    ? duration(liveness.elapsedSince, null)
     : null;
   const model = showModel ? splitModel(run.model) : null;
   const badge = mergeBadge(mergeOutcome);
-  const hideStatus = run.status === "RUNNING"
-    && badge === null
-    && (elapsed !== null || suppressRunningStatus);
+  const hideStatus = liveness.statusSuppressed && badge === null;
   const runDetailParts = [
     ...(model === null ? [] : [
       cardModelName(model.model),
       ...(model.effort === null ? [] : [model.effort]),
       ...(run.codexServiceTier === "FAST" ? ["fast"] : []),
     ]),
-    // The dot already says a run is live, so a RUNNING row spends its width on
-    // the elapsed time rather than on the word. Every other status still names
-    // itself: nothing else on the row distinguishes queued from waiting inbox.
+    // `statusSuppressed` owns why RUNNING is the one word a clock replaces.
     ...(hideStatus ? [] : [t(presentation.key)]),
     ...(elapsed === null ? [] : [elapsed]),
   ];
