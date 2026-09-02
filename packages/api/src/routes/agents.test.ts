@@ -539,6 +539,7 @@ test("Repo dependency provisioning round-trips through GET and PATCH", async () 
     const database = {
       repo: {
         findMany: async () => [row()],
+        findUnique: async () => row(),
         update: async ({ data }: { data: { dependencyProvisioning?: "NONE" | "NPM_CI" } }) => {
           if (data.dependencyProvisioning !== undefined) stored = data.dependencyProvisioning;
           return row();
@@ -568,6 +569,111 @@ test("Repo dependency provisioning round-trips through GET and PATCH", async () 
     const listedAfterPatch = await app.request("/projects/project-1/repos", { headers });
     assert.equal(listedAfterPatch.status, 200);
     assert.equal((await listedAfterPatch.json() as Array<Record<string, unknown>>)[0]?.dependencyProvisioning, "NONE");
+  });
+});
+
+test("PATCH repo preflights stored and patched repository identity before writing", async () => {
+  await withTokens(async () => {
+    const events: string[] = [];
+    const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string; dependencyProvisioning: "NONE" | "NPM_CI" }> = [];
+    const database = {
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/stored.git", defaultBranch: "main" }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          events.push("update");
+          return {
+            id: "repo-1", projectId: "project-1", credentialSecretId: null, name: "app",
+            remoteUrl: data.remoteUrl ?? "https://github.com/owner/stored.git",
+            mountPath: "repo", defaultBranch: data.defaultBranch ?? "main",
+            dependencyProvisioning: data.dependencyProvisioning ?? "NONE",
+            createdAt: new Date(0), updatedAt: new Date(0),
+          };
+        },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async (input) => {
+        events.push("preflight");
+        preflightInputs.push(input);
+      },
+    });
+    const response = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI", remoteUrl: "  https://github.com/owner/patched.git  ", defaultBranch: "release/v1" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(preflightInputs, [{
+      remoteUrl: "https://github.com/owner/patched.git",
+      defaultBranch: "release/v1",
+      dependencyProvisioning: "NPM_CI",
+    }]);
+    assert.deepEqual(events, ["preflight", "update"]);
+
+    const storedValues: Array<{ remoteUrl: string; defaultBranch: string }> = [];
+    const storedApp = createApp({
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/stored.git", defaultBranch: "main" }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          storedValues.push({
+            remoteUrl: String(data.remoteUrl ?? "https://github.com/owner/stored.git"),
+            defaultBranch: String(data.defaultBranch ?? "main"),
+          });
+          return data;
+        },
+      },
+    } as unknown as PrismaClient, {
+      repositoryPreflight: async (input) => {
+        preflightInputs.push(input);
+      },
+    });
+    const storedResponse = await storedApp.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NONE" }),
+    });
+    assert.equal(storedResponse.status, 200);
+    assert.deepEqual(preflightInputs.at(-1), {
+      remoteUrl: "https://github.com/owner/stored.git",
+      defaultBranch: "main",
+      dependencyProvisioning: "NONE",
+    });
+    assert.equal(storedValues.length, 1);
+    assert.deepEqual(preflightInputs.at(-1), {
+      remoteUrl: "https://github.com/owner/stored.git",
+      defaultBranch: "main",
+      dependencyProvisioning: "NONE",
+    });
+  });
+});
+
+test("PATCH repo refuses a preflight failure before writing", async () => {
+  await withTokens(async () => {
+    let updates = 0;
+    const database = {
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" }),
+        update: async () => {
+          updates += 1;
+          throw new Error("preflight refusal must prevent update");
+        },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async () => { throw new RepositoryPreflightError("remote-unreachable"); },
+    });
+    const response = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI" }),
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      error: "Repository preflight failed",
+      code: "repository-preflight-failed",
+      reason: "remote-unreachable",
+    });
+    assert.equal(updates, 0);
   });
 });
 

@@ -129,6 +129,32 @@ const dependencyProvisioningInvalid = {
   code: "repository-dependency-provisioning-invalid",
 } as const;
 
+const repositoryPreflightRefusal = (context: Context, error: unknown): Response | undefined => {
+  if (!(error instanceof RepositoryPreflightError)) return undefined;
+  if (error.reason === "package-lock-missing") {
+    return context.json({
+      error: "Repository preflight failed",
+      code: "repository-package-lock-missing",
+      remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
+    }, 422);
+  }
+  // This reason is added to the preflight failure union alongside the
+  // package-lock check. Keep the string cast until that shared contract is
+  // available to this route's type-check independently.
+  if ((error.reason as string) === "dependency-provisioning-contradicts-lockfile") {
+    return context.json({
+      error: "Repository dependency provisioning contradicts lockfile",
+      code: "repository-dependency-provisioning-contradicts-lockfile",
+      remedy: "Choose dependencyProvisioning NPM_CI for repositories with a root package-lock.json.",
+    }, 400);
+  }
+  return context.json({
+    error: "Repository preflight failed",
+    code: "repository-preflight-failed",
+    reason: error.reason,
+  }, 422);
+};
+
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
@@ -566,20 +592,8 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         dependencyProvisioning,
       });
     } catch (error: unknown) {
-      if (error instanceof RepositoryPreflightError) {
-        if (error.reason === "package-lock-missing") {
-          return context.json({
-            error: "Repository preflight failed",
-            code: "repository-package-lock-missing",
-            remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
-          }, 422);
-        }
-        return context.json({
-          error: "Repository preflight failed",
-          code: "repository-preflight-failed",
-          reason: error.reason,
-        }, 422);
-      }
+      const refusal = repositoryPreflightRefusal(context, error);
+      if (refusal) return refusal;
       throw error;
     }
     const { grantAgents, ...repoFields } = body;
@@ -613,12 +627,46 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     if (body.dependencyProvisioning !== undefined && !isDependencyProvisioning(body.dependencyProvisioning)) {
       return context.json(dependencyProvisioningInvalid, 400);
     }
+    const repoId = id.parse(context.req.param("repoId"));
     if (body.credentialSecretId) {
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
+    if (body.dependencyProvisioning !== undefined) {
+      const stored = await db.repo.findUnique({
+        where: { id: repoId },
+        select: { remoteUrl: true, defaultBranch: true },
+      });
+      if (!stored) return context.json({ error: "Repo not found" }, 404);
+      const remote = parseRepoRemote(body.remoteUrl ?? stored.remoteUrl);
+      if (!remote.ok) {
+        return context.json({
+          error: "Repository remote is invalid",
+          code: "repository-remote-invalid",
+          reason: remote.reason,
+        }, 400);
+      }
+      const defaultBranch = body.defaultBranch ?? stored.defaultBranch;
+      if (!isValidBranchName(defaultBranch)) {
+        return context.json({
+          error: "Repository default branch is invalid",
+          code: "repository-default-branch-invalid",
+        }, 400);
+      }
+      try {
+        await deps.repositoryPreflight({
+          remoteUrl: remote.remoteUrl,
+          defaultBranch,
+          dependencyProvisioning: body.dependencyProvisioning,
+        });
+      } catch (error: unknown) {
+        const refusal = repositoryPreflightRefusal(context, error);
+        if (refusal) return refusal;
+        throw error;
+      }
+    }
     return context.json((await db.repo.update({
-      where: { id: id.parse(context.req.param("repoId")) }, data: withoutUndefined(body),
+      where: { id: repoId }, data: withoutUndefined(body),
     })) satisfies RepoResponse);
   });
   app.delete("/repos/:repoId", async (context) => {
