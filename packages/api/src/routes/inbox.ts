@@ -202,7 +202,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
         externalEventId: `web:${body.requestId}`,
         decision: body.decision,
         actorOpenId: "web-operator",
-        note: body.note,
+        ...(body.note === undefined ? {} : { note: body.note }),
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
