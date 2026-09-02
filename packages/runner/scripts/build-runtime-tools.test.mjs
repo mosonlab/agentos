@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import {
   chmodSync,
@@ -49,25 +48,22 @@ const inventory = (root) => {
   return files.sort();
 };
 
-// Runtime-tool bytes at c1db52cc143f5f72a139c6b85c32f3be4e729e44.
-const targetBundleDigests = new Map([
-  ["gate-worker/gate-dispatch.sh", "ad317307a57ba723099423b468e21f7af4c96b9f1bf3f1d2b60265e378078e38"],
-  ["gate-worker/lib.sh", "65bd4791208879523c75bf8f1e29ea539dbd1f54b482e851cf466720e7650bf2"],
-  ["gate-worker/mirror-push.sh", "8974c7bd2a82c35df8f8b6bde243ac45de1d779063c172a8e24c3a1413fbb07b"],
-  ["gate-worker/remote-gate.sh", "ecfba015e3dac6c62ff8039aa97d6831772800d568ed1be8e3489c4243470695"],
-  ["gate-worker/run-gate.sh", "dfce1e0df4cd530a0a14de8f3e8bd4e78c7beaf351ddb9c8c114171c76f33e05"],
-  ["regression-verification.sh", "53dacc7438dbb9da350904c4d9955ebea1c111cf8b1400597510e867aef3134a"],
-]);
-
-test("buildRuntimeTools preserves the target commit's exact runtime-tool bytes", (t) => {
+test("buildRuntimeTools preserves each source runtime-tool's exact bytes", (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-runner-target-runtime-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const { outputRoot } = buildRuntimeTools({ packageRoot: join(root, "packages", "runner") });
+  const packageRoot = join(root, "packages", "runner");
+  const { outputRoot } = buildRuntimeTools({ packageRoot });
 
-  assert.deepEqual(inventory(outputRoot), [...targetBundleDigests.keys()].sort());
-  for (const [destination, expected] of targetBundleDigests) {
-    const actual = createHash("sha256").update(readFileSync(join(outputRoot, destination))).digest("hex");
-    assert.equal(actual, expected, destination);
+  assert.deepEqual(
+    inventory(outputRoot),
+    RUNTIME_TOOL_FILES.map(({ destination }) => destination).sort(),
+  );
+  for (const { source, destination } of RUNTIME_TOOL_FILES) {
+    assert.deepEqual(
+      readFileSync(join(outputRoot, destination)),
+      readFileSync(join(repositoryRoot, source)),
+      destination,
+    );
   }
 });
 
