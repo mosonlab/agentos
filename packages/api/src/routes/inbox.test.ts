@@ -63,6 +63,93 @@ test("Inbox summary returns zero when every open card is a dismissible notice", 
   });
 });
 
+test("Inbox read models expose the server-owned free-text capability", async () => {
+  await withTokens(async () => {
+    const messages = [
+      {
+        id: "waiting-choice", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE",
+        gateTaskId: null, replyToMessageId: null, dedupeKey: "question:choice",
+        session: { taskId: "task-1", waitingOnMessageId: "waiting-choice" },
+      },
+      {
+        id: "open-gate", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE",
+        gateTaskId: "gate-task", replyToMessageId: null, dedupeKey: "gate:1",
+        session: { taskId: "producing-task", waitingOnMessageId: null },
+      },
+      {
+        id: "stop-question", status: "OPEN", from: "AGENT", kind: "TEXT",
+        gateTaskId: null, replyToMessageId: null, dedupeKey: "merge-stop:stop-1",
+        session: { taskId: "task-1", waitingOnMessageId: "stop-question" },
+      },
+      {
+        id: "answered", status: "ANSWERED", from: "AGENT", kind: "TEXT",
+        gateTaskId: null, replyToMessageId: null, dedupeKey: "question:answered",
+        session: { taskId: "task-1", waitingOnMessageId: "answered" },
+      },
+      {
+        id: "detached", status: "OPEN", from: "AGENT", kind: "TEXT",
+        gateTaskId: null, replyToMessageId: null, dedupeKey: "notification:1", session: null,
+      },
+    ];
+    const database = {
+      inboxMessage: {
+        findMany: async () => messages,
+        findUnique: async () => messages[0],
+      },
+      session: { findMany: async () => [
+        { waitingOnMessageId: "waiting-choice" },
+        { waitingOnMessageId: "stop-question" },
+        { waitingOnMessageId: "answered" },
+      ] },
+    } as unknown as PrismaClient;
+
+    const list = await createApp(database).request("/inbox/messages", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(list.status, 200);
+    const listMessages = await list.json() as Array<{ id: string; acceptsFreeText: boolean }>;
+    assert.deepEqual(
+      Object.fromEntries(listMessages.map((message) => [message.id, message.acceptsFreeText])),
+      {
+        "waiting-choice": true,
+        "open-gate": true,
+        "stop-question": false,
+        answered: false,
+        detached: false,
+      },
+    );
+
+    const single = await createApp(database).request("/inbox/messages/waiting-choice", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(single.status, 200);
+    assert.equal((await single.json() as { acceptsFreeText: boolean }).acceptsFreeText, true);
+  });
+});
+
+test("decision notes are rejected with a named 400 for non-gate cards", async () => {
+  await withTokens(async () => {
+    let transactionStarted = false;
+    const database = {
+      inboxMessage: {
+        findUnique: async () => ({ gateTaskId: null }),
+      },
+      $transaction: async () => { transactionStarted = true; throw new Error("must not apply"); },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/inbox/messages/question-1/decision", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "choice-1", note: " operator context ", requestId: "request-1" }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "A decision note is only supported for an approval-gate card",
+      code: "inbox-note-not-allowed",
+    });
+    assert.equal(transactionStarted, false);
+  });
+});
+
 test("operator can close a notification attached to a task when no run waits on it", async () => {
   await withTokens(async () => {
     let updateWhere: unknown;

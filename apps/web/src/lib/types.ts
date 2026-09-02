@@ -129,6 +129,8 @@ export type InboxMessage = {
   taskId: string | null;
   goalId: string | null;
   gateTaskId: string | null;
+  /** Derived by the API: this open card has a consumer for operator text. */
+  acceptsFreeText: boolean;
   /** Derived by the API: no decision is owed on this card and no suspended run
    *  resumes on it, so the operator may archive it outright. */
   dismissible: boolean;

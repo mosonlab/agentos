@@ -290,6 +290,8 @@ test("the shared decision compare-and-set makes a second Web or Feishu click a n
 
 const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: Date | null } = {}) => {
   const queued: Record<string, unknown>[] = [];
+  const replies: Record<string, unknown>[] = [];
+  const activities: Record<string, unknown>[] = [];
   const locks: string[] = [];
   const executable = {
     id: "task-1", projectId: "project-1", name: "Write spec", description: "spec", assigneeType: AssigneeType.AGENT,
@@ -317,7 +319,7 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
         gateTask: { id: "task-1", name: "Write spec", assigneeType: AssigneeType.AGENT, previousTask: null },
       }),
       updateMany: async () => ({ count: 1 }),
-      create: async () => ({ id: "reply-1" }),
+      create: async ({ data }: { data: Record<string, unknown> }) => { replies.push(data); return { id: "reply-1" }; },
     },
     inboxDecision: { create: async () => ({}) },
     task: {
@@ -325,7 +327,7 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
       findUniqueOrThrow: async () => executable,
       findUnique: async () => executable,
     },
-    taskActivity: { create: async () => ({}) },
+    taskActivity: { create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; } },
     agent: { findUnique: async () => runAgent({ archivedAt: options.agentArchivedAt ?? null }) },
     run: {
       // enqueueTaskRun asks whether the producing run's branch actually reached
@@ -336,11 +338,11 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
       create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-2", ...data }; },
     },
   } as any;
-  return { tx, queued, locks };
+  return { tx, queued, replies, activities, locks };
 };
 
 test("rejecting a gate transactionally returns the producing step to the queue", async () => {
-  const { tx, queued, locks } = rejectionTx();
+  const { tx, queued, activities, locks } = rejectionTx();
   const result = await applyInboxDecisionTx(tx, { inboxMessageId: "gate-1", externalEventId: "feishu:evt-1", decision: "reject" });
   assert.equal(result.gateAction, "rejected");
   // Task row first, Agent row second: the one global lock order.
@@ -348,6 +350,31 @@ test("rejecting a gate transactionally returns the producing step to the queue",
   assert.equal(queued[0]!.runNumber, 2);
   assert.equal(queued[0]!.branch, "feature/x");
   assert.equal(queued[0]!.targetBranch, "feature/x");
+  assert.deepEqual(activities[0], {
+    taskId: "task-1",
+    actorType: "operator",
+    body: "Approval gate rejected; step queued again",
+  });
+});
+
+test("rejecting a gate with feedback stores the note on the reply and activity", async () => {
+  const { tx, queued, replies, activities } = rejectionTx();
+  const note = "The implementation must preserve the existing retry contract.";
+  const result = await applyInboxDecisionTx(tx, {
+    inboxMessageId: "gate-1",
+    externalEventId: "feishu:evt-feedback",
+    decision: "reject",
+    note,
+  });
+  assert.equal(result.gateAction, "rejected");
+  assert.equal(queued.length, 1);
+  assert.equal(replies[0]?.body, `reject\n\nOperator feedback on previous attempt:\n${note}`);
+  assert.equal((replies[0]?.selectedChoiceId), "reject");
+  assert.equal(activities[0]?.body, `Approval gate rejected; step queued again\nOperator feedback on previous attempt:\n${note}`);
+  assert.deepEqual(activities[0]?.metadata, {
+    approvalGateFeedback: true,
+    note,
+  });
 });
 
 test("rejecting a gate onto a step whose agent archived under the lock queues nothing", async () => {
@@ -399,6 +426,9 @@ test("a multiple-choice Inbox decision accepts an option id and persists the hum
   await assert.rejects(() => applyInboxDecisionTx(tx, {
     inboxMessageId: "question-1", externalEventId: "web:unknown", decision: "unknown",
   }), /must match an Inbox choice id/);
+  await assert.rejects(() => applyInboxDecisionTx(tx, {
+    inboxMessageId: "question-1", externalEventId: "web:note", decision: "ship", note: "not a gate note",
+  }), /only supported for an approval-gate card/);
 });
 
 test("agentArchiveBlocker asks the database for exactly the live task statuses", async () => {

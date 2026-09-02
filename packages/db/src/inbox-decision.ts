@@ -28,6 +28,10 @@ export type InboxDecisionInput = {
   actorOpenId?: string | null;
   externalMessageId?: string | null;
   allowFreeText?: boolean;
+  /** Optional operator note for an approval-gate decision. The HTTP route
+   * trims and bounds this value; keeping it optional here preserves the
+   * Feishu and existing decision callers. */
+  note?: string;
 };
 
 export type InboxDecisionResult = {
@@ -36,6 +40,24 @@ export type InboxDecisionResult = {
   gateAction?: "approved" | "rejected";
   messageId?: string;
 };
+
+/** Metadata marker consumed by the claim lane for rejection feedback. Keep
+ * this separate from the generic operator-note marker: gate feedback must not
+ * be dropped by the generic 4,000-character operator-note budget. */
+export const APPROVAL_GATE_FEEDBACK_METADATA_FIELD = "approvalGateFeedback";
+export const APPROVAL_GATE_NOTE_METADATA_FIELD = "note";
+
+const APPROVAL_GATE_APPROVED_BODY = "Approval gate approved";
+const APPROVAL_GATE_REJECTED_BODY = "Approval gate rejected; step queued again";
+const GATE_NOTE_LABEL = "Operator feedback on previous attempt";
+
+const gateReplyBody = (decision: string, note: string | null): string => note === null
+  ? decision
+  : `${decision}\n\n${GATE_NOTE_LABEL}:\n${note}`;
+
+const gateActivityBody = (base: string, note: string | null): string => note === null
+  ? base
+  : `${base}\n${GATE_NOTE_LABEL}:\n${note}`;
 
 /** Shared transaction body for Feishu and Web decisions. OPEN is the cross-channel compare-and-set. */
 export const applyInboxDecisionTx = async (
@@ -73,6 +95,23 @@ export const applyInboxDecisionTx = async (
     if (!matchesChoice) {
       throw new WorkflowRefusalError("inbox-choice-mismatch", "Decision must match an Inbox choice id");
     }
+  }
+  if (!gateDecision && input.note !== undefined) {
+    throw new WorkflowRefusalError(
+      "invalid-request",
+      "A decision note is only supported for an approval-gate card",
+    );
+  }
+  // The web route rejects this before entering the transaction for a clearer
+  // 400, but a shared DB caller must not accidentally attach a gate note to a
+  // resumable question. There is no InboxMessage note column, so only the
+  // gate branch below is allowed to serialize `note` onto its HUMAN reply.
+  const gateNote = gateDecision ? input.note?.trim() || null : null;
+  if (gateDecision && input.note !== undefined && (gateNote === null || gateNote.length > 8_000)) {
+    throw new WorkflowRefusalError(
+      "invalid-request",
+      "Approval gate note must be between 1 and 8000 characters",
+    );
   }
   // §D-P7. A stop question is answered long after its run ended, so it cannot
   // travel the WAITING_INBOX path — and it is not a gate card either, because a
@@ -211,7 +250,7 @@ export const applyInboxDecisionTx = async (
     threadId: question.threadId,
     replyToMessageId: question.id,
     kind: "TEXT",
-    body: input.decision,
+    body: gateDecision ? gateReplyBody(input.decision, gateNote) : input.decision,
     selectedChoiceId: input.decision,
     status: InboxStatus.CLOSED,
     dedupeKey: `decision:${input.externalEventId}:reply`,
@@ -230,7 +269,14 @@ export const applyInboxDecisionTx = async (
   if (gateDecision && question.gateTask) {
     if (input.decision === "approve") {
       await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.DONE, failureReason: null } });
-      await tx.taskActivity.create({ data: { taskId: question.gateTask.id, actorType: "operator", body: "Approval gate approved" } });
+      await tx.taskActivity.create({ data: {
+        taskId: question.gateTask.id,
+        actorType: "operator",
+        body: gateActivityBody(APPROVAL_GATE_APPROVED_BODY, gateNote),
+        ...(gateNote === null ? {} : { metadata: {
+          [APPROVAL_GATE_NOTE_METADATA_FIELD]: gateNote,
+        } }),
+      } });
       // §D-P3 Phase C, in the same transaction as the decision row it binds to.
       // A refusal here throws and rolls the whole approval back.
       const authorization = await produceMergeAuthorization(tx, {
@@ -264,7 +310,15 @@ export const applyInboxDecisionTx = async (
     if (redo.id !== question.gateTask.id) {
       await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.TODO } });
     }
-    await tx.taskActivity.create({ data: { taskId: redo.id, actorType: "operator", body: "Approval gate rejected; step queued again" } });
+    await tx.taskActivity.create({ data: {
+      taskId: redo.id,
+      actorType: "operator",
+      body: gateActivityBody(APPROVAL_GATE_REJECTED_BODY, gateNote),
+      ...(gateNote === null ? {} : { metadata: {
+        [APPROVAL_GATE_FEEDBACK_METADATA_FIELD]: true,
+        [APPROVAL_GATE_NOTE_METADATA_FIELD]: gateNote,
+      } }),
+    } });
     await enqueueTaskRun(tx, redo.id, now);
     return { duplicate: false, resumed: false, gateAction: "rejected", messageId: reply.id };
   }
