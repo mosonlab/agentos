@@ -83,7 +83,7 @@ test("heavy polled collection routes validate unchanged payloads and change vali
       agent: { findMany: async () => [{ id: `agent-${version}`, name: "worker" }] },
       repo: { findMany: async () => [{ id: `repo-${version}` }] },
       inboxMessage: { findMany: async () => [{
-        id: `message-${version}`, status: "OPEN", from: "AGENT", kind: "CHOICE",
+        id: `message-${version}`, status: "OPEN", from: "AGENT", kind: "CHOICE", choices: null,
         gateTaskId: null, replyToMessageId: null, decisions: [], replies: [], session: null,
       }] },
       session: { findMany: async () => [] },
