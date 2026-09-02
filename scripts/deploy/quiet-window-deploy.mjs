@@ -10,6 +10,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -148,6 +149,20 @@ const checked = (reason, program, args, options) => checkedResult(
   reason,
   () => command(program, args, options),
 );
+
+export const canonicalSyncRefusedLines = (stdout) => stdout
+  .split(/\r?\n/u)
+  .filter((line) => line.startsWith("REFUSED "));
+
+export const canonicalSyncNoticeRecord = (record, refusedLines) => ({
+  ...record,
+  ...(record.outcome === "success" && refusedLines.length > 0
+    ? { detail: refusedLines.join("\n") }
+    : {}),
+});
+
+export const autoDeployNoticeBody = ({ outcome, reason, detail = "", from, to }) =>
+  `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
 
 const parseJson = (contents, reason) => {
   try {
@@ -290,7 +305,7 @@ const blockingRuns = async () => {
 const notify = async ({ outcome, reason, detail = "", from, to }) => {
   if (outcome === "success") throwIfInterrupted();
   const db = await database();
-  const body = `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
+  const body = autoDeployNoticeBody({ outcome, reason, detail, from, to });
   const dedupeKey = `auto-deploy:${createHash("sha256").update(body).digest("hex")}`;
   try {
     const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
@@ -586,6 +601,8 @@ const makeWritable = (root) => {
 
 const createDeployHost = () => {
   let retryEscalation = null;
+  let canonicalSyncRefusals = [];
+  const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
     parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
     checkEscalation: async () => {
@@ -796,14 +813,20 @@ const createDeployHost = () => {
       timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
       timeoutReason: "prisma-client-generation-timeout",
     }),
-    syncCanonicalPrompts: (attempt) => checked("canonical-prompt-sync-refused", loadBinaries().node, [
-      "node_modules/tsx/dist/cli.mjs",
-      "packages/db/prisma/sync-canonical-prompts.ts",
-    ], {
-      cwd: attempt.requireFact("operationWorkspace"),
-      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
-      timeoutReason: "canonical-prompt-sync-timeout",
-    }),
+    syncCanonicalPrompts: async (attempt) => {
+      const result = await checked("canonical-prompt-sync-refused", loadBinaries().node, [
+        "node_modules/tsx/dist/cli.mjs",
+        "packages/db/prisma/sync-canonical-prompts.ts",
+      ], {
+        cwd: attempt.requireFact("operationWorkspace"),
+        capture: true,
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
+        timeoutReason: "canonical-prompt-sync-timeout",
+      });
+      if (result.stdout) process.stdout.write(result.stdout);
+      canonicalSyncRefusals = canonicalSyncRefusedLines(result.stdout);
+      return undefined;
+    },
     verifyRuntimePrismaClient: async (attempt) => {
       if (!generatedPrismaClientIsComplete(attempt.requireFact("operationWorkspace"))) {
         fail("runtime-prisma-client-missing", "operation-generated-client-is-absent");
@@ -893,7 +916,7 @@ const createDeployHost = () => {
     },
     escalate: writeEscalation,
     markEscalationNotified,
-    notify,
+    notify: notifyDeployOutcome,
     log,
   });
 };
@@ -956,36 +979,46 @@ const main = async () => {
   return result.ok ? (attempt.fact("exitCode") ?? 0) : 1;
 };
 
-for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
-  process.on(signal, () => {
-    if (migrationBarrierRetentionActive) {
-      log(`HOLD deploy-barrier signal=${signal}-refused clear-escalation-required`);
-      return;
-    }
-    if (!interruption.interrupt(signal)) return;
-    log(`STOP deploy-interrupted detail=${signal}; rolling-back-before-exit-${code}`);
-  });
-}
+const entrypoint = (() => {
+  try {
+    return process.argv[1] !== undefined
+      && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
+if (entrypoint) {
+  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+    process.on(signal, () => {
+      if (migrationBarrierRetentionActive) {
+        log(`HOLD deploy-barrier signal=${signal}-refused clear-escalation-required`);
+        return;
+      }
+      if (!interruption.interrupt(signal)) return;
+      log(`STOP deploy-interrupted detail=${signal}; rolling-back-before-exit-${code}`);
+    });
+  }
 
-let exitCode = 1;
-try {
-  exitCode = await main();
-} catch (error) {
-  const failure = failureOf(error);
-  log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
-  const dryRunMode = process.argv.includes("--dry-run");
-  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason })) {
-    await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
-      .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));
+  let exitCode = 1;
+  try {
+    exitCode = await main();
+  } catch (error) {
+    const failure = failureOf(error);
+    log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
+    const dryRunMode = process.argv.includes("--dry-run");
+    if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason })) {
+      await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
+        .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));
+    }
+    if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && existsSync(ESCALATION_PATH)) {
+      await loadEnvironment()
+        .then(retryEscalationNotification)
+        .catch(() => log(`STOP inbox-notification-pending reason=${failure.reason}`));
+    }
+    exitCode = failure.reason === "usage" ? 64 : 1;
+  } finally {
+    await Promise.allSettled([...activeResources].map((resource) => resource.release()));
+    if (prisma) await prisma.$disconnect().catch(() => undefined);
   }
-  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && existsSync(ESCALATION_PATH)) {
-    await loadEnvironment()
-      .then(retryEscalationNotification)
-      .catch(() => log(`STOP inbox-notification-pending reason=${failure.reason}`));
-  }
-  exitCode = failure.reason === "usage" ? 64 : 1;
-} finally {
-  await Promise.allSettled([...activeResources].map((resource) => resource.release()));
-  if (prisma) await prisma.$disconnect().catch(() => undefined);
+  process.exitCode = interruption.receivedSignal() === "SIGINT" ? 130 : interruption.receivedSignal() === "SIGTERM" ? 143 : exitCode;
 }
-process.exitCode = interruption.receivedSignal() === "SIGINT" ? 130 : interruption.receivedSignal() === "SIGTERM" ? 143 : exitCode;

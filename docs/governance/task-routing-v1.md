@@ -1,6 +1,8 @@
 # Task Routing Contract v1
 
-Version: 1.7 (2026-08-27: absorbs the dispatch rules formerly split into `AGENTS.md` — tier selection detail, implementation-assignee routing, and `afterTaskId` mechanics; `AGENTS.md` now carries a pointer only)
+Version: 1.8 (2026-09-02: dependency qualification names parallel dispatch as the default, narrows the true-dependency test to code and deploy order, and records that an `afterTaskId` binding is one-way)
+
+Previous: 1.7 (2026-08-27: absorbs the dispatch rules formerly split into `AGENTS.md` — tier selection detail, implementation-assignee routing, and `afterTaskId` mechanics; `AGENTS.md` now carries a pointer only)
 
 Status: Active
 
@@ -98,8 +100,8 @@ A backlog card is a dispatch-ready brief waiting for a decision, not a work item
 
 - Create the card with `assigneeType: HUMAN` so no runner claims it, with the brief as its description (written from `docs/BRIEF-TEMPLATE.md`) plus the machine-readable `Route:` line when the implementation assignee is non-default. The create API accepts an optional `status` of `BACKLOG` or `TODO` and defaults to `TODO`; pass `status: BACKLOG` to create a human Backlog card atomically without a follow-up PATCH.
 - Dispatch instantiates a chain from the card: the brief becomes the instantiate `description` (the chain's implementation task is then the specification of record), and direct-template instantiation consumes and validates its `Route:` line. Chain-to-chain ordering passes `afterTaskId` (the predecessor chain's final task) to the instantiate endpoint; the bound chain dispatches when the predecessor completes. `afterTaskId` is incompatible with `autoStart`, and each predecessor task takes one successor.
-- Dependency qualification precedes every instantiation: classify the new chain against every in-flight or co-dispatched chain and pick exactly one outcome.
-  1. True dependency — the new chain consumes another chain's output, or needs that chain merged and deployed first: bind with `afterTaskId` and record the basis (`Depends on: <chain> — <what is consumed or why deploy-first>`) in the instantiate description or the card's activity log.
+- Dependency qualification precedes every instantiation: classify the new chain against every in-flight or co-dispatched chain and pick exactly one outcome. Parallel is the default; bind with `afterTaskId` only for a true dependency, and serialize by choice only for heavy overlap or a concurrent migration.
+  1. True dependency — this chain's code reads code the other chain merges, or the other chain must be deployed before this one can be verified: bind with `afterTaskId` and record the basis (`Depends on: <chain> — <what is consumed or why deploy-first>`) in the instantiate description or the card's activity log. A brief that mentions the other chain, shares a document with it, or ships an adjacent feature on the same surface is independent. Binding is one-way: the bound chain's first step refuses a manual start until the predecessor is DONE, and only deleting the bound chain releases it (see the instantiate route in `docs/operator-api.md`).
   2. Heavy overlap — no dependency, but both chains rewrite the same code area: weigh expected refresh-conflict repair cost against serial wall-clock loss; either choice is valid, and a serial choice records its reason the same way.
   3. Independent — dispatch in parallel, no justification needed; the merge tail and the deploy quiet window already serialize delivery.
   Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list). Serialize unconditionally when both chains add a Prisma migration, whichever tables they touch: every migration bumps `RELEASE_CANDIDATE_MIGRATIONS` in `packages/db/src/release-migrate.ts`, so two concurrent migration-adding chains conflict on merge by construction (7 of the 19 refresh-conflict repairs between 2026-08-24 and 2026-08-31 were exactly those two lines).
