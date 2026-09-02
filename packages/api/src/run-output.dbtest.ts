@@ -760,10 +760,13 @@ test("a failed required-output status check is a non-retryable protocol failure"
   const completion = {
     ...failedCompletion("runner-output-status-failure", fencingToken, run.branch ?? "master"),
     exitCode: 0,
-    failureClass: "PROTOCOL_ERROR",
-    retryable: false,
-    failureReason: "Task output status could not be established for a step declaring output kind 'implementation'",
-    failureEnvelope: undefined,
+    // Not a provider failure: the control plane could not say whether the
+    // required output exists, and re-asking a question that did not answer is
+    // not a repair.
+    outcome: {
+      case: "terminal-protocol-failure" as const,
+      reason: "Task output status could not be established for a step declaring output kind 'implementation'",
+    },
   };
 
   const completed = await call("POST", `/runner/runs/${runId}/complete`, RUNNER, completion);

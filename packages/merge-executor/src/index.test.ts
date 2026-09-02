@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import type { Stats } from "node:fs";
 import { test } from "node:test";
 
+import type { RunOutcome } from "@anneal/db";
+
 import { makeAgentOsClient, type MechanicalClaim } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
@@ -185,9 +187,11 @@ test("any mint failure completes retryably before a GitHub surface or merge writ
     "https://agentos.test/runner/runs/failed-run/heartbeat",
     "https://agentos.test/runner/runs/failed-run/complete",
   ]);
-  const completion = JSON.parse(requests[2]!.body) as Record<string, unknown>;
-  assert.equal(completion.retryable, true);
-  assert.match(String(completion.failureReason), /private-key-read-failed/u);
+  const { outcome } = JSON.parse(requests[2]!.body) as { outcome: RunOutcome };
+  // A crashed executor persists no merge result, so the deliverable is absent
+  // rather than unverifiable: retryable, and the next attempt can still make it.
+  assert.equal(outcome.case, "required-output-unsatisfied");
+  assert.match("reason" in outcome ? outcome.reason : "", /private-key-read-failed/u);
   assert.equal(requests.some((request) => request.body.includes(secret)), false);
 });
 
