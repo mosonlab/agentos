@@ -888,11 +888,24 @@ const recordCacheUse = async (cacheRoot: string, key: string): Promise<void> => 
     marker,
     constants.O_CREAT | constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
     0o600,
-  );
+  ).catch((error: unknown) => {
+    throw new DependencyCacheIntegrityError(`usage-marker-unwritable:${errorCode(error) ?? "unknown"}`);
+  });
   try {
     await handle.writeFile(`${new Date().toISOString()}\n`);
   } finally {
     await handle.close();
+  }
+};
+
+const validateCacheUseMarker = async (cacheRoot: string, key: string): Promise<void> => {
+  const marker = join(cacheRoot, CACHE_USAGE_DIRECTORY, key);
+  const info = await lstat(marker).catch((error: unknown) => {
+    if (errorCode(error) === "ENOENT") return null;
+    throw new DependencyCacheIntegrityError(`usage-marker-unreadable:${errorCode(error) ?? "unknown"}`);
+  });
+  if (info?.isSymbolicLink() || (info !== null && !info.isFile())) {
+    throw new DependencyCacheIntegrityError("unsafe-usage-marker");
   }
 };
 
@@ -1023,12 +1036,17 @@ const asRetentionIntegrityError = (error: unknown): DependencyCacheIntegrityErro
     ? error
     : new DependencyCacheIntegrityError(`retention-walk-failed:${errorCode(error) ?? "unknown"}`);
 
-const pruneCacheEntries = async (
+export const enforceDependencyCacheByteBudget = async (
   cacheRoot: string,
   currentKey: string | undefined,
   newlyPublishedKey: string | undefined,
   report: (progress: DependencyCacheProgress) => void,
+  budget = DEPENDENCY_CACHE_BYTE_BUDGET,
 ): Promise<void> => {
+  if (!Number.isSafeInteger(budget) || budget < 0) {
+    throw new DependencyCacheBudgetError("invalid-byte-budget");
+  }
+  const budgetBytes = BigInt(budget);
   const handle = await openCacheLock(cacheRoot);
   let locked = false;
   try {
@@ -1054,7 +1072,7 @@ const pruneCacheEntries = async (
       entries.sort((left, right) => right.usedMs - left.usedMs || right.key.localeCompare(left.key));
       const protectedKey = currentKey && CACHE_KEY.test(currentKey) ? currentKey : undefined;
       let total = totalRetentionBytes(entries);
-      if (total > BigInt(DEPENDENCY_CACHE_BYTE_BUDGET)) {
+      if (total > budgetBytes) {
         const victims = [...entries].sort((left, right) => left.usedMs - right.usedMs || left.key.localeCompare(right.key));
         let selectedVictims: Set<string>;
         try {
@@ -1065,21 +1083,24 @@ const pruneCacheEntries = async (
               return { key, bytes: numericBytes, usedMs };
             }),
             protectedKey,
+            budget,
           ));
         } catch (error: unknown) {
           if (newlyPublishedKey && CACHE_KEY.test(newlyPublishedKey)) {
             await rollbackPublishedEntry(cacheRoot, newlyPublishedKey, report);
           }
-          const integrityError = asRetentionIntegrityError(error);
+          const condition = error instanceof DependencyCacheBudgetError
+            ? error.condition
+            : asRetentionIntegrityError(error).condition;
           report({
             event: "integrity-refusal",
             ...(protectedKey ? { key: protectedKey.slice(0, 16) } : {}),
-            condition: integrityError.condition,
+            condition,
           });
-          throw error instanceof DependencyCacheBudgetError ? error : integrityError;
+          throw error instanceof DependencyCacheBudgetError ? error : new DependencyCacheIntegrityError(condition);
         }
         for (const victim of victims) {
-          if (total <= BigInt(DEPENDENCY_CACHE_BYTE_BUDGET)) break;
+          if (total <= budgetBytes) break;
           if (!selectedVictims.has(victim.key)) continue;
           try {
             await removeRetentionEntry(victim, usageRoot);
@@ -1110,12 +1131,12 @@ const pruneCacheEntries = async (
         throw integrityError;
       }
       const finalTotal = totalRetentionBytes(finalEntries);
-      if (finalTotal <= BigInt(DEPENDENCY_CACHE_BYTE_BUDGET)) return;
+      if (finalTotal <= budgetBytes) return;
 
       const protectedEntry = protectedKey === undefined
         ? undefined
         : finalEntries.find((entry) => entry.key === protectedKey);
-      const condition = protectedEntry !== undefined && protectedEntry.bytes > BigInt(DEPENDENCY_CACHE_BYTE_BUDGET)
+      const condition = protectedEntry !== undefined && protectedEntry.bytes > budgetBytes
         ? "protected-entry-exceeds-byte-budget"
         : "byte-budget-invariant-unmet";
       if (newlyPublishedKey && CACHE_KEY.test(newlyPublishedKey)) {
@@ -1325,17 +1346,24 @@ export const materializeWorkspaceDependencies = async (
     if (!insideOrEqual(cacheRoot, entry)) throw new Error("Dependency cache entry escaped its root");
     const expected = { format: CACHE_FORMAT, key, toolchain, inputs, targetPaths } as const;
     const locked = await withSharedCacheLock(cacheRoot, async () => {
+      try {
+        await validateCacheUseMarker(cacheRoot, key);
+      } catch (error: unknown) {
+        if (!(error instanceof DependencyCacheIntegrityError)) throw error;
+        report({ event: "integrity-refusal", key: key.slice(0, 16), condition: error.condition });
+        throw error;
+      }
       if (await pathKind(entry) !== "missing") {
         try {
           const metadata = await timed("validate", report, () => validateEntry(entry, expected, workspace));
           await timed("restore", report, () => restoreEntry(config, metadata, entry, workspace, env, execute));
           await timed("rebuild", report, () => rebuildNativeWorkspaces(config, workspace, nativeWorkspaces, env, execute));
           await recordCacheUse(cacheRoot, key);
-          report({ event: "hit", key: key.slice(0, 16) });
           return {
             result: { status: "restored", key } as DependencyCacheResult,
             usableKey: key,
             newlyPublishedKey: undefined,
+            successEvent: { event: "hit", key: key.slice(0, 16) } as DependencyCacheProgress,
           };
         } catch (error: unknown) {
           if (!(error instanceof DependencyCacheIntegrityError)) throw error;
@@ -1356,20 +1384,29 @@ export const materializeWorkspaceDependencies = async (
         report({ event: "integrity-refusal", key: key.slice(0, 16), condition: integrityError.condition });
         throw integrityError;
       }
-      await recordCacheUse(cacheRoot, key);
-      report({ event: "publication", key: key.slice(0, 16), condition: publication });
+      try {
+        await recordCacheUse(cacheRoot, key);
+      } catch (error: unknown) {
+        if (!(error instanceof DependencyCacheIntegrityError)) throw error;
+        report({ event: "integrity-refusal", key: key.slice(0, 16), condition: error.condition });
+        throw error;
+      }
       return {
         result: { status: "installed", key } as DependencyCacheResult,
         usableKey: key,
         newlyPublishedKey: publication === "published" ? key : undefined,
+        successEvent: {
+          event: "publication", key: key.slice(0, 16), condition: publication,
+        } as DependencyCacheProgress,
       };
     });
-    await timed("retention", report, () => pruneCacheEntries(
+    await timed("retention", report, () => enforceDependencyCacheByteBudget(
       cacheRoot,
       locked.usableKey,
       locked.newlyPublishedKey,
       report,
     ));
+    report(locked.successEvent);
     return locked.result;
   } finally {
     report({ event: "elapsed", elapsedMs: Date.now() - started });
