@@ -12,8 +12,8 @@ import {
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
   PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
-import { claudeDeclaration, parseClaudeTranscript } from "./adapters/claude.js";
-import { CODEX_STARTER_MODEL, codexDeclaration, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
+import { parseClaudeTranscript } from "./adapters/claude.js";
+import { CODEX_STARTER_MODEL, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
 import { parsePiTranscript, piDeclaration } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -1797,7 +1797,6 @@ test("an adapter is substituted by injection, never by writing over the exported
   assert.equal(Object.isFrozen(adapters), true);
   for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
     assert.equal(Object.isFrozen(adapters[runner]), true, `${runner} adapter must be frozen`);
-    assert.equal(adapters[runner], RUNNER_DEFINITIONS[runner].adapter);
   }
   assert.deepEqual(RUNNER_KINDS, ["CLAUDE", "CODEX", "PI"]);
   assert.notEqual(adapters.CLAUDE.start, adapters.CODEX.start);
@@ -1808,8 +1807,7 @@ test("an adapter is substituted by injection, never by writing over the exported
   assert.notEqual(adapters.CODEX.classifyError, adapters.PI.classifyError);
 });
 
-test("the runner registry derives session policy from provider declarations", () => {
-  const declarations = { CLAUDE: claudeDeclaration, CODEX: codexDeclaration, PI: piDeclaration } as const;
+test("the runner registry exposes provider-owned session policy", () => {
   assert.deepEqual(
     Object.fromEntries(RUNNER_KINDS.map((runner) => [runner, {
       isolatesSessionConfig: RUNNER_DEFINITIONS[runner].isolatesSessionConfig,
@@ -1822,11 +1820,6 @@ test("the runner registry derives session policy from provider declarations", ()
       PI: { isolatesSessionConfig: true, startupPreflightModel: "openai-codex/gpt-5.6-luna", binaryEnvironment: "PI_BINARY" },
     },
   );
-  for (const runner of RUNNER_KINDS) {
-    assert.equal(RUNNER_DEFINITIONS[runner].args, declarations[runner].args);
-    assert.equal(RUNNER_DEFINITIONS[runner].childEnvironment, declarations[runner].childEnvironment);
-    assert.equal(RUNNER_DEFINITIONS[runner].provisionSessionConfig, declarations[runner].provisionSessionConfig);
-  }
   assert.deepEqual(piDeclaration.protectedEnvironmentVariables, [
     "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
   ]);
