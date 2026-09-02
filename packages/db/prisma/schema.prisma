@@ -657,6 +657,9 @@ model ChainControl {
   chainId          String
   state            ChainControlState   @default(HELD)
   heldLayer        Int?
+  /// Stored Task.chainLayer/chainIndex boundary. Null distinguishes a
+  /// before-first hold from a real stored layer zero.
+  heldExecutionLayer Int?
   heldAt           DateTime?
   holdRequestId    String?
   holdReason       String?

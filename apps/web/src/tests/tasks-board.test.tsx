@@ -10,12 +10,12 @@ import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavig
 import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, type BoardEntry, boardEntries, columnStep, countByStatus, parkedChains, taskBoardEntry } from "../lib/board";
+import { COLUMNS, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
-import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, TasksPage, activateAllNotice, archiveDoneNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
+import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, HoldAllDialog, TasksPage, activateAllNotice, archiveDoneNotice, holdAllNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
 import { type PageHarness, installDom, mountPage, reactDom } from "./dom-harness";
 
@@ -372,7 +372,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
     statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
     frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 }, activeRepair: null,
-    activation: { state: "settled" as const, predecessor: null, taskId }, totalCost: null,
+    activation: { state: "settled" as const, predecessor: null, taskId, hold: null }, totalCost: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   });
   const rows = [
@@ -892,6 +892,7 @@ const chainRow = (options: {
   state: ChainAggregateState;
   activationTaskId?: string | null;
   status?: TaskStatus;
+  hold?: ChainAggregate["activation"]["hold"];
 }): BoardTask => {
   const status = options.status ?? "TODO";
   const headId = `${options.chainId}-head`;
@@ -906,6 +907,7 @@ const chainRow = (options: {
       state: options.state,
       predecessor: options.state === "waiting-on-predecessor" ? { taskId: "release", taskName: "Release cut" } : null,
       taskId: options.activationTaskId === undefined ? headId : options.activationTaskId,
+      hold: options.hold ?? null,
     },
     totalCost: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   };
@@ -979,6 +981,196 @@ test("parkedChains projects exactly the chains an operator can start", () => {
   // An unnamed chain is still listed, under the short id the cards use.
   const unnamed = boardEntries([chainRow({ chainId: "c1234567890", name: null, stepCount: 1, state: "parked-unactivated" })]);
   assert.deepEqual(parkedChains(unnamed).map((chain) => chain.name), ["c1234567"]);
+});
+
+test("held Chains are excluded from Todo activation and Doing exposes only released chains", () => {
+  const parked = chainRow({ chainId: "parked", name: "Parked", stepCount: 2, state: "parked-unactivated" });
+  const held = task({
+    ...parked,
+    chainAggregate: {
+      ...parked.chainAggregate!,
+      activation: {
+        ...parked.chainAggregate!.activation,
+        hold: { heldLayer: 0, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null },
+      },
+    } as BoardTask["chainAggregate"],
+  });
+  assert.deepEqual(parkedChains(boardEntries([held])), []);
+
+  const running = chainRow({ chainId: "running", name: "Running", stepCount: 3, state: "running", status: "DOING" });
+  const runningEntry = boardEntries([running]);
+  assert.deepEqual(heldChains(runningEntry), [{ chainId: "running", name: "Running", stepCount: 3, taskId: "running-head" }]);
+  assert.deepEqual(heldChains(boardEntries([held, running])), [{ chainId: "running", name: "Running", stepCount: 3, taskId: "running-head" }]);
+});
+
+test("Doing offers Hold all only for chains without a persisted hold", async () => {
+  const { dom, container } = installDom();
+  const definition = COLUMNS.find((candidate) => candidate.status === "DOING");
+  assert.ok(definition);
+  const running = chainRow({ chainId: "running", name: "Running", stepCount: 3, state: "running", status: "DOING" });
+  const held = task({
+    id: "held-head", name: "Held: Implementation", displayName: "Implementation", status: "DOING",
+    chainId: "held", chainName: "Held", chainIndex: 0, chainProgress: progress({ chainId: "held" }),
+    chainAggregate: {
+      ...running.chainAggregate!, chainId: "held", chainName: "Held", detailTaskId: "held-head",
+      activation: { ...running.chainAggregate!.activation, taskId: "held-head", hold: { heldLayer: 1, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null } },
+    } as BoardTask["chainAggregate"],
+  });
+  const heldIds: string[][] = [];
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BoardColumn
+        column={definition} tasks={boardEntries([running, held])} loading={false} dragOver={null}
+        onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} onActivateAll={noop}
+        onHoldAll={(chains) => heldIds.push(chains.map((chain) => chain.chainId))} actions={ACTIONS}
+      />,
+    ));
+    const hold = [...container.querySelectorAll("button")].find((button) => button.textContent === en("tasks.holdAll"));
+    assert.ok(hold);
+    await act(async () => hold.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.deepEqual(heldIds, [["running"]]);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("Doing Hold all follows the visible page and is suppressed without a handler", async () => {
+  const definition = COLUMNS.find((candidate) => candidate.status === "DOING");
+  assert.ok(definition);
+  const rows = boardEntries([
+    ...Array.from({ length: CARD_PAGE_SIZE }, (_, index) => task({ id: `doing-${index}`, name: `Doing ${index}`, status: "DOING" })),
+    chainRow({ chainId: "page-two", name: "Page two", stepCount: 2, state: "running", status: "DOING" }),
+  ]);
+  const withoutHandler = renderToStaticMarkup(
+    <BoardColumn
+      column={definition} tasks={rows} loading={false} dragOver={null}
+      onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop}
+      onActivateAll={noop} actions={ACTIONS}
+    />,
+  );
+  assert.doesNotMatch(withoutHandler, new RegExp(en("tasks.holdAll")));
+
+  const { dom, container } = installDom();
+  const held: string[][] = [];
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BoardColumn
+        column={definition} tasks={rows} loading={false} dragOver={null}
+        onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop}
+        onActivateAll={noop} onHoldAll={(chains) => held.push(chains.map((chain) => chain.chainId))} actions={ACTIONS}
+      />,
+    ));
+    assert.doesNotMatch(container.textContent ?? "", new RegExp(en("tasks.holdAll")));
+    const more = [...container.querySelectorAll("button")].find((button) => button.textContent === en("tasks.column.more", { n: 1 }));
+    assert.ok(more);
+    await act(async () => more.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    const hold = [...container.querySelectorAll("button")].find((button) => button.textContent === en("tasks.holdAll"));
+    assert.ok(hold);
+    await act(async () => hold.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.deepEqual(held, [["page-two"]]);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("Hold all confirmation explains layer-granular stopping and reports refusals", async () => {
+  const { dom, container } = installDom();
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(
+      <HoldAllDialog
+        chains={[{ chainId: "running", name: "Running", stepCount: 3, taskId: "running-head" }]}
+        refusals={[{ name: "Stale", reason: "409 Chain is already held" }]}
+        pending={false} settled={false} onClose={noop} onConfirm={noop}
+      />,
+    ));
+    const text = dom.window.document.body.textContent ?? "";
+    assert.match(text, /finish its current step before stopping/u);
+    assert.match(text, /No running Run will be cancelled/u);
+    assert.match(text, /Stale: 409 Chain is already held/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+  assert.equal(holdAllNotice(5, 2), "Held 3 of 5 chains");
+});
+
+test("aggregate Hold and Resume post fresh chain-control request ids", async () => {
+  storage.set("agentos.projectId", "p1");
+  const rows = [
+    chainRow({ chainId: "running", name: "Running", stepCount: 2, state: "running", status: "DOING" }),
+    chainRow({
+      chainId: "held", name: "Held", stepCount: 2, state: "held", status: "TODO",
+      hold: { heldLayer: 0, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null },
+    }),
+  ];
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "POST /tasks/running-head/chain/hold": { control: { state: "held" } },
+    "POST /tasks/held-head/chain/resume": { control: { state: "released" } },
+    "*": [],
+  });
+  try {
+    await page.press(en("tasks.aggregate.stopAfter"));
+    await page.press(en("tasks.aggregate.resume"));
+    const controlRequests = page.requests.filter(({ method, path }) => method === "POST" && /chain\/(?:hold|resume)$/u.test(path));
+    assert.deepEqual(controlRequests.map(({ path }) => path), [
+      "/tasks/running-head/chain/hold",
+      "/tasks/held-head/chain/resume",
+    ]);
+    const payloads = controlRequests.map(({ init }) => JSON.parse(String(init.body)) as { requestId?: string });
+    assert.ok(payloads.every(({ requestId }) => typeof requestId === "string" && requestId.length > 0));
+    assert.notEqual(payloads[0]!.requestId, payloads[1]!.requestId);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("Doing Hold all posts each visible unheld Chain and reports named refusals", async () => {
+  storage.set("agentos.projectId", "p1");
+  const rows = [
+    chainRow({ chainId: "alpha", name: "Alpha", stepCount: 2, state: "running", status: "DOING" }),
+    chainRow({ chainId: "beta", name: "Beta", stepCount: 3, state: "running", status: "DOING" }),
+    chainRow({
+      chainId: "already-held", name: "Already held", stepCount: 1, state: "running", status: "DOING",
+      hold: { heldLayer: 1, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null },
+    }),
+  ];
+  const page = await mountPage(<ProjectProvider><TasksPage /></ProjectProvider>, {
+    "GET /projects": [{ id: "p1", name: "Project One" }],
+    "GET /tasks": rows,
+    "POST /tasks/alpha-head/chain/hold": { control: { state: "held" } },
+    "POST /tasks/beta-head/chain/hold": Response.json({ error: "Chain changed while holding" }, { status: 409 }),
+    "*": [],
+  });
+  try {
+    await page.press(en("tasks.holdAll"));
+    const confirm = [...page.dom.window.document.querySelectorAll("button")]
+      .find((button) => button.textContent?.trim() === en("tasks.holdAll.confirm"));
+    assert.ok(confirm);
+    await act(async () => confirm.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
+    await page.settle();
+    const posts = page.requests.filter(({ method, path }) => method === "POST" && path.endsWith("/chain/hold"));
+    assert.deepEqual(posts.map(({ path }) => path).sort(), [
+      "/tasks/alpha-head/chain/hold",
+      "/tasks/beta-head/chain/hold",
+    ]);
+    assert.ok(posts.every(({ init }) => typeof (JSON.parse(String(init.body)) as { requestId?: string }).requestId === "string"));
+    assert.equal(page.requests.some(({ path }) => path.includes("/cancel")), false);
+    assert.ok(page.requests.filter(({ method, path }) => method === "GET" && path.startsWith("/tasks")).length >= 2, "the page reloads after the wave");
+    const body = page.dom.window.document.body.textContent ?? "";
+    assert.match(body, /Beta: 409 Chain changed while holding/u);
+    assert.match(body, new RegExp(holdAllNotice(2, 1)));
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
 });
 
 test("the Todo head starts the whole wave from one dialog and names the chain that refused", async () => {

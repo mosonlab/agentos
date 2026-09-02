@@ -1157,6 +1157,24 @@ creation), `approvalGate`, `opensPullRequest`,
 The `board` view is a compact card projection. It includes `createdAt` for
 stable queue ordering and `assigneeType` so a human-owned task can be
 distinguished from an agent task whose agent assignment is missing.
+For a Chain member, the first emitted member also carries the
+`chainAggregate` projection. Its `activation.state` is one of
+`parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
+`settled`; `held` is a derived aggregate state, not a persisted Task status.
+The aggregate's `activation.hold` is either `null` or
+`{heldLayer, heldAt, holdReason}`, where `heldLayer` is the dense one-based
+ordinal of the highest execution layer admitted when the Chain was held (or
+`0` before the first layer), `heldAt` is an ISO timestamp, and
+`holdReason` is the optional operator reason. It is non-null whenever the
+Chain's persisted `ChainControl.state` is `HELD`.
+
+An active member keeps `activation.state` as `running` even when
+`activation.hold` is non-null: the hold lets the current Run finish and starts
+nothing after that layer. Once no member is active, a held Chain reports
+`activation.state: "held"`; its `activation.taskId` is the first primary
+member, which is the task to address with `chain/resume`. The aggregate's
+derived `status` continues to determine its board column, so a held Chain whose
+held layer has finished appears in Todo.
 
 ```sh
 curl "$BASE_URL/tasks?projectId=$PROJECT_ID&view=full&archived=false" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1247,8 +1265,21 @@ curl -X DELETE "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERA
 - Required JSON field: `requestId`.
 - Optional JSON field: `reason` (the operator's explanation for holding the
   Chain).
+- The hold barrier is layer-granular and never cancels an active Run. The
+  API records `heldLayer` as the dense one-based ordinal of the highest
+  execution layer already admitted:
+  any member whose status is not `TODO`, or any member with at least one Run,
+  admits its layer. If no layer has been admitted, `heldLayer` is `0`; the
+  `ChainControlEvent.layer` for the Hold is also `0`. A zero-layer hold
+  refuses every layer, and a later start/claim refusal says
+  `Chain is held before its first layer`.
 - A repeated Hold while the Chain is already held is a successful idempotent
   no-op: it reports the existing hold and makes no transition or audit event.
+- When a predecessor completes, a bound successor that is held before that
+  activation is not queued. The successor task remains `TODO` without a Run
+  and receives a `TaskActivity` whose metadata has
+  `kind: "chainControl.activationWithheld"`; resuming that successor Chain
+  owns the later activation.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`
   when the Task belongs to no Chain or every Task in the Chain is already
   `DONE` (there is nothing left to hold).
@@ -1266,6 +1297,17 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/hold" \
 - Resume releases a held Chain and activates the currently eligible layer at
   most once. It never revives a cancelled Run or reuses its provider
   conversation.
+- When the released hold has `heldLayer: 0`, Resume activates the Chain's
+  actual first execution layer (including every member of a parallel layer)
+  when that layer has no Run and its tasks are unbound (`dispatchAfterTaskId`
+  is absent) or their bound predecessors are `DONE`. This supports sparse,
+  zero-based, and one-based stored layers, uses the same repository, agent,
+  and startability admission as `POST /tasks/:taskId/start`, and returns the
+  first activated task's id in `nextTaskId`. If a bound predecessor is not
+  `DONE`, Resume still releases the control but activates nothing
+  (`nextTaskId: null`); completion of that predecessor later queues the
+  successor through the normal unheld path. For `heldLayer >= 1`, the existing
+  resume activation-anchor behavior is unchanged.
 - Resume on a Chain that is not held is a successful idempotent no-op: it
   makes no transition, audit event, or activation.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`

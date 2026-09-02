@@ -196,6 +196,30 @@ test("completion under a held Chain persists output and withholds successor acti
   assert.ok(activity, "completion records why the successor was withheld");
 });
 
+test("Hold at admitted layer two lets it finish and withholds layer three", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.DOING, TaskStatus.TODO],
+    control: null,
+  });
+  const running = await seedRun(db, chain, chain.second.id);
+  const held = await operatorRequest(db, `/tasks/${chain.second.id}/chain/hold`, { requestId: "hold-layer-two" });
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal(held.body.control.heldLayer, 2);
+  assert.equal((await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
+    projectId: chain.project.id,
+    chainId: chain.chainId,
+  } } })).heldExecutionLayer, 2);
+
+  const completed = await runnerCompletionRequest(db, running.run, "layer two complete");
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.second.id,
+    metadata: { path: ["kind"], equals: "chainControl.activationWithheld" },
+  } }), 1);
+});
+
 test("completion under a held Chain records fail-closed activity for a successor with no execution layer", async () => {
   const chain = await seedRunningHeldChain();
   await db.$executeRawUnsafe('ALTER TABLE "Task" DROP CONSTRAINT "Task_chain_identity_all_or_none_check"');
@@ -457,4 +481,39 @@ test("bound successor dispatch remains active while the predecessor Chain is hel
   assert.equal(await db.run.count({ where: { taskId: boundSuccessor.id } }), 0);
   assert.equal(await db.taskActivity.count({ where: { taskId: boundSuccessor.id, body: { contains: "no longer terminal" } } }), 1);
   assert.equal(await db.run.count({ where: { taskId: predecessorChain.first.id, status: RunStatus.CANCELLED } }), 0);
+});
+
+test("a held bound Chain withholds predecessor dispatch and Resume activates its first layer", async () => {
+  const predecessorChain = await seedBasicChain(db, { statuses: [TaskStatus.DOING], control: null });
+  const successorChainId = `held-bound-successor-${predecessorChain.chainId}`;
+  const successor = await db.task.create({ data: {
+    projectId: predecessorChain.project.id,
+    repoId: predecessorChain.repo.id,
+    assigneeAgentId: predecessorChain.agent.id,
+    name: "Held bound successor",
+    description: "held bound successor",
+    chainId: successorChainId,
+    chainIndex: 0,
+    chainLayer: 0,
+    status: TaskStatus.TODO,
+    dispatchAfterTaskId: predecessorChain.first.id,
+  } });
+  const held = await operatorRequest(db, `/tasks/${successor.id}/chain/hold`, { requestId: "hold-bound-before-first" });
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal(held.body.control.heldLayer, 0);
+
+  const running = await seedRun(db, predecessorChain, predecessorChain.first.id);
+  const completed = await runnerCompletionRequest(db, running.run, "bound predecessor complete");
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: successor.id,
+    metadata: { path: ["kind"], equals: "chainControl.activationWithheld" },
+  } }), 1);
+
+  const resumed = await operatorRequest(db, `/tasks/${successor.id}/chain/resume`, { requestId: "resume-bound-first" });
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.nextTaskId, successor.id);
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: RunStatus.QUEUED } }), 1);
 });

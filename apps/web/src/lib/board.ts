@@ -151,6 +151,14 @@ export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskSt
  *  request is sent to. */
 export type ParkedChain = { chainId: string; name: string; stepCount: number; taskId: string };
 
+/** A chain action target carries the first task address used by the chain
+ * control routes. It intentionally has the same shape as `ParkedChain`: the
+ * board can keep one small, named projection for both column-head waves. */
+export type HoldableChain = ParkedChain;
+
+const chainHold = (aggregate: ChainAggregate): ChainAggregate["activation"]["hold"] =>
+  aggregate.activation.hold;
+
 /**
  * The chains a column would activate, in the order they are read.
  *
@@ -163,8 +171,24 @@ export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): Park
   normalizeBoardEntries(entries).flatMap((entry) => {
     if (entry.kind !== "chain") return [];
     const { activation, chainId, chainName, stepCount } = entry.aggregate;
-    if (activation.state !== "parked-unactivated" || activation.taskId === null) return [];
+    if (activation.state !== "parked-unactivated" || activation.taskId === null || chainHold(entry.aggregate) !== null) return [];
     return [{ chainId, name: chainBindingLabel({ id: chainId, name: chainName }), stepCount, taskId: activation.taskId }];
+  });
+
+/** The chains a Doing column can hold in one operator wave. A persisted hold is
+ * the source of truth, so a stale card already marked held never gets sent a
+ * second request by the column head. */
+export const heldChains = (entries: readonly (BoardEntry | BoardTask)[]): HoldableChain[] =>
+  normalizeBoardEntries(entries).flatMap((entry) => {
+    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null) return [];
+    const { activation, chainId, chainName, stepCount } = entry.aggregate;
+    if (activation.taskId === null) return [];
+    return [{
+      chainId,
+      name: chainBindingLabel({ id: chainId, name: chainName }),
+      stepCount,
+      taskId: activation.taskId,
+    }];
   });
 
 /* ------------------------------------------------------------- the schedule */

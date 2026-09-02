@@ -79,10 +79,6 @@ export type ChainLayerGroup = {
   blockers: ChainStep[];
 };
 
-const executionLayer = (step: Pick<ChainStep, "layer" | "chainIndex">): number | null => (
-  layerOf({ layer: step.layer, index: step.chainIndex })
-);
-
 const chainStepOrder = (left: ChainStep, right: ChainStep): number => compare(
   { layer: left.layer, index: left.chainIndex, id: left.taskId },
   { layer: right.layer, index: right.chainIndex, id: right.taskId },
@@ -99,7 +95,8 @@ export const chainHeldLayer = (chain: Pick<Chain, "control">): number | null => 
 export const heldChainWaitingOnOperator = (chain: Chain): boolean => {
   const heldLayer = chainHeldLayer(chain);
   if (heldLayer === null) return false;
-  const heldSteps = chain.steps.filter((step) => executionLayer(step) === heldLayer);
+  if (heldLayer === 0) return chain.steps.every((step) => !step.currentExecution);
+  const heldSteps = chainLayerGroups(chain.steps).find((group) => group.ordinal === heldLayer)?.steps ?? [];
   return heldSteps.length > 0
     && heldSteps.every((step) => step.status === "DONE" && !step.currentExecution)
     && chain.steps.every((step) => !step.currentExecution);
@@ -178,7 +175,9 @@ export const ChainRow = ({
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
         {held ? (
           <span data-chain-held-hint="" className={cn(HINT, "mt-[3px] block")}>
-            {t("chain.startHeldHint", { n: heldLayer ?? "?" })}
+            {heldLayer === 0
+              ? t("chain.startHeldBeforeFirstHint")
+              : t("chain.startHeldHint", { n: heldLayer ?? "?" })}
           </span>
         ) : null}
         {blockedOn ? (
@@ -245,7 +244,9 @@ export const ChainList = ({
   const headerControl = (
     <div className={ROW_WRAP}>
       {held && heldLayer !== null ? (
-        <span data-chain-held-badge=""><Pill tone="amber">{t("chain.heldAfter", { n: heldLayer })}</Pill></span>
+        <span data-chain-held-badge=""><Pill tone="amber">
+          {heldLayer === 0 ? t("chain.heldBeforeFirst") : t("chain.heldAfter", { n: heldLayer })}
+        </Pill></span>
       ) : null}
       {held && chain.control?.holdReason ? (
         <span data-chain-hold-reason="" className={HINT}>{t("chain.holdReason", { reason: chain.control.holdReason })}</span>

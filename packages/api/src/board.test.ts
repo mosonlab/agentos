@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
+import { ChainControlState, markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
 
 import {
+  type BoardChainControl,
   type BoardChainMember,
   type BoardRow,
   boardCard,
@@ -78,6 +79,7 @@ const boardReadDatabase = ({
   chainRows = [],
   related = [],
   activities = [],
+  controls = [],
 }: {
   rows: BoardRow[];
   chainRows?: Array<Record<string, unknown>>;
@@ -89,8 +91,10 @@ const boardReadDatabase = ({
     chainId?: string | null;
   }>;
   activities?: Array<{ taskId: string; metadata: Record<string, unknown> }>;
-}): { db: PrismaClient; predecessorLookups: string[][] } => {
+  controls?: Array<BoardChainControl & { projectId: string; chainId: string }>;
+}): { db: PrismaClient; predecessorLookups: string[][]; controlLookups: string[][] } => {
   const predecessorLookups: string[][] = [];
+  const controlLookups: string[][] = [];
   const db = {
     task: {
       findMany: async (args: { where?: Record<string, unknown> }) => {
@@ -105,8 +109,15 @@ const boardReadDatabase = ({
       },
     },
     taskActivity: { findMany: async () => activities },
+    chainControl: {
+      findMany: async (args: { where?: { OR?: Array<{ projectId: string; chainId: string }> } }) => {
+        const keys = args.where?.OR ?? [];
+        controlLookups.push(keys.map((key) => `${key.projectId}:${key.chainId}`));
+        return controls;
+      },
+    },
   } as unknown as PrismaClient;
-  return { db, predecessorLookups };
+  return { db, predecessorLookups, controlLookups };
 };
 
 /* ------------------------------------------------------------ the read model */
@@ -146,6 +157,38 @@ test("readBoard resolves every bound row in one deduplicated predecessor lookup"
     taskId: predecessorTwo.id, taskName: predecessorTwo.name,
   });
   assert.equal(cards.find((card) => card.id === "unbound")?.blockedOn, null);
+});
+
+test("readBoard loads ChainControl rows once and projects a held aggregate", async () => {
+  const heldAt = new Date("2026-08-16T02:00:00.000Z");
+  const { db, controlLookups } = boardReadDatabase({
+    rows: [
+      row({ id: "held-first", chainId: "held-chain", chainIndex: 0, chainLayer: 0 }),
+      row({ id: "held-second", chainId: "held-chain", chainIndex: 1, chainLayer: 1 }),
+    ],
+    controls: [{
+      projectId: "p1",
+      chainId: "held-chain",
+      state: ChainControlState.HELD,
+      held: true,
+      heldLayer: 0,
+      heldAt,
+      holdReason: "operator review",
+    }],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  const aggregate = cards[0]?.chainAggregate;
+
+  assert.deepEqual(controlLookups, [["p1:held-chain"]]);
+  assert.equal(aggregate?.activation.state, "held");
+  assert.deepEqual(aggregate?.activation.hold, {
+    heldLayer: 0,
+    heldAt,
+    holdReason: "operator review",
+  });
+  assert.equal(aggregate?.activation.taskId, "held-first");
+  assert.equal(aggregate?.status, "TODO");
 });
 
 /* ------------------------------------------------------------ the projection */
@@ -285,7 +328,9 @@ test("chainAggregate derives primary progress and every board column from the fr
   assert.deepEqual(allTodo.frontier, {
     taskId: "step-1", title: "Build", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 1,
   });
-  assert.deepEqual(allTodo.activation, { state: "parked-unactivated", predecessor: null, taskId: "step-1" });
+  assert.deepEqual(allTodo.activation, {
+    state: "parked-unactivated", predecessor: null, taskId: "step-1", hold: null,
+  });
 
   const doing = chainAggregate("c1", "Release", [
     member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
@@ -374,6 +419,7 @@ test("chainAggregate reports a predecessor-bound chain and never offers parked a
     state: "waiting-on-predecessor",
     predecessor: { taskId: predecessor.id, taskName: predecessor.name },
     taskId: "step-1",
+    hold: null,
   });
 });
 
@@ -388,6 +434,41 @@ test("chainAggregate offers activation after a bound predecessor has settled", (
     state: "parked-unactivated",
     predecessor: null,
     taskId: "step-1",
+    hold: null,
+  });
+});
+
+test("chainAggregate projects a held chain without changing active-run or column semantics", () => {
+  const heldAt = new Date("2026-08-16T02:00:00.000Z");
+  const hold = {
+    state: ChainControlState.HELD,
+    held: true,
+    heldLayer: 1,
+    heldAt,
+    holdReason: "wait for operator review",
+  } satisfies BoardChainControl;
+  const held = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0 }),
+    member({ id: "step-2", status: "TODO", chainIndex: 1, chainLayer: 1 }),
+  ], [], new Map(), hold);
+
+  assert.equal(held.status, "TODO");
+  assert.equal(held.activation.state, "held");
+  assert.deepEqual(held.activation.hold, {
+    heldLayer: 1,
+    heldAt,
+    holdReason: "wait for operator review",
+  });
+
+  const running = chainAggregate("c1", "Release", [
+    member({ id: "step-1", status: "DOING", chainIndex: 0, chainLayer: 0 }),
+  ], [], new Map(), { ...hold, heldLayer: 0 });
+  assert.equal(running.status, "DOING");
+  assert.equal(running.activation.state, "running");
+  assert.deepEqual(running.activation.hold, {
+    heldLayer: 0,
+    heldAt,
+    holdReason: "wait for operator review",
   });
 });
 

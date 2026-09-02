@@ -59,6 +59,7 @@ export const boardDatabase = (
     },
     agentRepoAccess: { findMany: async () => [] },
     taskActivity: { findMany: async () => extras.activity ?? [] },
+    chainControl: { findMany: async () => [] },
   } as unknown as PrismaClient;
 };
 
