@@ -664,6 +664,8 @@ test("a failing workspace stage keeps nested assertion evidence ahead of passing
       ...workspaceBlocks,
       "printf '%s\\n' '--- sibling parallel stage ---'",
       "printf '%s\\n' 'sibling-stage-only-output'",
+      "printf '%s\\n' '   FAIL  unit tests (all workspaces)                 1s'",
+      "printf '%s\\n' '   ok    sibling parallel stage                      1s'",
       "printf '%s\\n' 'MERGE GATE: FAIL (unit tests (all workspaces))'",
       "exit 1",
     ].join("\n"),
@@ -682,6 +684,94 @@ test("a failing workspace stage keeps nested assertion evidence ahead of passing
   assert.match(excerpt, /AssertionError: first workspace assertion/u);
   assert.doesNotMatch(excerpt, /sibling-stage-only-output/u);
   assert.doesNotMatch(excerpt, /workspace-1 passing 000/u);
+});
+
+test("a saturated stage admits late failure evidence before it trims", (t) => {
+  const contextNoise = Array.from(
+    { length: 240 },
+    (_, index) => `printf '%s\\n' '# Subtest: packages/noise/src/context-${String(index).padStart(3, "0")}.test.ts'`,
+  );
+  const trailingOutput = Array.from(
+    { length: 240 },
+    (_, index) => `printf '%s\\n' 'ok ${index + 1} - trailing passing output ${String(index).padStart(3, "0")}'`,
+  );
+  const fixture = gateHome(t, {
+    verdict: [
+      "printf '%s\\n' '--- unit tests (all workspaces) ---'",
+      ...contextNoise,
+      "printf '%s\\n' '# Subtest: packages/runner/src/late-failure.test.ts'",
+      "printf '%s\\n' 'not ok 99 - LATE FAILURE'",
+      "printf '%s\\n' 'AssertionError: LATE FAILURE MESSAGE'",
+      ...trailingOutput,
+      "printf '%s\\n' '   FAIL  unit tests (all workspaces)                 1s'",
+      "printf '%s\\n' 'MERGE GATE: FAIL (unit tests (all workspaces))'",
+      "exit 1",
+    ].join("\n"),
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /# Subtest: packages\/runner\/src\/late-failure\.test\.ts/u);
+  assert.match(result.stdout, /not ok 99 - LATE FAILURE/u);
+  assert.match(result.stdout, /AssertionError: LATE FAILURE MESSAGE/u);
+});
+
+test("failure evidence wins each stage byte budget", (t) => {
+  const stages = [
+    "database tests (db + api)",
+    "lint (biome + type-aware no-floating-promises)",
+    "unit tests (all workspaces)",
+  ];
+  const stageOutput = stages.flatMap((stage, stageIndex) => [
+    `printf '%s\\n' '--- ${stage} ---'`,
+    `printf '%s\\n' '# Subtest: packages/runner/src/budget-${stageIndex}.test.ts'`,
+    `printf '%s\\n' 'not ok 1 - BUDGET ASSERTION ${stageIndex}'`,
+    `printf '%s\\n' 'AssertionError: BUDGET ASSERTION ${stageIndex}'`,
+    ...Array.from(
+      { length: 120 },
+      (_, line) =>
+        `printf '%s\\n' 'ok ${line + 1} - stage ${stageIndex} trailing ${String(line).padStart(3, "0")} ${"x".repeat(280)}'`,
+    ),
+  ]);
+  const fixture = gateHome(t, {
+    verdict: [
+      ...stageOutput,
+      ...stages.map((stage) => `printf '%s\\n' '   FAIL  ${stage}                 1s'`),
+      `printf '%s\\n' 'MERGE GATE: FAIL (${stages.join(", ")})'`,
+      "exit 1",
+    ].join("\n"),
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  for (let index = 0; index < stages.length; index += 1) {
+    assert.match(result.stdout, new RegExp(`AssertionError: BUDGET ASSERTION ${index}`, "u"));
+    assert.match(result.stdout, new RegExp(`budget-${index}\\.test\\.ts`, "u"));
+  }
+  assert.ok(Buffer.byteLength(result.stdout, "utf8") <= 66_000, "forwarded stdout exceeded its bounded envelope");
+});
+
+test("nested lint headings remain inside their enclosing failing stage", (t) => {
+  const fixture = gateHome(t, {
+    verdict: [
+      "printf '%s\\n' '--- lint (biome + type-aware no-floating-promises) ---'",
+      "printf '%s\\n' '--- biome ---'",
+      "printf '%s\\n' 'packages/runner/src/lint-failure.test.ts'",
+      "printf '%s\\n' '✖ LINT FAILURE'",
+      "printf '%s\\n' 'Error: LINT FAILURE'",
+      "printf '%s\\n' '--- unit tests (all workspaces) ---'",
+      "printf '%s\\n' '# Subtest: packages/runner/src/unit-failure.test.ts'",
+      "printf '%s\\n' 'not ok 1 - UNIT FAILURE'",
+      "printf '%s\\n' 'AssertionError: UNIT FAILURE'",
+      "printf '%s\\n' '   FAIL  lint (biome + type-aware no-floating-promises)                 1s'",
+      "printf '%s\\n' '   FAIL  unit tests (all workspaces)                 1s'",
+      "printf '%s\\n' 'MERGE GATE: FAIL (lint (biome + type-aware no-floating-promises), unit tests (all workspaces))'",
+      "exit 1",
+    ].join("\n"),
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /packages\/runner\/src\/lint-failure\.test\.ts/u);
+  assert.match(result.stdout, /✖ LINT FAILURE/u);
+  assert.match(result.stdout, /AssertionError: UNIT FAILURE/u);
 });
 
 test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {

@@ -55,7 +55,7 @@ const targetBundleDigests = new Map([
   ["gate-worker/lib.sh", "65bd4791208879523c75bf8f1e29ea539dbd1f54b482e851cf466720e7650bf2"],
   ["gate-worker/mirror-push.sh", "8974c7bd2a82c35df8f8b6bde243ac45de1d779063c172a8e24c3a1413fbb07b"],
   ["gate-worker/remote-gate.sh", "ecfba015e3dac6c62ff8039aa97d6831772800d568ed1be8e3489c4243470695"],
-  ["gate-worker/run-gate.sh", "603a4349602de1f26be71eca82507bc7c0f82389710657184237a3d972b986cb"],
+  ["gate-worker/run-gate.sh", "dfce1e0df4cd530a0a14de8f3e8bd4e78c7beaf351ddb9c8c114171c76f33e05"],
   ["regression-verification.sh", "53dacc7438dbb9da350904c4d9955ebea1c111cf8b1400597510e867aef3134a"],
 ]);
 

@@ -376,7 +376,10 @@ test("gate FAIL persists assertions from a forwarded nested-workspace excerpt", 
     "# Subtest: packages/workspace-one/src/nested-failure.test.ts",
     "    not ok 1 - nested workspace assertion",
     "      AssertionError: nested workspace assertion",
-    "      at packages/workspace-one/src/nested-failure.test.ts:17:3",
+    ...Array.from(
+      { length: 197 },
+      (_, index) => `ok ${index + 1} - trailing workspace passing output ${String(index).padStart(3, "0")}`,
+    ),
   ].join("\n");
   seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (unit tests (all workspaces))";
   seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
