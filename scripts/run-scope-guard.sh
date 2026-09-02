@@ -8,7 +8,12 @@ if [[ -z "${AGENTOS_RUN_ID:-}" ]]; then
 fi
 
 if [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
-  exit 0
+  # shellcheck source=scripts/run-scope-bypass.sh
+  . "${BASH_SOURCE[0]%/*}/run-scope-bypass.sh"
+  if agentos_regression_bypass_is_authenticated; then
+    exit 0
+  fi
+  agentos_regression_bypass_audit_refusal
 fi
 
 script="${1:-unknown}"

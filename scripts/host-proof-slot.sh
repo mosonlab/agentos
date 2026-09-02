@@ -13,8 +13,17 @@ host_proof_slot_exec_child() {
   exec "$@"
 }
 
-if [[ -z "${AGENTOS_RUN_ID:-}" || "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
+if [[ -z "${AGENTOS_RUN_ID:-}" ]]; then
   host_proof_slot_exec_child "$@"
+fi
+
+if [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
+  # shellcheck source=scripts/run-scope-bypass.sh
+  . "${BASH_SOURCE[0]%/*}/run-scope-bypass.sh"
+  if agentos_regression_bypass_is_authenticated; then
+    host_proof_slot_exec_child "$@"
+  fi
+  agentos_regression_bypass_audit_refusal
 fi
 
 # These two functions are intentionally small source seams.  Bash's SECONDS is
@@ -92,8 +101,8 @@ host_proof_slot_main() {
   local slot_count_raw="${AGENTOS_HOST_PROOF_SLOTS:-}"
 
   # Validate the invocation before any filesystem or tool work.  This path is
-  # only reached for an ordinary Run; host and exact Regression-bypass calls
-  # have already exec'd their child above.
+  # only reached when host or authenticated Regression fast paths did not exec
+  # their child above.
   if (( $# < 4 )) || [[ "$3" != "--" || -z "$script_name" || -z "$workspace_name" || -z "${4:-}" ]]; then
     host_proof_slot_invalid "expected <script> <workspace> -- <command> [args...]"
     return $?
