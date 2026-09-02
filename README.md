@@ -11,7 +11,7 @@ already signed in to.
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey)](#status)
+[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon%20verified-lightgrey)](#status)
 [![node](https://img.shields.io/badge/node-22.17.0-brightgreen)](.nvmrc)
 
 [Install](#quick-start) · [How it works](#how-it-works) · [Status](#status) · [简体中文](README.zh-CN.md)
@@ -124,7 +124,7 @@ board column semantics in the
 
 ## Quick start
 
-You need:
+The verified release path needs:
 
 - an Apple Silicon Mac
 - Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`; use `22.17.0` from
@@ -132,6 +132,9 @@ You need:
 - Docker Compose and Git
 - the official Codex CLI signed in under the same macOS account
   (Claude Code and Pi optional)
+
+Linux and macOS on Intel are expected to work but are not yet
+release-verified. This quick start documents the verified Apple Silicon path.
 
 ```sh
 git clone https://github.com/mosonlab/anneal.git
@@ -153,7 +156,8 @@ The full sequence with its preflights is in
 
 Developer Preview 6 (v0.6.0): interfaces and stored data shapes may
 change between previews, and the only upgrade path is a fresh install.
-macOS on Apple Silicon only.
+The verified target is macOS on Apple Silicon. Linux and macOS on Intel
+are expected to work but are not yet release-verified; Windows is unsupported.
 
 For the pull-request workflow, follow [Add a project](docs/runbooks/add-a-project.md).
 

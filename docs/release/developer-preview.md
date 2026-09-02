@@ -7,9 +7,11 @@
 > constraints, repository/CLI preflights, and foreground-service lifecycle. The
 > release tag remains immutable; use this corrected page when installing it.
 
-> **One platform, one shape of install.** This page is the supported sequence for
-> macOS on Apple Silicon, run by the machine's own operator, on loopback, against
-> repositories you are willing to have an agent write to.
+> **One verified path, one shape of install.** This page is the supported
+> sequence for macOS on Apple Silicon, run by the machine's own operator, on
+> loopback, against repositories you are willing to have an agent write to.
+> Linux and macOS on Intel are expected to work but are not yet release-verified;
+> Windows is unsupported.
 > [`support-matrix.md`](support-matrix.md) states what is supported
 > and on what evidence; anything not in it is not supported.
 
@@ -28,7 +30,7 @@ fresh install.
 
 | Requirement | Exact expectation |
 | --- | --- |
-| Machine | An Apple Silicon Mac running macOS. Keep the checkout, `~/.agentos/control-plane`, and runner workspaces on a local APFS or HFS+ volume. NFS, SMB/CIFS, FUSE, unknown filesystem types, and symlinked control-state path components are refused. Linux is unverified; Windows is unsupported. |
+| Machine | The verified path uses an Apple Silicon Mac running macOS. Keep the checkout, `~/.agentos/control-plane`, and runner workspaces on a local APFS or HFS+ volume. NFS, SMB/CIFS, FUSE, unknown filesystem types, and symlinked control-state path components are refused. Linux and macOS on Intel are expected to work but are not yet release-verified; Windows is unsupported. |
 | Node.js | Use `22.17.0`, recorded in `.nvmrc`. Installation is enforced at `^20.19.0 \|\| ^22.13.0 \|\| >=24`, the range shared by the locked toolchain; Node 22.12.x and 23 are refused. |
 | npm | 10.9.2 or newer, the npm generation floor recorded for this release. Use it with Node.js 22.17.0. |
 | Docker | Docker Desktop must be running, with Docker Compose available. The supported local shape needs loopback ports `5432`, `3000`, and `5173` free. |

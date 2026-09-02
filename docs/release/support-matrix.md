@@ -26,8 +26,8 @@ has never walked.
 | Platform | Status | Evidence boundary |
 | --- | --- | --- |
 | macOS on Apple Silicon | **Target platform** | The only platform this release targets. The install shape is in [`developer-preview.md`](developer-preview.md). |
-| macOS on Intel | **Unverified** | Nothing here is architecture-specific by design, and nothing has been run there. |
-| Linux | **Unverified** | Do not infer support from the fact that this is a Node.js codebase. |
+| macOS on Intel | **Unverified** | The portable design and locked `darwin-x64` dependencies make this path expected to work, but nothing has been run there. |
+| Linux | **Unverified** | The POSIX design, explicit Linux command branches and locked Linux dependencies make this path expected to work, but no release install or Run has been exercised there. |
 | Windows | **Unsupported** | The runner relies on POSIX process-group, path and command behaviour. This is a design position, not a gap waiting to be filled. |
 
 ## Runtime prerequisites
