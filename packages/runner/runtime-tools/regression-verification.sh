@@ -53,23 +53,50 @@ head_sha() {
   printf '%s' "$head"
 }
 
+FETCH_ATTEMPTS=6
+
+# The transient half of network-retry.ts, in the vocabulary git writes. Only a
+# match is retried: an absent branch, a bad credential, or an unreadable remote
+# is the remote's answer, and spending the backoff budget on it would delay a
+# failure the operator still has to read.
+FETCH_TRANSIENT_RE='SSL_ERROR_SYSCALL|SSL_connect|unexpected EOF|early EOF|RPC failed|Connection (reset|refused|timed out)|Operation timed out|Failed to connect|Could not resolve host|Recv failure|ECONNRESET|ETIMEDOUT|EAI_AGAIN|HTTP( response)? 5[0-9][0-9]'
+
+# Exponential backoff with full jitter, capped per attempt, matching the clone
+# profile in network-retry.ts. This host reaches GitHub through a proxy whose
+# 443 exit drops for seconds at a time; on 2026-09-02 the previous budget
+# (3 attempts, 1s apart) was exhausted inside one such drop twice in a row and
+# burned both Runs of a regression step before any verification began. Waiting
+# up to 1s,2s,4s,8s,8s (~23s worst case) rides out a second-scale drop while
+# staying far inside the step's stall timeout.
+fetch_backoff() {
+  local ceiling=$(( 1 << (($1 < 4 ? $1 : 4) - 1) ))
+  sleep "$(awk -v ceiling="$ceiling" 'BEGIN { srand(); printf "%.2f", rand() * ceiling }')"
+}
+
 fetch_base() {
-  local attempt
-  for attempt in 1 2 3; do
-    if GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$AGENTOS_PULL_REQUEST_BASE" \
-      >/dev/null 2>&1; then
+  local attempt error status
+  for attempt in $(seq 1 "$FETCH_ATTEMPTS"); do
+    status=0
+    error="$(GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$AGENTOS_PULL_REQUEST_BASE" \
+      2>&1 >/dev/null)" || status=$?
+    if [ "$status" -eq 0 ]; then
       local fetched
       fetched="$(git rev-parse FETCH_HEAD)" || return 1
       valid_sha "$fetched" || return 1
       printf '%s' "$fetched"
       return 0
     fi
-    if [ "$attempt" -lt 3 ]; then
-      printf 'regression-verification: target fetch failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
-      sleep 1
+    if [[ ! "$error" =~ $FETCH_TRANSIENT_RE ]]; then
+      printf 'regression-verification: target fetch failed (exit %s): %s\n' "$status" "$error" >&2
+      return 1
     fi
+    [ "$attempt" -lt "$FETCH_ATTEMPTS" ] || break
+    printf 'regression-verification: target fetch failed; retrying attempt=%s/%s\n' \
+      "$((attempt + 1))" "$FETCH_ATTEMPTS" >&2
+    fetch_backoff "$attempt"
   done
-  printf 'regression-verification: target fetch failed after 3 attempts\n' >&2
+  printf 'regression-verification: target fetch failed after %s attempts: %s\n' \
+    "$FETCH_ATTEMPTS" "$error" >&2
   return 1
 }
 

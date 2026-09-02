@@ -555,9 +555,27 @@ test("a credential-bearing runner proxy stays in env and out of run-as argv", ()
   assert.match(argv, /RUNNER_WORKSPACE_ROOT=/u);
   assert.match(argv, /CONTROL_PLANE_STATE_DIR=/u);
   assert.match(argv, /AGENTOS_RUN_ID=run-1/u);
-  assert.match(argv, /GIT_CONFIG_COUNT=1/u);
-  assert.match(argv, /GIT_CONFIG_KEY_0=core\.hooksPath/u);
-  assert.match(argv, /GIT_CONFIG_VALUE_0=\/work\/\.git\/anneal-hooks/u);
+  assert.match(argv, /GIT_CONFIG_COUNT=2/u);
+  assert.match(argv, /GIT_CONFIG_KEY_0=credential\.helper/u);
+  assert.match(argv, /GIT_CONFIG_VALUE_0=\S*\/git-credential-runner\.sh/u);
+  assert.match(argv, /GIT_CONFIG_KEY_1=core\.hooksPath/u);
+  assert.match(argv, /GIT_CONFIG_VALUE_1=\/work\/\.git\/anneal-hooks/u);
+});
+
+test("a session answers git credentials through the runner account's own home", () => {
+  // Codex and PI relocate HOME, so a helper declared in the account's global
+  // config resolves no credentials inside a session. Without this the platform
+  // can only ever drive public repositories.
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
+    claim,
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_RUNNER_HOME, "/runner");
+  assert.equal(env.GIT_CONFIG_COUNT, "1");
+  assert.equal(env.GIT_CONFIG_KEY_0, "credential.helper");
+  assert.equal(env.GIT_CONFIG_VALUE_0, join(scratch.toolsDir, "git-credential-runner.sh"));
 });
 
 test("the interpreter the CLI is told to run the MCP server with is overridable and published", () => {

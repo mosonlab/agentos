@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { stepRole } from "@anneal/db";
 
 import type { ClaimedTask } from "./api.js";
@@ -131,6 +133,17 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   ] : []),
 ].join("\n");
 
+/** Runner-owned `git -c` overrides, expressed as the environment form so they
+ *  reach every git a session runs rather than one command line. */
+const gitConfigOverrides = (entries: readonly (readonly [string, string])[]): NodeJS.ProcessEnv =>
+  Object.fromEntries([
+    ["GIT_CONFIG_COUNT", String(entries.length)],
+    ...entries.flatMap(([key, value], index) => [
+      [`GIT_CONFIG_KEY_${index}`, key],
+      [`GIT_CONFIG_VALUE_${index}`, value],
+    ]),
+  ]);
+
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
@@ -160,11 +173,20 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
-    ...(commitHooksPath ? {
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "core.hooksPath",
-      GIT_CONFIG_VALUE_0: commitHooksPath,
-    } : {}),
+    // The runner account's home, for tooling that a relocated HOME would
+    // otherwise cut off from the account's own configuration.
+    AGENTOS_RUNNER_HOME: config.home,
+    ...gitConfigOverrides([
+      // A credential helper declared in the account's global config resolves
+      // its own state through HOME, which the Codex and PI adapters relocate.
+      // Pinning GIT_CONFIG_GLOBAL preserves the declaration but not the
+      // answer, so a session could not fetch a private remote at all: the
+      // regression step's target refresh failed every Run with "could not read
+      // Username". Answer through the runner's own home instead. A public
+      // remote hid this for as long as every repository here was public.
+      ["credential.helper", join(scratch.toolsDir, "git-credential-runner.sh")] as const,
+      ...(commitHooksPath ? [["core.hooksPath", commitHooksPath] as const] : []),
+    ]),
     ...(regressionStep ? {
       AGENTOS_CHAIN_ID: claim.task.chainId!,
       AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
