@@ -17,11 +17,25 @@ before(() => { db = setupTestDb(); });
 beforeEach(async () => { await resetTestDb(db); });
 after(async () => { await db.$disconnect(); });
 
+const waitForDatabaseLockWaiter = async (): Promise<void> => {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const [waiting] = await db.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS "count"
+      FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock'
+    `;
+    if ((waiting?.count ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("timed out waiting for approval-gate PATCH to reach the Task-row mutex");
+};
+
 let sequence = 0;
 const seed = async (overrides: {
   chainId?: string;
   archivedAt?: Date | null;
   status?: TaskStatus;
+  outputKind?: string;
 } = {}) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
@@ -33,23 +47,125 @@ const seed = async (overrides: {
     projectId: project.id, environmentId: environment.id, name: `agent-${suffix}`, title: "Agent",
     model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
+  const template = overrides.outputKind === undefined
+    ? null
+    : await db.taskTemplate.create({
+      data: { projectId: project.id, name: `patch-template-${suffix}`, description: "Patch", variables: [] },
+    });
+  const templateStep = template === null
+    ? null
+    : await db.taskTemplateStep.create({
+      data: {
+        taskTemplateId: template.id,
+        stepIndex: 1,
+        name: "Gate slot",
+        assigneeType: "AGENT",
+        prompt: "Gate slot",
+        ...(overrides.outputKind === undefined ? {} : { outputKind: overrides.outputKind }),
+        layer: 1,
+      },
+    });
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Patchable", description: "work",
     assigneeAgentId: agent.id, status: overrides.status ?? TaskStatus.TODO,
     chainId: overrides.chainId ?? null,
     ...(overrides.chainId ? { chainIndex: 0, chainLayer: 0 } : {}),
+    ...(template === null ? {} : { templateId: template.id, templateStepId: templateStep!.id }),
     archivedAt: overrides.archivedAt ?? null,
   } });
   return { project, agent, task };
 };
 
-test("a dispatched chain task refuses an approval-gate patch", async () => {
+test("a non-slot dispatched chain task refuses an approval-gate patch", async () => {
   const { task } = await seed({ chainId: `chain-${process.pid}` });
   const result = await patchTask(db, task.id, { approvalGate: true });
   assert.deepEqual(result, {
     reason: "conflict",
-    message: "Approval gates on dispatched chain tasks are controlled by the chain",
+    message: "Only the specification and merge readiness steps carry a configurable gate",
   });
+});
+
+test("TODO gate slots accept on/off changes and record the operator activity", async () => {
+  for (const [outputKind, slot] of [["spec", "spec"], ["merge-authorization-v2", "merge"]] as const) {
+    const { task } = await seed({ chainId: `${slot}-${process.pid}`, outputKind });
+
+    const enabled = await patchTask(db, task.id, { approvalGate: true });
+    assert.ok("task" in enabled);
+    assert.equal(enabled.task.approvalGate, true);
+    assert.deepEqual(await db.taskActivity.findMany({
+      where: { taskId: task.id },
+      select: { actorType: true, body: true },
+    }), [{ actorType: "operator", body: `Approval gate changed: ${slot} = true` }]);
+
+    const disabled = await patchTask(db, task.id, { approvalGate: false });
+    assert.ok("task" in disabled);
+    assert.equal(disabled.task.approvalGate, false);
+    assert.deepEqual(await db.taskActivity.findMany({
+      where: { taskId: task.id },
+      orderBy: { createdAt: "asc" },
+      select: { actorType: true, body: true },
+    }), [
+      { actorType: "operator", body: `Approval gate changed: ${slot} = true` },
+      { actorType: "operator", body: `Approval gate changed: ${slot} = false` },
+    ]);
+  }
+});
+
+test("a slot past TODO is refused with its locked actual state", async () => {
+  for (const status of [TaskStatus.DOING, TaskStatus.REVIEW, TaskStatus.DONE]) {
+    const { task } = await seed({ chainId: `${status}-${process.pid}`, outputKind: "spec", status });
+    const result = await patchTask(db, task.id, { approvalGate: true });
+    assert.deepEqual(result, {
+      reason: "conflict",
+      message: `The specification gate is already ${status}; approval gates may only be changed while the step is TODO`,
+    });
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).approvalGate, false);
+    assert.equal(await db.taskActivity.count({ where: { taskId: task.id } }), 0);
+  }
+});
+
+test("an approval-gate PATCH loses the race when the locked slot has already started", { timeout: 10_000 }, async () => {
+  const { task } = await seed({ chainId: `gate-race-${process.pid}`, outputKind: "spec" });
+  let releaseHolder!: () => void;
+  let holderReady!: () => void;
+  const release = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  const ready = new Promise<void>((resolve) => { holderReady = resolve; });
+  const holder = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${task.id} FOR UPDATE`;
+    await tx.task.update({
+      where: { id: task.id },
+      data: { approvalGate: true, status: TaskStatus.DOING },
+    });
+    holderReady();
+    await release;
+  });
+  await ready;
+
+  const patching = patchTask(db, task.id, { approvalGate: false });
+  try {
+    await waitForDatabaseLockWaiter();
+  } finally {
+    releaseHolder();
+  }
+  await holder;
+
+  const result = await patching;
+  assert.deepEqual(result, {
+    reason: "conflict",
+    message: "The specification gate is already DOING; approval gates may only be changed while the step is TODO",
+  });
+  const persisted = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(persisted.approvalGate, true);
+  assert.equal(persisted.status, TaskStatus.DOING);
+  assert.equal(await db.taskActivity.count({ where: { taskId: task.id } }), 0);
+});
+
+test("a standalone task keeps its existing approval-gate edit behaviour", async () => {
+  const { task } = await seed();
+  const result = await patchTask(db, task.id, { approvalGate: true });
+  assert.ok("task" in result);
+  assert.equal(result.task.approvalGate, true);
+  assert.equal(await db.taskActivity.count({ where: { taskId: task.id } }), 0);
 });
 
 test("an assignee from another project is refused with 400", async () => {

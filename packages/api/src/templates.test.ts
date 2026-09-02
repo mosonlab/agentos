@@ -826,3 +826,146 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     { name: "direct-engineer-workflow: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);
 });
+
+test("instantiation resolves only the two gate slots from overrides then project defaults", async () => {
+  const agent = (id: string) => ({
+    id,
+    name: id,
+    projectId: "project-1",
+    archivedAt: null,
+    model: "codex",
+    runnerPreference: RunnerPreference.CODEX,
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  });
+  const agents = [agent("agent-spec"), agent("agent-work"), agent("agent-merge")];
+  const steps = [
+    {
+      id: "step-spec", stepIndex: 1, name: "Specification", prompt: "spec", outputKind: "spec",
+      attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
+      assigneeAgentId: "agent-spec", assigneeAgent: agents[0], approvalGate: false,
+      opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null,
+    },
+    {
+      id: "step-work", stepIndex: 2, name: "Work", prompt: "work", outputKind: "review",
+      attachmentsFromPrevious: true, priorOutputKinds: ["spec"], assigneeType: AssigneeType.AGENT,
+      assigneeAgentId: "agent-work", assigneeAgent: agents[1], approvalGate: true,
+      opensPullRequest: false, layer: 2, baseFromStepIndex: null, runner: null,
+    },
+    {
+      id: "step-merge", stepIndex: 3, name: "Readiness", prompt: "merge", outputKind: "merge-authorization",
+      attachmentsFromPrevious: true, priorOutputKinds: ["review"], assigneeType: AssigneeType.AGENT,
+      assigneeAgentId: "agent-merge", assigneeAgent: agents[2], approvalGate: false,
+      opensPullRequest: false, layer: 3, baseFromStepIndex: null, runner: null,
+    },
+  ];
+  const template = { id: "template-gates", name: "compound-fixture", variables: [], steps };
+  const projectDefaults = { specGateDefault: false, mergeGateDefault: false };
+  const created: Array<Record<string, unknown>> = [];
+  const tx = {
+    $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
+      const sql = "sql" in query ? query.sql : query.join(" ");
+      if (sql.includes('"TaskTemplate"')) return [{ id: template.id, projectId: "project-1", name: template.name }];
+      if (sql.includes('"Project"')) return [{ id: "project-1", ...projectDefaults }];
+      if (sql.includes('"AgentRepoAccess"')) return agents.map(({ id }) => ({ agentId: id, repoId: "repo-1" }));
+      if (sql.includes('"Agent"')) return agents;
+      return [];
+    },
+    project: {},
+    taskTemplate: { findFirst: async () => template },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agentRepoAccess: { count: async () => 1 },
+    task: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const task = { id: `task-${created.length + 1}`, ...data };
+        created.push(task);
+        return task;
+      },
+    },
+    taskActivity: { createMany: async () => ({ count: created.length }) },
+  };
+  const db = {
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+
+  const instantiate = async (
+    defaults: { specGateDefault: boolean; mergeGateDefault: boolean },
+    gates?: { spec?: boolean; merge?: boolean },
+  ) => {
+    projectDefaults.specGateDefault = defaults.specGateDefault;
+    projectDefaults.mergeGateDefault = defaults.mergeGateDefault;
+    created.length = 0;
+    return instantiateTemplate(db, "project-1", template.id, {
+      repoId: "repo-1", variables: {}, autoStart: false, gates,
+    });
+  };
+
+  const matrix: Array<[
+    { specGateDefault: boolean; mergeGateDefault: boolean },
+    { spec?: boolean; merge?: boolean } | undefined,
+    boolean,
+    boolean,
+  ]> = [
+    [{ specGateDefault: false, mergeGateDefault: false }, undefined, false, false],
+    [{ specGateDefault: false, mergeGateDefault: false }, { spec: true, merge: true }, true, true],
+    [{ specGateDefault: false, mergeGateDefault: true }, undefined, false, true],
+    [{ specGateDefault: false, mergeGateDefault: true }, { spec: true, merge: false }, true, false],
+    [{ specGateDefault: true, mergeGateDefault: false }, undefined, true, false],
+    [{ specGateDefault: true, mergeGateDefault: false }, { spec: false, merge: true }, false, true],
+    [{ specGateDefault: true, mergeGateDefault: true }, undefined, true, true],
+    [{ specGateDefault: true, mergeGateDefault: true }, { spec: false, merge: false }, false, false],
+    [{ specGateDefault: true, mergeGateDefault: false }, { spec: true }, true, false],
+    [{ specGateDefault: false, mergeGateDefault: false }, { spec: false, merge: false }, false, false],
+  ];
+  for (const [defaults, gates, specGate, mergeGate] of matrix) {
+    const result = await instantiate(defaults, gates);
+    assert.deepEqual(result.tasks.map((task) => task.approvalGate), [specGate, true, mergeGate]);
+  }
+});
+
+test("instantiate refuses absent gate slots before creating any task and checks spec first", async () => {
+  const created: Array<Record<string, unknown>> = [];
+  const step = {
+    id: "step-work", stepIndex: 1, name: "Work", prompt: "work", outputKind: "review",
+    attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: "agent-1", assigneeAgent: {
+      id: "agent-1", name: "agent-1", projectId: "project-1", archivedAt: null,
+      model: "codex", runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation", rolePrompt: "role",
+    }, approvalGate: false, opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null,
+  };
+  const template = { id: "template-neither", name: "pull-request-workflow", variables: [], steps: [step] };
+  const tx = {
+    $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
+      const sql = "sql" in query ? query.sql : query.join(" ");
+      if (sql.includes('"TaskTemplate"')) return [{ id: template.id, projectId: "project-1", name: template.name }];
+      if (sql.includes('"Project"')) return [{ id: "project-1", specGateDefault: false, mergeGateDefault: false }];
+      if (sql.includes('"AgentRepoAccess"')) return [{ agentId: "agent-1", repoId: "repo-1" }];
+      if (sql.includes('"Agent"')) return [{ id: "agent-1", name: "agent-1", projectId: "project-1", archivedAt: null }];
+      return [];
+    },
+    project: {},
+    taskTemplate: { findFirst: async () => template },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agentRepoAccess: { count: async () => 1 },
+    task: { create: async ({ data }: { data: Record<string, unknown> }) => {
+      const task = { id: `task-${created.length + 1}`, ...data };
+      created.push(task);
+      return task;
+    } },
+    taskActivity: { createMany: async () => ({ count: created.length }) },
+  };
+  const db = { $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx) } as unknown as PrismaClient;
+  for (const [gates, code, slot] of [
+    [{ spec: true }, "gates_spec_step_absent", "specification"] as const,
+    [{ merge: true }, "gates_merge_step_absent", "merge"] as const,
+    [{ spec: true, merge: true }, "gates_spec_step_absent", "specification"] as const,
+  ]) {
+    created.length = 0;
+    await assertTemplateRefusal(
+      () => instantiateTemplate(db, "project-1", template.id, { repoId: "repo-1", variables: {}, gates }),
+      code,
+    );
+    assert.equal(created.length, 0, `${slot} refusal must not partially materialize a chain`);
+  }
+});

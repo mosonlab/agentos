@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  InboxStatus,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
@@ -761,9 +762,27 @@ const activateChainSuccessorInternal = async (
       } });
       continue;
     }
-    // A REVIEW successor at dispatch time is a stalled chain rather than a
-    // decision anyone made, so it is returned to the queue under a bounded
-    // ceiling instead of being resumed unconditionally.
+    // A REVIEW successor at dispatch time is normally a stalled chain rather
+    // than a decision anyone made, so it is returned to the queue under a
+    // bounded ceiling. An approval-gated REVIEW is the deliberate exception
+    // only while its durable Inbox decision is still OPEN. A readiness hard
+    // stop also parks the task in REVIEW, but its prior card is already
+    // answered; that state must resume and open fresh evidence instead of
+    // silently dead-ending the tail.
+    if (successor.status === TaskStatus.REVIEW && successor.approvalGate) {
+      const openGate = await tx.inboxMessage.findFirst({
+        where: { gateTaskId: successor.id, status: InboxStatus.OPEN },
+        select: { id: true },
+      });
+      if (openGate) {
+        await tx.taskActivity.create({ data: {
+          taskId: successor.id,
+          actorType: "control-plane",
+          body: "Predecessor layer completed; approval gate remains open",
+        } });
+        continue;
+      }
+    }
     if (successor.status === TaskStatus.REVIEW && !await resumeParkedSuccessor(tx, current, successor)) continue;
 
     const successorStep = successor.templateStepId
@@ -774,6 +793,21 @@ const activateChainSuccessorInternal = async (
       : null;
     const compoundImplementation = isCompoundImplementationStep(successorStep);
     if (isMergeReadinessStep(successorStep)) {
+      // A gated server-owned readiness step has no Run of its own, so its gate
+      // must open at activation while the completing Regression Run still
+      // supplies the session and pull-request identity. Keep the task in
+      // REVIEW before creating the card in this same transaction; readiness
+      // claiming only considers TODO/DOING, so the worker cannot race the
+      // operator while the evidence card is being prepared.
+      if (successor.approvalGate && options.sourceRunId) {
+        await tx.task.update({
+          where: { id: successor.id },
+          data: { status: TaskStatus.REVIEW, failureReason: null },
+        });
+        await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
+        gated = true;
+        continue;
+      }
       await tx.taskActivity.create({ data: {
         taskId: successor.id,
         actorType: "control-plane",

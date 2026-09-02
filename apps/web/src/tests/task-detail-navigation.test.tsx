@@ -49,7 +49,7 @@ const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, control: nu
 const chainFor = (taskId: string): Chain => ({
   chainId: "chain-c", total: 1, done: 0, steps: [{
     taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
-    status: "TODO", approvalGate: false, assigneeType: "AGENT", executionOwner: "agent",
+    status: "TODO", approvalGate: false, gateSlot: null, assigneeType: "AGENT", executionOwner: "agent",
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
     failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
     blockedOn: null, currentExecution: false, mergeRecovery: null,

@@ -1,0 +1,3 @@
+ALTER TABLE "Project"
+ADD COLUMN "specGateDefault" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "mergeGateDefault" BOOLEAN NOT NULL DEFAULT false;

@@ -442,6 +442,33 @@ export const closeIntegratorQuestions = async (tx: Tx, integratorTaskId: string)
   });
 };
 
+/**
+ * Shared terminal settlement for an operator-closing merge integrator. Both a
+ * stopped merge answer and a merge-gate rejection use this disposition: all
+ * integrator questions close, an explicit merge-result account is persisted,
+ * and the mechanical task becomes terminal without opening another Run.
+ */
+export const settleIntegratorTerminal = async (
+  tx: Tx,
+  input: { integratorTaskId: string; outputBody: string; activityBody: string },
+): Promise<void> => {
+  await closeIntegratorQuestions(tx, input.integratorTaskId);
+  await tx.taskStepOutput.upsert({
+    where: { taskId: input.integratorTaskId },
+    create: { taskId: input.integratorTaskId, kind: INTEGRATOR_OUTPUT_KIND, body: input.outputBody },
+    update: { body: input.outputBody },
+  });
+  await tx.task.update({
+    where: { id: input.integratorTaskId },
+    data: { status: TaskStatus.DONE, failureReason: null },
+  });
+  await tx.taskActivity.create({ data: {
+    taskId: input.integratorTaskId,
+    actorType: "control-plane",
+    body: input.activityBody,
+  } });
+};
+
 export const INTEGRATOR_OUTPUT = INTEGRATOR_OUTPUT_KIND;
 
 // ---------------------------------------------------------------------------
@@ -823,24 +850,17 @@ export const applyStopAnswer = async (
     return outcome;
   }
 
-  await closeIntegratorQuestions(tx, task.id);
   const abandoned = disposition === "terminal-abandoned";
   const body = abandoned
     ? `Chain abandoned after merge stop ${condition}. No merge was performed by this contract.`
     : `Merge stop ${condition} closed by operator decision: ${input.choice}.`;
-  await tx.taskStepOutput.upsert({
-    where: { taskId: task.id },
-    create: { taskId: task.id, kind: INTEGRATOR_OUTPUT_KIND, body },
-    update: { body },
-  });
-  await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
-  await tx.taskActivity.create({ data: {
-    taskId: task.id,
-    actorType: "control-plane",
-    body: abandoned
+  await settleIntegratorTerminal(tx, {
+    integratorTaskId: task.id,
+    outputBody: body,
+    activityBody: abandoned
       ? `Chain abandoned; step ${INTEGRATOR_STEP_INDEX} closed without a merge (${condition})`
       : `Chain complete; step ${INTEGRATOR_STEP_INDEX} closed by operator decision (${condition})`,
-  } });
+  });
   return outcome;
 };
 

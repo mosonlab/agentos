@@ -1,12 +1,12 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { api } from "../lib/api";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import type { Agent, Repo, TaskTemplate } from "../lib/types";
+import type { Agent, Project, Repo, TaskTemplate, TaskTemplateStep } from "../lib/types";
 import {
-  CARD_TITLE, CODE_BLOCK, FIELD_ROW, ROW, STACK,
-  Card, EmptyState, ErrorNotice, Field, FullPanel, Tabs, Toggle,
+  CARD_TITLE, CODE_BLOCK, FIELD_ROW, HINT, ROW, STACK,
+  Card, Check, EmptyState, ErrorNotice, Field, FullPanel, Tabs, Toggle,
 } from "./ui";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -18,8 +18,54 @@ import { Textarea } from "./ui/textarea";
  * on three of the four tabs is not a button. The body below is a pure
  * relocation — only the `export` keyword is new. */
 
-export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
+type GateSlot = "spec" | "merge";
+type GateValues = Partial<Record<GateSlot, boolean>>;
+type GateSelection = { contextKey: string; initial: GateValues; current: GateValues };
+
+/** Keep the browser's slot identity in step with the server's structural rule.
+ * Versioned output kinds are part of the compatibility contract, so a suffix
+ * such as `merge-authorization-v2` still identifies the merge slot. */
+const gateSlotOf = (step: Pick<TaskTemplateStep, "outputKind">): GateSlot | null => {
+  const outputKind = step.outputKind.replace(/-(v[1-9]\d*)$/u, "");
+  if (outputKind === "spec") return "spec";
+  if (outputKind === "merge-authorization") return "merge";
+  return null;
+};
+
+const gateSlotsOf = (template: TaskTemplate | null): GateSlot[] => {
+  if (template === null) return [];
+  return (["spec", "merge"] as const).filter((slot) => template.steps.some((step) => gateSlotOf(step) === slot));
+};
+
+const gateDefaults = (project: Project | null | undefined): Record<GateSlot, boolean> => ({
+  spec: project?.specGateDefault ?? false,
+  merge: project?.mergeGateDefault ?? false,
+});
+
+const gateSelectionFor = (
+  contextKey: string,
+  template: TaskTemplate | null,
+  project: Project | null | undefined,
+): GateSelection => {
+  const defaults = gateDefaults(project);
+  const initial: GateValues = {};
+  for (const slot of gateSlotsOf(template)) initial[slot] = defaults[slot];
+  return { contextKey, initial, current: { ...initial } };
+};
+
+const changedGateValues = (selection: GateSelection): GateValues | undefined => {
+  const changed: GateValues = {};
+  for (const slot of ["spec", "merge"] as const) {
+    if (selection.current[slot] !== selection.initial[slot] && selection.current[slot] !== undefined) {
+      changed[slot] = selection.current[slot];
+    }
+  }
+  return Object.keys(changed).length === 0 ? undefined : changed;
+};
+
+export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated }: {
   projectId: string;
+  project?: Project | null;
   agents: Agent[];
   repos: Repo[];
   onClose: () => void;
@@ -46,6 +92,41 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
   const t = useT();
 
   const template = (templates.data ?? []).find((candidate) => candidate.id === templateId) ?? templates.data?.[0] ?? null;
+  const specDefault = project?.specGateDefault ?? false;
+  const mergeDefault = project?.mergeGateDefault ?? false;
+  /** Defaults are part of the dispatch context: if the operator changes the
+   * selected project while this panel is open, the old project's choices must
+   * not become overrides for the new one. */
+  const gateContextKey = `${projectId}:${template?.id ?? ""}:${specDefault}:${mergeDefault}`;
+  const [gateSelection, setGateSelection] = useState<GateSelection>(() => (
+    gateSelectionFor(gateContextKey, template, project)
+  ));
+  useEffect(() => {
+    setGateSelection((held) => held.contextKey === gateContextKey
+      ? held
+      : gateSelectionFor(gateContextKey, template, project));
+  }, [gateContextKey, project, template]);
+  // Effects run after the first paint. Use the new context synchronously for
+  // that render as well, so an immediate Create click cannot submit stale
+  // values while React is scheduling the reset effect.
+  const activeGateSelection = gateSelection.contextKey === gateContextKey
+    ? gateSelection
+    : gateSelectionFor(gateContextKey, template, project);
+  const gateSlots = gateSlotsOf(template);
+
+  useEffect(() => {
+    setTemplateId("");
+    setVariables({});
+  }, [projectId]);
+
+  const toggleGate = (slot: GateSlot, next: boolean): void => {
+    setGateSelection((held) => {
+      const baseline = held.contextKey === gateContextKey
+        ? held
+        : gateSelectionFor(gateContextKey, template, project);
+      return { ...baseline, current: { ...baseline.current, [slot]: next } };
+    });
+  };
 
   const createBlank = async (): Promise<void> => {
     const ok = await run(() => api.post(`/projects/${projectId}/tasks`, {
@@ -69,11 +150,13 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
 
   const createFromTemplate = async (): Promise<void> => {
     if (!template) return;
+    const gates = changedGateValues(activeGateSelection);
     const ok = await run(() => api.post(`/projects/${projectId}/task-templates/${template.id}/instantiate`, {
       repoId: form.repoId,
       variables,
       autoStart: false,
       ...(form.name.trim() === "" ? {} : { name: form.name }),
+      ...(gates === undefined ? {} : { gates }),
     }));
     if (ok) { onCreated(); onClose(); }
   };
@@ -176,15 +259,41 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                       placeholder={/branch/i.test(variable) ? "feat/…" : ""} />
                   </Field>
                 ))}
+                {gateSlots.length === 0 ? null : (
+                  <div className="grid gap-[10px]">
+                    <div className={CARD_TITLE}>{t("newTask.gates.title")}</div>
+                    {gateSlots.map((slot) => {
+                      const label = t(`newTask.gates.${slot}`);
+                      return (
+                        <div className={ROW} key={slot}>
+                          <Check
+                            on={activeGateSelection.current[slot] === true}
+                            onChange={(next) => toggleGate(slot, next)}
+                            label={label}
+                          />
+                          <div>
+                            <div>{label}</div>
+                            <div className={HINT}>{t(`newTask.gates.${slot}.hint`)}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 {template ? (
                   <div>
                     <div className={CARD_TITLE}>{t("newTask.preview.title")}</div>
                     <div className={CODE_BLOCK}>
-                      {template.steps.map((step) => [
-                        `- ${step.name}`,
-                        `    ${t("newTask.preview.agent", { name: step.assigneeAgent?.title ?? t("newTask.preview.human") })}`,
-                        step.approvalGate ? `    ${t("newTask.preview.gate")}` : null,
-                      ].filter((line) => line !== null).join("\n")).join("\n")}
+                      {template.steps.map((step) => {
+                        const slot = gateSlotOf(step);
+                        return [
+                          `- ${step.name}`,
+                          `    ${t("newTask.preview.agent", { name: step.assigneeAgent?.title ?? t("newTask.preview.human") })}`,
+                          (slot === null ? step.approvalGate : activeGateSelection.current[slot] === true)
+                            ? `    ${t("newTask.preview.gate")}`
+                            : null,
+                        ].filter((line) => line !== null).join("\n");
+                      }).join("\n")}
                     </div>
                   </div>
                 ) : null}

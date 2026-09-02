@@ -12,8 +12,10 @@
  * cannot reverse the order. Existing template writers were audited: canonical
  * installation creates/updates a template before its steps, canonical sync
  * updates steps without later taking a template lock, and the operator webhook
- * patch takes only the template row. No existing writer takes a step row and
- * then acquires its template row.
+ * patch takes only the template row. Instantiation takes the Project row after
+ * the template row, before it reads gate defaults; the project PATCH writer
+ * takes only the Project row. No existing writer takes a step row and then
+ * acquires its template row.
  */
 import { Prisma, type Agent } from "@prisma/client";
 
@@ -33,6 +35,23 @@ export const lockTemplateRow = async (
   const rows = await tx.$queryRaw<Array<{ id: string; projectId: string; name: string }>>`
     SELECT "id", "projectId", "name" FROM "TaskTemplate"
     WHERE "id" = ${templateId} FOR UPDATE
+  `;
+  return rows[0] ?? null;
+};
+
+/**
+ * Takes the Project-row mutex shared by project-default updates and chain
+ * instantiation. The defaults are read from the locked row so a PATCH that
+ * races dispatch is ordered before or after the whole chain snapshot rather
+ * than landing between the read and the Task inserts.
+ */
+export const lockProjectGateDefaults = async (
+  tx: Tx,
+  projectId: string,
+): Promise<{ id: string; specGateDefault: boolean; mergeGateDefault: boolean } | null> => {
+  const rows = await tx.$queryRaw<Array<{ id: string; specGateDefault: boolean; mergeGateDefault: boolean }>>`
+    SELECT "id", "specGateDefault", "mergeGateDefault" FROM "Project"
+    WHERE "id" = ${projectId} FOR UPDATE
   `;
   return rows[0] ?? null;
 };

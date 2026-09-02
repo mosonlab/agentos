@@ -290,6 +290,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/chain-activation.ts",
   "packages/db/src/claim-contract.ts",
   "packages/db/src/inbox-decision.ts",
+  "packages/db/src/merge-gate.ts",
   "packages/db/src/merge-integrator.ts",
   "packages/db/src/gate-attestation.ts",
   "packages/db/src/merge-integrator-db.ts",
