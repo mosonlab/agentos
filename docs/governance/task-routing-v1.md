@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.8 (2026-09-01: configurable approval gates add project defaults, per-dispatch overrides, and TODO-only slot toggles while preserving exact-head merge-tail authorization)
+Version 1.8 (2026-09-01: configurable approval gates add project defaults, per-dispatch overrides, and TODO-only slot toggles while preserving exact-head merge-tail authorization)
 
 Status: Active
 
