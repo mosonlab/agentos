@@ -22,6 +22,8 @@ const CURRENT_CLI_SURFACE_DOCS = [
 
 const CANONICAL_ONBOARDING_DOC = "docs/runbooks/add-a-project.md";
 const REDUCED_CANONICAL_SYNC_DOCS = ["agents/README.md", "docs/install.md"];
+const CANONICAL_NAME_MANAGEMENT_RULE =
+  "An Agent or task template whose name is a canonical name is rewritten to the canonical text on every deploy; a project that needs a different prompt uses a different name.";
 const CANONICAL_SYNC_COMMANDS = [
   "db:sync-canonical-prompts",
   "db:verify-agent-template",
@@ -91,6 +93,9 @@ test("the add-project runbook owns canonical sync and full-tail onboarding", () 
     assert.ok(onboarding.includes(command), `${CANONICAL_ONBOARDING_DOC}: ${command}`);
   }
   assert.match(onboarding, /partial (?:canonical )?inventory/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /canonical Project first[\s\S]*slug order/iu, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /REFUSED <slug>: <reason>/u, CANONICAL_ONBOARDING_DOC);
+  assert.match(onboarding, /--install-full[\s\S]*exits non-zero/iu, CANONICAL_ONBOARDING_DOC);
   for (const category of FULL_TAIL_READINESS_CATEGORIES) {
     assert.ok(onboarding.includes(category), `${CANONICAL_ONBOARDING_DOC}: ${category}`);
   }
@@ -112,6 +117,7 @@ test("the add-project runbook owns canonical sync and full-tail onboarding", () 
 
   for (const path of REDUCED_CANONICAL_SYNC_DOCS) {
     const text = readFileSync(path, "utf8");
+    assert.ok(text.replace(/\s+/gu, " ").includes(CANONICAL_NAME_MANAGEMENT_RULE), `${path}: canonical-name management rule`);
     assert.match(text, /(?:\.\.\/)?(?:docs\/)?runbooks\/add-a-project\.md/u, path);
     for (const command of CANONICAL_SYNC_COMMANDS) {
       assert.doesNotMatch(text, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"), `${path}: ${command}`);
