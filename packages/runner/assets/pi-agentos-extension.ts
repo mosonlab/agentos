@@ -9,7 +9,9 @@
  *  Loaded by pi's own loader, not compiled by the runner's tsc — keep it
  *  dependency-free and self-contained. SessionToolContract is inlined here at
  *  build time; session-tool-contract.test.ts checks the inlined adapter against
- *  the canonical definitions and request shapes. */
+ *  the canonical definitions and request shapes. The delivery receipt writer is
+ *  not inlined by hand: scripts/generate-pi-extension.mjs copies it verbatim
+ *  from src/task-output-receipt.ts into the marked region below. */
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -296,19 +298,40 @@ const call = async (request: ToolRequest): Promise<unknown> => {
 
 const said = (text: string): ToolResult => ({ content: [{ type: "text", text }], details: {} });
 
-const writeTaskOutputReceipt = async (kind: string, commitSha: string): Promise<void> => {
-  const session = credentials();
-  const path = join(session.workspacePath, ".agentos", "task-output-receipt.json");
+/** Copied verbatim from packages/runner/src/task-output-receipt.ts by
+ *  scripts/generate-pi-extension.mjs. Edit that module, not this region;
+ *  scripts/generate-pi-extension.test.mjs fails when the two drift. */
+// AGENT-WRITER-BEGIN
+export type TaskOutputReceipt = {
+  runId: string;
+  kind: string;
+  commitSha: string;
+};
+
+export const taskOutputReceiptPath = (workspacePath: string): string =>
+  join(workspacePath, ".agentos", "task-output-receipt.json");
+
+/**
+ * Record the delivered output identity only after the session output request
+ * has succeeded. The runner includes this Agent-writable receipt in recovery
+ * audit evidence; the server-returned output identity alone authorizes recovery.
+ */
+export const writeTaskOutputReceipt = async (
+  workspacePath: string,
+  output: TaskOutputReceipt,
+): Promise<void> => {
+  const path = taskOutputReceiptPath(workspacePath);
   const temporary = `${path}.${process.pid}.${randomUUID()}`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   try {
-    await writeFile(temporary, `${JSON.stringify({ runId: session.runId, kind, commitSha })}\n`, { mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify(output)}\n`, { mode: 0o600 });
     await rename(temporary, path);
   } catch (error: unknown) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
 };
+// AGENT-WRITER-END
 
 const invokeTool = async (name: ToolName, params: Record<string, unknown>): Promise<ToolResult> => {
   const request = requestFor(name, params);
@@ -322,9 +345,11 @@ const invokeTool = async (name: ToolName, params: Record<string, unknown>): Prom
     const body = params.body as string;
     const kind = params.kind as string;
     const commitSha = taskOutputCommitSha as string;
-    await writeTaskOutputReceipt(kind, commitSha).catch((error: unknown) => {
-      console.error(`Unable to write task output receipt: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    const session = credentials();
+    await writeTaskOutputReceipt(session.workspacePath, { runId: session.runId, kind, commitSha })
+      .catch((error: unknown) => {
+        console.error(`Unable to write task output receipt: ${error instanceof Error ? error.message : String(error)}`);
+      });
     const predecessorOutputs = (result as { predecessorOutputs?: unknown } | null)?.predecessorOutputs;
     return said([
       `Output persisted as '${kind}' (${body.length} characters).`,

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { handleRequest, invokeTool, readCredentials, TOOLS, type SessionCredentials } from "./mcp-server.js";
-import { taskOutputReceiptPath } from "./task-output-receipt.js";
+import { parseTaskOutputReceipt, taskOutputReceiptPath } from "./task-output-receipt.js";
 
 type Received = { method: string; url: string; authorization: string | undefined; body: string };
 
@@ -127,7 +127,7 @@ test("tools carry the session token and fencing token to the session endpoints",
     assert.ok(received.every((hit) => JSON.parse(hit.body).fencingToken === "1:run-1:token"));
     const commitSha = String(JSON.parse(received[0]!.body).commitSha);
     assert.match(commitSha, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
-    assert.deepEqual(JSON.parse(await readFile(taskOutputReceiptPath(credentials.workspacePath), "utf8")), {
+    assert.deepEqual(parseTaskOutputReceipt(await readFile(taskOutputReceiptPath(credentials.workspacePath), "utf8")), {
       runId: "run-1",
       kind: "spec",
       commitSha,
