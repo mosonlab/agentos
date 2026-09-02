@@ -745,6 +745,61 @@ test("an unrelated malformed retention entry refuses the pass after a valid hit"
   }
 });
 
+const malformedRetentionMetadata: Array<{
+  name: string;
+  mutate: (metadata: Record<string, unknown>, entry: string) => Promise<void> | void;
+}> = [
+  {
+    name: "empty targets",
+    mutate: async (metadata, entry) => {
+      metadata.targets = [];
+      const trees = join(entry, "trees");
+      await makeWritable(trees);
+      for (const child of await readdir(trees)) await rm(join(trees, child), { recursive: true });
+      await chmod(trees, 0o555);
+    },
+  },
+  {
+    name: "invalid toolchain object",
+    mutate: (metadata) => {
+      metadata.toolchain = { ...TOOLCHAIN, architecture: 42 };
+    },
+  },
+];
+
+for (const malformed of malformedRetentionMetadata) {
+  test(`retention rejects unrelated metadata with ${malformed.name} without invoking npm`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-metadata-"));
+    try {
+      const { configured, fake, published } = await publishFixtureVersions(root, ["2.0.1", "2.0.2"]);
+      const [unrelated, current] = published;
+      assert.ok(unrelated && current);
+      const unrelatedEntry = entryPath(root, unrelated.key);
+      const metadataPath = join(unrelatedEntry, "metadata.json");
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as Record<string, unknown>;
+      await malformed.mutate(metadata, unrelatedEntry);
+      await chmod(metadataPath, 0o644);
+      await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
+      await chmod(metadataPath, 0o444);
+      const events: DependencyCacheProgress[] = [];
+      await assert.rejects(
+        materializeWorkspaceDependencies(
+          configured, current.workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+          { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+        ),
+        /metadata-malformed/u,
+      );
+      assert.equal(fake.installs(), 2, "malformed unrelated metadata must not invoke npm");
+      assert.deepEqual(
+        events.find(({ event }) => event === "integrity-refusal"),
+        { event: "integrity-refusal", key: unrelated.key.slice(0, 16), condition: "metadata-malformed" },
+      );
+    } finally {
+      await cleanupRoot(root);
+    }
+  });
+}
+
 const unrelatedRetentionCorruptions: Array<{
   name: string;
   corrupt: (entry: string) => Promise<void>;

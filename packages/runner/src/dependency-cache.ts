@@ -635,8 +635,12 @@ const metadataShape = (value: unknown): value is CacheMetadata => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const metadata = value as Partial<CacheMetadata>;
   if (metadata.format !== CACHE_FORMAT || typeof metadata.key !== "string") return false;
-  if (metadata.toolchain === null || typeof metadata.toolchain !== "object") return false;
-  if (!Array.isArray(metadata.inputs) || !Array.isArray(metadata.targets)) return false;
+  if (metadata.toolchain === null || typeof metadata.toolchain !== "object" || Array.isArray(metadata.toolchain)) return false;
+  const toolchain = metadata.toolchain as Partial<DependencyCacheToolchain>;
+  if (!sameJson(Object.keys(toolchain).sort(), ["architecture", "node", "npm", "operatingSystem"])) return false;
+  if (![toolchain.node, toolchain.npm, toolchain.operatingSystem, toolchain.architecture]
+    .every((coordinate) => typeof coordinate === "string" && coordinate.length > 0)) return false;
+  if (!Array.isArray(metadata.inputs) || !Array.isArray(metadata.targets) || metadata.targets.length === 0) return false;
   return metadata.inputs.every((input) => {
     if (input === null || typeof input !== "object" || typeof (input as CacheInput).path !== "string") return false;
     const fields = Object.keys(input).sort();
