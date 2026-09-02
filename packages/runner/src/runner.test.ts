@@ -77,7 +77,10 @@ const mechanicalClaim: ClaimedTask = {
     remoteUrl: "git@github.com:owner/name.git",
     defaultBranch: "master",
     mountPath: "/does/not/exist",
-    dependencyProvisioning: "NPM_CI",
+    // Most runner scenarios use a minimal Git fixture without Node manifests;
+    // dependency provisioning is exercised explicitly by the installation and
+    // manifest-missing cases below.
+    dependencyProvisioning: "NONE",
   },
   run: {
     id: "run-10",
@@ -451,7 +454,12 @@ test("an implementation step provisions dependencies without recording the revie
       ...mechanicalClaim,
       executionMode: "agent" as const,
       runner: "CLAUDE" as const,
-      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      repo: {
+        ...mechanicalClaim.repo,
+        remoteUrl: remote,
+        defaultBranch: "master",
+        dependencyProvisioning: "NPM_CI",
+      },
       task: {
         ...mechanicalClaim.task,
         templateStep: { name: "Implementation", provisionDependencies: true },

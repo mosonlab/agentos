@@ -851,13 +851,11 @@ test("POST repo runs successful dependency-policy preflights through to creation
       assert.equal(created[0]?.dependencyProvisioning, dependencyProvisioning);
       assert.deepEqual(calls.map(({ args }) => args[0]), dependencyProvisioning === "NPM_CI"
         ? ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]
-        : ["config", "config", "ls-remote", "init", "fetch", "push"]);
+        : ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]);
       assert.equal(calls.filter(({ args }) => args[0] === "fetch").length, 1);
       const lockfileProbes = calls.filter(({ args }) => args[0] === "ls-tree");
-      assert.equal(lockfileProbes.length, dependencyProvisioning === "NPM_CI" ? 1 : 0);
-      if (dependencyProvisioning === "NPM_CI") {
-        assert.notEqual(lockfileProbes[0]?.cwd, process.cwd(), "ls-tree must inspect the fetched scratch repository");
-      }
+      assert.equal(lockfileProbes.length, 1);
+      assert.notEqual(lockfileProbes[0]?.cwd, process.cwd(), "ls-tree must inspect the fetched scratch repository");
       const pushes = calls.filter(({ args }) => args[0] === "push");
       assert.equal(pushes.length, 1);
       assert.deepEqual(pushes[0]?.args.slice(0, 3), ["push", "--dry-run", remoteUrl]);

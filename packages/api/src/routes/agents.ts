@@ -138,10 +138,7 @@ const repositoryPreflightRefusal = (context: Context, error: unknown): Response 
       remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
     }, 422);
   }
-  // This reason is added to the preflight failure union alongside the
-  // package-lock check. Keep the string cast until that shared contract is
-  // available to this route's type-check independently.
-  if ((error.reason as string) === "dependency-provisioning-contradicts-lockfile") {
+  if (error.reason === "dependency-provisioning-contradicts-lockfile") {
     return context.json({
       error: "Repository dependency provisioning contradicts lockfile",
       code: "repository-dependency-provisioning-contradicts-lockfile",
