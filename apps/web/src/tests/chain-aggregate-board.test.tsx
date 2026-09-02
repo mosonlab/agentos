@@ -316,6 +316,8 @@ const AggregateActivationHarness = (): ReactNode => {
       representativeTaskId="step-1"
       actions={{
         onActivate: (taskId) => { void start.requestForMove(taskId); },
+        onHold: noop,
+        onResume: noop,
         onFilter: noop,
         onArchive: noop,
       }}
