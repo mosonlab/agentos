@@ -17,7 +17,7 @@ const detailSource = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx
 
 const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep => ({
   taskId: `t${position}`, position, chainIndex: position - 1, layer: null, name: `Task ${position}`,
-  stepName: `Step ${position}`, status: "TODO", approvalGate: false, assigneeType: "AGENT",
+  stepName: `Step ${position}`, status: "TODO", approvalGate: false, gateSlot: null, assigneeType: "AGENT",
   executionOwner: "agent",
   agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
   startable: false, startAction: null, holdRefusal: null, blockedOn: null, currentExecution: false,
@@ -37,6 +37,14 @@ const heldControl = (overrides: Partial<NonNullable<Chain["control"]>> = {}): No
 
 const render = (value: Chain, taskId: string, repairActivities: readonly TaskActivity[] | null = null): string => renderToStaticMarkup(
   <ChainList chain={value} taskId={taskId} pending={false} regressionTaskId="regression" repairActivities={repairActivities} onStart={() => undefined} />,
+);
+
+const renderWithGateToggle = (
+  value: Chain,
+  taskId: string,
+  onToggleGate: (taskId: string, next: boolean) => void,
+): string => renderToStaticMarkup(
+  <ChainList chain={value} taskId={taskId} pending={false} regressionTaskId="regression" onStart={() => undefined} onToggleGate={onToggleGate} />,
 );
 
 const renderLocale = (value: Chain, taskId: string, locale: "en" | "zh", repairActivities: readonly TaskActivity[] | null = null): string => renderToStaticMarkup(
@@ -137,6 +145,38 @@ test("the gate's meaning is spelled out verbatim, once per gated step", () => {
   const markup = render(chain([step(1, { approvalGate: true }), step(2), step(3, { approvalGate: true })]), "t1");
   assert.equal(en(GATE_TITLE_KEY), "requires approval before unblocking dependents");
   assert.equal([...markup.matchAll(new RegExp(en(GATE_TITLE_KEY), "g"))].length, 2);
+});
+
+test("gate slots render their current values as editable toggles", () => {
+  const calls: Array<[string, boolean]> = [];
+  const markup = renderWithGateToggle(chain([
+    step(1, { gateSlot: "spec", approvalGate: false }),
+    step(2, { gateSlot: "merge", approvalGate: true }),
+    step(3, { approvalGate: true }),
+  ]), "t1", (taskId, next) => calls.push([taskId, next]));
+
+  assert.equal([...markup.matchAll(/data-slot="switch"/g)].length, 2);
+  assert.match(markup, new RegExp(`aria-label="${en("chain.gate.specification")}"`));
+  assert.match(markup, new RegExp(`aria-label="${en("chain.gate.merge")}"`));
+  assert.match(markup, /data-chain-node="t1"[\s\S]*data-state="unchecked"/u);
+  assert.match(markup, /data-chain-node="t2"[\s\S]*data-state="checked"/u);
+  // The non-slot row retains the existing lock icon rendering.
+  assert.equal([...markup.matchAll(new RegExp(en(GATE_TITLE_KEY), "g"))].length, 3);
+  assert.deepEqual(calls, []);
+});
+
+test("a non-TODO gate slot is disabled and names its state", () => {
+  const markup = renderWithGateToggle(chain([
+    step(1, { gateSlot: "spec", status: "DOING" }),
+    step(2, { gateSlot: "merge", status: "REVIEW", approvalGate: true }),
+    step(3, { gateSlot: "spec", status: "DONE" }),
+  ]), "t1", () => undefined);
+
+  assert.equal([...markup.matchAll(/data-slot="switch"/g)].length, 3);
+  assert.equal([...markup.matchAll(/disabled=""[^>]*data-slot="switch"/g)].length, 3);
+  assert.match(markup, /title="The specification gate is already DOING; approval gates may only be changed while the step is TODO"/u);
+  assert.match(markup, /title="The merge readiness gate is already REVIEW; approval gates may only be changed while the step is TODO"/u);
+  assert.match(markup, /title="The specification gate is already DONE; approval gates may only be changed while the step is TODO"/u);
 });
 
 test("a human step uses semantic human presentation and offers no start action", () => {

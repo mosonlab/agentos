@@ -1,6 +1,7 @@
 import { type ReactNode, useState } from "react";
 
 import { compare, denseOrdinals, layerOf } from "@anneal/db/chain-order";
+import { gateToggleRefusal } from "@anneal/db/gate-toggle";
 
 import { sha, titleCase } from "../lib/format";
 import { useT } from "../lib/i18n";
@@ -8,7 +9,7 @@ import { parseRepairCycles, type RepairCycleViewModel } from "../lib/repair-subt
 import { Link } from "../lib/router";
 import type { Chain, ChainStep, TaskActivity } from "../lib/types";
 import { IconLock, IconUser } from "./icons";
-import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, ErrorNotice, Pill, TaskPill } from "./ui";
+import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, ErrorNotice, Pill, TaskPill, Toggle } from "./ui";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
@@ -151,6 +152,7 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
 export const ChainRow = ({
   step, here, pending, blockedBy, heldLayer, repairCycles = [], repairLoading = false,
   repairError = null, onReloadRepairActivities, onStart,
+  onToggleGate,
 }: {
   step: ChainStep;
   here: boolean;
@@ -162,12 +164,23 @@ export const ChainRow = ({
   repairError?: string | null;
   onReloadRepairActivities?: () => void;
   onStart: (step: ChainStep) => void;
+  onToggleGate?: (taskId: string, next: boolean) => void;
 }): ReactNode => {
   const t = useT();
   const blockedOn = step.blockedOn;
   const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
   const held = step.holdRefusal !== null;
   const showStart = step.startAction !== null || blockedOn !== null || held;
+  const isGateSlot = step.gateSlot !== null && step.gateSlot !== undefined;
+  const gateToggleDisabledReason = isGateSlot && step.status !== "TODO"
+    ? gateToggleRefusal(step.gateSlot, step.status)
+    : null;
+  const gateToggleLabel = step.gateSlot === "spec"
+    ? t("chain.gate.specification")
+    : t("chain.gate.merge");
+  const gateToggleChange = step.status === "TODO" && onToggleGate !== undefined
+    ? { onChange: (next: boolean) => onToggleGate(step.taskId, next) }
+    : {};
   return (
     <div data-chain-node={step.taskId} className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
       <span className={STEP_POSITION}>{step.position}</span>
@@ -195,7 +208,17 @@ export const ChainRow = ({
         ) : null}
       </span>
       <ExecutionOwnerChip step={step} />
-      {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
+      {isGateSlot ? (
+        <Toggle
+          on={step.approvalGate}
+          {...gateToggleChange}
+          disabled={pending || step.status !== "TODO"}
+          label={gateToggleLabel}
+          title={gateToggleDisabledReason ?? t(GATE_TITLE_KEY)}
+        />
+      ) : step.approvalGate ? (
+        <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span>
+      ) : null}
       <TaskPill status={step.status} />
       {step.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
       {showStart ? (
@@ -224,6 +247,7 @@ export const ChainRow = ({
 export const ChainList = ({
   chain, taskId, pending, regressionTaskId, repairActivities, repairActivitiesLoading = false,
   repairActivitiesError = null, onReloadRepairActivities, onStart, onControl,
+  onToggleGate,
 }: {
   chain: Chain;
   taskId: string;
@@ -235,6 +259,7 @@ export const ChainList = ({
   onReloadRepairActivities?: () => void;
   onStart: (step: ChainStep) => void;
   onControl?: () => void;
+  onToggleGate?: (taskId: string, next: boolean) => void;
 }): ReactNode => {
   const [all, setAll] = useState(false);
   const t = useT();
@@ -293,6 +318,7 @@ export const ChainList = ({
               repairError={step.taskId === regressionTaskId ? repairActivitiesError : null}
               {...(onReloadRepairActivities ? { onReloadRepairActivities } : {})}
               onStart={onStart}
+              {...(onToggleGate ? { onToggleGate } : {})}
             />
           ))}
         </section>

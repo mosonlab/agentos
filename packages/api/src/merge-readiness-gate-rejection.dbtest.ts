@@ -91,17 +91,29 @@ test("Inbox rejection abandons the merge tail without activating or mutating Git
   }), 0);
 });
 
-test("a merge gate rejection is terminal, while no integrator run can be created afterwards", async () => {
+test("task PATCH rejection shares the terminal merge-gate disposition", async () => {
   const { chain, card } = await openMergeGate();
   assert.ok(chain.readinessTask);
   assert.ok(chain.integratorTask);
-  await reject(card.id, "merge-gate-reject-terminal");
 
-  const replay = await patchTask(db, chain.readinessTask.id, { status: TaskStatus.DONE });
-  assert.ok("task" in replay);
-  assert.equal(replay.task.status, TaskStatus.DONE);
+  const patched = await patchTask(db, chain.readinessTask.id, { status: TaskStatus.TODO });
+  assert.ok("task" in patched, JSON.stringify(patched));
+  assert.equal(patched.task.status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask.id } })).status, TaskStatus.DONE);
+  const answered = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
+  assert.equal(answered.status, "ANSWERED");
+  assert.equal(answered.selectedChoiceId, "reject");
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask.id } }), 0);
-  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: chain.integratorTask.id } })).kind, "merge-result");
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: chain.integratorTask.id } });
+  assert.equal(output.kind, "merge-result");
+  assert.match(output.body, /merge gate rejection/iu);
+  assert.ok(await db.taskActivity.findFirst({
+    where: { taskId: chain.readinessTask.id, actorType: "operator", body: { contains: "merge chain abandoned" } },
+  }));
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: chain.readinessTask.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } },
+  }), 0);
 });
 
 test("the rejection helper refuses an already-active merge execution run", async () => {

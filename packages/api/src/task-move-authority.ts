@@ -18,6 +18,9 @@ export type TaskMoveFacts = {
    *  allowed for a chained AGENT task. The route still supplies the active-run
    *  and predecessor facts under the Task/Chain mutex. */
   mergeGateApproval?: boolean;
+  /** A merge-gate card rejection is the operator-owned REVIEW -> TODO command
+   *  whose shared disposition terminates the merge tail instead of requeueing. */
+  mergeGateRejection?: boolean;
 };
 
 export type TaskMoveAuthority = {
@@ -42,6 +45,7 @@ const ownershipRefusal = (task: TaskMoveFacts, next: TaskStatusType): string | n
   if (next === task.status) return null;
   if (task.assigneeType === AssigneeType.HUMAN && next === TaskStatus.DONE) return null;
   if (task.mergeGateApproval === true && task.chainId !== null && next === TaskStatus.DONE) return null;
+  if (task.mergeGateRejection === true && task.chainId !== null && next === TaskStatus.TODO) return null;
   if (task.chainId !== null) return "Chain task statuses are controlled by chain execution";
   const queueTransition = (
     (task.status === TaskStatus.BACKLOG && next === TaskStatus.TODO)

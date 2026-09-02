@@ -41,6 +41,11 @@
       "development": "./src/chain-hold.ts",
       "import": "./dist/chain-hold.js"
     },
+    "./gate-toggle": {
+      "types": "./src/gate-toggle.ts",
+      "development": "./src/gate-toggle.ts",
+      "import": "./dist/gate-toggle.js"
+    },
     "./wire-contract": {
       "types": "./src/wire-contract.ts",
       "development": "./src/wire-contract.ts",

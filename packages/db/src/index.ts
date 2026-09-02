@@ -22,6 +22,7 @@ export * from "./merge-integrator-db.js";
 export * from "./merge-tail.js";
 export * from "./gate-slot.js";
 export * from "./merge-gate.js";
+export * from "./gate-toggle.js";
 export * from "./merge-tail-markers.js";
 export * from "./merge-lease-ledger.js";
 export {
@@ -32,6 +33,7 @@ export {
   lockAgentRows,
   lockChainRows,
   lockChainStructure,
+  lockProjectGateDefaults,
   lockRunRow,
   lockTemplateRow,
   lockTemplateStepRows,
