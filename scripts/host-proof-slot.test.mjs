@@ -483,6 +483,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "/bin/sh -c 'tsc -b && vite build'",
         typecheck: "tsc -b --pretty false",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --conditions=development --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
       },
       hooks: {},
@@ -492,6 +493,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "/bin/sh -c 'tsc -p tsconfig.json && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "node --conditions=development --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
         "test:db": "node --conditions=development --import tsx scripts/dbtest.mjs",
       },
@@ -499,7 +501,10 @@ test("all workspace proof manifests are wrapped exactly once without changing co
     },
     "packages/build-info/package.json": {
       name: "@anneal/build-info",
-      scripts: { test: "node --conditions=development --test *.test.mjs" },
+      scripts: {
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
+        test: "node --conditions=development --test *.test.mjs",
+      },
       hooks: {},
     },
     "packages/db/package.json": {
@@ -507,6 +512,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "/bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "node --conditions=development --import tsx --test prisma/*.test.ts src/*.test.ts",
         "test:db": "node --conditions=development --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
       },
@@ -517,6 +523,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
       hooks: {},
@@ -526,6 +533,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
       hooks: {},
@@ -535,6 +543,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "node --conditions=development --import tsx --test src/*.test.ts",
       },
       hooks: {},
@@ -544,6 +553,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       scripts: {
         build: "/bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
+        lint: "/bin/sh -c 'biome lint . && eslint .'",
         test: "node --conditions=development --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
       },
       hooks: {},
@@ -555,7 +565,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
   for (const [relativePath, contract] of Object.entries(expected)) {
     const manifest = JSON.parse(readFileSync(join(repositoryRoot, relativePath), "utf8"));
     assert.equal(manifest.name, contract.name);
-    assert.equal("lint" in manifest.scripts, false, `${contract.name} unexpectedly added lint`);
+    assert.equal("lint" in manifest.scripts, true, `${contract.name} is missing lint`);
     if ("start" in manifest.scripts) {
       assert.doesNotMatch(
         manifest.scripts.start,
@@ -579,7 +589,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       assert.equal(manifest.scripts[hookName].includes("host-proof-slot.sh"), false);
     }
   }
-  assert.equal(wrappedCount, 24);
+  assert.equal(wrappedCount, 32);
 });
 
 test("Runner child fixtures keep their audited development-condition counts", () => {
