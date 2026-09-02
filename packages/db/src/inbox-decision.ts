@@ -15,6 +15,11 @@ import { activateChainSuccessor } from "./chain-activation.js";
 import { lockChainRows, lockTaskRow } from "./locks.js";
 import { produceMergeAuthorization } from "./merge-authorization.js";
 import { applyStopAnswer, parseStopQuestionKey, recoverRefreshRequestedConfirmationCard } from "./merge-integrator-db.js";
+import {
+  isGatedMergeReadinessTask,
+  rejectMergeReadinessGate,
+  releaseMergeReadinessGate,
+} from "./merge-gate.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
 import { ArchivedTaskError, WorkflowRefusalError, enqueueTaskRun } from "./run-open.js";
 
@@ -141,7 +146,8 @@ export const applyInboxDecisionTx = async (
       chainId: question.gateTask.chainId,
     });
   }
-  if (gateDecision && question.gateTask && input.decision === "reject") {
+  if (gateDecision && question.gateTask && input.decision === "reject"
+    && !isGatedMergeReadinessTask(question.gateTask)) {
     const readiness = isMergeReadinessStep(question.gateTask.templateStep);
     rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT && !readiness
       ? question.gateTask
@@ -229,6 +235,32 @@ export const applyInboxDecisionTx = async (
 
   if (gateDecision && question.gateTask) {
     if (input.decision === "approve") {
+      if (isGatedMergeReadinessTask(question.gateTask)) {
+        await tx.taskActivity.create({ data: {
+          taskId: question.gateTask.id,
+          actorType: "operator",
+          body: "Approval gate approved",
+        } });
+        // The authorization is intentionally produced before releasing the
+        // readiness task. A missing, malformed, or unattested card rolls the
+        // whole decision back and leaves it OPEN for a fresh decision.
+        const authorization = await produceMergeAuthorization(tx, {
+          card: { id: question.id, body: question.body, gateTaskId: question.gateTaskId },
+          inboxDecisionId: decisionRow.id,
+          channel: "inbox",
+        }, now);
+        if (!authorization || authorization.purpose !== "gate") {
+          throw new WorkflowRefusalError(
+            "conflict",
+            "Merge readiness approval did not produce a gate authorization",
+          );
+        }
+        await releaseMergeReadinessGate(tx, {
+          task: question.gateTask,
+          sourceRunId: question.session.run.id,
+        });
+        return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
+      }
       await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.DONE, failureReason: null } });
       await tx.taskActivity.create({ data: { taskId: question.gateTask.id, actorType: "operator", body: "Approval gate approved" } });
       // §D-P3 Phase C, in the same transaction as the decision row it binds to.
@@ -249,6 +281,13 @@ export const applyInboxDecisionTx = async (
         }, now);
       }
       return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
+    }
+    if (isGatedMergeReadinessTask(question.gateTask)) {
+      await rejectMergeReadinessGate(tx, {
+        task: question.gateTask,
+        choice: input.decision,
+      });
+      return { duplicate: false, resumed: false, gateAction: "rejected", messageId: reply.id };
     }
     // Refusing by throwing rolls the whole transaction back, which leaves the
     // decision OPEN — the human unarchives the step and decides again, instead

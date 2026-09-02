@@ -14,6 +14,10 @@ export type TaskMoveFacts = {
   activeRun: boolean | undefined;
   stopStateRefusal: string | null | undefined;
   chainPredecessor: { name: string } | null;
+  /** A merge-gate card approval is the one operator-owned DONE disposition
+   *  allowed for a chained AGENT task. The route still supplies the active-run
+   *  and predecessor facts under the Task/Chain mutex. */
+  mergeGateApproval?: boolean;
 };
 
 export type TaskMoveAuthority = {
@@ -37,6 +41,7 @@ const liveStatus = (status: TaskStatusType): boolean => (
 const ownershipRefusal = (task: TaskMoveFacts, next: TaskStatusType): string | null => {
   if (next === task.status) return null;
   if (task.assigneeType === AssigneeType.HUMAN && next === TaskStatus.DONE) return null;
+  if (task.mergeGateApproval === true && task.chainId !== null && next === TaskStatus.DONE) return null;
   if (task.chainId !== null) return "Chain task statuses are controlled by chain execution";
   const queueTransition = (
     (task.status === TaskStatus.BACKLOG && next === TaskStatus.TODO)

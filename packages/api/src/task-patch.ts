@@ -6,9 +6,11 @@ import {
   compoundImplementationAssigneeValid,
   InboxStatus,
   integratorBindingRefusalFor,
+  isGatedMergeReadinessTask,
   Prisma,
   type PrismaClient,
   produceMergeAuthorization,
+  releaseMergeReadinessGate,
   ScheduleKind,
   stopStateFor,
   stopStateRefusal,
@@ -113,7 +115,7 @@ export const taskStatusChangedActivity = (
 type StatusWritePlan =
   | Refusal
   | { replay: true }
-  | { gate: GateWinner; previousStatus: TaskStatus };
+  | { gate: GateWinner; previousStatus: TaskStatus; mergeGateApproval: boolean };
 
 type GateWinner = {
   card: { id: string; body: string; gateTaskId: string | null; sessionId: string | null };
@@ -301,6 +303,45 @@ export const patchTask = async (
           ? await hasActiveRun(tx, taskId)
           : false;
         const stopped = statusChanged ? await stopStateFor(tx, taskId) : null;
+        let gate: GateWinner = null;
+        let mergeGateApproval = false;
+        if (nextStatus === TaskStatus.DONE) {
+          // A Human approval has one durable decision identity on both API
+          // channels. The earliest OPEN card is the deterministic winner; the
+          // gate Task lock the module took makes this selection and the Inbox
+          // route's OPEN claim one compare-and-set rather than two competing
+          // decisions. Selecting is a read; the CAS that writes it runs below,
+          // once the module has accepted the status write — a refusal after
+          // the CAS would commit a decision the request was refused.
+          const winningGateCard = await tx.inboxMessage.findFirst({
+            where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: { id: true, body: true, gateTaskId: true, sessionId: true },
+          });
+          if (winningGateCard) {
+            const session = winningGateCard.sessionId
+              ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
+              : null;
+            if (!session?.runId) {
+              return refuse("Gate card has no session run to bind a decision to");
+            }
+            gate = { card: winningGateCard, runId: session.runId };
+            mergeGateApproval = isGatedMergeReadinessTask(locked) && locked.status !== TaskStatus.DONE;
+          } else {
+            // A gate exists but none is OPEN only after another channel won or
+            // this request is a replay. Do not overwrite a concurrent reject
+            // or activate the successor a second time. No decision row is
+            // created on this branch, and no authorization: the SPEC's
+            // fail-closed resolution (missing-authorization) is preserved.
+            const openGates = await tx.inboxMessage.count({
+              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+            });
+            if (openGates === 0) {
+              const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
+              if (decidedGate > 0) return { update: null, activity: null, value: { replay: true as const } };
+            }
+          }
+        }
         let chainPredecessor: { name: string } | null = null;
         if (nextStatus === TaskStatus.DONE && locked.chainId) {
           const chainRows = await tx.task.findMany({
@@ -325,6 +366,7 @@ export const patchTask = async (
           activeRun,
           stopStateRefusal: stopped === null ? null : stopStateRefusal(stopped),
           chainPredecessor,
+          mergeGateApproval,
         });
         const moveRefusal = authority.refusals.find(({ status }) => status === nextStatus);
         if (moveRefusal) return refuse(moveRefusal.message);
@@ -332,53 +374,22 @@ export const patchTask = async (
         if (unresolved) {
           throw new Error(`PATCH move authority left ${unresolved.residue} unresolved under the Task mutex`);
         }
-        let gate: GateWinner = null;
-        if (nextStatus === TaskStatus.DONE) {
-          // A Human approval has one durable decision identity on both API
-          // channels. The earliest OPEN card is the deterministic winner; the
-          // gate Task lock the module took makes this selection and the Inbox
-          // route's OPEN claim one compare-and-set rather than two competing
-          // decisions. Selecting is a read; the CAS that writes it runs below,
-          // once the module has accepted the status write — a refusal after
-          // the CAS would commit a decision the request was refused.
-          const winningGateCard = await tx.inboxMessage.findFirst({
-            where: { gateTaskId: taskId, status: InboxStatus.OPEN },
-            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-            select: { id: true, body: true, gateTaskId: true, sessionId: true },
-          });
-          if (winningGateCard) {
-            const session = winningGateCard.sessionId
-              ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
-              : null;
-            if (!session?.runId) {
-              return refuse("Gate card has no session run to bind a decision to");
-            }
-            gate = { card: winningGateCard, runId: session.runId };
-          } else {
-            // A gate exists but none is OPEN only after another channel won or
-            // this request is a replay. Do not overwrite a concurrent reject
-            // or activate the successor a second time. No decision row is
-            // created on this branch, and no authorization: the SPEC's
-            // fail-closed resolution (missing-authorization) is preserved.
-            //
-            // The OPEN rows are counted rather than inferred from the CAS: the
-            // CAS is a write, and it now runs only once the status write has
-            // been accepted, so the replay decision cannot be taken from it.
-            const openGates = await tx.inboxMessage.count({
-              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
-            });
-            if (openGates === 0) {
-              const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
-              if (decidedGate > 0) return { update: null, activity: null, value: { replay: true as const } };
-            }
-          }
-        }
         return {
-          update: updateData,
-          activity: statusChanged
+          // A merge-gate approval is a decision command, not a request to
+          // write DONE. The shared disposition below moves readiness to TODO
+          // only after exact-card authorization succeeds.
+          update: mergeGateApproval
+            ? (() => {
+              const { status: _status, ...withoutStatus } = updateData;
+              return withoutStatus;
+            })()
+            : updateData,
+          activity: mergeGateApproval
+            ? { actorType: "operator", body: "Approval gate approved" }
+            : statusChanged
             ? taskStatusChangedActivity(locked.status, nextStatus)
             : null,
-          value: { gate, previousStatus: locked.status },
+          value: { gate, previousStatus: locked.status, mergeGateApproval },
         };
       });
       if (!result.ok) return taskWriteRefusal(result.refusal);
@@ -388,6 +399,7 @@ export const patchTask = async (
       // row the gate was already decided on.
       if ("replay" in plan) return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
       const updated = result.written!;
+      let finalTask = updated;
       // This OPEN row is the gate-decision CAS. It deliberately depends on
       // neither templateId nor approvalGate: gate creation records the
       // relationship in gateTaskId, and that is the only authority here.
@@ -418,13 +430,29 @@ export const patchTask = async (
           channel: "patch",
         }, new Date());
       }
-      if (plan.previousStatus !== TaskStatus.DONE
+      if (plan.mergeGateApproval) {
+        if (!plan.gate || authorization?.purpose !== "gate") {
+          throw new Error("Merge readiness approval did not produce a gate authorization");
+        }
+        await releaseMergeReadinessGate(tx, {
+          task: {
+            id: updated.id,
+            projectId: updated.projectId,
+            chainId: updated.chainId,
+            chainIndex: updated.chainIndex,
+            approvalGate: result.task.approvalGate,
+            templateStep: result.task.templateStep,
+          },
+          sourceRunId: plan.gate.runId,
+        });
+        finalTask = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
+      } else if (plan.previousStatus !== TaskStatus.DONE
         && nextStatus === TaskStatus.DONE
         && Boolean(updated.chainId)
         && authorization?.purpose !== "confirmation") {
         await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
       }
-      return { task: updated };
+      return { task: finalTask };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if ("message" in written) return written;
     return { task: written.task };

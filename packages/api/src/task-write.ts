@@ -18,6 +18,7 @@ export type LockedTask = {
   archivedAt: Date | null;
   projectId: string;
   chainId: string | null;
+  approvalGate: boolean;
   dispatchAfterTaskId: string | null;
   dispatchAfter: { name: string; status: TaskStatus } | null;
   assigneeType: AssigneeType;
@@ -35,6 +36,7 @@ export const lockedTaskSelect = {
   archivedAt: true,
   projectId: true,
   chainId: true,
+  approvalGate: true,
   dispatchAfterTaskId: true,
   dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,

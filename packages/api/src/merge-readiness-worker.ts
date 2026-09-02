@@ -11,10 +11,12 @@ import {
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   enqueueTaskRun,
+  isGatedMergeReadinessTask,
   isMergeReadinessStep,
   latestRecordedStop,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
+  requireMergeGateAuthorization,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   recoveryContext,
   resolveChainTarget,
@@ -498,6 +500,34 @@ const authorizeReadinessSettlement = (
     taskId: regression.id,
     at: read.input.now,
     apply: async (tx) => {
+      const currentReadiness = await tx.task.findUniqueOrThrow({
+        where: { id: readiness.id },
+        select: {
+          id: true,
+          projectId: true,
+          chainId: true,
+          chainIndex: true,
+          approvalGate: true,
+          templateStep: {
+            select: {
+              stepIndex: true,
+              outputKind: true,
+              taskTemplate: { select: { name: true } },
+            },
+          },
+        },
+      });
+      // A gated readiness task may be released only by an operator decision
+      // bound to the exact head/base this worker just re-verified. The check is
+      // inside the settlement transaction so a stale approval cannot race the
+      // status transition or manufacture a mechanical authorization path.
+      if (isGatedMergeReadinessTask(currentReadiness)) {
+        await requireMergeGateAuthorization(tx, {
+          taskId: readiness.id,
+          headSha: decision.evidence.headSha,
+          baseSha: decision.evidence.baseSha,
+        });
+      }
       await tx.task.update({
         where: { id: readiness.id },
         data: { status: TaskStatus.DONE, failureReason: null },
