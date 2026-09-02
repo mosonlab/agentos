@@ -593,7 +593,7 @@ const mergeGateScopeFixture = (t) => {
   const invoke = (path) => {
     writeFileSync(
       path,
-      `#!/usr/bin/env bash\nset -eu\nbash '${join(repo, "scripts", "merge-gate.sh")}' --expect-head not-a-full-object-id\n`,
+      `#!/usr/bin/env bash\nset -u\nbash '${join(repo, "scripts", "merge-gate.sh")}' --expect-head not-a-full-object-id &\nchild_pid=$!\nwait "$child_pid"\nchild_status=$?\nexit "$child_status"\n`,
     );
     chmodSync(path, 0o755);
   };
