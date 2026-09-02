@@ -476,6 +476,28 @@ test("a killed holder releases its descriptor, while a live holder is never recl
   assert.equal(waiterResult.stderr, "");
 });
 
+const RUN_TEST_CONCURRENCY_CAP = "${AGENTOS_RUN_ID:+--test-concurrency=2}";
+
+test("the Run-only test concurrency cap expands under a Run and vanishes on the host fast path", async () => {
+  const command = ["/bin/sh", "-c", `printf '%s\\n' --test ${RUN_TEST_CONCURRENCY_CAP} src/*.test.ts`];
+  const slotDirectory = makeSlotDirectory(1);
+  const run = await spawnWrapper({ slotDirectory, slotCount: 1, command }).promise;
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, "--test\n--test-concurrency=2\nsrc/*.test.ts\n");
+
+  const host = spawn("bash", [wrapper, "test", "@anneal/test", "--", ...command], {
+    cwd: repositoryRoot,
+    env: cleanEnvironment({}),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  host.stdout.setEncoding("utf8");
+  host.stdout.on("data", (chunk) => { stdout += chunk; });
+  const status = await new Promise((resolve) => host.once("close", resolve));
+  assert.equal(status, 0);
+  assert.equal(stdout, "--test\nsrc/*.test.ts\n");
+});
+
 test("all workspace proof manifests are wrapped exactly once without changing commands or lifecycle hooks", () => {
   const expected = {
     "apps/web/package.json": {
@@ -484,7 +506,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "/bin/sh -c 'tsc -b && vite build'",
         typecheck: "tsc -b --pretty false",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --conditions=development --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
+        test: "/bin/sh -c 'TSX_TSCONFIG_PATH=tsconfig.app.json node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} \"src/**/*.test.ts\" \"src/**/*.test.tsx\"'",
       },
       hooks: {},
     },
@@ -494,7 +516,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "/bin/sh -c 'tsc -p tsconfig.json && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
+        test: "node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
         "test:db": "node --conditions=development --import tsx scripts/dbtest.mjs",
       },
       hooks: {},
@@ -503,7 +525,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       name: "@anneal/build-info",
       scripts: {
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --test *.test.mjs",
+        test: "node --conditions=development --test ${AGENTOS_RUN_ID:+--test-concurrency=2} *.test.mjs",
       },
       hooks: {},
     },
@@ -513,7 +535,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "tsc -p tsconfig.json",
         typecheck: "/bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --import tsx --test prisma/*.test.ts src/*.test.ts",
+        test: "node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} prisma/*.test.ts src/*.test.ts",
         "test:db": "node --conditions=development --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
       },
       hooks: {},
@@ -524,7 +546,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts",
       },
       hooks: {},
     },
@@ -534,7 +556,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts",
       },
       hooks: {},
     },
@@ -544,7 +566,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "tsc -p tsconfig.json",
         typecheck: "tsc -p tsconfig.json --noEmit",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --import tsx --test src/*.test.ts",
+        test: "node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts",
       },
       hooks: {},
     },
@@ -554,7 +576,7 @@ test("all workspace proof manifests are wrapped exactly once without changing co
         build: "/bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
         typecheck: "tsc -p tsconfig.json --noEmit",
         lint: "/bin/sh -c 'biome lint . && eslint .'",
-        test: "node --conditions=development --import tsx --test src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
+        test: "node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
       },
       hooks: {},
     },
@@ -582,6 +604,11 @@ test("all workspace proof manifests are wrapped exactly once without changing co
       const prefix = `bash ../../scripts/host-proof-slot.sh ${scriptName} ${contract.name} -- `;
       assert.equal(manifest.scripts[scriptName], `${prefix}${innerCommand}`);
       assert.equal(manifest.scripts[scriptName].split("scripts/host-proof-slot.sh").length - 1, 1);
+      assert.equal(
+        manifest.scripts[scriptName].split(RUN_TEST_CONCURRENCY_CAP).length - 1,
+        scriptName === "test" ? 1 : 0,
+        `${contract.name} ${scriptName} must carry the Run-only test concurrency cap exactly when it is the unit test script`,
+      );
       wrappedCount += 1;
     }
     for (const [hookName, command] of Object.entries(contract.hooks)) {
