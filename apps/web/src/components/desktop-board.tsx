@@ -1,6 +1,6 @@
 import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, type ParkedChain, clampScroll, columnStep, edgeState, normalizeBoardEntries, parkedChains, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, type HoldableChain, type ParkedChain, clampScroll, columnStep, edgeState, heldChains, normalizeBoardEntries, parkedChains, sameEdges, scrollKey, storedScroll } from "../lib/board";
 import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
@@ -66,7 +66,7 @@ export { CARD_PAGE_SIZE };
 /** One board column, extracted so its rules — the head, the two head-action
  *  presence rules and the empty-state drop invitation — can be asserted from
  *  rendered markup rather than from the page's source text. */
-export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, onActivateAll, actions, aggregateActions }: {
+export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, onActivateAll, onHoldAll, actions, aggregateActions }: {
   column: { status: TaskStatus; labelKey: string };
   tasks: readonly (BoardEntry | BoardTask)[];
   loading: boolean;
@@ -76,6 +76,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   onDrop: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
   onActivateAll: (chains: readonly ParkedChain[]) => void;
+  onHoldAll?: ((chains: readonly HoldableChain[]) => void) | undefined;
   actions: CardActions;
   aggregateActions?: ChainAggregateActions | undefined;
 }): ReactNode => {
@@ -87,6 +88,9 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   // parked chains is started from the column head instead of card by card, and
   // a button that would activate nothing is not offered.
   const parked = column.status === "TODO" ? parkedChains(visibleEntries) : [];
+  // Doing's counterpart: a hold wave asks the control plane to stop each
+  // chain after its current layer. No active Run is cancelled by this action.
+  const holdable = column.status === "DOING" ? heldChains(visibleEntries) : [];
   const headAction = column.status === "DONE" && entries.length > 0
     ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
         {t("tasks.archiveAll")}
@@ -95,6 +99,10 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
       ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => onActivateAll(parked)}>
           {t("tasks.activateAll")}
         </Button>
+      : holdable.length > 0
+        ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => onHoldAll?.(holdable)}>
+            {t("tasks.holdAll")}
+          </Button>
       : null;
   return <div className={COLUMN}>
     <div className={COLUMN_HEAD}>
@@ -217,7 +225,7 @@ export const dragEdgeStep = (clientX: number, box: { left: number; right: number
     : box.right - clientX < DRAG_EDGE_PX ? DRAG_STEP_PX
       : 0);
 
-export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove, onArchiveDone, onActivateAll, actions, aggregateActions, boardRef, projectId }: {
+export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove, onArchiveDone, onActivateAll, onHoldAll, actions, aggregateActions, boardRef, projectId }: {
   byStatus: Map<TaskStatus, BoardEntry[]>;
   loading: boolean;
   dragOver: TaskStatus | null;
@@ -225,6 +233,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
   onMove: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
   onActivateAll: (chains: readonly ParkedChain[]) => void;
+  onHoldAll?: ((chains: readonly HoldableChain[]) => void) | undefined;
   actions: CardActions;
   aggregateActions?: ChainAggregateActions | undefined;
   boardRef: React.RefObject<HTMLDivElement | null>;
@@ -358,6 +367,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
                 onDrop={(taskId, status) => { setDragOver(null); stopEdgeScroll(); onMove(taskId, status); }}
                 onArchiveDone={onArchiveDone}
                 onActivateAll={onActivateAll}
+                onHoldAll={onHoldAll}
                 actions={actions}
                 aggregateActions={aggregateActions}
               />
