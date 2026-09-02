@@ -21,6 +21,7 @@ type Fixture = {
   leaseLog: string;
   gateLog: string;
   argvLog: string;
+  fetchLog: string;
 };
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, {
@@ -69,7 +70,23 @@ const fixture = (): Fixture => {
   const leaseLog = join(root, "lease.log");
   const gateLog = join(root, "gate.log");
   const argvLog = join(root, "argv.log");
-  for (const path of [leaseLog, gateLog, argvLog]) writeFileSync(path, "");
+  const fetchLog = join(root, "fetch.log");
+  for (const path of [leaseLog, gateLog, argvLog, fetchLog]) writeFileSync(path, "");
+  // Pass-through unless a test asks for failures, so every other case still
+  // reaches real git. `git fetch` is the only reachable transient network call
+  // in this script, and it is what the retry budget exists for.
+  executable(join(bin, "git"), `#!/bin/sh
+if [ "$1" = "fetch" ] && [ "${"$"}{REGRESSION_FIXTURE_FETCH_FAILURES:-0}" -gt 0 ]; then
+  attempt="$(wc -l < "$REGRESSION_FIXTURE_FETCH_LOG" | tr -d ' ')"
+  attempt=$((attempt + 1))
+  printf '%s\\n' "$attempt" >> "$REGRESSION_FIXTURE_FETCH_LOG"
+  if [ "$attempt" -le "$REGRESSION_FIXTURE_FETCH_FAILURES" ]; then
+    printf 'fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443\\n' >&2
+    exit 128
+  fi
+fi
+exec "$REGRESSION_FIXTURE_GIT" "$@"
+`);
   executable(join(bin, "node"), `#!/bin/sh
 printf 'node %s\\n' "$*" >> "$REGRESSION_FIXTURE_ARGV_LOG"
 exec "$REGRESSION_FIXTURE_NODE" "$@"
@@ -95,7 +112,7 @@ exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
     if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/u.test(name)) delete inheritedEnvironment[name];
   }
   return {
-    root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog,
+    root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog, fetchLog,
     env: {
       ...inheritedEnvironment,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -108,6 +125,8 @@ exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
       REGRESSION_FIXTURE_LEASE_LOG: leaseLog,
       REGRESSION_FIXTURE_GATE_LOG: gateLog,
       REGRESSION_FIXTURE_ARGV_LOG: argvLog,
+      REGRESSION_FIXTURE_FETCH_LOG: fetchLog,
+      REGRESSION_FIXTURE_GIT: execFileSync("/usr/bin/env", ["sh", "-c", "command -v git"], { encoding: "utf8" }).trim(),
       REGRESSION_FIXTURE_NODE: process.execPath,
       GIT_AUTHOR_NAME: "regression-fixture",
       GIT_AUTHOR_EMAIL: "regression@example.invalid",
@@ -240,7 +259,8 @@ test("an unreachable target fails prepare and finalize without persisting output
   git(prepareFixture.work, "remote", "set-url", "origin", join(prepareFixture.root, "missing.git"));
   const prepared = run(prepareFixture, "prepare");
   assert.notEqual(prepared.status, 0);
-  assert.match(prepared.stderr, /target fetch failed after 3 attempts/u);
+  assert.match(prepared.stderr, /target fetch failed \(exit \d+\): .*does not appear to be a git repository/su);
+  assert.doesNotMatch(prepared.stderr, /retrying attempt/u);
   assert.doesNotMatch(prepared.stdout, /refresh-conflict/u);
   assert.equal(existsSync(prepareFixture.output), false);
 
@@ -249,9 +269,28 @@ test("an unreachable target fails prepare and finalize without persisting output
   git(finalizeFixture.work, "remote", "set-url", "origin", join(finalizeFixture.root, "missing.git"));
   const finalized = run(finalizeFixture, "finalize");
   assert.notEqual(finalized.status, 0);
-  assert.match(finalized.stderr, /target fetch failed after 3 attempts/u);
+  assert.match(finalized.stderr, /target fetch failed \(exit \d+\): .*does not appear to be a git repository/su);
   assert.doesNotMatch(finalized.stdout, /refresh-conflict/u);
   assert.equal(existsSync(finalizeFixture.output), false);
+});
+
+test("a transient target fetch failure is retried instead of failing the Run", () => {
+  const seeded = fixture();
+  seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "3";
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0);
+  assert.match(prepared.stdout, /REGRESSION PREPARE: ready/u);
+  assert.match(prepared.stderr, /retrying attempt=4\/6/u);
+  assert.equal(readFileSync(seeded.fetchLog, "utf8").trim().split("\n").length, 4);
+});
+
+test("a transient target fetch failure that outlasts the budget reports the git error", () => {
+  const seeded = fixture();
+  seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "6";
+  const prepared = run(seeded, "prepare");
+  assert.notEqual(prepared.status, 0);
+  assert.match(prepared.stderr, /target fetch failed after 6 attempts: .*SSL_ERROR_SYSCALL/u);
+  assert.equal(existsSync(seeded.output), false);
 });
 
 test("finalize refreshes drift outside the lease and requires semantic recheck", () => {
