@@ -4,21 +4,21 @@ Load-bearing decisions of the slice decomposition. The spec's own decisions
 (D1-D13, A1-A6 in `spec.md`) are inherited, not restated; each entry below is a
 planning choice this slice set makes on top of them.
 
-## P1: Two prefactor slices, both unblocked
+## P1: Slot identity is a visible read vertical; the fixture belongs to gate opening
 
-Chosen: cut the shared `gateSlotOf` helper (slice 01) and the gated-readiness
-fixture option (slice 02) as standalone prefactor slices with empty
-`blocked_by`, before any behaviour slice.
+Chosen: slice 01 combines the shared `gateSlotOf` authority with the
+`ChainStep.gateSlot` contract, chain-read projection, and API proof. The
+gated-readiness fixture option is part of slice 07, the first production
+behaviour that consumes it. Slice 02 is removed, and slice 07 is unblocked.
 
-Rejected: folding the helper into the first slice that needs it (05 or 06), and
-folding the fixture option into the first merge-gate test (07).
+Rejected: standalone helper and test-fixture prefactor slices.
 
-Reason: three behaviour slices (05, 06, and the chain read shape) consume the
-helper and three (07, 08, 09) consume the fixture. Extracting them first means
-those consumers start from a green, tested primitive instead of each racing to
-create it, and it removes the only file-level coupling that would otherwise
-force 05 and 06 to serialise. This is the "make the change easy" step; both
-prefactors are small enough to verify in isolation.
+Reason: the chain-read projection gives slice 01 an independently demonstrable
+operator/API result, while a test-only fixture has no independent runtime
+result. Moving the projection out of 05 preserves the 05/06 parallel frontier;
+folding the fixture makes 07 startable immediately and does not deepen the
+critical path, so no behaviour parallelism is lost. This overturns the original
+prefactor decomposition in response to PLR-001.
 
 ## P2: Merge gate split into open (07), approve (08), reject (09)
 
@@ -102,24 +102,43 @@ conflict in the inbox decision module) applies inside this chain.
 
 ## P7: Risk flags
 
-Chosen: `risk: true` on 03 (Prisma migration, persisted schema) and on 07, 08,
-09 (they change the merge tail, whose end action — merging a pull request — is
-irreversible and external).
+Chosen: `risk: true` on 03, 05, 06, 07, 08, 09, and 10. Slice 03 changes the
+persisted schema; 05 changes stored task gates and writes activity rows; 06
+persists resolved gates on dispatched tasks; 10 controls the request that
+determines those persisted values; and 07-09 alter the merge tail whose end
+action is an irreversible external merge. Slices 01 and 04 remain false.
 
-Rejected: flagging 06 (writes `approvalGate` on created tasks) and the
-prefactors.
+Rejected: the earlier narrower interpretation that ordinary persisted task
+writes were non-risky.
 
-Reason: 06 writes ordinary task rows through the existing instantiate
-transaction and creates nothing irreversible; the prefactors are a pure helper
-and test fixture. The flag is reserved for the two surfaces where a defect
-destroys data or merges something a human did not approve.
+Reason: the routing contract's Critical rule covers any work touching persisted
+runtime-created data, not only destructive writes. This overturns the original
+risk decision in response to PLR-002; it changes metadata only and adds no
+dependency.
 
-## P8: Slice numbering and the critical path
+## P8: Slice numbering, requirement ownership, and the critical path
 
-Dependency order: 01-04 unblocked, 05 behind 01, 06 behind 01+03, 07 behind 02,
-08 and 09 behind 07, 10 behind 03+06. Critical path depth is 3
-(02 -> 07 -> 08), with six slices startable at depth <= 1. Every spec
-requirement maps to exactly one slice: stories 1-9 -> 03, 10-20 -> 06 (12-13 ->
-10), 21-28 -> 05, 29-34 -> 06, 35-44 and 50-51 -> 07/08 per P2, 45-49 -> 09,
-52-57 -> 04. Chain-level proof (repository merge gate) stays outside the slice
-set.
+The retained IDs are 01 and 03-10; removed ID 02 is not reused. Slices 01, 03,
+04, and 07 are unblocked; 05 depends on 01; 06 depends on 01+03; 08 and 09
+depend on 07; and 10 depends on 03+06. The initial frontier is four slices, the
+next frontier is four slices, and the longest path is three slices
+(01/03 -> 06 -> 10). Folding 02 into 07 therefore shortens the merge-gate path,
+and moving the chain-read projection to 01 does not serialise 05 and 06.
+
+Every specification requirement has one owning slice:
+
+- D1 and the D10 chain-read contract -> 01.
+- Stories 1-7 plus D2-D3 and the project-default UI surface -> 03.
+- Stories 52-57 and D12 -> 04.
+- Stories 21-28 plus D9 and the chain-toggle UI surface -> 05.
+- Stories 8-11, 14-20, and 29-34 plus D4 -> 06. Stories 8-9 move here from 03;
+  slice 03 proves migration preservation, while 06 owns the runtime
+  non-retroactivity behaviour.
+- Stories 35-37, 44, and 50 plus D5 and the gated-readiness fixture capability
+  -> 07.
+- Stories 38-43 and 51 plus D6-D7 -> 08.
+- Stories 45-49 plus D8 -> 09.
+- Stories 12-13 and the instantiate-dialog UI surface -> 10.
+
+The repository Merge Gate, snapshot scan, and repository-wide proof are
+chain-level evidence and remain outside the slice set.

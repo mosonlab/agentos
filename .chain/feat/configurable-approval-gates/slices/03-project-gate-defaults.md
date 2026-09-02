@@ -1,31 +1,54 @@
 ---
 id: 03-project-gate-defaults
-title: "Project gate defaults: columns, PATCH, read shape, project-page toggles"
+title: "Project gate defaults: persisted settings, API, and project toggles"
 blocked_by: []
 risk: true
 ---
 
-# 03: Project gate defaults: columns, PATCH, read shape, project-page toggles
+# 03: Project gate defaults: persisted settings, API, and project toggles
 
-**What to build:** An operator opens a project's detail page, sees two toggles —
-specification gate default and merge gate default, both off on any existing or
-new project — flips one, and the change persists: the project read shape returns
-it, and any client can also set it by scripting `PATCH /projects/:projectId`.
-This is the full vertical for spec stories 1–7: one Prisma migration adding
-`specGateDefault` and `mergeGateDefault` (`Boolean @default(false)`, per D2 —
-and per D2/A2 the migration does **not** touch `RELEASE_CANDIDATE_MIGRATIONS`),
-the two booleans on the `Project` wire contract and the PATCH input schema
-(patch only, not create — A6), and the two instant-PATCH `Toggle` controls on
-the project detail page following the existing task approval-gate toggle
-pattern (D11), with strings in both locales.
+**What to build:** Give every project two independent boolean defaults for the
+specification and merge gate, both false unless changed. Deliver the additive
+schema migration, shared project read contract, project PATCH validation and
+round-trip, and two instant-save controls on project detail with complete
+English and Chinese copy. Project creation continues to rely on database
+defaults; the create input is not widened. Per the specification’s migration
+decision, the new migration sorts after the recorded release candidate tail and
+does not change the release-candidate migration pin.
 
-Nothing reads these defaults yet; slice 06 consumes them at instantiation.
+The upgrade proof must stage the real migration history immediately before this
+feature, seed an existing project and chain with explicit stored gate values,
+apply this migration through the real deploy path, and inspect the upgraded
+rows. Runtime consumption of the project defaults belongs to slice 06.
 
 **Blocked by:** None (can start immediately)
 
-- [ ] The migration applies on a fresh database and on a database already at head (verified by the migration workflow the repository's existing migrations use), and an existing project row reads false for both columns afterwards.
-- [ ] A dbtest through the real API entrypoint over HTTP (spawned via the test startup environment helper) shows `PATCH /projects/:projectId` round-tripping each boolean independently, and `GET` of the project list and the single project returning both fields, with a fresh project reading false/false.
-- [ ] `PATCH /projects/:projectId` with neither field supplied leaves both values unchanged.
-- [ ] A new `apps/web` test renders the project detail with both toggles reflecting the fetched values, and clicking one issues a PATCH carrying only the changed field (asserted via the existing fetch-installing web test harness).
-- [ ] Both toggle labels exist in the `en` and `zh` locale files; the i18n sweep test passes.
-- [ ] Typecheck of `@anneal/db`, `@anneal/api`, and `apps/web` passes; `npm run lint` passes on the touched files.
+## Acceptance
+
+- [ ] A fresh migrated database gives a newly created project false for both
+  defaults, and project list and detail reads through the real API entrypoint
+  return both fields.
+- [ ] Applying the migration to the immediately preceding migration tail gives
+  an existing project non-null false defaults while preserving every stored
+  `approvalGate` value on its existing chain tasks.
+- [ ] Project PATCH round-trips either default independently; omitting a field
+  preserves it, and changing one never changes the other.
+- [ ] Project detail renders both fetched values as toggles; changing one sends
+  only that field and reloads the persisted result.
+- [ ] Both toggle labels are present in English and Chinese.
+
+## Verification
+
+- New focused upgrade dbtest: `packages/api/src/project-gate-defaults-migration.dbtest.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:db -w @anneal/api -- src/project-gate-defaults-migration.dbtest.ts`
+- New fresh-schema/HTTP dbtest, starting the real API through the repository's
+  test startup environment helper: `packages/api/src/project-gate-defaults.dbtest.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:db -w @anneal/api -- src/project-gate-defaults.dbtest.ts`
+- New web test: `apps/web/src/tests/project-gate-defaults.test.tsx` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" TSX_TSCONFIG_PATH=apps/web/tsconfig.app.json node --conditions=development --import tsx --test apps/web/src/tests/project-gate-defaults.test.tsx`
+- Existing locale sweep: `apps/web/src/tests/i18n-sweep.test.tsx` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" TSX_TSCONFIG_PATH=apps/web/tsconfig.app.json node --conditions=development --import tsx --test apps/web/src/tests/i18n-sweep.test.tsx`
+- Scoped controls: `npm run typecheck -w @anneal/db`,
+  `npm run typecheck -w @anneal/api`, `npm run typecheck -w @anneal/web`,
+  `npm run lint -w @anneal/db`, `npm run lint -w @anneal/api`, and
+  `npm run lint -w @anneal/web`.

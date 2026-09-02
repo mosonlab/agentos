@@ -1,32 +1,39 @@
 ---
 id: 09-merge-gate-rejection
-title: "Merge gate rejection ends the chain with the pull request left open"
+title: "Merge gate rejection ends the chain and leaves the pull request open"
 blocked_by: [07-merge-gate-opens]
 risk: true
 ---
 
-# 09: Merge gate rejection ends the chain with the pull request left open
+# 09: Merge gate rejection ends the chain and leaves the pull request open
 
-**What to build:** Rejecting the merge evidence card means "do not merge this,
-ever, on this chain" — not "try again". The merge execution task is never
-activated and no merge run opens; every still-OPEN Inbox card on the integrator
-task is closed so the aggregate card can be archived; a merge-result step output
-on the integrator task records that the chain was abandoned without a merge at
-the operator's rejection, and the integrator task closes terminal (DONE, no
-failure reason); the readiness task closes with an operator-actor activity
-naming the rejection; the pull request stays open and unmerged, with nothing in
-the path touching GitHub. The rejection disposition replaces, for merge-slot
-gates only, the existing redo-target search that would loop the chain back to
-regression; the specification slot's reject path is untouched. Spec stories
-45–49, decision D8, reusing the existing chain-abandonment disposition the
-operator-closed integrator path already implements.
-
-Like approval, rejection must behave identically through the Inbox decision
-channel and the task PATCH decision channel.
+**What to build:** Make rejection at the merge slot terminal rather than a
+request to redo regression. Reuse the existing chain-abandonment disposition:
+never activate merge execution, close its open Inbox cards, record an abandoned
+merge result, close the integrator terminal, and record the operator rejection
+on readiness. The pull request remains open and the path performs no GitHub
+mutation. Specification-gate rejection continues to requeue specification.
+Inbox and task-PATCH decisions must share the same merge-slot disposition.
 
 **Blocked by:** 07-merge-gate-opens
 
-- [ ] A dbtest (seam: the extended fixture plus the production decision entry points, run by named file) shows rejection through the Inbox channel ending with: the merge execution task never activated and owning no run, the integrator task DONE with a null failure reason and a merge-result step output recording abandonment at the operator's rejection, no OPEN Inbox card remaining on the integrator task, the readiness task closed with an operator-actor activity naming the rejection, and no call into GitHub made by the path.
-- [ ] The same rejection scenario run through the task PATCH decision channel produces the identical end state.
-- [ ] The dbtest asserts the absence of looping: after rejection, the regression task is not requeued and no readiness gate card reopens.
-- [ ] Typecheck of `@anneal/db` and `@anneal/api` passes; `npm run lint` passes on touched files.
+## Acceptance
+
+- [ ] Inbox rejection leaves merge execution never activated and with no run,
+  closes the integrator terminal with a merge result naming operator
+  abandonment, closes its remaining open cards, records the readiness rejection,
+  and makes no GitHub call.
+- [ ] Task-PATCH rejection produces the identical terminal state.
+- [ ] Regression is not requeued, readiness does not reopen, and the pull
+  request remains open and unmerged.
+- [ ] The same decision-surface scenario contrasts the new terminal merge-slot
+  result with a specification-slot rejection that still requeues specification
+  and consumes ordinary run budget.
+
+## Verification
+
+- New dbtest: `packages/api/src/merge-readiness-gate-rejection.dbtest.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:db -w @anneal/api -- src/merge-readiness-gate-rejection.dbtest.ts`
+- Scoped controls: `npm run typecheck -w @anneal/db`,
+  `npm run typecheck -w @anneal/api`, `npm run lint -w @anneal/db`, and
+  `npm run lint -w @anneal/api`.

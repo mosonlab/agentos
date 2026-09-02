@@ -1,35 +1,52 @@
 ---
 id: 05-todo-slot-toggle
-title: "TODO-slot gate toggle: PATCH rule, chain read shape, chain view toggle"
+title: "TODO-slot gate toggle through task PATCH and chain view"
 blocked_by: [01-gate-slot-helper]
-risk: false
+risk: true
 ---
 
-# 05: TODO-slot gate toggle: PATCH rule, chain read shape, chain view toggle
+# 05: TODO-slot gate toggle through task PATCH and chain view
 
-**What to build:** After dispatch, an operator looking at a chain in the task
-detail view sees each gate slot's current `approvalGate` as a toggle. While the
-slot task is still TODO the toggle works: flipping it patches the task, the
-change lands, and an operator-actor activity row records who changed what. Once
-the slot task is DOING, REVIEW, or DONE the toggle is disabled with the refusal
-reason shown; the API refuses the same attempt with 409 and a message naming the
-state. Any other chain task keeps refusing `approvalGate` changes (409, reason
-naming the non-slot cause), and a non-chain task's gate toggle keeps working
-exactly as today. Spec stories 21–28, decisions D9–D10 plus the chain-view
-surface of D11.
+**What to build:** Let an operator change `approvalGate` on either gate-slot
+task only while its stored status is TODO. The write path re-reads status under
+the task-row mutex, persists the new value, and records an operator activity
+naming the slot and value. A non-slot chain task remains forbidden; a slot in
+DOING, REVIEW, or DONE is refused with 409 and its actual state. Standalone task
+behaviour remains unchanged.
 
-The vertical: `patchTask`'s preflight becomes conditional on `gateSlotOf` and
-TODO status, with the status re-read under the Task-row mutex so a concurrent
-state change loses the race; the chain read shape (`ChainStep`) gains
-`gateSlot: "spec" | "merge" | null`; the chain list row renders a toggle in
-place of the static lock icon for slot steps only, enabled iff the step is
-TODO, wired to the task PATCH by the task detail page; the refusal message text
-is shared between server and disabled-toggle reason so they cannot drift.
+In chain detail, each slot uses the `gateSlot` projection from slice 01 to show
+its current value as a toggle. It is enabled only in TODO and otherwise disabled
+with the same state-specific reason the server returns. Non-slot rows retain
+their current rendering, and the standalone task editor remains the only editor
+for a non-chain task.
 
 **Blocked by:** 01-gate-slot-helper
 
-- [ ] `patchTask` tests (unit and dbtest, run by named file) show: an `approvalGate` change accepted on a TODO spec-slot task and on a TODO merge-slot task, each writing the value and an operator-actor `TaskActivity` naming the slot and the new value; 409 with a message naming the state on a DOING slot task; 409 on a REVIEW and a DONE slot task; 409 with the non-slot reason on a chain task that is not a gate slot; a non-chain task's `approvalGate` patch unchanged from today.
-- [ ] A dbtest shows the race guard: a slot task that leaves TODO between the preflight read and the locked write is refused, not patched.
-- [ ] The chain read shape returns `gateSlot` as `"spec"` for the specification step, `"merge"` for the merge readiness step, and `null` for every other step, asserted where the existing board-contract read shape is tested.
-- [ ] An `apps/web` test renders the chain list with a slot step in TODO showing an enabled toggle and a slot step in DOING showing a disabled toggle whose title carries the shared refusal reason; a non-slot step keeps today's rendering. Clicking the enabled toggle issues the task PATCH (asserted via the existing web test harness).
-- [ ] New strings exist in both locales; the i18n sweep test passes; typecheck of `@anneal/db`, `@anneal/api`, and `apps/web` passes; `npm run lint` passes on touched files.
+## Acceptance
+
+- [ ] A table-driven PATCH scenario shows both TODO slot types newly accepting
+  on/off changes with operator activity while the standalone-task row in the
+  same scenario keeps its existing gate-edit behaviour.
+- [ ] A slot in each of DOING, REVIEW, and DONE returns 409 naming that state;
+  a non-slot chain task returns 409 naming the slot restriction.
+- [ ] A slot that passes the initial TODO eligibility check but leaves TODO
+  before the locked re-read receives a state-named 409 and is not patched.
+- [ ] Chain detail renders the current value for both slot types, enables only a
+  TODO slot, displays the shared refusal reason on a disabled slot, sends the
+  task PATCH when changed, and preserves the non-slot row rendering in that same
+  feature scenario.
+
+## Verification
+
+- Existing API unit test extended: `packages/api/src/task-patch.test.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" node --conditions=development --import tsx --test packages/api/src/task-patch.test.ts`
+- Existing API dbtest extended: `packages/api/src/task-patch.dbtest.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:db -w @anneal/api -- src/task-patch.dbtest.ts`
+- Existing chain-view test extended: `apps/web/src/tests/chain-list.test.tsx` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" TSX_TSCONFIG_PATH=apps/web/tsconfig.app.json node --conditions=development --import tsx --test apps/web/src/tests/chain-list.test.tsx`
+- Existing locale sweep: `apps/web/src/tests/i18n-sweep.test.tsx` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" TSX_TSCONFIG_PATH=apps/web/tsconfig.app.json node --conditions=development --import tsx --test apps/web/src/tests/i18n-sweep.test.tsx`
+- Scoped controls: `npm run typecheck -w @anneal/db`,
+  `npm run typecheck -w @anneal/api`, `npm run typecheck -w @anneal/web`,
+  `npm run lint -w @anneal/db`, `npm run lint -w @anneal/api`, and
+  `npm run lint -w @anneal/web`.

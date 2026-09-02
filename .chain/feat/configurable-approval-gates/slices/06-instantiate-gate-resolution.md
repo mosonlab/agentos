@@ -1,35 +1,53 @@
 ---
 id: 06-instantiate-gate-resolution
-title: "Instantiate gate resolution, refusals, and the spec gate end to end"
+title: "Instantiate gate resolution, non-retroactivity, refusals, and spec gate"
 blocked_by: [01-gate-slot-helper, 03-project-gate-defaults]
-risk: false
+risk: true
 ---
 
-# 06: Instantiate gate resolution, refusals, and the spec gate end to end
+# 06: Instantiate gate resolution, non-retroactivity, refusals, and spec gate
 
-**What to build:** Dispatching a chain now respects gates. An operator (or API
-client) instantiates a template with an optional `gates` object
-(`{ spec?: boolean; merge?: boolean }`); each slot's `approvalGate` on the
-created task resolves as dispatch override, then project default, then the
-template step's frontmatter value — "present" including an explicit `false` —
-and every non-slot step keeps its frontmatter value unconditionally. The project
-row is read inside the chain-materialising transaction. Supplying `gates.spec`
-for a template without a specification step, or `gates.merge` for one without a
-merge readiness step, returns 400 with a named refusal (two new instantiation
-refusal codes wired through the existing exhaustive `refusalResponse` switch)
-before any task is created; when both are wrong, the spec slot is named first.
-Spec stories 10–11 and 14–20, decision D4.
+**What to build:** Accept an optional strict `gates` object at instantiation and
+persist each slot’s gate from exactly dispatch override, project default, then
+template frontmatter; explicit false counts as present. Every non-slot keeps its
+frontmatter value. Resolve the project row in the chain-creation transaction.
+Refuse a supplied gate for a missing slot before creating any task, with a named
+400 reason identifying slot and template; when both are invalid, report the
+specification slot first.
 
-The slice is demoable end to end through the specification gate, which needs no
-new runtime machinery (stories 29–34 ride existing `approvalGate` behaviour):
-dispatch a compound chain with the spec gate on, complete the spec step, and the
-task moves to REVIEW with an Inbox card carrying the spec preview; approval
-activates the plan step, rejection requeues the spec step consuming run budget.
+Prove the persisted snapshot is non-retroactive: a later project-default change
+must never alter tasks in an existing chain. Demonstrate the specification gate
+only through chains instantiated by this new resolver, so its REVIEW card,
+approve, reject, budget, and ungated controls cannot pass on the frozen base by
+relying on manually seeded approval metadata.
 
 **Blocked by:** 01-gate-slot-helper, 03-project-gate-defaults
 
-- [ ] An instantiate dbtest (seam: `instantiateTemplate`, run by named file) covers the spec's eight-row matrix on the compound template — asserting `approvalGate` on the specification and merge readiness steps and false on every other step in every row — plus the two "override present and equal to the default" rows.
-- [ ] The same seam shows the direct template resolving the merge slot only (its readiness step follows the same three-tier order; no other step is affected), `gates.spec` on the direct template refused with the spec-slot-absent code, and both refusals on the pull-request template, with messages naming the slot and the template; no task exists after a refusal.
-- [ ] The 400 mapping for both new refusal codes is asserted at the existing `refusalResponse` unit surface, and the zod input schema rejects unknown keys inside `gates`.
-- [ ] A dbtest drives a gated specification step through its lifecycle: completion parks it in REVIEW with an OPEN card carrying the spec preview; approval marks it DONE and activates the plan step; rejection requeues the spec step with run budget consumed; and an ungated spec step behaves exactly as today.
-- [ ] Typecheck of `@anneal/api` (and `@anneal/db` if touched) passes; `npm run lint` passes on touched files.
+## Acceptance
+
+- [ ] The compound template passes the specification’s eight-row defaults and
+  override matrix plus both present-and-equal controls; only its specification
+  and readiness slots vary and every other step remains false.
+- [ ] The direct template resolves only its readiness slot; its specification
+  override is refused. A template with neither slot refuses either supplied key.
+  Each 400 names the slot and template, and no partial chain is created.
+- [ ] Unknown keys inside `gates` are rejected, explicit false overrides true,
+  and both new refusal codes map to HTTP 400.
+- [ ] Chain A instantiated with false defaults retains every stored gate after
+  the project defaults are patched true; chain B instantiated afterwards takes
+  the new defaults. No chain read dynamically substitutes current project
+  values.
+- [ ] A compound chain instantiated with `gates.spec: true` completes its spec
+  into REVIEW with a persisted-spec preview card; approval activates planning,
+  rejection requeues specification and consumes run budget. The same route with
+  the resolved gate false follows the existing autonomous path.
+
+## Verification
+
+- New end-to-end dbtest: `packages/api/src/configurable-gate-instantiation.dbtest.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:db -w @anneal/api -- src/configurable-gate-instantiation.dbtest.ts`
+- Existing route unit test extended: `packages/api/src/routes/templates.test.ts` —
+  `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" node --conditions=development --import tsx --test packages/api/src/routes/templates.test.ts`
+- Scoped controls: `npm run typecheck -w @anneal/api`,
+  `npm run typecheck -w @anneal/db`, `npm run lint -w @anneal/api`, and
+  `npm run lint -w @anneal/db`.
