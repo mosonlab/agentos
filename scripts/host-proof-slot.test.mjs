@@ -407,6 +407,62 @@ test("a source-only clock and wait seam reaches the 1,200-second timeout without
   await holder.promise;
 });
 
+test("a wait of 60 seconds or more is reported once while waiting and again on admission", async () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const holderMarker = join(testRoot, "wait-report-holder");
+  const childMarker = join(testRoot, "wait-report-child");
+  const holder = spawnWrapper({
+    slotDirectory,
+    slotCount: 1,
+    runId: "run-wait-report-holder",
+    command: markerCommand(holderMarker, 10_000),
+    detached: true,
+  });
+  await waitFor(() => existsSync(holderMarker));
+
+  // First wait: 61 s elapsed, holder still live, so the next scan fails and
+  // reports the wait once. Second wait: 122 s elapsed and the holder is gone,
+  // so the next scan admits and reports the total.
+  const sourceHarness = [
+    '. "$1"',
+    "fake_now=0",
+    "fake_waits=0",
+    'holder_pid="$6"',
+    "host_proof_slot_set_now() { HOST_PROOF_SLOT_NOW=$fake_now; }",
+    "host_proof_slot_wait() { fake_waits=$((fake_waits + 1)); fake_now=$((fake_now + 61)); if (( fake_waits == 2 )); then kill -TERM -- \"-$holder_pid\"; /bin/sleep 0.5; fi; }",
+    'host_proof_slot_main test @anneal/wait-report -- "$2" "$3" "$4" "$5"',
+  ].join("; ");
+  const waiter = spawn("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper, process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", childMarker, String(holder.child.pid)], {
+    cwd: repositoryRoot,
+    env: cleanEnvironment({
+      AGENTOS_RUN_ID: "run-wait-report",
+      AGENTOS_HOST_PROOF_SLOT_DIR: slotDirectory,
+      AGENTOS_HOST_PROOF_SLOTS: "1",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  waiter.stdout.setEncoding("utf8");
+  waiter.stderr.setEncoding("utf8");
+  waiter.stdout.on("data", (chunk) => { stdout += chunk; });
+  waiter.stderr.on("data", (chunk) => { stderr += chunk; });
+  const result = await new Promise((resolve, reject) => {
+    waiter.once("error", reject);
+    waiter.once("close", (status, signal) => resolve({ status, signal }));
+  });
+  await holder.promise;
+
+  assert.deepEqual(result, { status: 0, signal: null });
+  assert.equal(stdout, "");
+  assert.equal(
+    stderr,
+    `host-proof-slot: test for workspace @anneal/wait-report in Run run-wait-report has waited 61s for a slot in ${slotDirectory}\n`
+    + `host-proof-slot: test for workspace @anneal/wait-report in Run run-wait-report admitted after 122s waiting in ${slotDirectory}\n`,
+  );
+  assert.equal(readFileSync(childMarker, "utf8"), "ran");
+});
+
 test("the source-only clock seam enforces the timeout while scanning slots", async () => {
   const slotDirectory = makeSlotDirectory(1);
   const childMarker = join(testRoot, "inner-timeout-child");
