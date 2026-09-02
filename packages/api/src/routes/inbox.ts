@@ -110,7 +110,10 @@ const blockedMessageIds = async (db: PrismaClient, ids: string[]): Promise<Reado
 const inboxDecisionInput = z.object({
   decision: z.string().trim().min(1).max(8000),
   requestId: z.string().trim().min(1).max(200),
-  note: z.string().trim().min(1).max(8000).optional(),
+  // Keep note's shape check in the route so malformed notes receive the same
+  // named refusal as blank and overlong notes, rather than the app-wide
+  // generic Zod validation response.
+  note: z.unknown().optional(),
 });
 const inboxReplyInput = z.object({
   body: z.string().trim().min(1).max(8000),
@@ -180,12 +183,35 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
     return context.json(withInboxReadModel(message, await blockedMessageIds(db, [message.id])));
   });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
-    const body = await readJson(context.req.raw, inboxDecisionInput);
+    const input = await readJson(context.req.raw, inboxDecisionInput);
+    let note: string | undefined;
+    if (input.note !== undefined) {
+      if (typeof input.note !== "string") {
+        return refusalJson(context, refusal(
+          "invalid-request",
+          "Inbox decision note must be a string between 1 and 8000 characters after trimming",
+          { code: "inbox-note-invalid" },
+        ));
+      }
+      note = input.note.trim();
+      if (note.length === 0 || note.length > 8_000) {
+        return refusalJson(context, refusal(
+          "invalid-request",
+          "Inbox decision note must be a string between 1 and 8000 characters after trimming",
+          { code: "inbox-note-invalid" },
+        ));
+      }
+    }
+    const body = {
+      decision: input.decision,
+      requestId: input.requestId,
+      ...(note === undefined ? {} : { note }),
+    };
     const messageId = id.parse(context.req.param("messageId"));
     // The DB transaction repeats this invariant while claiming the card. This
-    // early read gives malformed note usage its 400 validation response before
-    // a non-gate decision can be interpreted as a choice or a free-text reply.
-    // gateTaskId is immutable, so the read cannot race a gate/non-gate change.
+    // early read gives non-gate note usage its 400 refusal before a decision can
+    // be interpreted as a choice or a free-text reply. gateTaskId is immutable,
+    // so the read cannot race a gate/non-gate change.
     if (body.note !== undefined) {
       const message = await db.inboxMessage.findUnique({ where: { id: messageId }, select: { gateTaskId: true } });
       if (message?.gateTaskId === null) {

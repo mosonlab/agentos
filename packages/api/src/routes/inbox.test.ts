@@ -150,6 +150,26 @@ test("decision notes are rejected with a named 400 for non-gate cards", async ()
   });
 });
 
+test("malformed decision notes return a named 400", async () => {
+  await withTokens(async () => {
+    const database = {
+      inboxMessage: { findUnique: async () => ({ gateTaskId: "gate-1" }) },
+    } as unknown as PrismaClient;
+    for (const [index, note] of ["   ", 42, "x".repeat(8_001)].entries()) {
+      const response = await createApp(database).request(`/inbox/messages/gate-1/decision`, {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ decision: "approve", note, requestId: `request-invalid-${index}` }),
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        error: "Inbox decision note must be a string between 1 and 8000 characters after trimming",
+        code: "inbox-note-invalid",
+      });
+    }
+  });
+});
+
 test("operator can close a notification attached to a task when no run waits on it", async () => {
   await withTokens(async () => {
     let updateWhere: unknown;
