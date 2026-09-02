@@ -754,6 +754,31 @@ test("a required deliverable the run never persisted is a retryable failure, not
   assert.deepEqual(releasedChainLeases, []);
 });
 
+test("a failed required-output status check is a non-retryable protocol failure", async () => {
+  const { task } = await seedTask({ chained: true, outputKind: "implementation" });
+  const runId = await enqueue(task.id);
+  const { run, fencingToken } = await claimRun(runId, "runner-output-status-failure");
+  const completion = {
+    ...failedCompletion("runner-output-status-failure", fencingToken, run.branch ?? "master"),
+    exitCode: 0,
+    failureClass: "PROTOCOL_ERROR",
+    retryable: false,
+    failureReason: "Task output status could not be established for a step declaring output kind 'implementation'",
+    failureEnvelope: undefined,
+  };
+
+  const completed = await call("POST", `/runner/runs/${runId}/complete`, RUNNER, completion);
+
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.succeeded, false);
+  assert.equal(completed.body.retryCreated, false);
+  const settled = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(settled.status, "FAILED");
+  assert.equal(settled.failureClass, "PROTOCOL_ERROR");
+  assert.equal(settled.retryable, false);
+  assert.equal(await db.run.count({ where: { taskId: task.id } }), 1, "status-check failure queued a retry Run");
+});
+
 test("Regression v2 status reserves remediation for the mechanical Runner path", async () => {
   const { task } = await seedTask(REGRESSION_V2_STEP);
   const runId = await enqueue(task.id);
