@@ -399,16 +399,20 @@ export const patchTask = async (
             mergeGateRejection = mergeGateRejectionRequested;
           } else {
             // A gate exists but none is OPEN only after another channel won or
-            // this request is a replay. Do not overwrite a concurrent reject
-            // or activate the successor a second time. No decision row is
-            // created on this branch, and no authorization: the SPEC's
-            // fail-closed resolution (missing-authorization) is preserved.
-            const openGates = await tx.inboxMessage.count({
-              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+            // this request is a replay. Only replay the same durable decision:
+            // an answered rejection must not turn a stale DONE request into a
+            // successful approval response after the rejection requeued work.
+            const decidedGate = await tx.inboxMessage.findFirst({
+              where: { gateTaskId: taskId, status: InboxStatus.ANSWERED },
+              orderBy: [{ answeredAt: "asc" }, { id: "asc" }],
+              select: { selectedChoiceId: true },
             });
-            if (openGates === 0) {
-              const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
-              if (decidedGate > 0) return { update: null, activity: null, value: { replay: true as const } };
+            const requestedDecision = mergeGateRejectionRequested ? "reject" : "approve";
+            if (decidedGate?.selectedChoiceId === requestedDecision) {
+              return { update: null, activity: null, value: { replay: true as const } };
+            }
+            if (decidedGate) {
+              return refuse(`Approval gate already has a durable ${decidedGate.selectedChoiceId ?? "unknown"} decision`);
             }
           }
         }
@@ -487,7 +491,11 @@ export const patchTask = async (
             ? "approve" as const
             : null
         : null;
-      if (gateDecision !== null) {
+      // DONE has always consumed any OPEN Human-task gate, even when a legacy
+      // or non-template card was not materialized as a decision object above.
+      // Merge rejection is the additional TODO command that needs the same
+      // sibling-card cleanup.
+      if (nextStatus === TaskStatus.DONE || gateDecision !== null) {
         if (plan.gate) {
           await tx.inboxMessage.update({
             where: { id: plan.gate.card.id },

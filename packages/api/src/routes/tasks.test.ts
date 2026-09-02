@@ -354,6 +354,51 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
   });
 });
 
+test("a stale HUMAN gate approval PATCH cannot replay an answered rejection", async () => {
+  await withTokens(async () => {
+    let updates = 0;
+    const predecessor = {
+      id: "task-1", name: "Agent predecessor", status: "TODO", chainIndex: 0, chainLayer: 1,
+    };
+    const successor = {
+      id: "task-2", projectId: "project-1", name: "Human gate", status: "TODO", templateId: null,
+      templateStepId: null, templateStep: null, approvalGate: false, chainId: "chain-1", chainIndex: 1,
+      chainLayer: 2, assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
+      dispatchAfterTaskId: null, dispatchAfter: null, scheduleKind: null,
+    };
+    const tx = {
+      $queryRaw: async () => [{ id: successor.id }],
+      task: {
+        findUniqueOrThrow: async () => successor,
+        findUnique: async () => successor,
+        findMany: async () => [predecessor, successor],
+        update: async () => { updates += 1; return { ...successor, status: "DONE" }; },
+      },
+      run: { count: async () => 0 },
+      inboxMessage: {
+        findFirst: async ({ where }: { where: { status: string } }) => where.status === "ANSWERED"
+          ? { selectedChoiceId: "reject" }
+          : null,
+      },
+      chainControl: { findMany: async () => [] },
+    };
+    const database = {
+      task: { findUniqueOrThrow: async () => successor },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request(`/tasks/${successor.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json() as { error: string }).error), /durable reject decision/u);
+    assert.equal(updates, 0);
+  });
+});
+
 test("CRON create computes runAt, ignores caller runAt, and creates no immediate run", async () => {
   await withTokens(async () => {
     let stored: Record<string, any> | undefined;
