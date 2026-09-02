@@ -13,7 +13,7 @@ import { IconArrowLeft, IconPlus } from "../components/icons";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, METRICS, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1,
   PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, Field, KeyValue, Metric, Modal, Page, Pill, RowMenu, ShowMore,
+  Card, EmptyState, ErrorNotice, Field, KeyValue, Metric, Modal, Page, Pill, RowMenu, ShowMore, Toggle,
 } from "../components/ui";
 import { Button, buttonVariants } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -154,6 +154,13 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
     const ok = await run(() => api.patch(`/projects/${projectId}`, { yamlDocument: editingYaml }));
     if (ok) { setEditingYaml(null); reload(); reloadProjects(); }
   };
+  const saveGateDefault = (field: "specGateDefault" | "mergeGateDefault", next: boolean): void => {
+    void run(async () => {
+      await api.patch(`/projects/${projectId}`, { [field]: next });
+      reload();
+      reloadProjects();
+    });
+  };
 
   return (
     <Page>
@@ -186,6 +193,14 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
             { k: t("projects.details.stall"), v: t("projects.details.minutes", { n: project.stallTimeoutMin }) },
             { k: t("projects.details.maxRuns"), v: `${project.maxSessionsPerTask}` },
             { k: t("projects.details.spendCap"), v: project.spendCap === null ? t("projects.details.noSpendCap") : `$${project.spendCap}` },
+            {
+              k: t("projects.details.specGateDefault"),
+              v: <Toggle on={project.specGateDefault} onChange={(next) => saveGateDefault("specGateDefault", next)} disabled={pending} label={t("projects.details.specGateDefault")} />,
+            },
+            {
+              k: t("projects.details.mergeGateDefault"),
+              v: <Toggle on={project.mergeGateDefault} onChange={(next) => saveGateDefault("mergeGateDefault", next)} disabled={pending} label={t("projects.details.mergeGateDefault")} />,
+            },
           ]} />
         </Card>
 

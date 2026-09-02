@@ -237,6 +237,8 @@ model Project {
   maxDurationMin     Int             @default(240)
   stallTimeoutMin    Int             @default(10)
   maxSessionsPerTask Int             @default(3)
+  specGateDefault    Boolean         @default(false)
+  mergeGateDefault   Boolean         @default(false)
   spendCap           Decimal?        @db.Decimal(12, 2)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt

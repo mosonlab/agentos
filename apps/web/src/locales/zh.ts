@@ -526,6 +526,8 @@ export const zh = {
   "projects.details.slug": "Slug",
   "projects.details.spendCap": "花费上限",
   "projects.details.stall": "卡住超时",
+  "projects.details.specGateDefault": "规格完成后需要审批",
+  "projects.details.mergeGateDefault": "合并前需要审批",
   "projects.details.title": "详情",
   "projects.details.wallClock": "总时长上限",
   "projects.empty": "还没有项目。创建一个来划定 agent 与任务的范围。",

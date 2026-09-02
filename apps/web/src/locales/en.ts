@@ -529,6 +529,8 @@ export const en = {
   "projects.details.slug": "Slug",
   "projects.details.spendCap": "Spend cap",
   "projects.details.stall": "Stall timeout",
+  "projects.details.specGateDefault": "Require approval after specification",
+  "projects.details.mergeGateDefault": "Require approval before merge",
   "projects.details.title": "Details",
   "projects.details.wallClock": "Wall-clock limit",
   "projects.empty": "No projects yet. Create one to scope agents and tasks.",
