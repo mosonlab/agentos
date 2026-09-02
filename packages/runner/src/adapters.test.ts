@@ -1546,6 +1546,34 @@ test("Codex reconnect classification follows the counter shape instead of a fixe
   }
 });
 
+test("Codex reconnect progress stays provisional when the counter carries its cause", () => {
+  const state = parseCodexTranscript([
+    { type: "error", message: "Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)" },
+    { type: "error", message: "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)" },
+    { type: "item.completed", item: { type: "agent_message", text: "repair committed" } },
+    { type: "turn.completed" },
+  ]);
+  const evidence = evidenceFromState(state);
+
+  assert.equal(evidence.terminalSuccess, true);
+  assert.equal(adapterExecutionSucceeded(evidence), true);
+});
+
+test("Codex latches a real provider error that only resembles reconnect progress", () => {
+  const cases = [
+    "stream disconnected before completion: tls handshake eof",
+    "Reconnecting... failed (stream disconnected before completion)",
+    "Reconnect budget exhausted after Reconnecting... 5/5",
+    "Reconnecting... 5/5 (stream disconnected)\npolicy denied",
+  ] as const;
+
+  for (const message of cases) {
+    const state = parseCodexTranscript([{ type: "error", message }, { type: "turn.completed" }]);
+    assert.equal(state.terminalSuccess, false, message);
+    assert.equal(adapterExecutionSucceeded(evidenceFromState(state)), false, message);
+  }
+});
+
 test("Codex preserves reconnect evidence when the stream ends before completion", () => {
   const reconnectMessage = "Reconnecting... 3/5";
   const state = parseCodexTranscript([{ type: "error", message: reconnectMessage }]);
