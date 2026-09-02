@@ -36,6 +36,11 @@
       "development": "./src/chain-order.ts",
       "import": "./dist/chain-order.js"
     },
+    "./claim-contract": {
+      "types": "./src/claim-contract.ts",
+      "development": "./src/claim-contract.ts",
+      "import": "./dist/claim-contract.js"
+    },
     "./chain-hold": {
       "types": "./src/chain-hold.ts",
       "development": "./src/chain-hold.ts",

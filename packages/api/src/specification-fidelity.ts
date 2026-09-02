@@ -6,6 +6,7 @@ import {
   PR_TEMPLATE_NAME,
   stepRole,
 } from "@anneal/db";
+import type { ClaimSpecificationMaterialization } from "@anneal/db/claim-contract";
 
 import { abortableDelay, abortReason } from "./abortable-delay.js";
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
@@ -35,11 +36,8 @@ export type SpecificationRefusal = {
 /** The path the implementation step promises to materialize. */
 export const specificationPathForBranch = (branch: string): string => `.chain/${branch}/spec.md`;
 
-export type SpecificationMaterialization = {
-  kind: "direct-implementation";
-  path: string;
-  body: string;
-};
+/** Declared with the claim payload it travels in, not beside its producer. */
+export type SpecificationMaterialization = ClaimSpecificationMaterialization;
 
 /**
  * Both direct and PR workflows materialize the task brief before their

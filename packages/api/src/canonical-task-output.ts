@@ -17,6 +17,7 @@ import {
   type CanonicalReviewArtifact,
   type TaskStepOutput,
 } from "@anneal/db";
+import type { ClaimPreviousRunHandoff } from "@anneal/db/claim-contract";
 
 import {
   fenceRefusalResponse,
@@ -46,19 +47,8 @@ type OutputTask = {
   id: string;
 };
 
-export type PreviousRunHandoff = {
-  schemaVersion: 1;
-  previousRunId: string;
-  status: RunStatus;
-  failureReason: string | null;
-  retryReason: "approval-rejected-without-feedback" | "approval-rejected-with-feedback" | "automatic-retry" | "operator-retry" | "retry";
-  output: {
-    runId: string;
-    kind: string;
-    body: string;
-    commitSha: string | null;
-  } | null;
-};
+/** Declared with the claim payload it travels in, not beside its producer. */
+export type PreviousRunHandoff = ClaimPreviousRunHandoff;
 
 export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): boolean => {
   if (!step) return false;

@@ -27,6 +27,7 @@ import {
   TaskStatus,
 } from "@anneal/db";
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
+import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import { issueSessionToken } from "./auth.js";
@@ -43,6 +44,7 @@ import {
   specificationMaterializationForDirectImplementation,
   type SpecificationReader,
   type SpecificationRefusal,
+  type SpecificationVerification,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   verifyPreparedSpecification,
@@ -215,10 +217,25 @@ const operatorFeedbackForClaim = async (
  * to restate the isolation level or re-implement the retry would be restating
  * the reason this transaction can lose a race it did not cause.
  */
-export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
+export const claimRun = async (
+  db: PrismaClient,
+  input: ClaimRunInput,
+): Promise<ClaimContract | ClaimRefusal | null> => {
   const { body, claimantClass, now } = input;
   const verificationResults = new Map<string, SpecificationRefusal | null>();
-  const transactionalAttempt = () => serializable(db, async (tx) => {
+  /* The three outcomes one serializable attempt can reach. Naming them keeps
+   * the `"verification" in attempted` narrowing below honest: an inferred
+   * union of object literals carries `verification?: undefined` on its other
+   * members, which `in` cannot rule out. */
+  type ClaimAttempt = ClaimContract | ClaimRefusal | { verification: SpecificationVerification };
+  /* What one candidate settles on. Spelled out for the same reason. */
+  type CandidateDecision =
+    | typeof SKIP
+    | typeof HALT
+    | { outcome: "claimed"; claim: ClaimContract }
+    | ClaimRefusal
+    | { verification: SpecificationVerification };
+  const transactionalAttempt = (): Promise<ClaimAttempt | null> => serializable(db, async (tx) => {
     // This is the shared half of the production deploy barrier. It is the
     // first statement in the claim transaction: an in-flight claim finishes
     // before a deploy can acquire the exclusive half, and claims arriving
@@ -512,7 +529,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     // One candidate's decision, taken as its own unit of work so the loop can
     // isolate it. `skip` moves to the next candidate, `halt` ends the whole
     // claim without one, `claimed` carries the run handed to the runner.
-    const activateCandidate = async (candidate: (typeof candidates)[number]) => {
+    const activateCandidate = async (candidate: (typeof candidates)[number]): Promise<CandidateDecision> => {
       if (!candidate.task || !candidate.repo) return SKIP;
       if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
         const reason = "repository-grant-missing: restore the agent Repo grant, then retry this run";
@@ -917,25 +934,76 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       return {
         outcome: "claimed" as const,
         claim: {
-          task: candidate.task,
-          agent: candidate.agent,
-          repo: candidate.repo,
+          // Every row below is projected field by field. The candidate rows are
+          // loaded whole because the claim decision reads far more of them than
+          // a runner may see — `agent` alone carries decrypted-secret grants and
+          // the environment behind them — so spreading a row here is how a new
+          // column reaches a runner without anyone deciding that it should.
+          task: {
+            id: candidate.task.id,
+            chainId: candidate.task.chainId,
+            chainIndex: candidate.task.chainIndex,
+            name: candidate.task.name,
+            description: candidate.task.description,
+            repoId: candidate.task.repoId,
+            targetBranch: candidate.task.targetBranch,
+            maxDurationMin: candidate.task.maxDurationMin,
+            stallTimeoutMin: candidate.task.stallTimeoutMin,
+            maxSessionsPerTask: candidate.task.maxSessionsPerTask,
+            templateStep: candidate.task.templateStep === null ? null : {
+              name: candidate.task.templateStep.name,
+              provisionDependencies: candidate.task.templateStep.provisionDependencies,
+              outputKind: candidate.task.templateStep.outputKind,
+              taskTemplate: { name: candidate.task.templateStep.taskTemplate.name },
+            },
+          },
+          agent: {
+            id: candidate.agent.id,
+            name: candidate.agent.name,
+            model: candidate.agent.model,
+            foundationalPrompt: candidate.agent.foundationalPrompt,
+            rolePrompt: candidate.agent.rolePrompt,
+            disabledTools: candidate.agent.disabledTools,
+          },
+          repo: {
+            id: candidate.repo.id,
+            remoteUrl: candidate.repo.remoteUrl,
+            defaultBranch: candidate.repo.defaultBranch,
+            mountPath: candidate.repo.mountPath,
+            dependencyProvisioning: candidate.repo.dependencyProvisioning,
+          },
           // Server-computed from the template step. Nothing a client sends
           // participates, and the ordinary runner refuses `mechanical` before it
           // constructs a workspace, a prompt, or a child environment.
           executionMode,
-          // A later chain run targets the shared head, so its own targetBranch
-          // cannot tell delivery which integration line the chain started
-          // from. Carry the first run's durable base separately for PR create.
           run: {
-            ...run,
-            targetBranchPublished,
+            id: run.id,
+            taskId: run.taskId,
+            runNumber: run.runNumber,
+            opensPullRequest: run.opensPullRequest,
+            requiresCommit: run.requiresCommit,
+            // A later chain run targets the shared head, so its own targetBranch
+            // cannot tell delivery which integration line the chain started
+            // from. Carry the first run's durable base separately for PR create.
             pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch,
+            maxDurationMin: run.maxDurationMin,
+            stallTimeoutMin: run.stallTimeoutMin,
+            maxRunsPerTask: run.maxRunsPerTask,
+            model: run.model,
+            codexServiceTier: run.codexServiceTier,
+            subagentModel: run.subagentModel,
+            subagentMaxConcurrent: run.subagentMaxConcurrent,
+            targetBranch: run.targetBranch,
+            targetBranchPublished,
             pinnedBaseSha: candidate.task.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
             implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
             implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
+            promptHash: run.promptHash,
+            workspacePath: run.workspacePath,
+            branch: run.branch,
+            baseSha: run.baseSha,
           },
-          session,
+          session: { id: session.id },
           runner: candidate.runner,
           fencingToken,
           sessionToken: sessionCredential.token,
@@ -950,7 +1018,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           specificationMaterialization,
           resume: priorResume,
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
-        },
+        } satisfies ClaimContract,
       };
     };
 
@@ -968,7 +1036,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     for (const [index, candidate] of candidates.entries()) {
       const savepoint = `claim_candidate_${index}`;
       await tx.$executeRawUnsafe(`SAVEPOINT ${savepoint}`);
-      let decided: Awaited<ReturnType<typeof activateCandidate>>;
+      let decided: CandidateDecision;
       try {
         decided = await activateCandidate(candidate);
       } catch (error: unknown) {
@@ -1007,5 +1075,3 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     verificationResults.set(attempted.verification.key, verdict);
   }
 };
-
-export type ClaimedRun = NonNullable<Awaited<ReturnType<typeof claimRun>>>;
