@@ -9,12 +9,12 @@ import test from "node:test";
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
-import { runCommand } from "./exec.js";
+import { bindCommandRunner, runCommand, type CommandRunner } from "./exec.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
-  type WorkspaceCommandExecutor, type WorkspaceProvisionClaim,
+  type WorkspaceProvisionClaim,
 } from "./workspace.js";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -52,14 +52,16 @@ const pathWithNoopCommand = async (root: string, command: "chmod"): Promise<stri
 /**
  * Faking git means faking a repository, but the mirror's bookkeeping — its
  * root, its lock, its staging directory — is real filesystem work in a
- * temporary directory. These executors run that for real and answer only for
+ * temporary directory. These runners run that for real and answer only for
  * `git`, so the lock protocol under test is the production one.
  */
 const realShell = async (
-  config: RunnerConfig, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv,
-): Promise<string | null> => (executable === "/bin/sh"
-  ? runCommand(config.runAsPrefix, executable, args, cwd, env, {})
-  : null);
+  run: CommandRunner, executable: string, args: readonly string[],
+): Promise<string | null> => (executable === "/bin/sh" ? run(executable, args) : null);
+
+/** The runner provisioning binds, reproduced so a fake can wrap it. */
+const provisioningRun = (config: RunnerConfig): CommandRunner =>
+  bindCommandRunner(config.runAsPrefix, resolve(config.workspaceRoot), workspaceEnvironment(config));
 
 type WorkspaceClaimFixture = {
   task: Pick<WorkspaceProvisionClaim["task"], "id">
@@ -145,9 +147,10 @@ test("an explicit false template step skips all dependency inspection after chec
       home: root,
       gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
     } as unknown as RunnerConfig;
-    const execute: WorkspaceCommandExecutor = async (runnerConfig, executable, args, cwd, env, options) => {
+    const production = provisioningRun(config);
+    const execute: CommandRunner = async (executable, args, options) => {
       calls.push(`${executable} ${args.join(" ")}`);
-      return runCommand(runnerConfig.runAsPrefix, executable, args, cwd, env, options);
+      return production(executable, args, options);
     };
     const workspace = await provisionWorkspace(config, workspaceClaim({
       task: {
@@ -157,7 +160,7 @@ test("an explicit false template step skips all dependency inspection after chec
       repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-review", runNumber: 1, targetBranch: "main", branch: "main" },
     }), NO_DEPENDENCIES_FOR_REVIEW, {
-      execute,
+      run: execute,
       dependencyCacheOptions: { cacheRoot: join(root, "dependency-cache"), report: (event) => progress.push(event) },
     });
 
@@ -543,8 +546,9 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     });
-    const fake = async (config: RunnerConfig, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> => {
-      const shell = await realShell(config, executable, args, cwd, env);
+    const production = provisioningRun(config);
+    const fake: CommandRunner = async (executable, args) => {
+      const shell = await realShell(production, executable, args);
       if (shell !== null) return shell;
       if (executable === "git" && args[0] === "fetch") {
         fetchCalls += 1;
@@ -556,7 +560,7 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       return "";
     };
     const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES, {
-      execute: fake,
+      run: fake,
       retryOptions: { wait: async () => undefined },
     });
     // The retried operation is now the mirror's fetch. The clone that follows
@@ -575,10 +579,15 @@ type RecordedCommand = { args: string[]; cwd: string; timeoutMs: number | undefi
 const recordingExecutor = (
   calls: RecordedCommand[],
   answer: (args: string[]) => string,
-): WorkspaceCommandExecutor => async (config, executable, args, cwd, env, options) => {
-  calls.push({ args, cwd, timeoutMs: options?.timeoutMs });
-  const shell = await realShell(config, executable, args, cwd, env);
-  return shell ?? answer(args);
+  config: RunnerConfig,
+): CommandRunner => {
+  const root = resolve(config.workspaceRoot);
+  const production = provisioningRun(config);
+  return async (executable, args, options) => {
+    calls.push({ args: [...args], cwd: options?.cwd ?? root, timeoutMs: options?.timeoutMs });
+    const shell = await realShell(production, executable, args);
+    return shell ?? answer([...args]);
+  };
 };
 
 test("the mirror's remote fetch carries a per-command ceiling while local git commands stay uncapped", async () => {
@@ -607,9 +616,9 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       if (args[0] === "for-each-ref") return args[2] === "refs/heads/main" ? "refs/heads/main" : "";
       if (args[0] === "rev-parse") return "base-sha";
       return "";
-    });
+    }, config);
     await provisionWorkspace(config, claim, NO_DEPENDENCIES, {
-      execute: fake,
+      run: fake,
       retryOptions: { wait: async () => undefined },
     });
     const ceiling = (name: string): number | undefined => calls.find(({ args }) => args[0] === name)?.timeoutMs;
@@ -668,9 +677,9 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       if (args[0] === "cat-file") return "impl-base-sha commit\npinned-sha commit";
       if (args[0] === "rev-parse") return "pinned-sha";
       return "";
-    });
+    }, config);
     await provisionWorkspace(config, claim, NO_DEPENDENCIES, {
-      execute: fake,
+      run: fake,
       retryOptions: { wait: async () => undefined },
     });
     const remoteFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("origin"));

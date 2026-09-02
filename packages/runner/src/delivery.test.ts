@@ -11,10 +11,10 @@ import type { ExitEvidence } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
 import {
   deliverWorkspace, pullRequestTitle, salvageWorkspace,
-  type CommandExecutor, type DeliveryClaim,
+  type DeliveryClaim,
 } from "./delivery.js";
 import { completionEnvelope } from "./envelope.js";
-import { CommandTimeoutError, KILL_OVERHEAD_MS } from "./exec.js";
+import { CommandTimeoutError, KILL_OVERHEAD_MS, type CommandRunner } from "./exec.js";
 import {
   deliveryDeadline, NETWORK_COMMAND_TIMEOUT_MS, WORKSPACE_HEAD_TIMEOUT_MS,
 } from "./network-retry.js";
@@ -153,8 +153,8 @@ const canonicalFinalOutputs = (
 
 test("canonical PR implementation creates the deterministic initial handover body", async () => {
   const calls: Array<{ executable: string; args: string[] }> = [];
-  const fake: CommandExecutor = async (executable, args) => {
-    calls.push({ executable, args });
+  const fake: CommandRunner = async (executable, args) => {
+    calls.push({ executable, args: [...args] });
     if (executable === "gh" && args[1] === "list") return "[]";
     if (executable === "gh" && args[1] === "create") return "https://github.com/acme/app/pull/1\n";
     return "";
@@ -190,8 +190,8 @@ test("canonical PR implementation creates the deterministic initial handover bod
 test("canonical PR implementation edits an existing PR and reads back the initial body", async () => {
   const calls: Array<{ executable: string; args: string[] }> = [];
   let body = "";
-  const fake: CommandExecutor = async (executable, args) => {
-    calls.push({ executable, args });
+  const fake: CommandRunner = async (executable, args) => {
+    calls.push({ executable, args: [...args] });
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/2", number: 2 }]);
     if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
     if (executable === "gh" && args[1] === "view") return body;
@@ -222,8 +222,8 @@ test("canonical PR implementation edits an existing PR and reads back the initia
 test("canonical PR final delivery publishes a clean head and the complete review handover body", async () => {
   const calls: Array<{ executable: string; args: string[] }> = [];
   let body = "";
-  const fake: CommandExecutor = async (executable, args) => {
-    calls.push({ executable, args });
+  const fake: CommandRunner = async (executable, args) => {
+    calls.push({ executable, args: [...args] });
     if (executable === "git" && args[0] === "ls-tree") return "";
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/3", number: 3 }]);
     if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
@@ -271,7 +271,7 @@ test("canonical PR final body states when reviews required no code change", asyn
   fixed.closedFindings = [];
   outputs[3] = { ...outputs[3]!, body: JSON.stringify(fixed) };
   let body = "";
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "ls-tree") return "";
     if (executable === "gh" && args[1] === "list") {
       return JSON.stringify([{ url: "https://github.com/acme/app/pull/8", number: 8 }]);
@@ -292,7 +292,7 @@ test("canonical PR final body states when reviews required no code change", asyn
 
 test("canonical PR final delivery rejects retained chain bookkeeping before push", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "git" && args[0] === "ls-tree") return ".chain/fix/pr-workflow/spec.md\n";
     throw new Error(`unexpected command: ${executable} ${args.join(" ")}`);
@@ -311,7 +311,7 @@ test("canonical PR final delivery rejects retained chain bookkeeping before push
 test("canonical PR final delivery allows an already-pushed clean retry without a new commit", async () => {
   const calls: string[] = [];
   let body = "";
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "git" && args[0] === "ls-tree") return "";
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/4", number: 4 }]);
@@ -351,7 +351,7 @@ test("canonical PR implementation refuses an unchanged required-commit head befo
 test("canonical PR implementation reports an empty command list factually", async () => {
   let body = "";
   const output = canonicalImplementationOutput(canonicalImplementationSha, canonicalBaseSha, []);
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") return "[]";
     if (executable === "gh" && args[1] === "create") { body = args.at(-1)!; return "https://github.com/acme/app/pull/5\n"; }
     return "";
@@ -372,7 +372,7 @@ for (const failure of [
   { name: "unequal read-back", operation: "gh pr view", edit: null, view: "stale body" },
 ] as const) {
   test(`canonical PR final delivery fails on ${failure.name}`, async () => {
-    const fake: CommandExecutor = async (executable, args) => {
+    const fake: CommandRunner = async (executable, args) => {
       if (executable === "git" && args[0] === "ls-tree") return "";
       if (executable === "gh" && args[1] === "list") {
         return JSON.stringify([{ url: "https://github.com/acme/app/pull/6", number: 6 }]);
@@ -400,7 +400,7 @@ for (const failure of [
 }
 
 test("canonical PR final delivery fails when no open pull request exists", async () => {
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "ls-tree") return "";
     if (executable === "gh" && args[1] === "list") return "[]";
     return "";
@@ -417,7 +417,7 @@ test("canonical PR final delivery fails when no open pull request exists", async
 });
 
 test("canonical PR final delivery fails when open-PR lookup is malformed", async () => {
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "ls-tree") return "";
     if (executable === "gh" && args[1] === "list") return "not-json";
     return "";
@@ -436,7 +436,7 @@ test("canonical PR final delivery fails when open-PR lookup is malformed", async
 test("canonical PR final delivery fails for a non-GitHub remote after publishing", async () => {
   const finalClaim = canonicalClaim("fixed-implementation", "task-fixed", 4);
   finalClaim.repo.remoteUrl = "ssh://git.example.test/acme/app.git";
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "ls-tree") return "";
     return "";
   };
@@ -562,7 +562,7 @@ test("canonical PR final delivery pushes the exact descendant cleanup commit fro
     const implementationSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
     const calls: string[] = [];
     let body = "";
-    const command: CommandExecutor = async (executable, args, cwd, env) => {
+    const command: CommandRunner = async (executable, args) => {
       calls.push(`${executable} ${args.join(" ")}`);
       if (executable === "gh" && args[1] === "list") {
         return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
@@ -570,9 +570,9 @@ test("canonical PR final delivery pushes the exact descendant cleanup commit fro
       if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
       if (executable === "gh" && args[1] === "view") return body;
       if (executable === "gh") return "gh version fixture";
-      return execFileSync(executable, args, {
-        cwd,
-        env: { ...env, PATH: process.env.PATH },
+      return execFileSync(executable, [...args], {
+        cwd: repository,
+        env: { PATH: process.env.PATH },
         encoding: "utf8",
       });
     };
@@ -624,7 +624,7 @@ test("canonical PR final delivery pushes the exact descendant cleanup commit fro
 
 test("a missing requiresCommit defaults to required and fails before publication", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     return "";
   };
@@ -644,7 +644,7 @@ test("a missing requiresCommit defaults to required and fails before publication
 test("a workspace-head read failure is reported without any remote operation", async () => {
   const calls: string[] = [];
   const headError = new Error("fatal: not a git repository");
-  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+  const fake: CommandRunner = async (executable, args, options) => {
     calls.push(`${executable} ${args.join(" ")}`);
     assert.equal(options?.timeoutMs, WORKSPACE_HEAD_TIMEOUT_MS);
     throw headError;
@@ -659,7 +659,7 @@ test("a workspace-head read failure is reported without any remote operation", a
 
 test("a clean no-PR session with no commit also fails before publication", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     return executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
   };
@@ -675,7 +675,7 @@ test("a clean no-PR session with no commit also fails before publication", async
 test("an unchanged optional-commit step still publishes its branch", async () => {
   const calls: string[] = [];
   const publications: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     return "";
   };
@@ -697,7 +697,7 @@ test("an unchanged optional-commit step still publishes its branch", async () =>
 
 test("a session with a captured commit keeps the existing push and pull-request path", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "list") {
       return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
@@ -716,7 +716,7 @@ test("a session with a captured commit keeps the existing push and pull-request 
 test("delivery fails loudly with the gh probe error when gh is unavailable", async () => {
   const calls: string[] = [];
   const probeError = new Error("ENOENT");
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh") throw probeError;
     return "";
@@ -732,7 +732,7 @@ test("delivery fails loudly with the gh probe error when gh is unavailable", asy
 
 test("delivery records a pushed branch without invoking gh for a non-GitHub remote", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; };
+  const fake: CommandRunner = async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; };
   const result = await deliverWorkspace(config, {
     ...claim, repo: { ...claim.repo, remoteUrl: "ssh://git@example.test/acme/app.git" },
   }, workspace, { command: fake });
@@ -744,7 +744,7 @@ test("delivery records a pushed branch without invoking gh for a non-GitHub remo
 
 test("a chain step reuses the open pull request on its shared head branch", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
     return "";
@@ -756,7 +756,7 @@ test("a chain step reuses the open pull request on its shared head branch", asyn
 
 test("a failed initial pull-request lookup fails delivery with the lookup error", async () => {
   const lookupError = new Error("gh: API rate limit exceeded");
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") throw lookupError;
     return "";
   };
@@ -771,7 +771,7 @@ test("a failed initial pull-request lookup fails delivery with the lookup error"
 test("delivery opens one pull request titled after the chain, not the step", async () => {
   const calls: string[] = [];
   let created = false;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "create") { created = true; return ""; }
     if (executable === "gh" && args[1] === "list") {
@@ -792,7 +792,7 @@ test("delivery opens one pull request titled after the chain, not the step", asy
 test("a custom chain base is preserved in gh pr create", async () => {
   const calls: string[] = [];
   let created = false;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "create") created = true;
     if (executable === "gh" && args[1] === "list") {
@@ -808,7 +808,7 @@ test("a custom chain base is preserved in gh pr create", async () => {
 
 test("publication is acknowledged immediately after push and before GitHub work", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
     return "";
@@ -827,7 +827,7 @@ test("publication is acknowledged immediately after push and before GitHub work"
 
 test("a pull request created between list and create is confirmed and reused", async () => {
   let listCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       return listCalls === 1 ? "[]" : JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
@@ -843,7 +843,7 @@ test("a pull request created between list and create is confirmed and reused", a
 
 test("transient push failures succeed on the third attempt", async () => {
   let pushes = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "push") {
       pushes += 1;
       if (pushes < 3) throw new Error("LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443");
@@ -860,7 +860,7 @@ test("transient push failures succeed on the third attempt", async () => {
 
 test("deterministic authentication failures are not retried", async () => {
   let pushes = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "push") {
       pushes += 1;
       throw new Error("remote: HTTP 403 Forbidden: permission denied");
@@ -876,7 +876,7 @@ test("deterministic authentication failures are not retried", async () => {
 test("an EOF after PR creation is resolved by head lookup without duplicate creation", async () => {
   let listCalls = 0;
   let createCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       return listCalls === 1 ? "[]" : JSON.stringify([{ url: "https://github.com/acme/app/pull/12", number: 12 }]);
@@ -902,7 +902,7 @@ test("a read-back that cannot be completed preserves its typed failure and never
   let listCalls = 0;
   const createError = new CommandTimeoutError("gh", ["pr", "create"], 20_000);
   const readBackError = new CommandTimeoutError("gh", ["pr", "list"], 20_000);
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       if (listCalls === 1) return "[]";
@@ -946,7 +946,7 @@ test("a deterministic create failure is read back once and never resent", async 
   // fail again. It is still read back — the platform saying no is not evidence
   // that no pull request exists — and then reported.
   let createCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") return "[]";
     if (executable === "gh" && args[1] === "create") {
       createCalls += 1;
@@ -963,7 +963,7 @@ test("a deterministic create failure is read back once and never resent", async 
 
 test("gh names the pull request it made, so a confirmed create needs no lookup at all", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.slice(0, 2).join(" ")}`);
     if (executable === "gh" && args[1] === "list") return "[]";
     if (executable === "gh" && args[1] === "create") {
@@ -988,7 +988,7 @@ test("a create that succeeded and a lookup that failed never asks for a second c
   let createCalls = 0;
   let listCalls = 0;
   const lookupError = new Error("Get https://api.github.com/repos/acme/app/pulls: EOF");
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       if (listCalls === 1) return "[]";
@@ -1012,7 +1012,7 @@ test("a create that succeeded and a lookup that failed never asks for a second c
 
 test("a successful but unnamed create fails when no open pull request can be found", async () => {
   let listCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       return "[]";
@@ -1035,7 +1035,7 @@ test("a bare EOF is a lost response, so a read-back that finds nothing earns exa
   // landed — the safe direction, but not the one the ticket asks for.
   let createCalls = 0;
   let listCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") {
       listCalls += 1;
       return createCalls >= 2 ? JSON.stringify([{ url: "https://github.com/acme/app/pull/21", number: 21 }]) : "[]";
@@ -1061,7 +1061,7 @@ test("a resend is not started with less budget than one attempt needs", async ()
   // remaining budget would buy a five-second command that overruns the lease.
   let clock = 0;
   let createCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" || args[0] === "--version") return "";
     if (args[1] === "list") return "[]";
     createCalls += 1;
@@ -1086,7 +1086,7 @@ test("a resend is not started with less budget than one attempt needs", async ()
 
 test("a pushed branch remains published when PR retries are exhausted, but delivery fails", async () => {
   let createCalls = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") return "[]";
     if (executable === "gh" && args[1] === "create") {
       createCalls += 1;
@@ -1105,7 +1105,7 @@ test("a pushed branch remains published when PR retries are exhausted, but deliv
 
 test("git's Author identity error is a tool failure, not an auth failure", async () => {
   let pushes = 0;
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "push") {
       pushes += 1;
       throw new Error("Author identity unknown\n*** Please tell me who you are.\nfatal: unable to auto-detect email address");
@@ -1120,7 +1120,7 @@ test("git's Author identity error is a tool failure, not an auth failure", async
 
 test("a failed run commits uncommitted changes, pushes them as WIP, and opens no pull request", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "git" && args[0] === "status") return "M tracked.ts\n?? new.ts";
     return executable === "git" && args[0] === "rev-parse" ? "salvage-sha" : "";
@@ -1143,7 +1143,7 @@ test("a failed run commits uncommitted changes, pushes them as WIP, and opens no
 
 test("a failed run with no new commit is not pushed at all", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     return executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
   };
@@ -1153,7 +1153,7 @@ test("a failed run with no new commit is not pushed at all", async () => {
 
 test("a failed run still pushes commits the agent made before crashing", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     return executable === "git" && args[0] === "rev-parse" ? "agent-commit-sha" : "";
   };
@@ -1173,7 +1173,7 @@ const noPrClaim = { ...claim, run: { ...claim.run, opensPullRequest: false } } s
 
 test("a step that does not open pull requests still pushes its branch", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "list") return "[]";
     return "";
@@ -1187,7 +1187,7 @@ test("a step that does not open pull requests still pushes its branch", async ()
 });
 
 test("a step that does not open pull requests says so instead of failing", async () => {
-  const fake: CommandExecutor = async (executable, args) => (executable === "gh" && args[1] === "list" ? "[]" : "");
+  const fake: CommandRunner = async (executable, args) => (executable === "gh" && args[1] === "list" ? "[]" : "");
   const result = await deliverWorkspace(config, noPrClaim, workspace, { command: fake });
   assert.equal(result.pullRequestUrl, undefined);
   assert.match(result.deliveryInstructions ?? "", /Branch 'feature\/test' was pushed/);
@@ -1196,7 +1196,7 @@ test("a step that does not open pull requests says so instead of failing", async
 
 test("a late documentation step reports the chain's existing pull request", async () => {
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
     return "";
@@ -1209,7 +1209,7 @@ test("a late documentation step reports the chain's existing pull request", asyn
 });
 
 test("no gh and no pull request by design reads as design, not as a degraded path", async () => {
-  const fake: CommandExecutor = async (executable) => { if (executable === "gh") throw new Error("ENOENT"); return ""; };
+  const fake: CommandRunner = async (executable) => { if (executable === "gh") throw new Error("ENOENT"); return ""; };
   const result = await deliverWorkspace(config, noPrClaim, workspace, { command: fake });
   assert.match(result.deliveryInstructions ?? "", /does not open a pull request/);
   assert.doesNotMatch(result.deliveryInstructions ?? "", /manually/);
@@ -1221,7 +1221,7 @@ test("a failed pull-request lookup does not fail a step that opens no pull reque
   // documentation step *after* its push, and a delivery failure carrying a
   // failureClass is marked non-retryable — one rate-limited lookup would wedge
   // the step permanently.
-  const fake: CommandExecutor = async (executable, args) => {
+  const fake: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") throw new Error("gh: API rate limit exceeded");
     return "";
   };
@@ -1240,13 +1240,13 @@ test("the ref that was actually pushed is recorded on every path that pushed", a
   //   (d) below is the direction where a salvage push SUCCEEDED against a
   //       per-run branch while `branch` still reads the shared one — the next
   //       chain step would clone a ref nobody created.
-  const created: CommandExecutor = async (executable, args) => {
+  const created: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/9", number: 9 }]);
     return "";
   };
   assert.equal((await deliverWorkspace(config, claim, workspace, { command: created })).pushedBranch, "feature/test");
 
-  const prFails: CommandExecutor = async (executable, args) => {
+  const prFails: CommandRunner = async (executable, args) => {
     if (executable === "gh" && args[1] === "list") return "[]";
     if (executable === "gh" && args[1] === "create") throw new Error("gh: API rate limit exceeded");
     return "";
@@ -1255,13 +1255,13 @@ test("the ref that was actually pushed is recorded on every path that pushed", a
   assert.equal(failed.pushStatus, "FAILED");
   assert.equal(failed.pushedBranch, "feature/test");
 
-  const pushFails: CommandExecutor = async (executable, args) => {
+  const pushFails: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "push") throw new Error("remote rejected");
     return "";
   };
   assert.equal((await deliverWorkspace(config, claim, workspace, { command: pushFails })).pushedBranch, undefined);
 
-  const salvage: CommandExecutor = async (executable, args) => {
+  const salvage: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "status") return "M tracked.ts";
     return executable === "git" && args[0] === "rev-parse" ? "salvage-sha" : "";
   };
@@ -1278,7 +1278,7 @@ const LEASE_MS = 60_000;
 test("a hung push is timed out and reported as a transient failure, not a lease-eating stall", async () => {
   let clock = 0;
   const timeouts: Array<number | undefined> = [];
-  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+  const fake: CommandRunner = async (executable, args, options) => {
     if (executable === "git" && args[0] === "rev-parse") return "changed-head";
     timeouts.push(options?.timeoutMs);
     clock += (options?.timeoutMs ?? 0) + KILL_OVERHEAD_MS;
@@ -1320,7 +1320,7 @@ test("a hung push is timed out and reported as a transient failure, not a lease-
  */
 test("a hung push arrives at the API as a typed timeout, not as a failed task", async () => {
   let clock = 0;
-  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+  const fake: CommandRunner = async (executable, args, options) => {
     if (executable === "git" && args[0] === "rev-parse") return "changed-head";
     clock += (options?.timeoutMs ?? 0) + KILL_OVERHEAD_MS;
     throw new CommandTimeoutError("git", ["push"], options?.timeoutMs ?? 0);
@@ -1406,7 +1406,7 @@ test("every command of a slow delivery is capped, and the whole phase fits one l
   // drawing on the single phase deadline, measured from the delivery heartbeat.
   let clock = 0;
   const calls: string[] = [];
-  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+  const fake: CommandRunner = async (executable, args, options) => {
     calls.push(`${executable} ${args.slice(0, 2).join(" ")}`);
     const timeoutMs = options?.timeoutMs;
     // Nothing in delivery may run uncapped: an uncapped command is a hole in
@@ -1436,7 +1436,7 @@ test("a hung pull-request creation and its probe cannot open a second budget", a
   let clock = 0;
   const calls: string[] = [];
   const ghTimeouts: Array<number | undefined> = [];
-  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+  const fake: CommandRunner = async (executable, args, options) => {
     calls.push(`${executable} ${args.slice(0, 2).join(" ")}`);
     if (executable === "git") return "";
     if (args[0] === "--version") return "gh version 2.0.0";
@@ -1473,7 +1473,7 @@ test("retries across the delivery chain cannot stack into more than one lease", 
   // budgets back to back; with one phase deadline it is one.
   let clock = 0;
   const attempted = new Map<string, number>();
-  const fake: CommandExecutor = async (executable, args, _cwd, _env, options) => {
+  const fake: CommandRunner = async (executable, args, options) => {
     const key = `${executable} ${args.slice(0, 2).join(" ")}`;
     const seen = (attempted.get(key) ?? 0) + 1;
     attempted.set(key, seen);

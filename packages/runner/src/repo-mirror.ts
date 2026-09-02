@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
-import type { CommandOptions } from "./exec.js";
+import type { CommandRunner } from "./exec.js";
 import {
   CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
 } from "./network-retry.js";
@@ -47,15 +47,6 @@ import {
  *   remove a lock another contender has already replaced, and a holder that is
  *   merely slow is never mistaken for a dead one.
  */
-
-export type MirrorCommandExecutor = (
-  config: RunnerConfig,
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options?: CommandOptions,
-) => Promise<string>;
 
 export type RepoMirrorProgress = {
   event: "created" | "refreshed" | "object-top-up" | "lock-wait" | "lock-steal" | "staging-retained" | "elapsed";
@@ -180,24 +171,22 @@ export const repoMirrorPath = (root: string, remoteUrl: string): string =>
 /**
  * Run a shell fragment as the task principal.
  *
- * `cwd` is not where the work happens — every path the fragment touches is
- * absolute — it is only somewhere node can chdir *before* the prefix runs, as
- * the daemon's own uid. The mirror's own directories are not that place.
+ * The runner's bound directory is not where the work happens — every path the
+ * fragment touches is absolute — it is only somewhere node can chdir *before*
+ * the prefix runs, as the daemon's own uid. The mirror's own directories are
+ * not that place.
  */
 const shell = (
-  config: RunnerConfig,
-  execute: MirrorCommandExecutor,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
+  run: CommandRunner,
   body: string,
   ...args: string[]
-): Promise<string> => execute(config, "/bin/sh", ["-c", body, "agentos-mirror", ...args], cwd, env);
+): Promise<string> => run("/bin/sh", ["-c", body, "agentos-mirror", ...args]);
 
-/** Git addressed by GIT_DIR rather than by cwd, for the same reason. Keeping
- *  the subcommand at argv[0] also keeps network-retry.ts's allowlist — and the
- *  timeout that rides on it — matching what it is meant to match. */
-const gitEnvironment = (env: NodeJS.ProcessEnv, mirror: string): NodeJS.ProcessEnv =>
-  ({ ...env, GIT_DIR: mirror });
+/** Git addressed by GIT_DIR rather than by the bound directory, for the same
+ *  reason. Keeping the subcommand at argv[0] also keeps network-retry.ts's
+ *  allowlist — and the timeout that rides on it — matching what it is meant to
+ *  match. */
+const gitDirectory = (mirror: string): NodeJS.ProcessEnv => ({ GIT_DIR: mirror });
 
 const ENSURE_ROOT = 'mkdir -p "$1" && chmod 700 "$1" && [ ! -L "$1" ] || exit 1;'
   // Staging left behind by a process that died between mktemp and mv. Nothing
@@ -241,10 +230,7 @@ const ACQUIRE = 'if mkdir "$1" 2>/dev/null; then'
 const RELEASE = 'if [ "$(cat "$1/owner" 2>/dev/null)" = "$2" ]; then rm -rf "$1"; fi';
 
 const acquireMirrorLock = async (
-  config: RunnerConfig,
-  execute: MirrorCommandExecutor,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
+  run: CommandRunner,
   lockPath: string,
   owner: string,
   options: RepoMirrorOptions,
@@ -260,7 +246,7 @@ const acquireMirrorLock = async (
   const held = `${owner}:${process.pid}:${randomUUID()}`;
   let waited = false;
   for (;;) {
-    const outcome = await shell(config, execute, cwd, env, ACQUIRE, lockPath, held, String(staleMinutes));
+    const outcome = await shell(run, ACQUIRE, lockPath, held, String(staleMinutes));
     if (outcome === "acquired") {
       // A holder that stops touching its lock is a holder that died. Without
       // this, the staleness threshold would have to bound the uncapped local
@@ -271,12 +257,12 @@ const acquireMirrorLock = async (
         // and the touch are still two operations, so the guard narrows that
         // window rather than closing it; what closes it is that the next
         // acquisition steals anything at the path that is not a directory.
-        void shell(config, execute, cwd, env, 'if [ -d "$1" ]; then touch "$1"; fi', lockPath).catch(() => undefined);
+        void shell(run, 'if [ -d "$1" ]; then touch "$1"; fi', lockPath).catch(() => undefined);
       }, heartbeatMs);
       heartbeat.unref?.();
       return async (): Promise<void> => {
         clearInterval(heartbeat);
-        await shell(config, execute, cwd, env, RELEASE, lockPath, held);
+        await shell(run, RELEASE, lockPath, held);
       };
     }
     if (outcome === "stolen") {
@@ -302,12 +288,9 @@ const acquireMirrorLock = async (
 };
 
 const fetchFromRemote = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   mirror: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
+  args: readonly string[],
   retryOptions: RetryOptions,
 ): Promise<void> => {
   // The clone profile, not delivery's. The first fetch into an empty mirror
@@ -315,75 +298,63 @@ const fetchFromRemote = async (
   // while the runner heartbeat holds the lease, so the bound only has to
   // separate "hung" from "slow".
   await runWithNetworkRetry("git", args,
-    ({ timeoutMs }) => execute(config, "git", args, cwd, gitEnvironment(env, mirror), { timeoutMs }),
+    ({ timeoutMs }) => run("git", args, { env: gitDirectory(mirror), timeoutMs }),
     { commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS, budgetMs: CLONE_OPERATION_BUDGET_MS, ...retryOptions },
   );
 };
 
 const REFRESH_ARGS = ["fetch", "--prune", "--prune-tags", "--tags", "--quiet", "origin"] as const;
 
-const configureMirror = async (
-  config: RunnerConfig,
-  mirror: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
-): Promise<void> => {
-  const gitEnv = gitEnvironment(env, mirror);
+const configureMirror = async (run: CommandRunner, mirror: string): Promise<void> => {
+  const env = gitDirectory(mirror);
   // Heads only: GitHub advertises refs/pull/*, which no run has ever needed and
   // which would make every fetch pay for the repository's whole review history.
-  await execute(config, "git", ["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"], cwd, gitEnv);
+  await run("git", ["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"], { env });
   // Blind-review provisioning fetches an exact object id out of this mirror.
   // upload-pack refuses unadvertised objects by default, and the refusal would
   // read as a mirror fault rather than as the policy it is.
-  await execute(config, "git", ["config", "uploadpack.allowAnySHA1InWant", "true"], cwd, gitEnv);
+  await run("git", ["config", "uploadpack.allowAnySHA1InWant", "true"], { env });
 };
 
 const createMirror = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   root: string,
   mirror: string,
   remoteUrl: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
   retryOptions: RetryOptions,
   report: (progress: RepoMirrorProgress) => void,
 ): Promise<void> => {
   // Staged beside the destination and renamed only after the first fetch
   // succeeds, so an interrupted creation can never leave a directory that later
   // runs would mistake for a populated mirror.
-  const staging = await shell(config, execute, cwd, env, 'd=$(mktemp -d "$1/.stage-XXXXXXXX") && printf %s "$d"', root);
+  const staging = await shell(run, 'd=$(mktemp -d "$1/.stage-XXXXXXXX") && printf %s "$d"', root);
   if (!insideOrEqual(root, staging)) throw new Error(`Runner repository mirror staging escaped its root: ${staging}`);
   try {
-    await execute(config, "git", ["init", "--bare", "--quiet", staging], cwd, env);
-    await execute(config, "git", ["remote", "add", "origin", remoteUrl], cwd, gitEnvironment(env, staging));
-    await configureMirror(config, staging, cwd, env, execute);
-    await fetchFromRemote(config, staging, [...REFRESH_ARGS], cwd, env, execute, retryOptions);
-    await shell(config, execute, cwd, env, 'mv "$1" "$2"', staging, mirror);
+    await run("git", ["init", "--bare", "--quiet", staging]);
+    await run("git", ["remote", "add", "origin", remoteUrl], { env: gitDirectory(staging) });
+    await configureMirror(run, staging);
+    await fetchFromRemote(run, staging, REFRESH_ARGS, retryOptions);
+    await shell(run, 'mv "$1" "$2"', staging, mirror);
   } finally {
     // The sweep in ENSURE_ROOT is what covers a process that dies before this
     // runs; a failure here is reported rather than swallowed, because a staging
     // directory is close to a whole repository in size.
-    await shell(config, execute, cwd, env, 'rm -rf "$1"', staging)
+    await shell(run, 'rm -rf "$1"', staging)
       .catch(() => { report({ event: "staging-retained", mirror: staging }); });
   }
 };
 
 const validateMirror = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   mirror: string,
   remoteUrl: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
 ): Promise<void> => {
-  const gitEnv = gitEnvironment(env, mirror);
+  const env = gitDirectory(mirror);
   let bare: string;
   let configured: string;
   try {
-    bare = await execute(config, "git", ["rev-parse", "--is-bare-repository"], cwd, gitEnv);
-    configured = await execute(config, "git", ["config", "--get", "remote.origin.url"], cwd, gitEnv);
+    bare = await run("git", ["rev-parse", "--is-bare-repository"], { env });
+    configured = await run("git", ["config", "--get", "remote.origin.url"], { env });
   } catch (error: unknown) {
     throw new RepoMirrorError(mirror, "not-a-readable-git-repository", { cause: error });
   }
@@ -399,17 +370,14 @@ const validateMirror = async (
  * genuinely broken object database from being read as "not fetched yet".
  */
 export const mirrorRevisionsPresent = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   mirror: string,
   revisions: readonly string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
 ): Promise<Map<string, boolean>> => {
   if (revisions.length === 0) return new Map();
-  const output = await execute(
-    config, "git", ["cat-file", "--batch-check=%(objectname) %(objecttype)"], cwd, gitEnvironment(env, mirror),
-    { input: `${revisions.join("\n")}\n` },
+  const output = await run(
+    "git", ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+    { env: gitDirectory(mirror), input: `${revisions.join("\n")}\n` },
   );
   const lines = output.split("\n");
   if (lines.length !== revisions.length) {
@@ -425,21 +393,18 @@ export const mirrorRevisionsPresent = async (
  * was deleted upstream after the object was recorded.
  */
 export const ensureMirrorRevisions = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   mirror: string,
   revisions: readonly string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
   retryOptions: RetryOptions = {},
   report: (progress: RepoMirrorProgress) => void = progressReporter,
 ): Promise<void> => {
-  const present = await mirrorRevisionsPresent(config, mirror, revisions, cwd, env, execute);
+  const present = await mirrorRevisionsPresent(run, mirror, revisions);
   const missing = revisions.filter((revision) => present.get(revision) !== true);
   if (missing.length === 0) return;
   report({ event: "object-top-up", mirror, condition: missing.join(",") });
-  await fetchFromRemote(config, mirror, ["fetch", "--no-tags", "--quiet", "origin", ...missing], cwd, env, execute, retryOptions);
-  const settled = await mirrorRevisionsPresent(config, mirror, missing, cwd, env, execute);
+  await fetchFromRemote(run, mirror, ["fetch", "--no-tags", "--quiet", "origin", ...missing], retryOptions);
+  const settled = await mirrorRevisionsPresent(run, mirror, missing);
   const absent = missing.filter((revision) => settled.get(revision) !== true);
   // Not a RepoMirrorError: the mirror did what it was asked and the remote came
   // back without the object. Rebuilding the mirror would not change that answer.
@@ -449,16 +414,13 @@ export const ensureMirrorRevisions = async (
 /** Whether the mirror carries this branch. Read after a refresh, this is the
  *  same truth an `ls-remote` would have returned, without the round trip. */
 export const mirrorHasBranch = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   mirror: string,
   branch: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
 ): Promise<boolean> => {
   const reference = `refs/heads/${branch}`;
-  const listed = await execute(
-    config, "git", ["for-each-ref", "--format=%(refname)", reference], cwd, gitEnvironment(env, mirror),
+  const listed = await run(
+    "git", ["for-each-ref", "--format=%(refname)", reference], { env: gitDirectory(mirror) },
   );
   return listed.split("\n").includes(reference);
 };
@@ -468,15 +430,14 @@ export const mirrorHasBranch = async (
  * the machine-wide lock is still held, so nothing repacks the object database
  * while a workspace is being cloned out of it.
  *
- * `cwd` must be a directory the runner daemon's own uid can enter: node chdirs
- * into it before the run-as prefix executes. The workspace root is one.
+ * `run` must be bound to a directory the runner daemon's own uid can enter:
+ * node chdirs into it before the run-as prefix executes. The workspace root is
+ * one.
  */
 export const withRepoMirror = async <T>(
   config: RunnerConfig,
   remoteUrl: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: MirrorCommandExecutor,
+  run: CommandRunner,
   options: RepoMirrorOptions,
   use: (mirror: string) => Promise<T>,
 ): Promise<T> => {
@@ -492,24 +453,22 @@ export const withRepoMirror = async <T>(
       `Runner repository mirror root ${root} overlaps the workspace root ${config.workspaceRoot}`,
     );
   }
-  const retained = await shell(config, execute, cwd, env, ENSURE_ROOT, root, String(staleMinutes));
+  const retained = await shell(run, ENSURE_ROOT, root, String(staleMinutes));
   for (const staging of retained.split("\n").map((line) => line.trim()).filter(Boolean)) {
     report({ event: "staging-retained", mirror: staging });
   }
   const mirror = repoMirrorPath(root, remoteUrl);
-  const release = await acquireMirrorLock(
-    config, execute, cwd, env, `${mirror}.lock`, config.runnerId, options, report,
-  );
+  const release = await acquireMirrorLock(run, `${mirror}.lock`, config.runnerId, options, report);
   try {
-    const state = await shell(config, execute, cwd, env, PROBE, mirror);
+    const state = await shell(run, PROBE, mirror);
     if (state === "unusable") throw new RepoMirrorError(mirror, "not-a-directory");
     if (state === "present") {
-      await validateMirror(config, mirror, remoteUrl, cwd, env, execute);
-      await configureMirror(config, mirror, cwd, env, execute);
-      await fetchFromRemote(config, mirror, [...REFRESH_ARGS], cwd, env, execute, retryOptions);
+      await validateMirror(run, mirror, remoteUrl);
+      await configureMirror(run, mirror);
+      await fetchFromRemote(run, mirror, REFRESH_ARGS, retryOptions);
       report({ event: "refreshed", mirror });
     } else {
-      await createMirror(config, root, mirror, remoteUrl, cwd, env, execute, retryOptions, report);
+      await createMirror(run, root, mirror, remoteUrl, retryOptions, report);
       report({ event: "created", mirror });
     }
     return await use(mirror);

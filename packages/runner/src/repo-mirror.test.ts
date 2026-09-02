@@ -2,20 +2,17 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
-import { runCommand } from "./exec.js";
+import { bindCommandRunner, type CommandRunner } from "./exec.js";
 import {
   mirrorRevisionsPresent, repoMirrorPath, RepoMirrorError, withRepoMirror,
-  type MirrorCommandExecutor, type RepoMirrorProgress,
+  type RepoMirrorProgress,
 } from "./repo-mirror.js";
-import {
-  provisionWorkspace, workspaceEnvironment,
-  type WorkspaceCommandExecutor, type WorkspaceProvisionClaim,
-} from "./workspace.js";
+import { provisionWorkspace, workspaceEnvironment, type WorkspaceProvisionClaim } from "./workspace.js";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
@@ -74,15 +71,22 @@ const claimFor = (remote: string, id: string): WorkspaceProvisionClaim => ({
   },
 });
 
-/** The production executor, with every argv it is handed recorded. */
-const recorded = (calls: { args: string[]; cwd: string }[]): WorkspaceCommandExecutor =>
-  async (config, executable, args, cwd, env, options = {}) => {
-    calls.push({ args, cwd });
-    return runCommand(config.runAsPrefix, executable, args, cwd, env, options);
-  };
+/** The production runner, bound the way provisioning binds it. */
+const bound = (config: RunnerConfig, cwd: string): CommandRunner =>
+  bindCommandRunner(config.runAsPrefix, cwd, workspaceEnvironment(config));
 
-const passthrough: MirrorCommandExecutor = (config, executable, args, cwd, env, options = {}) =>
-  runCommand(config.runAsPrefix, executable, args, cwd, env, options);
+/** The production runner, with every argv it is handed recorded. */
+const recorded = (
+  calls: { args: string[]; cwd: string }[],
+  config: RunnerConfig,
+  cwd: string,
+): CommandRunner => {
+  const run = bound(config, cwd);
+  return async (executable, args, options) => {
+    calls.push({ args: [...args], cwd: options?.cwd ?? cwd });
+    return run(executable, args, options);
+  };
+};
 
 
 const silent = (): ((progress: RepoMirrorProgress) => void) => (): void => undefined;
@@ -103,7 +107,7 @@ test("the second run reuses the machine's mirror and fetches only what changed",
       config,
       claimFor(remote, "two"),
       NO_DEPENDENCIES,
-      { execute: recorded(calls), mirrorOptions: { report: silent() } },
+      { run: recorded(calls, config, resolve(config.workspaceRoot)), mirrorOptions: { report: silent() } },
     );
 
     // Same mirror directory, not a rebuilt one, and the run sees the commit
@@ -185,14 +189,13 @@ test("a mirror that is not a readable git repository is refused, not rebuilt", a
 
 test("a held lock is waited for, and one left behind by a dead holder is stolen", async () => {
   const { root, remote, config, mirror } = await fixture("lock");
-  const env = workspaceEnvironment(config);
   try {
     const lock = `${mirror}.lock`;
     await mkdir(join(root, "mirrors"), { recursive: true });
     await mkdir(lock);
 
     const refused = await withRepoMirror(
-      config, remote, root, env, passthrough,
+      config, remote, bound(config, root),
       { lockWaitMs: 10, lockPollMs: 1, report: silent() },
       async () => "unreachable",
     ).then(() => null, (error: unknown) => error);
@@ -204,7 +207,7 @@ test("a held lock is waited for, and one left behind by a dead holder is stolen"
     await utimes(lock, stale, stale);
     let steals = 0;
     const taken = await withRepoMirror(
-      config, remote, root, env, passthrough,
+      config, remote, bound(config, root),
       {
         lockWaitMs: 10,
         lockPollMs: 1,
@@ -224,7 +227,6 @@ test("a held lock is waited for, and one left behind by a dead holder is stolen"
 
 test("a file where the lock directory belongs is stolen rather than waited on", async () => {
   const { root, remote, config, mirror } = await fixture("lock-file");
-  const env = workspaceEnvironment(config);
   try {
     // What a heartbeat that raced its own release leaves behind. No mkdir can
     // ever acquire it, so waiting out the stale window would wedge the machine
@@ -232,7 +234,7 @@ test("a file where the lock directory belongs is stolen rather than waited on", 
     await mkdir(join(root, "mirrors"), { recursive: true });
     await writeFile(`${mirror}.lock`, "");
     const taken = await withRepoMirror(
-      config, remote, root, env, passthrough,
+      config, remote, bound(config, root),
       { lockWaitMs: 10, lockPollMs: 1, report: silent() },
       async (path) => path,
     );
@@ -244,10 +246,9 @@ test("a file where the lock directory belongs is stolen rather than waited on", 
 
 test("a holder that was taken over does not delete its successor's lock", async () => {
   const { root, remote, config, mirror } = await fixture("release");
-  const env = workspaceEnvironment(config);
   const lock = `${mirror}.lock`;
   try {
-    await withRepoMirror(config, remote, root, env, passthrough, { report: silent() }, async () => {
+    await withRepoMirror(config, remote, bound(config, root), { report: silent() }, async () => {
       // What a stale takeover looks like from inside the declared-dead holder:
       // its lock is gone and someone else's is at the path.
       await rm(lock, { recursive: true, force: true });
@@ -307,7 +308,6 @@ test("every mirror command runs through the run-as prefix, so the account with t
 
 test("a mirror root reached through a symlinked ancestor still counts as inside the workspace root", async () => {
   const { root, remote, config } = await fixture("overlap");
-  const env = workspaceEnvironment(config);
   try {
     // Nothing textual connects these two paths; the link is what puts the
     // mirror inside the tree the runner reclaims between runs.
@@ -316,7 +316,7 @@ test("a mirror root reached through a symlinked ancestor still counts as inside 
     const overlapping = { ...config, repoMirrorRoot: join(root, "alias", "mirrors") } as RunnerConfig;
 
     await assert.rejects(
-      withRepoMirror(overlapping, remote, root, env, passthrough, { report: silent() }, async () => undefined),
+      withRepoMirror(overlapping, remote, bound(overlapping, root), { report: silent() }, async () => undefined),
       /overlaps the workspace root/u,
     );
   } finally {
@@ -326,7 +326,6 @@ test("a mirror root reached through a symlinked ancestor still counts as inside 
 
 test("staging the sweep could not remove is reported rather than swallowed", async () => {
   const { root, remote, config, mirrorRoot } = await fixture("staging");
-  const env = workspaceEnvironment(config);
   const stranded = join(mirrorRoot, ".stage-abandoned");
   try {
     await mkdir(mirrorRoot, { recursive: true });
@@ -341,7 +340,7 @@ test("staging the sweep could not remove is reported rather than swallowed", asy
 
     const progress: RepoMirrorProgress[] = [];
     await withRepoMirror(
-      config, remote, root, env, passthrough,
+      config, remote, bound(config, root),
       { report: (event) => progress.push(event) },
       async () => undefined,
     );
@@ -360,14 +359,14 @@ test("staging the sweep could not remove is reported rather than swallowed", asy
 
 test("mirror git runs are addressed by GIT_DIR, never by entering the mirror the daemon cannot", async () => {
   const { root, remote, config, mirror } = await fixture("git-dir");
-  const env = workspaceEnvironment(config);
   const runs: { args: string[]; cwd: string; gitDir: string | undefined }[] = [];
-  const observed: MirrorCommandExecutor = (mirrorConfig, executable, args, cwd, commandEnv, options = {}) => {
-    if (executable === "git") runs.push({ args, cwd, gitDir: commandEnv.GIT_DIR });
-    return runCommand(mirrorConfig.runAsPrefix, executable, args, cwd, commandEnv, options);
+  const passthrough = bound(config, root);
+  const observed: CommandRunner = (executable, args, options) => {
+    if (executable === "git") runs.push({ args: [...args], cwd: options?.cwd ?? root, gitDir: options?.env?.GIT_DIR });
+    return passthrough(executable, args, options);
   };
   try {
-    await withRepoMirror(config, remote, root, env, observed, { report: silent() }, async () => undefined);
+    await withRepoMirror(config, remote, observed, { report: silent() }, async () => undefined);
 
     const bare = runs.filter((run) => run.args[0] === "fetch" || run.args[0] === "config");
     assert.equal(bare.length > 0, true);
@@ -388,13 +387,12 @@ test("mirror git runs are addressed by GIT_DIR, never by entering the mirror the
 
 test("object presence is read from cat-file's own answer, never from an exit code", async () => {
   const { root, remote, seed, config } = await fixture("objects");
-  const env = workspaceEnvironment(config);
   try {
     const present = git(seed, "rev-parse", "HEAD");
     const absent = "0".repeat(40);
     const answers = await withRepoMirror(
-      config, remote, root, env, passthrough, { report: silent() },
-      (mirror) => mirrorRevisionsPresent(config, mirror, [present, absent], root, env, passthrough),
+      config, remote, bound(config, root), { report: silent() },
+      (mirror) => mirrorRevisionsPresent(bound(config, root), mirror, [present, absent]),
     );
     assert.equal(answers.get(present), true);
     assert.equal(answers.get(absent), false);

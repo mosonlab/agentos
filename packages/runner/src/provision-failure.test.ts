@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { RUNNER_EXCEPTION_REASON, runnerExceptionEnvelope } from "./envelope.js";
-import { runCommand } from "./exec.js";
+import { bindCommandRunner, type CommandRunner } from "./exec.js";
 import { executeClaim } from "./runner.js";
 import { createControlPlaneDouble, envelopeOf } from "./test-control-plane.js";
-import { provisionWorkspace } from "./workspace.js";
+import { provisionWorkspace, workspaceEnvironment } from "./workspace.js";
 
 /**
  * What the API actually receives when provisioning fails.
@@ -151,19 +151,23 @@ test("a transient mirror fetch failure escapes provisioning as a transient error
   // rethrow are the production ones, and the backoff is the only thing skipped.
   const message = "git failed (128): fatal: unable to access 'https://example.test/repo.git/': "
     + "LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to example.test:443";
+  const configured = config(root);
+  const production = bindCommandRunner(
+    configured.runAsPrefix, resolve(configured.workspaceRoot), workspaceEnvironment(configured),
+  );
   const escaped = await provisionWorkspace(
-    config(root),
+    configured,
     claim("https://example.test/repo.git"),
     // The mirror fetch fails before dependencies are ever reached.
     { provision: false, evidence: "Dependency provisioning skipped: Repo.dependencyProvisioning=NONE" },
     {
-      execute: async (executorConfig, executable, args, cwd, env) => {
+      run: (async (executable, args, options) => {
         // Only git is faked: the mirror's own filesystem bookkeeping is real work
         // in a temporary directory, and the retry under test rides on the fetch.
-        if (executable === "/bin/sh") return runCommand(executorConfig.runAsPrefix, executable, args, cwd, env, {});
+        if (executable === "/bin/sh") return production(executable, args, options);
         if (args[0] === "fetch") throw new Error(message);
         return "";
-      },
+      }) satisfies CommandRunner,
       retryOptions: { attempts: 1 },
     },
   ).then(() => null, (error: unknown) => error);
