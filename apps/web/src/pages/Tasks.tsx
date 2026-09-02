@@ -500,15 +500,10 @@ export const TasksPage = (): ReactNode => {
     },
   }), [move, retry, archive, remove, copyError]);
 
-  type BoardChainAggregateActions = ChainAggregateActions & {
-    onHold: (taskId: string) => void;
-    onResume: (taskId: string) => void;
-  };
-
   /** Aggregate cards use the same startability/confirmation surface as a
    * task dropped onto Doing. Keeping this callback at the page boundary means
    * stale-view 4xx responses remain visible in StartTaskDialog. */
-  const aggregateActions: BoardChainAggregateActions = useMemo(() => ({
+  const aggregateActions: ChainAggregateActions = useMemo(() => ({
     onActivate: (taskId) => {
       void run(async () => { await start.requestForMove(taskId); });
     },

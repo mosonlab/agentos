@@ -90,7 +90,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   const parked = column.status === "TODO" ? parkedChains(visibleEntries) : [];
   // Doing's counterpart: a hold wave asks the control plane to stop each
   // chain after its current layer. No active Run is cancelled by this action.
-  const holdable = column.status === "DOING" ? heldChains(entries) : [];
+  const holdable = column.status === "DOING" && onHoldAll !== undefined ? heldChains(visibleEntries) : [];
   const headAction = column.status === "DONE" && entries.length > 0
     ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
         {t("tasks.archiveAll")}
@@ -100,7 +100,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
           {t("tasks.activateAll")}
         </Button>
       : holdable.length > 0
-        ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => onHoldAll?.(holdable)}>
+        ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => onHoldAll!(holdable)}>
             {t("tasks.holdAll")}
           </Button>
       : null;

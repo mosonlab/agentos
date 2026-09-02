@@ -288,6 +288,17 @@ test("an unheld Chain offers Hold and no held badge", () => {
   assert.doesNotMatch(markup, /data-chain-hold-reason=/u);
 });
 
+test("a before-first hold uses the zero-sentinel wording and waits on Resume", () => {
+  const markup = render(chain([
+    step(1, { layer: 0, holdRefusal: "Cannot start Step 1; Chain is held before its first layer" }),
+    step(2, { layer: 1, holdRefusal: "Cannot start Step 2; Chain is held before its first layer" }),
+  ], { control: heldControl({ heldLayer: 0 }) }), "t1");
+  assert.match(markup, new RegExp(en("chain.heldBeforeFirst")));
+  assert.match(markup, new RegExp(en("chain.startHeldBeforeFirstHint")));
+  assert.match(markup, new RegExp(en("chain.waitingOperator")));
+  assert.doesNotMatch(markup, /Held after layer 0/u);
+});
+
 test("a held Chain offers Resume, names its layer and disables later Start", () => {
   const refusal = "Cannot start Task 2; Chain is held after layer 1";
   const markup = render(chain([

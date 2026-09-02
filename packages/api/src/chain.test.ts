@@ -167,6 +167,7 @@ const heldControl = (heldLayer: number | null): ChainControlSnapshot => ({
   state: ChainControlState.HELD,
   held: true,
   heldLayer,
+  heldExecutionLayer: heldLayer,
   heldAt: new Date("2026-08-28T12:00:00.000Z"),
   holdRequestId: "hold-1",
   holdReason: null,

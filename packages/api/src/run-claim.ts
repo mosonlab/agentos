@@ -115,7 +115,7 @@ const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
 const heldChainTaskIdsForClaim = async (tx: Prisma.TransactionClient): Promise<string[]> => {
   const controls = await tx.chainControl.findMany({
     where: { state: ChainControlState.HELD },
-    select: { projectId: true, chainId: true, state: true, heldLayer: true },
+    select: { projectId: true, chainId: true, state: true, heldLayer: true, heldExecutionLayer: true },
   });
   const heldChains = controls.flatMap((control) => {
     const where = heldWhere(control);
@@ -750,7 +750,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             projectId: candidate.task.projectId,
             chainId: candidate.task.chainId,
           } },
-          select: { projectId: true, chainId: true, state: true, heldLayer: true },
+          select: { projectId: true, chainId: true, state: true, heldLayer: true, heldExecutionLayer: true },
         });
         if (heldPredicate({
           projectId: candidate.task.projectId,

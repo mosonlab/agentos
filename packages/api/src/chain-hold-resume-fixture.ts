@@ -17,6 +17,7 @@ export const CHAIN_RUNNER_TOKEN = "chain-hold-resume-runner-token";
 type ControlSeed = {
   state: ChainControlState;
   heldLayer?: number | null;
+  heldExecutionLayer?: number | null;
   holdGeneration?: number;
   holdRequestId?: string | null;
   holdReason?: string | null;
@@ -84,13 +85,23 @@ export const seedBasicChain = async (
     } }));
   }
 
+  const admittedExecutionLayer = [...statuses.entries()]
+    .flatMap(([index, status]) => status === TaskStatus.TODO ? [] : [layers[index]!])
+    .sort((left, right) => right - left)[0] ?? null;
+  const layerOrdinals = new Map([...new Set(layers)].sort((left, right) => left - right)
+    .map((layer, index) => [layer, index + 1]));
+  const heldOrdinal = admittedExecutionLayer === null
+    ? 0
+    : layerOrdinals.get(admittedExecutionLayer);
+  if (heldOrdinal === undefined) throw new Error("admitted fixture layer has no ordinal");
   const controlSeed: ControlSeed | null = options.control === undefined
     ? {
       state: ChainControlState.HELD,
       // The fixture's default control represents a hold taken at the current
       // frontier. Derive the highest layer already admitted by the seeded
       // statuses; an all-TODO chain is held before its first layer (0).
-      heldLayer: Math.max(0, ...statuses.flatMap((status, index) => status === TaskStatus.TODO ? [] : [layers[index] ?? 0])),
+      heldLayer: heldOrdinal,
+      heldExecutionLayer: admittedExecutionLayer,
       holdGeneration: 1,
       holdRequestId: "hold-fixture",
       holdReason: "fixture hold",
@@ -101,11 +112,17 @@ export const seedBasicChain = async (
   let control = null;
   if (controlSeed) {
     const heldLayer = controlSeed.heldLayer ?? layers[0] ?? null;
+    const heldExecutionLayer = controlSeed.heldExecutionLayer !== undefined
+      ? controlSeed.heldExecutionLayer
+      : heldLayer === 0
+        ? null
+        : [...layerOrdinals].find(([, ordinal]) => ordinal === heldLayer)?.[0] ?? heldLayer;
     control = await db.chainControl.create({ data: {
       projectId: project.id,
       chainId,
       state: controlSeed.state,
       heldLayer,
+      heldExecutionLayer,
       holdGeneration: controlSeed.holdGeneration ?? 1,
       holdRequestId: controlSeed.holdRequestId ?? null,
       holdReason: controlSeed.holdReason ?? null,

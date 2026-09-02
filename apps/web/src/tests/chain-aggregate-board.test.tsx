@@ -144,7 +144,34 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   const waitingMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({ activation: { state: "waiting-on-predecessor", predecessor: { taskId: "previous", taskName: "Prepare release" }, taskId: "step-1", hold: null } })} />);
   assert.match(waitingMarkup, /Prepare release/);
   assert.match(waitingMarkup, /Locked by/);
+  assert.match(waitingMarkup, />Hold<\/button>/);
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
+});
+
+test("aggregate card mirrors Hold and Resume across running and held states", () => {
+  const running = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
+  assert.match(running, /data-chain-hold=""/u);
+  assert.match(running, />Stop after current step<\/button>/u);
+
+  const held = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
+    activation: {
+      state: "held", predecessor: null, taskId: "step-1",
+      hold: { heldLayer: 0, heldAt: "2026-08-28T01:00:00.000Z", holdReason: "inspect output" },
+    },
+  })} />);
+  assert.match(held, /data-slot="badge"[^>]*>Held</u);
+  assert.match(held, /Reason: inspect output/u);
+  assert.match(held, /data-chain-resume=""/u);
+
+  const runningHeld = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
+    activation: {
+      state: "running", predecessor: null, taskId: "step-1",
+      hold: { heldLayer: 2, heldAt: "2026-08-28T01:00:00.000Z", holdReason: null },
+    },
+  })} />);
+  assert.match(runningHeld, /data-slot="badge"[^>]*>Stops after step/u);
+  assert.match(runningHeld, /data-chain-resume=""/u);
+  assert.doesNotMatch(runningHeld, /data-chain-hold=""/u);
 });
 
 const element = (markup: string, selector: string): Element => {

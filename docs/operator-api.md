@@ -1106,8 +1106,9 @@ For a Chain member, the first emitted member also carries the
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
 `settled`; `held` is a derived aggregate state, not a persisted Task status.
 The aggregate's `activation.hold` is either `null` or
-`{heldLayer, heldAt, holdReason}`, where `heldLayer` is the highest execution
-layer admitted when the Chain was held, `heldAt` is an ISO timestamp, and
+`{heldLayer, heldAt, holdReason}`, where `heldLayer` is the dense one-based
+ordinal of the highest execution layer admitted when the Chain was held (or
+`0` before the first layer), `heldAt` is an ISO timestamp, and
 `holdReason` is the optional operator reason. It is non-null whenever the
 Chain's persisted `ChainControl.state` is `HELD`.
 
@@ -1209,7 +1210,8 @@ curl -X DELETE "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERA
 - Optional JSON field: `reason` (the operator's explanation for holding the
   Chain).
 - The hold barrier is layer-granular and never cancels an active Run. The
-  API records `heldLayer` as the highest execution layer already admitted:
+  API records `heldLayer` as the dense one-based ordinal of the highest
+  execution layer already admitted:
   any member whose status is not `TODO`, or any member with at least one Run,
   admits its layer. If no layer has been admitted, `heldLayer` is `0`; the
   `ChainControlEvent.layer` for the Hold is also `0`. A zero-layer hold
@@ -1239,11 +1241,13 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/hold" \
 - Resume releases a held Chain and activates the currently eligible layer at
   most once. It never revives a cancelled Run or reuses its provider
   conversation.
-- When the released hold has `heldLayer: 0`, Resume activates layer 1 when
-  that layer has no Run and its first task is unbound (`dispatchAfterTaskId` is
-  absent) or its bound predecessor is `DONE`. This uses the same repository,
-  agent, and startability admission as `POST /tasks/:taskId/start` and returns
-  the activated task's id in `nextTaskId`. If the bound predecessor is not
+- When the released hold has `heldLayer: 0`, Resume activates the Chain's
+  actual first execution layer (including every member of a parallel layer)
+  when that layer has no Run and its tasks are unbound (`dispatchAfterTaskId`
+  is absent) or their bound predecessors are `DONE`. This supports sparse,
+  zero-based, and one-based stored layers, uses the same repository, agent,
+  and startability admission as `POST /tasks/:taskId/start`, and returns the
+  first activated task's id in `nextTaskId`. If a bound predecessor is not
   `DONE`, Resume still releases the control but activates nothing
   (`nextTaskId: null`); completion of that predecessor later queues the
   successor through the normal unheld path. For `heldLayer >= 1`, the existing

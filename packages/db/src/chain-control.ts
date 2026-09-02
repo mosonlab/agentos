@@ -10,7 +10,8 @@ import {
   ACTIVE_RUN_STATUSES,
   activateChainSuccessor,
 } from "./chain-activation.js";
-import { compare, layerOf } from "./chain-order.js";
+import { heldBeforeFirstLayer } from "./chain-hold.js";
+import { compare, denseOrdinals, layerOf } from "./chain-order.js";
 import { enqueueTaskRunInternal, errorForOpenRunRefusal } from "./run-open.js";
 import { lockAgentRepoGrant, lockChainRows, lockChainStructure } from "./locks.js";
 import { markerFromMetadata } from "./merge-tail-markers.js";
@@ -29,6 +30,7 @@ type ChainControlProjectionInput = {
   chainId: string;
   state: ChainControlState;
   heldLayer: number | null;
+  heldExecutionLayer: number | null;
   heldAt: Date | null;
   holdRequestId: string | null;
   holdReason: string | null;
@@ -216,6 +218,7 @@ export type ChainControlSnapshot = {
   state: ChainControlState;
   held: boolean;
   heldLayer: number | null;
+  heldExecutionLayer: number | null;
   heldAt: Date | null;
   holdRequestId: string | null;
   holdReason: string | null;
@@ -232,6 +235,7 @@ const notHeld = ({ projectId, chainId }: ChainControlKey): ChainControlSnapshot 
   state: ChainControlState.RELEASED,
   held: false,
   heldLayer: null,
+  heldExecutionLayer: null,
   heldAt: null,
   holdRequestId: null,
   holdReason: null,
@@ -245,6 +249,7 @@ const snapshot = (row: {
   chainId: string;
   state: ChainControlState;
   heldLayer: number | null;
+  heldExecutionLayer: number | null;
   heldAt: Date | null;
   holdRequestId: string | null;
   holdReason: string | null;
@@ -257,6 +262,7 @@ const snapshot = (row: {
   state: row.state,
   held: row.state === ChainControlState.HELD,
   heldLayer: row.heldLayer,
+  heldExecutionLayer: row.heldExecutionLayer,
   heldAt: row.heldAt,
   holdRequestId: row.holdRequestId,
   holdReason: row.holdReason,
@@ -278,6 +284,7 @@ export const readChainControls = async (
       chainId: true,
       state: true,
       heldLayer: true,
+      heldExecutionLayer: true,
       heldAt: true,
       holdRequestId: true,
       holdReason: true,
@@ -307,6 +314,7 @@ export const readChainControlRecord = async (
     chainId: true,
     state: true,
     heldLayer: true,
+    heldExecutionLayer: true,
     heldAt: true,
     holdRequestId: true,
     holdReason: true,
@@ -368,11 +376,14 @@ export const holdChain = async (
     ...chainRows.filter((row) => row.status !== TaskStatus.TODO).map((row) => row.id),
     ...runRows.map((row) => row.taskId),
   ]);
-  const heldLayer = chainRows
+  const heldExecutionLayer = chainRows
     .filter((row) => admittedTaskIds.has(row.id))
     .map(chainLayerOf)
     .filter((layer): layer is number => layer !== null)
-    .sort((left, right) => right - left)[0] ?? 0;
+    .sort((left, right) => right - left)[0] ?? null;
+  const ordinals = denseOrdinals(chainRows.map((row) => ({ layer: row.chainLayer, index: row.chainIndex })));
+  const heldLayer = heldExecutionLayer === null ? 0 : ordinals.get(heldExecutionLayer);
+  if (heldLayer === undefined) throw new Error(`Admitted Chain layer ${heldExecutionLayer} has no ordinal`);
   if (chainRows.every((row) => row.status === TaskStatus.DONE)) {
     return refusal("conflict", "Cannot hold a completed Chain; there is nothing left to hold");
   }
@@ -385,6 +396,7 @@ export const holdChain = async (
       data: {
         state: ChainControlState.HELD,
         heldLayer,
+        heldExecutionLayer,
         heldAt: now,
         holdRequestId: input.requestId,
         holdReason: input.reason ?? null,
@@ -399,6 +411,7 @@ export const holdChain = async (
         chainId: input.chainId,
         state: ChainControlState.HELD,
         heldLayer,
+        heldExecutionLayer,
         heldAt: now,
         holdRequestId: input.requestId,
         holdReason: input.reason ?? null,
@@ -476,18 +489,22 @@ export const resumeChain = async (
   }
   if (existing.heldLayer === null) throw new Error("Held Chain control is missing its held layer");
 
-  let firstLayerTask: ResumeFirstLayerTask | null = null;
+  let firstLayerTasks: ResumeFirstLayerTask[] = [];
   let activateFirstLayer = false;
-  if (existing.heldLayer === 0) {
-    const firstLayerRows = chainRows
-      .filter((row) => chainLayerOf(row) === 1)
-      .sort(chainOrder);
-    const firstLayerRow = firstLayerRows[0] ?? null;
-    if (firstLayerRow === null) {
-      return refusal("conflict", "Cannot resume Chain before its first layer; layer 1 is missing");
+  const beforeFirstLayer = heldBeforeFirstLayer(existing);
+  if (beforeFirstLayer) {
+    const firstExecutionLayer = chainRows
+      .map(chainLayerOf)
+      .filter((layer): layer is number => layer !== null)
+      .sort((left, right) => left - right)[0];
+    if (firstExecutionLayer === undefined) {
+      return refusal("conflict", "Cannot resume Chain before its first layer; execution metadata is missing");
     }
-    firstLayerTask = await tx.task.findUnique({
-      where: { id: firstLayerRow.id },
+    const firstLayerRows = chainRows
+      .filter((row) => chainLayerOf(row) === firstExecutionLayer)
+      .sort(chainOrder);
+    const loaded = await tx.task.findMany({
+      where: { id: { in: firstLayerRows.map((row) => row.id) } },
       include: {
         assigneeAgent: { select: { name: true, archivedAt: true } },
         repo: { select: { name: true } },
@@ -501,25 +518,32 @@ export const resumeChain = async (
         },
       },
     });
-    if (firstLayerTask === null) throw new Error(`Chain first layer task ${firstLayerRow.id} disappeared while resuming`);
+    const loadedById = new Map(loaded.map((task) => [task.id, task]));
+    firstLayerTasks = firstLayerRows.map((row) => {
+      const task = loadedById.get(row.id);
+      if (!task) throw new Error(`Chain first layer task ${row.id} disappeared while resuming`);
+      return task;
+    });
 
     // A held-before-first Chain that is bound to an unfinished predecessor is
     // released but deliberately not started. The predecessor's terminal
     // completion owns the later bound dispatch. Likewise, any existing Run
     // means another admission already won and Resume must not mint a second.
-    const predecessorDone = firstLayerTask.dispatchAfterTaskId === null
-      || firstLayerTask.dispatchAfter?.status === TaskStatus.DONE;
+    const predecessorDone = firstLayerTasks.every((task) => task.dispatchAfterTaskId === null
+      || task.dispatchAfter?.status === TaskStatus.DONE);
     const firstLayerRunCount = await tx.run.count({ where: { taskId: { in: firstLayerRows.map((row) => row.id) } } });
     if (predecessorDone && firstLayerRunCount === 0) {
-      const startRefusal = await resumeFirstLayerRefusal(tx, firstLayerTask);
-      if (startRefusal) return startRefusal;
+      for (const task of firstLayerTasks) {
+        const startRefusal = await resumeFirstLayerRefusal(tx, task);
+        if (startRefusal) return startRefusal;
+      }
       activateFirstLayer = true;
     }
   }
 
-  const anchor = existing.heldLayer === 0
+  const anchor = beforeFirstLayer
     ? null
-    : resumeActivationAnchor(chainRows, existing.heldLayer);
+    : resumeActivationAnchor(chainRows, existing.heldExecutionLayer ?? existing.heldLayer);
   const anchorLayer = anchor === null ? null : chainLayerOf(anchor);
   const sourceRun = anchorLayer === null
     ? null
@@ -583,29 +607,31 @@ export const resumeChain = async (
     },
   });
 
-  if (activateFirstLayer && firstLayerTask !== null) {
-    const opened = await enqueueTaskRunInternal(tx, firstLayerTask.id, now, null);
-    if (!opened.ok) {
-      if (hasSavepoint) {
-        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-        return refusal("conflict", opened.refusal.message);
+  if (activateFirstLayer && firstLayerTasks.length > 0) {
+    for (const task of firstLayerTasks) {
+      const opened = await enqueueTaskRunInternal(tx, task.id, now, null);
+      if (!opened.ok) {
+        if (hasSavepoint) {
+          await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+          return refusal("conflict", opened.refusal.message);
+        }
+        throw errorForOpenRunRefusal(opened.refusal);
       }
-      throw errorForOpenRunRefusal(opened.refusal);
+      if (task.status === TaskStatus.BACKLOG) {
+        await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.TODO } });
+      }
+      await tx.taskActivity.create({ data: {
+        taskId: task.id,
+        actorType: "control-plane",
+        body: "Chain resumed; first step queued",
+      } });
     }
     if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    if (firstLayerTask.status === TaskStatus.BACKLOG) {
-      await tx.task.update({ where: { id: firstLayerTask.id }, data: { status: TaskStatus.TODO } });
-    }
-    await tx.taskActivity.create({ data: {
-      taskId: firstLayerTask.id,
-      actorType: "control-plane",
-      body: "Chain resumed; first step queued",
-    } });
     return {
       control: chainControlMutationProjection(released),
       duplicate: false,
-      nextTaskId: firstLayerTask.id,
+      nextTaskId: firstLayerTasks[0]!.id,
       gated: false,
     };
   }

@@ -21,12 +21,10 @@ export type ChainAggregateActions = {
   onArchive: (aggregate: ChainAggregate) => void;
 };
 
-type ChainCardState = ChainAggregateState;
-
 /** Every state that still names itself on the card. `running` is absent by
  *  design: the run line's amber dot already says the chain is running, and the
  *  pill beside it was the same fact a second time. */
-const STATE_TONE: Record<Exclude<ChainCardState, "running">, "green" | "amber" | "grey"> = {
+const STATE_TONE: Record<Exclude<ChainAggregateState, "running">, "green" | "amber" | "grey"> = {
   "parked-unactivated": "grey",
   "waiting-on-predecessor": "amber",
   held: "amber",
@@ -50,31 +48,41 @@ const memberPosition = (aggregate: ChainAggregate, members: readonly BoardTask[]
 
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
 
+type ChainControlAction = { kind: "hold" | "resume"; taskId: string } | null;
+
+/** One action decision feeds both the visible control and its menu mirror. */
+const controlActionFor = (activation: ChainAggregate["activation"]): ChainControlAction => {
+  if (activation.taskId === null) return null;
+  if (activation.hold === null
+    && (activation.state === "waiting-on-predecessor" || activation.state === "running")) {
+    return { kind: "hold", taskId: activation.taskId };
+  }
+  if (activation.state === "held" || (activation.state === "running" && activation.hold !== null)) {
+    return { kind: "resume", taskId: activation.taskId };
+  }
+  return null;
+};
+
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
   actions: ChainAggregateActions,
   t: Translate,
+  controlAction: ChainControlAction,
 ): RowMenuEntry[] => {
   const activation = aggregate.activation;
-  const state: ChainCardState = activation.state;
-  const hold = activation.hold;
+  const state = activation.state;
   const controlTaskId = activation.taskId;
-  const canHold = controlTaskId !== null
-    && hold === null
-    && (state === "waiting-on-predecessor" || state === "running");
-  const canResume = controlTaskId !== null
-    && (state === "held" || (state === "running" && hold !== null));
   return [
     { label: t("tasks.aggregate.menu.open"), onSelect: () => navigate(routeFor(representativeTaskId)) },
     ...(state === "parked-unactivated" && controlTaskId !== null
       ? [{ label: t("tasks.aggregate.menu.activate"), onSelect: () => actions.onActivate(controlTaskId) }]
       : []),
-    ...(canHold
-      ? [{ label: t("tasks.aggregate.menu.hold"), onSelect: () => actions.onHold(controlTaskId!) }]
+    ...(controlAction?.kind === "hold"
+      ? [{ label: t("tasks.aggregate.menu.hold"), onSelect: () => actions.onHold(controlAction.taskId) }]
       : []),
-    ...(canResume
-      ? [{ label: t("tasks.aggregate.menu.resume"), onSelect: () => actions.onResume(controlTaskId!) }]
+    ...(controlAction?.kind === "resume"
+      ? [{ label: t("tasks.aggregate.menu.resume"), onSelect: () => actions.onResume(controlAction.taskId) }]
       : []),
     { label: t("tasks.aggregate.menu.filter"), onSelect: () => actions.onFilter(aggregate) },
     ...(state === "settled"
@@ -93,10 +101,9 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const representative = representativeTaskId ?? aggregate.frontier.taskId;
   const title = chainName(aggregate);
   const position = memberPosition(aggregate, members);
-  const state: ChainCardState = aggregate.activation.state;
+  const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
   const hold = aggregate.activation.hold;
-  const controlTaskId = aggregate.activation.taskId;
   const activeRepair = aggregate.activeRepair;
   const cost = usageCostAmount(aggregate.totalCost);
   const handlers: ChainAggregateActions = actions ?? {
@@ -106,11 +113,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     onFilter: () => undefined,
     onArchive: () => undefined,
   };
-  const canHold = controlTaskId !== null
-    && hold === null
-    && (state === "waiting-on-predecessor" || state === "running");
-  const canResume = controlTaskId !== null
-    && (state === "held" || (state === "running" && hold !== null));
+  const controlAction = controlActionFor(aggregate.activation);
   const holdPill = state === "running" && hold !== null
     ? <Pill tone="amber" data-chain-hold-state="pending">{t("tasks.aggregate.state.stopsAfter")}</Pill>
     : state === "held" && hold !== null
@@ -156,24 +159,24 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
           {t("chain.holdReason", { reason: hold.holdReason })}
         </span>,
       ] : []),
-      ...(canHold ? [
+      ...(controlAction?.kind === "hold" ? [
         <Button
           type="button"
           variant="legacy"
           size="legacySmall"
           data-chain-hold=""
-          onClick={(event) => { event.stopPropagation(); handlers.onHold(controlTaskId!); }}
+          onClick={(event) => { event.stopPropagation(); handlers.onHold(controlAction.taskId); }}
         >
           {t(state === "running" ? "tasks.aggregate.stopAfter" : "tasks.aggregate.hold")}
         </Button>,
       ] : []),
-      ...(canResume ? [
+      ...(controlAction?.kind === "resume" ? [
         <Button
           type="button"
           variant="legacyPrimary"
           size="legacySmall"
           data-chain-resume=""
-          onClick={(event) => { event.stopPropagation(); handlers.onResume(controlTaskId!); }}
+          onClick={(event) => { event.stopPropagation(); handlers.onResume(controlAction.taskId); }}
         >
           {t("tasks.aggregate.resume")}
         </Button>,
@@ -184,7 +187,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     chainId={aggregate.chainId}
     route={routeFor(representative)}
     title={title}
-    menuItems={menu(aggregate, representative, handlers, t)}
+    menuItems={menu(aggregate, representative, handlers, t, controlAction)}
     menuLabel={t("tasks.aggregate.actionsFor", { name: title })}
     metaRows={metaRows}
     failure={aggregate.frontier.failureReason === null

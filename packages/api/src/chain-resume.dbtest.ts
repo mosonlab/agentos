@@ -193,6 +193,22 @@ test("concurrent Resume activates every node in one eligible fan-out layer exact
   assert.equal(await db.run.count({ where: { taskId: { in: [chain.second.id, chain.third.id] } } }), 2);
 });
 
+test("Resume before a zero-based first layer activates every first-layer member", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.TODO, TaskStatus.TODO, TaskStatus.TODO],
+    layers: [0, 0, 1],
+  });
+  assert.equal(chain.control?.heldLayer, 0);
+  assert.equal(chain.control?.heldExecutionLayer, null);
+
+  const resumed = await resumeHttp(chain.first.id, "resume-zero-based-first-layer");
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.nextTaskId, chain.first.id);
+  assert.equal(resumed.body.control.state, "released");
+  assert.equal(await db.run.count({ where: { taskId: { in: [chain.first.id, chain.second.id] }, status: RunStatus.QUEUED } }), 2);
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+});
+
 test("Resume while the held layer runs only releases; ordinary completion then activates the next layer", async () => {
   const chain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO, TaskStatus.TODO] });
   const running = await seedRun(db, chain, chain.first.id);
