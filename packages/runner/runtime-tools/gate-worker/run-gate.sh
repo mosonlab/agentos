@@ -400,29 +400,129 @@ const splitStages = (value) => {
 
 const summary = verdict.slice(prefix.length, -1);
 const stages = splitStages(summary);
+const gateStages = new Set(stages);
 const rings = new Map(stages.map((stage) => [stage, []]));
 const globalRing = [];
 const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/gu, "");
-const append = (ring, line) => {
-  ring.push(line);
-  if (ring.length > MAX_LINES_PER_STAGE) ring.shift();
+const appendGlobal = (line) => {
+  globalRing.push({ line, priority: 0 });
+  if (globalRing.length > MAX_LINES_PER_STAGE) globalRing.shift();
+};
+
+// A failing assertion is more useful to an automatic repair than the passing
+// output that happened to be printed after it. Keep the ordinary ring shape,
+// but evict the oldest least-useful line when it reaches its cap. Context is
+// promoted only when a nearby failure marker confirms that it belongs to the
+// failure, so a noisy passing workspace cannot consume the evidence budget.
+const appendStage = (ring, line) => {
+  const entry = { line, priority: 0 };
+  ring.push(entry);
+  return entry;
+};
+
+const trimStage = (ring) => {
+  if (ring.length <= MAX_LINES_PER_STAGE) return;
+
+  let evict = 0;
+  for (let index = 1; index < ring.length; index += 1) {
+    if (ring[index].priority < ring[evict].priority) evict = index;
+  }
+  ring.splice(evict, 1);
+};
+
+const promote = (entry, priority) => {
+  if (entry !== null && entry.priority < priority) entry.priority = priority;
+};
+const demote = (entry) => {
+  if (entry !== null && entry.priority < 2) entry.priority = 0;
+};
+
+// Parallel member headings and the nested headings printed by those members
+// use the same syntax. The step report at the end of a real gate log is the
+// authority that distinguishes them, so learn its stage labels before
+// attributing any output.
+const readGateStages = async () => {
+  const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const rawLine of lines) {
+    const line = stripAnsi(rawLine);
+    const reportLabel = line.match(/^\s*(?:ok|FAIL|STOP)\s{2,}(.+?)\s*$/u)?.[1];
+    if (reportLabel === undefined) continue;
+    gateStages.add(reportLabel.replace(/\s+(?:\?|\d+)s$/u, "").trimEnd());
+  }
 };
 
 const readLog = async () => {
   let currentStage = null;
+  let pendingContexts = [];
+  let failureOpen = false;
+  let failureAge = 0;
+  const resetFailureEvidence = () => {
+    pendingContexts = [];
+    failureOpen = false;
+    failureAge = 0;
+  };
+
   const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const rawLine of lines) {
     const line = stripAnsi(rawLine);
     const parallelHeading = line.match(/^\s*---\s+(.+?)\s+---\s*$/u)?.[1];
     const serialHeading = line.match(/^\s*==\s+(.+?)\s*$/u)?.[1];
-    const heading = parallelHeading ?? serialHeading;
-    if (heading !== undefined) {
-      currentStage = stages.includes(heading) ? heading : null;
+    if (serialHeading !== undefined) {
+      currentStage = stages.includes(serialHeading) ? serialHeading : null;
+      resetFailureEvidence();
+      continue;
+    }
+    if (parallelHeading !== undefined) {
+      // Only a gate step begins or ends stage attribution. Workspace, lint and
+      // build replay headings remain inside their enclosing parallel step.
+      if (gateStages.has(parallelHeading)) {
+        currentStage = stages.includes(parallelHeading) ? parallelHeading : null;
+      }
+      resetFailureEvidence();
       continue;
     }
     if (/^\s*(?:MERGE GATE:|GATE NOT RUN:)/u.test(line)) continue;
-    append(globalRing, line);
-    if (currentStage !== null) append(rings.get(currentStage), line);
+    appendGlobal(line);
+    const stageRing = currentStage === null ? null : rings.get(currentStage);
+    const entry = stageRing === null ? null : appendStage(stageRing, line);
+
+    const isSubtestContext = /^\s*#\s*Subtest\b/u.test(line);
+    const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(line);
+    if (isSubtestContext || isFileContext) {
+      // Keep a short pending queue, matching the dispatcher extractor's
+      // context window. Pending entries are cheap to discard if a passing
+      // result closes the block before a failure marker arrives.
+      promote(entry, 1);
+      pendingContexts.push(entry);
+      if (pendingContexts.length > 12) demote(pendingContexts.shift());
+    }
+
+    const isNotOk = /\bnot ok\b/u.test(line);
+    const isFailureMarker = /^\s*[✖×]\s+(?!failing tests?:)/u.test(line);
+    const isAssertion = /\bAssertionError\b/u.test(line);
+    const isError = /\bError:/u.test(line);
+    if (isNotOk || isFailureMarker) {
+      for (const context of pendingContexts) promote(context, 2);
+      pendingContexts = [];
+      promote(entry, 3);
+      failureOpen = true;
+      failureAge = 0;
+    } else if (isAssertion || (failureOpen && isError)) {
+      promote(entry, 3);
+    }
+
+    if (failureOpen) {
+      failureAge += 1;
+      if (failureAge > 32) failureOpen = false;
+    }
+
+    // A passing result closes a pending context; it cannot describe a later
+    // failure in the same workspace's output.
+    if (/^\s*(?:ok\b|[✔✓]\s+|#\s+(?:tests|pass|fail|duration)|1\.\.)/u.test(line)) {
+      for (const context of pendingContexts) demote(context);
+      pendingContexts = [];
+    }
+    if (stageRing !== null) trimStage(stageRing);
   }
 };
 
@@ -434,26 +534,54 @@ const truncateTailUtf8 = (value, limit) => {
   while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start += 1;
   return buffer.subarray(start).toString("utf8");
 };
+const truncateHeadUtf8 = (value, limit) => {
+  const buffer = Buffer.from(value);
+  if (buffer.length <= limit) return value;
+  let end = limit;
+  while (end > 0 && end < buffer.length && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString("utf8");
+};
 
 const renderSection = (stage, sourceLines, budget) => {
   const heading = `--- ${stage} ---`;
-  const selected = [];
+  const selected = new Map();
   let bytes = byteLength(heading);
-  for (let index = sourceLines.length - 1; index >= 0; index -= 1) {
-    const line = sourceLines[index];
+  const select = (index, truncate) => {
+    if (selected.has(index)) return;
+    const line = sourceLines[index].line;
     const remaining = budget - bytes - 1;
-    if (remaining <= 0) break;
+    if (remaining <= 0) return;
     if (byteLength(line) > remaining) {
-      if (selected.length === 0) selected.unshift(truncateTailUtf8(line, remaining));
-      break;
+      if (truncate !== null) {
+        const shortened = truncate(line, remaining);
+        selected.set(index, shortened);
+        bytes += 1 + byteLength(shortened);
+      }
+      return;
     }
-    selected.unshift(line);
+    selected.set(index, line);
     bytes += 1 + byteLength(line);
+  };
+
+  // Confirmed failure lines and their context spend the unchanged byte budget
+  // first. Recent ordinary output fills whatever remains, and sorting the
+  // selected indexes restores the original log order.
+  for (const priority of [3, 2]) {
+    for (let index = 0; index < sourceLines.length; index += 1) {
+      if (sourceLines[index].priority === priority) select(index, truncateHeadUtf8);
+    }
   }
-  return [heading, ...selected].join("\n");
+  for (let index = sourceLines.length - 1; index >= 0; index -= 1) {
+    select(index, selected.size === 0 ? truncateTailUtf8 : null);
+  }
+  const selectedLines = [...selected.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, line]) => line);
+  return [heading, ...selectedLines].join("\n");
 };
 
 const main = async () => {
+  await readGateStages();
   await readLog();
   const outputStages = stages.length > 0 ? stages : [summary.trim() || "gate"];
   if (stages.length === 0) rings.set(outputStages[0], globalRing);
