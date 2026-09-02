@@ -1,5 +1,7 @@
 import {
   AssigneeType,
+  APPROVAL_GATE_FEEDBACK_METADATA_FIELD,
+  APPROVAL_GATE_NOTE_METADATA_FIELD,
   ChainControlState,
   CleanupStatus,
   type ClaimantClass,
@@ -13,6 +15,7 @@ import {
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
   MERGE_TAIL_KIND,
+  MAX_APPROVAL_GATE_NOTE_CHARS,
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
@@ -134,18 +137,23 @@ const heldChainTaskIdsForClaim = async (tx: Prisma.TransactionClient): Promise<s
  * rows are selected first, and a note that cannot fit the character budget is
  * omitted whole.
  */
-const operatorNotesForClaim = async (
+const claimHandoffLowerBound = async (
   tx: Prisma.TransactionClient,
   taskId: string,
   runNumber: number,
   taskCreatedAt: Date,
+): Promise<Date | null> => runNumber <= 1
+  ? taskCreatedAt
+  : (await tx.run.findUnique({
+    where: { taskId_runNumber: { taskId, runNumber: runNumber - 1 } },
+    select: { createdAt: true },
+  }))?.createdAt ?? null;
+
+const operatorNotesForClaim = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  lowerBound: Date | null,
 ): Promise<string[]> => {
-  const lowerBound = runNumber <= 1
-    ? taskCreatedAt
-    : (await tx.run.findUnique({
-      where: { taskId_runNumber: { taskId, runNumber: runNumber - 1 } },
-      select: { createdAt: true },
-    }))?.createdAt;
   if (!lowerBound) return [];
   const rows = await tx.taskActivity.findMany({
     where: {
@@ -165,6 +173,38 @@ const operatorNotesForClaim = async (
     return [body];
   });
   return newestFirst.reverse();
+};
+
+/**
+ * Gate feedback is a separate claim-time handoff from ordinary operator
+ * notes. The latter intentionally has a 4,000-character aggregate cap, while
+ * the Inbox decision route permits one gate note of up to 8,000 characters.
+ * Selecting the latest marked activity directly keeps that note intact and
+ * prevents a burst of unrelated operator notes from evicting it.
+ */
+const operatorFeedbackForClaim = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  lowerBound: Date | null,
+): Promise<string | null> => {
+  if (!lowerBound) return null;
+  const activity = await tx.taskActivity.findFirst({
+    where: {
+      taskId,
+      actorType: "operator",
+      metadata: { path: [APPROVAL_GATE_FEEDBACK_METADATA_FIELD], equals: true },
+      createdAt: { gt: lowerBound },
+    },
+    select: { metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  if (!activity?.metadata || typeof activity.metadata !== "object" || Array.isArray(activity.metadata)) return null;
+  const note = (activity.metadata as Record<string, unknown>)[APPROVAL_GATE_NOTE_METADATA_FIELD];
+  if (typeof note !== "string") return null;
+  if (note.length === 0 || note.length > MAX_APPROVAL_GATE_NOTE_CHARS) {
+    throw new Error(`Stored approval-gate feedback must be between 1 and ${MAX_APPROVAL_GATE_NOTE_CHARS} characters`);
+  }
+  return note;
 };
 
 /**
@@ -840,9 +880,22 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
         })
         : null;
+      const handoffLowerBound = await claimHandoffLowerBound(
+        tx,
+        candidate.task.id,
+        candidate.runNumber,
+        candidate.task.createdAt,
+      );
       const operatorNotes = blindReviewTask
         ? []
-        : await operatorNotesForClaim(tx, candidate.task.id, candidate.runNumber, candidate.task.createdAt);
+        : await operatorNotesForClaim(
+          tx,
+          candidate.task.id,
+          handoffLowerBound,
+        );
+      const operatorFeedback = blindReviewTask
+        ? null
+        : await operatorFeedbackForClaim(tx, candidate.task.id, handoffLowerBound);
       const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
         where: {
           repoId: candidate.repo.id,
@@ -889,6 +942,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           secrets,
           priorOutputs,
           operatorNotes,
+          ...(operatorFeedback === null ? {} : { operatorFeedback }),
           previousRunHandoff,
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff

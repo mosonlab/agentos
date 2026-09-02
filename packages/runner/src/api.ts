@@ -159,13 +159,16 @@ export type ClaimedTask = {
   priorOutputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number | null } }>;
   /** Direct operator comments eligible for claim-time prompt delivery. */
   operatorNotes: string[];
+  /** The latest approval-gate rejection note for this attempt, delivered
+   * separately from the bounded generic operator-note lane. */
+  operatorFeedback?: string | null;
   /** Immediate prior attempt evidence for a fresh provider Session. */
   previousRunHandoff: {
     schemaVersion: 1;
     previousRunId: string;
     status: string;
     failureReason: string | null;
-    retryReason: "approval-rejected-without-feedback" | "automatic-retry" | "operator-retry" | "retry";
+    retryReason: "approval-rejected-without-feedback" | "approval-rejected-with-feedback" | "automatic-retry" | "operator-retry" | "retry";
     output: { runId: string; kind: string; body: string; commitSha: string | null } | null;
   } | null;
   /** A control-plane selected, exact-head handoff for a fresh Regression Run.

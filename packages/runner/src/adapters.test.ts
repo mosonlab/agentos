@@ -184,6 +184,13 @@ test("buildPrompt appends operator notes after the task context", () => {
   assert.match(prompt, /Task: Ship it[\s\S]*Do the work[\s\S]*Operator notes:\n- Please preserve the existing API shape\.\n- The deployment window closes at 5pm\./u);
 });
 
+test("buildPrompt labels approval-gate feedback separately from bounded operator notes", () => {
+  const feedback = "x".repeat(8_000);
+  const prompt = buildPrompt({ ...claim, operatorFeedback: feedback });
+  assert.match(prompt, /Operator feedback on previous attempt:\n- /u);
+  assert.match(prompt, new RegExp(`Operator feedback on previous attempt:\\n- ${feedback}`));
+});
+
 test("buildPrompt makes the platform-pinned pull request base comparison and merge authority", () => {
   const retriedClaim = {
     ...claim,

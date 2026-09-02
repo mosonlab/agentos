@@ -384,6 +384,7 @@ export const zh = {
   "inbox.filter.active": "待回复",
   "inbox.filter.answered": "已回复",
   "inbox.filter.notices": "通知",
+  "inbox.gateNote.placeholder": "可选备注，将随批准或拒绝一并提交……",
   "inbox.head.subtitle": "来自 agent 的消息与更新",
   "inbox.head.title": "Inbox",
   "inbox.notFound": "找不到该消息。控制面只通过 {route} 暴露由 agent 发出的消息。",

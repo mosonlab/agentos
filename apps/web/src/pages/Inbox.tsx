@@ -203,8 +203,15 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   // Both channels post to the same endpoint; requestId makes double clicks and a
   // Feishu tap racing the web button idempotent (DECISIONS #16).
   const decide = (decision: string): void => {
+    const request: { decision: string; requestId: string; note?: string } = {
+      decision,
+      requestId: `${message.id}:${decision}`,
+    };
+    const note = reply.trim();
+    if (message.gateTaskId !== null && note !== "") request.note = note;
     void run(async () => {
-      await api.post(`/inbox/messages/${message.id}/decision`, { decision, requestId: `${message.id}:${decision}` });
+      await api.post(`/inbox/messages/${message.id}/decision`, request);
+      setReply("");
       reload();
     });
   };
@@ -229,6 +236,20 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   const choices = message.choices ?? [];
   const open = message.status === "OPEN";
   const detachedNotification = isNotice(message);
+  const freeTextReply = message.acceptsFreeText && message.gateTaskId === null ? (
+    <>
+      {/* `shadow-none` and `placeholder:text-foreground/50` for the reason
+          spelled out at Projects.tsx: this was a raw <textarea> before the
+          batch, so it carried no shadow and took Tailwind preflight's
+          `currentColor` at 50% for the placeholder, not the primitive's
+          pinned `text-muted-foreground`. */}
+      <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder={t("inbox.reply.placeholder")} />
+      <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || reply.trim() === ""} onClick={sendReply}>{t("inbox.reply.send")}</Button></div>
+    </>
+  ) : null;
+  const gateNote = message.acceptsFreeText && message.gateTaskId !== null ? (
+    <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder={t("inbox.gateNote.placeholder")} />
+  ) : null;
 
   return (
     <Page>
@@ -297,6 +318,14 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
               <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />{t(detachedNotification ? "inbox.notification" : "inbox.waiting")}</div>
               {detachedNotification ? (
                 <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={closeNotification}>{t("inbox.close")}</Button></div>
+              ) : message.gateTaskId !== null ? (
+                <>
+                  <div className={ROW}>
+                    <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>{t("inbox.approve")}</Button>
+                    <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>{t("inbox.reject")}</Button>
+                  </div>
+                  {gateNote}
+                </>
               ) : choices.length > 0 ? (
                 <div className={LIST}>
                   {choices.map((option) => (
@@ -305,22 +334,10 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
                       <span className="flex-1 text-[12.5px]">{option.label}<span className="mt-[3px] block">{option.id}</span></span>
                     </button>
                   ))}
-                </div>
-              ) : message.gateTaskId !== null ? (
-                <div className={ROW}>
-                  <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>{t("inbox.approve")}</Button>
-                  <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>{t("inbox.reject")}</Button>
+                  {freeTextReply}
                 </div>
               ) : (
-                <>
-                  {/* `shadow-none` and `placeholder:text-foreground/50` for the reason
-                      spelled out at Projects.tsx: this was a raw <textarea> before the
-                      batch, so it carried no shadow and took Tailwind preflight's
-                      `currentColor` at 50% for the placeholder, not the primitive's
-                      pinned `text-muted-foreground`. */}
-                  <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder={t("inbox.reply.placeholder")} />
-                  <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || reply.trim() === ""} onClick={sendReply}>{t("inbox.reply.send")}</Button></div>
-                </>
+                freeTextReply
               )}
             </div>
           </Card>
