@@ -4,10 +4,10 @@
 # fallback worker. The local machine is used only with explicit opt-in. Runs ON
 # THE LOCAL MACHINE:
 #
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid>
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --master <oid>
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --allow-local
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --server <one-server>
+#   @SCRIPT_DIR@/gate-dispatch.sh <oid>
+#   @SCRIPT_DIR@/gate-dispatch.sh <oid> --master <oid>
+#   @SCRIPT_DIR@/gate-dispatch.sh <oid> --allow-local
+#   @SCRIPT_DIR@/gate-dispatch.sh <oid> --server <one-server>
 #
 # The slot model rations measured host capacity, not arbitrary processes. An
 # explicitly configured primary worker contributes two fixed slots and an
@@ -90,9 +90,11 @@ SLOT_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch"
 OID=""
 MASTER_OID=""
 DEFAULT_REF=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 usage() {
-  awk 'NR > 1 && /^#/ { sub(/^#+ ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"
+  awk 'NR > 1 && /^#/ { sub(/^#+ ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}" \
+    | sed "s|@SCRIPT_DIR@|${SCRIPT_DIR}|g"
   exit "${1:-0}"
 }
 
@@ -170,8 +172,6 @@ fi
 case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) die "--timeout-minutes needs a number, got: $TIMEOUT_MINUTES" ;; esac
 case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a positive number, got: $POLL_SECONDS" ;; esac
 case "$ALLOW_LOCAL" in 0|1) ;; *) die "AGENTOS_GATE_ALLOW_LOCAL must be 0 or 1, got: $ALLOW_LOCAL" ;; esac
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Sourced before the first check that reports a code: the slot locks, the values
 # that reach a remote shell and the verdict's codes all live here, and this

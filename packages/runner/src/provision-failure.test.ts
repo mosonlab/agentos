@@ -79,7 +79,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     remoteUrl,
     defaultBranch: "master",
     mountPath: "/does/not/exist",
-    dependencyProvisioning: "NPM_CI",
+    dependencyProvisioning: "NONE",
   },
   run: {
     id: "run-113",

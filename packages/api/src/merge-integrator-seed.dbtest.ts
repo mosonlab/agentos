@@ -759,7 +759,7 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
   );
 });
 
-test("canonical sync rejects Agent structure drift across Projects without partial prompt updates", async () => {
+test("canonical sync isolates foreign Agent structure drift and still updates canonical prompts", async () => {
   assert.equal((await seed()).code, 0);
   const canonicalProject = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const second = await createA1Project("custom");
@@ -774,16 +774,23 @@ test("canonical sync rejects Agent structure drift across Projects without parti
     where: { id: foreign.id },
     data: { inboxAccess: !foreign.inboxAccess },
   });
-  const before = await agentSnapshot([canonicalProject.id, second.project.id]);
+  const foreignBefore = await agentSnapshot([second.project.id]);
+  const canonicalSource = (await loadAgentSources()).roles.find(({ name }) => name === canonical.name);
+  assert.ok(canonicalSource);
 
   const refused = await sync();
-  assert.notEqual(refused.code, 0, refused.output);
-  assert.match(refused.output, /Project custom:/u);
+  assert.equal(refused.code, 0, refused.output);
+  assert.match(refused.output, /^SYNCED agentos-example:/mu);
+  assert.match(refused.output, /^REFUSED custom:/mu);
   assert.match(refused.output, new RegExp(`Agent ${foreign.name} \\(${foreign.id}\\)`, "u"));
-  assert.deepEqual(await agentSnapshot([canonicalProject.id, second.project.id]), before);
+  assert.equal(
+    (await db.agent.findUniqueOrThrow({ where: { id: canonical.id } })).rolePrompt,
+    canonicalSource.rolePrompt,
+  );
+  assert.deepEqual(await agentSnapshot([second.project.id]), foreignBefore);
 });
 
-test("canonical sync rejects an invalid runtime pair in any Project atomically", async () => {
+test("canonical sync isolates a foreign invalid runtime pair and still updates canonical prompts", async () => {
   assert.equal((await seed()).code, 0);
   const canonicalProject = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const second = await createA1Project("custom");
@@ -802,13 +809,20 @@ test("canonical sync rejects an invalid runtime pair in any Project atomically",
       runtimeConfigCustomized: false,
     },
   });
-  const before = await agentSnapshot([canonicalProject.id, second.project.id]);
+  const foreignBefore = await agentSnapshot([second.project.id]);
+  const canonicalSource = (await loadAgentSources()).roles.find(({ name }) => name === canonical.name);
+  assert.ok(canonicalSource);
 
   const refused = await sync();
-  assert.notEqual(refused.code, 0, refused.output);
-  assert.match(refused.output, /Project custom:/u);
+  assert.equal(refused.code, 0, refused.output);
+  assert.match(refused.output, /^SYNCED agentos-example:/mu);
+  assert.match(refused.output, /^REFUSED custom:/mu);
   assert.match(refused.output, new RegExp(`Agent ${foreign.name} \\(${foreign.id}\\)`, "u"));
-  assert.deepEqual(await agentSnapshot([canonicalProject.id, second.project.id]), before);
+  assert.equal(
+    (await db.agent.findUniqueOrThrow({ where: { id: canonical.id } })).rolePrompt,
+    canonicalSource.rolePrompt,
+  );
+  assert.deepEqual(await agentSnapshot([second.project.id]), foreignBefore);
 });
 
 /* ------------------------------------------------------- the verifier negatives */

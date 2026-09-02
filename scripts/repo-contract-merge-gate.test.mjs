@@ -178,15 +178,39 @@ test("an Anneal Run cannot bypass the reference gate with an environment value",
   assert.equal(existsSync(witness), false);
 });
 
-test("mismatched expect-head and invalid master are FAIL preconditions", (t) => {
+test("a mismatched expect-head is a FAIL precondition", (t) => {
   const data = fixture(t);
   const mismatch = run(t, data, "touch should-not-run", ["--expect-head", "0".repeat(40), "--master", data.master]);
   assert.equal(mismatch.status, 1, mismatch.output);
   assert.equal(finalLine(mismatch), `MERGE GATE: FAIL (HEAD is ${data.head} but --expect-head asked for ${"0".repeat(40)})`);
+});
 
-  const invalid = run(t, data, "touch should-not-run", ["--master", "not-an-object-id"]);
-  assert.equal(invalid.status, 1, invalid.output);
-  assert.equal(finalLine(invalid), "MERGE GATE: FAIL (--master must be a full 40-character object id)");
+test("malformed OID arguments are usage errors before refusal, Git preconditions, and the command", (t) => {
+  const data = fixture(t);
+  const nonGitCwd = mkdtempSync(join(tmpdir(), "repo-contract-gate-non-git-"));
+  t.after(() => rmSync(nonGitCwd, { recursive: true, force: true }));
+  const replacement = `touch "$GATE_FIXTURE_WITNESS"`;
+  for (const [flag, message] of [
+    ["--expect-head", "--expect-head must be a full 40-character object id"],
+    ["--master", "--master must be a full 40-character object id"],
+  ]) {
+    for (const [context, fixtureData, overrides] of [
+      ["repository", data, {}],
+      ["Anneal run", data, { AGENTOS_RUN_ID: "fixture-run" }],
+      ["non-Git directory", { cwd: nonGitCwd }, {}],
+    ]) {
+      const witness = join(fixtureData.cwd, `command-ran-${flag.slice(2)}-${context.replaceAll(" ", "-")}`);
+      const result = run(t, fixtureData, replacement, [flag, "not-an-object-id"], {
+        ...overrides,
+        GATE_FIXTURE_WITNESS: witness,
+      });
+      assert.equal(result.status, 2, `${context}: ${result.output}`);
+      assertNoVerdict(result);
+      assert.match(result.output, new RegExp(`merge-gate: ${message}`, "u"));
+      assert.match(result.output, /usage: /u);
+      assert.equal(existsSync(witness), false);
+    }
+  }
 });
 
 test("a missing or non-ancestor master is rejected before the command", (t) => {
