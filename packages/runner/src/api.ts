@@ -1,11 +1,11 @@
 import { statfs } from "node:fs/promises";
 
-import type { CleanupStatus, FailureClass, FailureEnvelope, RegressionRepairHandoff } from "@anneal/db";
+import type { CleanupStatus, FailureClass, FailureEnvelope } from "@anneal/db";
+import type { ClaimContract } from "@anneal/db/claim-contract";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
 export type { CleanupStatus, FailureClass } from "@anneal/db";
-export type CodexServiceTier = "DEFAULT" | "FAST";
 /** The only repository dependency-provisioning policies understood by a runner. */
 export const DEPENDENCY_PROVISIONING_VALUES = ["NONE", "NPM_CI"] as const;
 export type DependencyProvisioning = (typeof DEPENDENCY_PROVISIONING_VALUES)[number];
@@ -52,129 +52,13 @@ export const authorityAfterHeartbeat = (result: HeartbeatResult): Authority =>
 export const retriableStartupError = (error: unknown): boolean =>
   !(error instanceof ControlPlaneError) || error.status >= 500;
 
-export type ClaimedTask = {
-  /**
-   * Server-computed from the claimed task's template step (§D-P1 rule 4).
-   * Required, not optional, so a runner build that predates this field fails to
-   * compile rather than reading `undefined` as "ordinary" — the one reading that
-   * would put a merge step in front of a model CLI.
-   *
-   * The ordinary runner refuses `"mechanical"` outright. It is claimed by
-   * `@anneal/merge-executor`, a different process under a different OS user.
-   */
-  executionMode: "mechanical" | "agent";
-  /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */
-  specificationMaterialization: {
-    kind: "direct-implementation";
-    path: string;
-    body: string;
-  } | null;
-  task: {
-    id: string;
-    chainId: string | null;
-    chainIndex: number | null;
-    name: string;
-    description: string;
-    repoId: string;
-    targetBranch: string | null;
-    maxDurationMin: number;
-    stallTimeoutMin: number;
-    maxSessionsPerTask: number;
-    /**
-     * The persisted dependency-provisioning decision for this template step.
-     * It is required for every non-null template step so a runner cannot
-     * silently reinterpret a missing field as either policy.
-     */
-    templateStep: { name: string; outputKind?: string; provisionDependencies: boolean } | null;
-  };
-  agent: {
-    id: string;
-    name: string;
-    model: string;
-    foundationalPrompt: string;
-    rolePrompt: string;
-    /**
-     * Denied tools, read at claim time. The claim handler returns the agent row
-     * whole (packages/api/src/app.ts), so this arrives for free once the column
-     * exists — this hand-written mirror is the only thing that needed updating.
-     */
-    disabledTools: string[];
-  };
-  repo: {
-    id: string;
-    remoteUrl: string;
-    defaultBranch: string;
-    mountPath: string;
-    dependencyProvisioning: DependencyProvisioning;
-  };
-  run: {
-    id: string;
-    runNumber: number;
-    /**
-     * Whether this run may open a pull request. Required, so a path in our own
-     * code that forgets it is a compile error rather than a silent
-     * `undefined → falsy → never open a PR`.
-     *
-     * It lives on `run` and deliberately NOT on `task`: the run carries the
-     * snapshot taken when it was created, so an operator's PATCH of the task
-     * cannot change a run that is already queued. The claim route reads the live
-     * task row, so reading it from `task` would break that contract — omitting
-     * it there makes doing so a compile error.
-     */
-    opensPullRequest: boolean;
-    /** Whether this Run must advance the workspace commit before delivery. */
-    requiresCommit: boolean;
-    /** The integration branch selected by the chain's first run. Later runs'
-     * targetBranch is the shared head and cannot recover this value. */
-    pullRequestBase: string;
-    maxDurationMin: number;
-    stallTimeoutMin: number;
-    maxRunsPerTask: number;
-    model: string;
-    codexServiceTier: CodexServiceTier;
-    subagentModel: string | null;
-    subagentMaxConcurrent: number | null;
-    targetBranch: string | null;
-    /** Whether targetBranch was selected from durable Run.pushedBranch evidence.
-     * When true, provisioning must not replace it with an older declared head. */
-    targetBranchPublished: boolean;
-    /** Exact commit selected by baseFromStepIndex. Null means ordinary branch
-     * provisioning; a value means fetch-only detached provisioning. */
-    pinnedBaseSha: string | null;
-    /** Immutable review range exposed without revealing predecessor outputs. */
-    implementationBaseSha: string | null;
-    implementationHeadSha: string | null;
-    promptHash: string | null;
-    workspacePath: string | null;
-    branch: string | null;
-    baseSha: string | null;
-  };
-  session: { id: string };
-  resume: { providerConversationId: string; input: string } | null;
-  nextEventSeq: number;
-  runner: RunnerKind;
-  fencingToken: string;
-  sessionToken: string;
-  secrets: Record<string, string>;
-  priorOutputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number | null } }>;
-  /** Direct operator comments eligible for claim-time prompt delivery. */
-  operatorNotes: string[];
-  /** The latest approval-gate rejection note for this attempt, delivered
-   * separately from the bounded generic operator-note lane. */
-  operatorFeedback?: string | null;
-  /** Immediate prior attempt evidence for a fresh provider Session. */
-  previousRunHandoff: {
-    schemaVersion: 1;
-    previousRunId: string;
-    status: string;
-    failureReason: string | null;
-    retryReason: "approval-rejected-without-feedback" | "approval-rejected-with-feedback" | "automatic-retry" | "operator-retry" | "retry";
-    output: { runId: string; kind: string; body: string; commitSha: string | null } | null;
-  } | null;
-  /** A control-plane selected, exact-head handoff for a fresh Regression Run.
-   * It carries only durable verdict/repair evidence, never provider history. */
-  regressionRepairHandoff: RegressionRepairHandoff | null;
-};
+/**
+ * The claim payload, declared once in `@anneal/db` and produced there by the
+ * API's `claimRun`. Aliased rather than mirrored: this used to be a hand-kept
+ * copy of the widest cross-process contract in the system, and only a database
+ * test stood between the two copies drifting apart.
+ */
+export type ClaimedTask = ClaimContract;
 
 /** The fenced Run identity consumed by runner-to-control-plane writes. */
 export type ControlPlaneRunClaim = Pick<ClaimedTask, "fencingToken"> & {

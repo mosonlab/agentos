@@ -46,6 +46,11 @@
       "development": "./src/wire-contract.ts",
       "import": "./dist/wire-contract.js"
     },
+    "./claim-contract": {
+      "types": "./src/claim-contract.ts",
+      "development": "./src/claim-contract.ts",
+      "import": "./dist/claim-contract.js"
+    },
     "./service-lock": {
       "types": "./src/service-maintenance-lock.ts",
       "development": "./src/service-maintenance-lock.ts",
