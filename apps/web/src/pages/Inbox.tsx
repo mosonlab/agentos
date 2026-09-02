@@ -336,6 +336,11 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
                   ))}
                   {freeTextReply}
                 </div>
+              ) : message.gateTaskId !== null ? (
+                <div className={ROW}>
+                  <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>{t("inbox.approve")}</Button>
+                  <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>{t("inbox.reject")}</Button>
+                </div>
               ) : (
                 freeTextReply
               )}

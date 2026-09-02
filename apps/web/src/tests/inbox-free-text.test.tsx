@@ -115,3 +115,16 @@ test("a card the server marks as not accepting free text has no text box", async
     await page.dispose();
   }
 });
+
+test("a false gate with no choices keeps its approve and reject controls", async () => {
+  const page = await renderThread(card({
+    id: "gate-no-text", body: "Approve only", gateTaskId: "gate-no-text", acceptsFreeText: false, choices: null,
+  }));
+  try {
+    assert.equal(page.container.querySelectorAll("textarea").length, 0);
+    assert.ok(button(page, "Approve"));
+    assert.ok(button(page, "Reject"));
+  } finally {
+    await page.dispose();
+  }
+});
