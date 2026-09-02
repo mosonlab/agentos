@@ -998,6 +998,8 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
 - Optional JSON fields: `autoStart` (default `false`), `afterTaskId`, `name`,
   `description`, and `stepOverrides` (map of positive step indexes to
   `{assigneeAgentId}`). `afterTaskId` cannot be combined with `autoStart:true`.
+- An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
+  on the bound chain; archiving the bound chain does not release it.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1347,6 +1349,8 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATO
 ### POST `/tasks/:taskId/start`
 
 - Required path parameter: `taskId`.
+- Refusals: `409 Conflict` when the task is the first step of a chain bound by
+  `afterTaskId` and the predecessor task is not `DONE`.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATOR_TOKEN"
