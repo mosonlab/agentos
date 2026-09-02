@@ -1,4 +1,5 @@
 import { type BuildInfo, buildSha, formatBuildLine, readBuildInfo } from "@anneal/build-info";
+import type { VersionInfo } from "@anneal/db/console-contract";
 
 /** What this process calls itself in its startup line and on `/version`. The
  *  package name in the stamp says what was built; this says what is running,
@@ -15,16 +16,6 @@ const info: BuildInfo = readBuildInfo(import.meta.url);
 export const apiBuildLine = (buildInfo: BuildInfo = info): string =>
   `Anneal API build: ${formatBuildLine(buildInfo)}`;
 
-export type VersionPayload = {
-  service: string;
-  version: string | null;
-  buildSha: string;
-  commit: string | null;
-  dirty: boolean;
-  stamped: boolean;
-  builtAt: string | null;
-};
-
 /**
  * The public version document.
  *
@@ -36,7 +27,7 @@ export type VersionPayload = {
  * useless to an attacker and needed by whoever is trying to find out whether a
  * restart actually took.
  */
-export const versionPayload = (buildInfo: BuildInfo = info): VersionPayload => ({
+export const versionPayload = (buildInfo: BuildInfo = info): VersionInfo => ({
   service: API_SERVICE,
   version: buildInfo.version,
   buildSha: buildSha(buildInfo),

@@ -113,8 +113,8 @@ test("an approval gate card carries the producing step's task, so the board can 
     // whose run opened it, reachable only through the card's session.
     const database = {
       inboxMessage: { findMany: async () => [
-        { id: "gate-1", from: "AGENT", kind: "MULTIPLE_CHOICE", replyToMessageId: null, gateTaskId: "gate-task", taskId: "gate-task", session: { taskId: "producing-task" } },
-        { id: "plain-1", from: "AGENT", kind: "TEXT", replyToMessageId: null, gateTaskId: null, taskId: "some-task", session: { taskId: "some-task" } },
+        { id: "gate-1", from: "AGENT", kind: "MULTIPLE_CHOICE", choices: null, replyToMessageId: null, gateTaskId: "gate-task", taskId: "gate-task", session: { taskId: "producing-task" } },
+        { id: "plain-1", from: "AGENT", kind: "TEXT", choices: null, replyToMessageId: null, gateTaskId: null, taskId: "some-task", session: { taskId: "some-task" } },
       ] },
       session: { findMany: async () => [] },
     } as unknown as PrismaClient;
@@ -139,7 +139,7 @@ test("Inbox list applies project scope and returns stored human replies", async 
     const database = {
       inboxMessage: { findMany: async (arguments_: Record<string, unknown>) => {
         query = arguments_;
-        return [{ id: "question-1", from: "AGENT", replies: [{ id: "reply-1", from: "HUMAN", body: "continue" }] }];
+        return [{ id: "question-1", from: "AGENT", choices: null, replies: [{ id: "reply-1", from: "HUMAN", body: "continue" }] }];
       } },
       session: { findMany: async () => [] },
     } as unknown as PrismaClient;
