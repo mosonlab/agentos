@@ -403,26 +403,114 @@ const stages = splitStages(summary);
 const rings = new Map(stages.map((stage) => [stage, []]));
 const globalRing = [];
 const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/gu, "");
-const append = (ring, line) => {
-  ring.push(line);
-  if (ring.length > MAX_LINES_PER_STAGE) ring.shift();
+const appendGlobal = (line) => {
+  globalRing.push(line);
+  if (globalRing.length > MAX_LINES_PER_STAGE) globalRing.shift();
+};
+
+// A failing assertion is more useful to an automatic repair than the passing
+// output that happened to be printed after it. Keep the ordinary ring shape,
+// but evict the oldest least-useful line when it reaches its cap. Context is
+// promoted only when a nearby failure marker confirms that it belongs to the
+// failure, so a noisy passing workspace cannot consume the evidence budget.
+const appendStage = (ring, line) => {
+  const entry = { line, priority: 0 };
+  ring.push(entry);
+  if (ring.length <= MAX_LINES_PER_STAGE) return entry;
+
+  let evict = 0;
+  for (let index = 1; index < ring.length; index += 1) {
+    if (ring[index].priority < ring[evict].priority) evict = index;
+  }
+  ring.splice(evict, 1);
+  return entry;
+};
+
+const promote = (entry, priority) => {
+  if (entry !== null && entry.priority < priority) entry.priority = priority;
+};
+const demote = (entry) => {
+  if (entry !== null) entry.priority = 0;
 };
 
 const readLog = async () => {
   let currentStage = null;
+  let pendingContexts = [];
+  let failureOpen = false;
+  let failureAge = 0;
+  const isNestedWorkspaceHeading = (heading) => /^test:\s+/u.test(heading);
+  const resetFailureEvidence = () => {
+    pendingContexts = [];
+    failureOpen = false;
+    failureAge = 0;
+  };
+
   const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const rawLine of lines) {
     const line = stripAnsi(rawLine);
     const parallelHeading = line.match(/^\s*---\s+(.+?)\s+---\s*$/u)?.[1];
     const serialHeading = line.match(/^\s*==\s+(.+?)\s*$/u)?.[1];
-    const heading = parallelHeading ?? serialHeading;
-    if (heading !== undefined) {
-      currentStage = stages.includes(heading) ? heading : null;
+    if (serialHeading !== undefined) {
+      currentStage = stages.includes(serialHeading) ? serialHeading : null;
+      resetFailureEvidence();
+      continue;
+    }
+    if (parallelHeading !== undefined) {
+      // `run_workspace_script_parallel` replays each workspace beneath the
+      // enclosing stage as `--- test: <workspace> ---`. Those headings are
+      // not stages themselves and must leave the enclosing failing stage open.
+      // Any other unknown parallel heading is a sibling stage (or a new group)
+      // and ends attribution, just as a known stage heading does.
+      if (stages.includes(parallelHeading)) currentStage = parallelHeading;
+      else if (!isNestedWorkspaceHeading(parallelHeading)) currentStage = null;
+      resetFailureEvidence();
       continue;
     }
     if (/^\s*(?:MERGE GATE:|GATE NOT RUN:)/u.test(line)) continue;
-    append(globalRing, line);
-    if (currentStage !== null) append(rings.get(currentStage), line);
+    appendGlobal(line);
+    const stageRing = currentStage === null ? null : rings.get(currentStage);
+    const entry = stageRing === null || stageRing === undefined ? null : appendStage(stageRing, line);
+
+    const isSubtestContext = /^\s*#\s*Subtest\b/u.test(line);
+    const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(line);
+    if (isSubtestContext || isFileContext) {
+      // Keep a short pending queue, matching the dispatcher extractor's
+      // context window. Pending entries are cheap to discard if a passing
+      // result closes the block before a failure marker arrives.
+      promote(entry, 1);
+      pendingContexts.push({ entry, stage: currentStage });
+      if (pendingContexts.length > 12) pendingContexts.shift();
+    }
+
+    const isNotOk = /\bnot ok\b/u.test(line);
+    const isFailureMarker = /^\s*[✖×]\s+(?!failing tests?:)/u.test(line);
+    const isAssertion = /\bAssertionError\b/u.test(line);
+    const isError = /\bError:/u.test(line);
+    if (isNotOk || isFailureMarker) {
+      for (const context of pendingContexts) {
+        if (context.stage === currentStage || context.stage === null || currentStage === null) {
+          promote(context.entry, 2);
+        }
+      }
+      pendingContexts = [];
+      promote(entry, 3);
+      failureOpen = true;
+      failureAge = 0;
+    } else if (isAssertion || (failureOpen && isError)) {
+      promote(entry, 3);
+    }
+
+    if (failureOpen) {
+      failureAge += 1;
+      if (failureAge > 32) failureOpen = false;
+    }
+
+    // A passing result closes a pending context; it cannot describe a later
+    // failure in the same workspace's output.
+    if (/^\s*(?:ok\b|[✔✓]\s+|#\s+(?:tests|pass|fail|duration)|1\.\.)/u.test(line)) {
+      for (const context of pendingContexts) demote(context.entry);
+      pendingContexts = [];
+    }
   }
 };
 
@@ -440,7 +528,7 @@ const renderSection = (stage, sourceLines, budget) => {
   const selected = [];
   let bytes = byteLength(heading);
   for (let index = sourceLines.length - 1; index >= 0; index -= 1) {
-    const line = sourceLines[index];
+    const line = typeof sourceLines[index] === "string" ? sourceLines[index] : sourceLines[index].line;
     const remaining = budget - bytes - 1;
     if (remaining <= 0) break;
     if (byteLength(line) > remaining) {
