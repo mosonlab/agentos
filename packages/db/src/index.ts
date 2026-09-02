@@ -20,6 +20,7 @@ export * from "./gate-attestation.js";
 export * from "./merge-integrator.js";
 export * from "./merge-integrator-db.js";
 export * from "./merge-tail.js";
+export * from "./gate-slot.js";
 export * from "./merge-tail-markers.js";
 export * from "./merge-lease-ledger.js";
 export {

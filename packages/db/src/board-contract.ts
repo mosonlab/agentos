@@ -27,6 +27,7 @@ import type {
 } from "@prisma/client";
 
 import type { Agent, Repo } from "./wire-contract.js";
+import type { GateSlot } from "./gate-slot.js";
 
 export type TaskStatus = PrismaTaskStatus;
 export type TaskSource = PrismaTaskSource;
@@ -436,6 +437,7 @@ export type ChainStep<DateTime = string> = {
   stepName: string;
   status: TaskStatus;
   approvalGate: boolean;
+  gateSlot: GateSlot | null;
   assigneeType: AssigneeType;
   executionOwner: ExecutionOwner;
   agent: { id: string; title: string } | null;
