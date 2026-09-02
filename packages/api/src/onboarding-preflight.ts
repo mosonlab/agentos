@@ -16,6 +16,7 @@ export type RepositoryPreflightFailure =
   | "default-branch-missing"
   | "push-not-authorized"
   | "package-lock-missing"
+  | "dependency-provisioning-contradicts-lockfile"
   | "command-timeout";
 
 export class RepositoryPreflightError extends Error {
@@ -127,17 +128,19 @@ export const preflightRepository = async (
   try {
     await expectSuccess(run, ["init", "--bare", scratch], cwd, env, "git-unavailable");
     await expectSuccess(run, ["fetch", "--depth=1", remote, ref], scratch, env, "remote-unreachable");
-    if (input.dependencyProvisioning === "NPM_CI") {
-      const lockfile = await expectSuccess(
-        run,
-        ["ls-tree", "-z", "FETCH_HEAD", "--", "package-lock.json"],
-        scratch,
-        env,
-        "remote-unreachable",
-      );
-      if (!hasRootPackageLockBlob(lockfile.stdout)) {
-        throw new RepositoryPreflightError("package-lock-missing");
+    const lockfile = await expectSuccess(
+      run,
+      ["ls-tree", "-z", "FETCH_HEAD", "--", "package-lock.json"],
+      scratch,
+      env,
+      "remote-unreachable",
+    );
+    if (hasRootPackageLockBlob(lockfile.stdout)) {
+      if (input.dependencyProvisioning === "NONE") {
+        throw new RepositoryPreflightError("dependency-provisioning-contradicts-lockfile");
       }
+    } else if (input.dependencyProvisioning === "NPM_CI") {
+      throw new RepositoryPreflightError("package-lock-missing");
     }
     const probeRef = `refs/heads/agentos-preflight-${randomBytes(8).toString("hex")}`;
     await expectSuccess(run, ["push", "--dry-run", remote, `FETCH_HEAD:${probeRef}`], scratch, env, "push-not-authorized");
