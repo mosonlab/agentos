@@ -1,0 +1,220 @@
+/**
+ * The payload `POST /runner/tasks/claim` hands a claiming process.
+ *
+ * This is the widest cross-process boundary in the system: the API composes
+ * the payload from database rows, and two independent processes decode it —
+ * the runner (`packages/runner`) and the merge executor
+ * (`packages/merge-executor`). Declaring it once here is what keeps the
+ * producer and the consumers from drifting. `claimRun` returns this type, so
+ * a projection that stops producing a field fails to compile, and the runner
+ * aliases it, so a consumer that reads a field the server never sends fails
+ * to compile too.
+ *
+ * Prisma is imported as types only: persisted enum widening becomes a
+ * compile-time change at this seam without pulling generated client code into
+ * a consumer. Unlike `wire-contract.ts` and `board-contract.ts` this contract
+ * takes no `DateTime` parameter, because the claim carries no timestamp and
+ * no Decimal — every value below is already a JSON scalar.
+ */
+
+import type {
+  CodexServiceTier,
+  DependencyProvisioning,
+  RunnerKind,
+  RunStatus,
+} from "@prisma/client";
+
+import type { ExecutionMode } from "./merge-integrator-db.js";
+import type { RegressionRepairHandoff } from "./merge-tail.js";
+
+/**
+ * Four fields below are marked ALWAYS SENT: `ClaimTask.chainLayer`,
+ * `ClaimRun.taskId`, `ClaimTemplateStep.outputKind` and
+ * `ClaimTemplateStep.taskTemplate`. The server produces every one of them on
+ * every claim and consumers assert them; they are optional here only because
+ * runner tests hand-build claim literals carrying the fields they exercise,
+ * and those fixtures belong to a different change than this one. Making the
+ * four required is mechanical — add them to five fixtures in `packages/runner`
+ * and drop the non-null assertions in the parallel-review tests — and it is
+ * the right end state. Until then, an optional marker here is not permission
+ * to stop sending one.
+ */
+
+/** The step identity a runner needs: title the delivery, and decide provisioning. */
+export type ClaimTemplateStep = {
+  name: string;
+  /**
+   * The persisted dependency-provisioning decision for this template step.
+   * Required for every non-null template step, so a runner cannot silently
+   * reinterpret a missing field as either policy.
+   */
+  provisionDependencies: boolean;
+  /** ALWAYS SENT. A non-null column with a database default. */
+  outputKind?: string;
+  /** ALWAYS SENT. The chain's own name, which delivery titles the pull request
+   * after; the template relation is mandatory. */
+  taskTemplate?: { name: string };
+};
+
+export type ClaimTask = {
+  id: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  /** ALWAYS SENT. The chain layer the claimed step sits on, which the API's
+   * parallel-review tests read to prove a review frontier claimed both of its
+   * siblings. */
+  chainLayer?: number | null;
+  name: string;
+  description: string;
+  repoId: string | null;
+  targetBranch: string | null;
+  maxDurationMin: number;
+  stallTimeoutMin: number;
+  maxSessionsPerTask: number;
+  templateStep: ClaimTemplateStep | null;
+};
+
+export type ClaimAgent = {
+  id: string;
+  name: string;
+  model: string;
+  foundationalPrompt: string;
+  rolePrompt: string;
+  /** Denied tools, not allowed ones. Empty means no restriction. */
+  disabledTools: string[];
+};
+
+export type ClaimRepo = {
+  id: string;
+  remoteUrl: string;
+  defaultBranch: string;
+  mountPath: string;
+  dependencyProvisioning: DependencyProvisioning;
+};
+
+export type ClaimRun = {
+  id: string;
+  /**
+   * ALWAYS SENT. The claimed Run's task, which the API's own tests read to tell
+   * two concurrent claims apart. The column is nullable, but a Run that reaches
+   * a claim always has a task, which is why those consumers assert it.
+   */
+  taskId?: string | null;
+  runNumber: number;
+  /**
+   * Whether this run may open a pull request.
+   *
+   * It lives on `run` and deliberately NOT on `task`: the run carries the
+   * snapshot taken when it was created, so an operator's PATCH of the task
+   * cannot change a run that is already queued. The claim reads the live task
+   * row, so reading it from `task` would break that contract — omitting it
+   * there makes doing so a compile error.
+   */
+  opensPullRequest: boolean;
+  /** Whether this Run must advance the workspace commit before delivery. */
+  requiresCommit: boolean;
+  /**
+   * The integration branch selected by the chain's first run. A later chain
+   * run targets the shared head, so its own `targetBranch` cannot tell
+   * delivery which integration line the chain started from.
+   */
+  pullRequestBase: string;
+  maxDurationMin: number;
+  stallTimeoutMin: number;
+  maxRunsPerTask: number;
+  model: string;
+  codexServiceTier: CodexServiceTier;
+  subagentModel: string | null;
+  subagentMaxConcurrent: number | null;
+  targetBranch: string | null;
+  /**
+   * Whether `targetBranch` was selected from durable `Run.pushedBranch`
+   * evidence. When true, provisioning must not replace it with an older
+   * declared head.
+   */
+  targetBranchPublished: boolean;
+  /**
+   * Exact commit selected by `baseFromStepIndex`. Null means ordinary branch
+   * provisioning; a value means fetch-only detached provisioning.
+   */
+  pinnedBaseSha: string | null;
+  /** Immutable review range exposed without revealing predecessor outputs. */
+  implementationBaseSha: string | null;
+  implementationHeadSha: string | null;
+  promptHash: string | null;
+  workspacePath: string | null;
+  branch: string | null;
+  baseSha: string | null;
+};
+
+/** An output produced by an earlier step of the same chain. */
+export type ClaimPriorOutput = {
+  kind: string;
+  body: string;
+  task: { name: string; chainIndex: number | null };
+};
+
+/** Immediate prior attempt evidence for a fresh provider Session. */
+export type ClaimPreviousRunHandoff = {
+  schemaVersion: 1;
+  previousRunId: string;
+  status: RunStatus;
+  failureReason: string | null;
+  retryReason:
+    | "approval-rejected-without-feedback"
+    | "approval-rejected-with-feedback"
+    | "automatic-retry"
+    | "operator-retry"
+    | "retry";
+  output: { runId: string; kind: string; body: string; commitSha: string | null } | null;
+};
+
+/** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */
+export type ClaimSpecificationMaterialization = {
+  kind: "direct-implementation";
+  path: string;
+  body: string;
+};
+
+export type ClaimContract = {
+  /**
+   * Server-computed from the claimed task's template step (§D-P1 rule 4).
+   * Required, not optional, so a runner build that predates this field fails
+   * to compile rather than reading `undefined` as "ordinary" — the one
+   * reading that would put a merge step in front of a model CLI.
+   *
+   * The ordinary runner refuses `"mechanical"` outright. It is claimed by
+   * `@anneal/merge-executor`, a different process under a different OS user.
+   */
+  executionMode: ExecutionMode;
+  specificationMaterialization: ClaimSpecificationMaterialization | null;
+  task: ClaimTask;
+  agent: ClaimAgent;
+  repo: ClaimRepo;
+  run: ClaimRun;
+  session: { id: string };
+  runner: RunnerKind;
+  fencingToken: string;
+  sessionToken: string;
+  secrets: Record<string, string>;
+  priorOutputs: ClaimPriorOutput[];
+  /** Direct operator comments eligible for claim-time prompt delivery. */
+  operatorNotes: string[];
+  /**
+   * The latest approval-gate rejection note for this attempt, delivered
+   * separately from the bounded generic operator-note lane. Absent, rather
+   * than null, when the claim carries no rejection.
+   */
+  operatorFeedback?: string | null;
+  previousRunHandoff: ClaimPreviousRunHandoff | null;
+  /**
+   * A control-plane selected, exact-head handoff for a fresh Regression Run.
+   * It carries only durable verdict/repair evidence, never provider history.
+   */
+  regressionRepairHandoff: RegressionRepairHandoff | null;
+  resume: { providerConversationId: string; input: string } | null;
+  nextEventSeq: number;
+};
+
+/** The refusal `claimRun` reports instead of a claim, rendered as a 409. */
+export type ClaimRefusal = { error: string; reason: string };

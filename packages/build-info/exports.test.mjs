@@ -18,6 +18,7 @@ const mappings = [
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./chain-order", source: "./src/chain-order.ts", dist: "./dist/chain-order.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./chain-hold", source: "./src/chain-hold.ts", dist: "./dist/chain-hold.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./wire-contract", source: "./src/wire-contract.ts", dist: "./dist/wire-contract.js" },
+  { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./claim-contract", source: "./src/claim-contract.ts", dist: "./dist/claim-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./service-lock", source: "./src/service-maintenance-lock.ts", dist: "./dist/service-maintenance-lock.js" },
   { packageName: "@anneal/runner", packageDirectory: "packages/runner", subpath: "./adapters", source: "./src/adapters.ts", dist: "./dist/adapters.js" },
   { packageName: "@anneal/runner", packageDirectory: "packages/runner", subpath: "./api", source: "./src/api.ts", dist: "./dist/api.js" },
@@ -26,7 +27,7 @@ const mappings = [
   { packageName: "@anneal/github-client", packageDirectory: "packages/github-client", subpath: ".", source: "./src/index.ts", dist: "./dist/index.js" },
 ];
 
-assert.equal(mappings.length, 14);
+assert.equal(mappings.length, 15);
 
 const packageSpecifier = ({ packageName, subpath }) =>
   subpath === "." ? packageName : `${packageName}/${subpath.slice(2)}`;
@@ -75,7 +76,7 @@ const resolveInChild = (conditions) => {
   return JSON.parse(execFileSync(process.execPath, args, { cwd: repositoryRoot, encoding: "utf8" }));
 };
 
-test("all fourteen source-backed exports have ordered development targets", () => {
+test("all fifteen source-backed exports have ordered development targets", () => {
   const entriesByPackage = new Map();
   for (const mapping of mappings) {
     const manifest = readManifest(mapping.packageDirectory);

@@ -59,7 +59,7 @@ test("hostNeutralEnv strips the gate's configuration and keeps the rest", () => 
 const GATE_SCRIPTS = [
   join(here, "..", "merge-gate.sh"),
   join(runtimeGateWorker, "lib.sh"),
-  join(here, "step-engine.sh"),
+  ...["host-sizing.sh", "step-engine.sh", "verdict.sh"].map((name) => join(here, name)),
   ...["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"].map((name) => join(runtimeGateWorker, name)),
 ];
 

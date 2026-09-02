@@ -389,6 +389,7 @@ export const en = {
   "inbox.filter.active": "Needs reply",
   "inbox.filter.answered": "Answered",
   "inbox.filter.notices": "Notices",
+  "inbox.gateNote.placeholder": "Optional note attached to Approve or Reject…",
   "inbox.head.subtitle": "Messages and updates from your agents",
   "inbox.head.title": "Inbox",
   "inbox.notFound": "Message not found. The control plane only exposes agent-authored messages via {route}.",

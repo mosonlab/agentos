@@ -277,95 +277,11 @@ acquire_lock() {
   printf '%s\n' "$$" > "${LOCK_DIR}/pid"
 }
 
-cleanup() {
-  local status=$?
-  trap - EXIT
-  local cleanup_error=""
-
-  # Before anything below is torn down, not after.
-  gate_steps_stop_running
-
-  discard_gate_tmp || cleanup_error="the temporary directory could not be removed"
-  release_lock || cleanup_error="${cleanup_error:+${cleanup_error}; }the merge gate lock could not be released"
-
-  if [ "${KEEP_POSTGRES}" -eq 1 ]; then
-    printf '\n   postgres container %s left running (--keep-postgres)\n' "${CONTAINER}"
-  elif [ "${POSTGRES_STARTED}" -eq 1 ]; then
-    # A gate that promises "deleted when this script exits" has to notice when
-    # that promise is not kept; an executor can only see the exit code.
-    if ! docker rm -f "${CONTAINER}" >/dev/null 2>&1; then
-      cleanup_error="${cleanup_error:+${cleanup_error}; }postgres container ${CONTAINER} could not be removed"
-    fi
-  fi
-
-  printf '\n'
-  gate_steps_report
-
-  # What this run learned, asked once. Which of a failure, a stop and a signal
-  # outranks which is the step engine's rule and is stated there; this reads
-  # the answer and picks the line that carries it.
-  local outcome; outcome="$(gate_steps_outcome)"
-  case "${outcome}" in
-    'no-verdict '*)
-      outcome="${outcome#no-verdict }"
-      printf '\n'
-      gate_verdict_not_run "${outcome#* }${cleanup_error:+; ${cleanup_error}}"
-      printf 'Nothing judged %s. Re-run the gate; this is not a FAIL.\n' "${GATED_HEAD:-this commit}"
-      exit "${outcome%% *}"
-      ;;
-    'fail '*)
-      printf '\n'
-      gate_verdict_fail "${outcome#fail }"
-      exit "${GATE_EXIT_FAIL}"
-      ;;
-  esac
-
-  # No step failed and none was stopped, and the script still ended non-zero:
-  # something outside the plan did, and the gate has no name for it.
-  if [ "${status}" -ne 0 ]; then
-    printf '\n'
-    gate_verdict_fail "unknown"
-    exit "${GATE_EXIT_FAIL}"
-  fi
-  if [ -n "${cleanup_error}" ]; then
-    printf '\n'
-    gate_verdict_fail "cleanup: ${cleanup_error}"
-    exit "${GATE_EXIT_FAIL}"
-  fi
-  if [ "${KEEP_POSTGRES}" -eq 1 ]; then
-    printf '\n'
-    gate_verdict_not_authoritative '--keep-postgres'
-    printf 'Every step passed, but this run left a container behind and must not authorise a merge.\n'
-    exit "${GATE_EXIT_NOT_AUTHORITATIVE}"
-  fi
-  printf '\n'
-  gate_verdict_pass "${GATED_HEAD}"
-  # What this PASS does NOT cover, stated here rather than left to be inferred
-  # from a skipped test buried in the suite output. Both need live credentials
-  # and neither can run inside a hermetic gate, so a green gate is silent about
-  # them and must not be read as endorsing them.
-  printf 'Not covered by this gate: the \xc2\xa7D-P6 GraphQL schema gate against the live GitHub schema\n'
-  printf '  (npm run schema-gate -w @anneal/merge-executor, needs GITHUB_SCHEMA_GATE_TOKEN; it fails without one),\n'
-  printf '  and the Step 9/10 [real] direction harnesses, which need a scratch repository and a\n'
-  printf '  non-production deployment. Run those separately before a release.\n'
-  exit 0
-}
-trap cleanup EXIT
-# Ctrl-C and `kill` have to run cleanup too, or an interrupted gate leaves its lock
-# and its container behind and the next run in this worktree has to reclaim both.
-# Exiting from the handler is what routes the signal through the EXIT trap.
-#
-# What the handler records is the other half of it. A gate that is stopped mid
-# step arrives at cleanup with a non-zero status and a FAILED_STEP naming the
-# step it was in, which is indistinguishable from that step having failed. It
-# did not fail; it never finished. Naming the signal here is what lets the EXIT
-# trap say so.
-interrupted() {
-  gate_steps_note_signal "$1" "$2"
-  exit "$2"
-}
-trap 'interrupted INT 130' INT
-trap 'interrupted TERM 143' TERM
+# How this run ends, and the last line it ends with: cleanup, the signal
+# handler, and the three traps that route every ending through the same
+# accounting. Sourcing it installs those traps.
+# shellcheck source=scripts/gate-worker/verdict.sh
+. "${SCRIPT_DIR}/gate-worker/verdict.sh"
 
 sha256() { shasum -a 256 | awk '{print $1}'; }
 
@@ -1065,44 +981,11 @@ FAILED_STEP=""
 
 # --- how much of this host the gate may use ---------------------------------
 
-# run-gate.sh states the worker's configured slot count, so a two-slot worker
-# gives each gate half the machine. Every parallel width below is derived from
-# this one number instead of each phase reading the CPU count for itself: two
-# concurrent gates then add up to one host, rather than each sizing itself for a
-# whole machine it does not have. An absent variable means half the host because
-# the shared runner host is where it is unset; a gate worker always exports its
-# own share.
-GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-2}"
-case "${GATE_HOST_SHARE}" in
-  1|2) ;;
-  *) die "AGENTOS_GATE_HOST_SHARE must be 1 or 2, got ${GATE_HOST_SHARE}" ;;
-esac
-GATE_CPUS="$(node -e 'const { availableParallelism } = require("node:os");
-process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / Number(process.argv[1])))));' \
-  "${GATE_HOST_SHARE}")" || die "could not size this gate against the host"
-[[ "${GATE_CPUS}" =~ ^[1-9][0-9]*$ ]] || die "could not size this gate against the host: got '${GATE_CPUS}'"
-
-# The proof waves run together, and they are not contending for one resource.
-# The unit wave is processor-bound and ends when the slowest workspace ends. The
-# database waves spend most of their wall clock waiting on PostgreSQL, so lanes
-# beyond the core count are deliberate oversubscription of something already
-# idle, not a claim the machine has more processors than it has.
-#
-# These were serial until now, and the comment that serialised them cited a
-# 4 GiB worker where running them together turned passing suites into timeouts.
-# That was a memory ceiling, which is exactly why these widths come from a
-# stated share of a measured host instead of from a raw core count.
-#
-# Each is overridable so that scripts/gate-worker/bench-dbtest-concurrency.sh
-# can alternate arms over one fixed commit. A gate never chooses them itself.
-GATE_UNIT_LANES="${AGENTOS_GATE_UNIT_LANES:-${GATE_CPUS}}"
-GATE_DB_LANES="${AGENTOS_GATE_DB_LANES:-$(( GATE_CPUS < 2 ? 2 : GATE_CPUS ))}"
-for lane_setting in GATE_UNIT_LANES GATE_DB_LANES; do
-  [[ "${!lane_setting}" =~ ^[1-9][0-9]*$ ]] \
-    || die "${lane_setting} must be a positive integer, got '${!lane_setting}'"
-done
-note "host share: 1/${GATE_HOST_SHARE} of $(node -e 'process.stdout.write(String(require("node:os").availableParallelism()))') cores = ${GATE_CPUS}"
-note "lanes:      unit ${GATE_UNIT_LANES}, database ${GATE_DB_LANES}"
+# What the gate is allowed to size itself against, and every parallel width
+# derived from that one number. The derivation and the refusals that guard it
+# are a unit, so they live in a file the fixtures source and run for real.
+# shellcheck source=scripts/gate-worker/host-sizing.sh
+. "${SCRIPT_DIR}/gate-worker/host-sizing.sh"
 
 # --- isolation --------------------------------------------------------------
 
