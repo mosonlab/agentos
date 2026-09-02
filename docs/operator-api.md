@@ -168,6 +168,8 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
   Agents (`senior-dev-luna`, `review-coordinator-sol`,
   `review-coordinator-opus`, and `senior-dev`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
+  The returned Project read shape includes `specGateDefault` and
+  `mergeGateDefault`, both `false` for a newly created project.
 - A duplicate slug returns `409 Conflict` with code `project-slug-taken`.
 
 ```sh
@@ -179,6 +181,10 @@ curl -X POST "$BASE_URL/projects" \
 ### GET `/projects/:projectId`
 
 - Required path parameter: `projectId`.
+- The Project read shape includes the independent boolean fields
+  `specGateDefault` and `mergeGateDefault`. Both are `false` for a newly
+  created project and are returned by this route, `GET /projects`, and the
+  project PATCH response.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -187,12 +193,16 @@ curl "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ### PATCH `/projects/:projectId`
 
 - Required path parameter: `projectId`.
-- Required JSON: at least one of `name`, `slug`, `yamlDocument`.
+- Required JSON: at least one of `name`, `slug`, `yamlDocument`,
+  `specGateDefault`, or `mergeGateDefault`.
+- `specGateDefault` and `mergeGateDefault` are optional booleans. Omission
+  preserves the stored value, and changing one does not change the other. The
+  response is the complete Project read shape, including both defaults.
 
 ```sh
 curl -X PATCH "$BASE_URL/projects/$PROJECT_ID" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"Demo updated"}'
+  -d '{"mergeGateDefault":true}'
 ```
 
 ### DELETE `/projects/:projectId`
@@ -1052,15 +1062,32 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
 - Required JSON fields: `repoId`, `variables` (string-to-string record; values
   must not be blank).
 - Optional JSON fields: `autoStart` (default `false`), `afterTaskId`, `name`,
-  `description`, and `stepOverrides` (map of positive step indexes to
-  `{assigneeAgentId}`). `afterTaskId` cannot be combined with `autoStart:true`.
+  `description`, `stepOverrides` (map of positive step indexes to
+  `{assigneeAgentId}`), and `gates` (a strict object with optional boolean
+  fields `spec` and `merge`). `afterTaskId` cannot be combined with
+  `autoStart:true`.
+- For the specification slot and merge readiness slot, the created task's
+  `approvalGate` resolves in exactly this order: the corresponding dispatch
+  override (`gates.spec` or `gates.merge`), then the project's corresponding
+  default (`specGateDefault` or `mergeGateDefault`), then the template step's
+  frontmatter `approvalGate`. An explicitly supplied `false` is an override.
+  Every other step keeps its template frontmatter value. The resolved values
+  are persisted on the created tasks; later project-default changes do not
+  change an existing Chain.
+- A supplied `gates.spec` for a template without a specification step returns
+  `400 Bad Request` with code `gates_spec_step_absent`; a supplied `gates.merge`
+  for a template without a merge readiness step returns `400 Bad Request` with
+  code `gates_merge_step_absent`. Each error message names the missing slot and
+  template. If both supplied keys address missing slots, the specification
+  refusal is reported first. No task is created for either refusal. Unknown
+  fields inside `gates` are rejected by the strict request schema.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"feature/demo"},"autoStart":true}'
+  -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"feature/demo"},"gates":{"spec":true,"merge":false},"autoStart":true}'
 ```
 
 ## Triggers and automations
@@ -1417,6 +1444,19 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
   `failureReason` may be `null`.
+- For a Chain task, `approvalGate` can change only when the task's template
+  step is one of the two configurable slots — the specification step or merge
+  readiness step — and the stored task status is `TODO`. The accepted value is
+  persisted and recorded as an operator TaskActivity. A non-slot Chain task
+  returns `409 Conflict` with a conflict reason stating that only the
+  specification and merge readiness steps carry a configurable gate. A slot
+  task whose status is `DOING`, `REVIEW`, or `DONE` returns `409 Conflict` with
+  a conflict reason naming that actual state (for example, that the gate can
+  change only while `TODO` and is already `DOING`). The status is checked at
+  the write boundary, so a slot that leaves `TODO` concurrently is refused.
+  This relaxes the previous blanket refusal that approval gates on dispatched
+  Chain tasks are controlled by the Chain. Standalone tasks retain their
+  existing `approvalGate` PATCH behavior.
 - On a Chain step that carries a feature brief, `description` is the brief
   alone. A task with both a `templateId` and a `chainId` whose Step authors a
   brief — every step role except readiness and integrator — keeps its stored
@@ -1433,7 +1473,7 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
 ```sh
 curl -X PATCH "$BASE_URL/tasks/$TASK_ID" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"maxSessionsPerTask":4}'
+  -d '{"approvalGate":true}'
 ```
 
 ### DELETE `/tasks/:taskId`

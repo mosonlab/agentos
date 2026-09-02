@@ -17,6 +17,7 @@ const mappings = [
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./board-contract", source: "./src/board-contract.ts", dist: "./dist/board-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./chain-order", source: "./src/chain-order.ts", dist: "./dist/chain-order.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./chain-hold", source: "./src/chain-hold.ts", dist: "./dist/chain-hold.js" },
+  { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./gate-toggle", source: "./src/gate-toggle.ts", dist: "./dist/gate-toggle.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./wire-contract", source: "./src/wire-contract.ts", dist: "./dist/wire-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./claim-contract", source: "./src/claim-contract.ts", dist: "./dist/claim-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./service-lock", source: "./src/service-maintenance-lock.ts", dist: "./dist/service-maintenance-lock.js" },
@@ -27,7 +28,7 @@ const mappings = [
   { packageName: "@anneal/github-client", packageDirectory: "packages/github-client", subpath: ".", source: "./src/index.ts", dist: "./dist/index.js" },
 ];
 
-assert.equal(mappings.length, 15);
+assert.equal(mappings.length, 16);
 
 const packageSpecifier = ({ packageName, subpath }) =>
   subpath === "." ? packageName : `${packageName}/${subpath.slice(2)}`;
@@ -76,7 +77,7 @@ const resolveInChild = (conditions) => {
   return JSON.parse(execFileSync(process.execPath, args, { cwd: repositoryRoot, encoding: "utf8" }));
 };
 
-test("all fifteen source-backed exports have ordered development targets", () => {
+test("all sixteen source-backed exports have ordered development targets", () => {
   const entriesByPackage = new Map();
   for (const mapping of mappings) {
     const manifest = readManifest(mapping.packageDirectory);

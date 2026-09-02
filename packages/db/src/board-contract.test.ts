@@ -18,7 +18,7 @@ test("the browser-safe board contract imports only types", () => {
   const typeSpecifiers = [
     ...source.matchAll(/(?:^|\n)\s*import\s+type\b[^;]*?from\s+"([^"]+)"/gu),
   ].map((match) => match[1]);
-  assert.deepEqual(typeSpecifiers, ["@prisma/client", "./wire-contract.js"]);
+  assert.deepEqual(typeSpecifiers, ["@prisma/client", "./wire-contract.js", "./gate-slot.js"]);
 });
 
 test("the package publishes the board contract as an isolated subpath", () => {

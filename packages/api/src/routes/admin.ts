@@ -23,7 +23,11 @@ import {
   type RouteDeps,
 } from "./support.js";
 
-const projectPatch = z.object(projectFields).partial().refine((value) => Object.keys(value).length > 0);
+const projectPatch = z.object({
+  ...projectFields,
+  specGateDefault: z.boolean(),
+  mergeGateDefault: z.boolean(),
+}).partial().refine((value) => Object.keys(value).length > 0);
 
 const environmentFields = {
   name: z.string().trim().min(1).max(120),

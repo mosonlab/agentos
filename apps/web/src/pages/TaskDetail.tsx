@@ -371,6 +371,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const startStep = (step: ChainStep): void => {
     void run(async () => { await api.post(`/tasks/${step.taskId}/start`, {}); reload(); chain.reload(); });
   };
+  const toggleGate = (gateTaskId: string, next: boolean): void => {
+    void run(async () => {
+      await api.patch(`/tasks/${gateTaskId}`, { approvalGate: next });
+      reload();
+      chain.reload();
+    });
+  };
   const controlChain = (): void => {
     const current = chain.data;
     if (current === null || current === undefined || current.chainId === null || chainControlInFlight.current) return;
@@ -546,7 +553,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             ? <ChainList chain={chain.data} taskId={taskId} pending={pending} regressionTaskId={regressionTaskId}
                 repairActivities={repairActivities.data} repairActivitiesLoading={repairActivities.loading}
                 repairActivitiesError={repairActivities.error?.message ?? null} onReloadRepairActivities={repairActivities.reload}
-                onStart={startStep} onControl={controlChain} />
+                onStart={startStep} onControl={controlChain} onToggleGate={toggleGate} />
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
