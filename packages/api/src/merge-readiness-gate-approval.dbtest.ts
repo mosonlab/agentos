@@ -261,6 +261,14 @@ test("head and base drift after approval requeues regression and opens a fresh e
     assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 0);
 
     const newRun = await db.run.findFirstOrThrow({ where: { taskId: chain.gateTask.id }, orderBy: { runNumber: "desc" } });
+    await db.session.create({ data: {
+      runId: newRun.id,
+      projectId: newRun.projectId,
+      agentId: newRun.agentId,
+      taskId: newRun.taskId,
+      runner: newRun.runner,
+      executionStatus: "SUCCEEDED",
+    } });
     const newHead = label === "head" ? NEW_HEAD : HEAD;
     const newBase = label === "base" ? NEW_BASE : BASE;
     await db.taskStepOutput.update({
@@ -278,8 +286,9 @@ test("head and base drift after approval requeues regression and opens a fresh e
         commitSha: newHead,
       },
     });
-    await db.mergeGateAttestation.create({
-      data: {
+    await db.mergeGateAttestation.upsert({
+      where: { chainId_headSha: { chainId: chain.chainId, headSha: newHead } },
+      create: {
         chainId: chain.chainId,
         taskId: chain.gateTask.id,
         runId: newRun.id,
@@ -287,6 +296,7 @@ test("head and base drift after approval requeues regression and opens a fresh e
         baseHeadSha: newBase,
         proof: `MERGE GATE: PASS ${newHead}`,
       },
+      update: {},
     });
     await db.task.update({ where: { id: chain.gateTask.id }, data: { status: TaskStatus.DONE } });
     await db.$transaction((tx) => advanceTemplateTask(
@@ -373,6 +383,13 @@ test("a merge-gate approval without a regression attestation remains open", asyn
     gatedReadiness: true,
   });
   assert.ok(chain.readinessTask);
+  // Current readiness tails require a v2 Regression attestation. The shared
+  // fixture intentionally defaults to the frozen v1 role for legacy tests,
+  // whose compatibility carve-out would make this scenario inapplicable.
+  await db.taskTemplateStep.update({
+    where: { id: chain.gateStep.id },
+    data: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
+  });
   const card = await fillGate(chain);
   await assert.rejects(
     () => approveInbox(card.id, "merge-gate-unattested-approve"),

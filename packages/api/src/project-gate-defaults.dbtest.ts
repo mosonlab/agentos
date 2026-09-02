@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -63,12 +63,12 @@ const request = async (base: string, method: string, path: string, body?: unknow
 
 test("fresh project defaults are returned by the real API and patch independently", async () => {
   const db = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  const roots = await Promise.all([
+  const roots = await Promise.all((await Promise.all([
     mkdtemp(join(tmpdir(), "agentos-project-gates-workspace-")),
     mkdtemp(join(tmpdir(), "agentos-project-gates-files-")),
     mkdtemp(join(tmpdir(), "agentos-project-gates-state-")),
-  ]);
-  const child = spawn(process.execPath, spawnedSourceEntrypointArgv("index.ts"), {
+  ])).map((root) => realpath(root)));
+  const child = spawn(process.execPath, spawnedSourceEntrypointArgv("src/index.ts"), {
     cwd: fileURLToPath(new URL("../", import.meta.url)),
     env: {
       ...process.env,

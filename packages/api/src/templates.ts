@@ -295,13 +295,13 @@ export const instantiateTemplate = async (
       if (input.gates && Object.prototype.hasOwnProperty.call(input.gates, "spec") && !slots.has("spec")) {
         throw templateRefusal(
           "gates_spec_step_absent",
-          `Cannot supply gates.spec for template ${template.name}: specification slot is absent`,
+          `Cannot supply gates.spec: specification slot is absent from template ${template.name}`,
         );
       }
       if (input.gates && Object.prototype.hasOwnProperty.call(input.gates, "merge") && !slots.has("merge")) {
         throw templateRefusal(
           "gates_merge_step_absent",
-          `Cannot supply gates.merge for template ${template.name}: merge readiness slot is absent`,
+          `Cannot supply gates.merge: merge readiness slot is absent from template ${template.name}`,
         );
       }
       const repo = await tx.repo.findFirst({ where: { id: input.repoId, projectId } });
