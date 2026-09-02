@@ -385,20 +385,57 @@ test("the authority is scoped by project and accepted request ids are unique per
   assert.equal(await db.chainControlEvent.count({ where: { chainControlId: rightControl.id } }), 1);
 });
 
-test("Hold records the next non-DONE layer even when no Run is active", async () => {
+test("Hold records the highest admitted layer even when the next layer has no Run", async () => {
   const chain = await seedChain();
   await db.task.update({ where: { id: chain.first.id }, data: { status: TaskStatus.DONE } });
   assert.equal(await db.run.count(), 0);
 
   const held = await holdDirect(chain, chain.first.id, "hold-without-run");
   assert.equal(held.status, 200);
-  assert.equal(held.body.control.heldLayer, 2);
+  assert.equal(held.body.control.heldLayer, 1);
   const control = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
     projectId: chain.project.id,
     chainId: chain.chainId,
   } } });
-  assert.equal(control.heldLayer, 2);
+  assert.equal(control.heldLayer, 1);
   assert.equal(control.state, ChainControlState.HELD);
+});
+
+test("Hold before an API-created zero-based Chain blocks its first stored layer", async () => {
+  const owner = await seedChain();
+  const chainId = `api-zero-${Date.now()}`;
+  const runAt = new Date(Date.now() + 60_000).toISOString();
+  const created = [];
+  for (const chainIndex of [0, 1]) {
+    const response = await call(`/projects/${owner.project.id}/tasks`, {
+      name: `API step ${chainIndex}`,
+      description: "zero-based hold regression",
+      repoId: owner.repo.id,
+      assigneeAgentId: owner.agent.id,
+      chainId,
+      chainIndex,
+      scheduleKind: "AT",
+      runAt,
+    });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    created.push(response.body);
+  }
+  assert.equal(await db.run.count({ where: { taskId: { in: created.map((task) => task.id) } } }), 0);
+
+  const held = await call(`/tasks/${created[0]!.id}/chain/hold`, { requestId: "hold-api-zero" });
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal(held.body.control.heldLayer, 0);
+  const control = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
+    projectId: owner.project.id,
+    chainId,
+  } } });
+  assert.equal(control.heldExecutionLayer, null);
+  assert.equal((await db.chainControlEvent.findFirstOrThrow({ where: { chainControlId: control.id } })).layer, 0);
+
+  const refused = await call(`/tasks/${created[0]!.id}/start`, {});
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /Chain is held before its first layer/u);
+  assert.equal(await db.run.count({ where: { taskId: { in: created.map((task) => task.id) } } }), 0);
 });
 
 test("operator cannot move AGENT chain steps to Backlog or change ChainControl", async () => {

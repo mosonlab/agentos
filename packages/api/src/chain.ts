@@ -348,6 +348,9 @@ export const refusalForHeldChainStep = (
   // A held control is only valid with a persisted layer, but fail closed if a
   // malformed legacy row reaches admission: an unknown layer must not bypass
   // an active Chain barrier.
+  if (control.heldLayer === 0) {
+    return { reason: "conflict", message: `Cannot start ${task.name}; Chain is held before its first layer` };
+  }
   if (taskLayer === null || control.heldLayer === null) {
     return { reason: "conflict", message: `Cannot start ${task.name}; Chain is held` };
   }

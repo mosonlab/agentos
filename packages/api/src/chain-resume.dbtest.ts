@@ -193,6 +193,22 @@ test("concurrent Resume activates every node in one eligible fan-out layer exact
   assert.equal(await db.run.count({ where: { taskId: { in: [chain.second.id, chain.third.id] } } }), 2);
 });
 
+test("Resume before a zero-based first layer activates every first-layer member", async () => {
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.TODO, TaskStatus.TODO, TaskStatus.TODO],
+    layers: [0, 0, 1],
+  });
+  assert.equal(chain.control?.heldLayer, 0);
+  assert.equal(chain.control?.heldExecutionLayer, null);
+
+  const resumed = await resumeHttp(chain.first.id, "resume-zero-based-first-layer");
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.nextTaskId, chain.first.id);
+  assert.equal(resumed.body.control.state, "released");
+  assert.equal(await db.run.count({ where: { taskId: { in: [chain.first.id, chain.second.id] }, status: RunStatus.QUEUED } }), 2);
+  assert.equal(await db.run.count({ where: { taskId: chain.third.id } }), 0);
+});
+
 test("Resume while the held layer runs only releases; ordinary completion then activates the next layer", async () => {
   const chain = await seedBasicChain(db, { statuses: [TaskStatus.DOING, TaskStatus.TODO, TaskStatus.TODO] });
   const running = await seedRun(db, chain, chain.first.id);
@@ -303,7 +319,14 @@ test("Resume refuses an approval successor when the completed layer has no succe
 });
 
 test("Resume leaves a BACKLOG successor parked and preserves the parked-skip narration", async () => {
-  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DONE, TaskStatus.BACKLOG, TaskStatus.TODO] });
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.BACKLOG, TaskStatus.TODO],
+    control: {
+      state: ChainControlState.HELD,
+      heldLayer: 1,
+      heldExecutionLayer: 1,
+    },
+  });
   const resumed = await resume(chain.first.id, "resume-backlog");
   assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.BACKLOG);
@@ -316,7 +339,14 @@ test("Resume leaves a BACKLOG successor parked and preserves the parked-skip nar
 });
 
 test("Resume releases the hold when a human BACKLOG successor needs no source Run", async () => {
-  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DONE, TaskStatus.BACKLOG] });
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.BACKLOG],
+    control: {
+      state: ChainControlState.HELD,
+      heldLayer: 1,
+      heldExecutionLayer: 1,
+    },
+  });
   await db.task.update({ where: { id: chain.second.id }, data: {
     assigneeType: AssigneeType.HUMAN,
     assigneeAgentId: null,

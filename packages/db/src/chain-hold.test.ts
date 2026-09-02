@@ -17,6 +17,7 @@ const control = (overrides: Partial<ChainHoldControl> = {}): ChainHoldControl =>
   chainId: "chain-1",
   state: ChainControlState.HELD,
   heldLayer: 2,
+  heldExecutionLayer: 2,
   ...overrides,
 });
 
@@ -62,6 +63,21 @@ test("heldPredicate treats absent, released, chainless, and foreign controls as 
   assert.equal(heldPredicate(subject({ chainId: "chain-2" }), control()), false);
 });
 
+test("the before-first sentinel blocks stored layer zero without colliding with an admitted zero layer", () => {
+  assert.equal(heldPredicate(
+    subject({ layer: 0, index: 0 }),
+    control({ heldLayer: 0, heldExecutionLayer: null }),
+  ), true, "before-first blocks the lowest supported stored layer");
+  assert.equal(heldPredicate(
+    subject({ layer: 0, index: 0 }),
+    control({ heldLayer: 1, heldExecutionLayer: 0 }),
+  ), false, "an admitted stored layer zero remains allowed");
+  assert.equal(heldPredicate(
+    subject({ layer: 1, index: 1 }),
+    control({ heldLayer: 1, heldExecutionLayer: 0 }),
+  ), true, "the next stored layer remains held");
+});
+
 test("heldWhere encodes the same authoritative layer fallback and missing-layer refusal", () => {
   assert.deepEqual(heldWhere(control()), {
     projectId: "project-1",
@@ -93,5 +109,6 @@ test("heldSql owns identity, state, effective layer, and fail-closed null SQL", 
   assert.match(sql, /chain_control\."chainId" = task\."chainId"/u);
   assert.match(sql, /chain_control\."state" = lower\(\$1\)::"ChainControlState"/u);
   assert.match(sql, /COALESCE\(task\."chainLayer", task\."chainIndex"\) IS NULL/u);
-  assert.match(sql, /COALESCE\(task\."chainLayer", task\."chainIndex"\) > chain_control\."heldLayer"/u);
+  assert.match(sql, /heldLayer" = 0 AND chain_control\."heldExecutionLayer" IS NULL/u);
+  assert.match(sql, /COALESCE\(task\."chainLayer", task\."chainIndex"\) > COALESCE\(chain_control\."heldExecutionLayer", chain_control\."heldLayer"\)/u);
 });

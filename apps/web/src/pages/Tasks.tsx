@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, errorMessage } from "../lib/api";
-import { type BoardEntry, type Counts, type ParkedChain, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
+import { type BoardEntry, type Counts, type HoldableChain, type ParkedChain, boardEntries, boardEntriesByStatus, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, orderColumn, parseStatus, statusLabel, tabKey, taskBoardEntry } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -172,6 +172,68 @@ export const activateParkedChains = async (chains: readonly ParkedChain[]): Prom
 export const activateAllNotice = (total: number, refused: number): string =>
   formatT("tasks.activateAll.notice", { started: total - refused, total });
 
+/** Holds a wave through the same per-chain route used by an aggregate card.
+ * Each request gets its own id so retries and parallel waves remain safely
+ * idempotent. A 409 stays attached to the named chain; it must not disappear
+ * into a partially successful page reload. */
+export const holdChains = async (chains: readonly HoldableChain[]): Promise<ChainRefusal[]> => {
+  const outcomes = await Promise.all(chains.map(async (chain): Promise<ChainRefusal | null> => {
+    try {
+      await api.post(`/tasks/${chain.taskId}/chain/hold`, { requestId: crypto.randomUUID() });
+      return null;
+    } catch (reason: unknown) {
+      return { name: chain.name, reason: errorMessage(reason) };
+    }
+  }));
+  return outcomes.filter((outcome): outcome is ChainRefusal => outcome !== null);
+};
+
+export const holdAllNotice = (total: number, refused: number): string =>
+  formatT("tasks.holdAll.notice", { held: total - refused, total });
+
+/** One confirmation for a Doing-column hold wave. The copy deliberately says
+ * what the layer-granular hold does and does not do: active Runs finish and no
+ * Run cancellation endpoint is involved. */
+export const HoldAllDialog = ({ chains, refusals, pending, settled, onClose, onConfirm }: {
+  chains: readonly HoldableChain[];
+  refusals: readonly ChainRefusal[];
+  pending: boolean;
+  settled: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}): ReactNode => {
+  const t = useT();
+  return (
+    <Modal title={t("tasks.holdAll.title")} onClose={onClose} footer={(
+      <>
+        <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={onClose}>
+          {settled ? t("common.close") : t("common.cancel")}
+        </Button>
+        {settled ? null : (
+          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={onConfirm}>
+            {t("tasks.holdAll.confirm")}
+          </Button>
+        )}
+      </>
+    )}>
+      {settled ? null : <>
+        <div className="text-[13px] text-foreground">{t("tasks.holdAll.what")}</div>
+        <ul data-hold-chains="" className="flex flex-col gap-[4px] text-[13px] text-muted-foreground">
+          {chains.map((chain) => (
+            <li key={chain.chainId} data-hold-chain={chain.chainId}>
+              {t("tasks.holdAll.chain", { name: chain.name, steps: chain.stepCount })}
+            </li>
+          ))}
+        </ul>
+      </>}
+      {refusals.length === 0 ? null : <ErrorNotice message={[
+        formatT("tasks.holdAll.refusedTitle"),
+        ...refusals.map((refusal) => formatT("tasks.holdAll.refused", refusal)),
+      ].join(" ")} />}
+    </Modal>
+  );
+};
+
 /** One confirmation for the whole wave, listing what it will start. Ten parked
  *  chains are ten cards and ten dialogs otherwise. */
 export const ActivateAllDialog = ({ chains, refusals, pending, settled, onClose, onConfirm }: {
@@ -272,6 +334,7 @@ export const TasksPage = (): ReactNode => {
   const [announcement, setAnnouncement] = useState("");
   const [chainFilter, setChainFilter] = useState<{ id: string; name: string } | null>(null);
   const [wave, setWave] = useState<{ chains: readonly ParkedChain[]; refusals: ChainRefusal[]; settled: boolean } | null>(null);
+  const [holdWave, setHoldWave] = useState<{ chains: readonly HoldableChain[]; refusals: ChainRefusal[]; settled: boolean } | null>(null);
   const { error: actionError, pending: pendingAction, run } = useAction();
   const t = useT();
   const allTasks = useStableRows(useMemo(() => data ?? [], [data]));
@@ -444,6 +507,18 @@ export const TasksPage = (): ReactNode => {
     onActivate: (taskId) => {
       void run(async () => { await start.requestForMove(taskId); });
     },
+    onHold: (taskId) => {
+      void run(async () => {
+        await api.post(`/tasks/${taskId}/chain/hold`, { requestId: crypto.randomUUID() });
+        reload();
+      });
+    },
+    onResume: (taskId) => {
+      void run(async () => {
+        await api.post(`/tasks/${taskId}/chain/resume`, { requestId: crypto.randomUUID() });
+        reload();
+      });
+    },
     onFilter: (aggregate) => setChainFilter({ id: aggregate.chainId, name: aggregate.chainName ?? aggregate.chainId.slice(0, 8) }),
     // One member addresses the whole Chain. The API already holds every Chain
     // row under one transaction, so the card cannot disappear halfway through
@@ -489,6 +564,24 @@ export const TasksPage = (): ReactNode => {
     setWave(refused.length === 0 ? null : { ...wave, refusals: refused, settled: true });
   }, [wave, run, reload]);
 
+  /** The Doing-column hold wave follows the same settled-dialog contract as
+   *  Activate all. Each chain is independent: one stale card can be refused
+   *  while the remaining chains are held, and every refusal remains visible by
+   *  name instead of being silently skipped. */
+  const holdAll = useCallback(async (): Promise<void> => {
+    if (holdWave === null || holdWave.settled) return;
+    setNotice(null);
+    let refusals: ChainRefusal[] | null = null;
+    const ok = await run(async () => {
+      refusals = await holdChains(holdWave.chains);
+      reload();
+    });
+    if (!ok || refusals === null) return;
+    const refused: ChainRefusal[] = refusals;
+    setNotice(holdAllNotice(holdWave.chains.length, refused.length));
+    setHoldWave(refused.length === 0 ? null : { ...holdWave, refusals: refused, settled: true });
+  }, [holdWave, run, reload]);
+
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
@@ -510,6 +603,16 @@ export const TasksPage = (): ReactNode => {
           settled={wave.settled}
           onClose={() => { if (!pendingAction) setWave(null); }}
           onConfirm={() => void activateAll()}
+        />
+      )}
+      {holdWave === null ? null : (
+        <HoldAllDialog
+          chains={holdWave.chains}
+          refusals={holdWave.refusals}
+          pending={pendingAction}
+          settled={holdWave.settled}
+          onClose={() => { if (!pendingAction) setHoldWave(null); }}
+          onConfirm={() => void holdAll()}
         />
       )}
       <TasksPageHead active="tasks" onCreated={reload} />
@@ -545,6 +648,7 @@ export const TasksPage = (): ReactNode => {
             onMove={drop}
             onArchiveDone={() => void archiveDone()}
             onActivateAll={(chains) => setWave({ chains, refusals: [], settled: false })}
+            onHoldAll={(chains) => setHoldWave({ chains, refusals: [], settled: false })}
             actions={actions}
             aggregateActions={aggregateActions}
             boardRef={boardRef}

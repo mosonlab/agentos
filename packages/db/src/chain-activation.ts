@@ -244,6 +244,13 @@ const dispatchBoundSuccessor = async (
     projectId: successorIdentity.projectId,
     chainId: successorIdentity.chainId,
   });
+  // The successor Chain owns its own hold barrier. Read it only after taking
+  // that Chain's row lock, matching the same-chain activation path, so a
+  // completion and an operator Hold have one serialized outcome.
+  const successorControl = await readChainControl(tx, {
+    projectId: successorIdentity.projectId,
+    chainId: successorIdentity.chainId,
+  });
   const successor = await tx.task.findUnique({
     where: { id: successorId },
     include: {
@@ -267,6 +274,25 @@ const dispatchBoundSuccessor = async (
       "bound predecessor is no longer terminal; successor was not queued",
       { predecessorTerminal: false },
     );
+    return;
+  }
+
+  if (successorControl.held) {
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: successorControl.heldLayer === 0
+        ? "Bound predecessor completed; successor activation withheld because Chain is held before its first layer"
+        : successorControl.heldLayer === null
+          ? "Bound predecessor completed; successor activation withheld because Chain is held"
+          : `Bound predecessor completed; successor activation withheld because Chain is held after layer ${String(successorControl.heldLayer)}`,
+      metadata: {
+        kind: "chainControl.activationWithheld",
+        schemaVersion: 1,
+        heldLayer: successorControl.heldLayer,
+        nextLayer: chainLayerOf(successor),
+      },
+    } });
     return;
   }
 
@@ -643,9 +669,11 @@ const activateChainSuccessorInternal = async (
     await tx.taskActivity.create({ data: {
       taskId: current.id,
       actorType: "control-plane",
-      body: chainControl.heldLayer === null
-        ? "Predecessor layer completed; successor activation withheld because Chain is held"
-        : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
+      body: chainControl.heldLayer === 0
+        ? "Predecessor layer completed; successor activation withheld because Chain is held before its first layer"
+        : chainControl.heldLayer === null
+          ? "Predecessor layer completed; successor activation withheld because Chain is held"
+          : `Predecessor layer completed; successor activation withheld because Chain is held after layer ${String(chainControl.heldLayer)}`,
       metadata: {
         kind: "chainControl.activationWithheld",
         schemaVersion: 1,
