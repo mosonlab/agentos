@@ -746,6 +746,21 @@ const activateChainSuccessorInternal = async (
       : null;
     const compoundImplementation = isCompoundImplementationStep(successorStep);
     if (isMergeReadinessStep(successorStep)) {
+      // A gated server-owned readiness step has no Run of its own, so its gate
+      // must open at activation while the completing Regression Run still
+      // supplies the session and pull-request identity. Keep the task in
+      // REVIEW before creating the card in this same transaction; readiness
+      // claiming only considers TODO/DOING, so the worker cannot race the
+      // operator while the evidence card is being prepared.
+      if (successor.approvalGate && options.sourceRunId) {
+        await tx.task.update({
+          where: { id: successor.id },
+          data: { status: TaskStatus.REVIEW, failureReason: null },
+        });
+        await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
+        gated = true;
+        continue;
+      }
       await tx.taskActivity.create({ data: {
         taskId: successor.id,
         actorType: "control-plane",
