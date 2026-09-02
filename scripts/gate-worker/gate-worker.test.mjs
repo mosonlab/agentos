@@ -639,6 +639,51 @@ test("a gate FAIL forwards the last 200 lines of every failing step", (t) => {
   assert.ok(Buffer.byteLength(result.stdout, "utf8") <= 66_000, "forwarded stdout exceeded its bounded envelope");
 });
 
+test("a failing workspace stage keeps nested assertion evidence ahead of passing output", (t) => {
+  const workspaces = Array.from({ length: 8 }, (_, index) => `workspace-${index + 1}`);
+  const workspaceBlocks = workspaces.flatMap((workspace, index) => {
+    const lines = [`printf '%s\\n' '--- test: ${workspace} ---'`];
+    if (index === 0) {
+      lines.push(
+        "printf '%s\\n' '# Subtest: packages/runner/src/first.test.ts'",
+        "printf '%s\\n' 'not ok 1 - first workspace assertion'",
+        "printf '%s\\n' 'AssertionError: first workspace assertion'",
+      );
+    }
+    lines.push(
+      ...Array.from(
+        { length: 35 },
+        (_, line) => `printf '%s\\n' 'ok ${line + 1} - ${workspace} passing ${String(line).padStart(3, "0")}'`,
+      ),
+    );
+    return lines;
+  });
+  const fixture = gateHome(t, {
+    verdict: [
+      "printf '%s\\n' '--- unit tests (all workspaces) ---'",
+      ...workspaceBlocks,
+      "printf '%s\\n' '--- sibling parallel stage ---'",
+      "printf '%s\\n' 'sibling-stage-only-output'",
+      "printf '%s\\n' 'MERGE GATE: FAIL (unit tests (all workspaces))'",
+      "exit 1",
+    ].join("\n"),
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+
+  const marker = "run-gate: failure excerpt (last 200 lines per failing step)";
+  const markerAt = result.stdout.indexOf(marker);
+  const verdictAt = result.stdout.indexOf("MERGE GATE: FAIL", markerAt);
+  assert.ok(markerAt >= 0, result.stdout);
+  assert.ok(verdictAt > markerAt, result.stdout);
+  const excerpt = result.stdout.slice(markerAt, verdictAt);
+  assert.match(excerpt, /--- unit tests \(all workspaces\) ---/u);
+  assert.match(excerpt, /# Subtest: packages\/runner\/src\/first\.test\.ts/u);
+  assert.match(excerpt, /AssertionError: first workspace assertion/u);
+  assert.doesNotMatch(excerpt, /sibling-stage-only-output/u);
+  assert.doesNotMatch(excerpt, /workspace-1 passing 000/u);
+});
+
 test("a remote FAIL tail reaches remote-gate and dispatcher stdout", (t) => {
   const fixture = remoteDispatchFixture(t);
   const result = spawnSync(
