@@ -51,6 +51,7 @@ const runtimeGateWorker = join(runtimeTools, "gate-worker");
 const runnerToolNames = new Set(["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]);
 const toolPath = (name) => join(runnerToolNames.has(name) ? runtimeGateWorker : here, name);
 const libPath = toolPath("lib.sh");
+const mergeGatePath = join(here, "..", "merge-gate.sh");
 const runGatePath = toolPath("run-gate.sh");
 const dispatchPath = toolPath("gate-dispatch.sh");
 const mirrorPushPath = toolPath("mirror-push.sh");
@@ -566,6 +567,93 @@ const runGate = (home, args, env = {}) =>
     timeout: 120_000,
     env: { ...FIXTURE_ENV, ...env },
   });
+
+// A minimal clean checkout that reaches merge-gate.sh's first preflight after
+// its Run-scope refusal. The invalid --expect-head keeps the accepted case
+// cheap: it proves the caller passed the refusal without starting Docker or
+// any repository proof command.
+const mergeGateScopeFixture = (t) => {
+  const root = scratch(t);
+  const repo = join(root, "repo");
+  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
+  writeFileSync(join(repo, "package.json"), '{"name": "anneal"}\n');
+  cpSync(mergeGatePath, join(repo, "scripts", "merge-gate.sh"));
+  cpSync(join(here, "..", "run-scope-bypass.sh"), join(repo, "scripts", "run-scope-bypass.sh"));
+  cpSync(join(here, "step-engine.sh"), join(repo, "scripts", "gate-worker", "step-engine.sh"));
+  cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
+  chmodSync(join(repo, "scripts", "merge-gate.sh"), 0o755);
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "fixture");
+
+  const callers = join(root, "callers");
+  const tools = join(root, "tools");
+  mkdirSync(callers, { recursive: true });
+  mkdirSync(tools, { recursive: true });
+  const invoke = (path) => {
+    writeFileSync(
+      path,
+      `#!/usr/bin/env bash\nset -u\nbash '${join(repo, "scripts", "merge-gate.sh")}' --expect-head not-a-full-object-id &\nchild_pid=$!\nwait "$child_pid"\nchild_status=$?\nexit "$child_status"\n`,
+    );
+    chmodSync(path, 0o755);
+  };
+  const forgedCaller = join(callers, "forged-caller.sh");
+  const regressionTool = join(tools, "regression-verification.sh");
+  invoke(forgedCaller);
+  invoke(regressionTool);
+  return { repo, forgedCaller, regressionTool, tools };
+};
+
+const runMergeGateScopeFixture = (fixture, caller, runId, { includeTools = true } = {}) => spawnSync(caller, [], {
+  cwd: fixture.repo,
+  encoding: "utf8",
+  env: {
+    ...FIXTURE_ENV,
+    AGENTOS_RUN_ID: runId,
+    AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
+    ...(includeTools ? { AGENTOS_TOOLS: fixture.tools } : {}),
+  },
+});
+
+const stripAnsi = (output) => {
+  const ansiEscape = String.fromCharCode(27);
+  return output.replaceAll(new RegExp(`${ansiEscape}\\[[0-9;]*m`, "gu"), "");
+};
+
+test("merge-gate refuses a forged bypass and audits the invoking command line", (t) => {
+  const fixture = mergeGateScopeFixture(t);
+  const result = runMergeGateScopeFixture(fixture, fixture.forgedCaller, "forged-gate-run");
+  const output = `${result.stdout}${result.stderr}`;
+  const plain = stripAnsi(output);
+  assert.equal(result.status, 76, output);
+  assert.match(plain, /^GATE NOT RUN: refused inside Anneal run forged-gate-run$/m);
+  assert.match(output, /forged-caller\.sh/u, "the refusal did not record the caller command line");
+});
+
+test("merge-gate refuses and audits a forged bypass when AGENTOS_TOOLS is absent", (t) => {
+  const fixture = mergeGateScopeFixture(t);
+  const result = runMergeGateScopeFixture(
+    fixture,
+    fixture.forgedCaller,
+    "missing-tools-gate-run",
+    { includeTools: false },
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  const plain = stripAnsi(output);
+  assert.equal(result.status, 76, output);
+  assert.match(plain, /^GATE NOT RUN: refused inside Anneal run missing-tools-gate-run$/m);
+  assert.match(output, /forged-caller\.sh/u, "the refusal did not record the caller command line");
+});
+
+test("merge-gate accepts the bypass only under the runner regression tool", (t) => {
+  const fixture = mergeGateScopeFixture(t);
+  const result = runMergeGateScopeFixture(fixture, fixture.regressionTool, "regression-gate-run");
+  const output = `${result.stdout}${result.stderr}`;
+  assert.notEqual(result.status, 76, output);
+  assert.match(output, /--expect-head needs a full 40-character object id/u);
+  assert.doesNotMatch(output, /^GATE NOT RUN: refused inside Anneal run regression-gate-run$/m);
+});
 
 test("a gate that passes is reported as the gate's own verdict", (t) => {
   const fixture = gateHome(t);

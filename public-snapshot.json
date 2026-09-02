@@ -164,6 +164,7 @@
     { "glob": "scripts/public-snapshot-scan.test.mjs", "purpose": "scanner regression tests" },
     { "glob": "scripts/release-docs.test.mjs", "purpose": "executable release documentation contract tests" },
     { "glob": "scripts/repo-contract-merge-gate.test.mjs", "purpose": "repository merge-gate contract reference tests" },
+    { "glob": "scripts/run-scope-bypass.sh", "purpose": "authenticates Regression bypass callers from runner-tool process ancestry" },
     { "glob": "scripts/run-scope-guard.sh", "purpose": "refuses repository-wide root work inside an Anneal run" },
     { "glob": "scripts/run-scope-guard.test.mjs", "purpose": "run-scope guard refusal and bypass fixtures" },
     { "glob": "scripts/host-proof-slot.sh", "purpose": "host-wide per-workspace proof slot admission" },
