@@ -122,20 +122,47 @@ if [ -z "$HOLDER" ]; then
   HOLDER="${holder_user}@${holder_host}"
 fi
 
+GIT_ATTEMPTS=6
+
+# The transient half of packages/runner/src/network-retry.ts, in the vocabulary
+# git writes. Only a match is retried: an authentication failure, an absent ref
+# or an unreadable remote is the remote's answer, and spending the backoff
+# budget on it only delays a failure the operator still has to read.
+GIT_TRANSIENT_RE='SSL_ERROR_SYSCALL|SSL_connect|unexpected EOF|early EOF|RPC failed|Connection (reset|refused|timed out)|Operation timed out|Failed to connect|Could not resolve host|Recv failure|ECONNRESET|ETIMEDOUT|EAI_AGAIN|HTTP( response)? 5[0-9][0-9]'
+
+# Exponential backoff with full jitter, capped per attempt, matching the clone
+# profile in network-retry.ts and the fetch budget in
+# packages/runner/runtime-tools/regression-verification.sh. This host reaches
+# GitHub through a proxy whose 443 exit drops for seconds at a time: 24 probes
+# on 2026-09-02 failed 5 times in clusters up to 5 consecutive failures, so the
+# previous budget (3 attempts, 1s apart, ~3s total) fell inside a single drop as
+# a matter of course rather than as an edge case. Waiting up to 1s,2s,4s,8s,8s
+# (~23s worst case) rides one out. Release is what makes the budget worth
+# spending: a failed status, acquire or steal changes nothing and can simply be
+# rerun, while a failed release strands the lease on origin until the 45-minute
+# machine steal threshold expires.
+git_backoff() {
+  local ceiling=$(( 1 << (($1 < 4 ? $1 : 4) - 1) ))
+  sleep "$(awk -v ceiling="$ceiling" 'BEGIN { srand(); printf "%.2f", rand() * ceiling }')"
+}
+
 RETRY_OUTPUT=""
 retry_git() {
   local label="$1" attempt status
   shift
-  for attempt in 1 2 3; do
+  for attempt in $(seq 1 "$GIT_ATTEMPTS"); do
     RETRY_OUTPUT="$(GIT_TERMINAL_PROMPT=0 "$@" 2>&1)"
     status=$?
     if [ "$status" -eq 0 ]; then
       return 0
     fi
-    if [ "$attempt" -lt 3 ]; then
-      printf 'merge-lease: %s failed; retrying attempt=%s/3\n' "$label" "$((attempt + 1))" >&2
-      sleep "$attempt"
+    if [ "$attempt" -lt "$GIT_ATTEMPTS" ] && [[ "$RETRY_OUTPUT" =~ $GIT_TRANSIENT_RE ]]; then
+      printf 'merge-lease: %s failed; retrying attempt=%s/%s\n' \
+        "$label" "$((attempt + 1))" "$GIT_ATTEMPTS" >&2
+      git_backoff "$attempt"
+      continue
     fi
+    break
   done
   [ -z "$RETRY_OUTPUT" ] || printf '%s\n' "$RETRY_OUTPUT" >&2
   return "$status"
@@ -175,11 +202,11 @@ load_lease() {
   LEASE_REASON=""
   LEASE_TOKEN=""
   LEASE_PRETTY=""
-  read_remote_sha || die "could not read ${LEASE_REF} from origin after 3 attempts"
+  read_remote_sha || die "could not read ${LEASE_REF} from origin"
   [ -n "$REMOTE_SHA" ] || return 0
   if ! git -C "$REPO_ROOT" cat-file -e "${REMOTE_SHA}^{blob}" 2>/dev/null; then
     retry_git "origin lease fetch" git -C "$REPO_ROOT" fetch --no-tags --no-write-fetch-head origin "$LEASE_REF" \
-      || die "could not fetch ${LEASE_REF} from origin after 3 attempts"
+      || die "could not fetch ${LEASE_REF} from origin"
   fi
   LEASE_JSON="$(git -C "$REPO_ROOT" cat-file blob "$REMOTE_SHA" 2>/dev/null)" \
     || die "origin lease ${REMOTE_SHA} is not a readable blob"
@@ -261,9 +288,9 @@ make_lease_blob() {
 # an operational failure. A unique token makes an ambiguous successful push
 # distinguishable from somebody else's lease.
 try_create_lease() {
-  local attempt status
-  for attempt in 1 2 3; do
-    RETRY_OUTPUT="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain origin "${NEW_SHA}:${LEASE_REF}" 2>&1)"
+  local attempt status push_output
+  for attempt in $(seq 1 "$GIT_ATTEMPTS"); do
+    push_output="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain origin "${NEW_SHA}:${LEASE_REF}" 2>&1)"
     status=$?
     read_remote_sha || return 2
     if [ "$REMOTE_SHA" = "$NEW_SHA" ]; then
@@ -276,19 +303,22 @@ try_create_lease() {
       printf 'merge-lease: push reported success but %s is absent\n' "$LEASE_REF" >&2
       return 2
     fi
-    if [ "$attempt" -lt 3 ]; then
-      printf 'merge-lease: lease create push failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
-      sleep "$attempt"
+    if [ "$attempt" -lt "$GIT_ATTEMPTS" ] && [[ "$push_output" =~ $GIT_TRANSIENT_RE ]]; then
+      printf 'merge-lease: lease create push failed; retrying attempt=%s/%s\n' \
+        "$((attempt + 1))" "$GIT_ATTEMPTS" >&2
+      git_backoff "$attempt"
+      continue
     fi
+    break
   done
-  [ -z "$RETRY_OUTPUT" ] || printf '%s\n' "$RETRY_OUTPUT" >&2
+  [ -z "$push_output" ] || printf '%s\n' "$push_output" >&2
   return 2
 }
 
 replace_lease() {
-  local observed_sha="$1" attempt status
-  for attempt in 1 2 3; do
-    RETRY_OUTPUT="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain \
+  local observed_sha="$1" attempt status push_output
+  for attempt in $(seq 1 "$GIT_ATTEMPTS"); do
+    push_output="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain \
       --force-with-lease="${LEASE_REF}:${observed_sha}" origin "${NEW_SHA}:${LEASE_REF}" 2>&1)"
     status=$?
     read_remote_sha || die "could not verify ${LEASE_REF} after the steal push"
@@ -299,19 +329,22 @@ replace_lease() {
     if [ "$status" -eq 0 ]; then
       die "steal push reported success but the observed lease did not change"
     fi
-    if [ "$attempt" -lt 3 ]; then
-      printf 'merge-lease: lease steal push failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
-      sleep "$attempt"
+    if [ "$attempt" -lt "$GIT_ATTEMPTS" ] && [[ "$push_output" =~ $GIT_TRANSIENT_RE ]]; then
+      printf 'merge-lease: lease steal push failed; retrying attempt=%s/%s\n' \
+        "$((attempt + 1))" "$GIT_ATTEMPTS" >&2
+      git_backoff "$attempt"
+      continue
     fi
+    break
   done
-  [ -z "$RETRY_OUTPUT" ] || printf '%s\n' "$RETRY_OUTPUT" >&2
-  die "could not steal the lease after 3 attempts"
+  [ -z "$push_output" ] || printf '%s\n' "$push_output" >&2
+  die "could not steal the lease"
 }
 
 delete_lease() {
-  local observed_sha="$1" attempt status
-  for attempt in 1 2 3; do
-    RETRY_OUTPUT="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain \
+  local observed_sha="$1" attempt status push_output
+  for attempt in $(seq 1 "$GIT_ATTEMPTS"); do
+    push_output="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain \
       --force-with-lease="${LEASE_REF}:${observed_sha}" origin ":${LEASE_REF}" 2>&1)"
     status=$?
     read_remote_sha || die "could not verify ${LEASE_REF} after the release push"
@@ -322,13 +355,16 @@ delete_lease() {
     if [ "$status" -eq 0 ]; then
       die "release push reported success but the observed lease remains"
     fi
-    if [ "$attempt" -lt 3 ]; then
-      printf 'merge-lease: lease release push failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
-      sleep "$attempt"
+    if [ "$attempt" -lt "$GIT_ATTEMPTS" ] && [[ "$push_output" =~ $GIT_TRANSIENT_RE ]]; then
+      printf 'merge-lease: lease release push failed; retrying attempt=%s/%s\n' \
+        "$((attempt + 1))" "$GIT_ATTEMPTS" >&2
+      git_backoff "$attempt"
+      continue
     fi
+    break
   done
-  [ -z "$RETRY_OUTPUT" ] || printf '%s\n' "$RETRY_OUTPUT" >&2
-  die "could not release the lease after 3 attempts"
+  [ -z "$push_output" ] || printf '%s\n' "$push_output" >&2
+  die "could not release the lease"
 }
 
 # One release, two readers. The operator reads the prose; the merge tail, in
@@ -387,7 +423,7 @@ case "$COMMAND" in
               exit 0
             fi
           fi ;;
-        *) die "could not create ${LEASE_REF} after 3 attempts" ;;
+        *) die "could not create ${LEASE_REF}" ;;
       esac
       if [ "$(date +%s)" -ge "$deadline" ]; then
         printf 'merge-lease: timed out waiting for %s after %s minute(s)\n' "$LEASE_REF" "$TIMEOUT_MINUTES" >&2
