@@ -8,6 +8,7 @@ import { workspaceEnvironment, type Workspace } from "./workspace.js";
 
 const MAX_RECEIPT_BYTES = 8 * 1024;
 
+// AGENT-WRITER-BEGIN
 export type TaskOutputReceipt = {
   runId: string;
   kind: string;
@@ -16,19 +17,6 @@ export type TaskOutputReceipt = {
 
 export const taskOutputReceiptPath = (workspacePath: string): string =>
   join(workspacePath, ".agentos", "task-output-receipt.json");
-
-const receipt = (value: unknown): TaskOutputReceipt => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Task output receipt is not an object");
-  }
-  const candidate = value as Record<string, unknown>;
-  if (typeof candidate.runId !== "string"
-    || typeof candidate.kind !== "string"
-    || typeof candidate.commitSha !== "string") {
-    throw new Error("Task output receipt is missing runId, kind, or commitSha");
-  }
-  return { runId: candidate.runId, kind: candidate.kind, commitSha: candidate.commitSha };
-};
 
 /**
  * Record the delivered output identity only after the session output request
@@ -49,6 +37,26 @@ export const writeTaskOutputReceipt = async (
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
+};
+// AGENT-WRITER-END
+
+export const parseTaskOutputReceipt = (raw: string): TaskOutputReceipt => {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (error: unknown) {
+    throw new Error(`Task output receipt is not JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Task output receipt is not an object");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.runId !== "string"
+    || typeof candidate.kind !== "string"
+    || typeof candidate.commitSha !== "string") {
+    throw new Error("Task output receipt is missing runId, kind, or commitSha");
+  }
+  return { runId: candidate.runId, kind: candidate.kind, commitSha: candidate.commitSha };
 };
 
 const readReceiptFile = async (config: RunnerConfig, workspace: Workspace): Promise<string | null> => {
@@ -96,5 +104,5 @@ export const readTaskOutputReceipt = async (
 ): Promise<TaskOutputReceipt | null> => {
   const raw = await readReceiptFile(config, workspace);
   if (raw === null) return null;
-  return receipt(JSON.parse(raw));
+  return parseTaskOutputReceipt(raw);
 };

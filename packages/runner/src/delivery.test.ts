@@ -11,7 +11,7 @@ import type { ExitEvidence } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
 import {
   deliverWorkspace, pullRequestTitle, salvageWorkspace,
-  type CommandExecutor, type DeliveryClaim, type PrWorkflowOutput,
+  type CommandExecutor, type DeliveryClaim,
 } from "./delivery.js";
 import { completionEnvelope } from "./envelope.js";
 import { CommandTimeoutError, KILL_OVERHEAD_MS } from "./exec.js";
@@ -451,24 +451,34 @@ test("canonical PR final delivery fails for a non-GitHub remote after publishing
   assert.equal(result.pushedBranch, workspace.branch);
 });
 
-test("canonical PR malformed evidence is refused before git or gh", async () => {
-  const calls: string[] = [];
-  const malformed: PrWorkflowOutput[] = [...canonicalFinalOutputs()];
-  malformed[3] = { ...malformed[3]!, commitSha: null };
-  const result = await deliverWorkspace(
-    config,
-    canonicalClaim("fixed-implementation", "task-fixed", 4),
-    { ...workspace, baseSha: canonicalImplementationSha },
-    {
-      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
-      headSha: canonicalFixedSha,
-      prWorkflowOutputs: malformed,
-    },
-  );
-  assert.equal(result.pushStatus, "FAILED");
-  assert.equal(result.failure?.operation, "canonical PR output validation");
-  assert.deepEqual(calls, []);
-});
+// The shape, order and Task binding of the handoff are the control plane's
+// decision (`decidePrHandoff`); what delivery still refuses on its own is a
+// canonical PR delivery reached without one, or with a body that does not
+// satisfy its kind's schema.
+for (const missing of [
+  { name: "no handoff at all", outputs: undefined },
+  { name: "a handoff missing its final artifact", outputs: canonicalFinalOutputs().slice(0, 3) },
+  { name: "a body that violates its canonical schema", outputs: canonicalFinalOutputs().map((output, index) => (
+    index === 3 ? { ...output, body: JSON.stringify({ schemaVersion: 1 }) } : output
+  )) },
+] as const) {
+  test(`canonical PR final delivery with ${missing.name} is refused before git or gh`, async () => {
+    const calls: string[] = [];
+    const result = await deliverWorkspace(
+      config,
+      canonicalClaim("fixed-implementation", "task-fixed", 4),
+      { ...workspace, baseSha: canonicalImplementationSha },
+      {
+        command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+        headSha: canonicalFixedSha,
+        ...(missing.outputs ? { prWorkflowOutputs: missing.outputs } : {}),
+      },
+    );
+    assert.equal(result.pushStatus, "FAILED");
+    assert.equal(result.failure?.operation, "canonical PR output validation");
+    assert.deepEqual(calls, []);
+  });
+}
 
 test("canonical PR final output and completion head mismatches are refused before publication", async () => {
   for (const candidate of [

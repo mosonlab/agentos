@@ -1,11 +1,11 @@
 import { statfs } from "node:fs/promises";
 
-import type { CleanupStatus, RunOutcome } from "@anneal/db";
+import { parseRunOutputEvidence, type CleanupStatus, type RunOutcome, type RunOutputEvidence } from "@anneal/db";
 import type { ClaimContract } from "@anneal/db/claim-contract";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
-export type { CleanupStatus, FailureClass } from "@anneal/db";
+export type { CleanupStatus, FailureClass, PrHandoffOutput, RunOutputEvidence } from "@anneal/db";
 /** The only repository dependency-provisioning policies understood by a runner. */
 export const DEPENDENCY_PROVISIONING_VALUES = ["NONE", "NPM_CI"] as const;
 export type DependencyProvisioning = (typeof DEPENDENCY_PROVISIONING_VALUES)[number];
@@ -196,29 +196,6 @@ const acknowledgeCancellation = async (
   });
 };
 
-export type SessionTaskOutputStatus = {
-  outputKind: string | null;
-  outputRequired: boolean;
-  outputRemediationAllowed: boolean;
-  outputSatisfiedByPriorRun: boolean;
-  outputPersisted: boolean;
-  output: {
-    runId: string;
-    kind: string;
-    commitSha: string | null;
-  } | null;
-  /** Persisted canonical PR handoff bodies projected by the session route. */
-  prWorkflowOutputs?: SessionPrWorkflowOutput[];
-};
-
-export type SessionPrWorkflowOutput = {
-  taskId: string;
-  chainIndex: number;
-  kind: "implementation" | "sol-findings" | "blind-findings" | "fixed-implementation";
-  body: string;
-  commitSha: string;
-};
-
 export type SessionTaskOutput = {
   kind: string;
   body: string;
@@ -241,91 +218,30 @@ const persistSessionTaskOutput = async (
   });
 };
 
-/** Read the output fact through the Run's session principal. Completion is too
- * late for recovery: by then the provider process and workspace are gone. */
-const readSessionTaskOutputStatus = async (
+/** Read the decided output evidence through the Run's session principal.
+ * Completion is too late for recovery: by then the provider process and
+ * workspace are gone. The runner judges nothing here -- the control plane
+ * already decided satisfaction and the canonical PR handoff -- so this only
+ * refuses a payload that is not the decided answer. */
+const readSessionRunOutputEvidence = async (
   config: RunnerConfig,
   claim: RunSessionClaim,
-): Promise<SessionTaskOutputStatus | null> => {
+): Promise<RunOutputEvidence | null> => {
   const response = await request(config, `/session/runs/${claim.run.id}/status`, {
     method: "GET",
     headers: { Authorization: `Bearer ${claim.sessionToken}` },
   });
-  const payload = await response.json() as {
-    task?: {
-      outputKind?: unknown;
-      outputRequired?: unknown;
-      outputRemediationAllowed?: unknown;
-      outputSatisfiedByPriorRun?: unknown;
-      outputPersisted?: unknown;
-      output?: unknown;
-      prWorkflowOutputs?: unknown;
-    } | null;
-  };
-  const output = payload.task?.output;
-  const prWorkflowOutputs = payload.task?.prWorkflowOutputs;
-  const validOutput = output === null || (
-    typeof output === "object"
-    && !Array.isArray(output)
-    && typeof (output as Record<string, unknown>).runId === "string"
-    && typeof (output as Record<string, unknown>).kind === "string"
-    && (typeof (output as Record<string, unknown>).commitSha === "string"
-      || (output as Record<string, unknown>).commitSha === null)
-  );
-  // Canonical repositories may use SHA-1 (40 hex) or SHA-256 (64 hex).
-  const isCanonicalCommitSha = (value: unknown): value is string => (
-    typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)
-  );
-  const validPrWorkflowOutputs = prWorkflowOutputs === undefined || (
-    Array.isArray(prWorkflowOutputs)
-    && prWorkflowOutputs.every((entry: unknown, index: number, entries: unknown[]) => {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-      const value = entry as Record<string, unknown>;
-      const previous = entries[index - 1];
-      const previousIndex = previous && typeof previous === "object" && !Array.isArray(previous)
-        ? (previous as Record<string, unknown>).chainIndex
-        : undefined;
-      return typeof value.taskId === "string"
-        && value.taskId.trim().length > 0
-        && Number.isInteger(value.chainIndex)
-        && (value.chainIndex as number) > 0
-        && typeof value.body === "string"
-        && value.body.trim().length > 0
-        && isCanonicalCommitSha(value.commitSha)
-        && (value.kind === "implementation"
-          || value.kind === "sol-findings"
-          || value.kind === "blind-findings"
-          || value.kind === "fixed-implementation")
-        && (index === 0 || (Number.isInteger(previousIndex)
-          && (value.chainIndex as number) > (previousIndex as number)))
-        && entries.findIndex((candidate) => candidate
-          && typeof candidate === "object"
-          && !Array.isArray(candidate)
-          && (candidate as Record<string, unknown>).taskId === value.taskId) === index;
-    })
-  );
-  if (payload.task === null) return null;
-  if (!payload.task
-    || (typeof payload.task.outputKind !== "string" && payload.task.outputKind !== null)
-    || typeof payload.task.outputRequired !== "boolean"
-    || typeof payload.task.outputRemediationAllowed !== "boolean"
-    || typeof payload.task.outputSatisfiedByPriorRun !== "boolean"
-    || typeof payload.task.outputPersisted !== "boolean"
-    || !validOutput
-    || !validPrWorkflowOutputs) {
-    throw new Error(`Anneal API returned an invalid task output status for Run ${claim.run.id}`);
+  const payload = await response.json() as { task?: { outputEvidence?: unknown } | null };
+  if (!payload.task) return null;
+  try {
+    return parseRunOutputEvidence(payload.task.outputEvidence);
+  } catch (error: unknown) {
+    throw new Error(
+      `Anneal API returned an invalid task output status for Run ${claim.run.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
-  return {
-    outputKind: payload.task.outputKind,
-    outputRequired: payload.task.outputRequired,
-    outputRemediationAllowed: payload.task.outputRemediationAllowed,
-    outputSatisfiedByPriorRun: payload.task.outputSatisfiedByPriorRun,
-    outputPersisted: payload.task.outputPersisted,
-    output: output as SessionTaskOutputStatus["output"],
-    ...(prWorkflowOutputs === undefined ? {} : {
-      prWorkflowOutputs: prWorkflowOutputs as SessionPrWorkflowOutput[],
-    }),
-  };
 };
 
 /** Durably acknowledge the exact ref immediately after git accepts the push.
@@ -584,8 +500,8 @@ export interface RunSession {
   emit(events: SessionEventPayload[], providerConversationId?: string | null): Promise<void>;
   /** Persist a mechanically-authored deliverable under the Run's session principal. */
   publishOutput(output: SessionTaskOutput): Promise<void>;
-  /** Read the output fact under the Run's session principal. */
-  outputStatus(): Promise<SessionTaskOutputStatus | null>;
+  /** Read the decided output evidence under the Run's session principal. */
+  outputStatus(): Promise<RunOutputEvidence | null>;
   /** Durably acknowledge the exact ref immediately after git accepts the push. */
   publishBranch(pushedBranch: string): Promise<void>;
   /** Record cleanup that carries no authority over the Run's outcome. */
@@ -640,7 +556,7 @@ export const openRunSession = (config: RunnerConfig, claim: RunSessionClaim): Ru
   note: (body, metadata) => appendActivity(config, claim, body, metadata),
   emit: (events, providerConversationId) => appendEvents(config, claim, events, providerConversationId),
   publishOutput: (output) => persistSessionTaskOutput(config, claim, output),
-  outputStatus: () => readSessionTaskOutputStatus(config, claim),
+  outputStatus: () => readSessionRunOutputEvidence(config, claim),
   publishBranch: (pushedBranch) => recordPublishedBranch(config, claim, pushedBranch),
   recordCleanup: (cleanup) => recordLeaseIndependentCleanup(config, claim, cleanup),
   acknowledgeCancellation: (cancellation, workspace, containment) =>

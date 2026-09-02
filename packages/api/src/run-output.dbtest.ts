@@ -790,9 +790,11 @@ test("Regression v2 status reserves remediation for the mechanical Runner path",
 
   assert.equal(status.status, 200, JSON.stringify(status.body));
   assert.equal(status.body.task.outputKind, "regression-verification-v2");
-  assert.equal(status.body.task.outputRequired, true);
-  assert.equal(status.body.task.outputRemediationAllowed, false);
-  assert.equal(status.body.task.outputPersisted, false);
+  assert.deepEqual(status.body.task.outputEvidence.satisfaction, {
+    case: "absent",
+    outputKind: "regression-verification-v2",
+    remediable: false,
+  });
 });
 
 test("a run that authored nothing is re-queued even when a prior run's output is on the task", async () => {
@@ -821,10 +823,11 @@ test("a run that authored nothing is re-queued even when a prior run's output is
   const claimed = await claimRun(secondRunId, "prior-output-runner-2");
   const status = await call("GET", `/session/runs/${secondRunId}/status`, claimed.sessionToken);
   assert.equal(status.status, 200, JSON.stringify(status.body));
-  assert.equal(status.body.task.outputRequired, true);
-  assert.equal(status.body.task.outputRemediationAllowed, true);
-  assert.equal(status.body.task.outputSatisfiedByPriorRun, false);
-  assert.equal(status.body.task.outputPersisted, false, "the prior Run's output is not this Run's deliverable");
+  assert.deepEqual(
+    status.body.task.outputEvidence.satisfaction,
+    { case: "absent", outputKind: "implementation", remediable: true },
+    "the prior Run's replaceable output is not this Run's deliverable",
+  );
 
   const completed = await call(
     "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,
@@ -870,10 +873,10 @@ test("an immutable prior Run output disables remediation and explicitly satisfie
   const status = await call("GET", `/session/runs/${secondRunId}/status`, second.sessionToken);
 
   assert.equal(status.status, 200, JSON.stringify(status.body));
-  assert.equal(status.body.task.outputRequired, true);
-  assert.equal(status.body.task.outputRemediationAllowed, false);
-  assert.equal(status.body.task.outputSatisfiedByPriorRun, true);
-  assert.equal(status.body.task.outputPersisted, false);
+  assert.deepEqual(status.body.task.outputEvidence.satisfaction, {
+    case: "satisfied-by-prior-run",
+    outputKind: "sol-findings",
+  });
 
   const completed = await call(
     "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,

@@ -61,24 +61,23 @@ test("session output authorization cannot introduce a second fence instant", asy
   ).in === activeRunStatuses));
 });
 
-test("GET /session/runs/:runId/status projects task output identity or null", async () => {
+test("GET /session/runs/:runId/status projects the decided output evidence", async () => {
   await withTokens(async () => {
     const commitSha = "a".repeat(40);
     const outputCases = [
       {
         stepOutput: { runId: "run-1", kind: "implementation", commitSha },
-        expected: { runId: "run-1", kind: "implementation", commitSha },
-        persisted: true,
+        expected: { case: "delivered", output: { kind: "implementation", commitSha } },
       },
-      { stepOutput: null, expected: null, persisted: false },
+      { stepOutput: null, expected: { case: "not-required" } },
       {
+        // A Step that requires no deliverable never claims an earlier Run's.
         stepOutput: { runId: "run-prior", kind: "implementation", commitSha },
-        expected: null,
-        persisted: false,
+        expected: { case: "not-required" },
       },
     ] as const;
 
-    for (const { stepOutput, expected, persisted } of outputCases) {
+    for (const { stepOutput, expected } of outputCases) {
       const database = {
         run: {
           findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
@@ -118,11 +117,7 @@ test("GET /session/runs/:runId/status projects task output identity or null", as
           status: string;
           approvalGate: boolean;
           chainIndex: number;
-          output: unknown;
-          outputRequired: boolean;
-          outputRemediationAllowed: boolean;
-          outputSatisfiedByPriorRun: boolean;
-          outputPersisted: boolean;
+          outputEvidence: unknown;
         };
       };
       assert.equal(body.run.id, "run-1");
@@ -132,11 +127,10 @@ test("GET /session/runs/:runId/status projects task output identity or null", as
       assert.equal(body.task.status, "DOING");
       assert.equal(body.task.approvalGate, false);
       assert.equal(body.task.chainIndex, 0);
-      assert.deepEqual(body.task.output, expected);
-      assert.equal(body.task.outputRequired, false);
-      assert.equal(body.task.outputRemediationAllowed, true);
-      assert.equal(body.task.outputSatisfiedByPriorRun, false);
-      assert.equal(body.task.outputPersisted, persisted);
+      assert.deepEqual(body.task.outputEvidence, {
+        satisfaction: expected,
+        prHandoff: { case: "not-a-pr-delivery" },
+      });
     }
   });
 });
@@ -213,15 +207,18 @@ test("PR workflow status projects same-chain canonical output bodies through the
     });
     assert.equal(response.status, 200);
     const body = await response.json() as {
-      task: { prWorkflowOutputs?: unknown };
+      task: { outputEvidence: { prHandoff: unknown } };
     };
-    assert.deepEqual(body.task.prWorkflowOutputs, outputs.map(({ id, chainIndex, stepOutput }) => ({
-      taskId: id,
-      chainIndex,
-      kind: stepOutput.kind,
-      body: stepOutput.body,
-      commitSha: stepOutput.commitSha,
-    })));
+    assert.deepEqual(body.task.outputEvidence.prHandoff, {
+      case: "complete",
+      outputs: outputs.map(({ id, chainIndex, stepOutput }) => ({
+        taskId: id,
+        chainIndex,
+        kind: stepOutput.kind,
+        body: stepOutput.body,
+        commitSha: stepOutput.commitSha,
+      })),
+    });
     const where = (calls[0] as { where: Record<string, unknown> }).where;
     assert.equal(where.projectId, "project-1");
     assert.equal(where.chainId, "chain-1");
@@ -283,14 +280,17 @@ test("PR implementation status projects only the current Run's implementation ev
       headers: { Authorization: "Bearer agos_session_current" },
     });
     assert.equal(response.status, 200);
-    const body = await response.json() as { task: { prWorkflowOutputs: unknown } };
-    assert.deepEqual(body.task.prWorkflowOutputs, [{
-      taskId: current.id,
-      chainIndex: 1,
-      kind: "implementation",
-      body: "implementation body",
-      commitSha: "a".repeat(40),
-    }]);
+    const body = await response.json() as { task: { outputEvidence: { prHandoff: unknown } } };
+    assert.deepEqual(body.task.outputEvidence.prHandoff, {
+      case: "complete",
+      outputs: [{
+        taskId: current.id,
+        chainIndex: 1,
+        kind: "implementation",
+        body: "implementation body",
+        commitSha: "a".repeat(40),
+      }],
+    });
     const where = (query as { where: Record<string, unknown> }).where;
     assert.equal(where.projectId, "project-current");
     assert.equal(where.chainId, "chain-current");
@@ -299,7 +299,7 @@ test("PR implementation status projects only the current Run's implementation ev
   });
 });
 
-test("PR workflow status omits nullable output rows so required evidence is refused downstream", async () => {
+test("PR workflow status refuses a nullable commit identity instead of shortening the handoff", async () => {
   await withTokens(async () => {
     const database = {
       run: {
@@ -325,8 +325,12 @@ test("PR workflow status omits nullable output rows so required evidence is refu
       headers: { Authorization: "Bearer agos_session_current" },
     });
     assert.equal(response.status, 200);
-    const body = await response.json() as { task: { prWorkflowOutputs: unknown } };
-    assert.deepEqual(body.task.prWorkflowOutputs, []);
+    const body = await response.json() as { task: { outputEvidence: { prHandoff: { case: string; reason: string } } } };
+    assert.equal(body.task.outputEvidence.prHandoff.case, "incomplete");
+    assert.match(
+      body.task.outputEvidence.prHandoff.reason,
+      /requires exactly 4 output entries, not 1/u,
+    );
   });
 });
 
@@ -369,8 +373,8 @@ test("non-PR session status does not expose the PR evidence projection", async (
       headers: { Authorization: "Bearer agos_session_current" },
     });
     assert.equal(response.status, 200);
-    const body = await response.json() as { task: Record<string, unknown> };
-    assert.equal("prWorkflowOutputs" in body.task, false);
+    const body = await response.json() as { task: { outputEvidence: { prHandoff: unknown } } };
+    assert.deepEqual(body.task.outputEvidence.prHandoff, { case: "not-a-pr-delivery" });
     assert.equal(queried, false);
   });
 });
