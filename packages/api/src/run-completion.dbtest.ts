@@ -70,10 +70,8 @@ const seed = async (status: RunStatus = RunStatus.RUNNING) => {
 const completion = (fencingToken: string) => ({
   runnerId: RUNNER_ID,
   fencingToken,
+  outcome: { case: "succeeded" as const },
   exitCode: 0,
-  terminalEventSeen: true,
-  terminalSuccess: true,
-  externalFailure: false,
   pushStatus: PushStatus.NOT_REQUESTED,
   cleanupStatus: CleanupStatus.SUCCEEDED,
   workspaceRetained: false,

@@ -45,7 +45,7 @@ const seedExecutableChain = async () => {
 };
 
 const completionBody = (runnerId: string, fencingToken: string, output = "Finished work") => ({
-  runnerId, fencingToken, exitCode: 0, terminalEventSeen: true, terminalSuccess: true, output, cleanupStatus: "SUCCEEDED",
+  runnerId, fencingToken, exitCode: 0, outcome: { case: "succeeded" }, output, cleanupStatus: "SUCCEEDED",
 });
 
 const seedRunningRun = async (taskId: string, projectId: string, agentId: string, repoId: string) => {

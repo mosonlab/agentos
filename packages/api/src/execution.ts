@@ -2,21 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import { FailureClass, type FailureEnvelope, type Prisma } from "@anneal/db";
 
-export type ExitEvidence = {
-  exitCode: number | null;
-  signal?: string | null;
-  terminalEventSeen: boolean;
-  terminalSuccess: boolean;
-  terminationReason?: string | null;
-};
-
-export const completionSucceeded = (evidence: ExitEvidence): boolean =>
-  evidence.exitCode === 0
-  && !evidence.signal
-  && !evidence.terminationReason
-  && evidence.terminalEventSeen
-  && evidence.terminalSuccess;
-
 export const makeFencingToken = (runId: string, generation: number): string =>
   `${generation}:${runId}:${randomUUID()}`;
 
@@ -27,26 +12,6 @@ const retryableFailureClasses: readonly FailureClass[] = [
 ];
 
 export const failureIsRetryable = (failureClass: FailureClass): boolean => retryableFailureClasses.includes(failureClass);
-
-// Failures caused by the environment rather than the agent's own work: the CLI
-// never got to decide anything, so the attempt must not eat the task's budget.
-// The task's ceiling is raised by one instead of the run number being reused,
-// which would collide with the (taskId, runNumber) dedupe key.
-export const externalFailure = (evidence: {
-  succeeded: boolean;
-  signal?: string | null;
-  reported?: boolean;
-  failureClass?: FailureClass | null;
-}): boolean => {
-  if (evidence.succeeded) return false;
-  // A signal the runner did not ask for (budget kills carry a terminationReason
-  // and are reported as CANCELLED_OR_TIMED_OUT) means the process was shot from
-  // outside the session.
-  if (evidence.signal && evidence.failureClass !== FailureClass.CANCELLED_OR_TIMED_OUT) return true;
-  if (evidence.failureClass === FailureClass.BINARY_NOT_FOUND) return true;
-  if (evidence.failureClass === FailureClass.AUTH_REQUIRED) return true;
-  return evidence.reported === true;
-};
 
 /**
  * The ceiling a task's next attempt is measured against.
@@ -250,7 +215,14 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // only change the label an operator reads, never the budget or the retry
   // decision. Auth and rate limits can do both, which is why they may not.
   if (TOOL_FAILURE_PATTERN.test(`${verdict}\n${envelope.stdoutSummary ?? ""}`)) return FailureClass.TOOL_FAILED;
-  if (envelope.exitCode === 0 && (!envelope.terminalEventSeen || !envelope.terminalSuccess)) {
+  // "Exited zero but never said it finished" is a statement about the *agent
+  // process*, so it may only be read in the phase where that process is what
+  // failed. In DELIVER the failure is the push, and the agent's own clean exit
+  // has already been accepted — reading it here is what forced the runner to
+  // overwrite `terminalEventSeen`/`terminalSuccess` on a mechanically settled
+  // or post-delivery-disconnect run before handing the envelope over.
+  if (envelope.phase === "EXECUTE" && envelope.exitCode === 0
+    && (!envelope.terminalEventSeen || !envelope.terminalSuccess)) {
     return FailureClass.PROTOCOL_ERROR;
   }
   return FailureClass.TASK_FAILED;

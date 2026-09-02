@@ -424,13 +424,6 @@ export const PREFLIGHT_REASONS = {
 export const preflightFailure = (reason: string, code: number | null): string =>
   code === null ? reason : `${reason} (exit ${code})`;
 
-export const adapterExecutionSucceeded = (evidence: ExitEvidence): boolean =>
-  evidence.exitCode === 0
-  && evidence.signal === null
-  && evidence.terminationReason === null
-  && evidence.terminalEventSeen
-  && evidence.terminalSuccess;
-
 export const outputTail = (evidence: ExitEvidence): string | null =>
   (evidence.finalOutput ?? evidence.stdout).trim().slice(-500_000) || null;
 

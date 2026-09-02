@@ -81,7 +81,7 @@ const queueIntegratorRun = async (chain: IntegratorChain): Promise<string> => {
 const MERGED = JSON.stringify({ outcome: "merged", mergeCommitSha: "0".repeat(40) });
 
 const completion = (runnerId: string, fencingToken: string) => ({
-  runnerId, fencingToken, exitCode: 0, terminalEventSeen: true, terminalSuccess: true,
+  runnerId, fencingToken, exitCode: 0, outcome: { case: "succeeded" },
   cleanupStatus: "SUCCEEDED",
 });
 

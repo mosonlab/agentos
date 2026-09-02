@@ -343,16 +343,30 @@ const createParallelReviewHarness = ({
     return runnerRequest(`/runner/runs/${claimed.run.id}/complete`, {
       runnerId,
       fencingToken: claimed.fencingToken,
-      exitCode: options.failed ? 1 : 0,
-      terminalEventSeen: !options.failed,
-      terminalSuccess: !options.failed,
-      ...(options.failed
+      outcome: options.failed
         ? {
-            failureClass: "TASK_FAILED",
-            retryable: false,
-            failureReason: "parallel-review fixture failure",
+            case: "provider-failure",
+            reason: "parallel-review fixture failure",
+            envelope: {
+              version: 1,
+              phase: "EXECUTE",
+              runnerClass: "TASK_FAILED",
+              exitCode: 1,
+              signal: null,
+              terminationReason: null,
+              terminalEventSeen: true,
+              terminalSuccess: false,
+              agentExited: true,
+              providerError: null,
+              stderrSummary: "parallel-review fixture failure",
+              stdoutSummary: null,
+              timedOut: false,
+              transient: false,
+              timeoutMs: null,
+            },
           }
-        : {}),
+        : { case: "succeeded" },
+      exitCode: options.failed ? 1 : 0,
       branch: options.branch ?? claimed.run.branch ?? "parallel/review-head",
       pushedBranch: options.branch ?? claimed.run.branch ?? "parallel/review-head",
       baseSha: options.baseSha ?? IMPLEMENTATION_BASE,

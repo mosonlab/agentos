@@ -175,8 +175,7 @@ test("completion under a held Chain persists output and withholds successor acti
       runnerId: "activation-runner",
       fencingToken: "activation-fence",
       exitCode: 0,
-      terminalEventSeen: true,
-      terminalSuccess: true,
+      outcome: { case: "succeeded" },
       cleanupStatus: "SUCCEEDED",
       output: "completed under hold",
     }),
@@ -235,8 +234,7 @@ test("completion under a held Chain records fail-closed activity for a successor
         runnerId: "activation-runner",
         fencingToken: "activation-fence",
         exitCode: 0,
-        terminalEventSeen: true,
-        terminalSuccess: true,
+        outcome: { case: "succeeded" },
         cleanupStatus: "SUCCEEDED",
         output: "completed before malformed successor",
       }),
@@ -443,7 +441,7 @@ test("a held merge-readiness completion records evidence, leaves the integrator 
     method: "POST",
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ runnerId: "readiness-runner", fencingToken: "readiness-fence", exitCode: 0,
-      terminalEventSeen: true, terminalSuccess: true, cleanupStatus: "SUCCEEDED", output: "readiness evidence" }),
+      outcome: { case: "succeeded" }, cleanupStatus: "SUCCEEDED", output: "readiness evidence" }),
   });
   assert.equal(completed.status, 200, await completed.text());
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.DONE);

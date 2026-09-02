@@ -172,7 +172,7 @@ test("every live provider status exposes one idempotent cancellation through hea
 
     const lateCompletion = await call("POST", `/runner/runs/${seeded.run.id}/complete`, RUNNER, {
       runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, exitCode: 0,
-      terminalEventSeen: true, terminalSuccess: true, pushStatus: "NOT_REQUESTED",
+      outcome: { case: "succeeded" }, pushStatus: "NOT_REQUESTED",
       cleanupStatus: "RETAINED", workspaceRetained: true,
     });
     assert.equal(lateCompletion.status, 409);
@@ -644,8 +644,17 @@ test("a completion that commits first remains authoritative", async () => {
   const seeded = await seed(RunStatus.RUNNING);
   const completed = await call("POST", `/runner/runs/${seeded.run.id}/complete`, RUNNER, {
     runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, exitCode: 1,
-    terminalEventSeen: true, terminalSuccess: false, failureReason: "finished first",
-    retryable: false, pushStatus: "NOT_REQUESTED", cleanupStatus: "RETAINED", workspaceRetained: true,
+    outcome: {
+      case: "provider-failure",
+      reason: "finished first",
+      envelope: {
+        version: 1, phase: "EXECUTE", runnerClass: "TASK_FAILED", exitCode: 1, signal: null,
+        terminationReason: null, terminalEventSeen: true, terminalSuccess: false, agentExited: true,
+        providerError: null, stderrSummary: "finished first", stdoutSummary: null,
+        timedOut: false, transient: false, timeoutMs: null,
+      },
+    },
+    pushStatus: "NOT_REQUESTED", cleanupStatus: "RETAINED", workspaceRetained: true,
   });
   assert.equal(completed.status, 200);
   const cancellation = await cancelRun(db, seeded.run.id, {

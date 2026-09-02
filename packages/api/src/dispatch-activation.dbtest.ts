@@ -165,8 +165,7 @@ const completionBody = (runnerId: string, fencingToken: string) => ({
   runnerId,
   fencingToken,
   exitCode: 0,
-  terminalEventSeen: true,
-  terminalSuccess: true,
+  outcome: { case: "succeeded" },
   cleanupStatus: "SUCCEEDED",
 });
 

@@ -111,6 +111,7 @@ export * from "./post-delivery-disconnect-audit.js";
 export * from "./cost.js";
 export * from "./task-source.js";
 export * from "./failure-envelope.js";
+export * from "./run-outcome.js";
 export * from "./provider-terminal.js";
 export * from "./agent-sources.js";
 export * from "./agent-contract.js";

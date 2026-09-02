@@ -302,7 +302,7 @@ test("completing a run no longer deletes anything from the API side", async () =
   const { run, fencingToken } = await seedRun({ root, runnerId });
 
   const completion = await call(root, `/runner/runs/${run.id}/complete`, {
-    runnerId, fencingToken, exitCode: 0, signal: null, terminalEventSeen: true, terminalSuccess: true,
+    runnerId, fencingToken, exitCode: 0, signal: null, outcome: { case: "succeeded" },
     // The runner says its own cleanup failed. Under API-side GC this was the
     // signal to delete the directory here; now it is only a status.
     cleanupStatus: "FAILED", cleanupFailureReason: "rm failed", workspaceRetained: false,
@@ -385,8 +385,17 @@ test("an old runner that never asks leaves its workspaces in place, and nothing 
   const runnerId = "runner-legacy";
   const { run, fencingToken } = await seedRun({ root, runnerId });
   await call(root, `/runner/runs/${run.id}/complete`, {
-    runnerId, fencingToken, exitCode: 1, signal: null, terminalEventSeen: true, terminalSuccess: false,
-    failureClass: "TASK_FAILED", failureReason: "failed", retryable: false,
+    runnerId, fencingToken, exitCode: 1, signal: null,
+    outcome: {
+      case: "provider-failure",
+      reason: "failed",
+      envelope: {
+        version: 1, phase: "EXECUTE", runnerClass: "TASK_FAILED", exitCode: 1, signal: null,
+        terminationReason: null, terminalEventSeen: true, terminalSuccess: false, agentExited: true,
+        providerError: null, stderrSummary: "failed", stdoutSummary: null,
+        timedOut: false, transient: false, timeoutMs: null,
+      },
+    },
     cleanupStatus: "FAILED", workspaceRetained: false,
   });
   await access(join(root, run.id));
@@ -577,8 +586,7 @@ test("a salvaged implementation continuation can deliver its unchanged base and 
     fencingToken,
     exitCode: 0,
     signal: null,
-    terminalEventSeen: true,
-    terminalSuccess: true,
+    outcome: { case: "succeeded" },
     branch: sharedBranch,
     pushedBranch: sharedBranch,
     baseSha: salvagedHead,

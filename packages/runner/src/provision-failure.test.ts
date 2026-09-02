@@ -6,10 +6,10 @@ import { test } from "node:test";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { type FailureEnvelope, RUNNER_EXCEPTION_REASON, runnerExceptionEnvelope } from "./envelope.js";
+import { RUNNER_EXCEPTION_REASON, runnerExceptionEnvelope } from "./envelope.js";
 import { runCommand } from "./exec.js";
 import { executeClaim } from "./runner.js";
-import { createControlPlaneDouble } from "./test-control-plane.js";
+import { createControlPlaneDouble, envelopeOf } from "./test-control-plane.js";
 import { provisionWorkspace } from "./workspace.js";
 
 /**
@@ -127,7 +127,7 @@ test("a clone that cannot succeed reaches the API as a PROVISION envelope stampe
 
   const completion = controlPlane.completions.at(-1);
   assert.ok(completion, "provisioning failure must still complete the run");
-  const envelope = completion.failureEnvelope as FailureEnvelope;
+  const envelope = envelopeOf(completion.outcome);
   // The three facts the API's verdict turns on, none of which the old
   // hand-written fixture had right.
   assert.equal(envelope.phase, "PROVISION", "no agent was started, so this is the runner's own plumbing");
@@ -138,7 +138,8 @@ test("a clone that cannot succeed reaches the API as a PROVISION envelope stampe
   assert.equal(envelope.transient, false);
   assert.equal(envelope.timedOut, false);
   assert.match(String(envelope.stderrSummary), /repository|not a git|does not exist/i);
-  assert.equal(completion.externalFailure, true);
+  // `agentExited: false` above is what the API reads as "the environment
+  // failed"; the runner no longer asserts an `externalFailure` flag of its own.
   assert.equal(completion.terminationReason, RUNNER_EXCEPTION_REASON);
 });
 

@@ -295,7 +295,7 @@ const completeRepair = async (
       method: "POST",
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
-        runnerId, fencingToken, exitCode: 0, terminalEventSeen: true, terminalSuccess: true,
+        runnerId, fencingToken, exitCode: 0, outcome: { case: "succeeded" },
         cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
         pushStatus: "SUCCEEDED", headSha,
       }),
@@ -338,17 +338,20 @@ const failRepairAfterDelivery = async (
       method: "POST",
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
-        runnerId, fencingToken, exitCode: 0, terminalEventSeen: false, terminalSuccess: false,
+        runnerId, fencingToken, exitCode: 0,
         cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
         pushStatus: "SUCCEEDED", headSha,
-        failureReason: "stream disconnected before completion: tls handshake eof",
-        failureEnvelope: {
-          version: 1, phase: "EXECUTE", agentExited: true, exitCode: 0, signal: null,
-          terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
-          runnerClass: "PROTOCOL_ERROR",
-          providerError: "stream disconnected before completion: tls handshake eof",
-          stderrSummary: null, stdoutSummary: null,
-          terminalEventSeen: false, terminalSuccess: false,
+        outcome: {
+          case: "provider-failure",
+          reason: "stream disconnected before completion: tls handshake eof",
+          envelope: {
+            version: 1, phase: "EXECUTE", agentExited: true, exitCode: 0, signal: null,
+            terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+            runnerClass: "PROTOCOL_ERROR",
+            providerError: "stream disconnected before completion: tls handshake eof",
+            stderrSummary: null, stdoutSummary: null,
+            terminalEventSeen: false, terminalSuccess: false,
+          },
         },
       }),
     });
@@ -411,8 +414,7 @@ const completeDocumentation = async (
         runnerId,
         fencingToken,
         exitCode: 0,
-        terminalEventSeen: true,
-        terminalSuccess: true,
+        outcome: { case: "succeeded" },
         cleanupStatus: "SUCCEEDED",
         branch: BRANCH,
         pushedBranch: BRANCH,
@@ -1222,8 +1224,18 @@ test("a resolver process failure escalates instead of leaving regression silentl
       method: "POST",
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
-        runnerId, fencingToken, exitCode: 1, terminalEventSeen: true, terminalSuccess: false,
-        failureClass: "TASK_FAILED", failureReason: "resolver crashed", retryable: false,
+        runnerId, fencingToken, exitCode: 1,
+        outcome: {
+          case: "provider-failure",
+          reason: "resolver crashed",
+          envelope: {
+            version: 1, phase: "EXECUTE", agentExited: true, exitCode: 1, signal: null,
+            terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+            runnerClass: "TASK_FAILED", providerError: null,
+            stderrSummary: "resolver crashed", stdoutSummary: null,
+            terminalEventSeen: true, terminalSuccess: false,
+          },
+        },
         cleanupStatus: "SUCCEEDED",
       }),
     });

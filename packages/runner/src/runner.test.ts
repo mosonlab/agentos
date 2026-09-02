@@ -7,6 +7,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import type { RunOutcome } from "@anneal/db";
+
 import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
 import type { ClaimedTask, ControlPlane } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -16,7 +18,10 @@ import {
   reportCliAvailabilityHeartbeat as reportCliAvailabilityHeartbeatProduction,
   runStartupPreflight as runStartupPreflightProduction,
 } from "./runner.js";
-import { createControlPlaneDouble, createRoutedControlPlaneDouble, type ControlPlaneFetchHandler } from "./test-control-plane.js";
+import {
+  createControlPlaneDouble, createRoutedControlPlaneDouble, envelopeOf, failureReasonOf,
+  type ControlPlaneFetchHandler,
+} from "./test-control-plane.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionSessionConfig, type AgentScratch,
 } from "./workspace.js";
@@ -183,7 +188,7 @@ test("a mechanical claim is refused before any adapter, workspace or child envir
 
   assert.deepEqual(calls.map((call) => call.path), ["http://api.invalid/runner/runs/run-10/complete"]);
   assert.equal(calls[0]!.body.terminationReason, "mechanical run claimed by a model runner");
-  assert.equal(calls[0]!.body.retryable, false);
+  assert.equal(outcomeOf(calls[0]!.body).case, "terminal-protocol-failure");
   assert.equal(calls[0]!.body.exitCode, null);
   // No workspace was provisioned: `provisionWorkspace` creates its run directory
   // under the workspace root, and nothing else in this path writes there.
@@ -230,9 +235,8 @@ for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as 
       );
       const completion = controlPlane.completions.at(-1);
       assert.ok(completion, "malformed claims must complete the run");
-      assert.equal(completion.failureClass, "PROTOCOL_ERROR");
-      assert.equal(completion.retryable, false);
-      assert.equal(completion.failureReason, "dependency-provisioning-missing");
+      assert.equal(completion.outcome.case, "terminal-protocol-failure");
+      assert.equal(failureReasonOf(completion.outcome), "dependency-provisioning-missing");
       assert.equal(completion.terminationReason, "dependency-provisioning-missing");
       assert.equal(completion.cleanupStatus, "SUCCEEDED");
       assert.equal(completion.workspaceRetained, false);
@@ -284,9 +288,8 @@ for (const [label, value] of [["missing", undefined], ["unknown", "yes"]] as con
       );
       const completion = controlPlane.completions.at(-1);
       assert.ok(completion, "malformed claims must complete the run");
-      assert.equal(completion.failureClass, "PROTOCOL_ERROR");
-      assert.equal(completion.retryable, false);
-      assert.equal(completion.failureReason, "template-step-provision-dependencies-missing");
+      assert.equal(completion.outcome.case, "terminal-protocol-failure");
+      assert.equal(failureReasonOf(completion.outcome), "template-step-provision-dependencies-missing");
       assert.equal(completion.terminationReason, "template-step-provision-dependencies-missing");
       assert.equal(completion.cleanupStatus, "SUCCEEDED");
       assert.equal(completion.workspaceRetained, false);
@@ -394,7 +397,7 @@ test("a review step records the dependency skip before fake adapter preflight an
     assert.ok(timeline.indexOf("activity") < timeline.indexOf("preflight"));
     assert.ok(timeline.indexOf("preflight") < timeline.indexOf("provider"));
     assert.equal(controlPlane.preflightReports.length, 0, "claim preflight is the adapter seam, not startup reporting");
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
     await assert.rejects(access(join(root, "dependency-cache")), { code: "ENOENT" });
   } finally {
     await cleanupTestSession(root);
@@ -503,7 +506,7 @@ test("an implementation step provisions dependencies without recording the revie
     assert.equal(startCalls, 1);
     assert.deepEqual(controlPlane.activities
       .filter(({ body }) => body.includes("Dependency provisioning skipped")), []);
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
   } finally {
     await cleanupTestSession(root);
     try { execFileSync("/bin/chmod", ["-R", "u+w", join(root, "dependency-cache")]); } catch { /* absent cache */ }
@@ -561,13 +564,14 @@ test("NPM_CI manifest failure reaches the Run outcome as a non-retryable protoco
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "manifest failure must complete the run");
-    assert.equal(completion.failureClass, "PROTOCOL_ERROR");
-    assert.equal(completion.retryable, false);
-    assert.equal(completion.failureReason, "dependency-provisioning-manifest-missing");
-    assert.equal(completion.externalFailure, true);
-    assert.equal((completion.failureEnvelope as { phase?: string }).phase, "PROVISION");
-    assert.equal((completion.failureEnvelope as { agentExited?: boolean }).agentExited, false);
-    assert.equal((completion.failureEnvelope as { runnerClass?: string }).runnerClass, "PROTOCOL_ERROR");
+    assert.equal(completion.outcome.case, "provider-failure");
+    assert.equal(failureReasonOf(completion.outcome), "dependency-provisioning-manifest-missing");
+    const envelope = envelopeOf(completion.outcome);
+    // `agentExited: false` is the fact the API reads as "the environment
+    // failed"; the runner no longer asserts an `externalFailure` flag of its own.
+    assert.equal(envelope.phase, "PROVISION");
+    assert.equal(envelope.agentExited, false);
+    assert.equal(envelope.runnerClass, "PROTOCOL_ERROR");
     assert.equal(preflightCalls, 0, "dependency provisioning must fail before adapter preflight");
     assert.equal(startCalls, 0, "dependency provisioning must fail before provider launch");
   } finally {
@@ -799,8 +803,10 @@ const pathWithFailingCommand = async (root: string, command: "cp" | "chmod"): Pr
   return `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
 };
 
+const outcomeOf = (body: Record<string, unknown>): RunOutcome => body.outcome as RunOutcome;
+
 const removeRetainedSessionConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
-  const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
+  const retained = /session CLI config retained at (.+)$/u.exec(failureReasonOf(outcomeOf(completion.body)))?.[1];
   if (retained) await rm(dirname(retained), { recursive: true, force: true });
 };
 
@@ -836,9 +842,9 @@ test("Codex provision auth failure is PROVISION, retains its root, and never spa
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
-    assert.match(String(completion.body.failureReason), /Unable to establish Codex authentication/u);
-    const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
+    assert.equal(envelopeOf(outcomeOf(completion.body)).phase, "PROVISION");
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /Unable to establish Codex authentication/u);
+    const retained = /session CLI config retained at (.+)$/u.exec(failureReasonOf(outcomeOf(completion.body)))?.[1];
     assert.ok(retained);
     assert.equal((await stat(retained)).isDirectory(), true);
     await rm(dirname(retained), { recursive: true, force: true });
@@ -880,9 +886,9 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
-    assert.match(String(completion.body.failureReason), /Unable to create session CLI config root/u);
-    assert.match(String(completion.body.failureReason), /missing-baseline/u);
+    assert.equal(envelopeOf(outcomeOf(completion.body)).phase, "PROVISION");
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /Unable to create session CLI config root/u);
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /missing-baseline/u);
     await removeRetainedSessionConfig(completion);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -928,8 +934,8 @@ test("runtime-tool materialization failure is PROVISION and never reaches prefli
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
-    assert.match(String(completion.body.failureReason), /release-local runtime tools are absent/u);
+    assert.equal(envelopeOf(outcomeOf(completion.body)).phase, "PROVISION");
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /release-local runtime tools are absent/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -983,7 +989,7 @@ for (const failureCase of ["collision", "missing source", "wrong source type", "
       assert.equal(startCalls, 0);
       const completion = posts.find((post) => post.path.endsWith("/complete"));
       assert.ok(completion);
-      assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+      assert.equal(envelopeOf(outcomeOf(completion.body)).phase, "PROVISION");
     } finally {
       await rm(sourceRoot, { recursive: true, force: true });
       await rm(root, { recursive: true, force: true });
@@ -1042,9 +1048,9 @@ test("Codex rejects a run-as config-root symlink in PROVISION without copying ho
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
-    assert.match(String(completion.body.failureReason), /Unable to create session CLI config root/u);
-    assert.match(String(completion.body.failureReason), /mkdir/u);
+    assert.equal(envelopeOf(outcomeOf(completion.body)).phase, "PROVISION");
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /Unable to create session CLI config root/u);
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /mkdir/u);
     assert.deepEqual(await readdir(plantedTarget), [], "neither baseline nor host auth may reach the symlink target");
     assert.equal((await stat(sessionParent)).mode & 0o777, 0o711, "the writable parent window must close after mkdir fails");
   } finally {
@@ -1186,7 +1192,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     assert.ok(eventAttempts > eventFailures, "the recovered endpoint must receive a retry");
     assert.deepEqual(acceptedBatches, [[0, 1, 2]], "the accepted retry must preserve order and carry each event once");
     const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.terminalSuccess, true, "event recovery must preserve successful completion");
+    assert.equal(outcomeOf(completion!.body).case, "succeeded", "event recovery must preserve successful completion");
     assert.equal(completion?.body.pushStatus, "SUCCEEDED", "the successful branch must still be delivered");
     const startIndex = posts.findIndex((post) => post.path.endsWith("/start"));
     const firstActiveHeartbeat = posts.findIndex((post, index) => index > startIndex && post.path.endsWith("/heartbeat") && post.body.processAlive === true);
@@ -1382,8 +1388,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     assert.equal((started.body.manifest as Record<string, unknown>).promptHash, expectedPromptHash);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, true);
-    assert.equal(completion.body.failureClass ?? null, null);
+    assert.equal(outcomeOf(completion.body).case, "succeeded");
     assert.equal(completion.body.worktreeContainmentViolations, undefined);
     const configRoot = await readFile(configReportPath, "utf8");
     await assert.rejects(stat(configRoot), /ENOENT/u, "successful Codex runs must remove CODEX_HOME");
@@ -1422,8 +1427,7 @@ test("an outside worktree is reported without changing a successful run outcome"
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, true);
-    assert.equal(completion.body.failureClass, undefined);
+    assert.equal(outcomeOf(completion.body).case, "succeeded");
     assert.equal(completion.body.pushStatus, "SUCCEEDED");
     assert.equal(completion.body.cleanupStatus, "SUCCEEDED");
     assert.deepEqual(completion.body.worktreeContainmentViolations, [await realpath(outsideWorktree)]);
@@ -1468,8 +1472,7 @@ test("Codex records success after reconnecting and reaching terminal completion"
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, true);
-    assert.equal(completion.body.failureReason ?? null, null);
+    assert.equal(outcomeOf(completion.body).case, "succeeded");
     assert.equal(completion.body.output, "output persisted");
   } finally {
     await cleanupTestSession(root);
@@ -1507,8 +1510,8 @@ test("Codex preserves reconnect evidence when the stream ends before terminal co
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, false);
-    assert.match(String(completion.body.failureReason), /Reconnecting\.\.\. 3\/5/u);
+    assert.equal(outcomeOf(completion.body).case, "provider-failure");
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /Reconnecting\.\.\. 3\/5/u);
     await removeRetainedSessionConfig({ body: completion.body });
   } finally {
     await cleanupTestSession(root);
@@ -1550,8 +1553,8 @@ test("Codex preserves reconnect evidence when terminal completion is followed by
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, false);
-    assert.match(String(completion.body.failureReason), /Reconnecting\.\.\. 2\/5/u);
+    assert.equal(outcomeOf(completion.body).case, "provider-failure");
+    assert.match(failureReasonOf(outcomeOf(completion.body)), /Reconnecting\.\.\. 2\/5/u);
     await removeRetainedSessionConfig({ body: completion.body });
   } finally {
     await cleanupTestSession(root);
@@ -1590,10 +1593,10 @@ test("a failed first completion request restores and retains CODEX_HOME", async 
 
     const completions = posts.filter((post) => post.path.endsWith("/complete"));
     assert.equal(completions.length, 2);
-    assert.equal(completions[0]!.body.terminalSuccess, true);
-    assert.equal(completions[1]!.body.terminalSuccess, false);
+    assert.equal(outcomeOf(completions[0]!.body).case, "succeeded");
+    assert.equal(outcomeOf(completions[1]!.body).case, "provider-failure");
     const configRoot = await readFile(configReportPath, "utf8");
-    assert.match(String(completions[1]!.body.failureReason), new RegExp(`session CLI config retained at ${configRoot.replaceAll("/", "\\/")}$`, "u"));
+    assert.match(failureReasonOf(outcomeOf(completions[1]!.body)), new RegExp(`session CLI config retained at ${configRoot.replaceAll("/", "\\/")}$`, "u"));
     assert.equal((await stat(configRoot)).isDirectory(), true);
     await removeRetainedSessionConfig(completions[1]!);
   } finally {
@@ -1665,9 +1668,7 @@ test("session-config cleanup failure does not turn delivered work into a failed 
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, true);
-    assert.equal(completion.body.failureClass ?? null, null);
-    assert.equal(completion.body.failureReason ?? null, null);
+    assert.equal(outcomeOf(completion.body).case, "succeeded");
     assert.equal(completion.body.cleanupStatus, "FAILED");
     const configRoot = await readFile(configReportPath, "utf8");
     assert.match(String(completion.body.cleanupFailureReason), /simulated config cleanup refusal/u);
@@ -1984,8 +1985,8 @@ test("successful execution with failed delivery salvages before removing the wor
     const salvage = "agentos/task-10/run-1";
     const publication = posts.find((post) => post.path.endsWith("/publication"));
     const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.terminalSuccess, false);
-    assert.match(String(completion?.body.failureReason), /push|remote|receive/u);
+    assert.equal(outcomeOf(completion!.body).case, "provider-failure");
+    assert.match(failureReasonOf(outcomeOf(completion!.body)), /push|remote|receive/u);
     assert.equal(completion?.body.pushedBranch, salvage);
     assert.equal(completion?.body.cleanupStatus, "SUCCEEDED");
     assert.ok(posts.indexOf(publication!) < posts.indexOf(completion!), "salvage publication must precede cleanup completion");
@@ -2047,12 +2048,12 @@ test("a pull-request failure after publication keeps the primary delivery eviden
     const publications = posts.filter((post) => post.path.endsWith("/publication"));
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.deepEqual(publications.map((post) => post.body.pushedBranch), ["declared/head"]);
-    assert.equal(completion?.body.terminalSuccess, false);
+    assert.equal(outcomeOf(completion!.body).case, "provider-failure");
     assert.equal(completion?.body.pushStatus, "FAILED");
     assert.equal(completion?.body.pushedBranch, "declared/head");
-    assert.match(String(completion?.body.failureReason), /Base branch was not found/u);
+    assert.match(failureReasonOf(outcomeOf(completion!.body)), /Base branch was not found/u);
     assert.match(String(completion?.body.deliveryInstructions), /PR creation failed/u);
-    assert.equal((completion?.body.failureEnvelope as { phase?: string }).phase, "DELIVER");
+    assert.equal(envelopeOf(outcomeOf(completion!.body)).phase, "DELIVER");
     assert.equal(git(root, `--git-dir=${remote}`, "branch", "--list", "agentos/task-10/run-1"), "");
   } finally {
     await cleanupTestSession(root);
@@ -2092,7 +2093,7 @@ test("a successful pinned review never publishes its dirty detached checkout", a
       },
     });
     assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
-    assert.equal(posts.find((post) => post.path.endsWith("/complete"))?.body.terminalSuccess, true);
+    assert.equal(outcomeOf(posts.find((post) => post.path.endsWith("/complete"))!.body).case, "succeeded");
     assert.throws(() => git(root, `--git-dir=${remote}`, "show-ref", "refs/heads/agentos/task-10/run-1"));
     await assert.rejects(access(join(workspaces, "run-10")));
   } finally {
@@ -2135,8 +2136,8 @@ test("a failed pinned review reports failure without publishing its dirty detach
     });
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.terminalSuccess, false);
-    assert.match(String(completion?.body.failureReason), /agent execution failed/u);
+    assert.equal(outcomeOf(completion!.body).case, "provider-failure");
+    assert.match(failureReasonOf(outcomeOf(completion!.body)), /agent execution failed/u);
     assert.equal(completion?.body.pushedBranch, undefined);
     assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
     assert.throws(() => git(root, `--git-dir=${remote}`, "show-ref", "refs/heads/agentos/task-10/run-1"));
@@ -2242,8 +2243,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
       session: testSession(root),
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
-    assert.equal(completion.body.terminalSuccess, false);
-    assert.equal(completion.body.failureClass, "AUTH_REQUIRED");
+    assert.equal(envelopeOf(outcomeOf(completion.body)).runnerClass, "AUTH_REQUIRED");
     const configRoot = await readFile(configReportPath, "utf8");
     assert.equal((await stat(configRoot)).isDirectory(), true, "failed Codex runs retain CODEX_HOME");
 
@@ -2288,7 +2288,11 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
       session: testSession(root),
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
-    assert.equal(completion.body.failureClass, "BINARY_NOT_FOUND");
+    // The runner reports the fact, not the verdict: exit 127 is what the API
+    // reads as a missing binary, and the adapter's own guess rides beside it.
+    const envelope = envelopeOf(completion.body.outcome as RunOutcome);
+    assert.equal(envelope.exitCode, 127);
+    assert.equal(envelope.runnerClass, "BINARY_NOT_FOUND");
     assert.ok(!JSON.stringify(posts).includes("ENOENT"));
     await removeRetainedSessionConfig(completion);
   } finally {

@@ -7,7 +7,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { activateChainSuccessor, DependencyProvisioning, PrismaClient, TaskStatus } from "@anneal/db";
+import {
+  activateChainSuccessor, DependencyProvisioning, FAILURE_ENVELOPE_VERSION, type FailureEnvelope,
+  PrismaClient, type RunOutcome, TaskStatus,
+} from "@anneal/db";
 import { buildChildEnvironment } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
 import type { RunnerConfig } from "@anneal/runner/config";
@@ -101,6 +104,43 @@ const claimRun = async (expectedRunId?: string): Promise<any> => withTokens(asyn
  * in production. Hand-writing terminal Run rows would advance the chain around
  * the routes this batch changes.
  */
+// The verdict a completion carries is one value, so a failing step in this file
+// names the failure it is modelling rather than restating six fields. The
+// envelope holds only facts; the class beside each one is what `classifyEnvelope`
+// reads out of them.
+const failedEnvelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelope => ({
+  version: FAILURE_ENVELOPE_VERSION,
+  phase: "EXECUTE",
+  runnerClass: null,
+  exitCode: 1,
+  signal: null,
+  terminationReason: null,
+  terminalEventSeen: true,
+  terminalSuccess: false,
+  agentExited: true,
+  providerError: null,
+  stderrSummary: "the agent reported a failure",
+  stdoutSummary: null,
+  timedOut: false,
+  transient: false,
+  timeoutMs: null,
+  ...overrides,
+});
+
+/** The agent itself failed: TASK_FAILED, not retryable, and it spends the attempt. */
+const agentFailure: RunOutcome = {
+  case: "provider-failure",
+  reason: "the agent reported a failure",
+  envelope: failedEnvelope(),
+};
+
+/** A dropped provider connection: TRANSIENT_PROVIDER, retried automatically. */
+const transientFailure: RunOutcome = {
+  case: "provider-failure",
+  reason: "the provider connection dropped",
+  envelope: failedEnvelope({ transient: true, stderrSummary: "read ECONNRESET" }),
+};
+
 const completeRunViaRoute = async (claim: any, overrides: Record<string, unknown> = {}): Promise<Response> => withTokens(async () => {
   const response = await createApp(db).request(`/runner/runs/${claim.run.id}/complete`, {
     method: "POST",
@@ -109,8 +149,7 @@ const completeRunViaRoute = async (claim: any, overrides: Record<string, unknown
       runnerId: "runner-1",
       fencingToken: claim.fencingToken,
       exitCode: 0,
-      terminalEventSeen: true,
-      terminalSuccess: true,
+      outcome: { case: "succeeded" },
       cleanupStatus: "SUCCEEDED",
       ...overrides,
     }),
@@ -270,9 +309,7 @@ test("T3: a failed run's WIP salvage push is the successor's durable clone base"
   const firstRun = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
   await runStep(first.body.id, {
     exitCode: 1,
-    terminalSuccess: false,
-    failureClass: "TASK_FAILED",
-    retryable: false,
+    outcome: agentFailure,
     branch: shared,
     pushStatus: "SUCCEEDED",
     pushedBranch: `agentos/${first.body.id}/run-1`,
@@ -299,7 +336,7 @@ test("T4: the first step of a chain that has published nothing bases on the defa
   });
 
   await runStep(first.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false, pushStatus: "FAILED",
+    exitCode: 1, outcome: agentFailure, pushStatus: "FAILED",
   });
   const retried = await operatorRequest(`/tasks/${first.body.id}/retry`, { method: "POST" });
   assert.equal(retried.status, 201);
@@ -507,9 +544,20 @@ test("T16: a pull-request failure after a successful push still counts as public
 
   await runStep(first.body.id, {
     exitCode: 0,
-    terminalSuccess: false,
-    failureClass: "TOOL_FAILED",
-    retryable: false,
+    // The agent exited cleanly and delivery is what failed, so this is a
+    // DELIVER envelope: the "exit 0 without a terminal event" protocol rule is
+    // about the agent process and does not apply here.
+    outcome: {
+      case: "provider-failure",
+      reason: "the pull request could not be opened",
+      envelope: failedEnvelope({
+        phase: "DELIVER",
+        runnerClass: "TOOL_FAILED",
+        exitCode: 0,
+        terminalSuccess: true,
+        stderrSummary: "the pull request could not be opened",
+      }),
+    } satisfies RunOutcome,
     branch: shared,
     pushStatus: "FAILED",
     pushError: "gh: API rate limit exceeded",
@@ -557,7 +605,7 @@ test("T10: an operator retry lands on the shared branch", async () => {
   await runStep(first.body.id, { pushedBranch: shared });
 
   await runStep(second.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false, pushStatus: "FAILED",
+    exitCode: 1, outcome: agentFailure, pushStatus: "FAILED",
   });
   const retried = await operatorRequest(`/tasks/${second.id}/retry`, { method: "POST" });
   assert.equal(retried.status, 201);
@@ -581,7 +629,7 @@ test("an operator-retried template step publishes its declared head from the lat
   const declared = `agentos/${chain.chainId}`;
   const salvage = `agentos/${task.id}/run-1`;
   await runStep(task.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false,
+    exitCode: 1, outcome: agentFailure,
     branch: salvage, pushStatus: "SUCCEEDED", pushedBranch: salvage,
   });
 
@@ -749,7 +797,7 @@ test("T12a: an operator retry never bases on a run branch that was never pushed"
   });
   const workspaceBranch = `agentos/${solo.body.id}/run-1`;
   await runStep(solo.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false,
+    exitCode: 1, outcome: agentFailure,
     branch: workspaceBranch, pushStatus: "FAILED",
   });
   const failed = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 1 } });
@@ -771,7 +819,7 @@ test("T12b: an operator retry bases on the WIP salvage the failed run did publis
   const workspaceBranch = `agentos/${solo.body.id}/run-1`;
   const salvage = `agentos/${solo.body.id}/run-2`;
   await runStep(solo.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false,
+    exitCode: 1, outcome: agentFailure,
     branch: workspaceBranch, pushStatus: "FAILED",
   });
   const second = await operatorRequest(`/tasks/${solo.body.id}/retry`, { method: "POST" });
@@ -779,7 +827,7 @@ test("T12b: an operator retry bases on the WIP salvage the failed run did publis
   // Run 2 fails too, but deliverFailedWorkspace salvages its tree to its own
   // per-run ref while `branch` still reports the workspace's (delivery.ts).
   await runStep(solo.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false,
+    exitCode: 1, outcome: agentFailure,
     branch: workspaceBranch, pushStatus: "SUCCEEDED", pushedBranch: salvage,
   });
 
@@ -817,7 +865,7 @@ test("T13b: an upgrade-state template retry returns to its chain head", async ()
 
   const salvageBranch = `agentos/${firstTask.id}/run-2`;
   const failed = await completeRunViaRoute(failedClaim, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    exitCode: 1, outcome: transientFailure,
     branch: workspaceBranch, pushStatus: "SUCCEEDED", pushedBranch: salvageBranch,
   });
   assert.equal(failed.status, 200);
@@ -845,7 +893,7 @@ test("T13: an automatic retry of a chain step stays on the shared branch", async
   // most often. Before this batch it copied targetBranch and carried no branch,
   // so the retry silently left the chain's tree.
   await runStep(first.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
+    exitCode: 1, outcome: transientFailure, pushStatus: "FAILED",
   });
   const retry = await db.run.findFirstOrThrow({ where: { taskId: first.body.id, runNumber: 2 } });
   assert.equal(retry.branch, shared);
@@ -857,7 +905,7 @@ test("T13: an automatic retry of a chain step stays on the shared branch", async
   const second = await seedChainStep(seed, chainId, 1);
   await startStep(second.id);
   await runStep(second.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    exitCode: 1, outcome: transientFailure,
     pushStatus: "SUCCEEDED", pushedBranch: shared,
   });
   const secondRetry = await db.run.findFirstOrThrow({ where: { taskId: second.id, runNumber: 2 } });
@@ -877,7 +925,7 @@ test("T14a: an automatic retry of a non-chain task answers to publication eviden
   const poisoned = `agentos/${solo.body.id}/run-1`;
   await db.run.update({ where: { id: first.id }, data: { branch: poisoned, targetBranch: poisoned } });
   await runStep(solo.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    exitCode: 1, outcome: transientFailure,
     branch: poisoned, pushStatus: "FAILED",
   });
   const retry = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
@@ -891,7 +939,7 @@ test("T14a: an automatic retry of a non-chain task answers to publication eviden
   const salvage = `agentos/${solo.body.id}/run-2`;
   await db.run.update({ where: { id: retry.id }, data: { readyAt: new Date(0) } });
   await runStep(solo.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    exitCode: 1, outcome: transientFailure,
     branch: poisoned, pushStatus: "SUCCEEDED", pushedBranch: salvage,
   });
   const third = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 3 } });
@@ -904,7 +952,7 @@ test("T14: an automatic retry of a non-chain task is unchanged", async () => {
     name: "Solo", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, targetBranch: "some/branch",
   });
   await runStep(solo.body.id, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
+    exitCode: 1, outcome: transientFailure, pushStatus: "FAILED",
   });
   const retry = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
   assert.equal(retry.targetBranch, "some/branch");
@@ -964,7 +1012,7 @@ test("T19: a PATCH does not change a run that is already queued", async () => {
 
   // …and the *next* run does get the new value.
   await completeRunViaRoute(claim, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false, pushStatus: "FAILED",
+    exitCode: 1, outcome: agentFailure, pushStatus: "FAILED",
   });
   const retried = await operatorRequest(`/tasks/${created.body.id}/retry`, { method: "POST" });
   assert.equal(retried.body.opensPullRequest, false);
@@ -1113,7 +1161,7 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
   });
   await waitForBlockedLocks(automaticBaseline + 1);
   const completeAutomatic = completeRunViaRoute(automaticClaim, {
-    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
+    exitCode: 1, outcome: transientFailure, pushStatus: "FAILED",
   });
   await waitForBlockedLocks(automaticBaseline + 2);
   heldAutomatic.release();

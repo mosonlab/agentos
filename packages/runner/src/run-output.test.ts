@@ -19,7 +19,7 @@ import { parsePiTranscript } from "./adapters/pi.js";
 import type { RunnerConfig } from "./config.js";
 import { RUNNER_EXCEPTION_REASON, summarizeEvidence } from "./envelope.js";
 import { executeClaim as executeClaimProduction } from "./runner.js";
-import { createControlPlaneDouble } from "./test-control-plane.js";
+import { createControlPlaneDouble, envelopeOf, failureReasonOf } from "./test-control-plane.js";
 import { materializeRuntimeTools } from "./workspace.js";
 
 const REGRESSION_OUTPUT_KIND = "regression-verification-v2";
@@ -483,7 +483,7 @@ test("a failed run's completion carries the output tail the run produced", async
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must complete even though the agent failed");
-    assert.equal(completion.terminalSuccess, false, "this is the failing case, not a success in disguise");
+    assert.equal(completion.outcome.case, "provider-failure", "this is the failing case, not a success in disguise");
     // The two facts issue #114 turns on: the tail exists on the wire, and it is
     // the agent's own account of what it found — the thing that used to be
     // dropped by the handler that received it.
@@ -512,7 +512,7 @@ test("a successful run's completion carries its final output as the same tail", 
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must complete");
-    assert.equal(completion.terminalSuccess, true);
+    assert.equal(completion.outcome.case, "succeeded");
     assert.equal(
       completion.output,
       "inverted the lock ordering in reconcile.ts and added the regression test",
@@ -553,10 +553,14 @@ test("a negative Regression verdict settles mechanically when provider transport
       summary: "RF-2 remains open",
     });
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, true);
-    assert.equal(completion?.exitCode, 0);
+    assert.equal(completion?.outcome.case, "regression-mechanically-settled");
+    // Exit evidence is what the process reported, not what the verdict needed
+    // it to be: the provider's transport failed after the fenced handoff, and
+    // the exit code says so. It used to be overwritten with 0 here, so that the
+    // control plane's own copy of the success predicate would agree with the
+    // verdict this side had already reached.
+    assert.equal(completion?.exitCode, 1);
     assert.equal(completion?.signal, null);
-    assert.equal(completion?.terminalEventSeen, true);
     assert.equal(completion?.terminationReason, null);
     assert.equal(completion?.baseSha, completion?.headSha, "Regression produced a verdict without advancing HEAD");
     assert.equal(completion?.pushStatus, "SUCCEEDED");
@@ -590,8 +594,8 @@ test("a Regression handoff cannot override an explicit provider terminal failure
     assert.equal(controlPlane.taskOutputs.length, 1);
     assert.equal(controlPlane.taskOutputs[0]?.kind, REGRESSION_OUTPUT_KIND);
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false, JSON.stringify(completion));
-    assert.equal(completion?.failureReason, "provider rejected regression run");
+    assert.equal(completion?.outcome.case, "provider-failure", JSON.stringify(completion));
+    assert.equal(failureReasonOf(completion?.outcome), "provider rejected regression run");
     assert.equal(
       controlPlane.eventBatches.flat().some(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED"),
       false,
@@ -623,7 +627,7 @@ test("a Regression mechanical output handoff retries a transient control-plane f
     );
 
     assert.equal(attempts, 2);
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "regression-mechanically-settled");
     const retrying = controlPlane.eventBatches.flat()
       .find(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_RETRYING");
     assert.equal(retrying?.payload.attempt, 1);
@@ -656,10 +660,9 @@ test("Regression v2 never resumes the model to remediate an absent mechanical ha
     );
 
     assert.equal(existsSync(remediationPrompt), false);
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, false);
     assert.equal(
-      controlPlane.completions.at(-1)?.failureClass,
-      "PROTOCOL_ERROR",
+      controlPlane.completions.at(-1)?.outcome.case,
+      "required-output-unsatisfied",
       JSON.stringify({ completion: controlPlane.completions.at(-1), events: controlPlane.eventBatches.flat() }),
     );
     const unavailable = controlPlane.eventBatches.flat()
@@ -708,7 +711,7 @@ test("a successful run remediates its missing required output in the same provid
     assert.ok(eventTypes.includes("TASK_OUTPUT_REMEDIATION_FINISHED"));
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion);
-    assert.equal(completion.terminalSuccess, true);
+    assert.equal(completion.outcome.case, "succeeded");
     assert.equal(completion.pushStatus, "SUCCEEDED");
     assert.equal(completion.output, "implemented the requested change");
   } finally {
@@ -738,9 +741,8 @@ test("canonical PR evidence handoff failures are flushed before completion", asy
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion);
-    assert.equal(completion.terminalSuccess, false);
-    assert.equal(completion.failureClass, "PROTOCOL_ERROR");
-    assert.match(String(completion.failureReason), /Canonical PR workflow evidence handoff failed/u);
+    assert.equal(completion.outcome.case, "required-output-unsatisfied");
+    assert.match(failureReasonOf(completion.outcome), /Canonical PR workflow evidence handoff failed/u);
     const events = controlPlane.eventBatches.flat();
     const handoffFailure = events.find(({ type }) => type === "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED");
     assert.ok(handoffFailure, "the handoff failure must be appended before terminal completion");
@@ -772,9 +774,9 @@ test("canonical PR evidence handoff does not overwrite an earlier terminal failu
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion);
-    assert.equal(completion.terminalSuccess, false);
-    assert.match(String(completion.failureReason), /Task output remediation unavailable/u);
-    assert.doesNotMatch(String(completion.failureReason), /Canonical PR workflow evidence handoff failed/u);
+    assert.equal(completion.outcome.case, "required-output-unsatisfied");
+    assert.match(failureReasonOf(completion.outcome), /Task output remediation unavailable/u);
+    assert.doesNotMatch(failureReasonOf(completion.outcome), /Canonical PR workflow evidence handoff failed/u);
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -802,7 +804,7 @@ test("an immutable output satisfied by a prior Run skips remediation", async () 
 
     assert.equal(existsSync(remediationPrompt), false);
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_SKIPPED"));
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -827,8 +829,7 @@ test("missing output with no provider conversation reports remediation unavailab
     assert.ok(unavailable);
     assert.equal(unavailable.payload.providerConversationIdAvailable, false);
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion?.outcome.case, "required-output-unsatisfied");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -859,12 +860,11 @@ test("a failed output status read is diagnosed without attempting remediation", 
     assert.match(String(failed.payload.message), /503/u);
     assert.equal(events.some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"), false);
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
-    assert.equal(completion?.retryable, false);
-    assert.equal(completion?.failureEnvelope, undefined);
+    // Unverifiable, not merely unsatisfied: re-asking a question that did not
+    // answer is not a repair, so this case is the non-retryable one.
+    assert.equal(completion?.outcome.case, "terminal-protocol-failure");
     assert.match(
-      String(completion?.failureReason),
+      failureReasonOf(completion?.outcome),
       /status could not be established for a step declaring output kind 'implementation'.*status unavailable/u,
     );
   } finally {
@@ -897,9 +897,8 @@ test("remediation that still leaves output missing fails with provider evidence"
     assert.match(String(evidence.finalOutputTail), /^…\[\d+ earlier characters truncated\]/u);
     assert.match(String(evidence.finalOutputTail), /diagnostic final output$/u);
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
-    assert.match(String(completion?.failureReason), /finished without persisting implementation output/u);
+    assert.equal(completion?.outcome.case, "required-output-unsatisfied");
+    assert.match(failureReasonOf(completion?.outcome), /finished without persisting implementation output/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -997,7 +996,7 @@ test("remediation cannot change workspace HEAD or publish its changes", async ()
       (finished.payload.workspaceAfter as Record<string, unknown>).headSha,
     );
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion?.outcome.case, "required-output-unsatisfied");
     assert.equal(completion?.pushStatus, "NOT_REQUESTED");
     assert.equal(git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master"), originalHead);
     assert.deepEqual(git(root, `--git-dir=${remote}`, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n"), ["refs/heads/master"]);
@@ -1127,9 +1126,13 @@ test("the original Run budget continues through remediation", async () => {
     );
     assert.equal(budgetSignalSent, true, "the remediation heartbeat did not deliver the controlled budget signal");
     assert.equal(budgetFired, true, "the original Run budget was not the reason remediation stopped");
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "BUDGET_EXCEEDED");
-    assert.match(String(completion?.failureReason), /walltime budget exceeded/u);
+    assert.equal(completion?.outcome.case, "budget-exhausted");
+    assert.equal(
+      completion?.outcome.case === "budget-exhausted" ? completion.outcome.gate : null,
+      "walltime",
+      "the gate that fired travels as itself, not as prose to be grepped",
+    );
+    assert.match(failureReasonOf(completion?.outcome), /walltime budget exceeded/u);
     const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     assert.ok(finished);
     assert.equal(finished.payload.outputPersisted, false);
@@ -1156,8 +1159,8 @@ for (const fixture of explicitTerminalFailureFixtures) {
       });
 
       const completion = controlPlane.completions.at(-1);
-      assert.equal(completion?.terminalSuccess, false, JSON.stringify(completion));
-      assert.equal(completion?.failureReason, fixture.state.providerError);
+      assert.equal(completion?.outcome.case, "provider-failure", JSON.stringify(completion));
+      assert.equal(failureReasonOf(completion?.outcome), fixture.state.providerError);
       assert.equal(controlPlane.outputStatusReadCount(), 0);
       assert.equal(
         controlPlane.eventBatches.flat().some(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED"),
@@ -1192,10 +1195,11 @@ test("a missing terminal event with matching server output succeeds without a lo
 
     const completion = controlPlane.completions.at(-1);
     assert.ok(completion);
-    assert.equal(completion.terminalSuccess, true);
+    assert.equal(completion.outcome.case, "delivered-then-disconnected");
     assert.equal(completion.pushedBranch, "configured-delivery", JSON.stringify(completion));
-    assert.equal(completion.failureEnvelope, undefined);
-    assert.equal(completion.failureClass, undefined);
+    // The agent never sent a terminal event, and that fact is now reported
+    // rather than overwritten: the outcome says why the Run still succeeded.
+    assert.equal(completion.exitCode, 0);
     assert.deepEqual(controlPlane.publishedBranches, ["configured-delivery"]);
     const accepted = controlPlane.eventBatches.flat()
       .filter(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED");
@@ -1237,9 +1241,8 @@ test("transport-noise stderr does not suppress post-delivery disconnect promotio
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, true, JSON.stringify(completion));
+    assert.equal(completion?.outcome.case, "delivered-then-disconnected", JSON.stringify(completion));
     assert.equal(completion?.pushedBranch, "configured-delivery");
-    assert.equal(completion?.failureEnvelope, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1280,7 +1283,7 @@ test("a run-as reader includes an otherwise protected receipt in recovery audit"
     await executeClaim(configured, promotedClaim, { controlPlane: controlPlane.controlPlane });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, true, JSON.stringify(completion));
+    assert.equal(completion?.outcome.case, "delivered-then-disconnected", JSON.stringify(completion));
     assert.equal(completion?.pushedBranch, "configured-delivery");
     const invocations = await readFile(prefixLog, "utf8");
     assert.match(invocations, /protected-receipt/u, "the receipt started unreadable to the daemon uid");
@@ -1341,9 +1344,8 @@ test("the real task_output MCP receipt promotes a delivered disconnect", async (
     assert.equal(receivedOutputs[0]?.kind, "result");
     assert.match(String(receivedOutputs[0]?.commitSha), /^[0-9a-f]{40}$/u);
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, true, JSON.stringify(completion));
+    assert.equal(completion?.outcome.case, "delivered-then-disconnected", JSON.stringify(completion));
     assert.equal(completion?.pushedBranch, "configured-delivery");
-    assert.equal(completion?.failureEnvelope, undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
@@ -1366,9 +1368,8 @@ test("exit code 0 with no persisted output stays FAILED", async () => {
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
-    assert.ok(completion?.failureEnvelope);
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, "PROTOCOL_ERROR");
     assert.notEqual(completion?.pushedBranch, "master");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1391,8 +1392,8 @@ test("persisted output with no server-side identity stays FAILED even with a mat
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, "PROTOCOL_ERROR");
     const reported = controlPlane.eventBatches.flat()
       .find(({ type }) => type === "POST_DELIVERY_DISCONNECT_CHECK_FAILED");
     assert.match(String(reported?.payload.message), /no server-side identity/u);
@@ -1422,8 +1423,8 @@ for (const fixture of rejectedServerIdentityFixtures) {
       });
 
       const completion = controlPlane.completions.at(-1);
-      assert.equal(completion?.terminalSuccess, false, JSON.stringify(completion));
-      assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+      assert.equal(completion?.outcome.case, "provider-failure", JSON.stringify(completion));
+      assert.equal(envelopeOf(completion?.outcome).runnerClass, "PROTOCOL_ERROR");
       assert.equal(
         controlPlane.eventBatches.flat().some(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED"),
         false,
@@ -1464,7 +1465,7 @@ test("a tolerance-activity failure does not demote a qualified promotion", async
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, true, JSON.stringify(completion));
+    assert.equal(completion?.outcome.case, "delivered-then-disconnected", JSON.stringify(completion));
     assert.equal(completion?.pushedBranch, "configured-delivery");
     const reported = controlPlane.eventBatches.flat()
       .find(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACTIVITY_FAILED");
@@ -1495,7 +1496,7 @@ test("a failed delivery never claims that its provider disconnect was tolerated"
       controlPlane: controlPlane.controlPlane,
     });
 
-    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, false);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
     assert.equal(
       controlPlane.activities.some(({ body }) => body.includes("provider disconnect after delivery was tolerated")),
       false,
@@ -1523,9 +1524,8 @@ test("output lookup errors preserve the original PROTOCOL_ERROR and are reported
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
-    assert.ok(completion?.failureEnvelope);
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, "PROTOCOL_ERROR");
     const reported = controlPlane.eventBatches.flat()
       .find(({ type }) => type === "POST_DELIVERY_DISCONNECT_CHECK_FAILED");
     assert.match(String(reported?.payload.message), /503/u);
@@ -1554,9 +1554,8 @@ test("rewritten local receipt cannot override a mismatched server commit SHA", a
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
-    assert.ok(completion?.failureEnvelope);
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, "PROTOCOL_ERROR");
     assert.notEqual(completion?.pushedBranch, "master");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1579,9 +1578,8 @@ test("nonzero exit with persisted output stays FAILED", async () => {
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "TASK_FAILED");
-    assert.ok(completion?.failureEnvelope);
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, "TASK_FAILED");
     assert.equal(controlPlane.outputStatusReadCount(), 0);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1613,9 +1611,8 @@ test("timeout terminationReason with persisted output stays FAILED", async () =>
     });
 
     const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.terminalSuccess, false);
-    assert.equal(completion?.failureClass, "CANCELLED_OR_TIMED_OUT");
-    assert.ok(completion?.failureEnvelope);
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, "CANCELLED_OR_TIMED_OUT");
     assert.equal(controlPlane.outputStatusReadCount(), 0);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1653,7 +1650,7 @@ test("output the agent already produced survives a delivery-phase failure", asyn
     // The failure is the runner's own, reported as such: this is the exception
     // path, not the ordinary one.
     assert.equal(completion.terminationReason, RUNNER_EXCEPTION_REASON);
-    assert.match(String(completion.failureReason), /connection reset by peer/);
+    assert.match(failureReasonOf(completion.outcome), /connection reset by peer/);
     // And the agent's work is still in it. This path used to rebuild its
     // evidence from the error message alone, so a run that had produced a real
     // answer reported nothing but the plumbing fault that followed it.

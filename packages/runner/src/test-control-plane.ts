@@ -1,3 +1,7 @@
+import assert from "node:assert/strict";
+
+import type { FailureEnvelope, RunOutcome } from "@anneal/db";
+
 import {
   ControlPlaneError,
   type CancellationRequest,
@@ -16,6 +20,18 @@ import {
   type SessionTaskOutputStatus,
 } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
+
+/** The reason a failing outcome carries, with the success cases ruled out. */
+export const failureReasonOf = (outcome: RunOutcome | undefined): string => {
+  assert.ok(outcome && "reason" in outcome, `expected a failing outcome, got ${outcome?.case}`);
+  return outcome.reason;
+};
+
+/** The structured evidence a provider failure carries. */
+export const envelopeOf = (outcome: RunOutcome | undefined): FailureEnvelope => {
+  assert.ok(outcome?.case === "provider-failure", `expected a provider failure, got ${outcome?.case}`);
+  return outcome.envelope;
+};
 
 /**
  * Every operation of both seams, in the bound form production consumes. A test

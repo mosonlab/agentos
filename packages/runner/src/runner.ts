@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 
-import { PR_TEMPLATE_NAME, REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+import {
+  agentExecutionSucceeded,
+  PR_TEMPLATE_NAME,
+  REGRESSION_VERIFICATION_OUTPUT_KIND,
+  type BudgetGate,
+  type RunOutcome,
+} from "@anneal/db";
 
 import {
   ADAPTER_VERSION,
-  adapterExecutionSucceeded,
   adapters,
   buildChildEnvironment,
   buildPrompt,
@@ -173,7 +178,11 @@ export const executeClaim = async (
   let scratch: AgentScratch | null = null;
   let handle: RuntimeHandle | null = null;
   let sessionConfigLease: SessionConfigLease | null = null;
-  let budgetReason: string | null = null;
+  // The budget gate that stopped this Run, kept as the gate it was rather than
+  // as prose the control plane would have to grep for "walltime". Held in a
+  // record because the heartbeat callback is its only writer, and a `let`
+  // written only from a callback stays narrowed to its initializer.
+  const budget: { refusal: { gate: BudgetGate; reason: string } | null } = { refusal: null };
   let terminalFailureReason: string | null = null;
   let taskOutputStatusCheckFailed = false;
   let workspacePublicationForbidden = false;
@@ -302,13 +311,9 @@ export const executeClaim = async (
       || (claimedTemplateStep !== null && typeof claimedTemplateStep.provisionDependencies !== "boolean")) {
       const condition = "template-step-provision-dependencies-missing";
       await session.finish({
+        outcome: { case: "terminal-protocol-failure", reason: condition },
         exitCode: null,
-        terminalEventSeen: false,
-        terminalSuccess: false,
         terminationReason: condition,
-        failureClass: "PROTOCOL_ERROR",
-        failureReason: condition,
-        retryable: false,
         cleanupStatus: "SUCCEEDED",
         workspaceRetained: false,
       });
@@ -323,13 +328,9 @@ export const executeClaim = async (
     if (!isDependencyProvisioning((claim.repo as { dependencyProvisioning?: unknown } | undefined)?.dependencyProvisioning)) {
       const condition = "dependency-provisioning-missing";
       await session.finish({
+        outcome: { case: "terminal-protocol-failure", reason: condition },
         exitCode: null,
-        terminalEventSeen: false,
-        terminalSuccess: false,
         terminationReason: condition,
-        failureClass: "PROTOCOL_ERROR",
-        failureReason: condition,
-        retryable: false,
         cleanupStatus: "SUCCEEDED",
         workspaceRetained: false,
       });
@@ -344,13 +345,12 @@ export const executeClaim = async (
     // executed, because retrying it here would just repeat the violation.
     if (claim.executionMode === "mechanical") {
       await session.finish({
+        outcome: {
+          case: "terminal-protocol-failure",
+          reason: "This runner does not execute mechanical runs; @anneal/merge-executor does",
+        },
         exitCode: null,
-        terminalEventSeen: false,
-        terminalSuccess: false,
         terminationReason: "mechanical run claimed by a model runner",
-        failureClass: "PROTOCOL_ERROR",
-        failureReason: "This runner does not execute mechanical runs; @anneal/merge-executor does",
-        retryable: false,
         cleanupStatus: "SUCCEEDED",
         workspaceRetained: false,
       });
@@ -361,20 +361,13 @@ export const executeClaim = async (
     if (claim.run.runNumber > claim.run.maxRunsPerTask) {
       const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, false, false, controlPlane);
       await session.finish({
+        outcome: {
+          case: "budget-exhausted",
+          gate: "max-runs",
+          reason: "Maximum run budget exceeded before launch",
+        },
         exitCode: null,
-        terminalEventSeen: false,
-        terminalSuccess: false,
         terminationReason: "max-runs budget exceeded",
-        failureClass: "BUDGET_EXCEEDED",
-        failureReason: "Maximum run budget exceeded before launch",
-        retryable: false,
-        failureEnvelope: buildFailureEnvelope({
-          phase,
-          evidence: { ...preflightEvidence("Maximum run budget exceeded before launch"), exitCode: null },
-          agentExited: false,
-          runnerClass: "BUDGET_EXCEEDED",
-          terminationReason: "max-runs budget exceeded",
-        }),
         ...finishedCleanup,
       });
       return;
@@ -418,17 +411,19 @@ export const executeClaim = async (
       const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0, false, controlPlane);
       const retainedPath = await sessionConfigLease.retainedPath();
       await session.finish({
-        ...evidence,
-        failureClass: classified.failureClass,
-        failureReason: appendRetainedSessionConfig(preflight.error ?? "Preflight failed", retainedPath),
-        retryable: classified.retryable,
-        externalFailure: true,
-        failureEnvelope: buildFailureEnvelope({
-          phase,
-          evidence,
-          agentExited: false,
-          runnerClass: classified.failureClass,
-        }),
+        outcome: {
+          case: "provider-failure",
+          reason: appendRetainedSessionConfig(preflight.error ?? "Preflight failed", retainedPath),
+          envelope: buildFailureEnvelope({
+            phase,
+            evidence,
+            agentExited: false,
+            runnerClass: classified.failureClass,
+          }),
+        },
+        exitCode: evidence.exitCode,
+        signal: evidence.signal,
+        terminationReason: evidence.terminationReason,
         branch: workspace.branch,
         baseSha: workspace.baseSha,
         headSha: workspace.baseSha,
@@ -471,8 +466,8 @@ export const executeClaim = async (
           inFlightTool: snapshot.inFlightTool,
         });
         if (!decision.allowed && snapshot.processAlive) {
-          budgetReason = `${decision.gate}: ${decision.reason}`;
-          await runLease.stopProvider(heartbeatHandle, budgetReason);
+          budget.refusal = { gate: decision.gate, reason: `${decision.gate}: ${decision.reason}` };
+          await runLease.stopProvider(heartbeatHandle, budget.refusal.reason);
         }
         return {
           processAlive: snapshot.processAlive,
@@ -530,7 +525,7 @@ export const executeClaim = async (
         });
       }
     }
-    if (adapterExecutionSucceeded(evidence)
+    if (agentExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
       && runLease.held
       && terminalFailureReason === null) {
@@ -629,7 +624,7 @@ export const executeClaim = async (
                 payload: {
                   outputKind,
                   outputPersisted: remediated,
-                  terminalSuccess: adapterExecutionSucceeded(remediationEvidence),
+                  terminalSuccess: agentExecutionSucceeded(remediationEvidence),
                   evidence: exitEvidencePayload(remediationEvidence),
                   workspaceChanged,
                   ...(workspaceChanged ? {
@@ -690,7 +685,7 @@ export const executeClaim = async (
       && evidence.terminationReason === null
       && evidence.terminalEventSeen === false
       && terminalFailureReason === null
-      && budgetReason === null
+      && budget.refusal === null
       && runLease.held;
     if (disconnectCandidate) {
       try {
@@ -788,12 +783,12 @@ export const executeClaim = async (
     const regressionMechanicallySettled = regressionHandoffPersisted
       && !explicitTerminalFailure
       && terminalFailureReason === null
-      && budgetReason === null;
-    const executionSucceeded = (adapterExecutionSucceeded(evidence)
+      && budget.refusal === null;
+    const executionSucceeded = (agentExecutionSucceeded(evidence)
       || regressionMechanicallySettled
       || postDeliveryDisconnectTolerated)
       && terminalFailureReason === null
-      && budgetReason === null;
+      && budget.refusal === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     // Bound outside the closures below: `workspace` is nullable at the top of
     // this function, and the narrowing does not survive into a callback.
@@ -863,14 +858,6 @@ export const executeClaim = async (
     }
     const sessionDisposal = await sessionConfigLease.settle(succeeded ? "succeeded" : "failed");
     const { salvage: _salvage, ...finishedCleanup } = cleaned;
-    const classified = succeeded ? null
-      : budgetReason
-        ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
-        : terminalFailureReason
-          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: !taskOutputStatusCheckFailed }
-          : primaryDelivery?.failureClass
-            ? { failureClass: primaryDelivery.failureClass, retryable: false }
-            : adapter.classifyError(evidence);
     // The normal delivery failure remains the failure-envelope evidence even
     // when terminal salvage subsequently succeeds. The wire publication is the
     // salvage result, because it names the ref that actually became durable.
@@ -891,60 +878,66 @@ export const executeClaim = async (
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     await runLease.close();
-    const acceptedEvidence = regressionMechanicallySettled || postDeliveryDisconnectTolerated
-      ? {
-        ...evidence,
-        exitCode: 0,
-        signal: null,
-        terminalEventSeen: true,
-        terminalSuccess: true,
-        terminationReason: null,
-      }
-      : evidence;
-    // The primary provider may have ended cleanly while the required
-    // remediation protocol failed afterwards. Reflect that protocol failure in
-    // the structured envelope too; otherwise the API correctly distrusts the
-    // runner's asserted class and would classify the clean primary evidence as
-    // TASK_FAILED instead of PROTOCOL_ERROR.
-    const completionEvidence = terminalFailureReason
-      ? { ...acceptedEvidence, terminalSuccess: false }
-      : acceptedEvidence;
+    // Which of the three acceptances granted this Run its success. The
+    // exit evidence below is left exactly as the process reported it: this
+    // value is what used to be spelled by overwriting `exitCode`,
+    // `terminalEventSeen` and `terminalSuccess` so the control plane's copy of
+    // the success predicate would agree with the verdict already reached here.
+    const successOutcome: RunOutcome = agentExecutionSucceeded(evidence)
+      ? { case: "succeeded" }
+      : regressionMechanicallySettled
+        ? { case: "regression-mechanically-settled" }
+        : { case: "delivered-then-disconnected" };
+    // A salvage push failure must not mask why the run itself failed.
+    const providerFailureReason = appendRetainedSessionConfig(
+      (executionSucceeded ? primaryDelivery?.pushError : null) ?? failureReasonFromEvidence(evidence),
+      retainedPath,
+    );
+    const outcome: RunOutcome = succeeded
+      ? successOutcome
+      : budget.refusal
+        ? {
+          case: "budget-exhausted",
+          gate: budget.refusal.gate,
+          reason: appendRetainedSessionConfig(budget.refusal.reason, retainedPath),
+        }
+        // The control plane could not say whether the required output exists,
+        // so re-asking it is not a repair; every other terminal failure here is
+        // an absent deliverable the next attempt can still produce.
+        : terminalFailureReason
+          ? taskOutputStatusCheckFailed
+            ? {
+              case: "terminal-protocol-failure",
+              reason: appendRetainedSessionConfig(terminalFailureReason, retainedPath),
+            }
+            : {
+              case: "required-output-unsatisfied",
+              reason: appendRetainedSessionConfig(terminalFailureReason, retainedPath),
+            }
+          : {
+            case: "provider-failure",
+            reason: providerFailureReason,
+            // `executionSucceeded` decides which side of the agent/plumbing
+            // line the run went wrong on. A run whose agent finished and whose
+            // push failed is a DELIVER failure, and the API must not charge the
+            // task for it.
+            envelope: completionEnvelope({
+              executionSucceeded,
+              evidence,
+              deliveryFailure,
+              // The runner's own first guess, advisory only: the control plane
+              // honours it for BUDGET_EXCEEDED and NO_CHANGES_PRODUCED and
+              // classifies everything else from the facts on the envelope.
+              runnerClass: primaryDelivery?.failureClass ?? adapter.classifyError(evidence).failureClass,
+              terminationReason: evidence.terminationReason,
+            }),
+          };
     await session.finish({
-      exitCode: completionEvidence.exitCode,
-      signal: completionEvidence.signal,
-      terminalEventSeen: completionEvidence.terminalEventSeen,
-      terminalSuccess: succeeded && completionEvidence.terminalSuccess,
-      terminationReason: budgetReason ?? completionEvidence.terminationReason,
-      ...(classified ? { failureClass: classified.failureClass, retryable: classified.retryable } : {}),
-      // A salvage push failure must not mask why the run itself failed.
-      ...(!succeeded ? {
-        failureReason: appendRetainedSessionConfig(
-          budgetReason
-            ?? terminalFailureReason
-            ?? (executionSucceeded ? primaryDelivery?.pushError : null)
-            ?? failureReasonFromEvidence(evidence),
-          retainedPath,
-        ),
-      } : {}),
+      outcome,
+      exitCode: evidence.exitCode,
+      signal: evidence.signal,
+      terminationReason: budget.refusal?.reason ?? evidence.terminationReason,
       output: outputTail(evidence),
-      // Ordinarily only a failure carries one: the envelope is the account of
-      // what went wrong, and `executionSucceeded` decides which side of the
-      // agent/plumbing line it went wrong on. A run whose agent finished and
-      // whose push failed is a DELIVER failure, and the API must not charge the
-      // task for it.
-      // The v1 envelope cannot distinguish this terminal control-plane
-      // protocol failure from retryable provider protocol drift. Omitting it
-      // only for this case lets the API honor the explicit non-retryable
-      // completion verdict instead of reclassifying the clean provider exit.
-      ...(succeeded || taskOutputStatusCheckFailed ? {} : {
-        failureEnvelope: completionEnvelope({
-          executionSucceeded,
-          evidence: completionEvidence,
-          deliveryFailure,
-          runnerClass: classified?.failureClass ?? null,
-          terminationReason: budgetReason ?? completionEvidence.terminationReason,
-        }),
-      }),
       ...gitResult,
       ...deliveryPayload,
       ...worktreeReport,
@@ -989,16 +982,17 @@ export const executeClaim = async (
     }
     await session.note(message, { stream: "stderr" }).catch(() => undefined);
     await session.finish({
+      // The runner's own code threw, so the agent never got to report a
+      // verdict: `agentExited: false` on the envelope is what tells the control
+      // plane this attempt must not spend the task's budget.
+      outcome: {
+        case: "provider-failure",
+        reason: failureReason,
+        envelope: runnerExceptionEnvelope({ phase, evidence, runnerClass: classified.failureClass, error }),
+      },
       exitCode: evidence.exitCode,
       signal: null,
-      terminalEventSeen: false,
-      terminalSuccess: false,
       terminationReason: RUNNER_EXCEPTION_REASON,
-      failureClass: classified.failureClass,
-      failureReason,
-      retryable: classified.retryable,
-      externalFailure: true,
-      failureEnvelope: runnerExceptionEnvelope({ phase, evidence, runnerClass: classified.failureClass, error }),
       // Null until the agent has exited, so a run that never got that far still
       // sends nothing; past that point this is the agent's own output and it
       // survives whatever went wrong afterwards. `evidence` above cannot supply
