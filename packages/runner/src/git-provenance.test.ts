@@ -91,7 +91,7 @@ const claim = (
     remoteUrl,
     defaultBranch: "main",
     mountPath: "repo",
-    dependencyProvisioning: "NPM_CI",
+    dependencyProvisioning: "NONE",
   },
   run: {
     id: runId,
@@ -156,8 +156,9 @@ test("a chain provider commit pins the human identity and records its exact clai
     const claimed = claim(remote, "run-real-123");
     const workspace = await provisionWorkspace(configured, claimed);
     const env = providerEnvironment(configured, claimed, workspace);
-    assert.equal(env.GIT_CONFIG_COUNT, "1", "the task secret cannot replace runner-owned Git config injection");
-    assert.equal(env.GIT_CONFIG_KEY_0, "core.hooksPath");
+    assert.equal(env.GIT_CONFIG_COUNT, "2", "the task secret cannot replace runner-owned Git config injection");
+    assert.equal(env.GIT_CONFIG_KEY_0, "credential.helper");
+    assert.equal(env.GIT_CONFIG_KEY_1, "core.hooksPath");
     assert.equal(env.GIT_AUTHOR_NAME, undefined, "task secrets cannot override local human identity");
 
     await writeFile(join(workspace.path, "provider.txt"), "provider change\n");
@@ -278,7 +279,11 @@ test("ordinary runs stay unmarked while global runner identity is pinned locally
     const workspace = await provisionWorkspace(configured, claimed);
     assert.equal(workspace.commitHooksPath, undefined);
     const env = providerEnvironment(configured, claimed, workspace);
-    assert.equal(env.GIT_CONFIG_COUNT, undefined);
+    // The credential helper is unconditional; the hooks path is what an
+    // ordinary run leaves out.
+    assert.equal(env.GIT_CONFIG_COUNT, "1");
+    assert.equal(env.GIT_CONFIG_KEY_0, "credential.helper");
+    assert.equal(env.GIT_CONFIG_KEY_1, undefined);
     await writeFile(join(workspace.path, "ordinary.txt"), "ordinary\n");
     git(workspace.path, ["add", "ordinary.txt"], env);
     git(workspace.path, ["commit", "-m", "ordinary commit"], env);

@@ -89,7 +89,7 @@ const expectedRuntimePaths = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
 
-test("release snapshots and deploy releases carry exactly the six runner runtime tools", (t) => {
+test("release snapshots and deploy releases carry exactly the runner runtime tools the build declares", (t) => {
   const context = releaseFixture();
   const stageRoot = join(context.root, "stage");
   const deployRoot = join(context.root, "deploy");

@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PR_TEMPLATE_NAME } from "@anneal/db";
 
 import { ControlPlaneError, type ClaimedTask } from "./api.js";
-import { adapters, type RuntimeHandle } from "./adapters.js";
+import { adapters, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
 import { parseCodexTranscript } from "./adapters/codex.js";
 import { parsePiTranscript } from "./adapters/pi.js";
@@ -191,7 +191,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     remoteUrl,
     defaultBranch: "master",
     mountPath: "/does/not/exist",
-    dependencyProvisioning: "NPM_CI",
+    dependencyProvisioning: "NONE",
   },
   run: {
     id: "run-114",
@@ -856,6 +856,15 @@ test("a failed output status read is diagnosed without attempting remediation", 
     assert.ok(failed);
     assert.match(String(failed.payload.message), /503/u);
     assert.equal(events.some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"), false);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion?.retryable, false);
+    assert.equal(completion?.failureEnvelope, undefined);
+    assert.match(
+      String(completion?.failureReason),
+      /status could not be established for a step declaring output kind 'implementation'.*status unavailable/u,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1000,32 +1009,125 @@ test("the original Run budget continues through remediation", async () => {
     const remote = await seedRemote(root);
     const remediationPrompt = join(root, "remediation-prompt.txt");
     const agentBinary = join(root, "remediating-agent.sh");
-    await writeFile(agentBinary, remediatingAgent(remediationPrompt, ["sleep 30"]));
+    await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       readSessionTaskOutputStatus: async () => outputStatus().task,
     });
-    const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
+    let initialHandle: RuntimeHandle | null = null;
+    let remediationHandle: RuntimeHandle | null = null;
+    let finishRemediation: ((evidence: ExitEvidence) => void) | null = null;
+    let budgetSignalSent = false;
+    let budgetFired = false;
+    let remediationSetupState = "not-started";
+    const adapter = {
+      ...adapters.CLAUDE,
+      start: async (...args: Parameters<typeof adapters.CLAUDE.start>) => {
+        const launched = await adapters.CLAUDE.start(...args);
+        initialHandle = launched;
+        return launched;
+      },
+      resume: async () => {
+        const firstHandle = initialHandle;
+        if (!firstHandle) throw new Error("remediation setup started without an initial provider handle");
+        remediationSetupState = "running";
+        const exit = new Promise<ExitEvidence>((resolve) => { finishRemediation = resolve; });
+        const startedAt = new Date();
+        const resumed: RuntimeHandle = {
+          ...firstHandle,
+          startedAt,
+          lastProcessAliveAt: startedAt,
+          lastProgressEventAt: startedAt,
+          terminalEventSeen: false,
+          terminalSuccess: false,
+          terminationReason: null,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          child: firstHandle.child,
+          pid: null,
+          exit,
+        };
+        remediationHandle = resumed;
+        return resumed;
+      },
+      heartbeat: async (handle: RuntimeHandle) => {
+        if (handle !== remediationHandle) return adapters.CLAUDE.heartbeat(handle);
+        if (!budgetSignalSent) {
+          budgetSignalSent = true;
+          const firstHandle = initialHandle;
+          if (!firstHandle) throw new Error("remediation heartbeat arrived without an initial provider handle");
+          // executeClaim deliberately keeps this Date object as the original
+          // Run's budget anchor while it awaits remediation. Advancing it here
+          // is the explicit test signal that the original budget has expired.
+          firstHandle.startedAt.setTime(0);
+          const finish = finishRemediation;
+          setImmediate(() => {
+            if (budgetFired || finishRemediation !== finish || !finish) return;
+            remediationSetupState = "budget signal delivered but no kill arrived";
+            finishRemediation = null;
+            finish({
+              exitCode: 1,
+              signal: null,
+              terminalEventSeen: false,
+              terminalSuccess: false,
+              terminationReason: null,
+              finalOutput: null,
+              providerError: remediationSetupState,
+              stdout: "",
+              stderr: remediationSetupState,
+            });
+          });
+        }
+        return {
+          processAlive: true,
+          lastProcessAliveAt: new Date(),
+          lastProgressEventAt: new Date(),
+          inFlightTool: null,
+        };
+      },
+      kill: async (handle: RuntimeHandle, reason: string) => {
+        if (handle !== remediationHandle) return adapters.CLAUDE.kill(handle, reason);
+        const finish = finishRemediation;
+        if (!finish) throw new Error("budget kill arrived before remediation setup completed");
+        budgetFired = reason.includes("walltime budget exceeded");
+        remediationSetupState = budgetFired ? "budget-fired" : `stopped-before-budget: ${reason}`;
+        handle.terminationReason = reason;
+        finishRemediation = null;
+        finish({
+          exitCode: null,
+          signal: "SIGTERM",
+          terminalEventSeen: false,
+          terminalSuccess: false,
+          terminationReason: reason,
+          finalOutput: null,
+          providerError: null,
+          stdout: "",
+          stderr: "",
+        });
+        return { signal: "SIGTERM" as const, processAlive: false };
+      },
+    };
+    const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 1 };
     const claimed = requiredOutputClaim(remote);
-    // Leave enough budget for setup under full-gate contention; the resumed
-    // 30-second command still has to be stopped by this Run's 12-second limit.
-    claimed.run.maxDurationMin = 0.2;
+    // Keep a normal Run budget. The adapter heartbeat above supplies an
+    // explicit expiry signal once remediation is actually running, so setup
+    // cannot race a wall-clock budget or a real sleeping child process.
 
-    await executeClaim(configured, claimed, { controlPlane: controlPlane.controlPlane });
-    // The heartbeat callback that performs the budget kill finishes its
-    // best-effort event report asynchronously. Under full-suite load a fixed
-    // sleep can expire before that callback is scheduled, so wait for the
-    // observable report instead.
-    let finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
-    for (let attempt = 0; attempt < 1_000 && !finished; attempt += 1) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
-      finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
-    }
+    await executeClaim(configured, claimed, { adapter, controlPlane: controlPlane.controlPlane });
 
     const completion = controlPlane.completions.at(-1);
+    assert.equal(
+      remediationSetupState,
+      "budget-fired",
+      `remediation setup did not reach the controlled budget expiry (state=${remediationSetupState}; completion=${JSON.stringify(completion)})`,
+    );
+    assert.equal(budgetSignalSent, true, "the remediation heartbeat did not deliver the controlled budget signal");
+    assert.equal(budgetFired, true, "the original Run budget was not the reason remediation stopped");
     assert.equal(completion?.terminalSuccess, false);
     assert.equal(completion?.failureClass, "BUDGET_EXCEEDED");
     assert.match(String(completion?.failureReason), /walltime budget exceeded/u);
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     assert.ok(finished);
     assert.equal(finished.payload.outputPersisted, false);
   } finally {

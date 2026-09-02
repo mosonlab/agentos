@@ -167,7 +167,6 @@ export const requireMergeGateAuthorization = async (
       taskId: input.taskId,
       AND: [
         { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.evidenceRequest } },
-        { metadata: { path: ["nonce"], equals: selected.authorization.nonce } },
         { metadata: { path: ["purpose"], equals: "gate" } },
       ],
     },

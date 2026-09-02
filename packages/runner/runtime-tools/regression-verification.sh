@@ -53,23 +53,50 @@ head_sha() {
   printf '%s' "$head"
 }
 
+FETCH_ATTEMPTS=6
+
+# The transient half of network-retry.ts, in the vocabulary git writes. Only a
+# match is retried: an absent branch, a bad credential, or an unreadable remote
+# is the remote's answer, and spending the backoff budget on it would delay a
+# failure the operator still has to read.
+FETCH_TRANSIENT_RE='SSL_ERROR_SYSCALL|SSL_connect|unexpected EOF|early EOF|RPC failed|Connection (reset|refused|timed out)|Operation timed out|Failed to connect|Could not resolve host|Recv failure|ECONNRESET|ETIMEDOUT|EAI_AGAIN|HTTP( response)? 5[0-9][0-9]'
+
+# Exponential backoff with full jitter, capped per attempt, matching the clone
+# profile in network-retry.ts. This host reaches GitHub through a proxy whose
+# 443 exit drops for seconds at a time; on 2026-09-02 the previous budget
+# (3 attempts, 1s apart) was exhausted inside one such drop twice in a row and
+# burned both Runs of a regression step before any verification began. Waiting
+# up to 1s,2s,4s,8s,8s (~23s worst case) rides out a second-scale drop while
+# staying far inside the step's stall timeout.
+fetch_backoff() {
+  local ceiling=$(( 1 << (($1 < 4 ? $1 : 4) - 1) ))
+  sleep "$(awk -v ceiling="$ceiling" 'BEGIN { srand(); printf "%.2f", rand() * ceiling }')"
+}
+
 fetch_base() {
-  local attempt
-  for attempt in 1 2 3; do
-    if GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$AGENTOS_PULL_REQUEST_BASE" \
-      >/dev/null 2>&1; then
+  local attempt error status
+  for attempt in $(seq 1 "$FETCH_ATTEMPTS"); do
+    status=0
+    error="$(GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$AGENTOS_PULL_REQUEST_BASE" \
+      2>&1 >/dev/null)" || status=$?
+    if [ "$status" -eq 0 ]; then
       local fetched
       fetched="$(git rev-parse FETCH_HEAD)" || return 1
       valid_sha "$fetched" || return 1
       printf '%s' "$fetched"
       return 0
     fi
-    if [ "$attempt" -lt 3 ]; then
-      printf 'regression-verification: target fetch failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
-      sleep 1
+    if [[ ! "$error" =~ $FETCH_TRANSIENT_RE ]]; then
+      printf 'regression-verification: target fetch failed (exit %s): %s\n' "$status" "$error" >&2
+      return 1
     fi
+    [ "$attempt" -lt "$FETCH_ATTEMPTS" ] || break
+    printf 'regression-verification: target fetch failed; retrying attempt=%s/%s\n' \
+      "$((attempt + 1))" "$FETCH_ATTEMPTS" >&2
+    fetch_backoff "$attempt"
   done
-  printf 'regression-verification: target fetch failed after 3 attempts\n' >&2
+  printf 'regression-verification: target fetch failed after %s attempts: %s\n' \
+    "$FETCH_ATTEMPTS" "$error" >&2
   return 1
 }
 
@@ -105,15 +132,41 @@ process.stdout.write(JSON.stringify(value));
 # a test prints an unbounded amount of output. Keeping the extraction here (next
 # to json_verdict) also means the gate proof and PASS/FAIL decision remain owned
 # by the existing mechanical path.
-extract_gate_failure_excerpt() {
-  local log="$1" summary="$2"
-  node - "$log" "$summary" <<'NODE'
-const { createReadStream } = require("node:fs");
+extract_gate_log_excerpt() {
+  local mode="$1" log="$2" summary="${3:-}"
+  node - "$mode" "$log" "$summary" <<'NODE'
+const { createReadStream, readFileSync } = require("node:fs");
 const { createInterface } = require("node:readline");
 
-const [logPath, summary] = process.argv.slice(2);
+const [mode, logPath, summary] = process.argv.slice(2);
 const MAX_LINES = 40;
 const MAX_BYTES = 4000;
+
+const byteLength = (value) => Buffer.byteLength(value, "utf8");
+const truncateUtf8 = (value, limit) => {
+  if (byteLength(value) <= limit) return value;
+  let end = limit;
+  const bytes = Buffer.from(value);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+};
+
+const takeBounded = (lines, lineLimit, byteBudget) => {
+  const taken = [];
+  let bytes = 0;
+  for (const line of lines) {
+    if (taken.length >= lineLimit) break;
+    const separator = taken.length > 0 ? 1 : 0;
+    const remaining = byteBudget - bytes - separator;
+    if (remaining <= 0) break;
+    const fitted = truncateUtf8(line, remaining);
+    if (fitted === "" && line !== "") break;
+    taken.push(fitted);
+    bytes += separator + byteLength(fitted);
+    if (fitted !== line) break;
+  }
+  return { lines: taken, bytes };
+};
 
 const splitStages = (value) => {
   const stages = [];
@@ -222,6 +275,14 @@ const readLog = async () => {
 };
 
 const main = async () => {
+if (mode === "no-verdict") {
+  const lines = readFileSync(logPath, "utf8").split(/\r?\n/u);
+  if (lines.at(-1) === "") lines.pop();
+  const selected = takeBounded(lines.reverse(), 60, MAX_BYTES);
+  process.stdout.write(selected.lines.reverse().join("\n"));
+  return;
+}
+if (mode !== "failure") throw new Error(`unknown gate log extraction mode: ${mode}`);
 await readLog();
 
 records.sort((left, right) => left.index - right.index);
@@ -231,31 +292,6 @@ for (const record of records) {
 
 const missingStages = fallbackStages.filter((stage) => !stageOutput.has(stage));
 const fallbackLines = missingStages.map((stage) => `${stage}: no per-test output in gate log`);
-
-const byteLength = (value) => Buffer.byteLength(value, "utf8");
-const truncateUtf8 = (value, limit) => {
-  if (byteLength(value) <= limit) return value;
-  let end = limit;
-  while (end > 0 && (Buffer.from(value)[end] & 0xc0) === 0x80) end -= 1;
-  return Buffer.from(value).subarray(0, end).toString("utf8");
-};
-
-const takeBounded = (lines, lineLimit, byteBudget) => {
-  const taken = [];
-  let bytes = 0;
-  for (const line of lines) {
-    if (taken.length >= lineLimit) break;
-    const separator = taken.length > 0 ? 1 : 0;
-    const remaining = byteBudget - bytes - separator;
-    if (remaining <= 0) break;
-    const fitted = truncateUtf8(line, remaining);
-    if (!fitted) break;
-    taken.push(fitted);
-    bytes += separator + byteLength(fitted);
-    if (fitted !== line) break;
-  }
-  return { lines: taken, bytes };
-};
 
 // Reserve room for notices before taking log lines. Otherwise forty noisy test
 // lines could crowd out the explicit "no per-test output" fact for another stage.
@@ -276,6 +312,28 @@ main().catch((error) => {
   process.exitCode = 1;
 });
 NODE
+}
+
+extract_gate_failure_excerpt() {
+  extract_gate_log_excerpt failure "$1" "$2"
+}
+
+# Keep a no-verdict dispatch diagnostic visible in the Run output without
+# turning it into durable verdict evidence. The tail uses the same UTF-8-safe
+# truncation as the failure excerpt above, but prioritizes the latest lines so
+# the final dispatch reason survives a noisy earlier attempt.
+extract_gate_no_verdict_tail() {
+  extract_gate_log_excerpt no-verdict "$1"
+}
+
+print_gate_no_verdict_tail() {
+  local log="$1" attempts="$2" status="$3" tail
+  printf 'REGRESSION FINALIZE: gate dispatch log tail (attempts=%s, last exit status=%s)\n' "$attempts" "$status"
+  if ! tail="$(extract_gate_no_verdict_tail "$log")"; then
+    printf 'regression-verification: warning: could not extract no-verdict gate log tail\n' >&2
+    return 0
+  fi
+  [ -z "$tail" ] || printf '%s\n' "$tail"
 }
 
 persist_output() {
@@ -427,6 +485,7 @@ finalize() {
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;
     *)
+      print_gate_no_verdict_tail "$gate_log" "$attempt" "$gate_status"
       die "gate dispatch produced no admissible PASS/FAIL verdict after $attempt attempt(s) (exit $gate_status)"
       ;;
   esac

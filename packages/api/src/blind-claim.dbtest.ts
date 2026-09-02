@@ -405,6 +405,12 @@ test("retried blind-findings claims do not receive operator activity as prompt n
     body: JSON.stringify({ body: "This must not reach an independent blind review." }),
   });
   assert.equal(note.status, 201, await note.text());
+  await db.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "operator",
+    body: "Approval gate rejected; step queued again\nOperator feedback on previous attempt:\nSibling review content must remain hidden.",
+    metadata: { approvalGateFeedback: true, note: "Sibling review content must remain hidden." },
+  } });
   const retry = await createApp(db).request(`/tasks/${task.id}/retry`, {
     method: "POST",
     headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
@@ -413,6 +419,7 @@ test("retried blind-findings claims do not receive operator activity as prompt n
 
   const claimed = await claim();
   assert.deepEqual(claimed.operatorNotes, []);
+  assert.equal((claimed as { operatorFeedback?: string }).operatorFeedback, undefined);
 });
 
 test("the fix step claims both immutable reports and cannot rewrite either", async () => {

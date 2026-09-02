@@ -12,10 +12,11 @@ in a host window. Read "Everyone", then only the section for your kind.
   requirement; add an abstraction, configuration option, or compatibility path
   only when a current acceptance criterion or caller requires it.
 - Verify narrowly: build, lint, typecheck, and test only the workspace(s) your
-  change touches (`npm run <script> -w <workspace>`, named test files such as
-  `npm run test:db -w @anneal/api -- src/<file>.dbtest.ts`). Never run a whole
-  database suite or a repository-wide root script by hand; the merge gate owns
-  repository-wide proof.
+  change touches (`npm run <script> -w <workspace>`). Database tests need a
+  scratch PostgreSQL that a Run is never granted, so `test:db` is merge gate
+  evidence: do not attempt it inside a Run, and do not report its absence as a
+  gap. Never run a whole database suite or a repository-wide root script by
+  hand; the merge gate owns repository-wide proof.
 - Before tests outside the merge gate, point `RUNNER_WORKSPACE_ROOT` at a new
   temporary directory; a hand-built `RunnerConfig` also pins `home` to one.
   Runner tests provision real workspaces.

@@ -11,6 +11,7 @@ import {
   TaskStatus,
   type PrismaClient,
 } from "@anneal/db";
+import type { ClaimContract } from "@anneal/db/claim-contract";
 
 import { createApp } from "./test-app.js";
 import { runDbScript } from "./test-db-script.js";
@@ -39,30 +40,13 @@ export const BOUND_SPECIFICATION_BRIEF = [
   "Route: implementation=senior-dev - claim-time materialization",
 ].join("\n");
 
-export type Claim = {
-  task: {
-    id: string;
-    chainIndex: number | null;
-    chainLayer: number | null;
-  };
-  run: {
-    id: string;
-    taskId: string;
-    runNumber: number;
-    branch: string | null;
-    targetBranch: string | null;
-    implementationBaseSha: string | null;
-    implementationHeadSha: string | null;
-    pinnedBaseSha: string | null;
-  };
-  specificationMaterialization: {
-    kind: "direct-implementation";
-    path: string;
-    body: string;
-  } | null;
-  fencingToken: string;
-  sessionToken: string;
-};
+/**
+ * The claim these fixtures cast a response body to. It was a third hand-written
+ * mirror of the claim payload; naming the contract instead is what makes a
+ * field these tests read but the projection stops sending a compile error here
+ * rather than an `undefined` in an assertion.
+ */
+export type Claim = ClaimContract;
 
 export type CanonicalInstallation = {
   projectId: string;
@@ -414,8 +398,8 @@ const createParallelReviewHarness = ({
     const first = await claim(firstRunner);
     const second = await claim(secondRunner);
     const reviewTasks = new Set([fixture.solTaskId, fixture.blindTaskId]);
-    assert.ok(reviewTasks.has(first.run.taskId));
-    assert.ok(reviewTasks.has(second.run.taskId));
+    assert.ok(reviewTasks.has(first.run.taskId!));
+    assert.ok(reviewTasks.has(second.run.taskId!));
     assert.notEqual(first.run.taskId, second.run.taskId);
     assert.equal((await getDb().run.findUniqueOrThrow({ where: { id: first.run.id } })).runnerId, firstRunner);
     assert.equal((await getDb().run.findUniqueOrThrow({ where: { id: second.run.id } })).runnerId, secondRunner);

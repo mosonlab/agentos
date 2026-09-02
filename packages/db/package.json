@@ -51,6 +51,11 @@
       "development": "./src/wire-contract.ts",
       "import": "./dist/wire-contract.js"
     },
+    "./claim-contract": {
+      "types": "./src/claim-contract.ts",
+      "development": "./src/claim-contract.ts",
+      "import": "./dist/claim-contract.js"
+    },
     "./service-lock": {
       "types": "./src/service-maintenance-lock.ts",
       "development": "./src/service-maintenance-lock.ts",
@@ -62,7 +67,7 @@
     "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/db -- /bin/sh -c 'tsc -p tsconfig.json --noEmit && npm run typecheck:cli'",
     "lint": "bash ../../scripts/host-proof-slot.sh lint @anneal/db -- /bin/sh -c 'biome lint . && eslint .'",
     "typecheck:cli": "tsc -p tsconfig.cli.json --noEmit",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/db -- node --conditions=development --import tsx --test prisma/*.test.ts src/*.test.ts",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/db -- node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} prisma/*.test.ts src/*.test.ts",
     "test:db": "bash ../../scripts/host-proof-slot.sh test:db @anneal/db -- node --conditions=development --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",

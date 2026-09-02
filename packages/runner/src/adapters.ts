@@ -1,9 +1,11 @@
+import { join } from "node:path";
+
 import { stepRole } from "@anneal/db";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { hostProofSlotDirectory } from "./host-proof-slots.js";
-import { manifestLines, toolsFor, type SessionToolTransport } from "./session-tool-contract.js";
+import { manifestLines, toolsFor } from "./session-tool-contract.js";
 import type { AgentScratch } from "./workspace.js";
 import { claudeDeclaration, claudePlatformSettingsPath } from "./adapters/claude.js";
 import { codexDeclaration, codexPlatformBaselinePath } from "./adapters/codex.js";
@@ -20,7 +22,6 @@ import {
   type ResumeSpec,
   type RunSpec,
 } from "./adapters/runtime.js";
-import type { SessionConfigOptions } from "./adapters/session-config.js";
 
 export * from "./adapters/runtime.js";
 export { claudePlatformSettingsPath } from "./adapters/claude.js";
@@ -28,7 +29,8 @@ export { piExtensionPath } from "./adapters/pi.js";
 
 export const ADAPTER_VERSION = "2.1.0";
 
-const ADAPTER_DECLARATIONS: Readonly<Record<RunnerKind, AdapterDeclaration>> = Object.freeze({
+/** The public runner registry is the set of provider-owned declarations. */
+export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, AdapterDeclaration>> = Object.freeze({
   CLAUDE: claudeDeclaration,
   CODEX: codexDeclaration,
   PI: piDeclaration,
@@ -41,7 +43,7 @@ const COMMON_PROTECTED_SECRET_ENVIRONMENT = [
 
 const PROTECTED_SECRET_ENVIRONMENT = new Set([
   ...COMMON_PROTECTED_SECRET_ENVIRONMENT,
-  ...Object.values(ADAPTER_DECLARATIONS).flatMap((declaration) => declaration.protectedEnvironmentVariables),
+  ...Object.values(RUNNER_DEFINITIONS).flatMap((declaration) => declaration.protectedEnvironmentVariables),
 ]);
 
 const toolManifest = (claim: ClaimedTask): string[] => [
@@ -76,7 +78,7 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     `- implementationBaseSha: ${claim.run.implementationBaseSha}`,
     `- implementationHeadSha: ${claim.run.implementationHeadSha}`,
   ] : []),
-  ...ADAPTER_DECLARATIONS[claim.runner].promptSections(claim),
+  ...RUNNER_DEFINITIONS[claim.runner].promptSections(claim),
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
@@ -84,6 +86,11 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     "",
     "Operator notes:",
     ...claim.operatorNotes.map((note) => `- ${note}`),
+  ] : []),
+  ...(claim.operatorFeedback ? [
+    "",
+    "Operator feedback on previous attempt:",
+    `- ${claim.operatorFeedback}`,
   ] : []),
   ...(claim.previousRunHandoff ? [
     "",
@@ -131,6 +138,17 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   ] : []),
 ].join("\n");
 
+/** Runner-owned `git -c` overrides, expressed as the environment form so they
+ *  reach every git a session runs rather than one command line. */
+const gitConfigOverrides = (entries: readonly (readonly [string, string])[]): NodeJS.ProcessEnv =>
+  Object.fromEntries([
+    ["GIT_CONFIG_COUNT", String(entries.length)],
+    ...entries.flatMap(([key, value], index) => [
+      [`GIT_CONFIG_KEY_${index}`, key],
+      [`GIT_CONFIG_VALUE_${index}`, value],
+    ]),
+  ]);
+
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
@@ -160,11 +178,20 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
-    ...(commitHooksPath ? {
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "core.hooksPath",
-      GIT_CONFIG_VALUE_0: commitHooksPath,
-    } : {}),
+    // The runner account's home, for tooling that a relocated HOME would
+    // otherwise cut off from the account's own configuration.
+    AGENTOS_RUNNER_HOME: config.home,
+    ...gitConfigOverrides([
+      // A credential helper declared in the account's global config resolves
+      // its own state through HOME, which the Codex and PI adapters relocate.
+      // Pinning GIT_CONFIG_GLOBAL preserves the declaration but not the
+      // answer, so a session could not fetch a private remote at all: the
+      // regression step's target refresh failed every Run with "could not read
+      // Username". Answer through the runner's own home instead. A public
+      // remote hid this for as long as every repository here was public.
+      ["credential.helper", join(scratch.toolsDir, "git-credential-runner.sh")] as const,
+      ...(commitHooksPath ? [["core.hooksPath", commitHooksPath] as const] : []),
+    ]),
     ...(regressionStep ? {
       AGENTOS_CHAIN_ID: claim.task.chainId!,
       AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
@@ -181,7 +208,7 @@ export const launchArgv = (
   runner: RunnerKind,
   args: string[],
   env: NodeJS.ProcessEnv,
-): { executable: string; args: string[] } => launchAdapterArgv(config, ADAPTER_DECLARATIONS[runner], args, env);
+): { executable: string; args: string[] } => launchAdapterArgv(config, RUNNER_DEFINITIONS[runner], args, env);
 
 export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): string => JSON.stringify({
   runtime: "agentos-runner",
@@ -195,45 +222,11 @@ export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): stri
   runAsPrefix: runAsPrefix.join(" "),
 });
 
-export type RunnerDefinition = {
-  binaryEnvironment: string;
-  defaultBinary: string;
-  toolIntroduction: string;
-  toolTransport: SessionToolTransport;
-  toolEntrypoint(): string;
-  adapter: CliAdapter;
-  isolatesSessionConfig: boolean;
-  startupPreflightModel: string | null;
-  args(spec: RunSpec, resume?: ResumeSpec): string[];
-  childEnvironment(claim: Pick<ClaimedTask, "run">, scratch: AgentScratch): NodeJS.ProcessEnv;
-  provisionSessionConfig(config: RunnerConfig, scratch: AgentScratch, options?: SessionConfigOptions): Promise<void>;
-};
-
-const definitionFrom = (declaration: AdapterDeclaration): Readonly<RunnerDefinition> => Object.freeze({
-  binaryEnvironment: declaration.binaryEnvironment,
-  defaultBinary: declaration.defaultBinary,
-  toolIntroduction: declaration.toolIntroduction,
-  toolTransport: declaration.toolTransport,
-  toolEntrypoint: declaration.toolEntrypoint,
-  adapter: createCliAdapter(declaration),
-  isolatesSessionConfig: declaration.isolatesSessionConfig,
-  startupPreflightModel: declaration.startupPreflightModel,
-  args: declaration.args,
-  childEnvironment: declaration.childEnvironment,
-  provisionSessionConfig: declaration.provisionSessionConfig,
-});
-
-/** The public runner registry is a derived view of provider-owned declarations. */
-export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefinition>>> = Object.freeze({
-  CLAUDE: definitionFrom(ADAPTER_DECLARATIONS.CLAUDE),
-  CODEX: definitionFrom(ADAPTER_DECLARATIONS.CODEX),
-  PI: definitionFrom(ADAPTER_DECLARATIONS.PI),
-});
-
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_DEFINITIONS) as RunnerKind[]);
 
+/** The one derived artifact: a CLI adapter per declaration, built once. */
 export const adapters: Readonly<Record<RunnerKind, CliAdapter>> = Object.freeze(Object.fromEntries(
-  RUNNER_KINDS.map((runner) => [runner, RUNNER_DEFINITIONS[runner].adapter]),
+  RUNNER_KINDS.map((runner) => [runner, createCliAdapter(RUNNER_DEFINITIONS[runner])]),
 ) as Record<RunnerKind, CliAdapter>);
 
 export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] =>

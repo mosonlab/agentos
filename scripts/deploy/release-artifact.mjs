@@ -15,6 +15,7 @@ const SHA = /^[0-9a-f]{40}$/u;
 const RELEASE = /^(?<commit>[0-9a-f]{40})-(?<digest>[0-9a-f]{64})$/u;
 const RUNTIME_TOOL_ROOT = "packages/runner/dist/runtime-tools";
 const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
+  "git-credential-runner.sh",
   "regression-verification.sh",
   "gate-worker/gate-dispatch.sh",
   "gate-worker/lib.sh",
@@ -23,7 +24,7 @@ const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
   "gate-worker/run-gate.sh",
 ]);
 const RUNTIME_TOOL_ENTRIES = new Map([
-  ["", new Set(["gate-worker", "regression-verification.sh"])],
+  ["", new Set(["gate-worker", "git-credential-runner.sh", "regression-verification.sh"])],
   ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"])],
 ]);
 

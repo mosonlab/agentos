@@ -3,12 +3,12 @@
 # Gate a commit on one remote worker and bring the verdict home. Runs ON THE
 # LOCAL MACHINE (issue #132):
 #
-#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server>                  # gate local HEAD
-#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid>            # gate that commit
-#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid> --verbose  # stream the log
-#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid> --fetch-log # scp the log back
-#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid> --master <oid> # state the baseline
-#   AGENTOS_GATE_SERVER=<server> packages/runner/runtime-tools/gate-worker/remote-gate.sh <oid>
+#   @SCRIPT_DIR@/remote-gate.sh <server>                  # gate local HEAD
+#   @SCRIPT_DIR@/remote-gate.sh <server> <oid>            # gate that commit
+#   @SCRIPT_DIR@/remote-gate.sh <server> <oid> --verbose  # stream the log
+#   @SCRIPT_DIR@/remote-gate.sh <server> <oid> --fetch-log # scp the log back
+#   @SCRIPT_DIR@/remote-gate.sh <server> <oid> --master <oid> # state the baseline
+#   AGENTOS_GATE_SERVER=<server> @SCRIPT_DIR@/remote-gate.sh <oid>
 #
 # The gate's frozen-record rules are statements about what is already on the
 # default branch, so a verdict has to name the baseline it was formed against.
@@ -58,7 +58,7 @@
 #   spot-checked locally. docs/runbooks/gate-worker.md states the boundary.
 #
 # The commit must already be in the worker's mirror. The worker never fetches, so
-# push first: packages/runner/runtime-tools/gate-worker/mirror-push.sh <server> --candidate <oid>
+# push first: @SCRIPT_DIR@/mirror-push.sh <server> --candidate <oid>
 # --baseline <baseline-oid>. Routine callers use gate-dispatch.sh, which freezes
 # and transports both before invoking this script.
 set -uo pipefail
@@ -70,6 +70,7 @@ OID=""
 MASTER_OID=""
 VERBOSE=0
 FETCH_LOG=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # 2, not sysexits' 64: this script's exit codes are the gate's table, and the
 # table has one row for a usage error. Two numbers for one meaning is how a
@@ -77,7 +78,9 @@ FETCH_LOG=0
 EXIT_USAGE=2
 
 usage() {
-  sed -n '2,65p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,65p' "$0" \
+    | sed 's/^#\{1,2\} \{0,1\}//' \
+    | sed "s|@SCRIPT_DIR@|${SCRIPT_DIR}|g"
   exit "${1:-0}"
 }
 
@@ -140,8 +143,6 @@ if [ -n "$SSH_PORT" ]; then
     ''|*[!0-9]*) die "--port needs a number, got: $SSH_PORT" "$EXIT_USAGE" ;;
   esac
 fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"

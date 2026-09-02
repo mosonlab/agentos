@@ -38,6 +38,8 @@ const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const NEW_HEAD = "c".repeat(40);
 const NEW_BASE = "d".repeat(40);
+const TEST_EPOCH_MS = Date.now();
+const testTime = (seconds: number): Date => new Date(TEST_EPOCH_MS + seconds * 1_000);
 
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
   repository: "acme/widgets",
@@ -58,7 +60,7 @@ const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnap
   mergeCommit: null,
   requiredCheckNames: ["ci/build"],
   checkContexts: [{ __typename: "CheckRun", name: "ci/build", status: "COMPLETED", conclusion: "SUCCESS" }],
-  readAt: new Date("2026-08-31T00:00:00.000Z").toISOString(),
+  readAt: testTime(0).toISOString(),
   ...overrides,
 });
 
@@ -78,7 +80,7 @@ const runWithMergeLease: WithMergeLease = (target, fn, database) => withMergeLea
       outcome: "released",
       ref: "refs/merge-lease/test",
       sha: "lease-test",
-      acquiredAt: "2026-08-31T00:00:00.000Z",
+      acquiredAt: testTime(0).toISOString(),
     }),
   },
 );
@@ -124,7 +126,7 @@ const attestRegression = async (
 
 const openGate = async (
   chain: Awaited<ReturnType<typeof seedIntegratorChain>>,
-  now = new Date("2026-08-31T00:00:01.000Z"),
+  now = testTime(1),
 ): Promise<{ id: string; body: string }> => {
   assert.ok(chain.readinessTask);
   await db.$transaction((tx) => advanceTemplateTask(
@@ -145,7 +147,7 @@ const fillGate = async (
   current: Partial<PullRequestSnapshot> = {},
 ): Promise<{ id: string; body: string }> => {
   const card = await openGate(chain);
-  await evidenceTick(db, reader(current), new Date("2026-08-31T00:00:02.000Z"));
+  await evidenceTick(db, reader(current), testTime(2));
   return db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
 };
 
@@ -244,7 +246,7 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
   const tick = await readinessTick(
     db,
     reader(),
-    new Date("2026-08-31T00:00:03.000Z"),
+    testTime(3),
     5,
     releaseLease,
     runWithMergeLease,
@@ -264,7 +266,7 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
     const claimed = await claimRun(db, {
       body: { runnerId: "merge-executor-gated-happy", leaseSeconds: 60 },
       claimantClass: "merge-executor",
-      now: new Date("2026-08-31T00:00:04.000Z"),
+      now: testTime(4),
       specificationReader: null,
     });
     assert.ok(claimed && "run" in claimed);
@@ -273,7 +275,7 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
     const mergedBody = JSON.stringify({ outcome: "merged", mergeCommitSha: "e".repeat(40) });
     const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
       task: { id: chain.integratorTask!.id },
-      fence: { runId: claimed.run.id, fencingToken: claimed.fencingToken, at: new Date("2026-08-31T00:00:05.000Z") },
+      fence: { runId: claimed.run.id, fencingToken: claimed.fencingToken, at: testTime(5) },
       kind: "merge-result",
       body: mergedBody,
       commitSha: null,
@@ -338,7 +340,7 @@ test("task PATCH approval shares the Inbox disposition and leaves readiness work
   const tick = await readinessTick(
     db,
     reader(),
-    new Date("2026-08-31T00:00:03.000Z"),
+    testTime(3),
     5,
     releaseLease,
     runWithMergeLease,
@@ -371,7 +373,7 @@ test("head and base drift after approval requeues regression and opens a fresh e
     const drifted = await readinessTick(
       db,
       reader(drift),
-      new Date("2026-08-31T00:00:03.000Z"),
+      testTime(3),
       5,
       releaseLease,
       runWithMergeLease,
@@ -425,7 +427,7 @@ test("head and base drift after approval requeues regression and opens a fresh e
       chain.gateTask.id,
       newRun.id,
       null,
-      new Date("2026-08-31T00:00:04.000Z"),
+      testTime(4),
     ));
     const fresh = await db.inboxMessage.findFirstOrThrow({
       where: { gateTaskId: chain.readinessTask.id, status: "OPEN" },
@@ -467,13 +469,13 @@ test("an old gate authorization cannot release a fresh gate after the state is r
     orderBy: { createdAt: "desc" },
   });
   assert.notEqual(freshCard.id, firstCard.id);
-  await evidenceTick(db, reader(), new Date("2026-08-31T00:00:04.000Z"));
+  await evidenceTick(db, reader(), testTime(4));
   await db.task.update({ where: { id: chain.readinessTask.id }, data: { status: TaskStatus.TODO } });
 
   const tick = await readinessTick(
     db,
     reader(),
-    new Date("2026-08-31T00:00:05.000Z"),
+    testTime(5),
     5,
     releaseLease,
     runWithMergeLease,
@@ -501,7 +503,7 @@ test("a hard-stopped gated readiness tail reopens a fresh gate after regression 
       readPullRequest: async () => snapshot(),
       compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: false, files: [] }),
     },
-    new Date("2026-08-31T00:00:03.000Z"),
+    testTime(3),
     5,
     releaseLease,
     runWithMergeLease,
@@ -517,7 +519,7 @@ test("a hard-stopped gated readiness tail reopens a fresh gate after regression 
     chain.gateTask.id,
     retry.id,
     null,
-    new Date("2026-08-31T00:00:04.000Z"),
+    testTime(4),
   ));
 
   const fresh = await db.inboxMessage.findFirst({
@@ -570,7 +572,7 @@ test("missing or mismatched operator approval stops a gated readiness settlement
     const tick = await readinessTick(
       db,
       reader(),
-      new Date("2026-08-31T00:00:03.000Z"),
+      testTime(3),
       5,
       releaseLease,
       runWithMergeLease,

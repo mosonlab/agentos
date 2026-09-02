@@ -14,7 +14,7 @@ const now = "2026-08-26T00:00:00.000Z";
 
 const deployNotice: InboxMessage = {
   id: "deploy-1", from: "AGENT", dismissible: true, agentId: null, sessionId: null,
-  taskId: null, goalId: null, gateTaskId: null, artifactTaskId: null, threadId: "thread-1",
+  taskId: null, goalId: null, gateTaskId: null, acceptsFreeText: false, artifactTaskId: null, threadId: "thread-1",
   replyToMessageId: null, kind: "TEXT", body: "[auto-deploy] success: old -> cb46e4a; reason=deployed",
   choices: null, selectedChoiceId: null, status: "CLOSED", channel: "FEISHU",
   deliveryStatus: "DELIVERED", deliveryAttempts: 1, lastDeliveryError: null,

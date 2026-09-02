@@ -21,6 +21,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -74,13 +75,59 @@ const leaseFixture = (t) => {
   return { root, origin };
 };
 
-const runLease = (fixture, args, holder = "machine@fixture") =>
+const runLease = (fixture, args, holder = "machine@fixture", options = {}) =>
   spawnSync("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
     cwd: fixture.root,
     encoding: "utf8",
-    timeout: 15_000,
-    env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
+    timeout: options.timeout ?? 15_000,
+    env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder, ...options.env },
   });
+
+// A `git` that fails a chosen subcommand a chosen number of times and then
+// stands aside. The retry budget is only observable through what git says, so
+// the cases below drive the classifier with git's own transient and
+// deterministic wording rather than with a flag on the script.
+const gitShim = (t, fixture) => {
+  const bin = join(dirname(fixture.root), `shim-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(bin, { recursive: true });
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  const log = join(bin, "calls.log");
+  writeFileSync(log, "");
+  const shimPath = join(bin, "git");
+  writeFileSync(shimPath, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "$LEASE_FIXTURE_SUBCOMMAND" ]; then
+    attempt=$(( $(wc -l < "$LEASE_FIXTURE_LOG") + 1 ))
+    printf '%s\\n' "$arg" >> "$LEASE_FIXTURE_LOG"
+    if [ "$attempt" -le "$LEASE_FIXTURE_FAILURES" ]; then
+      printf '%s\\n' "$LEASE_FIXTURE_ERROR" >&2
+      exit 128
+    fi
+    break
+  fi
+done
+exec "$LEASE_FIXTURE_GIT" "$@"
+`);
+  chmodSync(shimPath, 0o755);
+  const realGit = execFileSync("/usr/bin/env", ["sh", "-c", "command -v git"], { encoding: "utf8" }).trim();
+  return {
+    log,
+    calls: () => readFileSync(log, "utf8").split("\n").filter((line) => line !== "").length,
+    env: (subcommand, failures, error) => ({
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      LEASE_FIXTURE_GIT: realGit,
+      LEASE_FIXTURE_LOG: log,
+      LEASE_FIXTURE_SUBCOMMAND: subcommand,
+      LEASE_FIXTURE_FAILURES: String(failures),
+      LEASE_FIXTURE_ERROR: error,
+    }),
+  };
+};
+
+const TRANSIENT_GIT_ERROR =
+  "fatal: unable to access 'https://github.com/o/r.git/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443";
+const DETERMINISTIC_GIT_ERROR =
+  "fatal: Authentication failed for 'https://github.com/o/r.git/'";
 
 const installLease = (fixture, lease) => {
   const body = `${JSON.stringify(lease)}\n`;
@@ -476,4 +523,70 @@ test("a release refused on another machine's lease says refused in both lines", 
   );
   assert.match(refused.stderr, /^MERGE LEASE: refused holder@fixture$/mu);
   assert.deepEqual(readLease(fixture).lease, held);
+});
+
+// --- the git network retry budget -------------------------------------------
+//
+// This host reaches origin through a proxy whose 443 exit drops for seconds at
+// a time and in clusters, so the budget these cases pin is the one from
+// packages/runner/src/network-retry.ts: six attempts with jittered exponential
+// backoff, and only for the failures git writes transient words for. A release
+// that loses its push strands the lease on origin for the full 45-minute machine
+// steal threshold, which is what makes the budget worth spending.
+
+test("a transient release push failure is retried instead of stranding the lease", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Flaky exit", "--task", "chain-7"],
+    "api@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const { sha } = readLease(fixture);
+
+  const shim = gitShim(t, fixture);
+  const released = runLease(fixture, ["release", "--task", "chain-7"], "api@fixture", {
+    env: shim.env("push", 2, TRANSIENT_GIT_ERROR),
+    timeout: 60_000,
+  });
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  assert.match(released.stderr, /lease release push failed; retrying attempt=3\/6/u);
+  assert.equal(shim.calls(), 3);
+  assert.match(released.stdout, new RegExp(`^MERGE LEASE: released refs/merge-lease/holder ${sha} `, "mu"));
+});
+
+test("a deterministic git failure is not retried at all", (t) => {
+  const fixture = leaseFixture(t);
+  const shim = gitShim(t, fixture);
+  const status = runLease(fixture, ["status"], "api@fixture", {
+    env: shim.env("ls-remote", 6, DETERMINISTIC_GIT_ERROR),
+    timeout: 60_000,
+  });
+  assert.notEqual(status.status, 0, status.stdout + status.stderr);
+  assert.doesNotMatch(status.stderr, /retrying attempt/u);
+  assert.match(status.stderr, /Authentication failed/u);
+  assert.equal(shim.calls(), 1, "an authentication failure is the remote's answer, not a blip");
+});
+
+test("a transient failure that outlasts the budget reports git's own words", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Sustained outage", "--task", "chain-9"],
+    "api@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const original = readLease(fixture);
+
+  const shim = gitShim(t, fixture);
+  const released = runLease(fixture, ["release", "--task", "chain-9"], "api@fixture", {
+    env: shim.env("push", 6, TRANSIENT_GIT_ERROR),
+    timeout: 60_000,
+  });
+  assert.notEqual(released.status, 0, released.stdout + released.stderr);
+  assert.match(released.stderr, /lease release push failed; retrying attempt=6\/6/u);
+  assert.match(released.stderr, /SSL_ERROR_SYSCALL in connection to github.com:443/u);
+  assert.match(released.stderr, /could not release the lease/u);
+  assert.equal(shim.calls(), 6);
+  assert.deepEqual(readLease(fixture), original, "a lost release must leave the lease intact");
 });
