@@ -188,7 +188,9 @@ export class ChainHeldError extends Error {
     readonly taskLayer: number | null,
     readonly heldLayer: number | null,
   ) {
-    super(taskLayer === null || heldLayer === null
+    super(heldLayer === 0
+      ? `Chain ${chainId} is held before its first layer; Task ${taskId} cannot queue a Run`
+      : taskLayer === null || heldLayer === null
       ? `Chain ${chainId} is held; Task ${taskId} cannot queue a Run`
       : `Chain ${chainId} is held after layer ${heldLayer}; Task ${taskId} at layer ${taskLayer} cannot queue a Run`);
     this.name = "ChainHeldError";
@@ -769,7 +771,9 @@ export const openRun = async (
       layer: task.chainLayer,
       index: task.chainIndex,
     }, control)) {
-      const message = taskLayer === null || control.heldLayer === null
+      const message = control.heldLayer === 0
+        ? `Chain ${task.chainId} is held before its first layer; Task ${task.id} cannot queue a Run`
+        : taskLayer === null || control.heldLayer === null
         ? `Chain ${task.chainId} is held; Task ${task.id} cannot queue a Run`
         : `Chain ${task.chainId} is held after layer ${control.heldLayer}; Task ${task.id} at layer ${taskLayer} cannot queue a Run`;
       return openRunRefusal(
