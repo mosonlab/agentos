@@ -9,7 +9,11 @@ import {
   type PrismaClient,
   type UsageCost,
 } from "@anneal/db";
-import type { CostsReport as CostsReportContract } from "@anneal/db/board-contract";
+import type {
+  CostsChain as CostsChainContract,
+  CostsReport as CostsReportContract,
+} from "@anneal/db/board-contract";
+import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { stepRole, type StepRole } from "@anneal/db/merge-integrator";
 
 import {
@@ -92,32 +96,13 @@ export type CostsChainData = {
   until: Date;
 };
 
-type NativeCostsWaste = {
-  totalUsd: Prisma.Decimal;
-  operatorCancelledUsd: Prisma.Decimal;
-  failedUsd: Prisma.Decimal;
-  byFailureClass: Array<{ failureClass: string; usd: Prisma.Decimal; runs: number }>;
-};
+/** The report as this module builds it, and the proof that JSON serialization
+ * turns it into exactly the browser contract: every `Prisma.Decimal` amount
+ * reaches the browser as a string, `since` and every top run start as an ISO
+ * string, and no key is carried that the contract does not name. */
+export type CostsResponse = SerializesTo<CostsReportContract<Date, Prisma.Decimal>, CostsReportContract>;
 
-type NativeCostsChain = {
-  chainId: string;
-  detailTaskId: string;
-  chainName: string | null;
-  taskCount: number;
-  leadMinutes: number;
-  busyMinutes: number;
-  busyPct: number;
-  repairs: { gateFix: number; refreshConflict: number; reviewFix: number };
-  costUsd: Prisma.Decimal | null;
-  costByRole: Record<string, Prisma.Decimal>;
-  costUnavailableRuns: number;
-  longestGap: { minutes: number; beforeTaskName: string | null };
-};
-
-type NativeCostsReport = CostsReportContract<Date, Prisma.Decimal> & {
-  waste: NativeCostsWaste;
-  chains: NativeCostsChain[];
-};
+type NativeCostsChain = CostsChainContract<Prisma.Decimal>;
 
 const ZERO = new Prisma.Decimal(0);
 
@@ -489,7 +474,7 @@ export const aggregateCosts = (
   days: number,
   timeZone: string,
   chainData: CostsChainData,
-): NativeCostsReport => {
+): CostsResponse => {
   const daily = new Map<string, Map<string, Prisma.Decimal>>(
     windowDays(since, days, timeZone).map((date) => [date, new Map<string, Prisma.Decimal>()]),
   );
@@ -678,7 +663,7 @@ export const readProjectCosts = async (
   days: number,
   timeZone: string,
   now: Date = new Date(),
-): Promise<NativeCostsReport> => {
+): Promise<CostsResponse> => {
   const since = costsWindowStart(now, days, timeZone);
   const until = costsWindowEnd(now, timeZone);
   // Costs is a bounded report, but a matching Chain is not: its first run can

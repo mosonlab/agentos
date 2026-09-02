@@ -24,6 +24,7 @@ import {
 } from "@anneal/db";
 import type { PrismaClient } from "@anneal/db";
 import type { Session as SessionContract } from "@anneal/db/board-contract";
+import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
 
 import {
@@ -176,7 +177,10 @@ const cancelRunInput = z.object({
   parkTask: z.boolean().default(false),
 });
 
-type SessionResponse = SessionContract<Date, Prisma.Decimal>;
+/** The response names both its native projection and the browser contract that
+ * projection must JSON-serialize to, so every `satisfies` below proves the
+ * whole wire claim rather than the native half of it. */
+type SessionResponse = SerializesTo<SessionContract<Date, Prisma.Decimal>, SessionContract>;
 
 export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => void {
   const { db, releaseChainLease, appendFencedActivity } = deps;

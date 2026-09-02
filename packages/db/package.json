@@ -56,6 +56,11 @@
       "development": "./src/wire-contract.ts",
       "import": "./dist/wire-contract.js"
     },
+    "./wire-serialization": {
+      "types": "./src/wire-serialization.ts",
+      "development": "./src/wire-serialization.ts",
+      "import": "./dist/wire-serialization.js"
+    },
     "./claim-contract": {
       "types": "./src/claim-contract.ts",
       "development": "./src/claim-contract.ts",

@@ -13,6 +13,7 @@ import type {
   TriggerDetail as TriggerDetailContract,
   TriggerFire as TriggerFireContract,
 } from "@anneal/db/board-contract";
+import type { SerializesTo } from "@anneal/db/wire-serialization";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -92,9 +93,12 @@ const webhookConfigPatch = z.object({
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
 
-type TriggerResponse = TriggerContract<Date>;
-type TriggerDetailResponse = TriggerDetailContract<Date>;
-type TriggerFireResponse = TriggerFireContract<Date>;
+/** Each response names both its native projection and the browser contract that
+ * projection must JSON-serialize to, so every `satisfies` below proves the
+ * whole wire claim rather than the native half of it. */
+type TriggerResponse = SerializesTo<TriggerContract<Date>, TriggerContract>;
+type TriggerDetailResponse = SerializesTo<TriggerDetailContract<Date>, TriggerDetailContract>;
+type TriggerFireResponse = SerializesTo<TriggerFireContract<Date>, TriggerFireContract>;
 
 export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() => void) => {
   app.use("/hooks/templates/:templateId", bodyLimit({

@@ -43,6 +43,7 @@ import type {
   TaskStartability as TaskStartabilityContract,
   TaskStepOutput as TaskStepOutputContract,
 } from "@anneal/db/board-contract";
+import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
 
 import {
@@ -167,12 +168,17 @@ const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 }).strict();
 
-type RecurringFireResponse = RecurringFireContract<Date>;
-type RunResponse = RunContract<Date, Prisma.Decimal>;
-type TaskActivityResponse = TaskActivityContract<Date>;
-type TaskDetailResponse = TaskDetailContract<Date, Prisma.Decimal>;
-type TaskStartabilityResponse = TaskStartabilityContract;
-type TaskStepOutputResponse = TaskStepOutputContract<Date>;
+/** Each response names both its native projection and the browser contract that
+ * projection must JSON-serialize to, so every `satisfies` below proves the
+ * whole wire claim rather than the native half of it. */
+type ChainResponse = SerializesTo<ChainContract<Date>, ChainContract>;
+type ChainStepResponse = SerializesTo<ChainStepContract<Date>, ChainStepContract>;
+type RecurringFireResponse = SerializesTo<RecurringFireContract<Date>, RecurringFireContract>;
+type RunResponse = SerializesTo<RunContract<Date, Prisma.Decimal>, RunContract>;
+type TaskActivityResponse = SerializesTo<TaskActivityContract<Date>, TaskActivityContract>;
+type TaskDetailResponse = SerializesTo<TaskDetailContract<Date, Prisma.Decimal>, TaskDetailContract>;
+type TaskStartabilityResponse = SerializesTo<TaskStartabilityContract, TaskStartabilityContract>;
+type TaskStepOutputResponse = SerializesTo<TaskStepOutputContract<Date>, TaskStepOutputContract>;
 
 export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   const { db } = deps;
@@ -380,7 +386,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const detail = await readChainDetail(db, taskId);
     if (detail.kind === "not-found") return context.json({ error: "Task not found" }, 404);
     if (detail.kind === "chainless") {
-      return context.json({ chainId: null, total: 0, done: 0, control: null, steps: [] } satisfies ChainContract<Date>);
+      return context.json({ chainId: null, total: 0, done: 0, control: null, steps: [] } satisfies ChainResponse);
     }
     const { admissions, chainId, control, dispatchAfter, firstTaskId, rows: chainRows } = detail;
     const mergeRecovery = mergeRecoveryProjection(detail.recoveryRow);
@@ -423,8 +429,8 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
           ? { taskId: dispatchAfter.id, name: dispatchAfter.name, status: dispatchAfter.status }
           : null,
         mergeRecovery,
-      } satisfies ChainStepContract<Date>)),
-    } satisfies ChainContract<Date>);
+      } satisfies ChainStepResponse)),
+    } satisfies ChainResponse);
   });
   app.post("/tasks/:taskId/chain/hold", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
