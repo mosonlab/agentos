@@ -17,6 +17,8 @@ Follow its Tier 1 checklist when onboarding another Project.
 - `roles/<name>.md` — one file per agent. Frontmatter maps to `Agent` columns and join tables; markdown body maps to `Agent.rolePrompt`.
 - `templates/<template-name>/<NN>-<slug>.md` — one file per canonical workflow step. Frontmatter maps to structural `TaskTemplateStep` fields; markdown body maps to `TaskTemplateStep.prompt`.
 
+An Agent or task template whose name is a canonical name is rewritten to the canonical text on every deploy; a project that needs a different prompt uses a different name.
+
 ## Role frontmatter
 
 ```yaml

@@ -165,6 +165,19 @@ test("an Anneal Run refuses before the repository command with code 76", (t) => 
   assert.equal(existsSync(witness), false);
 });
 
+test("an Anneal Run cannot bypass the reference gate with an environment value", (t) => {
+  const data = fixture(t);
+  const witness = join(data.cwd, "command-ran");
+  const result = run(t, data, `touch "$GATE_FIXTURE_WITNESS"`, ["--master", data.master], {
+    AGENTOS_RUN_ID: "forged-reference-run",
+    AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
+    GATE_FIXTURE_WITNESS: witness,
+  });
+  assert.equal(result.status, 76, result.output);
+  assert.equal(finalLine(result), "GATE NOT RUN: refused inside Anneal run forged-reference-run");
+  assert.equal(existsSync(witness), false);
+});
+
 test("mismatched expect-head and invalid master are FAIL preconditions", (t) => {
   const data = fixture(t);
   const mismatch = run(t, data, "touch should-not-run", ["--expect-head", "0".repeat(40), "--master", data.master]);

@@ -62,7 +62,7 @@ Tests are behavior evidence, not automatic authority. Tests or docs as the only 
 
 For asynchronous, concurrent, ownership, cancellation, retry, or lifecycle code, map owners, states, transitions, terminal outcomes, cleanup, and rollback before proposing consolidation. Mirrored flags are a candidate only when they encode the same fact and no distinct transition or failure boundary depends on them.
 
-Repository-native evidence is the required stack. Knip is not part of this workflow: do not install or configure it, add persistent analysis dependencies, or wire a scanner into CI or the merge gate. A preinstalled scanner may supply leads, but never deletion authority.
+Repository-native evidence is the required stack. Do not install or configure analysis tooling such as Knip, do not add persistent analysis dependencies, or wire a scanner into CI or the merge gate. A preinstalled scanner may supply leads, but never deletion authority.
 
 ## Prefer high-value simplifications
 
@@ -85,11 +85,11 @@ Assign exactly one verdict to every investigated lead:
 
 - `confirmed-internal-delete`: internal removal or folding supported by strong consumer and intent evidence.
 - `public-removal-needs-operator`: exported API, CLI, protocol, wire format, configuration contract, or other externally consumable surface. List it separately; target an approved removal to the next minor release while Anneal is pre-1.0.
-- `defense-or-persisted-separate-task`: persisted data, Prisma schema or migrations, merge authorization or automation, release authority, ownership, locking, workspace containment, security, secrets, or other defense-list behavior. Report the opportunity, but require a separate Sol high task and explicit the operator approval before implementation.
+- `defense-or-persisted-separate-task`: persisted data, Prisma schema or migrations, merge authorization or automation, ownership, locking, workspace containment, security, secrets, or other defense-list behavior. Report the opportunity, but require a separate Sol high task and explicit operator approval before implementation.
 - `intentional-keep`: complexity or duplication justified by a current owner, contract, boundary, or deliberate architecture.
 - `rejected`: the evidence did not prove a net simplification or a production consumer still needs the behavior.
 
-Representative defense paths include `packages/db/prisma/**`, `scripts/merge-gate.sh`, `scripts/gate-worker/**`, release-authority surfaces, merge-executor and merge-evidence paths, and ownership or workspace-containment code. Discover current paths and semantics before classifying; the list is not exhaustive.
+Representative defense paths include `packages/db/prisma/**`, `scripts/merge-gate.sh`, `scripts/gate-worker/**`, merge-executor and merge-evidence paths, and ownership or workspace-containment code. Discover current paths and semantics before classifying; the list is not exhaustive.
 
 ## Report and stop
 

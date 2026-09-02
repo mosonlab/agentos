@@ -10,6 +10,7 @@
     }
   },
   "scripts": {
+    "lint": "bash ../../scripts/host-proof-slot.sh lint @anneal/build-info -- /bin/sh -c 'biome lint . && eslint .'",
     "test": "bash ../../scripts/host-proof-slot.sh test @anneal/build-info -- node --conditions=development --test *.test.mjs"
   }
 }

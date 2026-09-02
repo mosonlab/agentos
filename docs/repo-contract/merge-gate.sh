@@ -44,7 +44,7 @@ stopped() {
 trap 'stopped INT 130' INT
 trap 'stopped TERM 143' TERM
 
-if [ -n "${AGENTOS_RUN_ID:-}" ] && [ "${AGENTOS_RUN_SCOPE_BYPASS:-}" != "regression-verification" ]; then
+if [ -n "${AGENTOS_RUN_ID:-}" ]; then
   not_run "refused inside Anneal run ${AGENTOS_RUN_ID}" "$EXIT_NO_VERDICT"
 fi
 if [ "$EXPECT_HEAD_SET" -eq 1 ]; then

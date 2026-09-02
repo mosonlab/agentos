@@ -166,9 +166,21 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 # needs one writer.
 # shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "${REPO_ROOT}/packages/runner/runtime-tools/gate-worker/lib.sh"
-if [[ -n "${AGENTOS_RUN_ID:-}" && "${AGENTOS_RUN_SCOPE_BYPASS:-}" != "regression-verification" ]]; then
-  gate_verdict_not_run "refused inside Anneal run ${AGENTOS_RUN_ID}"
-  exit "${GATE_EXIT_NO_VERDICT}"
+if [[ -n "${AGENTOS_RUN_ID:-}" ]]; then
+  regression_bypass_authenticated=0
+  if [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
+    # shellcheck source=scripts/run-scope-bypass.sh
+    . "${SCRIPT_DIR}/run-scope-bypass.sh"
+    if agentos_regression_bypass_is_authenticated; then
+      regression_bypass_authenticated=1
+    else
+      agentos_regression_bypass_audit_refusal
+    fi
+  fi
+  if (( regression_bypass_authenticated == 0 )); then
+    gate_verdict_not_run "refused inside Anneal run ${AGENTOS_RUN_ID}"
+    exit "${GATE_EXIT_NO_VERDICT}"
+  fi
 fi
 # What it means to run a step, to run a group of them at once, and what this
 # run's outcome is. It travels with the commit rather than being installed on
