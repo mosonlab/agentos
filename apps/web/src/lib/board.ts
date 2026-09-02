@@ -156,16 +156,8 @@ export type ParkedChain = { chainId: string; name: string; stepCount: number; ta
  * board can keep one small, named projection for both column-head waves. */
 export type HoldableChain = ParkedChain;
 
-/** The API's aggregate activation projection grows a persisted hold object.
- * Keep this narrow compatibility view here while older board payload fixtures
- * (and callers) are still allowed to omit it; a missing value is the same as
- * an unheld chain. */
-type ChainActivationWithHold = ChainAggregate["activation"] & {
-  hold?: { heldLayer: number; heldAt: string; holdReason: string | null } | null;
-};
-
-const chainHold = (aggregate: ChainAggregate): ChainActivationWithHold["hold"] =>
-  (aggregate.activation as ChainActivationWithHold).hold ?? null;
+const chainHold = (aggregate: ChainAggregate): ChainAggregate["activation"]["hold"] =>
+  aggregate.activation.hold;
 
 /**
  * The chains a column would activate, in the order they are read.
@@ -183,20 +175,18 @@ export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): Park
     return [{ chainId, name: chainBindingLabel({ id: chainId, name: chainName }), stepCount, taskId: activation.taskId }];
   });
 
-/** The chains a Doing column can hold in one operator wave. The control route
- * accepts any member task id; the API supplies `activation.taskId` where it has
- * one and the aggregate's detail task is the safe fallback for older payloads.
- * A persisted hold is the source of truth, so a stale card already marked held
- * never gets sent a second request by the column head. */
+/** The chains a Doing column can hold in one operator wave. A persisted hold is
+ * the source of truth, so a stale card already marked held never gets sent a
+ * second request by the column head. */
 export const heldChains = (entries: readonly (BoardEntry | BoardTask)[]): HoldableChain[] =>
   normalizeBoardEntries(entries).flatMap((entry) => {
-    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null) return [];
-    const { activation, chainId, chainName, stepCount, detailTaskId } = entry.aggregate;
+    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null || entry.aggregate.activation.taskId === null) return [];
+    const { activation, chainId, chainName, stepCount } = entry.aggregate;
     return [{
       chainId,
       name: chainBindingLabel({ id: chainId, name: chainName }),
       stepCount,
-      taskId: activation.taskId ?? detailTaskId,
+      taskId: activation.taskId,
     }];
   });
 
