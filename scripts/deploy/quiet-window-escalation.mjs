@@ -1,41 +1,18 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
-
 import { DeployFailure, failureOf, runLocked } from "./quiet-window-lib.mjs";
-import { writeEscalationRecord } from "./quiet-window-escalation-record.mjs";
+import {
+  clearEscalationRecord,
+  ESCALATION_RETRY_CAP,
+  escalationAttempts,
+  escalationIdentity,
+  readEscalationRecord,
+  writeEscalationRecord,
+} from "./quiet-window-escalation-record.mjs";
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
-export const ESCALATION_RETRY_CAP = 5;
-
-/** Escalation attempts are one-based: the first persisted failure is attempt
- * one, and a marker without the field predates the retry policy. An explicitly
- * malformed value is not allowed to bypass the cap. */
-const validAttempts = (record) => {
-  if (!Object.hasOwn(record, "attempts")) return 1;
-  return Number.isSafeInteger(record.attempts) && record.attempts > 0 ? record.attempts : null;
-};
-
-const parseEscalation = (contents) => {
-  try {
-    const value = JSON.parse(contents);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      fail("escalation-state-unreadable", "json-root-is-not-an-object");
-    }
-    return value;
-  } catch (error) {
-    if (error instanceof DeployFailure) throw error;
-    fail("escalation-state-unreadable", "unreadable-or-invalid-json");
-  }
-};
-
-// Notification delivery may atomically rewrite only its delivery flag. Treat
-// every other field as the marker identity so a concurrent watchdog record
-// cannot be admitted and later removed by this retry.
-const escalationIdentity = (record) => JSON.stringify(
-  Object.fromEntries(Object.entries(record).filter(([key]) => key !== "notificationDelivered")),
-);
 
 /** Inspect and possibly clear an escalation while the caller owns the deploy
- * process lock. File comparison prevents a changed marker from being removed. */
+ * process lock. Comparing the marker identity prevents a changed marker from
+ * being removed. */
 export const checkExistingEscalation = async ({
   escalationPath,
   retryEscalationNotification,
@@ -43,16 +20,10 @@ export const checkExistingEscalation = async ({
   retryableReasons,
   retryCap = ESCALATION_RETRY_CAP,
 }) => {
-  if (!existsSync(escalationPath)) return { active: false };
-  let snapshot;
-  try {
-    snapshot = readFileSync(escalationPath, "utf8");
-  } catch {
-    fail("escalation-state-unreadable", "unreadable-or-invalid-json");
-  }
-  const escalation = parseEscalation(snapshot);
-  const attempts = validAttempts(escalation);
-  if (retryableReasons.has(escalation.reason)
+  const marker = readEscalationRecord({ path: escalationPath });
+  if (marker === null) return { active: false };
+  const attempts = escalationAttempts(marker.record);
+  if (retryableReasons.has(marker.record.reason)
     && attempts !== null
     && attempts < retryCap) {
     // A previous escalation may have been persisted while its Inbox delivery
@@ -62,28 +33,21 @@ export const checkExistingEscalation = async ({
     try {
       await retryEscalationNotification();
     } catch {
-      log(`RETRY inbox-notification-pending reason=${String(escalation.reason ?? "unknown-failure")}`);
+      log(`RETRY inbox-notification-pending reason=${String(marker.record.reason ?? "unknown-failure")}`);
     }
-    let currentSnapshot;
-    try {
-      currentSnapshot = readFileSync(escalationPath, "utf8");
-    } catch (error) {
-      if (error?.code === "ENOENT") return { active: false };
-      fail("escalation-state-unreadable", "unreadable-or-invalid-json");
-    }
-    const current = parseEscalation(currentSnapshot);
-    if (escalationIdentity(current) !== escalationIdentity(escalation)) {
+    const current = readEscalationRecord({ path: escalationPath });
+    if (current === null) return { active: false };
+    if (escalationIdentity(current.record) !== escalationIdentity(marker.record)) {
       log(`STOP escalation-active path=${escalationPath}`);
       return { active: true };
     }
-    snapshot = currentSnapshot;
     return {
       active: false,
       retryEscalation: Object.freeze({
-        record: current,
-        snapshot,
-        reason: String(current.reason ?? escalation.reason),
-        attempts: validAttempts(current) ?? attempts,
+        record: current.record,
+        snapshot: current.snapshot,
+        reason: String(current.record.reason ?? marker.record.reason),
+        attempts: escalationAttempts(current.record) ?? attempts,
       }),
     };
   }
@@ -106,14 +70,13 @@ export const selfClearEscalation = async ({
   const attempts = Number.isSafeInteger(retryEscalation?.attempts)
     && retryEscalation.attempts > 0
     ? retryEscalation.attempts
-    : validAttempts(record) ?? 1;
+    : escalationAttempts(record) ?? 1;
   try {
     let snapshot = retryEscalation?.snapshot;
     const readMarker = () => {
       try {
-        return readFileSync(escalationPath, "utf8");
-      } catch (error) {
-        if (error?.code === "ENOENT") return null;
+        return readEscalationRecord({ path: escalationPath })?.snapshot ?? null;
+      } catch {
         fail("escalation-state-changed", "marker-no-longer-readable");
       }
     };
@@ -133,12 +96,7 @@ export const selfClearEscalation = async ({
     if (current !== snapshot) {
       fail("escalation-state-changed", "marker-replaced-before-self-clear");
     }
-    try {
-      unlinkSync(escalationPath);
-    } catch (error) {
-      if (error?.code === "ENOENT") return false;
-      fail("escalation-state-changed", "marker-clear-failed");
-    }
+    if (!clearEscalationRecord({ path: escalationPath })) return false;
     log(`SELF-CLEAR escalation reason=${reason} attempts=${attempts}`);
     return true;
   } catch (error) {
@@ -176,7 +134,7 @@ export const escalationAttemptCount = ({ record, previous, retryableReasons }) =
   return 1;
 };
 
-/** Persist the terminal record through the production atomic writer while
+/** Persist the terminal record through the marker's atomic writer while
  * advancing retry state from the marker it replaces. */
 export const writeEscalationWithAttempts = ({
   escalationPath,
@@ -185,12 +143,11 @@ export const writeEscalationWithAttempts = ({
   now,
 }) => {
   let previous = null;
-  if (existsSync(escalationPath)) {
-    try {
-      previous = JSON.parse(readFileSync(escalationPath, "utf8"));
-    } catch {
-      // An unreadable marker is replaced by a fresh valid first-attempt record.
-    }
+  try {
+    previous = readEscalationRecord({ path: escalationPath })?.record ?? null;
+  } catch (error) {
+    // An unreadable marker is replaced by a fresh valid first-attempt record.
+    if (!(error instanceof DeployFailure)) throw error;
   }
   const attempts = escalationAttemptCount({ record, previous, retryableReasons });
   const persisted = attempts === null ? record : { ...record, attempts };

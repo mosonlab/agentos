@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   checkExistingEscalation,
-  ESCALATION_RETRY_CAP,
   resolveRemoteMainTarget,
 } from "./quiet-window-escalation.mjs";
+import {
+  clearEscalationRecord,
+  ESCALATION_RETRY_CAP,
+  escalationIdentity,
+  markEscalationNotified,
+  readEscalationRecord,
+  writeEscalationRecord,
+} from "./quiet-window-escalation-record.mjs";
 
 const revision = "b".repeat(40);
 const retryableReasons = new Set(["remote-main-unreadable"]);
@@ -141,4 +148,90 @@ test("two startup invocations serialize target reads while leaving self-clear to
   assert.deepEqual(second, { ok: true, skipped: "lock-held" });
   assert.equal(existsSync(state.escalationPath), true);
   assert.equal(state.logs.filter((line) => line.startsWith("SKIP concurrent-run")).length, 1);
+});
+
+const markerFixture = (t) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-escalation-marker-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return join(root, "state", "escalated.json");
+};
+
+test("a created marker is readable, undelivered, and stamped by the injected clock", (t) => {
+  const path = markerFixture(t);
+
+  writeEscalationRecord({
+    path,
+    record: { outcome: "failure", reason: "remote-main-unreadable", detail: "exit-128", attempts: 1 },
+    now: () => new Date("2026-09-02T04:00:00.000Z"),
+  });
+
+  const marker = readEscalationRecord({ path });
+  assert.deepEqual(marker.record, {
+    notificationDelivered: false,
+    outcome: "failure",
+    reason: "remote-main-unreadable",
+    detail: "exit-128",
+    attempts: 1,
+    escalatedAt: "2026-09-02T04:00:00.000Z",
+  });
+  assert.equal(marker.snapshot, readFileSync(path, "utf8"));
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("an absent marker reads as no escalation while an unreadable one fails", (t) => {
+  const path = markerFixture(t);
+
+  assert.equal(readEscalationRecord({ path }), null);
+
+  writeEscalationRecord({ path, record: { reason: "remote-main-unreadable" } });
+  writeFileSync(path, "{not json", { mode: 0o600 });
+  assert.throws(() => readEscalationRecord({ path }), {
+    name: "DeployFailure",
+    reason: "escalation-state-unreadable",
+    detail: "unreadable-or-invalid-json",
+  });
+
+  writeFileSync(path, "[]", { mode: 0o600 });
+  assert.throws(() => readEscalationRecord({ path }), {
+    name: "DeployFailure",
+    reason: "escalation-state-unreadable",
+    detail: "json-root-is-not-an-object",
+  });
+});
+
+test("marking the notification delivered changes no other field of the marker identity", (t) => {
+  const path = markerFixture(t);
+  writeEscalationRecord({
+    path,
+    record: { outcome: "failure", reason: "remote-main-unreadable", detail: "exit-128", attempts: 3 },
+    now: () => new Date("2026-09-02T04:00:00.000Z"),
+  });
+  const before = readEscalationRecord({ path }).record;
+
+  markEscalationNotified({ path });
+
+  const after = readEscalationRecord({ path }).record;
+  assert.equal(after.notificationDelivered, true);
+  assert.equal(escalationIdentity(after), escalationIdentity(before));
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("marking an absent marker fails rather than creating one", (t) => {
+  const path = markerFixture(t);
+
+  assert.throws(() => markEscalationNotified({ path }), {
+    name: "DeployFailure",
+    reason: "escalation-state-unreadable",
+    detail: "marker-absent",
+  });
+  assert.equal(existsSync(path), false);
+});
+
+test("clearing reports whether it removed a marker", (t) => {
+  const path = markerFixture(t);
+  writeEscalationRecord({ path, record: { reason: "remote-main-unreadable" } });
+
+  assert.equal(clearEscalationRecord({ path }), true);
+  assert.equal(existsSync(path), false);
+  assert.equal(clearEscalationRecord({ path }), false);
 });
