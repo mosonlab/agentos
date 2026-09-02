@@ -24,6 +24,12 @@ import {
 
 import { loadAgentSources, type AgentSources, type RoleSource } from "./agent-sources.js";
 import {
+  emptyCanonicalSyncCounters,
+  parseCanonicalSyncSummary,
+  type CanonicalSyncCounters,
+  type CanonicalSyncSummary,
+} from "./canonical-sync-report.js";
+import {
   LEGACY_ALL_PRIOR_OUTPUTS,
   loadAllTemplateStepSources,
   type CanonicalTemplateName,
@@ -69,24 +75,6 @@ const rootNpmCommand = (args: string[]) => {
 };
 
 type FixtureProject = { id: string; slug: string; environmentId: string };
-type ProjectCounters = {
-  templates: number;
-  createdCanonicalTemplates: number;
-  createdAgents: number;
-  createdAgentRepoGrants: number;
-  adoptedAssignees: number;
-  adoptedStepBases: number;
-  adoptedPriorOutputDeclarations: number;
-  adoptedDependencyProvisioning: number;
-  renamedSteps: number;
-  migratedTasks: number;
-  adoptedAgentDefaults: number;
-  runtimeDriftNotices: number;
-  updated: number;
-  preservedTaskAssignments: { archived: number; nonTodo: number; started: number; output: number };
-  updatedSteps: Record<string, Record<string, number>>;
-  updatedRoles: Record<string, number>;
-};
 
 let prisma: PrismaClient;
 let sources: AgentSources;
@@ -97,47 +85,14 @@ let canonicalProject: FixtureProject;
 const canonicalTemplateNames = (): string[] => [...templateSources.keys()];
 const canonicalRoleNames = (): string[] => sources.roles.map(({ name }) => name);
 
-const zeroSteps = (): Record<string, Record<string, number>> => Object.fromEntries(
-  [...templateSources.entries()].map(([name, steps]) => [
-    name,
-    Object.fromEntries(steps.map(({ stepIndex }) => [String(stepIndex), 0])),
-  ]),
-);
-
-const zeroRoles = (): Record<string, number> => Object.fromEntries(
-  sources.roles.map(({ name }) => [name, 0]),
-);
-
-const zeroCounters = (): ProjectCounters => ({
-  templates: 0,
-  createdCanonicalTemplates: 0,
-  createdAgents: 0,
-  createdAgentRepoGrants: 0,
-  adoptedAssignees: 0,
-  adoptedStepBases: 0,
-  adoptedPriorOutputDeclarations: 0,
-  adoptedDependencyProvisioning: 0,
-  renamedSteps: 0,
-  migratedTasks: 0,
-  adoptedAgentDefaults: 0,
-  runtimeDriftNotices: 0,
-  updated: 0,
-  preservedTaskAssignments: { archived: 0, nonTodo: 0, started: 0, output: 0 },
-  updatedSteps: zeroSteps(),
-  updatedRoles: zeroRoles(),
+const zeroCounters = (): CanonicalSyncCounters => emptyCanonicalSyncCounters({
+  templateSteps: templateSources,
+  roleNames: canonicalRoleNames(),
 });
 
-type SyncSummary = {
-  projects: Record<string, ProjectCounters>;
-  refused: Record<string, string>;
-  totals: ProjectCounters;
-};
+const zeroSteps = (): Record<string, Record<string, number>> => zeroCounters().updatedSteps;
 
-const summaryFrom = (output: string): SyncSummary => {
-  const line = output.trim().split("\n").at(-1);
-  assert.ok(line, `sync did not print a summary: ${output}`);
-  return JSON.parse(line) as SyncSummary;
-};
+const zeroRoles = (): Record<string, number> => zeroCounters().updatedRoles;
 
 const createProject = async (slug: string, withEnvironment = true): Promise<FixtureProject> => {
   const project = await prisma.project.create({ data: { name: `A2 ${slug}`, slug } });
@@ -267,7 +222,7 @@ const deleteProject = async (projectId: string): Promise<void> => {
   await prisma.project.delete({ where: { id: projectId } });
 };
 
-const assertSummaryShape = (summary: SyncSummary): void => {
+const assertSummaryShape = (summary: CanonicalSyncSummary): void => {
   const expectedCounters = Object.keys(zeroCounters()).sort();
   for (const counter of [...Object.values(summary.projects), summary.totals]) {
     assert.deepEqual(Object.keys(counter).sort(), expectedCounters);
@@ -427,7 +382,7 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "implementation-plan-executioner" } }), 0);
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "regression-verifier" } }), 0);
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "spec-revalidator" } }), 0);
-  const summary = summaryFrom(synced.output);
+  const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
   assert.equal(summary.projects[project.slug]!.adoptedAgentDefaults, 1);
   assert.equal(summary.projects[project.slug]!.runtimeDriftNotices, 1);
@@ -494,7 +449,7 @@ test("foreign structural drift refuses only that Project and still syncs canonic
     }),
     { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role("default").rolePrompt },
   );
-  const summary = summaryFrom(refused.output);
+  const summary = parseCanonicalSyncSummary(refused.output);
   assert.equal(Object.hasOwn(summary.projects, refusedProject.slug), false);
   assert.match(summary.refused[refusedProject.slug]!, /Agent default/u);
   assert.ok(summary.projects[canonicalProject.slug]);
@@ -661,7 +616,7 @@ test("partial template rows synchronize across Projects, leave missing rows vali
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep7.id } })).name, "Merge authorization");
   assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).assigneeAgentId, transitionAgents.get("regression-verifier"));
   assert.equal(await prisma.taskActivity.count({ where: { taskId: task.id, body: { contains: "Canonical routing reassigned" } } }), 1);
-  const summary = summaryFrom(synced.output);
+  const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
   assert.equal(summary.projects[partial.slug]!.templates, 1);
   assert.equal(summary.projects[empty.slug]!.templates, 0);
@@ -801,7 +756,7 @@ test("full installation fills only the addressed Project's missing inventory and
   assert.equal(await prisma.filesystemGrant.count({ where: { agent: { projectId: project.id } } }), filesystemGrantCountBefore);
   assert.equal(await prisma.agentSkill.count({ where: { agent: { projectId: project.id } } }), skillGrantCountBefore);
   assert.equal(await prisma.agentMCPConnection.count({ where: { agent: { projectId: project.id } } }), mcpGrantCountBefore);
-  const installedSummary = summaryFrom(installed.output);
+  const installedSummary = parseCanonicalSyncSummary(installed.output);
   assertSummaryShape(installedSummary);
   assert.equal(installedSummary.projects[project.slug]!.createdAgents, canonicalRoleNames().length - initialNames.length);
   assert.equal(installedSummary.projects[project.slug]!.createdCanonicalTemplates, 2);
@@ -809,7 +764,7 @@ test("full installation fills only the addressed Project's missing inventory and
 
   const second = command(["tsx", "prisma/sync-canonical-prompts.ts", "--install-full", project.id]);
   assert.equal(second.status, 0, second.output);
-  const secondSummary = summaryFrom(second.output);
+  const secondSummary = parseCanonicalSyncSummary(second.output);
   assertSummaryShape(secondSummary);
   assert.deepEqual(secondSummary.projects[project.slug], {
     ...zeroCounters(),
@@ -1060,9 +1015,9 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
-  const summary = summaryFrom(synced.output);
+  const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
-  const activeCounters: ProjectCounters = {
+  const activeCounters: CanonicalSyncCounters = {
     ...zeroCounters(),
     templates: 2,
     adoptedAgentDefaults: 1,
@@ -1075,8 +1030,8 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     },
     updatedRoles: { ...zeroRoles(), "senior-dev": 1 },
   };
-  const canonicalCounters: ProjectCounters = { ...zeroCounters(), templates: canonicalTemplateNames().length };
-  const totals: ProjectCounters = {
+  const canonicalCounters: CanonicalSyncCounters = { ...zeroCounters(), templates: canonicalTemplateNames().length };
+  const totals: CanonicalSyncCounters = {
     ...activeCounters,
     templates: activeCounters.templates + canonicalCounters.templates,
   };
