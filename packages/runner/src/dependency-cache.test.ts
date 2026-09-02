@@ -13,7 +13,8 @@ import { flock } from "fs-ext";
 import type { RunnerConfig } from "./config.js";
 import * as dependencyCacheModule from "./dependency-cache.js";
 import {
-  DependencyCacheInputMissError, deriveDependencyCacheKey,
+  DEPENDENCY_PROVISIONING_MANIFEST_MISSING, DependencyCacheInputMissError,
+  DependencyProvisioningManifestMissingError, deriveDependencyCacheKey,
   materializeWorkspaceDependencies,
   type DependencyCacheProgress, type DependencyCacheToolchain, type DependencyCommandExecutor,
 } from "./dependency-cache.js";
@@ -337,6 +338,39 @@ test("NONE skips dependency discovery, cache access, toolchain probes, and npm",
     assert.equal(events.filter(({ event }) => event === "elapsed").length, 1);
     assert.deepEqual(fake.calls, []);
     await assert.rejects(lstat(join(root, "cache")), /ENOENT/u, "NONE must not initialize the dependency cache");
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("NPM_CI fails loudly when the root package manifest is missing and audits the miss", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-manifest-missing-"));
+  try {
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const fake = fakeInstallExecutor();
+    const events: DependencyCacheProgress[] = [];
+    const configured = config(root);
+
+    await assert.rejects(
+      materializeWorkspaceDependencies(
+        configured,
+        workspace,
+        "NPM_CI",
+        workspaceEnvironment(configured),
+        { execute: fake.execute },
+        { report: (event) => events.push(event) },
+      ),
+      (error: unknown) => error instanceof DependencyProvisioningManifestMissingError
+        && error.condition === DEPENDENCY_PROVISIONING_MANIFEST_MISSING
+        && error.message === DEPENDENCY_PROVISIONING_MANIFEST_MISSING,
+    );
+    assert.deepEqual(events.filter(({ event }) => event === "miss"), [
+      { event: "miss", condition: DEPENDENCY_PROVISIONING_MANIFEST_MISSING },
+    ]);
+    assert.equal(events.filter(({ event }) => event === "elapsed").length, 1);
+    assert.deepEqual(fake.calls, [], "a missing manifest must not probe npm or install uncached");
+    await assert.rejects(lstat(join(root, "cache")), /ENOENT/u, "a manifest refusal must not initialize the cache");
   } finally {
     await cleanupRoot(root);
   }
