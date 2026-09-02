@@ -26,9 +26,6 @@ in a host window. Read "Everyone", then only the section for your kind.
 - Before changing canonical Agents, roles, or task templates, read
   [`agents/README.md`](agents/README.md); it and the contract files it names own
   canonical defaults.
-- Database bootstrap and the full test-safety rules are in
-  [`CONTRIBUTING.md`](CONTRIBUTING.md); read the applicable section before
-  acting on one of those surfaces.
 
 ## Inside an Anneal run
 
@@ -48,13 +45,12 @@ gate on the gate worker. Never operate on a production or appliance checkout.
   sequencing, and the backlog card lifecycle — is owned by
   [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md);
   qualify dependencies there before every instantiation.
-- `scripts/merge-gate.sh` is the only CI; a merge requires
-  `MERGE GATE: PASS <oid>` for the exact commit being merged. The delivery
-  procedure — gate dispatch, merge lease, pull-request timing, and worktree
-  isolation — is owned by the "Delivering to main" section of
-  [`CONTRIBUTING.md`](CONTRIBUTING.md). Never switch branches or commit feature
-  work in the shared checkout: deliver from an isolated worktree on your own
-  branch, and remove the worktree once merged.
+- Database bootstrap, the testing red lines, and the delivery procedure —
+  gate, gate dispatch, merge lease, pull-request timing, and worktree
+  isolation — are owned by [`CONTRIBUTING.md`](CONTRIBUTING.md); read the
+  applicable section before acting on one of those surfaces. Never switch
+  branches or commit feature work in the shared checkout: deliver from an
+  isolated worktree on your own branch, and remove the worktree once merged.
 - Appliance checkout: before changing files or branches in a checkout named by
   a loaded `com.agentos.*` service, read
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md).
@@ -66,6 +62,10 @@ This file is the routing and guardrail layer: branch-specific detail lives in
 its owning document, with a trigger-first pointer here only when agents must
 discover it. `package.json`, configuration, the directory tree, and `--help`
 output are live authority — never cached here. One authoritative home per rule;
-an obsolete path is removed when its replacement lands.
+an obsolete path is removed when its replacement lands. A runnable command
+literal is an instruction to every reader whose section contains it: the only
+commands written into "Everyone" or "Inside an Anneal run" are ones a run may
+execute; host-workflow commands live in host-facing documents, reached from "In
+a host window" by pointer.
 
 For the operator-facing HTTP route handbook, see [docs/operator-api.md](docs/operator-api.md). A change that adds, removes, or alters an HTTP route updates the handbook in the same change.
