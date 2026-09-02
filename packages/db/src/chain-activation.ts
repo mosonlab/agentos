@@ -733,9 +733,19 @@ const activateChainSuccessorInternal = async (
       } });
       continue;
     }
-    // A REVIEW successor at dispatch time is a stalled chain rather than a
-    // decision anyone made, so it is returned to the queue under a bounded
-    // ceiling instead of being resumed unconditionally.
+    // A REVIEW successor at dispatch time is normally a stalled chain rather
+    // than a decision anyone made, so it is returned to the queue under a
+    // bounded ceiling. An approval-gated REVIEW is the deliberate exception:
+    // replaying predecessor completion must not resume it behind the
+    // operator's back (or try to create a duplicate evidence card).
+    if (successor.status === TaskStatus.REVIEW && successor.approvalGate) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: "Predecessor layer completed; approval gate remains open",
+      } });
+      continue;
+    }
     if (successor.status === TaskStatus.REVIEW && !await resumeParkedSuccessor(tx, current, successor)) continue;
 
     const successorStep = successor.templateStepId

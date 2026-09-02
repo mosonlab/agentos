@@ -6,6 +6,7 @@ import {
 
 import {
   gateFeedsIntegratorStep,
+  parseEvidenceRequest,
   settleIntegratorTerminal,
 } from "./merge-integrator-db.js";
 import {
@@ -126,11 +127,15 @@ export const requireMergeGateAuthorization = async (
   tx: Tx,
   input: { taskId: string; headSha: string; baseSha: string },
 ): Promise<void> => {
-  const candidates = await tx.taskActivity.findMany({
-    where: { taskId: input.taskId, actorType: "operator" },
+  const activities = await tx.taskActivity.findMany({
+    where: { taskId: input.taskId },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { id: true, createdAt: true, actorType: true, metadata: true },
+    select: { id: true, taskId: true, createdAt: true, actorType: true, metadata: true },
   });
+  const gateRequest = activities
+    .map((activity) => parseEvidenceRequest(activity))
+    .find((request) => request?.purpose === "gate");
+  const candidates = activities.filter((activity) => activity.actorType === "operator");
   const decisionIds = candidates.flatMap((candidate) => {
     const parsed = parseAuthorizationMetadata(candidate.metadata);
     return parsed.status === "ok" && parsed.payload.decision.channel !== "mechanical"
@@ -158,6 +163,13 @@ export const requireMergeGateAuthorization = async (
         : "missing operator authorization";
     throw new MergeGateAuthorizationError(
       `Merge gate operator authorization is ${detail} for verified head ${input.headSha} and base ${input.baseSha}`,
+    );
+  }
+  if (!gateRequest
+    || selected.authorization.decision.inboxMessageId !== gateRequest.cardId
+    || selected.authorization.nonce !== gateRequest.nonce) {
+    throw new MergeGateAuthorizationError(
+      `Merge gate operator authorization does not match the current gate evidence request for verified head ${input.headSha} and base ${input.baseSha}`,
     );
   }
   if (selected.authorization.headSha !== input.headSha) {

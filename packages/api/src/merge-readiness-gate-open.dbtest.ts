@@ -3,6 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   advanceTemplateTask,
+  CHAIN_AUTO_RESUME_KIND,
   EVIDENCE_PLACEHOLDER_BODY,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
@@ -187,4 +188,46 @@ test("the evidence worker fills a gated readiness card and the readiness worker 
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
   assert.equal(await db.taskActivity.count({ where: { taskId: chain.readinessTask.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } } }), 0);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 0);
+});
+
+test("replaying predecessor completion does not auto-resume a deliberate merge gate", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "gated-replay",
+    shape: "canonical-compound-readiness",
+    gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await db.$transaction((tx) => advanceTemplateTask(
+    tx,
+    chain.gateTask.id,
+    chain.gateRun.id,
+    null,
+    new Date("2026-08-31T00:00:01.000Z"),
+  ));
+  const initialCard = await db.inboxMessage.findFirstOrThrow({
+    where: { gateTaskId: chain.readinessTask.id, status: "OPEN" },
+  });
+
+  // A duplicate completion notification must not treat an operator's REVIEW
+  // gate as the stalled REVIEW state that chain auto-resume is allowed to
+  // repair. In particular, it must not create a second card or release the
+  // readiness worker while the original decision is still open.
+  await assert.doesNotReject(() => db.$transaction((tx) => advanceTemplateTask(
+    tx,
+    chain.gateTask.id,
+    chain.gateRun.id,
+    null,
+    new Date("2026-08-31T00:00:02.000Z"),
+  )));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
+  assert.deepEqual(
+    await db.inboxMessage.findMany({ where: { gateTaskId: chain.readinessTask.id, status: "OPEN" }, select: { id: true } }),
+    [{ id: initialCard.id }],
+  );
+  assert.equal(await db.taskActivity.count({
+    where: {
+      taskId: chain.readinessTask.id,
+      metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
+    },
+  }), 0);
 });

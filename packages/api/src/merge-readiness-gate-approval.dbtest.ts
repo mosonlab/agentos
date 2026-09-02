@@ -9,6 +9,7 @@ import {
   TaskStatus,
   applyInboxDecisionTx,
   advanceTemplateTask,
+  gateQuestion,
 } from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
@@ -317,6 +318,50 @@ test("head and base drift after approval requeues regression and opens a fresh e
     assert.notEqual(fresh.id, card.id);
     assert.equal((await authorizationRows(chain.readinessTask.id)).length, 1, "old authorization is not reused");
   }
+});
+
+test("an old gate authorization cannot release a fresh gate after the state is re-opened", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-fresh-decision",
+    shape: "canonical-compound-readiness",
+    gatedReadiness: true,
+    prNumbers: [123, 123],
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const firstCard = await fillGate(chain);
+  await approveInbox(firstCard.id, "merge-gate-fresh-decision-first");
+
+  // Re-open the same slot with a different completing run, as the normal
+  // regression-requeue path does after remote drift. Deliberately release the
+  // fresh REVIEW gate below to exercise the worker's fail-closed fence: the
+  // old authorization has the same head/base, but it belongs to the old card.
+  const firstRun = await db.run.findFirstOrThrow({
+    where: { taskId: chain.gateTask.id },
+    orderBy: { runNumber: "asc" },
+  });
+  await db.task.update({ where: { id: chain.readinessTask.id }, data: { status: TaskStatus.REVIEW } });
+  await db.$transaction((tx) => gateQuestion(tx, chain.readinessTask!.id, firstRun.id, null));
+  const freshCard = await db.inboxMessage.findFirstOrThrow({
+    where: { gateTaskId: chain.readinessTask.id, status: "OPEN" },
+    orderBy: { createdAt: "desc" },
+  });
+  assert.notEqual(freshCard.id, firstCard.id);
+  await evidenceTick(db, reader(), new Date("2026-08-31T00:00:04.000Z"));
+  await db.task.update({ where: { id: chain.readinessTask.id }, data: { status: TaskStatus.TODO } });
+
+  const tick = await readinessTick(
+    db,
+    reader(),
+    new Date("2026-08-31T00:00:05.000Z"),
+    5,
+    releaseLease,
+    runWithMergeLease,
+  );
+  assert.equal(tick.stopped, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 0);
+  assert.equal(await authorizationRows(chain.readinessTask.id).then((rows) => rows.length), 1);
 });
 
 test("missing or mismatched operator approval stops a gated readiness settlement closed", async () => {
