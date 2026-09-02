@@ -28,7 +28,7 @@ For each bounded theme:
 - Net deletion or consolidation expected
 - Highest risk classification in the theme
 - Recommended chain: `direct` | `compound` | `separate high-risk investigation`
-- Implementation route: `Luna Max eligible` | `Sol High required`, with the current `AGENTS.md` routing reason
+- Implementation route: `Luna Max eligible` | `Sol High required`, with the routing reason named by `docs/governance/task-routing-v1.md`
 - Why the candidates belong in one independently verifiable change
 
 Keep public-interface candidates and defense or persisted-data candidates visually separate from ordinary internal themes.

@@ -256,16 +256,6 @@
       "reason": "internal plans and generated baseline images require separate review"
     },
     {
-      "glob": "docs/release/private/**",
-      "disposition": "later-release-follow-up",
-      "reason": "the private OSS-F0 release evidence matrix: dependency authority SHAs, named operators, review-ledger state and product-owner decisions. It is evidence *about* the snapshot and names private surfaces, so it is never part of one; `npm run verify:oss-f0 -- authority` refuses if this exclusion is removed"
-    },
-    {
-      "glob": "docs/release/v0.1.0-evidence-template.md",
-      "disposition": "later-release-follow-up",
-      "reason": "the maintainer's own evidence form, filled at Step 10 from a rehearsal on one machine; it is not part of the install path a reader follows"
-    },
-    {
       "glob": "docs/reviews/**",
       "disposition": "later-release-follow-up",
       "reason": "internal review records require a separate publication decision"
@@ -279,16 +269,6 @@
       "glob": "docs/wiki/**",
       "disposition": "later-release-follow-up",
       "reason": "internal implementation wiki material requires separate publication review"
-    },
-    {
-      "glob": "scripts/verify-oss-f0.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "maintainer release-chain harness for the private OSS-F0 cutover; it reads the excluded private evidence matrix and gates a process, not the product"
-    },
-    {
-      "glob": "scripts/verify-oss-f0.test.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "tests for the release-chain harness, published or withheld with it"
     },
     {
       "glob": "scripts/watch-chains.py",

@@ -98,7 +98,7 @@ chain into a workflow for your own team of agents.
 | 8 | Apply review fixes | `senior-dev` | Dispositions every finding from both reviews and applies the adopted ones | Codex | GPT-5.6 Sol · high |
 | 9 | Documentation | `librarian` | Updates internal documentation to match the delivered code | Pi | GPT-5.6 Luna · xhigh |
 | 10 | Regression verification | `regression-verifier` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · xhigh |
-| 11 | Merge readiness | — | Recomputes the head, requires every open review to clear, emits an exact-head authorization | — | mechanical, no model run |
+| 11 | Merge readiness | — | Recomputes the head, requires head-bound regression PASS evidence and a server-side ancestry check, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
 
 </details>

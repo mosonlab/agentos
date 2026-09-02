@@ -55,10 +55,12 @@ metadata; all execution structure and prompt text live in the Markdown
 sources.
 
 The operator procedure for changing a template, including its shape, is
-maintained outside this repository. There is no authoring API for template
-structure: the source here is the record, canonical sync's closed contract
+maintained outside this repository. There is no authoring API for the canonical
+templates: the source here is the record, canonical sync's closed contract
 decides what may replace what, and a change reaches production as an ordinary
-pull request through the merge gate.
+pull request through the merge gate. The template-authoring routes in
+`docs/operator-api.md` rewrite a clone's step graph and refuse a canonical
+template with `template_canonical`.
 
 Exact canonical model and runner defaults live in the role frontmatter; `packages/db/src/agent-sources.ts` is the loader consumed by the seed, canonical sync, onboarding, and contract checks. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort: canonical values apply to new or uncustomized Agents, and an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege — granted only where the role contract requires talking to the human; the role frontmatter is the live roster.
 
@@ -83,8 +85,9 @@ Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities. Keep
 experiments out of `roles/`; create them as local overlays and archive them
 when no longer needed so a seed cannot silently turn an experiment into a
-release default. Implementation-assignee escalation follows the "Work
-directly" section of `AGENTS.md`.
+release default. Implementation-assignee escalation follows the
+implementation-assignee routing rules in
+`docs/governance/task-routing-v1.md`.
 
 Each review and regression role states its own duty in its role file; read
 `roles/` rather than a summary here. Superseded roles and template rows —

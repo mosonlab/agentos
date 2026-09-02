@@ -34,9 +34,11 @@ Your checkout is exclusive to this run and already on the chain branch. Create
 any worktree you need inside your own run workspace (a relative path such as
 `./worktrees/<name>`), never outside it. Commit your work; the platform pushes,
 opens the pull request, and runs the Regression step and merge tail. Never run
-`scripts/merge-gate.sh`, `scripts/gate-worker/*`, or a repository-wide root
-script inside a run: the guard refuses them, and the Regression step runs the
-gate on the gate worker. Never operate on a production or appliance checkout.
+`scripts/merge-gate.sh`, the gate-worker scripts under `scripts/gate-worker/*`
+and `packages/runner/runtime-tools/gate-worker/*`, or a repository-wide root
+script inside a run: the merge gate and the root scripts refuse from inside a
+run, the gate-worker scripts carry no such refusal and rely on this rule alone,
+and the Regression step runs the gate on the gate worker. Never operate on a production or appliance checkout.
 
 ## In a host window
 

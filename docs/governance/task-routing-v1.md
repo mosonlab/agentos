@@ -1,6 +1,8 @@
 # Task Routing Contract v1
 
-Version: 1.8 (2026-09-02: dependency qualification names parallel dispatch as the default, narrows the true-dependency test to code and deploy order, and records that an `afterTaskId` binding is one-way)
+Version: 1.9 (2026-09-02: corrects the basis for serializing two migration-adding chains — the release-candidate pin moves when a migration's timestamp moves the recorded terminal, not on every migration — and realigns the recorded snapshot block with this version)
+
+Previous: 1.8 (2026-09-02: dependency qualification names parallel dispatch as the default, narrows the true-dependency test to code and deploy order, and records that an `afterTaskId` binding is one-way)
 
 Previous: 1.7 (2026-08-27: absorbs the dispatch rules formerly split into `AGENTS.md` — tier selection detail, implementation-assignee routing, and `afterTaskId` mechanics; `AGENTS.md` now carries a pointer only)
 
@@ -85,7 +87,7 @@ Direct has no planning gates. Gate selection is recorded at dispatch; an active 
 Record this block when creating or materially rerouting a chain:
 
 ```text
-Routing Contract: v1.4
+Routing Contract: v1.9
 Tier: Direct
 Implementation Agent: <project-agent-name>
 Critical: no
@@ -104,7 +106,7 @@ A backlog card is a dispatch-ready brief waiting for a decision, not a work item
   1. True dependency — this chain's code reads code the other chain merges, or the other chain must be deployed before this one can be verified: bind with `afterTaskId` and record the basis (`Depends on: <chain> — <what is consumed or why deploy-first>`) in the instantiate description or the card's activity log. A brief that mentions the other chain, shares a document with it, or ships an adjacent feature on the same surface is independent. Binding is one-way: the bound chain's first step refuses a manual start until the predecessor is DONE, and only deleting the bound chain releases it (see the instantiate route in `docs/operator-api.md`).
   2. Heavy overlap — no dependency, but both chains rewrite the same code area: weigh expected refresh-conflict repair cost against serial wall-clock loss; either choice is valid, and a serial choice records its reason the same way.
   3. Independent — dispatch in parallel, no justification needed; the merge tail and the deploy quiet window already serialize delivery.
-  Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list). Serialize unconditionally when both chains add a Prisma migration, whichever tables they touch: every migration bumps `RELEASE_CANDIDATE_MIGRATIONS` in `packages/db/src/release-migrate.ts`, so two concurrent migration-adding chains conflict on merge by construction (7 of the 19 refresh-conflict repairs between 2026-08-24 and 2026-08-31 were exactly those two lines).
+  Serialize an independent pair anyway when the merge would be clean but the semantics unsafe — changes to the same fail-closed enforcement path, behavior coupled across disjoint files (examples, not a closed list). Serialize unconditionally when both chains add a Prisma migration, whichever tables they touch: a migration merged after a release cut updates the `RELEASE_CANDIDATE_MIGRATIONS` pin in `packages/db/src/release-migrate.ts` whenever its timestamp moves the recorded terminal, so two concurrent migration-adding chains land on the same two lines (7 of the 19 refresh-conflict repairs between 2026-08-24 and 2026-08-31 were exactly those two lines).
 - Archive the card at the moment of instantiation. The archived card remains recoverable in the Archived view; re-dispatching its work is a new decision, not a revival of the card.
 
 ## Board column semantics

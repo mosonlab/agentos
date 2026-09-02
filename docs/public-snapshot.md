@@ -42,18 +42,19 @@ node scripts/public-snapshot-scan.mjs --list-included
 `docs/` is closed by default. Every path that opens part of it is named one at a
 time rather than by a directory glob. The public set includes this page, the
 named release documents and fixtures, the public governance/demo pages, and
-three test-coupled runbooks: gate worker, merge executor, and quiet-window
-auto-deploy. The merge-executor authority is
+four test-coupled runbooks: add a project, gate worker, merge executor, and
+quiet-window auto-deploy. The merge-executor authority is
 `docs/runbooks/merge-executor.md`; its repeatable wizard and deterministic test
 are separately named source entries in `public-snapshot.json`. Other operator
 runbooks are maintained outside this repository.
 
 The exact list is the point. A directory glob would publish anything dropped into
-`docs/release/` afterwards, which is how `docs/release/v0.1.0-evidence-template.md`
-would have gone out: it is the maintainer's own evidence form, filled at one
-release-candidate commit, and not a document a reader follows. It is excluded by
-name, with a reason, so the scan classifies it as held back rather than as a file
-nobody looked at. A scanner test derives the open docs set from the manifest and
+`docs/release/` afterwards. The internal record classes a maintainer checkout does
+carry — `docs/reviews/**`, `docs/briefs/**`, `docs/merge-notes/**` and
+`docs/plans/**`, the same directories the frozen-record guard in
+`scripts/check-frozen-docs.sh` protects — are excluded by name, each with a
+reason, so a file dropped into one is classified as held back rather than as a
+file nobody looked at. A scanner test derives the open docs set from the manifest and
 asserts that every entry names one literal file rather than a glob.
 
 These pages were written as public artifacts rather than moved from internal

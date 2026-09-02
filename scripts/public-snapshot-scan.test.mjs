@@ -428,11 +428,6 @@ test("the docs surface is closed and named one file at a time", () => {
   for (const glob of docs) {
     assert.doesNotMatch(glob, /[*?[\]{}]/u, `${glob} must name one literal file`);
   }
-  assert.equal(
-    manifest.exclude.some((entry) => entry.glob === "docs/release/v0.1.0-evidence-template.md"),
-    true,
-    "the evidence template is the maintainer's form, excluded by name with a reason",
-  );
 });
 
 test("the six release documents the inventory names are published, and tracked", () => {

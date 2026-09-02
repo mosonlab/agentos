@@ -48,8 +48,9 @@ README pair. `public-snapshot.json` includes each file and records its reviewed
 
 All three captures come from this repository's own application, are owned by
 Moson Lab, and are covered by `LICENSE`. The scanner classifies a file as binary
-when its first 8 KiB contain a NUL byte or more than 10% control characters and
-reports every binary in scope; no other binary file is published.
+when its bytes contain a NUL or more than 10% control characters, reading the
+whole blob rather than a leading window, and reports every binary in scope; no
+other binary file is published.
 
 To re-derive it from a clean checkout:
 
@@ -77,16 +78,16 @@ and this repository's own.
 | --- | --- | --- | --- |
 | `apps/web/src/components/ui/badge.tsx` | `text/tsx` | `e90e4f11a2f327581bc110f65512529a89c84ee87c019b1e2bfd5ec5fe9cce44` | 2748 |
 | `apps/web/src/components/ui/button.tsx` | `text/tsx` | `2849e10eb34dc1779a406738f493284776c4e7c392ed3c0e5a00954f1948872a` | 4609 |
-| `apps/web/src/components/ui/card.tsx` | `text/tsx` | `87c7dfedb4345b7f33d86d69368c6ce85d98cdb5982a752f78cea0b5520fe7ae` | 1493 |
+| `apps/web/src/components/ui/card.tsx` | `text/tsx` | `7c12cc68d14fa593bb04b36827b79c1c854f6a8f65046224f388e45b9957e426` | 352 |
 | `apps/web/src/components/ui/checkbox.tsx` | `text/tsx` | `809d10a00a9cd4c719cf6b0a3b7c6bf488f9d14213eae3ca6258084f47f4ee13` | 1113 |
-| `apps/web/src/components/ui/dialog.tsx` | `text/tsx` | `19bb7d89fbb3c228d57b2b99cef05a0b21bda2ea58455d4d2f4f0b1a442c727b` | 3823 |
-| `apps/web/src/components/ui/dropdown-menu.tsx` | `text/tsx` | `30c55f744d6480e77eb2a13f028b2b8285b1e0ea0cd907849fe9158fc68ba8aa` | 6801 |
+| `apps/web/src/components/ui/dialog.tsx` | `text/tsx` | `583efb35c353b5828955b52fd305bcdba700909f3dbd42f46aef96c8a6837190` | 3160 |
+| `apps/web/src/components/ui/dropdown-menu.tsx` | `text/tsx` | `762ee3774aa90023e68fb71c37c552ac640e97f13f02c1c6a811bf22ca47bfc1` | 2712 |
 | `apps/web/src/components/ui/hover-card.tsx` | `text/tsx` | `645289e91ae03c96dc6854af77b231d2d54758963a4f184ce4f8c15d0e3938db` | 1624 |
 | `apps/web/src/components/ui/input.tsx` | `text/tsx` | `c97f29222b2dff9cc77225747fc036d8fc75446c31fe46278eff712f8b2eb032` | 2194 |
 | `apps/web/src/components/ui/progress.tsx` | `text/tsx` | `b1eff95e96636a7040c1c5a160fb030ecc50e8a948d60c6691278905173ccf6b` | 720 |
 | `apps/web/src/components/ui/select.tsx` | `text/tsx` | `50b8ee0ec789e167e23993907529b01e22e1ba2b41ee57ada18f989777c2c827` | 1784 |
 | `apps/web/src/components/ui/switch.tsx` | `text/tsx` | `15d1beaf5575318d9f1065f94036fc3c3464f967f8e6b19a1356c63b0269762a` | 1238 |
-| `apps/web/src/components/ui/table.tsx` | `text/tsx` | `932dce4e8a81167636a36ee4d02477d9820cbbe338774ddea7334abbedb0feeb` | 3424 |
+| `apps/web/src/components/ui/table.tsx` | `text/tsx` | `6f22198c03f94b6bbc36e98cc3b09f87e34b4bfc0a7e5a871a6331d30e748f34` | 2876 |
 | `apps/web/src/components/ui/textarea.tsx` | `text/tsx` | `592fb0c774fec5943cf21bfd462129737dce2788ce024c77f3fe30d22697118f` | 1304 |
 
 These files import `@radix-ui/*`, `class-variance-authority`, `clsx`,

@@ -66,8 +66,8 @@ archives for the release, but they are not an install medium. They carry no
 just its files:
 
 - `npm run snapshot:scan`, the check that the published file set is the one the
-  manifest allows, runs `git ls-files` and `git rev-parse HEAD`. Outside a
-  repository it does not degrade; it fails.
+  manifest allows, resolves `git rev-parse HEAD` and reads that commit's tree
+  with `git ls-tree`. Outside a repository it does not degrade; it fails.
 - The migration preflight in step 6 checks its release attestation against the
   checkout's history when there is one, and falls back to a content-only check
   when there is not. An unpacked archive silently gets the weaker of the two.

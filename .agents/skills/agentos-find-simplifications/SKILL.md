@@ -103,7 +103,7 @@ Read [references/candidate-report.md](references/candidate-report.md) before wri
 
 The report must account for every surveyed area, including areas with no accepted candidate, and must distinguish exclusions from completed coverage. Prefer a few high-confidence themes over a long list of guesses.
 
-For each theme, read the current `AGENTS.md` `Dispatching chains` rules and recommend a chain type plus one implementation route: `Luna Max eligible` or `Sol High required`. State the exact routing reason. Treat this as a post-approval handoff recommendation, not implementation authority. A Luna subagent dispatched outside the required Anneal chain does not inherit the chain's permission to implement.
+For each theme, read the current tier-selection and implementation-assignee rules in `docs/governance/task-routing-v1.md` and recommend a chain type plus one implementation route: `Luna Max eligible` or `Sol High required`. State the exact routing reason. Treat this as a post-approval handoff recommendation, not implementation authority. A Luna subagent dispatched outside the required Anneal chain does not inherit the chain's permission to implement.
 
 End with only the consequential decisions the operator must make:
 

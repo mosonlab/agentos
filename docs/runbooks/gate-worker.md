@@ -77,7 +77,8 @@ is a guess about a ratio nothing maintains, and on the four-core fallback worker
 the guess starved the small wave to a single lane and 201 seconds. One pool
 balances itself and migrates the template once.
 
-Everything here is `scripts/gate-worker/`:
+`provision.sh` is in `scripts/gate-worker/`; the other five ship from
+`packages/runner/runtime-tools/gate-worker/`:
 
 | File | Runs on | What it does |
 | --- | --- | --- |

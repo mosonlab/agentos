@@ -35,8 +35,10 @@ tunnel or a reverse proxy in front of it does not add one.
 - `npm run setup:local` generates every value: distinct random operator and
   runner tokens, a session-cookie secret, a base64-encoded 32-byte encryption
   key, and one database password. It writes `.env` at mode `0600`, prints a
-  class rather than a value, and refuses to overwrite or repair an existing
-  file.
+  class rather than a value, and refuses to overwrite an existing file. Its
+  `--upgrade` mode repairs one in place instead: it preserves every existing
+  assignment, adds only the missing locally generated secret keys, and rotates
+  nothing.
 - Stored secrets are encrypted with AES-256-GCM. Neither plaintext nor
   ciphertext appears in the API's secret representations.
 - Per-run credentials are written mode `0600` inside the throwaway run
