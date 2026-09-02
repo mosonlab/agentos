@@ -87,7 +87,10 @@ export const seedBasicChain = async (
   const controlSeed: ControlSeed | null = options.control === undefined
     ? {
       state: ChainControlState.HELD,
-      heldLayer: layers[0] ?? null,
+      // The fixture's default control represents a hold taken at the current
+      // frontier. Derive the highest layer already admitted by the seeded
+      // statuses; an all-TODO chain is held before its first layer (0).
+      heldLayer: Math.max(0, ...statuses.flatMap((status, index) => status === TaskStatus.TODO ? [] : [layers[index] ?? 0])),
       holdGeneration: 1,
       holdRequestId: "hold-fixture",
       holdReason: "fixture hold",

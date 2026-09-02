@@ -385,19 +385,19 @@ test("the authority is scoped by project and accepted request ids are unique per
   assert.equal(await db.chainControlEvent.count({ where: { chainControlId: rightControl.id } }), 1);
 });
 
-test("Hold records the next non-DONE layer even when no Run is active", async () => {
+test("Hold records the highest admitted layer even when the next layer has no Run", async () => {
   const chain = await seedChain();
   await db.task.update({ where: { id: chain.first.id }, data: { status: TaskStatus.DONE } });
   assert.equal(await db.run.count(), 0);
 
   const held = await holdDirect(chain, chain.first.id, "hold-without-run");
   assert.equal(held.status, 200);
-  assert.equal(held.body.control.heldLayer, 2);
+  assert.equal(held.body.control.heldLayer, 1);
   const control = await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: {
     projectId: chain.project.id,
     chainId: chain.chainId,
   } } });
-  assert.equal(control.heldLayer, 2);
+  assert.equal(control.heldLayer, 1);
   assert.equal(control.state, ChainControlState.HELD);
 });
 
