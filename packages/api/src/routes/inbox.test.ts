@@ -67,27 +67,27 @@ test("Inbox read models expose the server-owned free-text capability", async () 
   await withTokens(async () => {
     const messages = [
       {
-        id: "waiting-choice", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE",
+        id: "waiting-choice", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE", choices: null,
         gateTaskId: null, replyToMessageId: null, dedupeKey: "question:choice",
         session: { taskId: "task-1", waitingOnMessageId: "waiting-choice" },
       },
       {
-        id: "open-gate", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE",
+        id: "open-gate", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE", choices: null,
         gateTaskId: "gate-task", replyToMessageId: null, dedupeKey: "gate:1",
         session: { taskId: "producing-task", waitingOnMessageId: null },
       },
       {
-        id: "stop-question", status: "OPEN", from: "AGENT", kind: "TEXT",
+        id: "stop-question", status: "OPEN", from: "AGENT", kind: "TEXT", choices: null,
         gateTaskId: null, replyToMessageId: null, dedupeKey: "merge-stop:stop-1",
         session: { taskId: "task-1", waitingOnMessageId: "stop-question" },
       },
       {
-        id: "answered", status: "ANSWERED", from: "AGENT", kind: "TEXT",
+        id: "answered", status: "ANSWERED", from: "AGENT", kind: "TEXT", choices: null,
         gateTaskId: null, replyToMessageId: null, dedupeKey: "question:answered",
         session: { taskId: "task-1", waitingOnMessageId: "answered" },
       },
       {
-        id: "detached", status: "OPEN", from: "AGENT", kind: "TEXT",
+        id: "detached", status: "OPEN", from: "AGENT", kind: "TEXT", choices: null,
         gateTaskId: null, replyToMessageId: null, dedupeKey: "notification:1", session: null,
       },
     ];
@@ -403,6 +403,44 @@ test("archived successor errors from gate approve and reject map to named 409 re
       const response = await gateResponse(decision);
       assert.equal(response.status, 409);
       assert.match(String((await response.json() as { error: string }).error), /Archived Gate Agent.*archived/);
+    }
+  });
+});
+
+/* `InboxMessage.choices` is a `Json` column, and the console contract declares
+ * it as a choice list. The route is where that becomes true: a row no writer in
+ * this repository could have produced is reported rather than rendered as a
+ * card with no answers on it. */
+test("a card's choice list is narrowed out of its Json column, and a malformed one is refused", async () => {
+  await withTokens(async () => {
+    const card = (choices: unknown) => ({
+      id: "message-1", status: "OPEN", from: "AGENT", kind: "MULTIPLE_CHOICE",
+      gateTaskId: null, replyToMessageId: null, dedupeKey: "question:1", choices,
+      session: { taskId: "task-1" },
+    });
+    const listWith = async (choices: unknown): Promise<Response> => {
+      const database = {
+        inboxMessage: { findMany: async () => [card(choices)] },
+        session: { findMany: async () => [] },
+      } as unknown as PrismaClient;
+      return await createApp(database).request("/inbox/messages", {
+        headers: { Authorization: "Bearer operator-unit-token" },
+      });
+    };
+
+    const answered = await listWith([{ id: "approve", label: "Approve" }]);
+    assert.equal(answered.status, 200);
+    assert.deepEqual(
+      (await answered.json() as Array<{ choices: unknown }>)[0]?.choices,
+      [{ id: "approve", label: "Approve" }],
+    );
+
+    const empty = await listWith(null);
+    assert.equal(empty.status, 200);
+    assert.equal((await empty.json() as Array<{ choices: unknown }>)[0]?.choices, null);
+
+    for (const malformed of [{ approve: "Approve" }, [{ id: 1, label: "Approve" }], ["approve"]]) {
+      assert.equal((await listWith(malformed)).status, 500, JSON.stringify(malformed));
     }
   });
 });

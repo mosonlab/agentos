@@ -31,6 +31,11 @@
       "development": "./src/board-contract.ts",
       "import": "./dist/board-contract.js"
     },
+    "./console-contract": {
+      "types": "./src/console-contract.ts",
+      "development": "./src/console-contract.ts",
+      "import": "./dist/console-contract.js"
+    },
     "./chain-order": {
       "types": "./src/chain-order.ts",
       "development": "./src/chain-order.ts",
