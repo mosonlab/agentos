@@ -85,6 +85,11 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     "Operator notes:",
     ...claim.operatorNotes.map((note) => `- ${note}`),
   ] : []),
+  ...(claim.operatorFeedback ? [
+    "",
+    "Operator feedback on previous attempt:",
+    `- ${claim.operatorFeedback}`,
+  ] : []),
   ...(claim.previousRunHandoff ? [
     "",
     "Platform-pinned previous-run handoff:",

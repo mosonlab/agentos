@@ -2,6 +2,8 @@ import {
   canonicalClosedReviewArtifactSchema as closedReviewArtifact,
   canonicalFixedImplementationArtifactSchema as fixedImplementationArtifact,
   canonicalOutputSchema,
+  APPROVAL_GATE_FEEDBACK_METADATA_FIELD,
+  APPROVAL_GATE_NOTE_METADATA_FIELD,
   canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
   Prisma,
@@ -49,7 +51,7 @@ export type PreviousRunHandoff = {
   previousRunId: string;
   status: RunStatus;
   failureReason: string | null;
-  retryReason: "approval-rejected-without-feedback" | "automatic-retry" | "operator-retry" | "retry";
+  retryReason: "approval-rejected-without-feedback" | "approval-rejected-with-feedback" | "automatic-retry" | "operator-retry" | "retry";
   output: {
     runId: string;
     kind: string;
@@ -598,9 +600,12 @@ export const previousRunHandoffForClaim = async (
       taskId: input.taskId,
       actorType: "operator",
       createdAt: { gte: previous.endedAt ?? previous.updatedAt },
-      body: { in: ["Approval gate rejected; step queued again", `Run ${input.runNumber} queued by operator retry`] },
+      OR: [
+        { body: { startsWith: "Approval gate rejected; step queued again" } },
+        { body: `Run ${input.runNumber} queued by operator retry` },
+      ],
     },
-    select: { body: true },
+    select: { body: true, metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
   const refusalActivity = await tx.taskActivity.findFirst({
@@ -636,11 +641,18 @@ export const previousRunHandoffForClaim = async (
     && refusalMetadata?.kind === "canonicalTaskOutput.refusal"
     && refusalMetadata.runId === previous.id
     && (refusalMetadata.reason === recomputedRefusal || acceptedImmutableOutputHadLegacyOwnershipRefusal);
-  const retryReason = activity?.body === "Approval gate rejected; step queued again"
-    ? "approval-rejected-without-feedback"
-    : activity?.body === `Run ${input.runNumber} queued by operator retry`
-      ? "operator-retry"
-      : previous.failureReason ? "automatic-retry" : "retry";
+  const activityMetadata = activity?.metadata && typeof activity.metadata === "object" && !Array.isArray(activity.metadata)
+    ? activity.metadata as Record<string, unknown>
+    : null;
+  const gateFeedbackNote = activityMetadata?.[APPROVAL_GATE_NOTE_METADATA_FIELD];
+  const hasGateFeedback = activityMetadata?.[APPROVAL_GATE_FEEDBACK_METADATA_FIELD] === true
+    && typeof gateFeedbackNote === "string"
+    && gateFeedbackNote.length > 0;
+  const rejectedByGate = activity?.body.startsWith("Approval gate rejected; step queued again") === true;
+  const operatorRetry = activity?.body === `Run ${input.runNumber} queued by operator retry`;
+  const retryReason = rejectedByGate
+    ? hasGateFeedback ? "approval-rejected-with-feedback" : "approval-rejected-without-feedback"
+    : operatorRetry ? "operator-retry" : previous.failureReason ? "automatic-retry" : "retry";
   return {
     schemaVersion: 1,
     previousRunId: previous.id,
