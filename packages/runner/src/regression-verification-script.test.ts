@@ -514,7 +514,7 @@ exit 76
   assert.ok(printedTail.split("\n").length <= 60, printedTail);
   assert.ok(Buffer.byteLength(printedTail, "utf8") <= 4000, printedTail);
   assert.doesNotMatch(printedTail, /\uFFFD/u);
-  const [truncatedFirstLine] = printedTail.split("\n");
+  const truncatedFirstLine = printedTail.split("\n")[0] ?? "";
   assert.match(truncatedFirstLine, /^noise-\d+ 界+$/u);
   assert.ok(Buffer.byteLength(truncatedFirstLine, "utf8") < 99, truncatedFirstLine);
   assert.match(printedTail, /\n\nstub distinguishing output after blank line!\n/u);
