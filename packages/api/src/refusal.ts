@@ -11,27 +11,49 @@ import {
   type WorkflowRefusalReason,
 } from "@anneal/db";
 
+import type { RefusalStatus } from "./refusal-status.js";
 import {
   isTemplateInstantiationRefusal,
+  templateInstantiationRefusalStatus,
   type TemplateInstantiationRefusalCode,
 } from "./template-errors.js";
 import {
   isTemplateAuthoringRefusal,
+  templateAuthoringRefusalStatus,
   type TemplateAuthoringRefusalCode,
 } from "./template-authoring-errors.js";
 
-export type RefusalReason =
-  | WorkflowRefusalReason
-  | "forbidden"
-  | "not-found"
-  | "compound-implementation-assignee"
-  | "archived-assignee"
-  | "archived-task"
-  | "chain-held"
-  | "integrator-stopped"
-  | "pinned-base-commit"
-  | "merge-evidence"
-  | "merge-confirmation";
+/**
+ * The status family for each reason `@anneal/db` declares in
+ * `WorkflowRefusalReason`. It is declared here rather than beside the union
+ * because the HTTP contract belongs to this workspace; `satisfies` makes a
+ * reason added there fail to compile until it has a family.
+ */
+const workflowRefusalStatus = {
+  "invalid-request": 400,
+  conflict: 409,
+  "inbox-question-not-found": 409,
+  "approval-gate-decision-invalid": 409,
+  "inbox-choice-mismatch": 409,
+  "inbox-run-not-waiting": 409,
+  "approval-gate-rejection-target-missing": 409,
+} as const satisfies Record<WorkflowRefusalReason, RefusalStatus>;
+
+/** The refusals this module declares, each with its status family. */
+const localRefusalStatus = {
+  forbidden: 403,
+  "not-found": 404,
+  "compound-implementation-assignee": 409,
+  "archived-assignee": 409,
+  "archived-task": 409,
+  "chain-held": 409,
+  "integrator-stopped": 409,
+  "pinned-base-commit": 409,
+  "merge-evidence": 409,
+  "merge-confirmation": 409,
+} as const satisfies Record<string, RefusalStatus>;
+
+export type RefusalReason = WorkflowRefusalReason | keyof typeof localRefusalStatus;
 
 export type RefusalValue =
   | string
@@ -51,105 +73,27 @@ export type Refusal = {
 
 export type RefusalResponse = {
   body: Readonly<{ error: string } & Record<string, RefusalValue>>;
-  status: 400 | 403 | 404 | 409 | 422;
+  status: RefusalStatus;
 };
 
-export const refusalResponse = (refusal: Refusal): RefusalResponse => {
-  let status: RefusalResponse["status"];
-  switch (refusal.reason) {
-    case "after_task_already_bound":
-    case "after_task_already_done":
-    case "after_task_archived":
-    case "after_task_not_chained":
-    case "after_task_not_found":
-    case "after_task_not_terminal":
-    case "dispatch_conflicts_with_auto_start":
-    case "gates_merge_step_absent":
-    case "gates_spec_step_absent":
-    case "implementation_route_agent_renamed":
-    case "implementation_route_conflicts_with_step_override":
-    case "implementation_route_malformed":
-    case "repo_not_found":
-    case "step_override_agent_archived":
-    case "step_override_agent_not_found":
-    case "step_override_compound_implementation":
-    case "step_override_integrator_binding":
-    case "step_override_invalid_key":
-    case "step_override_missing_repo_grant":
-    case "step_override_step_not_agent":
-    case "step_override_too_many":
-    case "step_override_unknown_step":
-    case "template_agent_repo_grant_missing":
-    case "template_base_reference_missing":
-    case "template_base_reference_not_earlier":
-    case "template_branch_invalid":
-    case "template_compound_implementation_assignee_invalid":
-    case "template_first_step_not_agent":
-    case "template_has_no_instantiable_steps":
-    case "template_has_no_steps":
-    case "template_integrator_binding_invalid":
-    case "template_not_found":
-    case "template_step_agent_archived":
-    case "template_step_agent_missing":
-    case "template_variables_missing":
-    case "template_variables_unknown":
-    case "invalid-request":
-      status = 400;
-      break;
-    case "template_not_in_project":
-      status = 404;
-      break;
-    case "forbidden":
-      status = 403;
-      break;
-    case "not-found":
-      status = 404;
-      break;
-    case "conflict":
-    case "compound-implementation-assignee":
-    case "archived-assignee":
-    case "archived-task":
-    case "chain-held":
-    case "integrator-stopped":
-    case "pinned-base-commit":
-    case "merge-evidence":
-    case "merge-confirmation":
-    case "inbox-question-not-found":
-    case "approval-gate-decision-invalid":
-    case "inbox-choice-mismatch":
-    case "inbox-run-not-waiting":
-    case "approval-gate-rejection-target-missing":
-    case "template_name_taken":
-    case "template_name_reserved":
-    case "template_canonical":
-    case "template_in_use":
-      status = 409;
-      break;
-    case "graph_empty":
-    case "first_step_not_agent":
-    case "first_layer_not_single":
-    case "layer_order_invalid":
-    case "base_step_invalid":
-    case "prior_kind_unproduced":
-    case "output_kind_duplicate":
-    case "prior_kind_duplicate":
-    case "approval_gate_in_parallel_layer":
-    case "assignee_invalid":
-    case "integrator_binding_invalid":
-      status = 422;
-      break;
-    default: {
-      const unhandled: never = refusal.reason;
-      return unhandled;
-    }
-  }
-  return {
-    body: refusal.detail === undefined
-      ? { error: refusal.message }
-      : { error: refusal.message, ...refusal.detail },
-    status,
-  };
+/**
+ * Every refusal code that can reach a route, resolved to the family declared
+ * beside it. The annotation is the exhaustiveness check: a code without a
+ * declared family fails to compile here.
+ */
+const statusByReason: Record<Refusal["reason"], RefusalStatus> = {
+  ...workflowRefusalStatus,
+  ...localRefusalStatus,
+  ...templateInstantiationRefusalStatus,
+  ...templateAuthoringRefusalStatus,
 };
+
+export const refusalResponse = (refusal: Refusal): RefusalResponse => ({
+  body: refusal.detail === undefined
+    ? { error: refusal.message }
+    : { error: refusal.message, ...refusal.detail },
+  status: statusByReason[refusal.reason],
+});
 
 export const refusalFor = (error: unknown): Refusal | null => {
   if (isTemplateAuthoringRefusal(error)) {
