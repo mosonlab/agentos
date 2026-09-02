@@ -171,7 +171,7 @@ export const executeClaim = async (
   let sessionConfigLease: SessionConfigLease | null = null;
   let budgetReason: string | null = null;
   let terminalFailureReason: string | null = null;
-  let terminalFailureRetryable = true;
+  let taskOutputStatusCheckFailed = false;
   let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
@@ -538,30 +538,25 @@ export const executeClaim = async (
       && claim.task.templateStep?.outputKind
       && runLease.held
       && terminalFailureReason === null) {
-      const requiredOutputKind = claim.task.templateStep.outputKind;
+      const declaredOutputKind = claim.task.templateStep.outputKind;
       let outputStatus: SessionTaskOutputStatus | null = null;
-      let outputStatusError: string | null = null;
+      let statusFailure: string | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
       } catch (error: unknown) {
-        outputStatusError = errorMessage(error);
+        statusFailure = errorMessage(error);
+      }
+      if (outputStatus === null) {
+        statusFailure ??= "Anneal API returned no task output status";
+      }
+      if (statusFailure !== null) {
         sink({
           source: "RUNNER",
           type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
-          payload: { message: outputStatusError },
+          payload: { message: statusFailure },
         });
-      }
-      if (outputStatus === null) {
-        const message = outputStatusError ?? "Anneal API returned no task output status";
-        if (outputStatusError === null) {
-          sink({
-            source: "RUNNER",
-            type: "TASK_OUTPUT_REMEDIATION_CHECK_FAILED",
-            payload: { message },
-          });
-        }
-        terminalFailureRetryable = false;
-        terminalFailureReason = `Task output status check failed for required '${requiredOutputKind}' output for Run ${claim.run.id}: ${message}`;
+        taskOutputStatusCheckFailed = true;
+        terminalFailureReason = `Task output status could not be established for a step declaring output kind '${declaredOutputKind}' for Run ${claim.run.id}: ${statusFailure}`;
       }
       if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
         const outputKind = outputStatus.outputKind;
@@ -880,7 +875,7 @@ export const executeClaim = async (
       : budgetReason
         ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
         : terminalFailureReason
-          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: terminalFailureRetryable }
+          ? { failureClass: "PROTOCOL_ERROR" as const, retryable: !taskOutputStatusCheckFailed }
           : primaryDelivery?.failureClass
             ? { failureClass: primaryDelivery.failureClass, retryable: false }
             : adapter.classifyError(evidence);
@@ -940,11 +935,16 @@ export const executeClaim = async (
         ),
       } : {}),
       output: outputTail(evidence),
-      // Only a failure carries one: the envelope is the account of what went
-      // wrong, and `executionSucceeded` decides which side of the agent/plumbing
-      // line it went wrong on. A run whose agent finished and whose push failed
-      // is a DELIVER failure, and the API must not charge the task for it.
-      ...(succeeded ? {} : {
+      // Ordinarily only a failure carries one: the envelope is the account of
+      // what went wrong, and `executionSucceeded` decides which side of the
+      // agent/plumbing line it went wrong on. A run whose agent finished and
+      // whose push failed is a DELIVER failure, and the API must not charge the
+      // task for it.
+      // The v1 envelope cannot distinguish this terminal control-plane
+      // protocol failure from retryable provider protocol drift. Omitting it
+      // only for this case lets the API honor the explicit non-retryable
+      // completion verdict instead of reclassifying the clean provider exit.
+      ...(succeeded || taskOutputStatusCheckFailed ? {} : {
         failureEnvelope: completionEnvelope({
           executionSucceeded,
           evidence: completionEvidence,

@@ -860,9 +860,10 @@ test("a failed output status read is diagnosed without attempting remediation", 
     assert.equal(completion?.terminalSuccess, false);
     assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
     assert.equal(completion?.retryable, false);
+    assert.equal(completion?.failureEnvelope, undefined);
     assert.match(
       String(completion?.failureReason),
-      /required 'implementation' output.*status unavailable/u,
+      /status could not be established for a step declaring output kind 'implementation'.*status unavailable/u,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1060,6 +1061,23 @@ test("the original Run budget continues through remediation", async () => {
           // Run's budget anchor while it awaits remediation. Advancing it here
           // is the explicit test signal that the original budget has expired.
           firstHandle.startedAt.setTime(0);
+          const finish = finishRemediation;
+          setImmediate(() => {
+            if (budgetFired || finishRemediation !== finish || !finish) return;
+            remediationSetupState = "budget signal delivered but no kill arrived";
+            finishRemediation = null;
+            finish({
+              exitCode: 1,
+              signal: null,
+              terminalEventSeen: false,
+              terminalSuccess: false,
+              terminationReason: null,
+              finalOutput: null,
+              providerError: remediationSetupState,
+              stdout: "",
+              stderr: remediationSetupState,
+            });
+          });
         }
         return {
           processAlive: true,
@@ -1075,6 +1093,7 @@ test("the original Run budget continues through remediation", async () => {
         budgetFired = reason.includes("walltime budget exceeded");
         remediationSetupState = budgetFired ? "budget-fired" : `stopped-before-budget: ${reason}`;
         handle.terminationReason = reason;
+        finishRemediation = null;
         finish({
           exitCode: null,
           signal: "SIGTERM",
