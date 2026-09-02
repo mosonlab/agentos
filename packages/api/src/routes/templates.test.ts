@@ -69,3 +69,17 @@ test("template instantiate route rejects blank variables and invalid Git refs be
     }
   });
 });
+
+test("template instantiate route rejects unknown gate keys before database access", async () => {
+  await withTokens(async () => {
+    const database = new Proxy({}, {
+      get: () => { throw new Error("database must not be read for invalid gates"); },
+    }) as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ repoId: "repo-1", variables: {}, gates: { spec: true, unexpected: false } }),
+    });
+    assert.equal(response.status, 400);
+  });
+});

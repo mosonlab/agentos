@@ -64,6 +64,8 @@ export const refusalResponse = (refusal: Refusal): RefusalResponse => {
     case "after_task_not_found":
     case "after_task_not_terminal":
     case "dispatch_conflicts_with_auto_start":
+    case "gates_merge_step_absent":
+    case "gates_spec_step_absent":
     case "implementation_route_agent_renamed":
     case "implementation_route_conflicts_with_step_override":
     case "implementation_route_malformed":

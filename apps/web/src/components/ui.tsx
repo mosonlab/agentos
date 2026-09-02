@@ -275,15 +275,17 @@ export const Tabs = <T extends string>({ options, value, onChange }: {
  *  box-shadow on `.toggle`, so it renders today — while the thumb takes
  *  `shadow-none`, because a hidden element's `shadow-lg` has never rendered and
  *  un-hiding it must not introduce one. */
-export const Toggle = ({ on, onChange, disabled, label }: {
+export const Toggle = ({ on, onChange, disabled, label, title }: {
   on: boolean;
   onChange?: (next: boolean) => void;
   disabled?: boolean;
   label: string;
+  title?: string;
 }): ReactNode => (
   <Switch
     checked={on}
     aria-label={label}
+    title={title}
     className={cn(
       "relative h-[21px] w-[38px] flex-none rounded-full border-[3px] border-transparent p-0 duration-[140ms]",
       "data-[state=unchecked]:bg-[color:var(--toggle-background)] data-[state=checked]:bg-primary",

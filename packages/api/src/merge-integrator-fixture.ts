@@ -50,6 +50,12 @@ export const seedIntegratorChain = async (
     prNumbers?: number[];
     withIntegrator?: boolean;
     shape?: IntegratorFixtureShape;
+    /**
+     * Materialise the server-owned readiness step as a gate waiting for the
+     * regression predecessor. This is deliberately opt-in: the existing
+     * readiness shapes model a tail that has already reached readiness.
+     */
+    gatedReadiness?: boolean;
   } = {},
 ) => {
   const label = options.label ?? "mi";
@@ -68,6 +74,10 @@ export const seedIntegratorChain = async (
   const templateName = direct
     ? (legacy ? LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME : DIRECT_INTEGRATOR_TEMPLATE_NAME)
     : (legacy ? LEGACY_INTEGRATOR_TEMPLATE_NAME : INTEGRATOR_TEMPLATE_NAME);
+  const gatedReadiness = options.gatedReadiness ?? false;
+  if (gatedReadiness && !realReadinessTail) {
+    throw new Error(`gatedReadiness requires a real readiness-tail shape; ${shape} has no readiness slot`);
+  }
   const project = await db.project.create({ data: { name: label, slug: unique(label) } });
   const environment = await db.environment.create({
     data: { projectId: project.id, name: "local", allowedHosts: [] },
@@ -106,7 +116,7 @@ export const seedIntegratorChain = async (
   } });
   const readinessStep = realReadinessTail ? await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id, stepIndex: integratorIndex - 1, layer: integratorIndex - 1, name: "Merge readiness",
-    assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "server-owned", approvalGate: false,
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "server-owned", approvalGate: gatedReadiness,
     outputKind: "merge-authorization", opensPullRequest: false,
   } }) : null;
   const integratorStep = options.withIntegrator === false ? null : await db.taskTemplateStep.create({ data: {
@@ -125,8 +135,9 @@ export const seedIntegratorChain = async (
   const readinessTask = readinessStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: readinessStep.id,
     name: "Merge readiness", description: "server-owned", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: agent.id, approvalGate: false, opensPullRequest: false,
-    chainId, chainIndex: readinessStep.stepIndex, chainLayer: readinessStep.layer, status: TaskStatus.DONE, targetBranch: "master",
+    assigneeAgentId: agent.id, approvalGate: gatedReadiness, opensPullRequest: false,
+    chainId, chainIndex: readinessStep.stepIndex, chainLayer: readinessStep.layer,
+    status: gatedReadiness ? TaskStatus.TODO : TaskStatus.DONE, targetBranch: "master",
   } }) : null;
   const integratorTask = integratorStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: integratorStep.id,
