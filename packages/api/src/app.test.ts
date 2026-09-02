@@ -13,7 +13,6 @@ import {
 import { createApp, partitionArchivable } from "./test-app.js";
 import { createApp as createLiveApp } from "./app.js";
 import { LOOPBACK_BROWSER_ORIGINS } from "./local-origin.js";
-import { completionSucceeded, externalFailure } from "./execution.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import {
   boardDatabase,
@@ -107,26 +106,6 @@ test("heavy polled collection routes validate unchanged payloads and change vali
       assert.notEqual(changed.headers.get("ETag"), firstTag, path);
     }
   });
-});
-
-test("completion requires both exit zero and a successful terminal event", () => {
-  assert.equal(completionSucceeded({
-    exitCode: 0,
-    signal: null,
-    terminalEventSeen: false,
-    terminalSuccess: false,
-    terminationReason: null,
-  }), false);
-});
-
-test("only environment failures are external, so agent failures still spend budget", () => {
-  assert.equal(externalFailure({ succeeded: true, signal: "SIGTERM" }), false);
-  assert.equal(externalFailure({ succeeded: false, signal: "SIGKILL" }), true);
-  assert.equal(externalFailure({ succeeded: false, failureClass: "AUTH_REQUIRED" }), true);
-  assert.equal(externalFailure({ succeeded: false, reported: true }), true);
-  // A budget kill signals the process on purpose; that attempt was really spent.
-  assert.equal(externalFailure({ succeeded: false, signal: "SIGTERM", failureClass: "CANCELLED_OR_TIMED_OUT" }), false);
-  assert.equal(externalFailure({ succeeded: false, failureClass: "TASK_FAILED" }), false);
 });
 
 test("startup reconciliation spares a run whose runner is still heartbeating", async () => {

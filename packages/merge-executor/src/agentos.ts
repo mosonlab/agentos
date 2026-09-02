@@ -183,10 +183,15 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
       body: {
         runnerId: config.runnerId,
         fencingToken: claimed.fencingToken,
+        outcome: completion.succeeded
+          ? { case: "succeeded" }
+          // A crashed executor persisted no merge result, which is exactly the
+          // output its step requires; the control plane may attempt it again.
+          : {
+            case: "required-output-unsatisfied",
+            reason: completion.failureReason ?? "merge executor crashed",
+          },
         exitCode: completion.succeeded ? 0 : 1,
-        terminalEventSeen: true,
-        terminalSuccess: completion.succeeded,
-        ...(completion.succeeded ? {} : { failureClass: "PROTOCOL_ERROR", failureReason: completion.failureReason ?? "merge executor crashed", retryable: true }),
         pushStatus: "NOT_REQUESTED",
         cleanupStatus: "SUCCEEDED",
         workspaceRetained: false,

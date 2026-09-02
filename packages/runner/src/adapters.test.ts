@@ -7,8 +7,10 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
+import { agentExecutionSucceeded } from "@anneal/db";
+
 import {
-  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
+  adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
   PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
@@ -1462,8 +1464,8 @@ test("exit code zero without a provider terminal event is failure", () => {
     stdout: "",
     stderr: "",
   };
-  assert.equal(adapterExecutionSucceeded(evidence), false);
-  assert.equal(adapterExecutionSucceeded({ ...evidence, terminalEventSeen: true, terminalSuccess: true }), true);
+  assert.equal(agentExecutionSucceeded(evidence), false);
+  assert.equal(agentExecutionSucceeded({ ...evidence, terminalEventSeen: true, terminalSuccess: true }), true);
 });
 
 const evidenceFromState = (state: AdapterState, exitCode = 0): ExitEvidence => ({
@@ -1497,7 +1499,7 @@ test("Codex treats recovered reconnect evidence as provisional after terminal co
   assert.equal(evidence.terminalEventSeen, true);
   assert.equal(evidence.terminalSuccess, true);
   assert.equal(evidence.providerError, "Reconnecting... 2/5");
-  assert.equal(adapterExecutionSucceeded(evidence), true);
+  assert.equal(agentExecutionSucceeded(evidence), true);
 });
 
 test("Codex emits an observed-child signal only after a spawn returns a child thread", () => {
@@ -1556,7 +1558,7 @@ test("Codex reconnect progress stays provisional when the counter carries its ca
   const evidence = evidenceFromState(state);
 
   assert.equal(evidence.terminalSuccess, true);
-  assert.equal(adapterExecutionSucceeded(evidence), true);
+  assert.equal(agentExecutionSucceeded(evidence), true);
 });
 
 test("Codex latches a real provider error that only resembles reconnect progress", () => {
@@ -1570,7 +1572,7 @@ test("Codex latches a real provider error that only resembles reconnect progress
   for (const message of cases) {
     const state = parseCodexTranscript([{ type: "error", message }, { type: "turn.completed" }]);
     assert.equal(state.terminalSuccess, false, message);
-    assert.equal(adapterExecutionSucceeded(evidenceFromState(state)), false, message);
+    assert.equal(agentExecutionSucceeded(evidenceFromState(state)), false, message);
   }
 });
 
@@ -1581,7 +1583,7 @@ test("Codex preserves reconnect evidence when the stream ends before completion"
 
   assert.equal(evidence.terminalEventSeen, false);
   assert.equal(evidence.terminalSuccess, false);
-  assert.equal(adapterExecutionSucceeded(evidence), false);
+  assert.equal(agentExecutionSucceeded(evidence), false);
   assert.equal(failureReasonFromEvidence(evidence), reconnectMessage);
 });
 
@@ -1597,7 +1599,7 @@ test("PI terminal success follows the final provider attempt after an internal r
   assert.equal(evidence.terminalSuccess, true);
   assert.equal(evidence.providerError, null);
   assert.equal(evidence.finalOutput, "final PASS");
-  assert.equal(adapterExecutionSucceeded(evidence), true);
+  assert.equal(agentExecutionSucceeded(evidence), true);
 });
 
 test("PI exposes the exhausted provider error instead of a generic protocol failure", () => {

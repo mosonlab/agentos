@@ -3,11 +3,11 @@ import {
   type ClaimantClass,
   ACTIVE_RUN_STATUSES,
   advanceTemplateTask,
+  budgetGates,
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
   CleanupStatus,
   executionModeFor,
-  FAILURE_ENVELOPE_VERSION,
   FailureClass,
   failurePhases,
   gateQuestion,
@@ -29,6 +29,8 @@ import {
   readMarkers,
   recordIntegratorStop,
   runBudgetCeiling,
+  type RunOutcome,
+  runOutcomeVerdict,
   RunStatus,
   stepRole,
   TaskStatus,
@@ -44,9 +46,6 @@ import {
 } from "./canonical-task-output.js";
 import {
   classifyEnvelope,
-  completionSucceeded,
-  externalFailure,
-  failureIsRetryable,
   jsonValue,
   retryDelayMs,
 } from "./execution.js";
@@ -69,31 +68,76 @@ import { lockTask, lockTaskMutationRows } from "./task-write.js";
 
 export const worktreeContainmentViolationsInput = z.array(z.string().min(1).max(4096)).max(5000);
 
-// Envelopes are dispatched on `version` before any version's field schema is
-// applied. Only `version` itself is required to parse, and everything else is
-// carried through untouched.
+// Mirrors packages/db/src/failure-envelope.ts, which is the canonical shape,
+// and packages/runner/src/envelope.ts, which builds it. This schema is the seam
+// that catches drift between the two.
 //
-// Validating v1's shape first would have made the fallback a lie: a v2 runner
-// that adds a phase or a failure class would be rejected at the schema, and its
-// completion — a terminal write that cannot simply be retried — would 400
-// instead of degrading to the legacy fields. The version is the only thing this
-// API can read from an envelope it does not know.
-const versionedEnvelopeInput = z.object({
+// Every field is defaulted rather than required wherever a default is
+// unambiguous, and the free-text limits are 16x what the runner truncates to:
+// a rejected completion is not a rejected envelope, it is a run that never
+// records a terminal state and is later reconciled as LOST.
+const failureEnvelopeInput = z.object({
   version: z.number().int().positive(),
-}).catchall(z.unknown());
+  phase: z.enum(failurePhases),
+  runnerClass: z.nativeEnum(FailureClass).nullable().default(null),
+  exitCode: z.number().int().nullable().default(null),
+  signal: z.string().max(64).nullable().default(null),
+  terminationReason: z.string().max(4000).nullable().default(null),
+  terminalEventSeen: z.boolean().default(false),
+  terminalSuccess: z.boolean().default(false),
+  agentExited: z.boolean().default(false),
+  providerError: z.string().max(64_000).nullable().default(null),
+  stderrSummary: z.string().max(64_000).nullable().default(null),
+  stdoutSummary: z.string().max(64_000).nullable().default(null),
+  timedOut: z.boolean().default(false),
+  transient: z.boolean().default(false),
+  timeoutMs: z.number().int().nonnegative().nullable().default(null),
+});
+
+/**
+ * What the Run ended as, decided once by the runner.
+ *
+ * The wire used to carry fragments of this verdict —
+ * `terminalEventSeen`/`terminalSuccess` for the control plane to re-run the
+ * runner's own success predicate on, plus `failureClass`, `retryable`,
+ * `externalFailure` and `failureReason` for it to then ignore whenever an
+ * envelope was present. One named case replaces all seven, and
+ * `runOutcomeVerdict` is the only reader.
+ */
+const runOutcomeInput: z.ZodType<RunOutcome> = z.discriminatedUnion("case", [
+  z.object({ case: z.literal("succeeded") }),
+  z.object({ case: z.literal("regression-mechanically-settled") }),
+  z.object({ case: z.literal("delivered-then-disconnected") }),
+  z.object({
+    case: z.literal("budget-exhausted"),
+    gate: z.enum(budgetGates),
+    reason: failureReasonText(FAILURE_REASON_LIMIT),
+  }),
+  z.object({
+    case: z.literal("required-output-unsatisfied"),
+    reason: failureReasonText(FAILURE_REASON_LIMIT),
+  }),
+  z.object({
+    case: z.literal("terminal-protocol-failure"),
+    reason: failureReasonText(FAILURE_REASON_LIMIT),
+  }),
+  z.object({
+    case: z.literal("provider-failure"),
+    reason: failureReasonText(FAILURE_REASON_LIMIT),
+    envelope: failureEnvelopeInput,
+  }),
+]);
 
 export const completionInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: z.string().min(1),
+  outcome: runOutcomeInput,
+  // Exit facts, kept as the process reported them. Nothing here is read as a
+  // verdict: that is what `outcome` is for, and re-deriving success from these
+  // is what made the runner rewrite them.
   exitCode: z.number().int().nullable(),
   signal: z.string().nullable().optional(),
-  terminalEventSeen: z.boolean(),
-  terminalSuccess: z.boolean(),
   terminationReason: z.string().nullable().optional(),
-  failureClass: z.nativeEnum(FailureClass).optional(),
-  failureReason: failureReasonText(FAILURE_REASON_LIMIT).optional(),
-  retryable: z.boolean().optional(),
-  externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
   // The ref the runner actually handed to `git push`, which is not always
   // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
@@ -116,43 +160,12 @@ export const completionInput = z.object({
   // runner observed no worktree outside its run workspace; it never changes
   // terminal outcome classification.
   worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
-  failureEnvelope: versionedEnvelopeInput.optional(),
 });
 
 export type CompletionInput = z.infer<typeof completionInput>;
 
 const isDocumentationStep = (step: { outputKind: string } | null | undefined): boolean =>
   Boolean(step && stepRole(step) === "documentation");
-
-// Mirrors packages/db/src/failure-envelope.ts, which is the canonical shape,
-// and packages/runner/src/envelope.ts, which is the runner's hand-kept copy of
-// it. This schema is the seam that catches drift between the two, and it is
-// applied only to envelopes that announce themselves as v1.
-//
-// Every field is defaulted rather than required wherever a default is
-// unambiguous, and the free-text limits are 16x what the runner truncates to.
-// That is deliberate: a rejected completion is not a rejected envelope, it is a
-// run that never records a terminal state and is later reconciled as LOST. The
-// envelope must never be the reason a completion fails — which is also why the
-// route treats a v1 envelope that fails this schema as no envelope at all rather
-// than as a bad request.
-const failureEnvelopeV1Input = z.object({
-  version: z.number().int().positive(),
-  phase: z.enum(failurePhases),
-  runnerClass: z.nativeEnum(FailureClass).nullable().default(null),
-  exitCode: z.number().int().nullable().default(null),
-  signal: z.string().max(64).nullable().default(null),
-  terminationReason: z.string().max(4000).nullable().default(null),
-  terminalEventSeen: z.boolean().default(false),
-  terminalSuccess: z.boolean().default(false),
-  agentExited: z.boolean().default(false),
-  providerError: z.string().max(64_000).nullable().default(null),
-  stderrSummary: z.string().max(64_000).nullable().default(null),
-  stdoutSummary: z.string().max(64_000).nullable().default(null),
-  timedOut: z.boolean().default(false),
-  transient: z.boolean().default(false),
-  timeoutMs: z.number().int().nonnegative().nullable().default(null),
-});
 
 /**
  * Merge-tail repair markers point at an existing canonical task rather than a
@@ -427,13 +440,9 @@ export const completeRun = async (
     });
     if (!run?.session) return null;
     const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
-    const reportedSuccess = completionSucceeded({
-      exitCode: body.exitCode,
-      signal: body.signal ?? null,
-      terminalEventSeen: body.terminalEventSeen,
-      terminalSuccess: body.terminalSuccess,
-      terminationReason: body.terminationReason ?? null,
-    });
+    // The runner decided this once, at the end of its own run, from facts it
+    // alone held. Nothing below re-derives it from the exit evidence.
+    const reported = runOutcomeVerdict(body.outcome, classifyEnvelope);
     // Mechanical output is the executor's durable account of whether it
     // merged. It may be committed immediately before a transport failure in
     // the separate completion request, so inspect it before classifying that
@@ -450,7 +459,7 @@ export const completeRun = async (
       && persistedMechanicalOutput.kind === INTEGRATOR_OUTPUT_KIND
       ? parseMergeResult(persistedMechanicalOutput)
       : null;
-    const authoritativeMechanicalOutcome = !reportedSuccess
+    const authoritativeMechanicalOutcome = !reported.succeeded
       && persistedMechanicalOutcome
       && persistedMechanicalOutcome.outcome !== "malformed"
       ? persistedMechanicalOutcome
@@ -482,7 +491,7 @@ export const completeRun = async (
     // Ordinary canonical Steps retain their prior retry-ceiling semantics.
     const evidenceRequirement = completionEvidenceRequirement(
       run,
-      reportedSuccess,
+      reported.succeeded,
       body.headSha ?? null,
     );
     const outputTaskId = evidenceRequirement ? run.taskId : null;
@@ -491,7 +500,7 @@ export const completeRun = async (
       : null;
     const missingOutputReason = completionEvidenceRefusal(
       run,
-      reportedSuccess,
+      reported.succeeded,
       body.headSha ?? null,
       persistedOutput,
     );
@@ -499,45 +508,28 @@ export const completeRun = async (
     // when the later completion envelope says exit 1/PROTOCOL_ERROR. This is
     // deliberately narrower than trusting the envelope: malformed, foreign,
     // non-mechanical, or absent output remains a failure.
-    const succeeded = (reportedSuccess || authoritativeMechanicalOutcome !== null) && !missingOutputReason;
-    // The runner is on the untrusted side of this boundary. When it reports a
-    // structured envelope, the API classifies from the facts in it and
-    // ignores the runner's own `failureClass`/`retryable`/`externalFailure`
-    // — before this, `body.retryable ?? …` meant the runner always won and
-    // the retry whitelist in execution.ts was dead code, so a stdout-derived
-    // misverdict of RATE_LIMITED spent the task's whole run budget on retries
-    // that could not succeed.
-    //
-    // A runner too old to send an envelope, or one sending a version this API
-    // does not know, keeps the previous behaviour verbatim. That is the point
-    // of the version check: an unrecognised shape must not be half-read.
-    const known = body.failureEnvelope?.version === FAILURE_ENVELOPE_VERSION
-      ? failureEnvelopeV1Input.safeParse(body.failureEnvelope)
-      : null;
-    const envelope = !succeeded && known?.success ? known.data : null;
-    const verdict = envelope ? classifyEnvelope(envelope) : null;
+    const succeeded = (reported.succeeded || authoritativeMechanicalOutcome !== null) && !missingOutputReason;
+    // The runner is on the untrusted side of this seam. It names *what the Run
+    // ended as*; the class, the retry decision and the budget decision are read
+    // off that name here — and for a provider failure, off the facts on its
+    // envelope. The runner's own guess at a class never wins: before this,
+    // `body.retryable ?? …` meant it always did, and the retry whitelist in
+    // execution.ts was dead code, so a stdout-derived misverdict of
+    // RATE_LIMITED spent the task's whole run budget on retries that could not
+    // succeed.
     const failureClass = succeeded
       ? null
       : missingOutputReason
         ? FailureClass.PROTOCOL_ERROR
-        : verdict?.failureClass ?? body.failureClass ?? (body.exitCode === 0 ? FailureClass.PROTOCOL_ERROR : FailureClass.TASK_FAILED);
-    // The runner reported a success, so it reported no verdict about this
-    // failure: the control plane owns both answers here rather than reading
-    // fields a successful completion never filled in.
-    const retryable = missingOutputReason
-      ? true
-      : failureClass
-        ? verdict?.retryable ?? body.retryable ?? failureIsRetryable(failureClass)
-        : false;
-    const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
+        : reported.failureClass;
+    // `failureClass` is null exactly when the completion succeeded, so these
+    // two follow it rather than re-testing `succeeded`.
+    const retryable = missingOutputReason ? true : failureClass !== null && reported.retryable;
     // An external failure buys the task one more attempt rather than spending
     // one. A missing deliverable is the agent's own attempt, not the
     // environment's, so it spends the attempt like any other failed one.
-    const external = missingOutputReason
-      ? false
-      : verdict
-        ? verdict.externalFailure
-        : externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
+    const external = missingOutputReason ? false : failureClass !== null && reported.externalFailure;
+    const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
     // A negative Regression verdict is durable control-plane evidence even
     // when the provider stream drops before its terminal event. Qualify this
     // exception at the same canonical boundary as an ordinary successful
@@ -560,9 +552,9 @@ export const completeRun = async (
     // Preserve a failed completion's diagnostic reason even when a definitive
     // mechanical result overrides its protocol classification. Ordinary
     // reported success still carries no failure reason.
-    const failureReason = succeeded && reportedSuccess
+    const failureReason = succeeded && reported.succeeded
       ? null
-      : missingOutputReason ?? body.failureReason ?? "Execution failed";
+      : missingOutputReason ?? reported.failureReason ?? "Execution failed";
     // §D-P5 / MF-5. For the integrator step that compensation is switched off
     // entirely, so the answer transaction is the *only* writer of a ceiling
     // above the task's original. Otherwise a run authorized once could buy
@@ -677,7 +669,10 @@ export const completeRun = async (
     const completionTaskStatus = run.task?.status;
     const terminalStatus = succeeded
       ? RunStatus.SUCCEEDED
-      : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
+      // Which budget gate fired is a named case on the outcome now. It used to
+      // be recovered by looking for "walltime" or "stall" inside prose the
+      // runner had composed out of that same gate name.
+      : reported.timedOut
         ? RunStatus.TIMED_OUT
         : RunStatus.FAILED;
     const terminal = await terminalizeRun(tx, {
@@ -700,7 +695,7 @@ export const completeRun = async (
         // Stored whether or not this API understood it: an envelope from a
         // future runner is still the evidence of what happened, and the
         // reason a verdict can be re-decided later instead of re-run.
-        failureEnvelope: reportedSuccess || !body.failureEnvelope ? Prisma.DbNull : jsonValue(body.failureEnvelope),
+        failureEnvelope: body.outcome.case === "provider-failure" ? jsonValue(body.outcome.envelope) : Prisma.DbNull,
         // Kept on the run that produced it, whatever became of that run. The
         // same tail used to reach this route on every completion and be read
         // only by the step-output synthesis below, which runs for successful
@@ -965,7 +960,7 @@ export const completeRun = async (
               ? `Maximum ${budgetCeiling} runs reached`
               : retryRefusal
                 ? `Automatic retry refused: ${retryRefusal.message}`
-                : body.failureReason ?? "Execution failed"),
+                : reported.failureReason ?? "Execution failed"),
           },
         });
       }
@@ -981,7 +976,7 @@ export const completeRun = async (
             : retryCreated ? `Run ${run.runNumber} failed; retry queued`
               : retryRefusal ? `Run ${run.runNumber} failed; automatic retry refused: ${retryRefusal.message}`
               : `Run ${run.runNumber} failed; task moved to review`,
-          metadata: jsonValue({ exitCode: body.exitCode, terminalEventSeen: body.terminalEventSeen, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl }),
+          metadata: jsonValue({ exitCode: body.exitCode, outcome: body.outcome.case, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl }),
         },
       });
       if (budgetExhausted) {

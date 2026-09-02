@@ -152,28 +152,27 @@ const executeEnvelope = {
 } as const;
 
 /** The rest of the completion payload exactly as `runner.ts`'s catch sends it:
- *  the runner's own advisory verdict rides along and must lose to the API's. */
+ *  the runner's own advisory verdict rides inside the envelope as `runnerClass`
+ *  and must lose to the API's. */
 const completeRun = (
   runId: string,
   identity: { runnerId: string; fencingToken: string },
-  envelope: FailureEnvelope | null,
+  envelope: FailureEnvelope,
   extra: Record<string, unknown> = {},
 ) => withTokens(() => createApp(db).request(`/runner/runs/${runId}/complete`, {
   method: "POST",
   headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
   body: JSON.stringify({
     ...identity,
-    exitCode: envelope?.exitCode ?? null,
+    outcome: {
+      case: "provider-failure",
+      reason: envelope.stderrSummary ?? "clone failed",
+      envelope,
+    },
+    exitCode: envelope.exitCode,
     signal: null,
-    terminalEventSeen: envelope?.terminalEventSeen ?? false,
-    terminalSuccess: false,
-    terminationReason: envelope?.terminationReason ?? null,
-    failureClass: envelope?.runnerClass ?? "TASK_FAILED",
-    failureReason: envelope?.stderrSummary ?? "clone failed",
-    retryable: false,
-    externalFailure: true,
+    terminationReason: envelope.terminationReason,
     cleanupStatus: "SUCCEEDED",
-    ...(envelope ? { failureEnvelope: envelope } : {}),
     ...extra,
   }),
 }));
@@ -341,17 +340,4 @@ test("raising a task's budget is honoured without waiting for a refund", async (
   const queued = await db.run.findFirstOrThrow({ where: { taskId: context.task.id, runNumber: started.body.runNumber } });
   assert.equal(queued.maxRunsPerTask, 3);
   assert.equal(queued.budgetGrants, 0, "a raised budget is a bigger budget, not a grant");
-});
-
-test("a runner too old to send an envelope keeps the contract it was written against", async () => {
-  const context = await seedTask("legacy-runner", 2);
-  const { run, runnerId, fencingToken } = await makeRunnable(context, 1);
-  // No envelope, and the pre-#111 flag the runner set by hand at its own
-  // provisioning catch. The API still takes the runner's word here; that path
-  // is deliberately untouched.
-  assert.equal((await completeRun(run.id, { runnerId, fencingToken }, null, { externalFailure: true, retryable: true, failureClass: "TRANSIENT_PROVIDER" })).status, 200);
-  const closed = await db.run.findUniqueOrThrow({ where: { id: run.id } });
-  assert.equal(closed.maxRunsPerTask, 3);
-  assert.equal(closed.failureClass, "TRANSIENT_PROVIDER");
-  assert.equal(await db.run.count({ where: { taskId: context.task.id, runNumber: 2 } }), 1);
 });

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { FAILURE_ENVELOPE_VERSION, FailureClass, type FailureEnvelope } from "@anneal/db";
 
-import { classifyEnvelope, externalFailure, failureIsRetryable } from "./execution.js";
+import { classifyEnvelope, failureIsRetryable } from "./execution.js";
 
 const envelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelope => ({
   version: FAILURE_ENVELOPE_VERSION,
@@ -114,14 +114,8 @@ test("a killed-by-budget run stays BUDGET_EXCEEDED despite the signal", () => {
     terminationReason: "walltime: exceeded 120 minutes",
   }));
   assert.equal(verdict.failureClass, FailureClass.BUDGET_EXCEEDED);
+  // Raising the ceiling for exceeding the ceiling is an unbounded loop.
   assert.equal(verdict.externalFailure, false);
-  // The pre-envelope helper reached the opposite answer off the same facts: an
-  // unexpected signal, so external, so the ceiling goes up by one — for a run
-  // killed precisely because it had run out of ceiling.
-  assert.equal(
-    externalFailure({ succeeded: false, signal: "SIGKILL", reported: false, failureClass: FailureClass.BUDGET_EXCEEDED }),
-    true,
-  );
 });
 
 test("a failure outside the agent's own phase does not spend the task's budget", () => {

@@ -1,6 +1,6 @@
 import { statfs } from "node:fs/promises";
 
-import type { CleanupStatus, FailureClass, FailureEnvelope } from "@anneal/db";
+import type { CleanupStatus, RunOutcome } from "@anneal/db";
 import type { ClaimContract } from "@anneal/db/claim-contract";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -401,16 +401,15 @@ const appendActivity = async (
 };
 
 export type Completion = {
+  /** What this Run ended as. The control plane reads its verdict off this and
+   *  derives nothing from the exit facts below. */
+  outcome: RunOutcome;
+  /** Exit facts, reported as the process gave them. They are persisted as
+   *  evidence and are never re-read as a verdict; a Run that succeeded through
+   *  `regression-mechanically-settled` still reports the exit code it had. */
   exitCode: number | null;
   signal?: string | null;
-  terminalEventSeen: boolean;
-  terminalSuccess: boolean;
   terminationReason?: string | null;
-  failureClass?: FailureClass;
-  failureReason?: string;
-  retryable?: boolean;
-  /** The environment failed, not the agent: the attempt must not spend budget. */
-  externalFailure?: boolean;
   branch?: string | null;
   /** The ref actually handed to `git push`, which is not always `branch`: a WIP
    *  salvage pushes a per-run branch while `branch` still reports the
@@ -433,12 +432,6 @@ export type Completion = {
    *  This is report-only evidence; omission or an empty list is compliant and
    *  does not affect the API's terminal outcome classification. */
   worktreeContainmentViolations?: string[];
-  /** Structured account of a failure, from which the API — not this process —
-   *  decides the failure class, whether it is retryable and whether it spends
-   *  the task's run budget. `failureClass`/`retryable`/`externalFailure` above
-   *  are this runner's own verdict; an API that understands the envelope
-   *  ignores them, and one that does not keeps using them unchanged. */
-  failureEnvelope?: FailureEnvelope;
 };
 
 const completeRun = async (

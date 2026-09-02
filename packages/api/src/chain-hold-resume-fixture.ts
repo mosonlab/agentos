@@ -234,9 +234,8 @@ export const runnerCompletionRequest = async (
     body: JSON.stringify({
       runnerId: run.runnerId,
       fencingToken: run.fencingToken,
+      outcome: { case: "succeeded" },
       exitCode: 0,
-      terminalEventSeen: true,
-      terminalSuccess: true,
       cleanupStatus: "SUCCEEDED",
       output,
     }),

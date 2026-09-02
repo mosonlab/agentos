@@ -123,7 +123,16 @@ test("completion refunds an external failure but refuses an automatic retry for 
       headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         runnerId: "runner-1", fencingToken: "1:run-3:token", exitCode: null, signal: "SIGTERM",
-        terminalEventSeen: false, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER",
+        outcome: {
+          case: "provider-failure",
+          reason: "read ECONNRESET",
+          envelope: {
+            version: 1, phase: "EXECUTE", runnerClass: "TRANSIENT_PROVIDER", exitCode: null,
+            signal: "SIGTERM", terminationReason: null, terminalEventSeen: false, terminalSuccess: false,
+            agentExited: true, providerError: null, stderrSummary: "read ECONNRESET", stdoutSummary: null,
+            timedOut: false, transient: true, timeoutMs: null,
+          },
+        },
         cleanupStatus: "SUCCEEDED",
       }),
     });
@@ -402,8 +411,7 @@ test("successful completion commits output and parks an archived chain successor
           runnerId: "runner-1",
           fencingToken: "1:run-1:token",
           exitCode: 0,
-          terminalEventSeen: true,
-          terminalSuccess: true,
+          outcome: { case: "succeeded" },
           cleanupStatus: "SUCCEEDED",
           pushStatus: "NOT_REQUESTED",
           output: "done",

@@ -118,7 +118,7 @@ const liveIntegratorRun = async (chain: IntegratorChain, runNumber = 1, maxRuns 
 const completeRun = async (run: { id: string; fencingToken: string | null }, overrides: Record<string, unknown> = {}) =>
   call("POST", `/runner/runs/${run.id}/complete`, {
     runnerId: "merge-executor-1", fencingToken: run.fencingToken, exitCode: 0,
-    terminalEventSeen: true, terminalSuccess: true, cleanupStatus: "SUCCEEDED", ...overrides,
+    outcome: { case: "succeeded" }, cleanupStatus: "SUCCEEDED", ...overrides,
   }, EXECUTOR);
 
 /** What the executor writes before it completes: the fenced merge-result output. */
@@ -178,11 +178,10 @@ const failedProtocolCompletion = (fencingToken: string) => ({
   fencingToken,
   exitCode: 1,
   signal: null,
-  terminalEventSeen: true,
-  terminalSuccess: false,
-  failureClass: "PROTOCOL_ERROR",
-  retryable: true,
-  failureReason: "merge completion transport failed",
+  outcome: {
+    case: "required-output-unsatisfied",
+    reason: "merge completion transport failed",
+  },
   pushStatus: "NOT_REQUESTED",
   cleanupStatus: "SUCCEEDED",
   workspaceRetained: false,
@@ -214,26 +213,7 @@ test("a SESSION stop and definitive output outrank a later failed completion env
   }, claimed.sessionToken);
   assert.equal(resultActivity.status, 201, JSON.stringify(resultActivity.body));
 
-  const completionBody = {
-    ...failedProtocolCompletion(claimed.fencingToken),
-    failureEnvelope: {
-      version: 1,
-      phase: "COMPLETE",
-      runnerClass: "PROTOCOL_ERROR",
-      exitCode: 1,
-      signal: null,
-      terminationReason: null,
-      terminalEventSeen: true,
-      terminalSuccess: false,
-      agentExited: false,
-      providerError: "completion request lost connectivity",
-      stderrSummary: "completion transport failed",
-      stdoutSummary: null,
-      timedOut: false,
-      transient: true,
-      timeoutMs: null,
-    },
-  };
+  const completionBody = failedProtocolCompletion(claimed.fencingToken);
   const completion = await call(
     "POST",
     `/runner/runs/${claimed.runId}/complete`,
@@ -255,7 +235,7 @@ test("a SESSION stop and definitive output outrank a later failed completion env
   assert.equal(settledRun.status, "SUCCEEDED");
   assert.equal(settledRun.failureClass, null);
   assert.equal(settledRun.failureReason, "merge completion transport failed");
-  assert.deepEqual(settledRun.failureEnvelope, completionBody.failureEnvelope);
+  assert.equal(settledRun.failureEnvelope, null, "a required-output-unsatisfied outcome carries no envelope");
   assert.equal(settledRun.retryable, false);
   assert.equal(settledRun.retryAt, null);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1);
@@ -447,11 +427,16 @@ test("a failed mechanical completion keeps the existing lease across its retry",
   const run = await liveIntegratorRun(chain, 1, 3);
   const completed = await completeRun(run, {
     exitCode: 1,
-    terminalSuccess: false,
-    failureClass: "TRANSIENT_PROVIDER",
-    retryable: true,
-    externalFailure: true,
-    failureReason: "provider disconnected",
+    outcome: {
+      case: "provider-failure",
+      reason: "provider disconnected",
+      envelope: {
+        version: 1, phase: "EXECUTE", runnerClass: "TRANSIENT_PROVIDER", exitCode: 1, signal: null,
+        terminationReason: null, terminalEventSeen: false, terminalSuccess: false, agentExited: false,
+        providerError: null, stderrSummary: "provider disconnected", stdoutSummary: null,
+        timedOut: false, transient: true, timeoutMs: null,
+      },
+    },
   });
   assert.equal(completed.status, 200, JSON.stringify(completed.body));
   assert.equal(completed.body.retryCreated, true);
@@ -575,8 +560,7 @@ test("a fresh regression completion preserves success and parks a legacy-stopped
     runnerId: RUNNER,
     fencingToken: regression.fencingToken,
     exitCode: 0,
-    terminalEventSeen: true,
-    terminalSuccess: true,
+    outcome: { case: "succeeded" },
     cleanupStatus: "SUCCEEDED",
     headSha: "a".repeat(40),
     output: regressionOutput,
@@ -1054,8 +1038,17 @@ test("N20 an external failure at the ceiling buys an integrator step no extra ru
   const chain = await seedIntegratorChain(db, { label: "n20-external" });
   const run = await liveIntegratorRun(chain, 5, 5);
   const completion = await completeRun(run, {
-    exitCode: 1, terminalSuccess: false, terminalEventSeen: false, externalFailure: true,
-    failureClass: "TRANSIENT_PROVIDER", retryable: true, failureReason: "network",
+    exitCode: 1,
+    outcome: {
+      case: "provider-failure",
+      reason: "network",
+      envelope: {
+        version: 1, phase: "EXECUTE", runnerClass: "TRANSIENT_PROVIDER", exitCode: 1, signal: null,
+        terminationReason: null, terminalEventSeen: false, terminalSuccess: false, agentExited: false,
+        providerError: null, stderrSummary: "network", stdoutSummary: null,
+        timedOut: false, transient: true, timeoutMs: null,
+      },
+    },
   });
   assert.equal(completion.status, 200);
   // §D-P5: the automatic path may not raise the ceiling, so no run 6 exists and
@@ -1080,9 +1073,17 @@ test("N20 an ordinary task's external-failure compensation is unchanged", async 
   } });
   await db.task.update({ where: { id: chain.gateTask.id }, data: { status: "DOING" } });
   const completion = await call("POST", `/runner/runs/${run.id}/complete`, {
-    runnerId: "runner-1", fencingToken: run.fencingToken, exitCode: 1,
-    terminalSuccess: false, terminalEventSeen: false, cleanupStatus: "SUCCEEDED", externalFailure: true,
-    failureClass: "TRANSIENT_PROVIDER", retryable: true, failureReason: "network",
+    runnerId: "runner-1", fencingToken: run.fencingToken, exitCode: 1, cleanupStatus: "SUCCEEDED",
+    outcome: {
+      case: "provider-failure",
+      reason: "network",
+      envelope: {
+        version: 1, phase: "EXECUTE", runnerClass: "TRANSIENT_PROVIDER", exitCode: 1, signal: null,
+        terminationReason: null, terminalEventSeen: false, terminalSuccess: false, agentExited: false,
+        providerError: null, stderrSummary: "network", stdoutSummary: null,
+        timedOut: false, transient: true, timeoutMs: null,
+      },
+    },
   }, RUNNER);
   assert.equal(completion.status, 200);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).maxRunsPerTask, 6);
