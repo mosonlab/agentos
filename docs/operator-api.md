@@ -1738,20 +1738,32 @@ The two revalidation routes below are session-only capabilities; they are
 listed here so their authorization boundary is explicit even though operators
 cannot call them directly. A `spec-revalidator` session on a bound direct chain
 is the only caller accepted.
-The machine-only `/session/runs/:runId/status` projection used by PR-workflow
-delivery is run-bound and is not an operator read route. For the current
-canonical template, it carries persisted output bodies only for the current
-`implementation` or `fixed-implementation` Run at its chain index. Each entry
-contains the Task id, chain index, output kind, body, and commit SHA, and is
-accepted only when its `projectId` and `chainId` match the claimed Run.
-Malformed, foreign-chain, or missing required evidence is rejected rather than
-silently omitted or guessed. The implementation delivery receives only its
-current `implementation` entry; the final delivery receives exactly
-`implementation`, `sol-findings`, `blind-findings`, and `fixed-implementation`,
-in chain order. This projection does not widen prompt `priorOutputs`, expose
-sibling evidence to a blind review, or derive text from provider output,
-activity prose, or repository contents. Its source is persisted task output
-and its authentication is the claimed session/run identity.
+The machine-only `/session/runs/:runId/status` projection is run-bound and is
+not an operator read route. Its `task.outputEvidence` is the server's decided
+answer about this Run's deliverables, and the runner reads it rather than
+re-deciding anything. It has two parts.
+
+`outputEvidence.satisfaction` names whether the deliverable this Run's Step
+requires exists: `delivered` (this Run persisted it; carries the output `kind`
+and `commitSha`), `not-required`, `satisfied-by-prior-run` (an immutable
+findings artifact an earlier Run authored, which this Run may not replace), or
+`absent` (with the required `outputKind` and whether asking the agent again can
+still produce it).
+
+`outputEvidence.prHandoff` names the canonical PR handoff this delivery may
+publish: `not-a-pr-delivery`, `complete` with the ordered `outputs`, or
+`incomplete` with the reason it was refused. Each entry contains the Task id,
+chain index, output kind, body, and commit SHA, and is accepted only when its
+`projectId` and `chainId` match the claimed Run. The implementation delivery
+receives only its current `implementation` entry; the final delivery receives
+exactly `implementation`, `sol-findings`, `blind-findings`, and
+`fixed-implementation`, in chain order. Malformed, foreign-chain, out-of-order
+or missing evidence makes the handoff `incomplete` rather than being silently
+omitted or guessed, and delivery fails instead of publishing. This projection
+does not widen prompt `priorOutputs`, expose sibling evidence to a blind
+review, or derive text from provider output, activity prose, or repository
+contents. Its source is persisted task output and its authentication is the
+claimed session/run identity.
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree

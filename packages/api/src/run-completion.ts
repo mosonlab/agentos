@@ -7,6 +7,7 @@ import {
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
   CleanupStatus,
+  decideRunOutputSatisfaction,
   executionModeFor,
   FailureClass,
   failurePhases,
@@ -380,9 +381,20 @@ export const completionEvidenceRefusal = (
       requirement.headSha,
     );
   }
-  return persistedOutput?.runId !== run.id
-    && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
-    ? `missing ${requirement.outputKind} task output for current Run ${run.id}`
+  // The same decision the session status route hands the runner, read here so
+  // completion and the Run that asked cannot disagree about whether the
+  // deliverable exists.
+  const satisfaction = decideRunOutputSatisfaction(
+    run.id,
+    {
+      outputKind: requirement.outputKind,
+      immutableOncePersisted: outputIsImmutableOncePersisted(run.task?.templateStep),
+      remediable: !isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind),
+    },
+    persistedOutput,
+  );
+  return satisfaction.case === "absent"
+    ? `missing ${satisfaction.outputKind} task output for current Run ${run.id}`
     : null;
 };
 

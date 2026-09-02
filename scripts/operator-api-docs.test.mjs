@@ -271,24 +271,30 @@ test("the canonical PR workflow documents its clean-tree and five-section handov
   assert.match(text, /exactly these\s+five sections, in order[\s\S]*no provider-generated or activity-log prose/u);
 });
 
-test("the handbook documents the machine-only, run-bound PR evidence projection", () => {
-  const marker = "The machine-only `/session/runs/:runId/status` projection used by PR-workflow";
+test("the handbook documents the machine-only, run-bound decided output evidence", () => {
+  const marker = "The machine-only `/session/runs/:runId/status` projection is run-bound";
   const start = handbook.indexOf(marker);
-  assert.notEqual(start, -1, "operator handbook must document the PR evidence projection");
+  assert.notEqual(start, -1, "operator handbook must document the decided output evidence");
   const end = handbook.indexOf("\nThe machine-only `POST /runner/runs/:runId/complete`", start + marker.length);
   const text = handbook.slice(start, end === -1 ? handbook.length : end);
 
-  assert.match(text, /run-bound and is not an operator read route/u);
-  assert.match(text, /persisted output bodies only for the current[\s\S]*`implementation` or `fixed-implementation`/u);
+  assert.match(text, /not an operator read route/u);
+  assert.match(text, /the runner reads it rather than\s+re-deciding anything/u);
+  for (const satisfaction of ["delivered", "not-required", "satisfied-by-prior-run", "absent"]) {
+    assert.match(text, new RegExp(`\`${satisfaction}\``, "u"));
+  }
+  for (const handoff of ["not-a-pr-delivery", "complete", "incomplete"]) {
+    assert.match(text, new RegExp(`\`${handoff}\``, "u"));
+  }
   for (const field of ["Task id", "chain index", "output kind", "body", "commit SHA", "projectId", "chainId"]) {
     assert.match(text, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   }
-  assert.match(text, /implementation\s+delivery receives only its\s+current `implementation` entry/u);
-  assert.match(text, /final\s+delivery receives exactly\s+`implementation`, `sol-findings`,\s+`blind-findings`, and `fixed-implementation`,\s+in chain order/u);
-  assert.match(text, /does not widen prompt `priorOutputs`, expose\s+sibling evidence to a blind\s+review/u);
-  assert.match(text, /derive text from provider output,\s+activity prose, or repository\s+contents/u);
+  assert.match(text, /implementation delivery\s+receives only its current `implementation` entry/u);
+  assert.match(text, /final delivery receives\s+exactly `implementation`, `sol-findings`, `blind-findings`, and\s+`fixed-implementation`, in chain order/u);
+  assert.match(text, /does not widen prompt `priorOutputs`, expose sibling evidence to a blind\s+review/u);
+  assert.match(text, /derive text from provider output, activity prose, or repository\s+contents/u);
   assert.match(text, /source is persisted task output[\s\S]*claimed session\/run identity/u);
-  assert.match(text, /Malformed, foreign-chain, or missing required evidence is rejected rather than\s+silently omitted or guessed/u);
+  assert.match(text, /out-of-order\s+or missing evidence makes the handoff `incomplete` rather than being silently\s+omitted or guessed, and delivery fails instead of publishing/u);
 });
 
 test("the template step replace route documents its contract, refusals, warnings, and example", () => {

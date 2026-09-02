@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import {
   agentExecutionSucceeded,
   PR_TEMPLATE_NAME,
-  REGRESSION_VERIFICATION_OUTPUT_KIND,
   type BudgetGate,
+  type PrHandoffOutput,
   type RunOutcome,
+  type RunOutputEvidence,
 } from "@anneal/db";
 
 import {
@@ -33,7 +34,6 @@ import {
   type RunSession,
   type SessionEventPayload,
   type SessionTaskOutput,
-  type SessionTaskOutputStatus,
 } from "./api.js";
 import {
   probeSupportedCliAvailability,
@@ -42,7 +42,7 @@ import {
 } from "./availability.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { deliverWorkspace, type PrWorkflowOutput } from "./delivery.js";
+import { deliverWorkspace } from "./delivery.js";
 import {
   classifyDependencyProvisioningFailure,
   decideDependencyProvisioning,
@@ -104,7 +104,7 @@ const missingOutputRemediationInput = (outputKind: string): string => [
   `Anneal detected that this Run finished its work but did not persist its required '${outputKind}' task output.`,
   "Do not redo the task, edit files, commit, push, open a PR, or run delivery steps.",
   `Using the work and evidence already produced in this conversation, call task_output with kind '${outputKind}' and a body that satisfies the task's exact output contract and current HEAD binding.`,
-  "If the write is rejected, correct the body and retry. Then call task_status and finish only after it reports outputPersisted: true for this Run.",
+  "If the write is rejected, correct the body and retry. Then call task_status and finish only after its outputEvidence reports satisfaction case 'delivered' for this Run.",
 ].join("\n");
 
 const sameWorkspaceSnapshot = (left: WorkspaceSnapshot, right: WorkspaceSnapshot): boolean =>
@@ -510,14 +510,14 @@ export const executeClaim = async (
       && runLease.held
       && terminalFailureReason === null) {
       const declaredOutputKind = claim.task.templateStep.outputKind;
-      let outputStatus: SessionTaskOutputStatus | null = null;
+      let outputEvidence: RunOutputEvidence | null = null;
       let statusFailure: string | null = null;
       try {
-        outputStatus = await session.outputStatus();
+        outputEvidence = await session.outputStatus();
       } catch (error: unknown) {
         statusFailure = errorMessage(error);
       }
-      if (outputStatus === null) {
+      if (outputEvidence === null) {
         statusFailure ??= "Anneal API returned no task output status";
       }
       if (statusFailure !== null) {
@@ -529,11 +529,20 @@ export const executeClaim = async (
         taskOutputStatusCheckFailed = true;
         terminalFailureReason = `Task output status could not be established for a step declaring output kind '${declaredOutputKind}' for Run ${claim.run.id}: ${statusFailure}`;
       }
-      if (outputStatus?.outputRequired && !outputStatus.outputPersisted) {
-        const outputKind = outputStatus.outputKind;
+      const satisfaction = outputEvidence?.satisfaction;
+      if (satisfaction?.case === "satisfied-by-prior-run") {
+        sink({
+          source: "RUNNER",
+          type: "TASK_OUTPUT_REMEDIATION_SKIPPED",
+          payload: { outputKind: satisfaction.outputKind, reason: "immutable-output-satisfied-by-prior-run" },
+        });
+      } else if (satisfaction?.case === "absent") {
+        const { outputKind } = satisfaction;
         const providerConversationId = completedHandle.providerConversationId;
-        if (claim.task.templateStep.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND) {
-          terminalFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
+        if (!satisfaction.remediable) {
+          // Only a mechanical verdict is undeliverable by asking again, and
+          // the control plane says so; the runner does not re-test the kind.
+          terminalFailureReason = `A step declaring output kind '${outputKind}' finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
@@ -544,16 +553,7 @@ export const executeClaim = async (
               reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent",
             },
           });
-        } else if (outputStatus.outputSatisfiedByPriorRun) {
-          sink({
-            source: "RUNNER",
-            type: "TASK_OUTPUT_REMEDIATION_SKIPPED",
-            payload: { outputKind, reason: "immutable-output-satisfied-by-prior-run" },
-          });
-        } else if (outputStatus.outputRemediationAllowed
-          && outputKind
-          && providerConversationId
-          && runLease.held) {
+        } else if (providerConversationId && runLease.held) {
           const beforeRemediation = await captureWorkspaceSnapshot(config, workspace);
           // Snapshotting is asynchronous. Cancellation may have been ACKed
           // against the already-closed first launch while it ran, so no second
@@ -578,9 +578,8 @@ export const executeClaim = async (
               let statusCheckError: string | null = null;
               if (!workspaceChanged) {
                 try {
-                  const remediatedStatus = await session.outputStatus();
-                  remediated = remediatedStatus?.outputPersisted === true
-                    || remediatedStatus?.outputSatisfiedByPriorRun === true;
+                  const recheck = (await session.outputStatus())?.satisfaction.case;
+                  remediated = recheck === "delivered" || recheck === "satisfied-by-prior-run";
                 } catch (error: unknown) {
                   statusCheckError = errorMessage(error);
                   sink({
@@ -618,16 +617,14 @@ export const executeClaim = async (
           }
         } else {
           terminalFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
-            !outputStatus.outputRemediationAllowed ? "remediation is not allowed"
-              : !outputKind ? "output kind is unavailable"
-                : "provider conversation id is unavailable"
+            providerConversationId ? "the Run no longer holds its lease" : "provider conversation id is unavailable"
           }`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
             payload: {
               outputKind,
-              outputRemediationAllowed: outputStatus.outputRemediationAllowed,
+              outputRemediationAllowed: true,
               providerConversationIdAvailable: providerConversationId !== null,
             },
           });
@@ -669,21 +666,18 @@ export const executeClaim = async (
       && runLease.held;
     if (disconnectCandidate) {
       try {
-        const outputStatus = await session.outputStatus();
+        const satisfaction = (await session.outputStatus())?.satisfaction;
         const expectedKind = "result";
-        if (outputStatus?.outputPersisted !== true) {
+        // The server-returned output identity alone authorizes recovery, and
+        // "this Run delivered it" is the control plane's decision, not a
+        // predicate to re-run here. What remains is the one fact only this
+        // process knows: the commit the workspace actually ends on.
+        if (satisfaction?.case !== "delivered") {
           throw new Error(`No persisted ${expectedKind} output exists for this Run`);
         }
-        const output = outputStatus.output;
-        if (!output) throw new Error(`Persisted ${expectedKind} output has no server-side identity`);
-        if (output.runId !== claim.run.id) {
-          throw new Error(`Persisted ${expectedKind} output belongs to Run ${output.runId}`);
-        }
+        const { output } = satisfaction;
         if (output.kind !== expectedKind) {
           throw new Error(`Persisted output kind ${output.kind} is not ${expectedKind}`);
-        }
-        if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) {
-          throw new Error(`Persisted ${expectedKind} output has an invalid commit SHA`);
         }
         if (output.commitSha !== capturedHeadSha) {
           throw new Error(`Persisted ${expectedKind} output does not match captured workspace HEAD`);
@@ -717,19 +711,19 @@ export const executeClaim = async (
         });
       }
     }
-    let prWorkflowOutputs: readonly PrWorkflowOutput[] | undefined;
+    let prWorkflowOutputs: readonly PrHandoffOutput[] | undefined;
     const templateStep = claim.task.templateStep;
     const canonicalPrDelivery = templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
       && (templateStep.outputKind === "implementation" || templateStep.outputKind === "fixed-implementation");
     if (canonicalPrDelivery && runLease.held) {
       try {
-        const status = await session.outputStatus() as (
-          SessionTaskOutputStatus & { prWorkflowOutputs?: readonly PrWorkflowOutput[] }
-        ) | null;
-        if (!status || !Array.isArray(status.prWorkflowOutputs)) {
-          throw new Error("session status omitted canonical PR workflow output evidence");
+        const handoff = (await session.outputStatus())?.prHandoff;
+        if (handoff?.case !== "complete") {
+          throw new Error(handoff?.case === "incomplete"
+            ? handoff.reason
+            : "session status omitted canonical PR workflow output evidence");
         }
-        prWorkflowOutputs = status.prWorkflowOutputs;
+        prWorkflowOutputs = handoff.outputs;
       } catch (error: unknown) {
         if (terminalFailureReason === null) {
           terminalFailureReason = `Canonical PR workflow evidence handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;

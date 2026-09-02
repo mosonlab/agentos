@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import type { RunOutcome } from "@anneal/db";
+import type { RunOutcome, RunOutputEvidence } from "@anneal/db";
 
 import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
 import type { ClaimedTask, ControlPlane } from "./api.js";
@@ -126,13 +126,9 @@ const mechanicalClaim: ClaimedTask = {
 };
 
 /** The output status of a step whose agent persisted what it declared. */
-const persistedResultOutput = {
-  outputKind: "result",
-  outputRequired: true,
-  outputRemediationAllowed: true,
-  outputSatisfiedByPriorRun: false,
-  outputPersisted: true,
-  output: null,
+const persistedResultOutput: RunOutputEvidence = {
+  satisfaction: { case: "delivered", output: { kind: "result", commitSha: null } },
+  prHandoff: { case: "not-a-pr-delivery" },
 };
 
 /**
