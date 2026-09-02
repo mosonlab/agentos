@@ -27,6 +27,19 @@ import type {
 import type { ExecutionMode } from "./merge-integrator-db.js";
 import type { RegressionRepairHandoff } from "./merge-tail.js";
 
+/**
+ * Four fields below are marked ALWAYS SENT: `ClaimTask.chainLayer`,
+ * `ClaimRun.taskId`, `ClaimTemplateStep.outputKind` and
+ * `ClaimTemplateStep.taskTemplate`. The server produces every one of them on
+ * every claim and consumers assert them; they are optional here only because
+ * runner tests hand-build claim literals carrying the fields they exercise,
+ * and those fixtures belong to a different change than this one. Making the
+ * four required is mechanical — add them to five fixtures in `packages/runner`
+ * and drop the non-null assertions in the parallel-review tests — and it is
+ * the right end state. Until then, an optional marker here is not permission
+ * to stop sending one.
+ */
+
 /** The step identity a runner needs: title the delivery, and decide provisioning. */
 export type ClaimTemplateStep = {
   name: string;
@@ -36,12 +49,10 @@ export type ClaimTemplateStep = {
    * reinterpret a missing field as either policy.
    */
   provisionDependencies: boolean;
-  /* Optional only because runner tests hand-build steps with the fields they
-   * exercise. The server always sends both: `outputKind` is a non-null column
-   * with a database default, and the template relation is mandatory. See the
-   * note on `ClaimRun.taskId`. */
+  /** ALWAYS SENT. A non-null column with a database default. */
   outputKind?: string;
-  /** The chain's own name, which delivery titles the pull request after. */
+  /** ALWAYS SENT. The chain's own name, which delivery titles the pull request
+   * after; the template relation is mandatory. */
   taskTemplate?: { name: string };
 };
 
@@ -49,6 +60,10 @@ export type ClaimTask = {
   id: string;
   chainId: string | null;
   chainIndex: number | null;
+  /** ALWAYS SENT. The chain layer the claimed step sits on, which the API's
+   * parallel-review tests read to prove a review frontier claimed both of its
+   * siblings. */
+  chainLayer?: number | null;
   name: string;
   description: string;
   repoId: string | null;
@@ -80,14 +95,9 @@ export type ClaimRepo = {
 export type ClaimRun = {
   id: string;
   /**
-   * The claimed Run's task, which the API's own tests read to tell two
-   * concurrent claims apart.
-   *
-   * Optional for the same reason as `ClaimTemplateStep.outputKind`: a claim
-   * always names a task, but runner fixtures construct a `run` without one.
-   * Both are a widening this contract inherited from the mirror it replaced,
-   * not a statement about the wire; tightening them to required is mechanical
-   * once the fixtures that predate this contract are updated.
+   * ALWAYS SENT. The claimed Run's task, which the API's own tests read to tell
+   * two concurrent claims apart. The column is nullable, but a Run that reaches
+   * a claim always has a task, which is why those consumers assert it.
    */
   taskId?: string | null;
   runNumber: number;

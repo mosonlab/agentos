@@ -943,6 +943,7 @@ export const claimRun = async (
             id: candidate.task.id,
             chainId: candidate.task.chainId,
             chainIndex: candidate.task.chainIndex,
+            chainLayer: candidate.task.chainLayer,
             name: candidate.task.name,
             description: candidate.task.description,
             repoId: candidate.task.repoId,
