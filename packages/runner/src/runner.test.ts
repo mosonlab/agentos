@@ -191,112 +191,106 @@ test("a mechanical claim is refused before any adapter, workspace or child envir
   assert.deepEqual(await readdir(workspaceRoot), []);
 });
 
-const malformedDependencyProvisioningClaim = (value: unknown): ClaimedTask => {
+// Which values are refused is a table in `dependency-provisioning.test.ts`.
+// What this test owns is the order: a refusal reaches the control plane before
+// the runner has provisioned, installed or launched anything.
+const claimWithoutRepositoryPolicy = (): ClaimedTask => {
   const repo = { ...mechanicalClaim.repo } as Record<string, unknown>;
-  if (value === undefined) delete repo.dependencyProvisioning;
-  else repo.dependencyProvisioning = value;
-  return {
-    ...agentClaim,
-    repo,
-  } as unknown as ClaimedTask;
+  delete repo.dependencyProvisioning;
+  return { ...agentClaim, repo } as unknown as ClaimedTask;
 };
 
-for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as const) {
-  test(`a ${label} dependency-provisioning claim is rejected before provisioning or adapter launch`, async () => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-dependency-protocol-${label}-`));
-    const commandRoot = await mkdtemp(join(tmpdir(), `runner-dependency-command-${label}-`));
-    const npmSentinel = join(commandRoot, "npm-called");
-    const npm = join(commandRoot, "npm");
-    await writeFile(npm, `#!/bin/sh\nprintf called > ${JSON.stringify(npmSentinel)}\n`);
-    await chmod(npm, 0o755);
-    const controlPlane = createControlPlaneDouble();
-    let adapterCalls = 0;
-    const adapter: CliAdapter = {
-      ...adapters.CLAUDE,
-      preflight: async () => {
-        adapterCalls += 1;
-        throw new Error("adapter preflight must not be reached for a malformed dependency claim");
-      },
-      start: async () => {
-        adapterCalls += 1;
-        throw new Error("adapter start must not be reached for a malformed dependency claim");
-      },
-    };
+test("a refused dependency-provisioning claim is rejected before provisioning or adapter launch", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-dependency-protocol-"));
+  const commandRoot = await mkdtemp(join(tmpdir(), "runner-dependency-command-"));
+  const npmSentinel = join(commandRoot, "npm-called");
+  const npm = join(commandRoot, "npm");
+  await writeFile(npm, `#!/bin/sh\nprintf called > ${JSON.stringify(npmSentinel)}\n`);
+  await chmod(npm, 0o755);
+  const controlPlane = createControlPlaneDouble();
+  let adapterCalls = 0;
+  const adapter: CliAdapter = {
+    ...adapters.CLAUDE,
+    preflight: async () => {
+      adapterCalls += 1;
+      throw new Error("adapter preflight must not be reached for a malformed dependency claim");
+    },
+    start: async () => {
+      adapterCalls += 1;
+      throw new Error("adapter start must not be reached for a malformed dependency claim");
+    },
+  };
 
-    try {
-      await executeClaimProduction(
-        { ...config(workspaceRoot), path: commandRoot },
-        malformedDependencyProvisioningClaim(value),
-        { adapter, controlPlane: controlPlane.controlPlane },
-      );
-      const completion = controlPlane.completions.at(-1);
-      assert.ok(completion, "malformed claims must complete the run");
-      assert.equal(completion.outcome.case, "terminal-protocol-failure");
-      assert.equal(failureReasonOf(completion.outcome), "dependency-provisioning-missing");
-      assert.equal(completion.terminationReason, "dependency-provisioning-missing");
-      assert.equal(completion.cleanupStatus, "SUCCEEDED");
-      assert.equal(completion.workspaceRetained, false);
-      assert.equal(adapterCalls, 0, "malformed claims must not reach adapter preflight or launch");
-      assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
-      await assert.rejects(access(npmSentinel), { code: "ENOENT" }, "malformed claims must not invoke npm");
-    } finally {
-      await Promise.all([
-        rm(workspaceRoot, { recursive: true, force: true }),
-        rm(commandRoot, { recursive: true, force: true }),
-      ]);
-    }
-  });
-}
+  try {
+    await executeClaimProduction(
+      { ...config(workspaceRoot), path: commandRoot },
+      claimWithoutRepositoryPolicy(),
+      { adapter, controlPlane: controlPlane.controlPlane },
+    );
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion, "malformed claims must complete the run");
+    assert.equal(completion.outcome.case, "terminal-protocol-failure");
+    assert.equal(failureReasonOf(completion.outcome), "dependency-provisioning-missing");
+    assert.equal(completion.terminationReason, "dependency-provisioning-missing");
+    assert.equal(completion.cleanupStatus, "SUCCEEDED");
+    assert.equal(completion.workspaceRetained, false);
+    assert.equal(adapterCalls, 0, "malformed claims must not reach adapter preflight or launch");
+    assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+    await assert.rejects(access(npmSentinel), { code: "ENOENT" }, "malformed claims must not invoke npm");
+  } finally {
+    await Promise.all([
+      rm(workspaceRoot, { recursive: true, force: true }),
+      rm(commandRoot, { recursive: true, force: true }),
+    ]);
+  }
+});
 
-const malformedTemplateProvisionDependenciesClaim = (value: unknown): ClaimedTask => {
+const claimWithoutTemplateStepDecision = (): ClaimedTask => {
   const templateStep = { ...mechanicalClaim.task.templateStep! } as Record<string, unknown>;
-  if (value === undefined) delete templateStep.provisionDependencies;
-  else templateStep.provisionDependencies = value;
+  delete templateStep.provisionDependencies;
   return {
     ...agentClaim,
     task: { ...mechanicalClaim.task, templateStep },
   } as unknown as ClaimedTask;
 };
 
-for (const [label, value] of [["missing", undefined], ["unknown", "yes"]] as const) {
-  test(`a ${label} template-step dependency decision is rejected before workspace or adapter work`, async () => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-template-step-protocol-${label}-`));
-    const controlPlane = createControlPlaneDouble();
-    let preflightCalls = 0;
-    let startCalls = 0;
-    const adapter: CliAdapter = {
-      ...adapters.CLAUDE,
-      preflight: async () => {
-        preflightCalls += 1;
-        throw new Error("adapter preflight must not be reached for a malformed template step");
-      },
-      start: async () => {
-        startCalls += 1;
-        throw new Error("provider start must not be reached for a malformed template step");
-      },
-    };
+test("a refused template-step dependency decision is rejected before workspace or adapter work", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-template-step-protocol-"));
+  const controlPlane = createControlPlaneDouble();
+  let preflightCalls = 0;
+  let startCalls = 0;
+  const adapter: CliAdapter = {
+    ...adapters.CLAUDE,
+    preflight: async () => {
+      preflightCalls += 1;
+      throw new Error("adapter preflight must not be reached for a malformed template step");
+    },
+    start: async () => {
+      startCalls += 1;
+      throw new Error("provider start must not be reached for a malformed template step");
+    },
+  };
 
-    try {
-      await executeClaimProduction(
-        config(workspaceRoot),
-        malformedTemplateProvisionDependenciesClaim(value),
-        { adapter, controlPlane: controlPlane.controlPlane },
-      );
-      const completion = controlPlane.completions.at(-1);
-      assert.ok(completion, "malformed claims must complete the run");
-      assert.equal(completion.outcome.case, "terminal-protocol-failure");
-      assert.equal(failureReasonOf(completion.outcome), "template-step-provision-dependencies-missing");
-      assert.equal(completion.terminationReason, "template-step-provision-dependencies-missing");
-      assert.equal(completion.cleanupStatus, "SUCCEEDED");
-      assert.equal(completion.workspaceRetained, false);
-      assert.equal(preflightCalls, 0);
-      assert.equal(startCalls, 0);
-      assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
-    } finally {
-      await rm(workspaceRoot, { recursive: true, force: true });
-    }
-  });
-}
+  try {
+    await executeClaimProduction(
+      config(workspaceRoot),
+      claimWithoutTemplateStepDecision(),
+      { adapter, controlPlane: controlPlane.controlPlane },
+    );
+    const completion = controlPlane.completions.at(-1);
+    assert.ok(completion, "malformed claims must complete the run");
+    assert.equal(completion.outcome.case, "terminal-protocol-failure");
+    assert.equal(failureReasonOf(completion.outcome), "template-step-provision-dependencies-missing");
+    assert.equal(completion.terminationReason, "template-step-provision-dependencies-missing");
+    assert.equal(completion.cleanupStatus, "SUCCEEDED");
+    assert.equal(completion.workspaceRetained, false);
+    assert.equal(preflightCalls, 0);
+    assert.equal(startCalls, 0);
+    assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
 
 test("a review step records the dependency skip before fake adapter preflight and launch", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-review-dependency-activity-"));

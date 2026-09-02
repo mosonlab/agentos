@@ -18,6 +18,15 @@ import {
   SPEC_REVALIDATOR_AGENT_NAME,
 } from "../src/canonical-step-adoption.js";
 import {
+  canonicalSyncSummary,
+  canonicalSyncSummaryLine,
+  emptyCanonicalSyncCounters,
+  recordRolePromptUpdate,
+  recordStepPromptUpdate,
+  type CanonicalSyncCounters,
+  type CanonicalSyncProjectOutcome,
+} from "../src/canonical-sync-report.js";
+import {
   applyCanonicalInstallation,
   planCanonicalInstallation,
   type CanonicalInstallationAction,
@@ -39,134 +48,13 @@ const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPr
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
 
-type PreservedTaskAssignments = { archived: number; nonTodo: number; started: number; output: number };
-type ProjectCounters = {
-  templates: number;
-  createdCanonicalTemplates: number;
-  createdAgents: number;
-  createdAgentRepoGrants: number;
-  adoptedAssignees: number;
-  adoptedStepBases: number;
-  adoptedPriorOutputDeclarations: number;
-  adoptedDependencyProvisioning: number;
-  renamedSteps: number;
-  migratedTasks: number;
-  adoptedAgentDefaults: number;
-  runtimeDriftNotices: number;
-  updated: number;
-  preservedTaskAssignments: PreservedTaskAssignments;
-  updatedSteps: Record<string, Record<number, number>>;
-  updatedRoles: Record<string, number>;
-};
-
 type ProjectRow = { id: string; slug: string };
-
-const mutationCounterNames = [
-  "createdCanonicalTemplates",
-  "createdAgents",
-  "createdAgentRepoGrants",
-  "adoptedAssignees",
-  "adoptedStepBases",
-  "adoptedPriorOutputDeclarations",
-  "adoptedDependencyProvisioning",
-  "renamedSteps",
-  "migratedTasks",
-  "adoptedAgentDefaults",
-  "runtimeDriftNotices",
-] as const;
 
 const sortedProjectRows = (rows: readonly ProjectRow[]): ProjectRow[] => [...rows].sort((left, right) => (
   left.slug < right.slug ? -1 : left.slug > right.slug ? 1 : 0
 ));
 
-const emptyProjectCounters = (
-  templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
-  roleNames: readonly string[],
-): ProjectCounters => ({
-  templates: 0,
-  createdCanonicalTemplates: 0,
-  createdAgents: 0,
-  createdAgentRepoGrants: 0,
-  adoptedAssignees: 0,
-  adoptedStepBases: 0,
-  adoptedPriorOutputDeclarations: 0,
-  adoptedDependencyProvisioning: 0,
-  renamedSteps: 0,
-  migratedTasks: 0,
-  adoptedAgentDefaults: 0,
-  runtimeDriftNotices: 0,
-  updated: 0,
-  preservedTaskAssignments: { archived: 0, nonTodo: 0, started: 0, output: 0 },
-  updatedSteps: Object.fromEntries([...templateSources].map(([name, steps]) => [
-    name,
-    Object.fromEntries(steps.map((step) => [step.stepIndex, 0])),
-  ])),
-  updatedRoles: Object.fromEntries(roleNames.map((name) => [name, 0])),
-});
-
-const finalizeUpdated = (counters: ProjectCounters): void => {
-  const scalar = mutationCounterNames.reduce((sum, name) => sum + counters[name], 0);
-  const steps = Object.values(counters.updatedSteps)
-    .flatMap((byStep) => Object.values(byStep))
-    .reduce((sum, count) => sum + count, 0);
-  const roles = Object.values(counters.updatedRoles).reduce((sum, count) => sum + count, 0);
-  counters.updated = scalar + steps + roles;
-};
-
 const projectError = (project: ProjectRow, message: string): Error => new Error(`Project ${project.slug}: ${message}`);
-
-const increment = <K extends keyof ProjectCounters>(
-  countersByProject: Map<string, ProjectCounters>,
-  projectId: string,
-  field: K,
-  amount = 1,
-): void => {
-  const counters = countersByProject.get(projectId);
-  if (!counters) throw new Error(`Project ${projectId} was not found`);
-  const value = counters[field];
-  if (typeof value !== "number") throw new Error(`Project ${projectId} counter ${String(field)} is not scalar`);
-  (counters[field] as number) = value + amount;
-};
-
-const addPreserved = (
-  countersByProject: Map<string, ProjectCounters>,
-  projectId: string,
-  field: keyof PreservedTaskAssignments,
-): void => {
-  const counters = countersByProject.get(projectId);
-  if (!counters) throw new Error(`Project ${projectId} was not found`);
-  counters.preservedTaskAssignments[field] += 1;
-};
-
-const addStepUpdate = (
-  countersByProject: Map<string, ProjectCounters>,
-  projectId: string,
-  templateName: string,
-  stepIndex: number,
-  amount: number,
-): void => {
-  const counters = countersByProject.get(projectId);
-  if (!counters) throw new Error(`Project ${projectId} was not found`);
-  const byStep = counters.updatedSteps[templateName];
-  if (!byStep || byStep[stepIndex] === undefined) {
-    throw new Error(`Project ${projectId} has no counter for ${templateName} step ${stepIndex}`);
-  }
-  byStep[stepIndex] += amount;
-};
-
-const addRoleUpdate = (
-  countersByProject: Map<string, ProjectCounters>,
-  projectId: string,
-  roleName: string,
-  amount: number,
-): void => {
-  const counters = countersByProject.get(projectId);
-  if (!counters) throw new Error(`Project ${projectId} was not found`);
-  if (counters.updatedRoles[roleName] === undefined) {
-    throw new Error(`Project ${projectId} has no counter for Agent ${roleName}`);
-  }
-  counters.updatedRoles[roleName] += amount;
-};
 
 const transitionStepInclude = {
   assigneeAgent: { select: { name: true } },
@@ -304,7 +192,7 @@ const migrateSpecialCanonicalAgents = async (
   canonicalProject: ProjectRow,
   sources: AgentSources,
   rolesByName: ReadonlyMap<string, RoleSource>,
-  countersByProject: Map<string, ProjectCounters>,
+  counters: CanonicalSyncCounters,
 ): Promise<void> => {
   const regressionRole = rolesByName.get(REGRESSION_VERIFIER_AGENT_NAME);
   if (!regressionRole) throw projectError(canonicalProject, `Canonical role ${REGRESSION_VERIFIER_AGENT_NAME} was not found`);
@@ -316,8 +204,8 @@ const migrateSpecialCanonicalAgents = async (
     REGRESSION_AGENT_SOURCE,
     null,
   );
-  if (regression.created) increment(countersByProject, canonicalProject.id, "createdAgents");
-  if (regression.grants > 0) increment(countersByProject, canonicalProject.id, "createdAgentRepoGrants", regression.grants);
+  if (regression.created) counters.createdAgents += 1;
+  if (regression.grants > 0) counters.createdAgentRepoGrants += regression.grants;
 
   const revalidatorRole = rolesByName.get(SPEC_REVALIDATOR_AGENT_NAME);
   if (!revalidatorRole) throw projectError(canonicalProject, `Canonical role ${SPEC_REVALIDATOR_AGENT_NAME} was not found`);
@@ -329,8 +217,8 @@ const migrateSpecialCanonicalAgents = async (
     SPEC_REVALIDATOR_AGENT_SOURCE,
     RepoPermission.GIT_READ,
   );
-  if (revalidator.created) increment(countersByProject, canonicalProject.id, "createdAgents");
-  if (revalidator.grants > 0) increment(countersByProject, canonicalProject.id, "createdAgentRepoGrants", revalidator.grants);
+  if (revalidator.created) counters.createdAgents += 1;
+  if (revalidator.grants > 0) counters.createdAgentRepoGrants += revalidator.grants;
 };
 
 const installMissingAgents = async (
@@ -339,7 +227,7 @@ const installMissingAgents = async (
   sources: AgentSources,
   rolesByName: ReadonlyMap<string, RoleSource>,
   roleNames: readonly string[],
-  countersByProject: Map<string, ProjectCounters>,
+  counters: CanonicalSyncCounters,
 ): Promise<void> => {
   const existing = await tx.agent.findMany({
     where: { projectId: target.id, archivedAt: null, name: { in: [...roleNames] } },
@@ -368,7 +256,7 @@ const installMissingAgents = async (
       archivedAt: null,
     } });
     createdNames.add(name);
-    increment(countersByProject, target.id, "createdAgents");
+    counters.createdAgents += 1;
   }
 
   if (createdNames.size === 0) return;
@@ -402,7 +290,7 @@ const synchronizeAgents = async (
   sources: AgentSources,
   rolesByName: ReadonlyMap<string, RoleSource>,
   roleNames: readonly string[],
-  countersByProject: Map<string, ProjectCounters>,
+  counters: CanonicalSyncCounters,
   runtimeConfigAdoptions: Array<{
     name: string;
     from: { model: string; runnerPreference: RunnerPreference };
@@ -467,7 +355,7 @@ const synchronizeAgents = async (
       if (adopted.count !== 1) {
         throw projectError(project, `Agent ${agent.name} (${agent.id}) changed while its canonical runtime configuration was being adopted`);
       }
-      increment(countersByProject, project.id, "adoptedAgentDefaults");
+      counters.adoptedAgentDefaults += 1;
       runtimeConfigAdoptions.push({
         name: agent.name,
         from: { model: agent.model, runnerPreference: agent.runnerPreference },
@@ -511,7 +399,7 @@ const synchronizeAgents = async (
           ].join("\n"),
           ...(thread ? { threadId: thread.id } : {}),
         } });
-        increment(countersByProject, project.id, "runtimeDriftNotices");
+        counters.runtimeDriftNotices += 1;
       }
     } else if (!adoptsCanonicalDefaults && agent.runtimeConfigDriftNoticeFingerprint !== null) {
       await tx.agent.updateMany({
@@ -537,7 +425,7 @@ const synchronizeAgents = async (
       },
       data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
     });
-    if (promptUpdate.count > 0) addRoleUpdate(countersByProject, project.id, role.name, promptUpdate.count);
+    if (promptUpdate.count > 0) recordRolePromptUpdate(counters, role.name, promptUpdate.count);
   }
 };
 
@@ -547,7 +435,7 @@ const syncCanonicalTemplates = async (
   tx: Prisma.TransactionClient,
   project: ProjectRow,
   templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
-  countersByProject: Map<string, ProjectCounters>,
+  counters: CanonicalSyncCounters,
 ): Promise<RegressionStep[]> => {
   const regressionSteps: RegressionStep[] = [];
   for (const [templateName, steps] of templateSources) {
@@ -556,7 +444,7 @@ const syncCanonicalTemplates = async (
       select: { id: true, projectId: true },
     });
     for (const template of templates) {
-      increment(countersByProject, project.id, "templates");
+      counters.templates += 1;
       const persistedSteps = await tx.taskTemplateStep.findMany({
         where: { taskTemplateId: template.id },
         select: {
@@ -628,7 +516,7 @@ const syncCanonicalTemplates = async (
           } else {
             await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: adoption.write.data });
           }
-          increment(countersByProject, project.id, adoption.counter);
+          counters[adoption.counter] += 1;
         }
         if (step.agentName === REGRESSION_VERIFIER_AGENT_NAME) {
           regressionSteps.push({
@@ -646,7 +534,7 @@ const syncCanonicalTemplates = async (
         }
         if (persisted.prompt !== step.prompt) {
           await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { prompt: step.prompt } });
-          addStepUpdate(countersByProject, project.id, templateName, step.stepIndex, 1);
+          recordStepPromptUpdate(counters, templateName, step.stepIndex, 1);
         }
       }
     }
@@ -658,7 +546,7 @@ const migrateRegressionTasks = async (
   tx: Prisma.TransactionClient,
   project: ProjectRow,
   regressionSteps: readonly RegressionStep[],
-  countersByProject: Map<string, ProjectCounters>,
+  counters: CanonicalSyncCounters,
 ): Promise<void> => {
   for (const step of regressionSteps) {
     const target = await tx.agent.findFirst({
@@ -687,19 +575,19 @@ const migrateRegressionTasks = async (
     });
     for (const task of tasks) {
       if (task.archivedAt) {
-        addPreserved(countersByProject, project.id, "archived");
+        counters.preservedTaskAssignments.archived += 1;
         continue;
       }
       if (task.status !== TaskStatus.TODO) {
-        addPreserved(countersByProject, project.id, "nonTodo");
+        counters.preservedTaskAssignments.nonTodo += 1;
         continue;
       }
       if (task._count.runs > 0 || task._count.sessions > 0) {
-        addPreserved(countersByProject, project.id, "started");
+        counters.preservedTaskAssignments.started += 1;
         continue;
       }
       if (task.stepOutput) {
-        addPreserved(countersByProject, project.id, "output");
+        counters.preservedTaskAssignments.output += 1;
         continue;
       }
       const adopted = await tx.task.updateMany({
@@ -728,35 +616,9 @@ const migrateRegressionTasks = async (
           toAgentId: target.id,
         },
       } });
-      increment(countersByProject, project.id, "migratedTasks");
+      counters.migratedTasks += 1;
     }
   }
-};
-
-const sumCounters = (
-  projectRows: readonly ProjectRow[],
-  countersByProject: Map<string, ProjectCounters>,
-  templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
-  roleNames: readonly string[],
-): ProjectCounters => {
-  const total = emptyProjectCounters(templateSources, roleNames);
-  for (const project of projectRows) {
-    const counters = countersByProject.get(project.id);
-    if (!counters) continue;
-    total.templates += counters.templates;
-    for (const name of mutationCounterNames) total[name] += counters[name];
-    for (const field of Object.keys(total.preservedTaskAssignments) as (keyof PreservedTaskAssignments)[]) {
-      total.preservedTaskAssignments[field] += counters.preservedTaskAssignments[field];
-    }
-    for (const [templateName, byStep] of Object.entries(counters.updatedSteps)) {
-      for (const [stepIndex, count] of Object.entries(byStep)) {
-        total.updatedSteps[templateName]![Number(stepIndex)]! += count;
-      }
-    }
-    for (const [roleName, count] of Object.entries(counters.updatedRoles)) total.updatedRoles[roleName]! += count;
-  }
-  finalizeUpdated(total);
-  return total;
 };
 
 export const main = async (
@@ -769,6 +631,7 @@ export const main = async (
   const [templateSources, sources] = await Promise.all([loadAllTemplateStepSources(), loadAgentSources()]);
   const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
   const roleNames = [...rolesByName.keys()];
+  const reportKeys = { templateSteps: templateSources, roleNames };
 
   const prisma = database ?? new PrismaClient();
   const ownsPrisma = database === undefined;
@@ -786,13 +649,12 @@ export const main = async (
       canonicalProject,
       ...projectRows.filter(({ id }) => id !== canonicalProject.id),
     ];
-    const countersByProject = new Map<string, ProjectCounters>();
+    const outcomes: CanonicalSyncProjectOutcome[] = [];
     const runtimeConfigAdoptions: Array<{
       name: string;
       from: { model: string; runnerPreference: RunnerPreference };
       to: { model: string; runnerPreference: RunnerPreference };
     }> = [];
-    const refusals = new Map<string, string>();
 
     for (const project of orderedProjects) {
       try {
@@ -810,8 +672,7 @@ export const main = async (
             if (!present) throw projectError(project, "Project was not found");
           }
 
-          const projectCounters = emptyProjectCounters(templateSources, roleNames);
-          const transactionCounters = new Map([[project.id, projectCounters]]);
+          const projectCounters = emptyCanonicalSyncCounters(reportKeys);
           const transactionAdoptions: typeof runtimeConfigAdoptions = [];
           const installationRows = await readCanonicalInstallationRows(tx, project.id, templateSources);
           const installationPlan = planCanonicalInstallation(
@@ -823,12 +684,12 @@ export const main = async (
           if (plannedRefusal) throw projectError(project, plannedRefusal.reason);
           for (const action of installationPlan) {
             if (action.kind === "create" || action.kind === "rollover") {
-              increment(transactionCounters, action.projectId, "createdCanonicalTemplates");
+              projectCounters.createdCanonicalTemplates += 1;
             }
           }
 
           if (project.id === canonicalProject.id) {
-            await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByName, transactionCounters);
+            await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByName, projectCounters);
           }
           await synchronizeAgents(
             tx,
@@ -837,40 +698,39 @@ export const main = async (
             sources,
             rolesByName,
             roleNames,
-            transactionCounters,
+            projectCounters,
             transactionAdoptions,
           );
 
           await applyCanonicalInstallation(tx, installationPlan, templateSources, {
             projectLabel: () => project.slug,
           });
-          const regressionSteps = await syncCanonicalTemplates(tx, project, templateSources, transactionCounters);
-          await migrateRegressionTasks(tx, project, regressionSteps, transactionCounters);
+          const regressionSteps = await syncCanonicalTemplates(tx, project, templateSources, projectCounters);
+          await migrateRegressionTasks(tx, project, regressionSteps, projectCounters);
 
           if (fullInstallTarget) {
-            await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, transactionCounters);
+            await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, projectCounters);
             const postSyncRows = await readCanonicalInstallationRows(tx, project.id, templateSources);
             const fullInstallationPlan = planCanonicalInstallation(postSyncRows, templateSources, [project.id]);
             for (const action of fullInstallationPlan) {
               if (action.kind === "create" || action.kind === "rollover") {
-                increment(transactionCounters, action.projectId, "createdCanonicalTemplates");
+                projectCounters.createdCanonicalTemplates += 1;
               }
             }
             await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
               projectLabel: () => project.slug,
             });
           }
-          finalizeUpdated(projectCounters);
           return { counters: projectCounters, runtimeConfigAdoptions: transactionAdoptions };
         }, { timeout: 120_000 });
-        countersByProject.set(project.id, result.counters);
+        outcomes.push({ kind: "synced", slug: project.slug, counters: result.counters });
         runtimeConfigAdoptions.push(...result.runtimeConfigAdoptions);
       } catch (error) {
         if (project.id === canonicalProject.id || project.id === installFullProjectId) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const prefix = `Project ${project.slug}: `;
         const reason = message.startsWith(prefix) ? message.slice(prefix.length) : message;
-        refusals.set(project.id, reason.replace(/\s+/gu, " ").trim());
+        outcomes.push({ kind: "refused", slug: project.slug, reason: reason.replace(/\s+/gu, " ").trim() });
       }
     }
 
@@ -881,21 +741,12 @@ export const main = async (
         + `to model=${adoption.to.model}, runnerPreference=${adoption.to.runnerPreference}`,
       );
     }
-    for (const project of orderedProjects) {
-      const refusal = refusals.get(project.id);
-      if (refusal !== undefined) console.log(`REFUSED ${project.slug}: ${refusal}`);
-      else console.log(`SYNCED ${project.slug}: ${JSON.stringify(countersByProject.get(project.id)!)}`);
+    const summary = canonicalSyncSummary(outcomes, reportKeys);
+    for (const outcome of outcomes) {
+      if (outcome.kind === "refused") console.log(`REFUSED ${outcome.slug}: ${outcome.reason}`);
+      else console.log(`SYNCED ${outcome.slug}: ${JSON.stringify(summary.projects[outcome.slug])}`);
     }
-    const projects = Object.fromEntries(projectRows.flatMap((project) => {
-      const counters = countersByProject.get(project.id);
-      return counters ? [[project.slug, counters]] : [];
-    }));
-    const refused = Object.fromEntries(projectRows.flatMap((project) => {
-      const reason = refusals.get(project.id);
-      return reason === undefined ? [] : [[project.slug, reason]];
-    }));
-    const totals = sumCounters(projectRows, countersByProject, templateSources, roleNames);
-    console.log(JSON.stringify({ projects, refused, totals }));
+    console.log(canonicalSyncSummaryLine(summary));
   } finally {
     if (ownsPrisma) await prisma.$disconnect();
   }

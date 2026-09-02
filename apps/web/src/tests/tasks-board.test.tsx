@@ -442,6 +442,10 @@ test("running, ended, and absent runs render only durations their timestamps pro
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
   try {
     assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
+    // Every live status the run line already gives an elapsed clock to gets the
+    // same clock here: the footer used to answer `timeAgo` for a CLAIMED run
+    // that the aggregate card was counting up.
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "CLAIMED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z", pullRequestUrl: null } })), "8m 0s · 3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" })), "3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null } })), "3h ago");

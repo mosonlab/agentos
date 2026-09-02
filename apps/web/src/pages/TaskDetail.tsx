@@ -19,7 +19,7 @@ import {
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
 } from "../components/ui";
-import { isActiveRunStatus, retryable } from "../lib/board";
+import { retryable, runLiveness } from "../lib/board";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
@@ -69,16 +69,12 @@ export const NowBlock = ({ run }: { run: Run }): ReactNode => {
   const [expanded, setExpanded] = useState(false);
   const message = run.session?.latestAgentMessage ?? null;
   const body = message?.body ?? t("taskDetail.now.noMessage");
-  // Task-detail Runs carry cost on their nested Session, while RunLine's
-  // shared board projection keeps it at the top level. The line only needs the
-  // common run fields, so provide the projection's unavailable cost as null.
-  const runLine = { ...run, costUsd: run.session?.costUsd ?? null };
 
   return (
     <div data-task-now="">
       <Card title={t("taskDetail.now.title")}>
         <div className="grid gap-[12px]">
-          <RunLine run={runLine} mergeOutcome={run.mergeOutcome} showElapsed showModel />
+          <RunLine run={run} mergeOutcome={run.mergeOutcome} elapsed="line" showModel />
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-[10px]">
             {message === null ? (
               <span className="min-w-0 [overflow-wrap:anywhere] text-secondary-foreground">{body}</span>
@@ -407,7 +403,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   // `app.ts` orders runs `runNumber desc`, so the newest run is the head.
   const newest = runs[0];
   const newestIsActive = task.executionOwner === "agent" && newest !== undefined
-    && isActiveRunStatus(newest.status);
+    && runLiveness(newest).live;
   const newestIsCancelling = newestIsActive && newest.cancelRequestedAt !== null && newest.cancelAcknowledgedAt === null;
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);

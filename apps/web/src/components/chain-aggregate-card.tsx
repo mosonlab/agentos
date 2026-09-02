@@ -108,13 +108,13 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
         {holdPill ?? (state === "running" ? null : <Pill tone={STATE_TONE[state]}>{t(`tasks.aggregate.state.${state}`)}</Pill>)}
       </span>,
       ...(aggregate.frontier.latestRun === null ? [] : [
-        <RunLine run={aggregate.frontier.latestRun} mergeOutcome={aggregate.frontier.mergeOutcome} showElapsed showModel />,
+        <RunLine run={aggregate.frontier.latestRun} mergeOutcome={aggregate.frontier.mergeOutcome} elapsed="line" showModel />,
       ]),
       ...(activeRepair?.latestRun === null || activeRepair?.latestRun === undefined ? [] : [
         <span data-chain-repair="" className="contents">
           <span>{activeRepair.repairKind}</span>
           <span aria-hidden="true"> · </span>
-          <RunLine run={activeRepair.latestRun} showElapsed showModel />
+          <RunLine run={activeRepair.latestRun} elapsed="line" showModel />
         </span>,
       ]),
       ...(controlAction?.kind === "activate" ? [

@@ -26,7 +26,6 @@ import {
   type RuntimeHandle,
 } from "./adapters.js";
 import {
-  isDependencyProvisioning,
   openControlPlane,
   retriableStartupError,
   type ClaimedTask,
@@ -44,6 +43,10 @@ import {
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { deliverWorkspace } from "./delivery.js";
+import {
+  classifyDependencyProvisioningFailure,
+  decideDependencyProvisioning,
+} from "./dependency-provisioning.js";
 import { disposeWorkspace, type WorkspaceDisposal } from "./dispose-workspace.js";
 import {
   buildFailureEnvelope,
@@ -57,7 +60,6 @@ import { createRunLease, deliverUnderLease, type RunLease } from "./run-lease.js
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
-import { DependencyProvisioningManifestMissingError } from "./dependency-cache.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
@@ -299,38 +301,17 @@ export const executeClaim = async (
   };
 
   try {
-    // A template step carries an explicit dependency decision. A missing or
-    // malformed value is a protocol violation: no default is safe because it
-    // could either strip dependencies from an implementation step or expose a
-    // review step to the dependency materializer. Validate before any runner
-    // workspace, dependency, adapter, or provider operation.
-    const claimedTemplateStep = claim.task.templateStep as {
-      provisionDependencies?: unknown;
-    } | null | undefined;
-    if (claimedTemplateStep === undefined
-      || (claimedTemplateStep !== null && typeof claimedTemplateStep.provisionDependencies !== "boolean")) {
-      const condition = "template-step-provision-dependencies-missing";
+    // The dependency decision is made once, here, and passed down. It is the
+    // first thing this function does: a refused claim shape must not reach a
+    // runner workspace, scratch, child environment, adapter preflight or
+    // provider launch, and the condition goes in both terminal fields so old
+    // and new control planes can expose it.
+    const provisioning = decideDependencyProvisioning(claim);
+    if (!provisioning.admitted) {
       await session.finish({
-        outcome: { case: "terminal-protocol-failure", reason: condition },
+        outcome: { case: "terminal-protocol-failure", reason: provisioning.condition },
         exitCode: null,
-        terminationReason: condition,
-        cleanupStatus: "SUCCEEDED",
-        workspaceRetained: false,
-      });
-      return;
-    }
-    // Dependency provisioning is a required claim contract. A runner build
-    // that predates this field must fail closed: treating an omitted value as
-    // either policy would silently change whether a repository's dependencies
-    // are installed. Validate before any workspace, scratch, child environment
-    // or adapter preflight/launch work can happen, and keep the condition in
-    // both terminal fields so old and new control planes can expose it.
-    if (!isDependencyProvisioning((claim.repo as { dependencyProvisioning?: unknown } | undefined)?.dependencyProvisioning)) {
-      const condition = "dependency-provisioning-missing";
-      await session.finish({
-        outcome: { case: "terminal-protocol-failure", reason: condition },
-        exitCode: null,
-        terminationReason: condition,
+        terminationReason: provisioning.condition,
         cleanupStatus: "SUCCEEDED",
         workspaceRetained: false,
       });
@@ -373,15 +354,14 @@ export const executeClaim = async (
       return;
     }
 
-    workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
-    if (claim.task.templateStep?.provisionDependencies === false) {
+    workspace = claim.resume
+      ? await reuseWorkspace(config, claim)
+      : await provisionWorkspace(config, claim, provisioning.decision);
+    if (!provisioning.decision.provision) {
       // This is deliberately a fenced activity write with no fallback: the
-      // reviewer must have durable evidence of the dependency-free checkout
+      // agent must have durable evidence of the dependency-free checkout
       // before its adapter is preflighted or launched.
-      await session.note(
-        "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
-        { stream: "runner" },
-      );
+      await session.note(provisioning.decision.evidence, { stream: "runner" });
     }
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
@@ -960,9 +940,7 @@ export const executeClaim = async (
       return;
     }
     const evidence = preflightEvidence(message);
-    const classified = error instanceof DependencyProvisioningManifestMissingError
-      ? { failureClass: "PROTOCOL_ERROR" as const, retryable: false }
-      : adapter.classifyError(evidence);
+    const classified = classifyDependencyProvisioningFailure(error) ?? adapter.classifyError(evidence);
     const worktreeReport = await worktreeContainmentReport();
     const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0, false, controlPlane);
     const { salvage, ...finishedCleanup } = cleaned;

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
+import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { runCommand } from "./exec.js";
 import {
   mirrorRevisionsPresent, repoMirrorPath, RepoMirrorError, withRepoMirror,
@@ -49,12 +50,18 @@ const fixture = async (label: string): Promise<Fixture> => {
   return { root, remote, seed, config, mirrorRoot, mirror: repoMirrorPath(mirrorRoot, remote) };
 };
 
+/** Mirror behaviour is what these tests provision for; no Run installs here. */
+const NO_DEPENDENCIES = {
+  provision: false,
+  evidence: "Dependency provisioning skipped: Repo.dependencyProvisioning=NONE",
+} as const satisfies DependencyProvisioningDecision;
+
 const claimFor = (remote: string, id: string): WorkspaceProvisionClaim => ({
   executionMode: "agent",
   runner: "CODEX",
   specificationMaterialization: null,
   task: { id: `task-${id}`, chainId: null, chainIndex: null, templateStep: null },
-  repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+  repo: { remoteUrl: remote, defaultBranch: "main" },
   run: {
     id: `run-${id}`,
     runNumber: 1,
@@ -83,7 +90,7 @@ const silent = (): ((progress: RepoMirrorProgress) => void) => (): void => undef
 test("the second run reuses the machine's mirror and fetches only what changed", async () => {
   const { root, remote, seed, config, mirror } = await fixture("reuse");
   try {
-    await provisionWorkspace(config, claimFor(remote, "one"), { mirrorOptions: { report: silent() } });
+    await provisionWorkspace(config, claimFor(remote, "one"), NO_DEPENDENCIES, { mirrorOptions: { report: silent() } });
     const created = (await stat(mirror)).birthtimeMs;
 
     await writeFile(join(seed, "tree.txt"), "second\n");
@@ -95,6 +102,7 @@ test("the second run reuses the machine's mirror and fetches only what changed",
     const workspace = await provisionWorkspace(
       config,
       claimFor(remote, "two"),
+      NO_DEPENDENCIES,
       { execute: recorded(calls), mirrorOptions: { report: silent() } },
     );
 
@@ -123,7 +131,7 @@ test("the mirror carries branches and tags but not the remote's other refs", asy
     // would make every fetch pay for the repository's whole review history.
     git(seed, "push", "origin", "HEAD:refs/pull/7/head");
 
-    await provisionWorkspace(config, claimFor(remote, "refspec"), { mirrorOptions: { report: silent() } });
+    await provisionWorkspace(config, claimFor(remote, "refspec"), NO_DEPENDENCIES, { mirrorOptions: { report: silent() } });
 
     const refs = git(mirror, "for-each-ref", "--format=%(refname)").split("\n");
     assert.equal(refs.includes("refs/heads/main"), true);
@@ -137,12 +145,13 @@ test("the mirror carries branches and tags but not the remote's other refs", asy
 test("a mirror pointing at a different remote is refused instead of quietly re-cloning", async () => {
   const { root, remote, config, mirror } = await fixture("mismatch");
   try {
-    await provisionWorkspace(config, claimFor(remote, "first"), { mirrorOptions: { report: silent() } });
+    await provisionWorkspace(config, claimFor(remote, "first"), NO_DEPENDENCIES, { mirrorOptions: { report: silent() } });
     git(mirror, "remote", "set-url", "origin", "https://github.com/acme/somewhere-else.git");
 
     const failure = await provisionWorkspace(
       config,
       claimFor(remote, "second"),
+      NO_DEPENDENCIES,
       { mirrorOptions: { report: silent() } },
     ).then(() => null, (error: unknown) => error);
     assert.equal(failure instanceof RepoMirrorError, true);
@@ -162,6 +171,7 @@ test("a mirror that is not a readable git repository is refused, not rebuilt", a
     const failure = await provisionWorkspace(
       config,
       claimFor(remote, "corrupt"),
+      NO_DEPENDENCIES,
       { mirrorOptions: { report: silent() } },
     ).then(() => null, (error: unknown) => error);
     assert.equal(failure instanceof RepoMirrorError, true);
@@ -255,7 +265,7 @@ test("the mirror is private to the account that runs the tasks", async () => {
   const { root, remote, config, mirror, mirrorRoot } = await fixture("private");
   const previous = process.umask(0o022);
   try {
-    await provisionWorkspace(config, claimFor(remote, "private"), { mirrorOptions: { report: silent() } });
+    await provisionWorkspace(config, claimFor(remote, "private"), NO_DEPENDENCIES, { mirrorOptions: { report: silent() } });
     // The mirror carries the same history as the run workspace and lives in the
     // task account's own home. Nothing outside that account has business
     // reading it, and a permissive umask must not decide otherwise.
@@ -280,7 +290,7 @@ test("every mirror command runs through the run-as prefix, so the account with t
     const isolated = { ...config, runAsPrefix: [launcher] } as RunnerConfig;
     await mkdir(config.workspaceRoot, { recursive: true });
 
-    await provisionWorkspace(isolated, claimFor(remote, "run-as"), { mirrorOptions: { report: silent() } });
+    await provisionWorkspace(isolated, claimFor(remote, "run-as"), NO_DEPENDENCIES, { mirrorOptions: { report: silent() } });
 
     const argv = await readFile(log, "utf8");
     assert.match(argv, /git init --bare/u);
