@@ -367,6 +367,34 @@ test("gate FAIL records bounded node:test failures and missing-stage output", ()
   assert.ok(Buffer.byteLength(excerpt, "utf8") <= 4000, "failure excerpt exceeded its byte cap");
 });
 
+test("gate FAIL persists assertions from a forwarded nested-workspace excerpt", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = [
+    "run-gate: failure excerpt (last 200 lines per failing step)",
+    "--- unit tests (all workspaces) ---",
+    "# Subtest: packages/workspace-one/src/nested-failure.test.ts",
+    "    not ok 1 - nested workspace assertion",
+    "      AssertionError: nested workspace assertion",
+    ...Array.from(
+      { length: 197 },
+      (_, index) => `ok ${index + 1} - trailing workspace passing output ${String(index).padStart(3, "0")}`,
+    ),
+  ].join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (unit tests (all workspaces))";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  const excerpt = verdict.gateFailureExcerpt;
+  assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
+  assert.match(excerpt, /packages\/workspace-one\/src\/nested-failure\.test\.ts/u);
+  assert.match(excerpt, /AssertionError: nested workspace assertion/u);
+  assert.doesNotMatch(excerpt, /unit tests \(all workspaces\): no per-test output in gate log/u);
+});
+
 test("gate FAIL keeps missing-stage notices when forwarded output starts mid-stage", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
