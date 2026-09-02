@@ -151,6 +151,22 @@ export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskSt
  *  request is sent to. */
 export type ParkedChain = { chainId: string; name: string; stepCount: number; taskId: string };
 
+/** A chain action target carries the first task address used by the chain
+ * control routes. It intentionally has the same shape as `ParkedChain`: the
+ * board can keep one small, named projection for both column-head waves. */
+export type HoldableChain = ParkedChain;
+
+/** The API's aggregate activation projection grows a persisted hold object.
+ * Keep this narrow compatibility view here while older board payload fixtures
+ * (and callers) are still allowed to omit it; a missing value is the same as
+ * an unheld chain. */
+type ChainActivationWithHold = ChainAggregate["activation"] & {
+  hold?: { heldLayer: number; heldAt: string; holdReason: string | null } | null;
+};
+
+const chainHold = (aggregate: ChainAggregate): ChainActivationWithHold["hold"] =>
+  (aggregate.activation as ChainActivationWithHold).hold ?? null;
+
 /**
  * The chains a column would activate, in the order they are read.
  *
@@ -163,8 +179,25 @@ export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): Park
   normalizeBoardEntries(entries).flatMap((entry) => {
     if (entry.kind !== "chain") return [];
     const { activation, chainId, chainName, stepCount } = entry.aggregate;
-    if (activation.state !== "parked-unactivated" || activation.taskId === null) return [];
+    if (activation.state !== "parked-unactivated" || activation.taskId === null || chainHold(entry.aggregate) !== null) return [];
     return [{ chainId, name: chainBindingLabel({ id: chainId, name: chainName }), stepCount, taskId: activation.taskId }];
+  });
+
+/** The chains a Doing column can hold in one operator wave. The control route
+ * accepts any member task id; the API supplies `activation.taskId` where it has
+ * one and the aggregate's detail task is the safe fallback for older payloads.
+ * A persisted hold is the source of truth, so a stale card already marked held
+ * never gets sent a second request by the column head. */
+export const heldChains = (entries: readonly (BoardEntry | BoardTask)[]): HoldableChain[] =>
+  normalizeBoardEntries(entries).flatMap((entry) => {
+    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null) return [];
+    const { activation, chainId, chainName, stepCount, detailTaskId } = entry.aggregate;
+    return [{
+      chainId,
+      name: chainBindingLabel({ id: chainId, name: chainName }),
+      stepCount,
+      taskId: activation.taskId ?? detailTaskId,
+    }];
   });
 
 /* ------------------------------------------------------------- the schedule */
