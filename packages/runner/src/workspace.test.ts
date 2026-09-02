@@ -9,6 +9,7 @@ import test from "node:test";
 import type { RunnerConfig } from "./config.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import { runCommand } from "./exec.js";
+import { runtimeToolPaths } from "./runtime-tools.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
@@ -17,14 +18,8 @@ import {
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-const canonicalRuntimeTools = [
-  ["regression-verification.sh", "../runtime-tools/regression-verification.sh"],
-  ["gate-worker/gate-dispatch.sh", "../runtime-tools/gate-worker/gate-dispatch.sh"],
-  ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
-  ["gate-worker/mirror-push.sh", "../runtime-tools/gate-worker/mirror-push.sh"],
-  ["gate-worker/remote-gate.sh", "../runtime-tools/gate-worker/remote-gate.sh"],
-  ["gate-worker/run-gate.sh", "../runtime-tools/gate-worker/run-gate.sh"],
-] as const;
+const canonicalRuntimeTools = runtimeToolPaths.map((relativePath) =>
+  [relativePath, `../runtime-tools/${relativePath}`] as const);
 
 const createRuntimeToolsFixture = async (): Promise<string> => {
   const root = await mkdtemp(join(tmpdir(), "agentos-runtime-tools-source-"));
@@ -914,7 +909,7 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
       assert.equal(scratch.toolsDir.startsWith(`${checkout}${sep}`), false);
       assert.deepEqual(
         (await readdir(scratch.toolsDir)).sort(),
-        ["gate-worker", "regression-verification.sh"],
+        ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"],
       );
       assert.deepEqual(
         (await readdir(join(scratch.toolsDir, "gate-worker"))).sort(),
@@ -1073,7 +1068,7 @@ test("runtime-tool materialization ignores unrelated release-source entries", as
   try {
     await writeFile(join(sourceRoot, ".incidental"), "not part of the bundle\n");
     await materializeRuntimeTools(config, scratch, { sourceRoot });
-    assert.deepEqual((await readdir(scratch.toolsDir)).sort(), ["gate-worker", "regression-verification.sh"]);
+    assert.deepEqual((await readdir(scratch.toolsDir)).sort(), ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"]);
   } finally {
     await cleanupAgentScratch(config, scratch);
     await rm(sourceRoot, { recursive: true, force: true });
