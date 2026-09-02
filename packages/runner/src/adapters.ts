@@ -6,6 +6,7 @@ import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { hostProofSlotDirectory } from "./host-proof-slots.js";
 import { manifestLines, toolsFor } from "./session-tool-contract.js";
+import { gitCredentialHelperTool } from "./runtime-tools.js";
 import type { AgentScratch } from "./workspace.js";
 import { claudeDeclaration, claudePlatformSettingsPath } from "./adapters/claude.js";
 import { codexDeclaration, codexPlatformBaselinePath } from "./adapters/codex.js";
@@ -189,7 +190,7 @@ export const buildChildEnvironment = (
       // regression step's target refresh failed every Run with "could not read
       // Username". Answer through the runner's own home instead. A public
       // remote hid this for as long as every repository here was public.
-      ["credential.helper", join(scratch.toolsDir, "git-credential-runner.sh")] as const,
+      ["credential.helper", join(scratch.toolsDir, gitCredentialHelperTool)] as const,
       ...(commitHooksPath ? [["core.hooksPath", commitHooksPath] as const] : []),
     ]),
     ...(regressionStep ? {
