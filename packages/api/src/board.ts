@@ -27,13 +27,13 @@ import type {
   BoardLatestRun as BoardContractLatestRun,
   BoardMoveTarget as BoardContractMoveTarget,
   ChainAggregate as BoardContractChainAggregate,
-  ChainFrontier as BoardContractChainFrontier,
   RepairBinding as BoardContractRepairBinding,
   RunStatus as BoardRunStatus,
   TaskList as TaskListContract,
   UsageCost as BoardUsageCost,
 } from "@anneal/db/board-contract";
 import { compare } from "@anneal/db/chain-order";
+import type { SerializesTo } from "@anneal/db/wire-serialization";
 
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import {
@@ -63,42 +63,15 @@ import { taskMoveAuthority } from "./task-move-authority.js";
  * point of the shape is that its cost is legible.
  */
 export type BoardMoveTarget = BoardContractMoveTarget;
-export type BoardCard = BoardContractCard<Date>;
+/** Compile-time proof that JSON serialization turns the native projection into
+ * the exact shared browser contract, at every depth. `boardCard` returns this
+ * type, so a projected key the contract does not name, or a `Date` the browser
+ * reads as a `string`, fails where the projection is written. */
+export type BoardCard = SerializesTo<BoardContractCard<Date>, BoardContractCard>;
 export type BoardLatestRun = BoardContractLatestRun<Date>;
 export type BoardChainActivationState = BoardContractChainActivationState;
 export type RepairBinding = BoardContractRepairBinding;
 export type BoardChainControl = Pick<ChainControlSnapshot, "state" | "held" | "heldLayer" | "heldAt" | "holdReason">;
-
-type JsonSerialized<T> = T extends Date
-  ? string
-  : T extends readonly (infer Item)[]
-    ? JsonSerialized<Item>[]
-    : T extends object
-      ? { [Key in keyof T]: JsonSerialized<T[Key]> }
-      : T;
-type ExactKeys<Left, Right> = [
-  Exclude<keyof Left, keyof Right>,
-  Exclude<keyof Right, keyof Left>,
-] extends [never, never] ? true : false;
-type ContractCheck<
-  Projection extends BoardContractCard,
-  Proof extends [true, true, true, true, false, false],
-> = Proof extends [true, true, true, true, false, false] ? Projection : never;
-/** Compile-time proof that JSON serialization turns the native projection into
- * the exact shared browser contract, including every nested aggregate, frontier
- * and latest-run key. The final two checks prove missing and surplus adapter keys
- * both fail the bidirectional key comparison. */
-export type SerializedBoardCardProjection = ContractCheck<
-  JsonSerialized<BoardCard>,
-  [
-    ExactKeys<JsonSerialized<BoardCard>, BoardContractCard>,
-    ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>, BoardContractChainAggregate>,
-    ExactKeys<NonNullable<JsonSerialized<BoardCard>["chainAggregate"]>["frontier"], BoardContractChainFrontier>,
-    ExactKeys<NonNullable<JsonSerialized<BoardCard>["latestRun"]>, BoardContractLatestRun>,
-    ExactKeys<Omit<JsonSerialized<BoardCard>, "id">, BoardContractCard>,
-    ExactKeys<JsonSerialized<BoardCard> & { surplus: never }, BoardContractCard>,
-  ]
->;
 
 /** The Prisma row shape `boardCard` needs — declared structurally so `readBoard`
  *  can select exactly these columns and nothing else. */
@@ -1127,7 +1100,7 @@ const taskListInclude = {
   },
 } as const satisfies Prisma.TaskInclude;
 
-export type TaskListRow = TaskListContract<Date, Prisma.Decimal>;
+export type TaskListRow = SerializesTo<TaskListContract<Date, Prisma.Decimal>, TaskListContract>;
 
 /** Read the full task list and optionally attach its expensive enrichment. */
 export const readTaskList = async (

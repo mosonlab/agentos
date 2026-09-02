@@ -8,9 +8,10 @@ import type {
   Project as ProjectContract,
   Secret as SecretContract,
 } from "@anneal/db/wire-contract";
+import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
 
-import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts } from "../costs.js";
+import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts, type CostsResponse } from "../costs.js";
 import { createProjectBootstrap, projectFields, projectInput } from "../project-bootstrap.js";
 import { encryptSecret } from "../secrets.js";
 import { withoutUndefined } from "../without-undefined.js";
@@ -50,8 +51,13 @@ const secretInput = z.object({ ...secretFields, description: secretFields.descri
 const secretPatch = z.object(secretFields).partial().extend({ value: z.string().min(1).max(100_000).optional() })
   .refine((value) => Object.keys(value).length > 0);
 
-type ProjectResponse = ProjectContract<Date, Prisma.Decimal>;
-type SecretResponse = SecretContract<Date>;
+/** Each response names both its native projection and the browser contract that
+ * projection must JSON-serialize to, so every `satisfies` below proves the
+ * whole wire claim rather than the native half of it. `Environment` holds no
+ * date or amount, and the proof is what says so. */
+type EnvironmentResponse = SerializesTo<EnvironmentContract, EnvironmentContract>;
+type ProjectResponse = SerializesTo<ProjectContract<Date, Prisma.Decimal>, ProjectContract>;
+type SecretResponse = SerializesTo<SecretContract<Date>, SecretContract>;
 
 export const registerAdminRoutes = (app: RouteApp, { db, projectBootstrapLoaders }: RouteDeps): void => {
   app.get("/projects", async (context) => validated(context,
@@ -89,27 +95,29 @@ export const registerAdminRoutes = (app: RouteApp, { db, projectBootstrapLoaders
     if (days === undefined) {
       return context.json({ error: `days must be one of ${COSTS_RANGE_DAYS.join(", ")}` }, 400);
     }
-    return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days, timeZone));
+    return context.json(
+      await readProjectCosts(db, id.parse(context.req.param("projectId")), days, timeZone) satisfies CostsResponse,
+    );
   });
 
   app.get("/projects/:projectId/environments", async (context) => context.json((await db.environment.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
-  })) satisfies EnvironmentContract[]));
+  })) satisfies EnvironmentResponse[]));
   app.post("/projects/:projectId/environments", async (context) => context.json((await db.environment.create({
     data: { projectId: id.parse(context.req.param("projectId")), ...await readJson(context.req.raw, environmentInput) },
-  })) satisfies EnvironmentContract, 201));
+  })) satisfies EnvironmentResponse, 201));
   app.get("/environments/:environmentId", async (context) => {
     const environment = await db.environment.findUnique({
       where: { id: id.parse(context.req.param("environmentId")) },
       include: { secrets: { include: { secret: { select: secretPublicSelect } } } },
     });
-    return environment ? context.json(environment satisfies EnvironmentContract) : context.json({ error: "Environment not found" }, 404);
+    return environment ? context.json(environment satisfies EnvironmentResponse) : context.json({ error: "Environment not found" }, 404);
   });
   app.patch("/environments/:environmentId", async (context) => context.json((await db.environment.update({
     where: { id: id.parse(context.req.param("environmentId")) },
     data: withoutUndefined(await readJson(context.req.raw, environmentPatch)),
-  })) satisfies EnvironmentContract));
+  })) satisfies EnvironmentResponse));
   app.delete("/environments/:environmentId", async (context) => {
     await db.environment.delete({ where: { id: id.parse(context.req.param("environmentId")) } });
     return context.body(null, 204);
