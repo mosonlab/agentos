@@ -57,7 +57,12 @@ checks and named test files inside a Run; for workspace lint, use
 `npm run lint -w <workspace>`. The Regression step owns repository-wide proof
 and the Merge Gate.
 
-Per-workspace `build`, `typecheck`, `lint`, `test`, and `test:db` verification inside an Anneal Run shares a host-wide pool of three proof slots by default; set `AGENTOS_HOST_PROOF_SLOTS` to an integer from 1 through 1024 to override the count. A wait of 60 seconds or more is reported on stderr once while it lasts and again with the total when the slot is admitted; shorter waits are silent, and a command exits **75** after 20 minutes if no slot becomes available. Inside a Run the workspace `test` scripts also pass `--test-concurrency=2` to Node's test runner, so one slot holds at most two test child processes instead of the host-wide default of one per core; the same scripts outside a Run keep Node's default. Regression-owned proof and commands running outside a Run use the host fast path and execute immediately without acquiring a slot.
+`test:db -w @anneal/api` refuses with exit **78** inside a Run as well, named
+files included: a Run is granted no scratch PostgreSQL, so every `*.dbtest.ts`
+would die on import. Database tests are merge gate evidence — do not attempt
+them inside a Run, and do not report their absence as a gap.
+
+Per-workspace `build`, `typecheck`, `lint`, and `test` verification inside an Anneal Run shares a host-wide pool of three proof slots by default; set `AGENTOS_HOST_PROOF_SLOTS` to an integer from 1 through 1024 to override the count. A wait of 60 seconds or more is reported on stderr once while it lasts and again with the total when the slot is admitted; shorter waits are silent, and a command exits **75** after 20 minutes if no slot becomes available. Inside a Run the workspace `test` scripts also pass `--test-concurrency=2` to Node's test runner, so one slot holds at most two test child processes instead of the host-wide default of one per core; the same scripts outside a Run keep Node's default. Regression-owned proof and commands running outside a Run use the host fast path and execute immediately without acquiring a slot.
 
 The merge gate holds a lock, so run one gate per worktree. A verdict belongs to the exact
 commit it names — not to an earlier one on the same branch, and not to "the

@@ -123,12 +123,30 @@ test("RUN-SCOPE-GUARD prefixes all eight repository-wide root scripts", () => {
   }
 });
 
-test("DBTEST-SCOPE refuses only an unscoped non-bypassed Run invocation", () => {
-  const refused = dbtestInvocationDecision({
+test("DBTEST-SCOPE refuses a Run without a scratch database, named files included", () => {
+  const noScratchDatabase =
+    "run-scope-guard: test:db -w @anneal/api refused for Run db-run: an Anneal Run is granted no scratch PostgreSQL, so test:db -w @anneal/api is merge gate evidence. Do not attempt it inside a Run, and do not report its absence as a gap.";
+
+  for (const args of [[], ["src/chain.dbtest.ts"]]) {
+    assert.deepEqual(dbtestInvocationDecision({
+      args,
+      environment: { AGENTOS_RUN_ID: "db-run" },
+      cpuCount: 8,
+    }), { exitCode: 78, refusal: noScratchDatabase });
+  }
+
+  const bypassed = dbtestInvocationDecision({
     args: [],
-    environment: { AGENTOS_RUN_ID: "db-run" },
+    environment: { AGENTOS_RUN_ID: "db-run", AGENTOS_RUN_SCOPE_BYPASS: regressionVerificationBypass },
     cpuCount: 8,
   });
+  assert.equal(bypassed.exitCode, null);
+});
+
+test("DBTEST-SCOPE refuses only an unscoped invocation once a Run holds a scratch database", () => {
+  const scratchDatabase = { AGENTOS_RUN_ID: "db-run", TEST_DATABASE_URL: "postgresql://scratch/db?schema=run" };
+
+  const refused = dbtestInvocationDecision({ args: [], environment: scratchDatabase, cpuCount: 8 });
   assert.deepEqual(refused, {
     exitCode: 78,
     refusal:
@@ -137,7 +155,7 @@ test("DBTEST-SCOPE refuses only an unscoped non-bypassed Run invocation", () => 
 
   const focused = dbtestInvocationDecision({
     args: ["src/chain.dbtest.ts"],
-    environment: { AGENTOS_RUN_ID: "db-run" },
+    environment: scratchDatabase,
     cpuCount: 8,
   });
   assert.equal(focused.exitCode, null);
@@ -153,12 +171,12 @@ test("DBTEST-SCOPE executes through a symlinked repository path", (t) => {
   const result = run(
     process.execPath,
     ["--import", "tsx", join(linkedRepository, "packages", "api", "scripts", "dbtest.mjs")],
-    { AGENTOS_RUN_ID: "symlink-run" },
+    { AGENTOS_RUN_ID: "symlink-run", TEST_DATABASE_URL: "" },
   );
   assert.equal(result.status, 78, result.stderr);
   assert.equal(
     result.stderr,
-    "run-scope-guard: test:db -w @anneal/api refused for Run symlink-run: inside an Anneal Run, verify only the affected workspace using npm run test:db -w @anneal/api -- src/<file>.dbtest.ts; the Regression step owns repository-wide proof and the Merge Gate.\n",
+    "run-scope-guard: test:db -w @anneal/api refused for Run symlink-run: an Anneal Run is granted no scratch PostgreSQL, so test:db -w @anneal/api is merge gate evidence. Do not attempt it inside a Run, and do not report its absence as a gap.\n",
   );
 });
 
@@ -167,6 +185,7 @@ test("DBTEST-SCOPE preserves host and bypass concurrency and caps Runs at two", 
     args: ["src/chain.dbtest.ts"],
     environment: {
       AGENTOS_RUN_ID: "db-run",
+      TEST_DATABASE_URL: "postgresql://scratch/db?schema=run",
       ...(configured === undefined ? {} : { AGENTOS_DBTEST_CONCURRENCY: configured }),
       ...extra,
     },
@@ -203,7 +222,11 @@ test("DBTEST-SCOPE leaves invalid configured concurrency loud", () => {
   for (const bad of ["0", "-2", "3.5", "many", " 3"]) {
     assert.throws(() => dbtestInvocationDecision({
       args: ["src/chain.dbtest.ts"],
-      environment: { AGENTOS_RUN_ID: "db-run", AGENTOS_DBTEST_CONCURRENCY: bad },
+      environment: {
+        AGENTOS_RUN_ID: "db-run",
+        TEST_DATABASE_URL: "postgresql://scratch/db?schema=run",
+        AGENTOS_DBTEST_CONCURRENCY: bad,
+      },
       cpuCount: 8,
     }), /positive integer/u);
   }
