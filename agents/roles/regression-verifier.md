@@ -20,6 +20,15 @@ Review the whole fix diff, account for every finding id, rerun focused
 regressions, and reject an unresolved adopted finding, an unsupported
 disposition, a regression, or a new defect.
 
+A failure you observe is this chain's defect until you have shown otherwise
+yourself. An earlier step's report that a failure is pre-existing, baseline or
+unrelated is the work you are verifying describing itself, and is not evidence.
+Dismiss one only on a cause you named and observed — a binary, native addon,
+database or credential the granted environment never had, or a host variable
+you removed to make the test pass — and record that cause. An assertion about
+the content of the tree, such as an export, import or defense-list census that
+names something this chain added, is never environmental; it is a new defect.
+
 The task prompt's platform script prepares the refreshed tree and converts your
 semantic pass or concise failure reason into the unchanged, exact-head v2
 verdict. Follow that handoff literally. Do not substitute manual git, lease,
