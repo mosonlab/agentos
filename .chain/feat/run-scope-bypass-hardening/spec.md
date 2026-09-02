@@ -19,7 +19,7 @@ Constraints: Fail loudly: a refused bypass prints its reason to stderr and exits
 Acceptance:
 1. `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:run-scope-guard` and `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:host-proof-slot` exit 0, each with the forged-caller refusal and the tooling-caller acceptance cases green.
 2. `RUNNER_WORKSPACE_ROOT="$(mktemp -d)" npm run test:gate-worker` exits 0 with the in-Run refusal pair green.
-3. `git grep -n 'AGENTOS_RUN_SCOPE_BYPASS=regression-verification' -- '*.md'` prints nothing.
+3. `git grep -n 'AGENTOS_RUN_SCOPE_BYPASS=regression-verification' -- '*.md' ':!.chain/**'` prints nothing.
 4. For every workspace listed by `npm query .workspace --json`, `npm run lint -w <workspace>` exits 0 on the implementation head, and `AGENTOS_RUN_ID=x npm run lint:biome` exits 78.
 5. `npm run lint` exits 0 and `npm run test:release-docs` exits 0.
 6. `scripts/merge-gate.sh --expect-head <exact-implementation-oid>` exits 0 and prints `MERGE GATE: PASS <exact-implementation-oid>` for the implementation commit being delivered.
