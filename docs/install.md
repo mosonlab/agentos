@@ -67,6 +67,9 @@ prompt synchronization, project-scoped installation and verification,
 and full-tail readiness — lives in the
 [Tier 0 / Tier 1 onboarding runbook](runbooks/add-a-project.md).
 Follow that runbook after completing the installation sequence above.
+An Agent or task template whose name is a canonical name is rewritten to the
+canonical text on every deploy; a project that needs a different prompt uses a
+different name.
 
 ## Advanced delivery infrastructure
 

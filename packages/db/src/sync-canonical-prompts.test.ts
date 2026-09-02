@@ -3,7 +3,15 @@ import { test } from "node:test";
 
 import type { PrismaClient } from "@prisma/client";
 
-import { main, parseInstallFullProjectId } from "./sync-canonical-prompts.js";
+type SyncModule = {
+  main: (database?: PrismaClient, installFullProjectId?: string | null) => Promise<void>;
+  parseInstallFullProjectId: (args?: readonly string[]) => string | null;
+};
+
+// Keep the acceptance test under src/ without pulling the prisma CLI entrypoint
+// under src/'s TypeScript rootDir during the library typecheck.
+const syncModulePath: string = "../prisma/sync-canonical-prompts.js";
+const { main, parseInstallFullProjectId } = await import(syncModulePath) as SyncModule;
 
 const asPrisma = (value: unknown): PrismaClient => value as PrismaClient;
 
@@ -18,7 +26,7 @@ test("--install-full parsing accepts only the exact optional argument pair", () 
 test("an unknown full-install target is refused before a transaction opens", async () => {
   let transactions = 0;
   const database = asPrisma({
-    project: { findUnique: async () => null },
+    project: { findMany: async () => [] },
     $transaction: async () => {
       transactions += 1;
       throw new Error("transaction-must-not-open");
@@ -29,13 +37,14 @@ test("an unknown full-install target is refused before a transaction opens", asy
   assert.equal(transactions, 0);
 });
 
-test("ordinary synchronization opens one 120-second transaction without an isolation override", async () => {
+test("ordinary synchronization opens one 120-second transaction per discovered Project without an isolation override", async () => {
   let transactions = 0;
   let transactionOptions: unknown;
   const transactionClient = {
-    project: { findMany: async () => [] },
+    project: { findUnique: async () => null },
   };
   const database = asPrisma({
+    project: { findMany: async () => [{ id: "canonical-project", slug: "agentos-example" }] },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>, options: unknown) => {
       transactions += 1;
       transactionOptions = options;
@@ -43,7 +52,7 @@ test("ordinary synchronization opens one 120-second transaction without an isola
     },
   });
 
-  await assert.rejects(main(database, null), /Canonical project agentos-example was not found/u);
+  await assert.rejects(main(database, null), /Project agentos-example: Project was not found/u);
   assert.equal(transactions, 1);
   assert.deepEqual(transactionOptions, { timeout: 120_000 });
   assert.equal(Object.hasOwn(transactionOptions as object, "isolationLevel"), false);
@@ -61,9 +70,9 @@ test("full installation re-reads the target inside the transaction before any mu
   };
   const database = asPrisma({
     project: {
-      findUnique: async () => {
-        events.push("outer.project.findUnique");
-        return { id: "deleted-project" };
+      findMany: async () => {
+        events.push("outer.project.findMany");
+        return [{ id: "deleted-project", slug: "agentos-example" }];
       },
     },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => {
@@ -73,7 +82,7 @@ test("full installation re-reads the target inside the transaction before any mu
   });
 
   await assert.rejects(main(database, "deleted-project"), /Project deleted-project was not found/u);
-  assert.deepEqual(events, ["outer.project.findUnique", "transaction", "tx.project.findUnique"]);
+  assert.deepEqual(events, ["outer.project.findMany", "transaction", "tx.project.findUnique"]);
 });
 
 for (const fixture of [
@@ -83,18 +92,20 @@ for (const fixture of [
   test(`full installation refuses ${fixture.name} before observing a mutation`, async () => {
     const events: string[] = [];
     const database = asPrisma({
-      project: { findUnique: async () => ({ id: "project-1" }) },
+      project: {
+        findMany: async () => [{ id: "project-1", slug: "agentos-example" }],
+      },
       $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
         project: {
           findUnique: async () => {
             events.push("project-read");
-            return { id: "project-1", slug: "project-one", environments: fixture.environments };
+            return { id: "project-1", slug: "agentos-example", environments: fixture.environments };
           },
         },
       }),
     });
 
-    await assert.rejects(main(database, "project-1"), /Project project-one: Project has .*Environment/u);
+    await assert.rejects(main(database, "project-1"), /Project agentos-example: Project has .*Environment/u);
     assert.deepEqual(events, ["project-read"]);
   });
 }
@@ -102,14 +113,16 @@ for (const fixture of [
 test("full installation refuses an archived canonical Agent before observing a mutation", async () => {
   const events: string[] = [];
   const database = asPrisma({
-    project: { findUnique: async () => ({ id: "project-1" }) },
+    project: {
+      findMany: async () => [{ id: "project-1", slug: "agentos-example" }],
+    },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
       project: {
         findUnique: async () => {
           events.push("project-read");
           return {
             id: "project-1",
-            slug: "project-one",
+            slug: "agentos-example",
             environments: [{ id: "environment-1", name: "local" }],
           };
         },
@@ -123,6 +136,6 @@ test("full installation refuses an archived canonical Agent before observing a m
     }),
   });
 
-  await assert.rejects(main(database, "project-1"), /Project project-one: Agent senior-dev \(archived-agent-1\) is archived/u);
+  await assert.rejects(main(database, "project-1"), /Project agentos-example: Agent senior-dev \(archived-agent-1\) is archived/u);
   assert.deepEqual(events, ["project-read", "archived-agent-read"]);
 });
