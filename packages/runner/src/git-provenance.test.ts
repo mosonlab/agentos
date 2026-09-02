@@ -8,6 +8,7 @@ import test from "node:test";
 import { buildChildEnvironment } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
+import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { platformCommitArgs } from "./exec.js";
 import { provisionWorkspace, workspaceEnvironment, type Workspace } from "./workspace.js";
 
@@ -148,6 +149,12 @@ const providerEnvironment = (configured: RunnerConfig, claimed: ClaimedTask, wor
     configRoot: join(configured.workspaceRoot, "scratch", "config"),
   }, workspace.path, workspace.commitHooksPath);
 
+/** Provenance is what these tests provision for; no Run installs here. */
+const NO_DEPENDENCIES = {
+  provision: false,
+  evidence: "Dependency provisioning skipped: Repo.dependencyProvisioning=NONE",
+} as const satisfies DependencyProvisioningDecision;
+
 const commitMessage = (cwd: string): string => git(cwd, ["show", "-s", "--format=%B", "HEAD"]);
 
 test("a chain provider commit pins the human identity and records its exact claimed run provenance", async () => {
@@ -156,7 +163,7 @@ test("a chain provider commit pins the human identity and records its exact clai
     const remote = await seedRemote(root);
     const configured = config(root);
     const claimed = claim(remote, "run-real-123");
-    const workspace = await provisionWorkspace(configured, claimed);
+    const workspace = await provisionWorkspace(configured, claimed, NO_DEPENDENCIES);
     const env = providerEnvironment(configured, claimed, workspace);
     assert.equal(env.GIT_CONFIG_COUNT, "2", "the task secret cannot replace runner-owned Git config injection");
     assert.equal(env.GIT_CONFIG_KEY_0, "credential.helper");
@@ -198,7 +205,7 @@ test("the provider hook covers an in-workspace linked worktree but refuses a nes
     const remote = await seedRemote(root);
     const configured = config(root);
     const claimed = claim(remote, "run-linked-456");
-    const workspace = await provisionWorkspace(configured, claimed);
+    const workspace = await provisionWorkspace(configured, claimed, NO_DEPENDENCIES);
     const env = providerEnvironment(configured, claimed, workspace);
     const linked = join(workspace.path, "worktrees", "linked");
     await mkdir(join(workspace.path, "worktrees"));
@@ -228,7 +235,7 @@ test("rewrite operations remain unmarked and conflicting provenance fails the co
     const remote = await seedRemote(root);
     const configured = config(root);
     const claimed = claim(remote, "run-rewrite-789");
-    const workspace = await provisionWorkspace(configured, claimed);
+    const workspace = await provisionWorkspace(configured, claimed, NO_DEPENDENCIES);
     const env = providerEnvironment(configured, claimed, workspace);
 
     await writeFile(join(workspace.path, "provider.txt"), "provider change\n");
@@ -278,7 +285,7 @@ test("ordinary runs stay unmarked while global runner identity is pinned locally
     git(root, ["config", "--global", "user.name", HUMAN.name], globalEnv);
     git(root, ["config", "--global", "user.email", HUMAN.email], globalEnv);
     const claimed = claim(remote, "run-ordinary", { chainId: null, chainIndex: null, templateStep: null });
-    const workspace = await provisionWorkspace(configured, claimed);
+    const workspace = await provisionWorkspace(configured, claimed, NO_DEPENDENCIES);
     assert.equal(workspace.commitHooksPath, undefined);
     const env = providerEnvironment(configured, claimed, workspace);
     // The credential helper is unconditional; the hooks path is what an

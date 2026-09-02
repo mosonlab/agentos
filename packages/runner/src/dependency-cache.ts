@@ -8,7 +8,6 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 
 import { flock } from "fs-ext";
 
-import type { DependencyProvisioning } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
 import {
@@ -111,7 +110,7 @@ export type DependencyCacheOptions = {
 };
 
 export type DependencyCacheResult = {
-  status: "not-applicable" | "restored" | "installed";
+  status: "restored" | "installed";
   key?: string;
   condition?: string;
 };
@@ -128,8 +127,8 @@ export class DependencyCacheInputMissError extends Error {
 
 /**
  * NPM_CI cannot be honoured without a root package manifest. This is a
- * repository-policy failure, not an optional cache miss: falling through to
- * `not-applicable` would let the provider start with an incomplete workspace.
+ * repository-policy failure, not an optional cache miss: installing nothing
+ * would let the provider start with an incomplete workspace.
  */
 export const DEPENDENCY_PROVISIONING_MANIFEST_MISSING = "dependency-provisioning-manifest-missing" as const;
 
@@ -1322,10 +1321,15 @@ const rebuildNativeWorkspaces = async (
   }
 };
 
+/**
+ * Install the workspace's dependencies under the repository's NPM_CI policy.
+ *
+ * Whether a Run provisions at all is decided when its claim is admitted
+ * (`dependency-provisioning.ts`); reaching here means the answer was yes.
+ */
 export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
-  dependencyProvisioning: DependencyProvisioning,
   env: NodeJS.ProcessEnv,
   dependencies: DependencyCacheDependencies,
   options: DependencyCacheOptions = {},
@@ -1333,14 +1337,6 @@ export const materializeWorkspaceDependencies = async (
   const execute = dependencies.execute;
   const started = Date.now();
   const report = options.report ?? progressReporter;
-  if (dependencyProvisioning === "NONE") {
-    try {
-      report({ event: "miss", condition: "dependency-provisioning-none" });
-      return { status: "not-applicable", condition: "dependency-provisioning-none" };
-    } finally {
-      report({ event: "elapsed", elapsedMs: Date.now() - started });
-    }
-  }
   const requestedWorkspace = resolve(workspacePath);
   if (await pathKind(requestedWorkspace) !== "directory" || (await lstat(requestedWorkspace)).isSymbolicLink()) {
     throw new Error("Run workspace is not a real directory");
