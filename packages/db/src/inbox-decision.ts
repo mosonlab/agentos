@@ -46,6 +46,7 @@ export type InboxDecisionResult = {
  * be dropped by the generic 4,000-character operator-note budget. */
 export const APPROVAL_GATE_FEEDBACK_METADATA_FIELD = "approvalGateFeedback";
 export const APPROVAL_GATE_NOTE_METADATA_FIELD = "note";
+export const MAX_APPROVAL_GATE_NOTE_CHARS = 8_000;
 
 const APPROVAL_GATE_APPROVED_BODY = "Approval gate approved";
 const APPROVAL_GATE_REJECTED_BODY = "Approval gate rejected; step queued again";
@@ -107,7 +108,7 @@ export const applyInboxDecisionTx = async (
   // resumable question. There is no InboxMessage note column, so only the
   // gate branch below is allowed to serialize `note` onto its HUMAN reply.
   const gateNote = gateDecision ? input.note?.trim() || null : null;
-  if (gateDecision && input.note !== undefined && (gateNote === null || gateNote.length > 8_000)) {
+  if (gateDecision && input.note !== undefined && (gateNote === null || gateNote.length > MAX_APPROVAL_GATE_NOTE_CHARS)) {
     throw new WorkflowRefusalError(
       "invalid-request",
       "Approval gate note must be between 1 and 8000 characters",

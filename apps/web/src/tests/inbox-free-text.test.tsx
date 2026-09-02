@@ -85,6 +85,7 @@ test("an open gate renders approve and reject with its note text box", async () 
   }), posts);
   try {
     assert.equal(page.container.querySelectorAll("textarea").length, 1);
+    assert.equal(page.container.querySelector("textarea")?.getAttribute("placeholder"), "Optional note attached to Approve or Reject…");
     assert.ok(button(page, "Approve"));
     assert.ok(button(page, "Reject"));
     assert.equal([...page.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Reply"), false);
@@ -116,14 +117,15 @@ test("a card the server marks as not accepting free text has no text box", async
   }
 });
 
-test("a false gate with no choices keeps its approve and reject controls", async () => {
+test("a gate without free text keeps one approve and reject control set even when it carries choices", async () => {
   const page = await renderThread(card({
-    id: "gate-no-text", body: "Approve only", gateTaskId: "gate-no-text", acceptsFreeText: false, choices: null,
+    id: "gate-no-text", body: "Approve only", gateTaskId: "gate-no-text", acceptsFreeText: false,
   }));
   try {
     assert.equal(page.container.querySelectorAll("textarea").length, 0);
     assert.ok(button(page, "Approve"));
     assert.ok(button(page, "Reject"));
+    assert.equal([...page.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.includes("Continue")), false);
   } finally {
     await page.dispose();
   }

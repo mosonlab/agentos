@@ -15,6 +15,7 @@ import {
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
   MERGE_TAIL_KIND,
+  MAX_APPROVAL_GATE_NOTE_CHARS,
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
@@ -101,7 +102,6 @@ const MAX_OPERATOR_NOTES = 10;
 const MAX_OPERATOR_NOTES_CHARS = 4_000;
 const PRIOR_OUTPUT_MISSING_REASON = "prior-output-missing";
 export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
-const MAX_OPERATOR_FEEDBACK_CHARS = 8_000;
 const SPECIFICATION_READ_DEFERRAL_CONDITION = "specification-read-claim-deferred";
 const SPECIFICATION_READ_DEFERRAL_BUDGET_MS = 5 * 60_000;
 const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
@@ -152,13 +152,8 @@ const claimHandoffLowerBound = async (
 const operatorNotesForClaim = async (
   tx: Prisma.TransactionClient,
   taskId: string,
-  runNumber: number,
-  taskCreatedAt: Date,
-  lowerBoundOverride?: Date | null,
+  lowerBound: Date | null,
 ): Promise<string[]> => {
-  const lowerBound = lowerBoundOverride === undefined
-    ? await claimHandoffLowerBound(tx, taskId, runNumber, taskCreatedAt)
-    : lowerBoundOverride;
   if (!lowerBound) return [];
   const rows = await tx.taskActivity.findMany({
     where: {
@@ -190,13 +185,8 @@ const operatorNotesForClaim = async (
 const operatorFeedbackForClaim = async (
   tx: Prisma.TransactionClient,
   taskId: string,
-  runNumber: number,
-  taskCreatedAt: Date,
-  lowerBoundOverride?: Date | null,
+  lowerBound: Date | null,
 ): Promise<string | null> => {
-  const lowerBound = lowerBoundOverride === undefined
-    ? await claimHandoffLowerBound(tx, taskId, runNumber, taskCreatedAt)
-    : lowerBoundOverride;
   if (!lowerBound) return null;
   const activity = await tx.taskActivity.findFirst({
     where: {
@@ -210,7 +200,11 @@ const operatorFeedbackForClaim = async (
   });
   if (!activity?.metadata || typeof activity.metadata !== "object" || Array.isArray(activity.metadata)) return null;
   const note = (activity.metadata as Record<string, unknown>)[APPROVAL_GATE_NOTE_METADATA_FIELD];
-  return typeof note === "string" && note.length <= MAX_OPERATOR_FEEDBACK_CHARS ? note : null;
+  if (typeof note !== "string") return null;
+  if (note.length === 0 || note.length > MAX_APPROVAL_GATE_NOTE_CHARS) {
+    throw new Error(`Stored approval-gate feedback must be between 1 and ${MAX_APPROVAL_GATE_NOTE_CHARS} characters`);
+  }
+  return note;
 };
 
 /**
@@ -897,17 +891,11 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         : await operatorNotesForClaim(
           tx,
           candidate.task.id,
-          candidate.runNumber,
-          candidate.task.createdAt,
           handoffLowerBound,
         );
-      const operatorFeedback = await operatorFeedbackForClaim(
-        tx,
-        candidate.task.id,
-        candidate.runNumber,
-        candidate.task.createdAt,
-        handoffLowerBound,
-      );
+      const operatorFeedback = blindReviewTask
+        ? null
+        : await operatorFeedbackForClaim(tx, candidate.task.id, handoffLowerBound);
       const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
         where: {
           repoId: candidate.repo.id,

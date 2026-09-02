@@ -3,6 +3,7 @@ import {
   InboxKind,
   InboxSender,
   InboxStatus,
+  MAX_APPROVAL_GATE_NOTE_CHARS,
   parseStopQuestionKey,
   Prisma,
   type PrismaClient,
@@ -186,21 +187,15 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
     const input = await readJson(context.req.raw, inboxDecisionInput);
     let note: string | undefined;
     if (input.note !== undefined) {
-      if (typeof input.note !== "string") {
+      const parsedNote = typeof input.note === "string" ? input.note.trim() : null;
+      if (parsedNote === null || parsedNote.length === 0 || parsedNote.length > MAX_APPROVAL_GATE_NOTE_CHARS) {
         return refusalJson(context, refusal(
           "invalid-request",
           "Inbox decision note must be a string between 1 and 8000 characters after trimming",
           { code: "inbox-note-invalid" },
         ));
       }
-      note = input.note.trim();
-      if (note.length === 0 || note.length > 8_000) {
-        return refusalJson(context, refusal(
-          "invalid-request",
-          "Inbox decision note must be a string between 1 and 8000 characters after trimming",
-          { code: "inbox-note-invalid" },
-        ));
-      }
+      note = parsedNote;
     }
     const body = {
       decision: input.decision,

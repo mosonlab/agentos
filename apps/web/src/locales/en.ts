@@ -392,6 +392,7 @@ export const en = {
   "inbox.notFound": "Message not found. The control plane only exposes agent-authored messages via {route}.",
   "inbox.notification": "This is a notification. Closing it archives the message and does not approve or resume any task.",
   "inbox.reject": "Reject",
+  "inbox.gateNote.placeholder": "Optional note attached to Approve or Reject…",
   "inbox.reply.placeholder": "Write a reply…",
   "inbox.reply.send": "Reply",
   "inbox.selectedChoice": " · selected “{id}”",

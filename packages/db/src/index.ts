@@ -94,6 +94,7 @@ export {
 export {
   APPROVAL_GATE_FEEDBACK_METADATA_FIELD,
   APPROVAL_GATE_NOTE_METADATA_FIELD,
+  MAX_APPROVAL_GATE_NOTE_CHARS,
   type InboxDecisionInput,
   type InboxDecisionResult,
   applyInboxDecision,

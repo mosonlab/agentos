@@ -170,6 +170,91 @@ test("malformed decision notes return a named 400", async () => {
   });
 });
 
+test("gate decision route trims feedback without changing the rejection", async () => {
+  await withTokens(async () => {
+    const replies: Record<string, unknown>[] = [];
+    const activities: Record<string, unknown>[] = [];
+    const executable = {
+      id: "gate-task", projectId: "project-1", name: "Review implementation", description: "review",
+      chainId: null, chainIndex: null, chainLayer: null, status: "REVIEW", assigneeType: "AGENT",
+      assigneeAgentId: "agent-1", repoId: "repo-1", templateId: null, templateStepId: null,
+      targetBranch: "main", updatedAt: new Date(), maxDurationMin: 120, stallTimeoutMin: 10,
+      maxSessionsPerTask: 3, approvalGate: true, archivedAt: null, failureReason: null,
+      runs: [{ runNumber: 1, branch: "feature/gate-note" }],
+      assigneeAgent: {
+        id: "agent-1", name: "Gate Agent", archivedAt: null, model: "model",
+        runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "foundation", rolePrompt: "role",
+      },
+      repo: { id: "repo-1", defaultBranch: "main" },
+      templateStep: null,
+    };
+    const tx = {
+      $queryRaw: async (_strings: unknown, id: string) => [{ id, archivedAt: null }],
+      inboxMessage: {
+        findUnique: async () => ({
+          id: "message-1", kind: "MULTIPLE_CHOICE", gateTaskId: executable.id,
+          agentId: "agent-1", sessionId: "session-1", taskId: executable.id,
+          goalId: null, threadId: "thread-1", status: "OPEN", choices: [], dedupeKey: "gate:message-1",
+          session: { id: "session-1", run: { id: "run-1", status: RunStatus.SUCCEEDED } },
+          gateTask: executable,
+          thread: null,
+        }),
+        updateMany: async () => ({ count: 1 }),
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          replies.push(data);
+          return { id: "reply-1" };
+        },
+      },
+      inboxDecision: { create: async () => ({ id: "decision-1" }) },
+      task: {
+        update: async () => ({}),
+        findUniqueOrThrow: async () => executable,
+        findUnique: async () => executable,
+      },
+      taskActivity: { create: async ({ data }: { data: Record<string, unknown> }) => {
+        activities.push(data);
+        return {};
+      } },
+      agent: { findUnique: async () => lockedAgent(executable.assigneeAgent) },
+      run: {
+        findFirst: async ({ where }: { where: { pushedBranch?: unknown } }) =>
+          where.pushedBranch === "feature/gate-note" ? { id: "run-1", pushedBranch: "feature/gate-note" } : null,
+        create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "run-2", ...data }),
+      },
+    };
+    const database = {
+      inboxMessage: tx.inboxMessage,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request("/inbox/messages/message-1/decision", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision: "reject",
+        note: "  Preserve the existing retry contract.  ",
+        requestId: "request-gate-note",
+      }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal((await response.json() as { gateAction: string }).gateAction, "rejected");
+    assert.equal(replies[0]?.selectedChoiceId, "reject");
+    assert.equal(
+      replies[0]?.body,
+      "reject\n\nOperator feedback on previous attempt:\nPreserve the existing retry contract.",
+    );
+    assert.equal(
+      activities[0]?.body,
+      "Approval gate rejected; step queued again\nOperator feedback on previous attempt:\nPreserve the existing retry contract.",
+    );
+    assert.deepEqual(activities[0]?.metadata, {
+      approvalGateFeedback: true,
+      note: "Preserve the existing retry contract.",
+    });
+  });
+});
+
 test("operator can close a notification attached to a task when no run waits on it", async () => {
   await withTokens(async () => {
     let updateWhere: unknown;

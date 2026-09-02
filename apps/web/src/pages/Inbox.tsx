@@ -248,7 +248,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
     </>
   ) : null;
   const gateNote = message.acceptsFreeText && message.gateTaskId !== null ? (
-    <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder={t("inbox.reply.placeholder")} />
+    <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder={t("inbox.gateNote.placeholder")} />
   ) : null;
 
   return (
@@ -318,7 +318,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
               <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />{t(detachedNotification ? "inbox.notification" : "inbox.waiting")}</div>
               {detachedNotification ? (
                 <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={closeNotification}>{t("inbox.close")}</Button></div>
-              ) : message.gateTaskId !== null && message.acceptsFreeText ? (
+              ) : message.gateTaskId !== null ? (
                 <>
                   <div className={ROW}>
                     <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>{t("inbox.approve")}</Button>
@@ -335,11 +335,6 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
                     </button>
                   ))}
                   {freeTextReply}
-                </div>
-              ) : message.gateTaskId !== null ? (
-                <div className={ROW}>
-                  <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>{t("inbox.approve")}</Button>
-                  <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>{t("inbox.reject")}</Button>
                 </div>
               ) : (
                 freeTextReply
