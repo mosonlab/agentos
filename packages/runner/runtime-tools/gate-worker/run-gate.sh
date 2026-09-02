@@ -430,7 +430,7 @@ const promote = (entry, priority) => {
   if (entry !== null && entry.priority < priority) entry.priority = priority;
 };
 const demote = (entry) => {
-  if (entry !== null) entry.priority = 0;
+  if (entry !== null && entry.priority < 2) entry.priority = 0;
 };
 
 const readLog = async () => {
