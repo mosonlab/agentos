@@ -2,15 +2,18 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmod, chown, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile,
+  chmod, chown, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile,
 } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import { flock } from "fs-ext";
+
 import type { RunnerConfig } from "./config.js";
+import * as dependencyCacheModule from "./dependency-cache.js";
 import {
-  DEPENDENCY_CACHE_ENTRY_LIMIT, DependencyCacheInputMissError, deriveDependencyCacheKey,
+  DependencyCacheInputMissError, deriveDependencyCacheKey,
   materializeWorkspaceDependencies,
   type DependencyCacheProgress, type DependencyCacheToolchain, type DependencyCommandExecutor,
 } from "./dependency-cache.js";
@@ -149,6 +152,45 @@ const makeWritable = async (path: string): Promise<void> => {
 const cleanupRoot = async (root: string): Promise<void> => {
   await makeWritable(root).catch(() => undefined);
   await rm(root, { recursive: true, force: true });
+};
+
+const BYTE_BUDGET = 16 * 1024 ** 3;
+
+// Retention decisions are intentionally exercised through the production
+// selector with synthetic accounted sizes. The implementation exports this
+// narrow test seam so these cases do not need to allocate a 16 GiB fixture.
+type SyntheticRetentionEntry = { key: string; bytes: number; usedMs: number };
+type DependencyCacheTestApi = {
+  selectDependencyCacheEvictions: (
+    entries: SyntheticRetentionEntry[], currentKey?: string, budgetBytes?: number,
+  ) => string[];
+  accountDependencyCacheEntryBytes: (entry: string) => Promise<bigint>;
+};
+const dependencyCacheTestApi = dependencyCacheModule as unknown as DependencyCacheTestApi;
+
+const assertDependencyCacheTestApi = (): void => {
+  assert.equal(typeof dependencyCacheTestApi.selectDependencyCacheEvictions, "function");
+  assert.equal(typeof dependencyCacheTestApi.accountDependencyCacheEntryBytes, "function");
+};
+
+const syntheticKey = (index: number): string => index.toString(16).padStart(64, "0");
+
+const accountedBytes = async (path: string): Promise<bigint> => {
+  const info = await lstat(path);
+  if (info.isDirectory()) {
+    let total = BigInt(info.blocks) * 512n;
+    for (const child of await readdir(path)) total += await accountedBytes(join(path, child));
+    return total;
+  }
+  return BigInt(info.blocks) * 512n;
+};
+
+const lockExclusive = async (path: string) => {
+  const handle = await open(path, "a+");
+  await new Promise<void>((resolve, reject) => {
+    flock(handle.fd, "ex", (error) => error ? reject(error) : resolve());
+  });
+  return handle;
 };
 
 const supportsCopyOnWriteRestore = async (root: string): Promise<boolean> => {
@@ -604,7 +646,7 @@ const corruptions: Array<{ name: string; corrupt: (entry: string, root: string) 
     },
 ];
 
-for (const corruption of corruptions) test(`refuses ${corruption.name} cache entries and uses one clean install`, async () => {
+for (const corruption of corruptions) test(`refuses ${corruption.name} cache entries without an uncached install`, async () => {
   const root = await mkdtemp(join(tmpdir(), `runner-dependency-cache-${corruption.name}-`));
   try {
     const workspace = join(root, "workspace");
@@ -617,14 +659,166 @@ for (const corruption of corruptions) test(`refuses ${corruption.name} cache ent
     assert.ok(first.key);
     await corruption.corrupt(entryPath(root, first.key), root);
     const events: DependencyCacheProgress[] = [];
+    await assert.rejects(
+      materializeWorkspaceDependencies(
+        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+      ),
+      /(?:integrity|cache).*?(?:refusal|unsafe|malformed|missing|mismatch|escape|directory)/iu,
+    );
+    assert.equal(fake.installs(), 1, "cache corruption must not trigger an uncached npm install");
+    assert.ok(events.some(({ event }) => event === "integrity-refusal"));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("an unrelated malformed retention entry refuses the pass after a valid hit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-corruption-"));
+  try {
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    const firstWorkspace = join(root, "workspace-first");
+    const secondWorkspace = join(root, "workspace-second");
+    await Promise.all([createFixture(firstWorkspace), createFixture(secondWorkspace)]);
+    await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.0.0"));
+    const first = await materializeWorkspaceDependencies(
+      configured, firstWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    const second = await materializeWorkspaceDependencies(
+      configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    const firstKey = first.key;
+    const secondKey = second.key;
+    assert.ok(firstKey && secondKey && firstKey !== secondKey);
+    const unrelated = entryPath(root, firstKey);
+    await makeWritable(unrelated);
+    await writeFile(join(unrelated, "metadata.json"), "malformed unrelated retention entry\n");
+    const events: DependencyCacheProgress[] = [];
+    await assert.rejects(
+      materializeWorkspaceDependencies(
+        configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+      ),
+      /(?:integrity|retention|malformed|unsafe)/iu,
+    );
+    assert.equal(fake.installs(), 2, "retention corruption must not invoke npm after a valid hit");
+    assert.ok(events.some(({ event, key }) => event === "hit" && key === secondKey.slice(0, 16)));
+    assert.ok(events.some(({ event, key }) => event === "integrity-refusal" && key === firstKey.slice(0, 16)));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("an unsafe usage marker refuses retention instead of allowing an over-budget snapshot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-marker-corruption-"));
+  try {
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    const firstWorkspace = join(root, "workspace-first");
+    const secondWorkspace = join(root, "workspace-second");
+    await Promise.all([createFixture(firstWorkspace), createFixture(secondWorkspace)]);
+    await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.1.0"));
+    const first = await materializeWorkspaceDependencies(
+      configured, firstWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    const second = await materializeWorkspaceDependencies(
+      configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    const firstKey = first.key;
+    const secondKey = second.key;
+    assert.ok(firstKey && secondKey && firstKey !== secondKey);
+    await rm(join(root, "cache/usage", firstKey));
+    await mkdir(join(root, "marker-target"));
+    await symlink(join(root, "marker-target"), join(root, "cache/usage", firstKey));
+    const events: DependencyCacheProgress[] = [];
+    await assert.rejects(
+      materializeWorkspaceDependencies(
+        configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+      ),
+      /(?:integrity|usage|marker|unsafe)/iu,
+    );
+    assert.equal(fake.installs(), 2, "an unsafe usage marker must not invoke npm");
+    assert.ok(events.some(({ event, key }) => event === "integrity-refusal" && key === firstKey.slice(0, 16)));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("dependency-cache audit payloads retain stable event names and fields", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-audit-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const fake = fakeInstallExecutor();
+    const configured = config(root);
+    const events: DependencyCacheProgress[] = [];
+    const first = await materializeWorkspaceDependencies(
+      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+    );
     const second = await materializeWorkspaceDependencies(
       configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
-    assert.equal(second.status, "installed");
-    assert.ok(second.condition, "integrity fallback must retain its named reason");
-    assert.equal(fake.installs(), 2);
-    assert.ok(events.some(({ event }) => event === "integrity-refusal"));
+    assert.equal(second.status, "restored");
+    assert.ok(first.key);
+    const firstKey = first.key.slice(0, 16);
+    const event = (name: DependencyCacheProgress["event"]): DependencyCacheProgress => {
+      const match = events.find((candidate) => candidate.event === name);
+      assert.ok(match, `missing ${name} audit event`);
+      return match;
+    };
+    assert.deepEqual(Object.keys(event("miss")).sort(), ["condition", "event", "key"]);
+    assert.equal(event("miss").key, firstKey);
+    assert.equal(event("miss").condition, "entry-missing");
+    assert.deepEqual(Object.keys(event("publication")).sort(), ["condition", "event", "key"]);
+    assert.equal(event("publication").key, firstKey);
+    assert.ok(["published", "converged"].includes(event("publication").condition ?? ""));
+    assert.deepEqual(Object.keys(event("hit")).sort(), ["event", "key"]);
+    assert.equal(event("hit").key, firstKey);
+    const serialized = events.map((candidate) => JSON.stringify({ audit: "dependency-cache", ...candidate }));
+    const parsed = serialized.map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(new Set(parsed.map(({ event: name }) => name)), new Set(events.map(({ event: name }) => name)));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("cache materialization blocks behind an existing exclusive root lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-lock-wait-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    const first = await materializeWorkspaceDependencies(
+      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    assert.ok(first.key);
+    const lock = await lockExclusive(join(root, "cache/lock"));
+    try {
+      let settled = false;
+      const blocked = materializeWorkspaceDependencies(
+        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        { toolchain: TOOLCHAIN, report: () => undefined },
+      ).finally(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(settled, false, "a concurrent cache owner must make materialization wait");
+      await lock.close();
+      const result = await blocked;
+      assert.equal(result.status, "restored");
+      assert.equal(fake.installs(), 1, "waiting for the lock must not turn a hit into an install");
+    } catch (error: unknown) {
+      await lock.close().catch(() => undefined);
+      throw error;
+    }
   } finally {
     await cleanupRoot(root);
   }
@@ -665,74 +859,124 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
   }
 });
 
-test("retention keeps twelve entries, then evicts the least-recently-used thirteenth", async () => {
-  assert.equal(DEPENDENCY_CACHE_ENTRY_LIMIT, 12, "the dependency cache retains twelve entries");
-  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-"));
+test("byte-budget retention keeps a large below-budget population and evicts oldest bytes", () => {
+  assertDependencyCacheTestApi();
+  const gibibyte = 1024 ** 3;
+  const belowBudget = Array.from({ length: 40 }, (_, index) => ({
+    key: syntheticKey(index), bytes: 256 * 1024 ** 2, usedMs: index + 1,
+  }));
+  assert.equal(
+    belowBudget.reduce((total, entry) => total + entry.bytes, 0) < BYTE_BUDGET,
+    true,
+    "the synthetic population is below the fixed budget",
+  );
+  assert.deepEqual(
+    dependencyCacheTestApi.selectDependencyCacheEvictions(belowBudget, syntheticKey(39), BYTE_BUDGET),
+    [],
+    "entry count does not trigger retention",
+  );
+
+  const entries: SyntheticRetentionEntry[] = [
+    { key: syntheticKey(100), bytes: 4 * gibibyte, usedMs: 1 },
+    { key: syntheticKey(101), bytes: 7 * gibibyte, usedMs: 2 },
+    { key: syntheticKey(102), bytes: 6 * gibibyte, usedMs: 3 },
+    { key: syntheticKey(103), bytes: 5 * gibibyte, usedMs: 4 },
+  ];
+  const victims = dependencyCacheTestApi.selectDependencyCacheEvictions(entries, syntheticKey(103), BYTE_BUDGET);
+  assert.deepEqual(victims, [syntheticKey(100), syntheticKey(101)], "multiple oldest entries are evicted in one pass");
+  assert.ok(entries.filter(({ key }) => !victims.includes(key)).reduce((total, entry) => total + entry.bytes, 0) <= BYTE_BUDGET);
+
+  const exact = [
+    { key: syntheticKey(110), bytes: 8 * gibibyte, usedMs: 1 },
+    { key: syntheticKey(111), bytes: 8 * gibibyte, usedMs: 2 },
+  ];
+  assert.deepEqual(
+    dependencyCacheTestApi.selectDependencyCacheEvictions(exact, syntheticKey(111), BYTE_BUDGET),
+    [],
+    "exactly the budget is retained",
+  );
+
+  const refreshable: SyntheticRetentionEntry[] = [
+    { key: syntheticKey(120), bytes: 6 * gibibyte, usedMs: 1 },
+    { key: syntheticKey(121), bytes: 7 * gibibyte, usedMs: 2 },
+    { key: syntheticKey(122), bytes: 5 * gibibyte, usedMs: 3 },
+  ];
+  assert.deepEqual(
+    dependencyCacheTestApi.selectDependencyCacheEvictions(refreshable, syntheticKey(122), BYTE_BUDGET),
+    [syntheticKey(120)],
+  );
+  refreshable[0]!.usedMs = 10;
+  assert.deepEqual(
+    dependencyCacheTestApi.selectDependencyCacheEvictions(refreshable, syntheticKey(122), BYTE_BUDGET),
+    [syntheticKey(121)],
+    "refreshing the oldest usage marker changes the victim",
+  );
+
+  assert.throws(
+    () => dependencyCacheTestApi.selectDependencyCacheEvictions(
+      [{ key: syntheticKey(130), bytes: BYTE_BUDGET + 1, usedMs: 1 }], syntheticKey(130), BYTE_BUDGET,
+    ),
+    /(?:byte.?budget|oversized|over.?budget)/iu,
+    "a protected entry larger than the budget is a named refusal",
+  );
+});
+
+test("allocated-byte accounting includes metadata, trees, and safe symlink inodes without following links", async () => {
+  assertDependencyCacheTestApi();
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-size-walk-"));
   try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const fake = fakeInstallExecutor(async (cwd) => {
+      await mkdir(join(cwd, "node_modules/fake-package"), { recursive: true });
+      await mkdir(join(cwd, "packages/db/node_modules/nested-package"), { recursive: true });
+      await writeFile(join(cwd, "node_modules/fake-package/index.js"), "cached root\n");
+      await writeFile(join(cwd, "packages/db/node_modules/nested-package/index.js"), "cached nested\n");
+      await symlink("index.js", join(cwd, "node_modules/fake-package/safe-link.js"));
+    });
     const configured = config(root);
+    const result = await materializeWorkspaceDependencies(
+      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    assert.ok(result.key);
+    const entry = entryPath(root, result.key);
+    const expected = await accountedBytes(entry);
+    const actual = await dependencyCacheTestApi.accountDependencyCacheEntryBytes(entry);
+    assert.equal(actual, expected, "the production walk counts every lstat inode allocation");
+    assert.ok(await accountedBytes(join(entry, "metadata.json")) > 0n, "metadata contributes to accounted bytes");
+    assert.ok(await accountedBytes(join(entry, "trees")) > 0n, "complete trees contribute to accounted bytes");
+    const link = join(entry, "trees/node_modules/fake-package/safe-link.js");
+    const linkInfo = await lstat(link);
+    assert.equal(linkInfo.isSymbolicLink(), true);
+    assert.equal(actual >= BigInt(linkInfo.blocks) * 512n, true, "the symlink inode is counted");
+    assert.equal(await readFile(join(entry, "trees/node_modules/fake-package/index.js"), "utf8"), "cached root\n");
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("allocated-byte accounting rejects special files instead of treating them as cache misses", async () => {
+  assertDependencyCacheTestApi();
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-size-special-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
     const fake = fakeInstallExecutor();
-    const events: DependencyCacheProgress[] = [];
-    const retainedKeys: string[] = [];
-    for (let index = 0; index < DEPENDENCY_CACHE_ENTRY_LIMIT; index += 1) {
-      const workspace = join(root, `workspace-${index}`);
-      await createFixture(workspace);
-      await writeFile(join(workspace, "package-lock.json"), packageLock(`1.0.${index}`));
-      const result = await materializeWorkspaceDependencies(
-        configured,
-        workspace,
-        "NPM_CI",
-        workspaceEnvironment(configured),
-        { execute: fake.execute },
-        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
-      );
-      assert.ok(result.key);
-      retainedKeys.push(result.key);
-    }
-
-    let entries = await readdir(join(root, "cache/entries"));
-    let usage = await readdir(join(root, "cache/usage"));
-    assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
-    assert.deepEqual(usage.sort(), entries.sort());
-    assert.equal(events.filter(({ event }) => event === "eviction").length, 0);
-
-    // Refresh the oldest entry so the next distinct publication must evict the
-    // second entry rather than the one we just used.
-    const refreshed = await materializeWorkspaceDependencies(
-      configured,
-      join(root, "workspace-0"),
-      "NPM_CI",
-      workspaceEnvironment(configured),
-      { execute: fake.execute },
-      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+    const configured = config(root);
+    const result = await materializeWorkspaceDependencies(
+      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      { toolchain: TOOLCHAIN, report: () => undefined },
     );
-    assert.equal(refreshed.status, "restored");
-    const overflowIndex = DEPENDENCY_CACHE_ENTRY_LIMIT;
-    const thirteenthWorkspace = join(root, `workspace-${overflowIndex}`);
-    await createFixture(thirteenthWorkspace);
-    await writeFile(join(thirteenthWorkspace, "package-lock.json"), packageLock(`1.0.${overflowIndex}`));
-    const thirteenth = await materializeWorkspaceDependencies(
-      configured,
-      thirteenthWorkspace,
-      "NPM_CI",
-      workspaceEnvironment(configured),
-      { execute: fake.execute },
-      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+    assert.ok(result.key);
+    const entry = entryPath(root, result.key);
+    await makeWritable(entry);
+    const special = join(entry, "trees/node_modules/fake-package/special");
+    await runCommand([], "mkfifo", [special], root, process.env);
+    await assert.rejects(
+      dependencyCacheTestApi.accountDependencyCacheEntryBytes(entry),
+      /(?:special|unsupported|malformed)/iu,
     );
-    assert.ok(thirteenth.key);
-
-    entries = await readdir(join(root, "cache/entries"));
-    usage = await readdir(join(root, "cache/usage"));
-    assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
-    assert.deepEqual(usage.sort(), entries.sort());
-    assert.equal(events.filter(({ event }) => event === "eviction").length, 1);
-    assert.ok(entries.includes(retainedKeys[0]!));
-    assert.ok(!entries.includes(retainedKeys[1]!));
-    assert.ok(entries.includes(thirteenth.key));
-    const phases = new Set(events.filter(({ event }) => event === "phase").map(({ phase }) => phase));
-    assert.ok(phases.has("identity"));
-    assert.ok(phases.has("install"));
-    assert.ok(phases.has("publish"));
-    assert.ok(phases.has("retention"));
   } finally {
     await cleanupRoot(root);
   }
