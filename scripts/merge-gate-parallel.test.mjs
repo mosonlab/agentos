@@ -12,12 +12,13 @@
 // was in, so a reviewer reading that line recorded a judgement about the commit
 // that nothing had formed. Nothing about it is visible on a green run either.
 //
-// The engine is sourced from scripts/gate-worker/step-engine.sh and run for
-// real. Re-typing it into a fixture would test a copy, and the copy is the one
+// Every fixture here sources a file the gate itself sources, and runs it for
+// real. Re-typing one into a fixture would test a copy, and the copy is the one
 // thing that cannot drift into disagreeing with the gate while still passing.
-// It used to be sliced out of merge-gate.sh by string offsets, which needed
-// four guard assertions to notice when the slicing stopped matching; a file
-// the gate itself sources needs none of them.
+// All three used to be sliced out of merge-gate.sh by string offsets, which
+// needed a guard assertion apiece to notice when the slicing stopped matching
+// and silently failed to notice when a slice still matched the wrong text; a
+// file the gate sources needs neither.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -26,7 +27,6 @@ import { join } from "node:path";
 import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
 
-const gatePath = fileURLToPath(new URL("./merge-gate.sh", import.meta.url));
 // Sourced by the harnesses below rather than restated in them. The verdict's
 // exit codes and the four lines that carry them live in one file, and a fixture
 // that re-typed them would keep passing while the gate's real output changed
@@ -36,25 +36,26 @@ const libPath = fileURLToPath(new URL("../packages/runner/runtime-tools/gate-wor
 // learned are all behind this one interface, so a fixture declares its inputs
 // and nothing else.
 const enginePath = fileURLToPath(new URL("./gate-worker/step-engine.sh", import.meta.url));
+// How much of the host the gate may use: one stated share, every width derived
+// from it, and the refusals that guard both.
+const hostSizingPath = fileURLToPath(new URL("./gate-worker/host-sizing.sh", import.meta.url));
+// How a run ends and which last line it ends with: cleanup, the signal handler,
+// and the traps that route every ending through the same accounting.
+const verdictPath = fileURLToPath(new URL("./gate-worker/verdict.sh", import.meta.url));
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
-const extractHostSizing = () => {
-  const source = readFileSync(gatePath, "utf8");
-  const start = source.indexOf('GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-');
-  assert.notEqual(start, -1, "merge-gate.sh no longer defines GATE_HOST_SHARE");
-  const end = source.indexOf("\n\n# The proof waves", start);
-  assert.notEqual(end, -1, "merge-gate.sh no longer keeps host sizing together");
-  return source.slice(start, end);
-};
-
+// The two helpers host-sizing.sh is owed. `note` is the gate's log format, not
+// the sizing's, so the fixture supplies a silent one and reads the derived
+// values back itself.
 const runHostSizing = (hostShare) => {
   const env = { ...process.env };
   if (hostShare === undefined) delete env.AGENTOS_GATE_HOST_SHARE;
   else env.AGENTOS_GATE_HOST_SHARE = hostShare;
   const harness = `
 die() { printf '%s\\n' "$*" >&2; exit 1; }
-${extractHostSizing()}
+note() { :; }
+. ${JSON.stringify(hostSizingPath)}
 printf 'GATE_HOST_SHARE=%s\\nGATE_CPUS=%s\\n' "$GATE_HOST_SHARE" "$GATE_CPUS"
 `;
   return spawnSync("bash", ["-c", harness], { encoding: "utf8", env });
@@ -288,16 +289,6 @@ test("OUTCOME a signal with nothing learned is no verdict under the signal's own
 // question these answer is only ever "which last line, and which code", so the
 // container, the lock and the temp directory are stubs; nothing they do changes
 // the answer.
-const extractVerdict = () => {
-  const source = readFileSync(gatePath, "utf8");
-  const start = source.indexOf("\ncleanup() {");
-  assert.notEqual(start, -1, "merge-gate.sh no longer defines cleanup");
-  const endMarker = "trap 'interrupted TERM 143' TERM";
-  const end = source.indexOf(endMarker, start);
-  assert.notEqual(end, -1, "merge-gate.sh no longer routes TERM through interrupted");
-  return source.slice(start, end + endMarker.length);
-};
-
 const VERDICT_HARNESS = `${ENGINE}
 discard_gate_tmp() { :; }
 release_lock() { :; }
@@ -305,7 +296,7 @@ KEEP_POSTGRES=0
 POSTGRES_STARTED=0
 CONTAINER=stub
 GATED_HEAD=abc123
-${extractVerdict()}
+. ${JSON.stringify(verdictPath)}
 `;
 
 const runVerdict = (scenario) => {
@@ -359,9 +350,8 @@ test("VERDICT a clean run still passes and still names its commit", () => {
 });
 
 // A group and the verdict together, which is the only way to observe what a
-// signal arriving mid-group actually prints. The engine is the gate's own file
-// and cleanup is the gate's own source; cleanup's teardown is stubbed for the
-// same reason as above.
+// signal arriving mid-group actually prints. Both files are the gate's own;
+// cleanup's teardown is stubbed for the same reason as above.
 const COMBINED_HARNESS = `${HARNESS}
 discard_gate_tmp() { :; }
 release_lock() { :; }
@@ -369,7 +359,7 @@ KEEP_POSTGRES=0
 POSTGRES_STARTED=0
 CONTAINER=stub
 GATED_HEAD=abc123
-${extractVerdict()}
+. ${JSON.stringify(verdictPath)}
 `;
 
 // Runs a group, waits until the member that is meant to block has reported its
@@ -486,8 +476,8 @@ test("PARALLEL-INTERRUPT stops members still running before the gate tears down"
 test("PARALLEL-INTERRUPT stops the members before cleanup removes what they use", () => {
   // Order, not just presence. Signalling the members after GATE_TMP is gone
   // and the lock is released closes nothing.
-  const source = readFileSync(gatePath, "utf8");
-  const cleanup = source.slice(source.indexOf("\ncleanup() {"));
+  const source = readFileSync(verdictPath, "utf8");
+  const cleanup = source.slice(source.indexOf("cleanup() {"));
   const stop = cleanup.indexOf("gate_steps_stop_running");
   const discard = cleanup.indexOf("discard_gate_tmp");
   const release = cleanup.indexOf("release_lock");
