@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import type { FailureEnvelope, RunOutcome } from "@anneal/db";
+import { parseRunOutputEvidence, type FailureEnvelope, type RunOutcome } from "@anneal/db";
 
 import {
   ControlPlaneError,
@@ -17,7 +17,6 @@ import {
   type RunStartSnapshot,
   type SessionEventPayload,
   type SessionTaskOutput,
-  type SessionTaskOutputStatus,
 } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
@@ -243,11 +242,11 @@ export const createRoutedControlPlaneDouble = (
           }, "PUT");
         },
         outputStatus: async () => {
-          const payload = await request<{ task: SessionTaskOutputStatus | null }>(
+          const payload = await request<{ task: { outputEvidence: unknown } | null }>(
             `/session/runs/${claim.run.id}/status`,
             {},
           );
-          return payload.task;
+          return payload.task ? parseRunOutputEvidence(payload.task.outputEvidence) : null;
         },
         publishBranch: async (pushedBranch) => {
           await request(`/runner/runs/${claim.run.id}/publication`, { ...fenced, pushedBranch });

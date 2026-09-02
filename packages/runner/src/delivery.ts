@@ -1,5 +1,5 @@
 import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@anneal/github-client";
-import { canonicalOutputSchema, PR_TEMPLATE_NAME } from "@anneal/db";
+import { canonicalOutputSchema, PR_TEMPLATE_NAME, type PrHandoffKind, type PrHandoffOutput } from "@anneal/db";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -70,23 +70,14 @@ export type DeliveryClaim = {
   run: Partial<Pick<ClaimedTask["run"], "opensPullRequest" | "pullRequestBase" | "requiresCommit">>;
 };
 
-/** Server-projected, run-bound evidence for the canonical PR handover. */
-export type PrWorkflowOutput = {
-  taskId: string;
-  chainIndex: number;
-  kind: string;
-  body: string;
-  commitSha: string | null;
-};
-
 export type DeliverWorkspaceDependencies = {
   command?: CommandExecutor;
   /** HEAD already captured by the runner before delivery. Direct callers may
    *  omit it and let delivery resolve the commit itself. */
   headSha?: string;
   recordPublication?: (branch: string) => Promise<void>;
-  /** Persisted canonical PR outputs projected by the session status route. */
-  prWorkflowOutputs?: readonly PrWorkflowOutput[];
+  /** The canonical PR handoff the session status route already decided complete. */
+  prWorkflowOutputs?: readonly PrHandoffOutput[];
   retryOptions?: RetryOptions;
 };
 
@@ -211,13 +202,6 @@ const PR_IMPLEMENTATION_KIND = "implementation";
 const PR_SOL_FINDINGS_KIND = "sol-findings";
 const PR_BLIND_FINDINGS_KIND = "blind-findings";
 const PR_FIXED_IMPLEMENTATION_KIND = "fixed-implementation";
-const PR_INITIAL_OUTPUT_KINDS = [PR_IMPLEMENTATION_KIND] as const;
-const PR_FINAL_OUTPUT_KINDS = [
-  PR_IMPLEMENTATION_KIND,
-  PR_SOL_FINDINGS_KIND,
-  PR_BLIND_FINDINGS_KIND,
-  PR_FIXED_IMPLEMENTATION_KIND,
-] as const;
 
 type PrImplementationArtifact = {
   headSha: string;
@@ -289,25 +273,17 @@ const taskGoal = (claim: DeliveryClaim): string => {
   return description.slice(briefStart, briefEnd).split(/\r?\n/u)[0] ?? "";
 };
 
-const isWellFormedPrOutput = (output: PrWorkflowOutput | undefined): output is PrWorkflowOutput & { commitSha: string } => (
-  output !== undefined
-  && typeof output.taskId === "string"
-  && output.taskId.trim().length > 0
-  && Number.isInteger(output.chainIndex)
-  && output.chainIndex > 0
-  && typeof output.body === "string"
-  && typeof output.commitSha === "string"
-);
-
+/**
+ * Read one canonical artifact out of the decided handoff. Its shape, order and
+ * Task binding were decided by the control plane; what is checked here is the
+ * body: valid JSON that satisfies the kind's canonical schema.
+ */
 const parsePrOutput = <T>(
-  output: PrWorkflowOutput | undefined,
-  expectedKind: string,
+  output: PrHandoffOutput | undefined,
+  expectedKind: PrHandoffKind,
 ): T => {
   if (!output || output.kind !== expectedKind) {
     throw new Error(`missing required ${expectedKind} canonical output evidence`);
-  }
-  if (!isWellFormedPrOutput(output)) {
-    throw new Error(`malformed ${expectedKind} canonical output evidence`);
   }
   let value: unknown;
   try {
@@ -324,13 +300,13 @@ const parsePrOutput = <T>(
 
 const validatePrReviewHandoff = (
   implementation: PrImplementationArtifact,
-  implementationOutput: PrWorkflowOutput,
+  implementationOutput: PrHandoffOutput,
   sol: PrReviewArtifact,
-  solOutput: PrWorkflowOutput,
+  solOutput: PrHandoffOutput,
   blind: PrReviewArtifact,
-  blindOutput: PrWorkflowOutput,
+  blindOutput: PrHandoffOutput,
   fixed: PrFixedArtifact,
-  fixedOutput: PrWorkflowOutput,
+  fixedOutput: PrHandoffOutput,
 ): void => {
   if (implementationOutput.commitSha !== implementation.headSha
     || solOutput.commitSha !== sol.headSha
@@ -365,47 +341,6 @@ const validatePrReviewHandoff = (
     || adoptedIds.some((id) => !closedIds.includes(id))) {
     throw new Error("fixed-implementation closedFindings do not match adopted review fixes");
   }
-};
-
-const requiredPrOutputs = (
-  claim: DeliveryClaim,
-  outputs: readonly PrWorkflowOutput[] | undefined,
-  final: boolean,
-): readonly PrWorkflowOutput[] => {
-  const expectedKinds = final ? PR_FINAL_OUTPUT_KINDS : PR_INITIAL_OUTPUT_KINDS;
-  if (!Array.isArray(outputs) || outputs.length !== expectedKinds.length) {
-    throw new Error(`canonical PR workflow requires exactly ${expectedKinds.length} output evidence entr${expectedKinds.length === 1 ? "y" : "ies"}`);
-  }
-  for (const [index, expectedKind] of expectedKinds.entries()) {
-    const output = outputs[index];
-    if (!output || output.kind !== expectedKind) {
-      throw new Error(`canonical PR workflow output evidence is missing or out of order at ${expectedKind}`);
-    }
-    if (!isWellFormedPrOutput(output)) {
-      throw new Error(`malformed ${expectedKind} canonical output evidence`);
-    }
-    if (index > 0 && output.chainIndex <= outputs[index - 1]!.chainIndex) {
-      throw new Error("canonical PR workflow output evidence is not ordered by chain index");
-    }
-  }
-  const current = outputs.at(-1)!;
-  if (final && current.taskId !== claim.task.id) {
-    throw new Error("fixed-implementation canonical output evidence belongs to another Task");
-  }
-  if (!final && outputs[0]!.taskId !== claim.task.id) {
-    throw new Error("implementation canonical output evidence belongs to another Task");
-  }
-  if (claim.task.chainId === undefined || claim.task.chainId === null || claim.task.chainId.trim().length === 0) {
-    throw new Error("canonical PR workflow requires a non-null chain identity");
-  }
-  if (claim.task.chainIndex === undefined || claim.task.chainIndex === null
-    || !Number.isInteger(claim.task.chainIndex) || claim.task.chainIndex <= 0) {
-    throw new Error("canonical PR workflow requires a non-null chain index");
-  }
-  if (current.chainIndex !== claim.task.chainIndex) {
-    throw new Error(`${current.kind} canonical output evidence is not for the current chain index`);
-  }
-  return outputs;
 };
 
 const markdownTests = (testsRun: readonly string[]): string => testsRun.length > 0
@@ -529,7 +464,7 @@ export const deliverWorkspace = async (
   const canonicalFinal = isCanonicalPrFinal(claim);
   const canonicalPr = canonicalImplementation || canonicalFinal;
   let canonicalBody: string | undefined;
-  let canonicalOutputs: readonly PrWorkflowOutput[] | undefined;
+  const canonicalOutputs = dependencies.prWorkflowOutputs;
   let implementationArtifact: PrImplementationArtifact | undefined;
   let solArtifact: PrReviewArtifact | undefined;
   let blindArtifact: PrReviewArtifact | undefined;
@@ -540,21 +475,20 @@ export const deliverWorkspace = async (
   // malformed output cannot turn into an ordinary branch push.
   if (canonicalPr) {
     try {
-      canonicalOutputs = requiredPrOutputs(claim, dependencies.prWorkflowOutputs, canonicalFinal);
-      implementationArtifact = parsePrOutput<PrImplementationArtifact>(canonicalOutputs[0], PR_IMPLEMENTATION_KIND);
+      implementationArtifact = parsePrOutput<PrImplementationArtifact>(canonicalOutputs?.[0], PR_IMPLEMENTATION_KIND);
       if (canonicalFinal) {
-        solArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs[1], PR_SOL_FINDINGS_KIND);
-        blindArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs[2], PR_BLIND_FINDINGS_KIND);
-        fixedArtifact = parsePrOutput<PrFixedArtifact>(canonicalOutputs[3], PR_FIXED_IMPLEMENTATION_KIND);
+        solArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs?.[1], PR_SOL_FINDINGS_KIND);
+        blindArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs?.[2], PR_BLIND_FINDINGS_KIND);
+        fixedArtifact = parsePrOutput<PrFixedArtifact>(canonicalOutputs?.[3], PR_FIXED_IMPLEMENTATION_KIND);
         validatePrReviewHandoff(
           implementationArtifact,
-          canonicalOutputs[0]!,
+          canonicalOutputs![0]!,
           solArtifact,
-          canonicalOutputs[1]!,
+          canonicalOutputs![1]!,
           blindArtifact,
-          canonicalOutputs[2]!,
+          canonicalOutputs![2]!,
           fixedArtifact,
-          canonicalOutputs[3]!,
+          canonicalOutputs![3]!,
         );
         canonicalBody = finalPullRequestBody(claim, implementationArtifact, solArtifact, blindArtifact, fixedArtifact);
       } else {

@@ -10,7 +10,12 @@ import {
   runOwnsMergeOutcome,
   selectAuthorization,
   taskIsIntegratorStep,
-  isRegressionVerificationOutputKind,
+  decidePrHandoff,
+  decideRunOutputSatisfaction,
+  PR_HANDOFF_KINDS,
+  type PrHandoff,
+  type PrHandoffStage,
+  type RunOutputEvidence,
   type CandidateActivity,
   type CardRow,
   type DecisionRow,
@@ -62,46 +67,36 @@ import {
 
 const SESSION_READ_LIMIT = 5 * 1024 * 1024;
 const SESSION_BASE64_BODY_LIMIT = 34 * 1024 * 1024;
-const PR_WORKFLOW_OUTPUT_KINDS = [
-  "implementation",
-  "sol-findings",
-  "blind-findings",
-  "fixed-implementation",
-] as const;
-const PR_DELIVERY_OUTPUT_KINDS = ["implementation", "fixed-implementation"] as const;
-
-type PrWorkflowOutputProjection = {
-  taskId: string;
-  chainIndex: number;
-  kind: string;
-  body: string;
-  commitSha: string;
-};
-
-const isPrDeliveryStep = (task: {
+/**
+ * Which canonical PR delivery this Task is, or null when it is not one. The
+ * chain predicates are part of the answer rather than a later trust decision:
+ * a Step without a positive chain index has no handoff to assemble.
+ */
+const prDeliveryStage = (task: {
   chainId: string | null;
   chainIndex: number | null;
   templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
-}): boolean => typeof task.chainId === "string"
-  && task.chainId.trim().length > 0
-  && task.chainIndex !== null
-  && Number.isInteger(task.chainIndex)
-  && task.chainIndex > 0
-  && task.templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
-  && PR_DELIVERY_OUTPUT_KINDS.includes(task.templateStep.outputKind as (typeof PR_DELIVERY_OUTPUT_KINDS)[number]);
+}): PrHandoffStage | null => {
+  if (typeof task.chainId !== "string" || task.chainId.trim().length === 0) return null;
+  if (task.chainIndex === null || !Number.isInteger(task.chainIndex) || task.chainIndex <= 0) return null;
+  if (task.templateStep?.taskTemplate?.name !== PR_TEMPLATE_NAME) return null;
+  if (task.templateStep.outputKind === "implementation") return "implementation";
+  return task.templateStep.outputKind === "fixed-implementation" ? "final" : null;
+};
 
 /**
- * Project only the persisted canonical PR handoff bodies that the current
- * delivery Run is allowed to consume. The project/chain predicates are part
- * of the query rather than a post-query trust decision: a session can never
- * receive a body from a same-index task in another Project or Chain.
+ * Decide the canonical PR handoff this delivery Run may publish. The
+ * project/chain predicates are part of the query rather than a post-query
+ * trust decision: a session can never receive a body from a same-index task in
+ * another Project or Chain.
  *
  * The implementation Run sees only its own output (there are no earlier PR
  * outputs at its index); the final Run sees all four canonical outputs that
- * exist through its chain index. Missing rows remain absent so delivery can
- * fail loudly instead of treating an unavailable body as a success.
+ * exist through its chain index. Rows that are absent or unusable stay in the
+ * candidate list as themselves, so `decidePrHandoff` refuses with the reason
+ * rather than silently shortening the handoff.
  */
-const prWorkflowOutputsFor = async (
+const prHandoffFor = async (
   db: PrismaClient,
   runId: string,
   task: {
@@ -111,24 +106,23 @@ const prWorkflowOutputsFor = async (
     chainIndex: number | null;
     templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
   },
-): Promise<PrWorkflowOutputProjection[] | undefined> => {
-  if (!isPrDeliveryStep(task)) return undefined;
+): Promise<PrHandoff> => {
+  const stage = prDeliveryStage(task);
+  if (stage === null) return decidePrHandoff(null, []);
 
   const rows = await db.task.findMany({
     where: {
       projectId: task.projectId,
       chainId: task.chainId,
-      chainIndex: task.templateStep?.outputKind === "implementation"
-        ? task.chainIndex!
-        : { lte: task.chainIndex! },
+      chainIndex: stage === "implementation" ? task.chainIndex! : { lte: task.chainIndex! },
       templateStep: {
-        outputKind: { in: [...PR_WORKFLOW_OUTPUT_KINDS] },
+        outputKind: { in: [...PR_HANDOFF_KINDS] },
         taskTemplate: { name: PR_TEMPLATE_NAME },
       },
-      stepOutput: task.templateStep?.outputKind === "implementation"
+      stepOutput: stage === "implementation"
         ? { is: { runId, kind: "implementation" } }
         : { isNot: null },
-      ...(task.templateStep?.outputKind === "implementation" ? {} : {
+      ...(stage === "implementation" ? {} : {
         OR: [
           { id: { not: task.id } },
           { id: task.id, stepOutput: { is: { runId } } },
@@ -139,23 +133,20 @@ const prWorkflowOutputsFor = async (
     select: {
       id: true,
       chainIndex: true,
-      templateStep: { select: { outputKind: true } },
       stepOutput: { select: { kind: true, body: true, commitSha: true } },
     },
   });
 
-  return rows.flatMap((row) => (
-    row.chainIndex === null || row.stepOutput === null || row.templateStep === null
-      || typeof row.stepOutput.commitSha !== "string"
-      ? []
-      : [{
-        taskId: row.id,
-        chainIndex: row.chainIndex,
-        kind: row.stepOutput.kind,
-        body: row.stepOutput.body,
-        commitSha: row.stepOutput.commitSha,
-      }]
-  ));
+  return decidePrHandoff(
+    { taskId: task.id, chainIndex: task.chainIndex!, stage },
+    rows.map((row) => ({
+      taskId: row.id,
+      chainIndex: row.chainIndex,
+      kind: row.stepOutput?.kind ?? "",
+      body: row.stepOutput?.body ?? "",
+      commitSha: row.stepOutput?.commitSha ?? null,
+    })),
+  );
 };
 const sessionWriteInput = z.object({
   path: z.string(),
@@ -303,23 +294,17 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     if (boundImplementationTask && "message" in boundImplementationTask) {
       return refusalJson(context, boundImplementationTask);
     }
-    const taskOutput = run.task?.stepOutput;
-    const outputPersisted = taskOutput?.runId === run.id;
-    const outputSatisfiedByPriorRun = Boolean(
-      run.task && taskOutput
-      && !outputPersisted
-      && outputIsImmutableOncePersisted(run.task.templateStep),
-    );
-    const output = outputPersisted && taskOutput
-      ? {
-        runId: taskOutput.runId,
-        kind: taskOutput.kind,
-        commitSha: taskOutput.commitSha,
-      }
-      : null;
-    const prWorkflowOutputs = run.task
-      ? await prWorkflowOutputsFor(db, run.id, run.task)
-      : undefined;
+    const outputEvidence: RunOutputEvidence = {
+      satisfaction: decideRunOutputSatisfaction(
+        run.id,
+        {
+          outputKind: run.task ? requiredOutputKind(run.task.templateStep) : null,
+          immutableOncePersisted: outputIsImmutableOncePersisted(run.task?.templateStep),
+        },
+        run.task?.stepOutput ?? null,
+      ),
+      prHandoff: run.task ? await prHandoffFor(db, run.id, run.task) : decidePrHandoff(null, []),
+    };
     return context.json({
       run: {
         id: run.id,
@@ -340,16 +325,10 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         chainIndex: run.task.chainIndex,
         stepName: run.task.templateStep?.name ?? null,
         outputKind: run.task.templateStep?.outputKind ?? null,
-        output,
-        outputRequired: requiredOutputKind(run.task.templateStep) !== null,
-        outputRemediationAllowed:
-          !isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
-          && !(run.task.stepOutput && outputIsImmutableOncePersisted(run.task.templateStep)),
-        outputSatisfiedByPriorRun,
-        // A retry must not mistake an earlier Run's artifact for its own. This
-        // is the same run-scoped fact completion validates before it advances.
-        outputPersisted,
-        ...(prWorkflowOutputs === undefined ? {} : { prWorkflowOutputs }),
+        // The one decided answer completion reads too, so a retry cannot
+        // mistake an earlier Run's artifact for its own and delivery cannot
+        // re-judge a handoff this route already refused.
+        outputEvidence,
         ...(boundImplementationTask ? { boundImplementationTask } : {}),
       } : null,
     });

@@ -53,120 +53,61 @@ test("startup retries only transport failures and control-plane server errors", 
   assert.equal(retriableStartupError(new ControlPlaneError(409, "refused")), false);
 });
 
-test("session status validates and normalizes the nested PR workflow evidence projection", async () => {
+const answerWith = (task: unknown): (() => void) => {
   const originalFetch = globalThis.fetch;
-  const output = {
-    taskId: "task-implementation",
-    chainIndex: 1,
-    kind: "implementation",
-    body: JSON.stringify({ schemaVersion: 1 }),
-    commitSha: "a".repeat(40),
-  } as const;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    task: {
-      outputKind: "implementation",
-      outputRequired: true,
-      outputRemediationAllowed: true,
-      outputSatisfiedByPriorRun: false,
-      outputPersisted: true,
-      output: { runId: "run-1", kind: "implementation", commitSha: output.commitSha },
-      prWorkflowOutputs: [output],
-    },
-  }), { status: 200, headers: { "Content-Type": "application/json" } });
-  try {
-    const status = await session().outputStatus();
-    assert.deepEqual(status?.prWorkflowOutputs, [output]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
+  globalThis.fetch = async () => new Response(JSON.stringify({ task }), {
+    status: 200, headers: { "Content-Type": "application/json" },
+  });
+  return () => { globalThis.fetch = originalFetch; };
+};
 
-test("session status rejects malformed PR workflow evidence entries", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    task: {
-      outputKind: "fixed-implementation",
-      outputRequired: true,
-      outputRemediationAllowed: true,
-      outputSatisfiedByPriorRun: false,
-      outputPersisted: true,
-      output: null,
-      prWorkflowOutputs: [{
-        taskId: "task-fixed",
-        chainIndex: "4",
-        kind: "fixed-implementation",
-        body: "{}",
-        commitSha: "b".repeat(40),
-      }],
-    },
-  }), { status: 200, headers: { "Content-Type": "application/json" } });
-  try {
-    await assert.rejects(
-      session().outputStatus(),
-      /invalid task output status/u,
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("session status accepts the exact ordered final PR evidence set including SHA-256", async () => {
-  const originalFetch = globalThis.fetch;
-  const kinds = ["implementation", "sol-findings", "blind-findings", "fixed-implementation"] as const;
-  const outputs = kinds.map((kind, index) => ({
-    taskId: `task-${kind}`,
-    chainIndex: index + 1,
-    kind,
-    body: JSON.stringify({ schemaVersion: 1, kind }),
-    commitSha: index === 3 ? "d".repeat(64) : String(index + 1).repeat(40),
-  }));
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    task: {
-      outputKind: "fixed-implementation",
-      outputRequired: true,
-      outputRemediationAllowed: true,
-      outputSatisfiedByPriorRun: false,
-      outputPersisted: true,
-      output: { runId: "run-1", kind: "fixed-implementation", commitSha: outputs[3]!.commitSha },
-      prWorkflowOutputs: outputs,
-    },
-  }), { status: 200, headers: { "Content-Type": "application/json" } });
-  try {
-    const status = await session().outputStatus();
-    assert.deepEqual(status?.prWorkflowOutputs, outputs);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-for (const malformed of [
-  { name: "nullable commit", mutate: (outputs: any[]) => { outputs[0].commitSha = null; } },
-  { name: "duplicate Task identity", mutate: (outputs: any[]) => { outputs[1].taskId = outputs[0].taskId; } },
-  { name: "out-of-order chain index", mutate: (outputs: any[]) => { outputs[1].chainIndex = 1; } },
-] as const) {
-  test(`session status rejects ${malformed.name} in final PR evidence`, async () => {
-    const originalFetch = globalThis.fetch;
-    const outputs = ["implementation", "sol-findings", "blind-findings", "fixed-implementation"].map((kind, index) => ({
+test("session status reads the decided output evidence without re-deciding it", async () => {
+  const outputs = ["implementation", "sol-findings", "blind-findings", "fixed-implementation"]
+    .map((kind, index) => ({
       taskId: `task-${kind}`,
       chainIndex: index + 1,
       kind,
-      body: "{}",
-      commitSha: String(index + 1).repeat(40),
+      body: JSON.stringify({ schemaVersion: 1, kind }),
+      commitSha: index === 3 ? "d".repeat(64) : String(index + 1).repeat(40),
     }));
-    malformed.mutate(outputs);
-    globalThis.fetch = async () => new Response(JSON.stringify({
-      task: {
-        outputKind: "fixed-implementation", outputRequired: true, outputRemediationAllowed: true,
-        outputSatisfiedByPriorRun: false, outputPersisted: true, output: null, prWorkflowOutputs: outputs,
+  const evidence = {
+    satisfaction: { case: "delivered", output: { kind: "fixed-implementation", commitSha: outputs[3]!.commitSha } },
+    prHandoff: { case: "complete", outputs },
+  };
+  const restore = answerWith({ outputEvidence: evidence });
+  try {
+    assert.deepEqual(await session().outputStatus(), evidence);
+  } finally {
+    restore();
+  }
+});
+
+test("a Run without a task has no output evidence to read", async () => {
+  const restore = answerWith(null);
+  try {
+    assert.equal(await session().outputStatus(), null);
+  } finally {
+    restore();
+  }
+});
+
+test("session status refuses a payload that is not the decided answer", async () => {
+  for (const outputEvidence of [
+    undefined,
+    { satisfaction: { case: "delivered" }, prHandoff: { case: "not-a-pr-delivery" } },
+    {
+      satisfaction: { case: "not-required" },
+      prHandoff: {
+        case: "complete",
+        outputs: [{ taskId: "t", chainIndex: 1, kind: "implementation", body: "{}", commitSha: "not-a-sha" }],
       },
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  ]) {
+    const restore = answerWith({ outputEvidence });
     try {
-      await assert.rejects(
-        session().outputStatus(),
-        /invalid task output status/u,
-      );
+      await assert.rejects(session().outputStatus(), /invalid task output status/u);
     } finally {
-      globalThis.fetch = originalFetch;
+      restore();
     }
-  });
-}
+  }
+});
