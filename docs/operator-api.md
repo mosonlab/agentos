@@ -1475,6 +1475,13 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
   history whose nullable relation was removed; all four relation ids are
   `null` for these global rows). It retains top-level-message
   behavior. With no `projectId`, the list remains unfiltered by Project.
+- Each Inbox message object includes the server-computed boolean
+  `acceptsFreeText`; the single-message route below returns the same field.
+  It is `true` only for an open agent-authored `TEXT` or `MULTIPLE_CHOICE`
+  question with a session waiting on it, and for an open approval-gate card.
+  It is `false` for stop questions, closed or answered cards, human replies,
+  and detached notifications. Clients should use this field rather than
+  re-deriving the rule.
 
 ```sh
 curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1506,11 +1513,29 @@ curl "$BASE_URL/inbox/messages/$MESSAGE_ID" -H "Authorization: Bearer $OPERATOR_
 
 - Required path parameter: `messageId`.
 - Required JSON fields: `decision`, `requestId`.
+- Optional JSON field: `note` (a string trimmed by the API; when supplied it
+  must contain 1–8000 characters after trimming).
+- For an approval-gate card, `decision` must be exactly `approve` or `reject`.
+  A supplied `note` is stored on the human reply and in the task activity for
+  the gate outcome; on rejection it is also passed to the requeued step as
+  operator feedback. The note never changes the recorded decision.
+- Supplying `note` for a non-gate card returns `400 Bad Request` with a named
+  refusal reason; submit free text for those cards through `/reply` instead.
+  Blank or overlong notes likewise return `400 Bad Request` rather than being
+  silently discarded.
 
 ```sh
 curl -X POST "$BASE_URL/inbox/messages/$MESSAGE_ID/decision" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"decision":"approve","requestId":"decision-001"}'
+```
+
+An approval rejection can include operator feedback in the same request:
+
+```sh
+curl -X POST "$BASE_URL/inbox/messages/$MESSAGE_ID/decision" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"decision":"reject","note":"Refresh the error handling before resubmitting.","requestId":"decision-002"}'
 ```
 
 ### POST `/inbox/messages/:messageId/reply`
