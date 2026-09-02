@@ -3,6 +3,11 @@ import {
   Prisma,
   RunnerPreference,
 } from "@anneal/db";
+import type {
+  Goal as GoalContract,
+  GoalDefinitionItem as GoalDefinitionItemContract,
+  GoalProgressEntry as GoalProgressEntryContract,
+} from "@anneal/db/console-contract";
 import type { Context } from "hono";
 import { z } from "zod";
 
@@ -55,19 +60,45 @@ const goalInclude = {
   progressLog: { orderBy: { createdAt: "asc" as const } },
 };
 
+type GoalResponse = GoalContract<Date, Prisma.Decimal>;
+type GoalDefinitionItemResponse = GoalDefinitionItemContract;
+type GoalProgressEntryResponse = GoalProgressEntryContract<Date>;
+type PersistedGoalStatus = (typeof GoalStatus)[keyof typeof GoalStatus];
+
+/**
+ * The console spelling of a persisted Goal status.
+ *
+ * Five of the eight values in `schema.prisma` are deliberately absent from the
+ * console contract because nothing in this repository writes them (the reasons
+ * are in `wire-contract.ts`). Reading one here means a writer appeared without
+ * the console decision that goes with it, so the route says so instead of
+ * sending a status the console has no label, tone or legend for.
+ */
+const consoleGoalStatus = (status: PersistedGoalStatus): GoalResponse["status"] => {
+  if (status === GoalStatus.ACTIVE || status === GoalStatus.PAUSED || status === GoalStatus.COMPLETED) return status;
+  throw new Error(`Goal status ${status} has no console wire spelling`);
+};
+
+const goalResponse = <T extends { status: PersistedGoalStatus }>(
+  goal: T,
+): Omit<T, "status"> & { status: GoalResponse["status"] } => ({
+  ...goal,
+  status: consoleGoalStatus(goal.status),
+});
+
 export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
   const { db } = deps;
 
-  app.get("/projects/:projectId/goals", async (context) => context.json(await db.goal.findMany({
+  app.get("/projects/:projectId/goals", async (context) => context.json((await db.goal.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     include: goalInclude,
     orderBy: { createdAt: "asc" },
-  })));
+  })).map(goalResponse) satisfies GoalResponse[]));
   app.post("/projects/:projectId/goals", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, goalInput);
     const { definitionOfDone, ...fields } = body;
-    return context.json(await db.goal.create({
+    return context.json(goalResponse(await db.goal.create({
       data: {
         ...fields,
         projectId,
@@ -76,19 +107,19 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         },
       },
       include: goalInclude,
-    }), 201);
+    })) satisfies GoalResponse, 201);
   });
   app.get("/goals/:goalId", async (context) => {
     const goal = await db.goal.findUnique({
       where: { id: id.parse(context.req.param("goalId")) }, include: goalInclude,
     });
-    return goal ? context.json(goal) : context.json({ error: "Goal not found" }, 404);
+    return goal ? context.json(goalResponse(goal) satisfies GoalResponse) : context.json({ error: "Goal not found" }, 404);
   });
-  app.patch("/goals/:goalId", async (context) => context.json(await db.goal.update({
+  app.patch("/goals/:goalId", async (context) => context.json(goalResponse(await db.goal.update({
     where: { id: id.parse(context.req.param("goalId")) },
     data: withoutUndefined(await readJson(context.req.raw, goalPatch)) as Prisma.GoalUncheckedUpdateInput,
     include: goalInclude,
-  })));
+  })) satisfies GoalResponse));
   app.delete("/goals/:goalId", async (context) => {
     await db.goal.delete({ where: { id: id.parse(context.req.param("goalId")) } });
     return context.body(null, 204);
@@ -104,7 +135,7 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     if (goal.definitionOfDone.length === 0) return context.json({ error: "Definition of Done must contain at least one item" }, 409);
     const completed = goal.definitionOfDone.every((item) => item.done);
     const now = new Date();
-    return context.json(await db.goal.update({
+    return context.json(goalResponse(await db.goal.update({
       where: { id: goalId },
       data: {
         dodApproved: true,
@@ -113,7 +144,7 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         endedAt: completed ? now : null,
       },
       include: goalInclude,
-    }));
+    })) satisfies GoalResponse);
   };
   app.post("/goals/:goalId/approve-dod", approveGoalDod);
 
@@ -124,13 +155,15 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       data: { status: GoalStatus.PAUSED },
     });
     if (updated.count !== 1) return context.json({ error: "Only an active Goal can be paused" }, 409);
-    return context.json(await db.goal.findUniqueOrThrow({ where: { id: goalId }, include: goalInclude }));
+    return context.json(goalResponse(
+      await db.goal.findUniqueOrThrow({ where: { id: goalId }, include: goalInclude }),
+    ) satisfies GoalResponse);
   };
   app.post("/goals/:goalId/pause", pauseGoal);
 
-  app.get("/goals/:goalId/definition-of-done", async (context) => context.json(await db.goalDefinitionItem.findMany({
+  app.get("/goals/:goalId/definition-of-done", async (context) => context.json((await db.goalDefinitionItem.findMany({
     where: { goalId: id.parse(context.req.param("goalId")) }, orderBy: { itemIndex: "asc" },
-  })));
+  })) satisfies GoalDefinitionItemResponse[]));
   app.post("/goals/:goalId/definition-of-done", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const body = await readJson(context.req.raw, definitionItemText);
@@ -143,7 +176,7 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       }
       return item;
     });
-    return context.json(result, 201);
+    return context.json(result satisfies GoalDefinitionItemResponse, 201);
   });
   app.patch("/goals/:goalId/definition-of-done/:itemId", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
@@ -170,7 +203,9 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       }
       return item;
     });
-    return result ? context.json(result) : context.json({ error: "Definition of Done item not found" }, 404);
+    return result
+      ? context.json(result satisfies GoalDefinitionItemResponse)
+      : context.json({ error: "Definition of Done item not found" }, 404);
   });
   app.delete("/goals/:goalId/definition-of-done/:itemId", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
@@ -194,9 +229,9 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     return deleted ? context.body(null, 204) : context.json({ error: "Definition of Done item not found" }, 404);
   });
 
-  app.get("/goals/:goalId/progress-log", async (context) => context.json(await db.goalProgressEntry.findMany({
+  app.get("/goals/:goalId/progress-log", async (context) => context.json((await db.goalProgressEntry.findMany({
     where: { goalId: id.parse(context.req.param("goalId")) }, orderBy: { createdAt: "asc" },
-  })));
+  })) satisfies GoalProgressEntryResponse[]));
   app.post("/goals/:goalId/progress-log", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const body = await readJson(context.req.raw, progressInput);
@@ -204,11 +239,11 @@ export const registerGoalsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       const session = await db.session.findFirst({ where: { id: body.sessionId, goalId }, select: { id: true } });
       if (!session) return context.json({ error: "Session does not belong to this Goal" }, 400);
     }
-    return context.json(await db.goalProgressEntry.create({ data: {
+    return context.json((await db.goalProgressEntry.create({ data: {
       goalId,
       sessionId: body.sessionId ?? null,
       body: body.body,
       ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
-    } }), 201);
+    } })) satisfies GoalProgressEntryResponse, 201);
   });
 };

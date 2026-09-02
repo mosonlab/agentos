@@ -14,6 +14,7 @@ import {
   type WorkflowRefusalReason,
 } from "@anneal/db";
 
+import type { RefusalStatus } from "./refusal-status.js";
 import {
   type Refusal,
   type RefusalReason,
@@ -22,34 +23,23 @@ import {
 } from "./refusal.js";
 import {
   TemplateAuthoringRefusal,
-  type TemplateAuthoringRefusalCode,
+  templateAuthoringRefusalStatus,
 } from "./template-authoring-errors.js";
+import { templateInstantiationRefusalStatus } from "./template-errors.js";
 
-const authoringCodes = [
-  "template_not_in_project",
-  "template_name_taken",
-  "template_name_reserved",
-  "template_canonical",
-  "template_in_use",
-  "graph_empty",
-  "first_step_not_agent",
-  "first_layer_not_single",
-  "layer_order_invalid",
-  "base_step_invalid",
-  "prior_kind_unproduced",
-  "output_kind_duplicate",
-  "prior_kind_duplicate",
-  "approval_gate_in_parallel_layer",
-  "assignee_invalid",
-  "integrator_binding_invalid",
-] as const satisfies readonly TemplateAuthoringRefusalCode[];
-const authoringConflictCodes = new Set<TemplateAuthoringRefusalCode>([
-  "template_name_taken",
-  "template_name_reserved",
-  "template_canonical",
-  "template_in_use",
-]);
+/** One refusal per status family: the families are the contract, the codes are not. */
+const familyExample = {
+  400: { reason: "invalid-request", message: "invalid" },
+  403: { reason: "forbidden", message: "forbidden" },
+  404: { reason: "not-found", message: "missing" },
+  409: { reason: "conflict", message: "conflict" },
+  422: { reason: "graph_empty", message: "empty graph" },
+} as const satisfies Record<RefusalStatus, Refusal>;
 
+/**
+ * Every reason declared in `refusal.ts` and in `@anneal/db`. `satisfies` keeps
+ * the table total, so a reason added to either union fails to compile here.
+ */
 const refusalByReason = {
   "invalid-request": { reason: "invalid-request", message: "invalid" },
   forbidden: { reason: "forbidden", message: "forbidden" },
@@ -73,29 +63,26 @@ const refusalByReason = {
   },
 } as const satisfies Record<RefusalReason, Refusal>;
 
-test("every refusal reason has one exhaustive HTTP status", () => {
-  const statuses = Object.fromEntries(
-    Object.entries(refusalByReason).map(([reason, refusal]) => [reason, refusalResponse(refusal).status]),
-  );
-  assert.deepEqual(statuses, {
-    "invalid-request": 400,
-    forbidden: 403,
-    "not-found": 404,
-    conflict: 409,
-    "compound-implementation-assignee": 409,
-    "archived-assignee": 409,
-    "archived-task": 409,
-    "chain-held": 409,
-    "integrator-stopped": 409,
-    "pinned-base-commit": 409,
-    "merge-evidence": 409,
-    "merge-confirmation": 409,
-    "inbox-question-not-found": 409,
-    "approval-gate-decision-invalid": 409,
-    "inbox-choice-mismatch": 409,
-    "inbox-run-not-waiting": 409,
-    "approval-gate-rejection-target-missing": 409,
-  });
+const families: readonly RefusalStatus[] = [400, 403, 404, 409, 422];
+
+test("each status family answers with its own status", () => {
+  for (const [status, refusal] of Object.entries(familyExample)) {
+    assert.equal(refusalResponse(refusal).status, Number(status));
+  }
+});
+
+test("every declared refusal code answers with the family declared beside it", () => {
+  const declaredByCode = {
+    ...templateInstantiationRefusalStatus,
+    ...templateAuthoringRefusalStatus,
+  };
+  for (const [code, status] of Object.entries(declaredByCode)) {
+    const rendered = refusalResponse({ reason: code as Refusal["reason"], message: code });
+    assert.equal(rendered.status, status, code);
+  }
+  for (const [reason, refusal] of Object.entries(refusalByReason)) {
+    assert.ok(families.includes(refusalResponse(refusal).status), reason);
+  }
 });
 
 test("all seven refusal error families map through the same module", () => {
@@ -161,17 +148,13 @@ test("refusal detail is preserved beside the public error message", () => {
   });
 });
 
-test("authoring refusals render every code with its status and optional stepIndex", () => {
-  for (const code of authoringCodes) {
-    const stepIndex = code === "first_step_not_agent" ? 1 : undefined;
-    const rendered = refusalResponse(refusalFor(new TemplateAuthoringRefusal(code, code, stepIndex))!);
-    const expectedStatus = code === "template_not_in_project" ? 404
-      : authoringConflictCodes.has(code) ? 409
-      : 422;
-    assert.equal(rendered.status, expectedStatus, code);
-    assert.equal(rendered.body.error, code);
-    assert.equal(rendered.body.code, code);
-    if (stepIndex === undefined) assert.equal("stepIndex" in rendered.body, false, code);
-    else assert.equal(rendered.body.stepIndex, stepIndex);
-  }
+test("authoring refusals carry their code and optional stepIndex", () => {
+  const withStep = refusalResponse(refusalFor(new TemplateAuthoringRefusal("first_step_not_agent", "not an agent", 1))!);
+  assert.equal(withStep.body.error, "not an agent");
+  assert.equal(withStep.body.code, "first_step_not_agent");
+  assert.equal(withStep.body.stepIndex, 1);
+
+  const withoutStep = refusalResponse(refusalFor(new TemplateAuthoringRefusal("template_in_use", "in use"))!);
+  assert.equal(withoutStep.body.code, "template_in_use");
+  assert.equal("stepIndex" in withoutStep.body, false);
 });

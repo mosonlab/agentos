@@ -7,6 +7,7 @@ import {
   isTemplateRunnerInherited,
 } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences, type RoleSource } from "../src/agent-sources.js";
+import { canonicalStepDrift } from "../src/canonical-step-adoption.js";
 import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -18,8 +19,8 @@ import {
 import {
   loadAllTemplateStepSources,
   templateMetadataDifferences,
-  templateStepStructureDifferences,
   type CanonicalTemplateName,
+  type PersistedTemplateStepStructure,
   type TemplateStepSource,
 } from "../src/template-sources.js";
 
@@ -54,7 +55,7 @@ type TemplateStepRow = {
   approvalGate: boolean;
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
-  spawnPolicy: Parameters<typeof templateStepStructureDifferences>[0]["spawnPolicy"];
+  spawnPolicy: PersistedTemplateStepStructure["spawnPolicy"];
   runner: RunnerKind | null;
   outputKind: string;
   opensPullRequest: boolean;
@@ -140,13 +141,19 @@ const verifyTemplateMetadata = (
   }
 };
 
+/**
+ * The verifier states the zero-tolerance stance against the same adoption
+ * roster the plan and the sync consult: a persisted step that the sync would
+ * still have to adopt has not been installed yet, so it is drift here.
+ */
 const verifyTemplateStep = (
   template: TemplateRow,
+  templateName: CanonicalTemplateName,
   step: TemplateStepRow,
   expected: TemplateStepSource,
   context: VerificationContext,
 ): void => {
-  const differences = templateStepStructureDifferences(step, expected);
+  const differences = canonicalStepDrift(templateName, step, expected, "refuse-all");
   if (step.stepIndex !== expected.stepIndex) differences.unshift("stepIndex");
   if (!isTemplateRunnerInherited(step.runner)) differences.push("runner");
   if (step.prompt !== expected.prompt) differences.push("prompt");
@@ -187,7 +194,7 @@ const verifyTemplate = (
         context.partial ? `${templateLabel(template)} is missing step ${expected.stepIndex}` : message,
       ));
     }
-    verifyTemplateStep(template, step, expected, context);
+    verifyTemplateStep(template, templateName, step, expected, context);
   }
 };
 

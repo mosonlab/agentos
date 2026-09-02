@@ -8,6 +8,11 @@ import {
   Prisma,
   type PrismaClient,
 } from "@anneal/db";
+import type {
+  InboxChoice,
+  InboxMessage as InboxMessageContract,
+  InboxSummary as InboxSummaryContract,
+} from "@anneal/db/console-contract";
 import { z } from "zod";
 
 import { supersedeTaskInboxMessage } from "../inbox.js";
@@ -81,17 +86,43 @@ const withDismissible = <T extends {
     && !blocked.has(message.id),
 });
 
+/**
+ * The card's choice list, narrowed out of its `Json` column.
+ *
+ * Every writer of `InboxMessage.choices` in this repository stores
+ * `Array<{ id, label }>` or nothing, and the console has always read the column
+ * as that shape. Narrowing it here is what makes the console's declaration
+ * true; a row that does not match it means a writer bypassed that shape, which
+ * is reported rather than rendered as a card with no answers on it.
+ */
+const isInboxChoice = (value: Prisma.JsonValue): value is Prisma.JsonObject & InboxChoice =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+  && typeof value.id === "string" && typeof value.label === "string";
+
+const inboxChoices = (choices: Prisma.JsonValue, messageId: string): InboxChoice[] | null => {
+  if (choices === null) return null;
+  const parsed = Array.isArray(choices)
+    ? choices.flatMap((choice) => isInboxChoice(choice) ? [{ id: choice.id, label: choice.label }] : [])
+    : [];
+  if (!Array.isArray(choices) || parsed.length !== choices.length) {
+    throw new Error(`Inbox message ${messageId} stores a malformed choice list`);
+  }
+  return parsed;
+};
+
 const withInboxReadModel = <T extends {
   id: string;
   status: InboxStatus;
   from: InboxSender;
   kind: InboxKind;
+  choices: Prisma.JsonValue;
   gateTaskId: string | null;
   dedupeKey: string | null;
   replyToMessageId: string | null;
   session: { taskId: string | null } | null;
 }>(message: T, blocked: ReadonlySet<string>) => withDismissible({
   ...withArtifactTask(message),
+  choices: inboxChoices(message.choices, message.id),
   acceptsFreeText: acceptsFreeText(message, blocked),
 }, blocked);
 
@@ -140,6 +171,8 @@ const inboxProjectPredicate = (projectId: string): Prisma.InboxMessageWhereInput
   ],
 });
 
+type InboxCard = InboxMessageContract<Date>;
+
 export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
   app.get("/inbox/messages/summary", async (context) => {
     const projectId = context.req.query("projectId");
@@ -155,7 +188,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
     const needsReply = messages.filter((message) => (
       message.status === InboxStatus.OPEN && !withDismissible(message, blocked).dismissible
     )).length;
-    return validated(context, { needsReply });
+    return validated(context, { needsReply } satisfies InboxSummaryContract);
   });
   app.get("/inbox/messages", async (context) => {
     const projectId = context.req.query("projectId");
@@ -168,7 +201,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
       orderBy: { createdAt: "desc" },
     });
     const blocked = await blockedMessageIds(db, messages.map((message) => message.id));
-    return validated(context, messages.map((message) => withInboxReadModel(message, blocked)));
+    return validated(context, messages.map((message) => withInboxReadModel(message, blocked)) satisfies InboxCard[]);
   });
   app.get("/inbox/messages/:messageId", async (context) => {
     const message = await db.inboxMessage.findUnique({
@@ -181,7 +214,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
       },
     });
     if (!message) return context.json({ error: "Inbox message not found" }, 404);
-    return context.json(withInboxReadModel(message, await blockedMessageIds(db, [message.id])));
+    return context.json(withInboxReadModel(message, await blockedMessageIds(db, [message.id])) satisfies InboxCard);
   });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const input = await readJson(context.req.raw, inboxDecisionInput);

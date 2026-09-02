@@ -12,41 +12,25 @@ import { resolve } from "node:path";
 import { catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences, type AgentSources, type RoleSource } from "../src/agent-sources.js";
 import {
+  canonicalStepAdoptions,
+  canonicalStepDrift,
+  REGRESSION_VERIFIER_AGENT_NAME,
+  SPEC_REVALIDATOR_AGENT_NAME,
+} from "../src/canonical-step-adoption.js";
+import {
   applyCanonicalInstallation,
-  isCanonicalReviewStep,
   planCanonicalInstallation,
   type CanonicalInstallationAction,
   type CanonicalInstallationRow,
 } from "../src/canonical-template-installation.js";
 import {
   loadAllTemplateStepSources,
-  LEGACY_ALL_PRIOR_OUTPUTS,
-  templateStepStructureDifferences,
   type CanonicalTemplateName,
   type TemplateStepSource,
 } from "../src/template-sources.js";
 
-const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
-const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator";
 const SPEC_REVALIDATOR_AGENT_SOURCE = "review-coordinator-sol";
-
-type AssigneeTransition = { from: readonly (string | null)[]; to: string };
-const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
-  ["compound-engineer-workflow:10", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
-  ["direct-engineer-workflow:6", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
-  ["direct-engineer-workflow:1", { from: [null], to: SPEC_REVALIDATOR_AGENT_NAME }],
-]);
-
-const STEP_NAME_TRANSITIONS = new Map([
-  ["compound-engineer-workflow:11", { from: "Merge readiness", to: "Merge authorization" }],
-  ["direct-engineer-workflow:7", { from: "Merge readiness", to: "Merge authorization" }],
-]);
-
-const STEP_BASE_TRANSITIONS = new Map([
-  ["compound-engineer-workflow:6", { from: null, to: 5 }],
-  ["direct-engineer-workflow:3", { from: null, to: 2 }],
-]);
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
   const expected = catalogRunnerForModel(agent.model);
@@ -322,8 +306,8 @@ const migrateSpecialCanonicalAgents = async (
   rolesByName: ReadonlyMap<string, RoleSource>,
   countersByProject: Map<string, ProjectCounters>,
 ): Promise<void> => {
-  const regressionRole = rolesByName.get(REGRESSION_AGENT_NAME);
-  if (!regressionRole) throw projectError(canonicalProject, `Canonical role ${REGRESSION_AGENT_NAME} was not found`);
+  const regressionRole = rolesByName.get(REGRESSION_VERIFIER_AGENT_NAME);
+  if (!regressionRole) throw projectError(canonicalProject, `Canonical role ${REGRESSION_VERIFIER_AGENT_NAME} was not found`);
   const regression = await createSpecialCanonicalAgent(
     tx,
     canonicalProject,
@@ -615,86 +599,38 @@ const syncCanonicalTemplates = async (
           }
           throw projectError(project, `Template ${templateName} (${template.id}) step ${step.stepIndex} was not found`);
         }
-        const differences = templateStepStructureDifferences(persisted, step);
-        const transition = ASSIGNEE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
-        const adoptsCanonicalAssignee = differences.includes("agent")
-          && transition?.from.includes(persisted.assigneeAgent?.name ?? null) === true
-          && transition.to === step.agentName;
-        const baseTransition = STEP_BASE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
-        const adoptsCanonicalBase = differences.includes("baseFromStepIndex")
-          && baseTransition?.from === persisted.baseFromStepIndex
-          && baseTransition.to === step.baseFromStepIndex;
-        const adoptsCanonicalPriorOutput = differences.includes("priorOutputKinds")
-          && persisted.priorOutputKinds.length === 1
-          && persisted.priorOutputKinds[0] === LEGACY_ALL_PRIOR_OUTPUTS;
-        const adoptsCanonicalDependencyProvisioning = differences.includes("provisionDependencies")
-          && isCanonicalReviewStep(templateName, step.stepIndex)
-          && persisted.provisionDependencies === true
-          && step.provisionDependencies === false;
-        const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
-        const adoptsCanonicalName = differences.includes("name")
-          && nameTransition?.from === persisted.name
-          && nameTransition.to === step.name;
-        const adoptedDifferences = new Set([
-          ...(adoptsCanonicalAssignee ? ["agent"] : []),
-          ...(adoptsCanonicalBase ? ["baseFromStepIndex"] : []),
-          ...(adoptsCanonicalPriorOutput ? ["priorOutputKinds"] : []),
-          ...(adoptsCanonicalDependencyProvisioning ? ["provisionDependencies"] : []),
-          ...(adoptsCanonicalName ? ["name"] : []),
-        ]);
-        if (differences.some((difference) => !adoptedDifferences.has(difference))) {
+        const drift = canonicalStepDrift(templateName, persisted, step, "adopt");
+        if (drift.length > 0) {
           throw projectError(
             project,
-            `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) differs from canonical Markdown structure: ${differences.join(", ")}`,
+            `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) differs from canonical Markdown structure: ${drift.join(", ")}`,
           );
         }
-        const protectInUse = (): void => {
-          if (persisted._count.tasks > 0) {
+        for (const adoption of canonicalStepAdoptions(templateName, persisted, step)) {
+          if (adoption.refusesReferencedStep && persisted._count.tasks > 0) {
             throw projectError(
               project,
               `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) is referenced by instantiated tasks; canonical sync will not mutate it`,
             );
           }
-        };
-        if (adoptsCanonicalAssignee) {
-          protectInUse();
-          const assignee = step.agentName === null
-            ? null
-            : await tx.agent.findFirst({
-              where: { projectId: template.projectId, name: transition!.to, archivedAt: null },
+          if (adoption.write.kind === "bind-agent") {
+            const assignee = await tx.agent.findFirst({
+              where: { projectId: template.projectId, name: adoption.write.agentName, archivedAt: null },
               select: { id: true },
             });
-          if (step.agentName !== null && !assignee) {
-            throw projectError(
-              project,
-              `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) cannot adopt ${transition!.to}: active target Agent was not found`,
-            );
+            if (!assignee) {
+              throw projectError(
+                project,
+                `Template ${templateName} (${template.id}), ${templateName} step ${step.stepIndex} (${persisted.id}) cannot adopt ${adoption.write.agentName}: active target Agent was not found`,
+              );
+            }
+            await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { assigneeAgentId: assignee.id } });
+          } else {
+            await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: adoption.write.data });
           }
-          await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { assigneeAgentId: assignee?.id ?? null } });
-          increment(countersByProject, project.id, "adoptedAssignees");
+          increment(countersByProject, project.id, adoption.counter);
         }
-        if (adoptsCanonicalBase) {
-          protectInUse();
-          await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { baseFromStepIndex: baseTransition!.to } });
-          increment(countersByProject, project.id, "adoptedStepBases");
-        }
-        if (adoptsCanonicalPriorOutput) {
-          await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { priorOutputKinds: step.priorOutputKinds } });
-          increment(countersByProject, project.id, "adoptedPriorOutputDeclarations");
-        }
-        if (adoptsCanonicalDependencyProvisioning) {
-          await tx.taskTemplateStep.update({
-            where: { id: persisted.id },
-            data: { provisionDependencies: step.provisionDependencies },
-          });
-          increment(countersByProject, project.id, "adoptedDependencyProvisioning");
-        }
-        if (adoptsCanonicalName) {
-          protectInUse();
-          await tx.taskTemplateStep.update({ where: { id: persisted.id }, data: { name: nameTransition!.to } });
-          increment(countersByProject, project.id, "renamedSteps");
-        }
-        if (step.agentName === REGRESSION_AGENT_NAME) {
+        if (step.agentName === REGRESSION_VERIFIER_AGENT_NAME) {
           regressionSteps.push({
             id: persisted.id,
             templateName,
@@ -726,13 +662,13 @@ const migrateRegressionTasks = async (
 ): Promise<void> => {
   for (const step of regressionSteps) {
     const target = await tx.agent.findFirst({
-      where: { projectId: project.id, name: REGRESSION_AGENT_NAME, archivedAt: null },
+      where: { projectId: project.id, name: REGRESSION_VERIFIER_AGENT_NAME, archivedAt: null },
       select: { id: true },
     });
     if (!target) {
       throw projectError(
         project,
-        `Template ${step.templateName} (${step.templateId}), ${step.templateName} step ${step.stepIndex} (${step.id}) has no active ${REGRESSION_AGENT_NAME} Agent`,
+        `Template ${step.templateName} (${step.templateId}), ${step.templateName} step ${step.stepIndex} (${step.id}) has no active ${REGRESSION_VERIFIER_AGENT_NAME} Agent`,
       );
     }
     const tasks = await tx.task.findMany({
@@ -784,7 +720,7 @@ const migrateRegressionTasks = async (
       await tx.taskActivity.create({ data: {
         taskId: task.id,
         actorType: "control-plane",
-        body: `Canonical routing reassigned this unstarted regression step to ${REGRESSION_AGENT_NAME}`,
+        body: `Canonical routing reassigned this unstarted regression step to ${REGRESSION_VERIFIER_AGENT_NAME}`,
         metadata: {
           kind: "canonicalRouting.regressionVerifier",
           schemaVersion: 1,

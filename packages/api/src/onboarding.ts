@@ -34,11 +34,15 @@ import {
   Prisma,
   type PrismaClient,
   RepoPermission,
-  type RunnerPreference,
   STARTER_MOUNT_PATH,
   type StarterAgentSource,
   loadStarterAgentSource,
 } from "@anneal/db";
+import type {
+  OnboardingDisclosure,
+  OnboardingInstallation,
+  OnboardingStatus,
+} from "@anneal/db/console-contract";
 import { z } from "zod";
 
 import { isValidBranchName } from "./branch-name.js";
@@ -243,46 +247,7 @@ export const onboardingInput = z.object({
 
 export type OnboardingInput = z.infer<typeof onboardingInput>;
 
-/** Public identities only. No prompt, no remote URL, no token, no internal
- *  column: everything here is safe in a browser, a log, and release evidence. */
-export interface OnboardingInstallation {
-  complete: true;
-  project: { id: string; name: string; slug: string };
-  environment: { id: string; name: string; networking: NetworkingMode; allowedHosts: string[] };
-  agent: { id: string; name: string; title: string; model: string; runnerPreference: RunnerPreference };
-  repo: { id: string; name: string; defaultBranch: string; mountPath: string };
-  access: { agentId: string; repoId: string; permissions: RepoPermission; mountPath: string };
-}
-
-export interface OnboardingStatus {
-  complete: boolean;
-  project: { id: string; name: string; slug: string } | null;
-  /** `null` when this process cannot read `agents/`. Never a reason to withhold
-   *  `complete`, which is derived from the Project row alone. */
-  starter: { name: string; title: string; model: string; runnerPreference: RunnerPreference } | null;
-  disclosure: StarterDisclosure;
-}
-
-/**
- * What the confirmation screen must say, as facts rather than prose, so the
- * wizard cannot soften them into a claim the runtime does not honour. Every
- * value is a statement about this build's actual behaviour.
- */
-export interface StarterDisclosure {
-  environmentNetworking: "OPEN";
-  filesystemGrantCreated: false;
-  repoPermission: "GIT_WRITE";
-  codexSandbox: "none";
-  runsWithHostUserAuthority: true;
-  /** A statement about the supported v0.1 deployment, not about what this
-   *  process binds to: the transport boundary itself is Step 2's, and saying
-   *  "loopbackOnly: true" here would read as an enforcement claim this module
-   *  does not make. */
-  supportedScope: "loopback-only";
-  embeddedRemoteCredentialsRejected: true;
-}
-
-export const STARTER_DISCLOSURE: StarterDisclosure = {
+export const STARTER_DISCLOSURE: OnboardingDisclosure = {
   environmentNetworking: "OPEN",
   filesystemGrantCreated: false,
   repoPermission: "GIT_WRITE",
