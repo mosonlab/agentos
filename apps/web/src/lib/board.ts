@@ -180,8 +180,9 @@ export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): Park
  * second request by the column head. */
 export const heldChains = (entries: readonly (BoardEntry | BoardTask)[]): HoldableChain[] =>
   normalizeBoardEntries(entries).flatMap((entry) => {
-    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null || entry.aggregate.activation.taskId === null) return [];
+    if (entry.kind !== "chain" || chainHold(entry.aggregate) !== null) return [];
     const { activation, chainId, chainName, stepCount } = entry.aggregate;
+    if (activation.taskId === null) return [];
     return [{
       chainId,
       name: chainBindingLabel({ id: chainId, name: chainName }),
