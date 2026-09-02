@@ -847,6 +847,9 @@ export const main = async (
       select: { id: true, slug: true },
       orderBy: { slug: "asc" },
     }));
+    if (installFullProjectId !== null && !projectRows.some(({ id }) => id === installFullProjectId)) {
+      throw new Error(`Project ${installFullProjectId} was not found`);
+    }
     const canonicalProject = projectRows.find(({ slug }) => slug === "agentos-example");
     if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
     const orderedProjects = [
@@ -937,7 +940,8 @@ export const main = async (
         if (project.id === canonicalProject.id) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const prefix = `Project ${project.slug}: `;
-        refusals.set(project.id, message.startsWith(prefix) ? message.slice(prefix.length) : message);
+        const reason = message.startsWith(prefix) ? message.slice(prefix.length) : message;
+        refusals.set(project.id, reason.replace(/\s+/gu, " ").trim());
       }
     }
 
