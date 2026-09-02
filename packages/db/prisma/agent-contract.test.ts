@@ -167,6 +167,14 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   assert.match(regressionVerification, /platform script prepares the refreshed tree/u);
   assert.match(regressionVerification, /never[\s\S]*operate the merge lease[\s\S]*author the final task output/u);
   assert.doesNotMatch(regressionVerification, /blind reports mechanically/u);
+  // The 2026-09-02 incident: this role adopted the fix step's own "pre-existing
+  // baseline" label for three failures that chain's own diff had caused, one of
+  // which was a rejected approval gate replayed as a success, and finalized.
+  // The merge gate caught all three, so the independent verification step had
+  // contributed nothing.
+  assert.match(regressionVerification, /is not evidence/u);
+  assert.match(regressionVerification, /Dismiss one only on a cause you named and observed/u);
+  assert.match(regressionVerification, /never environmental/u);
 });
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
