@@ -67,15 +67,14 @@ test("buildRuntimeTools preserves each source runtime-tool's exact bytes", (t) =
   }
 });
 
-test("buildRuntimeTools bundles the run-gate harness installed by mirror-push", (t) => {
+test("bundled runtime tools do not emit the retired scripts/gate-worker path", (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-runner-harness-runtime-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const { outputRoot } = buildRuntimeTools({ packageRoot: join(root, "packages", "runner") });
 
-  assert.equal(
-    readFileSync(join(outputRoot, "gate-worker/run-gate.sh"), "utf8"),
-    readFileSync(join(repositoryRoot, "packages/runner/runtime-tools/gate-worker/run-gate.sh"), "utf8"),
-  );
+  for (const { destination } of RUNTIME_TOOL_FILES) {
+    assert.doesNotMatch(readFileSync(join(outputRoot, destination), "utf8"), /scripts\/gate-worker\//u);
+  }
 });
 
 test("buildRuntimeTools creates the exact byte-identical tree and purges stale files", (t) => {

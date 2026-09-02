@@ -485,16 +485,64 @@ test("a retried no-verdict gate prints the bounded tail without publishing a han
 attempt="$(wc -l < '${attemptsLog}' | tr -d ' ')"
 attempt=$((attempt + 1))
 printf '%s\\n' "$attempt" >> '${attemptsLog}'
-printf 'stub no-verdict output %s\\n' "$attempt"
+if [ "$attempt" -lt 3 ]; then
+  printf 'stub no-verdict output %s\\n' "$attempt"
+else
+  line=1
+  while [ "$line" -le 70 ]; do
+    printf 'noise-%02d ' "$line"
+    column=1
+    while [ "$column" -le 30 ]; do
+      printf '界'
+      column=$((column + 1))
+    done
+    printf '\\n'
+    line=$((line + 1))
+  done
+  printf '\\nstub distinguishing output after blank line!\\nstub no-verdict output 3\\n'
+fi
 exit 76
 `);
   seeded.env.REGRESSION_GATE_DISPATCH = noVerdictGate;
 
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 1);
-  assert.match(finalized.stdout, /REGRESSION FINALIZE: gate dispatch log tail \(attempts=3, last exit status=76\)/u);
-  assert.match(finalized.stdout, /stub no-verdict output 3/u);
+  const heading = "REGRESSION FINALIZE: gate dispatch log tail (attempts=3, last exit status=76)";
+  const headingIndex = finalized.stdout.indexOf(`${heading}\n`);
+  assert.notEqual(headingIndex, -1, finalized.stdout);
+  const printedTail = finalized.stdout.slice(headingIndex + heading.length + 1, -1);
+  assert.ok(printedTail.split("\n").length <= 60, printedTail);
+  assert.ok(Buffer.byteLength(printedTail, "utf8") <= 4000, printedTail);
+  assert.doesNotMatch(printedTail, /\uFFFD/u);
+  const [truncatedFirstLine] = printedTail.split("\n");
+  assert.match(truncatedFirstLine, /^noise-\d+ 界+$/u);
+  assert.ok(Buffer.byteLength(truncatedFirstLine, "utf8") < 99, truncatedFirstLine);
+  assert.match(printedTail, /\n\nstub distinguishing output after blank line!\n/u);
+  assert.match(printedTail, /stub no-verdict output 3/u);
+  assert.doesNotMatch(printedTail, /^(?:MERGE GATE:|GATE NOT RUN:)/mu);
   assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 3 attempt\(s\) \(exit 76\)/u);
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
+  assert.equal(existsSync(seeded.output), false);
+});
+
+test("a failed no-verdict tail extractor preserves the primary diagnostic", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "gate exited before verdict";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "143";
+  executable(join(dirname(seeded.env.REGRESSION_GATE_DISPATCH!), "node"), `#!/bin/sh
+if [ "$1" = "-" ] && [ "$2" = "no-verdict" ]; then
+  printf 'fixture extractor failure\\n' >&2
+  exit 19
+fi
+exec "$REGRESSION_FIXTURE_NODE" "$@"
+`);
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 1);
+  assert.match(finalized.stdout, /REGRESSION FINALIZE: gate dispatch log tail \(attempts=1, last exit status=143\)/u);
+  assert.match(finalized.stderr, /warning: could not extract no-verdict gate log tail/u);
+  assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 1 attempt\(s\) \(exit 143\)/u);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   assert.equal(existsSync(seeded.output), false);
 });

@@ -36,7 +36,7 @@ STATE_FILE="${AGENTOS_REGRESSION_STATE:-$AGENTOS_WORKSPACE_PATH/.git/agentos-reg
 OUTPUT_FILE="$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"
 GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_DIR/gate-worker/gate-dispatch.sh}"
 GATE_LOG=""
-# shellcheck source=scripts/gate-worker/lib.sh
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "$SCRIPT_DIR/gate-worker/lib.sh"
 
 cleanup() {
@@ -105,15 +105,41 @@ process.stdout.write(JSON.stringify(value));
 # a test prints an unbounded amount of output. Keeping the extraction here (next
 # to json_verdict) also means the gate proof and PASS/FAIL decision remain owned
 # by the existing mechanical path.
-extract_gate_failure_excerpt() {
-  local log="$1" summary="$2"
-  node - "$log" "$summary" <<'NODE'
-const { createReadStream } = require("node:fs");
+extract_gate_log_excerpt() {
+  local mode="$1" log="$2" summary="${3:-}"
+  node - "$mode" "$log" "$summary" <<'NODE'
+const { createReadStream, readFileSync } = require("node:fs");
 const { createInterface } = require("node:readline");
 
-const [logPath, summary] = process.argv.slice(2);
+const [mode, logPath, summary] = process.argv.slice(2);
 const MAX_LINES = 40;
 const MAX_BYTES = 4000;
+
+const byteLength = (value) => Buffer.byteLength(value, "utf8");
+const truncateUtf8 = (value, limit) => {
+  if (byteLength(value) <= limit) return value;
+  let end = limit;
+  const bytes = Buffer.from(value);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+};
+
+const takeBounded = (lines, lineLimit, byteBudget) => {
+  const taken = [];
+  let bytes = 0;
+  for (const line of lines) {
+    if (taken.length >= lineLimit) break;
+    const separator = taken.length > 0 ? 1 : 0;
+    const remaining = byteBudget - bytes - separator;
+    if (remaining <= 0) break;
+    const fitted = truncateUtf8(line, remaining);
+    if (fitted === "" && line !== "") break;
+    taken.push(fitted);
+    bytes += separator + byteLength(fitted);
+    if (fitted !== line) break;
+  }
+  return { lines: taken, bytes };
+};
 
 const splitStages = (value) => {
   const stages = [];
@@ -222,6 +248,14 @@ const readLog = async () => {
 };
 
 const main = async () => {
+if (mode === "no-verdict") {
+  const lines = readFileSync(logPath, "utf8").split(/\r?\n/u);
+  if (lines.at(-1) === "") lines.pop();
+  const selected = takeBounded(lines.reverse(), 60, MAX_BYTES);
+  process.stdout.write(selected.lines.reverse().join("\n"));
+  return;
+}
+if (mode !== "failure") throw new Error(`unknown gate log extraction mode: ${mode}`);
 await readLog();
 
 records.sort((left, right) => left.index - right.index);
@@ -231,31 +265,6 @@ for (const record of records) {
 
 const missingStages = fallbackStages.filter((stage) => !stageOutput.has(stage));
 const fallbackLines = missingStages.map((stage) => `${stage}: no per-test output in gate log`);
-
-const byteLength = (value) => Buffer.byteLength(value, "utf8");
-const truncateUtf8 = (value, limit) => {
-  if (byteLength(value) <= limit) return value;
-  let end = limit;
-  while (end > 0 && (Buffer.from(value)[end] & 0xc0) === 0x80) end -= 1;
-  return Buffer.from(value).subarray(0, end).toString("utf8");
-};
-
-const takeBounded = (lines, lineLimit, byteBudget) => {
-  const taken = [];
-  let bytes = 0;
-  for (const line of lines) {
-    if (taken.length >= lineLimit) break;
-    const separator = taken.length > 0 ? 1 : 0;
-    const remaining = byteBudget - bytes - separator;
-    if (remaining <= 0) break;
-    const fitted = truncateUtf8(line, remaining);
-    if (!fitted) break;
-    taken.push(fitted);
-    bytes += separator + byteLength(fitted);
-    if (fitted !== line) break;
-  }
-  return { lines: taken, bytes };
-};
 
 // Reserve room for notices before taking log lines. Otherwise forty noisy test
 // lines could crowd out the explicit "no per-test output" fact for another stage.
@@ -278,53 +287,25 @@ main().catch((error) => {
 NODE
 }
 
+extract_gate_failure_excerpt() {
+  extract_gate_log_excerpt failure "$1" "$2"
+}
+
 # Keep a no-verdict dispatch diagnostic visible in the Run output without
 # turning it into durable verdict evidence. The tail uses the same UTF-8-safe
 # truncation as the failure excerpt above, but prioritizes the latest lines so
 # the final dispatch reason survives a noisy earlier attempt.
 extract_gate_no_verdict_tail() {
-  local log="$1"
-  node - "$log" <<'NODE'
-const { readFileSync } = require("node:fs");
-
-const [logPath] = process.argv.slice(2);
-const MAX_LINES = 60;
-const MAX_BYTES = 4000;
-
-const byteLength = (value) => Buffer.byteLength(value, "utf8");
-const truncateUtf8 = (value, limit) => {
-  if (byteLength(value) <= limit) return value;
-  let end = limit;
-  const bytes = Buffer.from(value);
-  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString("utf8");
-};
-
-const lines = readFileSync(logPath, "utf8").split(/\r?\n/u);
-if (lines.at(-1) === "") lines.pop();
-
-const selected = [];
-let bytes = 0;
-for (let index = lines.length - 1; index >= 0; index -= 1) {
-  if (selected.length >= MAX_LINES) break;
-  const separator = selected.length > 0 ? 1 : 0;
-  const remaining = MAX_BYTES - bytes - separator;
-  if (remaining <= 0) break;
-  const fitted = truncateUtf8(lines[index], remaining);
-  if (!fitted) break;
-  selected.push(fitted);
-  bytes += separator + byteLength(fitted);
-  if (fitted !== lines[index]) break;
-}
-
-process.stdout.write(selected.reverse().join("\n"));
-NODE
+  extract_gate_log_excerpt no-verdict "$1"
 }
 
 print_gate_no_verdict_tail() {
   local log="$1" attempts="$2" status="$3" tail
-  tail="$(extract_gate_no_verdict_tail "$log")" || return 1
   printf 'REGRESSION FINALIZE: gate dispatch log tail (attempts=%s, last exit status=%s)\n' "$attempts" "$status"
+  if ! tail="$(extract_gate_no_verdict_tail "$log")"; then
+    printf 'regression-verification: warning: could not extract no-verdict gate log tail\n' >&2
+    return 0
+  fi
   [ -z "$tail" ] || printf '%s\n' "$tail"
 }
 
@@ -477,8 +458,7 @@ finalize() {
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;
     *)
-      print_gate_no_verdict_tail "$gate_log" "$attempt" "$gate_status" \
-        || die "could not extract no-verdict gate log tail"
+      print_gate_no_verdict_tail "$gate_log" "$attempt" "$gate_status"
       die "gate dispatch produced no admissible PASS/FAIL verdict after $attempt attempt(s) (exit $gate_status)"
       ;;
   esac
