@@ -983,24 +983,27 @@ test("parkedChains projects exactly the chains an operator can start", () => {
   assert.deepEqual(parkedChains(unnamed).map((chain) => chain.name), ["c1234567"]);
 });
 
-test("held Chains are excluded from Todo activation and Doing exposes only released chains", () => {
-  const parked = chainRow({ chainId: "parked", name: "Parked", stepCount: 2, state: "parked-unactivated" });
-  const held = task({
-    ...parked,
-    chainAggregate: {
-      ...parked.chainAggregate!,
-      activation: {
-        ...parked.chainAggregate!.activation,
-        hold: { heldLayer: 0, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null },
-      },
-    } as BoardTask["chainAggregate"],
+test("held, settled and idle Chains stay out of both column-head waves", () => {
+  // A parked chain an operator has held arrives as `held`: the projection
+  // derives the state from the persisted hold, which outranks the parked check.
+  const held = chainRow({
+    chainId: "parked", name: "Parked", stepCount: 2, state: "held",
+    hold: { heldLayer: 0, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null },
   });
   assert.deepEqual(parkedChains(boardEntries([held])), []);
 
   const running = chainRow({ chainId: "running", name: "Running", stepCount: 3, state: "running", status: "DOING" });
-  const runningEntry = boardEntries([running]);
-  assert.deepEqual(heldChains(runningEntry), [{ chainId: "running", name: "Running", stepCount: 3, taskId: "running-head" }]);
-  assert.deepEqual(heldChains(boardEntries([held, running])), [{ chainId: "running", name: "Running", stepCount: 3, taskId: "running-head" }]);
+  const runningWave = [{ chainId: "running", name: "Running", stepCount: 3, taskId: "running-head" }];
+  assert.deepEqual(heldChains(boardEntries([running])), runningWave);
+  assert.deepEqual(heldChains(boardEntries([held, running])), runningWave);
+
+  // The divergence the one rule closes: both carry an activation task id, and a
+  // wave that read the persisted hold alone swept them in while their own cards
+  // offered no Hold button.
+  const settled = chainRow({ chainId: "settled", name: "Settled", stepCount: 2, state: "settled", status: "DOING" });
+  const idle = chainRow({ chainId: "idle", name: "Idle", stepCount: 2, state: "idle", status: "DOING" });
+  assert.deepEqual(heldChains(boardEntries([settled, idle])), []);
+  assert.deepEqual(parkedChains(boardEntries([settled, idle])), []);
 });
 
 test("Doing offers Hold all only for chains without a persisted hold", async () => {
@@ -1008,13 +1011,9 @@ test("Doing offers Hold all only for chains without a persisted hold", async () 
   const definition = COLUMNS.find((candidate) => candidate.status === "DOING");
   assert.ok(definition);
   const running = chainRow({ chainId: "running", name: "Running", stepCount: 3, state: "running", status: "DOING" });
-  const held = task({
-    id: "held-head", name: "Held: Implementation", displayName: "Implementation", status: "DOING",
-    chainId: "held", chainName: "Held", chainIndex: 0, chainProgress: progress({ chainId: "held" }),
-    chainAggregate: {
-      ...running.chainAggregate!, chainId: "held", chainName: "Held", detailTaskId: "held-head",
-      activation: { ...running.chainAggregate!.activation, taskId: "held-head", hold: { heldLayer: 1, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null } },
-    } as BoardTask["chainAggregate"],
+  const held = chainRow({
+    chainId: "held", name: "Held", stepCount: 3, state: "running", status: "DOING",
+    hold: { heldLayer: 1, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null },
   });
   const heldIds: string[][] = [];
   const root = (await reactDom()).createRoot(container);
