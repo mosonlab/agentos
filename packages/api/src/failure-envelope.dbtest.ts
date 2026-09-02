@@ -161,6 +161,33 @@ test("the runner cannot declare a failure retryable the API's whitelist refuses"
   assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
 });
 
+test("a missing NPM_CI manifest persists as a named non-retryable protocol error", async () => {
+  const { task, run, runnerId, fencingToken } = await seedRunningRun();
+  const reason = "dependency-provisioning-manifest-missing";
+  await complete(run.id, {
+    ...misclassifiedBody(runnerId, fencingToken, {
+      phase: "PROVISION",
+      runnerClass: "PROTOCOL_ERROR",
+      exitCode: 1,
+      terminationReason: "runner exception",
+      terminalEventSeen: false,
+      agentExited: false,
+      stderrSummary: reason,
+      stdoutSummary: null,
+    }),
+    failureClass: "PROTOCOL_ERROR",
+    failureReason: reason,
+    retryable: false,
+  });
+
+  const closed = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(closed.status, "FAILED");
+  assert.equal(closed.failureClass, "PROTOCOL_ERROR");
+  assert.equal(closed.failureReason, reason);
+  assert.equal(closed.retryable, false);
+  assert.equal(await db.run.count({ where: { taskId: task.id, runNumber: 2 } }), 0);
+});
+
 /**
  * Copied verbatim from the `"a hung push arrives at the API as a typed timeout"`
  * test in packages/runner/src/delivery.test.ts, which asserts this exact object

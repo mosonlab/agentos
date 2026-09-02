@@ -188,6 +188,12 @@ export const transientNetworkText = (text: string): boolean => {
 };
 
 const TOOL_FAILURE_PATTERN = /"isError"\s*:\s*true|"command_execution"[\s\S]{0,500}"status"\s*:\s*"failed"/u;
+const DEPENDENCY_PROVISIONING_MANIFEST_MISSING = "dependency-provisioning-manifest-missing";
+
+const dependencyProvisioningManifestMissing = (envelope: FailureEnvelope): boolean =>
+  envelope.phase === "PROVISION"
+  && !envelope.agentExited
+  && envelope.stderrSummary === DEPENDENCY_PROVISIONING_MANIFEST_MISSING;
 
 const authPatternFor = (phase: FailureEnvelope["phase"]): RegExp =>
   phase === "DELIVER" ? GIT_AUTH_PATTERN : CLI_AUTH_PATTERN;
@@ -203,6 +209,11 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   if (envelope.phase === "DELIVER" && envelope.runnerClass === FailureClass.NO_CHANGES_PRODUCED) {
     return FailureClass.NO_CHANGES_PRODUCED;
   }
+  // This is a repository/runner contract violation observed before an agent
+  // starts, not the runner's advisory classification. The exact named
+  // condition is carried on the structured stderr evidence channel so it
+  // survives the completion trust boundary without trusting runnerClass.
+  if (dependencyProvisioningManifestMissing(envelope)) return FailureClass.PROTOCOL_ERROR;
   // A termination reason is an account of how *an agent session* was stopped:
   // a walltime kill, a stall kill, a cancel. `agentExited` is what says there
   // was a session at all, and without one this field is the runner narrating
@@ -292,7 +303,7 @@ export const classifyEnvelope = (envelope: FailureEnvelope): EnvelopeVerdict => 
     failureClass,
     // Derived, never taken from the runner: this is the whitelist finally doing
     // its job.
-    retryable: failureIsRetryable(failureClass),
+    retryable: dependencyProvisioningManifestMissing(envelope) ? false : failureIsRetryable(failureClass),
     externalFailure: envelopeExternalFailure(envelope, failureClass),
   };
 };

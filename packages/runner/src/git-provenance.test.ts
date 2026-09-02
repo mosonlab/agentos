@@ -91,7 +91,7 @@ const claim = (
     remoteUrl,
     defaultBranch: "main",
     mountPath: "repo",
-    dependencyProvisioning: "NPM_CI",
+    dependencyProvisioning: "NONE",
   },
   run: {
     id: runId,
