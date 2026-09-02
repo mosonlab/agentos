@@ -52,7 +52,7 @@ const makeSlotDirectory = (count) => {
 const makeCallerFixture = (name) => {
   const directory = mkdtempSync(join(tmpdir(), "host-proof-caller."));
   const script = join(directory, name);
-  writeFileSync(script, "#!/usr/bin/env bash\nbash \"$@\"\n", { mode: 0o755 });
+  writeFileSync(script, "#!/usr/bin/env bash\nbash \"$@\" &\nchild=$!\nwait \"$child\"\nstatus=$?\nexit \"$status\"\n", { mode: 0o755 });
   chmodSync(script, 0o755);
   return { directory, script };
 };
