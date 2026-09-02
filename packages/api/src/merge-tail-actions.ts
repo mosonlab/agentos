@@ -631,7 +631,14 @@ export const createMergeTailRepairTask = async (
     opensPullRequest: false,
     status: TaskStatus.TODO,
     targetBranch: input.sourceRun.branch,
-    maxSessionsPerTask: 1,
+    // Two attempts, not one. A repair that delivered its commit and then lost
+    // the provider stream on the way out completes as a retryable failure; at
+    // a budget of one there is no second Run to re-report it, so
+    // `run-completion.ts` reaches `stopMergeTail` and the whole tail stops for
+    // a transport blip. This is the per-card Run budget and is unrelated to
+    // MAX_MERGE_TAIL_REPAIR_ATTEMPTS, which bounds how many repair cards the
+    // tail opens.
+    maxSessionsPerTask: 2,
   } });
   const repairRun = await enqueueTaskRun(tx, task.id, input.now);
   await tx.run.update({
