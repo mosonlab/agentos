@@ -1156,8 +1156,7 @@ const runBackendPreflight = async (
   runner: RunnerKind,
   env = workspaceEnvironment(config),
 ) => {
-  const definition = RUNNER_DEFINITIONS[runner];
-  return definition.adapter.preflight({ config, runner, model: definition.startupPreflightModel, env });
+  return adapters[runner].preflight({ config, runner, model: RUNNER_DEFINITIONS[runner].startupPreflightModel, env });
 };
 
 /** One cheap daemon heartbeat. Every backend is attempted independently so a
