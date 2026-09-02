@@ -87,6 +87,7 @@ test("buildRuntimeTools creates the exact byte-identical tree and purges stale f
     "gate-worker/mirror-push.sh",
     "gate-worker/remote-gate.sh",
     "gate-worker/run-gate.sh",
+    "git-credential-runner.sh",
     "regression-verification.sh",
   ]);
   for (const { source, destination } of RUNTIME_TOOL_FILES) {
@@ -146,7 +147,9 @@ test("buildRuntimeTools turns copy and byte-integrity failures into build failur
   };
   assert.throws(
     () => buildRuntimeTools({ ...context, filesystem: copyFailureFilesystem }),
-    /runner-runtime-tools: copy-failed:regression-verification\.sh/u,
+    // The first tool copied, whichever it is: the assertion is that a copy
+    // failure surfaces as a build failure, not that a given file leads.
+    new RegExp(`runner-runtime-tools: copy-failed:${RUNTIME_TOOL_FILES[0].destination.replace(".", "\\.")}`, "u"),
   );
 
   const byteMismatchFilesystem = {
@@ -158,7 +161,7 @@ test("buildRuntimeTools turns copy and byte-integrity failures into build failur
   };
   assert.throws(
     () => buildRuntimeTools({ ...context, filesystem: byteMismatchFilesystem }),
-    /runner-runtime-tools: byte-mismatch:regression-verification\.sh/u,
+    new RegExp(`runner-runtime-tools: byte-mismatch:${RUNTIME_TOOL_FILES[0].destination.replace(".", "\\.")}`, "u"),
   );
   assert.equal(existsSync(context.outputRoot), false);
 });

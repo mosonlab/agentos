@@ -252,8 +252,24 @@ export const promptHashFor = (prompt: string): string => createHash("sha256").up
 const COMMON_LAUNCHER_ENVIRONMENT = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "HOME", "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER",
   "AGENTOS_RUN_ID", "AGENTOS_TOOLS", "AGENTOS_HOST_PROOF_SLOT_DIR", "AGENTOS_HOST_PROOF_SLOTS",
-  "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+  "AGENTOS_RUNNER_HOME",
 ] as const;
+
+/**
+ * The runner's `git -c` overrides are a numbered list, so the launcher forwards
+ * as many pairs as GIT_CONFIG_COUNT declares. Naming a fixed first pair instead
+ * would silently drop every later one across the run-as boundary, and git reads
+ * GIT_CONFIG_COUNT before the pairs: a forwarded count with a missing pair is a
+ * hard git error, not a quiet default.
+ */
+const gitConfigLauncherNames = (env: NodeJS.ProcessEnv): string[] => {
+  const declared = Number(env.GIT_CONFIG_COUNT);
+  if (!Number.isSafeInteger(declared) || declared <= 0) return [];
+  return [
+    "GIT_CONFIG_COUNT",
+    ...Array.from({ length: declared }, (_unused, index) => [`GIT_CONFIG_KEY_${index}`, `GIT_CONFIG_VALUE_${index}`]).flat(),
+  ];
+};
 
 export const launchAdapterArgv = (
   config: Pick<RunnerConfig, "runAsPrefix" | "binaries">,
@@ -263,7 +279,11 @@ export const launchAdapterArgv = (
 ): { executable: string; args: string[] } => {
   const binary = config.binaries[declaration.runner];
   if (config.runAsPrefix.length === 0) return { executable: binary, args };
-  const names = [...COMMON_LAUNCHER_ENVIRONMENT, ...declaration.launcherEnvironmentVariables];
+  const names = [
+    ...COMMON_LAUNCHER_ENVIRONMENT,
+    ...gitConfigLauncherNames(env),
+    ...declaration.launcherEnvironmentVariables,
+  ];
   const assignments = names.flatMap((name) => env[name] !== undefined ? [`${name}=${env[name]}`] : []);
   return {
     executable: config.runAsPrefix[0]!,

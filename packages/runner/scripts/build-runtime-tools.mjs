@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
  * gate-worker helper part of the runner's release contract by accident.
  */
 export const RUNTIME_TOOL_FILES = Object.freeze([
+  Object.freeze({ source: "packages/runner/runtime-tools/git-credential-runner.sh", destination: "git-credential-runner.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/regression-verification.sh", destination: "regression-verification.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
@@ -51,7 +52,7 @@ const directory = (filesystem, path, label) => {
 };
 
 const expectedDirectoryEntries = new Map([
-  ["", ["gate-worker", "regression-verification.sh"]],
+  ["", ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"]],
   ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]],
 ]);
 
