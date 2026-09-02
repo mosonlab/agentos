@@ -21,16 +21,6 @@ export const RUNTIME_TOOL_FILES = Object.freeze([
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");
 const defaultPackageRoot = resolve(scriptDirectory, "..");
-const sourceRuntimeToolPrefix = "packages/runner/runtime-tools/";
-const bundledRuntimeToolPrefix = "scripts/";
-
-// The package-owned sources name their canonical home, while Acceptance 2
-// freezes the release-local bundle to the target commit's bytes. Rewriting only
-// the moved prefix preserves that bundle and leaves every payload edit visible.
-const generatedBytes = (sourceBytes) => Buffer.from(
-  sourceBytes.toString("utf8").replaceAll(sourceRuntimeToolPrefix, bundledRuntimeToolPrefix),
-  "utf8",
-);
 
 const failure = (detail, cause) => {
   const error = new Error(`runner-runtime-tools: ${detail}`);
@@ -84,7 +74,7 @@ const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
     const sourcePath = resolve(sourceRoot, source);
     const destinationPath = join(outputRoot, destination);
     regularFile(filesystem, destinationPath, `generated-file:${destination}`);
-    const sourceBytes = generatedBytes(filesystem.readFileSync(sourcePath));
+    const sourceBytes = filesystem.readFileSync(sourcePath);
     const destinationBytes = filesystem.readFileSync(destinationPath);
     if (!sourceBytes.equals(destinationBytes)) failure(`byte-mismatch:${destination}`);
   }
@@ -145,7 +135,7 @@ export const buildRuntimeTools = ({
       const sourcePath = resolve(sourceRoot, source);
       const destinationPath = join(stageRoot, destination);
       try {
-        filesystem.writeFileSync(destinationPath, generatedBytes(filesystem.readFileSync(sourcePath)));
+        filesystem.writeFileSync(destinationPath, filesystem.readFileSync(sourcePath));
         // Preserve the source mode so generated scripts remain useful when
         // inspected directly;
         // per-Run materialization applies its stricter 0500 mode later.

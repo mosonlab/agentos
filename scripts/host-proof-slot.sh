@@ -68,6 +68,7 @@ host_proof_slot_try() {
   fi
 
   HOST_PROOF_SLOT_ACQUIRED=1
+  host_proof_slot_report_admission || { exec 9<&-; return $?; }
   "$@" 9<&-
   local child_status=$?
   exec 9<&-
@@ -78,6 +79,35 @@ host_proof_slot_try() {
     kill "-$((child_status - 128))" "$$"
   fi
   return "$child_status"
+}
+
+# A wait of at least 60 seconds is reported once while it is still going and
+# again when the slot is admitted, so a host can measure its queue from Run
+# output; anything shorter stays silent.
+HOST_PROOF_SLOT_REPORT_AFTER_SECONDS=60
+
+host_proof_slot_report_admission() {
+  host_proof_slot_set_now || return $?
+  local waited=$((HOST_PROOF_SLOT_NOW - start_seconds))
+  if (( waited >= HOST_PROOF_SLOT_REPORT_AFTER_SECONDS )); then
+    printf 'host-proof-slot: %s for workspace %s in Run %s admitted after %ss waiting in %s\n' \
+      "$script_name" "$workspace_name" "$AGENTOS_RUN_ID" "$waited" "$slot_directory" >&2
+  fi
+  return 0
+}
+
+host_proof_slot_report_wait() {
+  if (( waiting_reported != 0 )); then
+    return 0
+  fi
+  host_proof_slot_set_now || return $?
+  local waited=$((HOST_PROOF_SLOT_NOW - start_seconds))
+  if (( waited >= HOST_PROOF_SLOT_REPORT_AFTER_SECONDS )); then
+    waiting_reported=1
+    printf 'host-proof-slot: %s for workspace %s in Run %s has waited %ss for a slot in %s\n' \
+      "$script_name" "$workspace_name" "$AGENTOS_RUN_ID" "$waited" "$slot_directory" >&2
+  fi
+  return 0
 }
 
 host_proof_slot_check_deadline() {
@@ -166,6 +196,7 @@ host_proof_slot_main() {
     return "$now_status"
   fi
   start_seconds="$HOST_PROOF_SLOT_NOW"
+  local waiting_reported=0
 
   while :; do
     host_proof_slot_check_deadline || return $?
@@ -189,6 +220,7 @@ host_proof_slot_main() {
       slot_number=$((slot_number + 1))
     done
 
+    host_proof_slot_report_wait || return $?
     host_proof_slot_wait
     now_status=$?
     if (( now_status != 0 )); then
