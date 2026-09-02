@@ -11,7 +11,7 @@ const now = "2026-08-25T00:00:00.000Z";
  *  `artifactTaskId` is the step that produced the artifact under review. */
 const gateCard = (): InboxMessage => ({
   id: "gate-1", from: "AGENT", dismissible: false, agentId: "agent-1", sessionId: "session-1",
-  taskId: "gate-task", goalId: null, gateTaskId: "gate-task", artifactTaskId: "producing-task",
+  taskId: "gate-task", goalId: null, gateTaskId: "gate-task", acceptsFreeText: true, artifactTaskId: "producing-task",
   threadId: "thread-1", replyToMessageId: null, kind: "MULTIPLE_CHOICE",
   body: "审批闸门：Write a spec\n\n产物（spec）：\nPREVIEW HEAD\n…（预览已截断，完整产物见 Inbox 页的产物卡片）",
   choices: [{ id: "approve", label: "批准并继续" }, { id: "reject", label: "打回上一步" }],

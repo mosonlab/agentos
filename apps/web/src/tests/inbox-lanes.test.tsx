@@ -10,7 +10,7 @@ const now = "2026-08-26T00:00:00.000Z";
 
 const card = (overrides: Partial<InboxMessage> & Pick<InboxMessage, "id" | "body">): InboxMessage => ({
   from: "AGENT", dismissible: true, agentId: null, sessionId: null, taskId: null, goalId: null,
-  gateTaskId: null, artifactTaskId: null, threadId: "thread-1", replyToMessageId: null,
+  gateTaskId: null, acceptsFreeText: false, artifactTaskId: null, threadId: "thread-1", replyToMessageId: null,
   kind: "TEXT", choices: null, selectedChoiceId: null, status: "OPEN", channel: "FEISHU",
   deliveryStatus: "DELIVERED", deliveryAttempts: 1, lastDeliveryError: null,
   createdAt: now, answeredAt: null, decisions: [], replies: [],
