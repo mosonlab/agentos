@@ -9,9 +9,6 @@ const phase = (scope, name, hostMethod, mutating, ledgerState = null) => Object.
 /** The full ordered deployment. Every row names a host method that receives
  * the DeploymentAttempt and returns the facts it established. */
 export const DEPLOY_PHASES = Object.freeze([
-  phase("prefix", "parse-arguments", "parseArgs", false),
-  phase("prefix", "check-escalation", "checkEscalation", false),
-  phase("prefix", "acquire-deploy-lock", "acquireLock", false),
   phase("prefix", "read-revisions", "readRevisions", false),
   phase("prefix", "check-already-deployed", "checkAlreadyDeployed", false),
   phase("prefix", "start-deployment-ledger", "startDeploymentLedger", false, "STARTED"),
