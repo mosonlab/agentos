@@ -21,11 +21,12 @@ import { fileURLToPath } from "node:url";
 import {
   DeployFailure,
   SERVICE_LABELS,
+  decideInvocation,
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
   failureOf,
-  runLocked,
+  parseDeployArguments,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import {
@@ -38,7 +39,6 @@ import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment
 import { readRemoteMainRevision } from "./remote-main-read.mjs";
 import {
   checkExistingEscalation,
-  resolveRemoteMainTarget,
   selfClearEscalation,
   writeEscalationWithAttempts,
 } from "./quiet-window-escalation.mjs";
@@ -71,7 +71,14 @@ import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
 import { serviceWrapperPath } from "./install-launchd.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPOSITORY_ROOT = resolve(process.env.AGENTOS_REPOSITORY_ROOT ?? resolve(SCRIPT_DIR, "../.."));
+
+/** The deploy root is the operator's appliance root, not the directory this
+ * script was reached through: an invocation through the `current` symlink
+ * resolves its state, marker and release paths from the configured root. */
+export const deployRootFromEnvironment = (environment, scriptDir) =>
+  resolve(environment.AGENTOS_REPOSITORY_ROOT ?? resolve(scriptDir, "../.."));
+
+const REPOSITORY_ROOT = deployRootFromEnvironment(process.env, SCRIPT_DIR);
 const STATE_DIR = join(REPOSITORY_ROOT, ".agentos-deploy");
 const LOCK_PATH = join(STATE_DIR, "lock");
 const ESCALATION_PATH = join(STATE_DIR, "escalated.json");
@@ -487,18 +494,23 @@ const persistAndNotifyFailure = async (failure, from, to) => {
   }
 };
 
-const parseArgs = (args) => {
-  const allowed = new Set(["--dry-run", "--clear-escalation", "--prune-history"]);
-  const unknown = args.find((argument) => !allowed.has(argument));
-  if (unknown) fail("usage", `unknown-argument-${unknown}`);
-  const modes = ["--dry-run", "--clear-escalation", "--prune-history"].filter((mode) => args.includes(mode));
-  if (modes.length > 1) fail("usage", "modes-are-mutually-exclusive");
-  return {
-    dryRun: args.includes("--dry-run"),
-    clearEscalation: args.includes("--clear-escalation"),
-    pruneHistory: args.includes("--prune-history"),
-  };
-};
+const createDeployStartup = () => ({
+  pollIntervalMs: POLL_MS,
+  log,
+  clearEscalation: () => clearEscalationOnOperatorRequest({ path: ESCALATION_PATH, log }),
+  loadEnvironment,
+  loadBinaries,
+  acquireLock,
+  checkEscalation: () => checkExistingEscalation({
+    escalationPath: ESCALATION_PATH,
+    retryEscalationNotification,
+    log,
+    retryableReasons: RETRYABLE_ESCALATION_REASONS,
+    retryCap: ESCALATION_RETRY_CAP,
+  }),
+  readRemoteMain: remoteMainRevision,
+  persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
+});
 
 const pruneHistory = () => {
   const result = pruneDeployHistory({ stateDir: STATE_DIR });
@@ -550,17 +562,37 @@ const verifyStableServicePaths = async () => {
   }
 };
 
-const dryRun = async () => {
-  await loadEnvironment();
-  loadBinaries();
-  const from = readDeployedRevision();
-  const to = await remoteMainRevision();
-  const result = await dryRunDecision({
-    revisions: async () => ({ from, to }),
+const makeWritable = (root) => {
+  const visit = (path) => {
+    const status = lstatSync(path);
+    if (status.isSymbolicLink()) return;
+    chmodSync(path, status.mode & 0o777 | (status.isDirectory() ? 0o700 : 0o600));
+    if (status.isDirectory()) for (const entry of readdirSync(path)) visit(join(path, entry));
+  };
+  visit(root);
+};
+
+const createDeployHost = () => {
+  let canonicalSyncRefusals = [];
+  const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
+  return createProductionHost({
+    selfClearEscalation: async (attempt) => {
+      const pending = attempt.fact("retryEscalation");
+      if (!pending) return false;
+      return selfClearEscalation({
+        escalationPath: ESCALATION_PATH,
+        retryEscalation: pending,
+        notify,
+        log,
+      });
+    },
     blockingRuns,
-    artifactState: async () => {
+    artifactState: async (attempt) => {
       try {
-        const artifact = findReleaseArtifact({ deployRoot: REPOSITORY_ROOT, revision: to });
+        const artifact = findReleaseArtifact({
+          deployRoot: attempt.deployRoot,
+          revision: attempt.targetCommit,
+        });
         return { ok: true, releaseName: artifact.releaseName };
       } catch (error) {
         const failure = failureOf(error);
@@ -580,68 +612,6 @@ const dryRun = async () => {
           reason: error instanceof Error ? error.message : String(error),
         };
       }
-    },
-  });
-  for (const line of result.lines) log(line);
-  return !result.artifact.ok || !result.services.ok || !result.backup.ok ? 1 : 0;
-};
-
-const makeWritable = (root) => {
-  const visit = (path) => {
-    const status = lstatSync(path);
-    if (status.isSymbolicLink()) return;
-    chmodSync(path, status.mode & 0o777 | (status.isDirectory() ? 0o700 : 0o600));
-    if (status.isDirectory()) for (const entry of readdirSync(path)) visit(join(path, entry));
-  };
-  visit(root);
-};
-
-const createDeployHost = () => {
-  let retryEscalation = null;
-  let canonicalSyncRefusals = [];
-  const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
-  return createProductionHost({
-    parseArgs: async () => ({ options: parseArgs(process.argv.slice(2)) }),
-    checkEscalation: async () => {
-      const escalation = await checkExistingEscalation({
-        escalationPath: ESCALATION_PATH,
-        retryEscalationNotification,
-        log,
-        retryableReasons: RETRYABLE_ESCALATION_REASONS,
-        retryCap: ESCALATION_RETRY_CAP,
-      });
-      if (!escalation.active) {
-        retryEscalation = escalation.retryEscalation ?? null;
-        return;
-      }
-      retryEscalation = null;
-      return { skip: "escalation-active", exitCode: 2 };
-    },
-    selfClearEscalation: async () => {
-      const pending = retryEscalation;
-      retryEscalation = null;
-      if (!pending) return false;
-      return selfClearEscalation({
-        escalationPath: ESCALATION_PATH,
-        retryEscalation: pending,
-        notify,
-        log,
-      });
-    },
-    acquireLock: async () => {
-      const lock = await acquireLock();
-      if (lock === null) {
-        log("SKIP concurrent-run lock-held");
-        return { skip: "lock-held" };
-      }
-      if (lock.recovered) {
-        await lock.release();
-        throw new DeployFailure(
-          "stale-deploy-owner-recovered",
-          `pid-${lock.recovered.pid ?? "unknown"}`,
-        );
-      }
-      return { lock, resources: [lock] };
     },
     readRevisions: async (attempt) => ({
       revisions: { from: readDeployedRevision(), to: attempt.targetCommit },
@@ -918,51 +888,40 @@ const createDeployHost = () => {
   });
 };
 
+// The failure path outside the deployment attempt has to know whether this
+// process was a dry run, which must never leave an escalation behind.
+let deployMode = null;
+
 const main = async () => {
-  const options = parseArgs(process.argv.slice(2));
-  if (!Number.isSafeInteger(POLL_MS) || POLL_MS < 1_000) fail("environment-invalid", "QUIET_WINDOW_POLL_SECONDS-must-be-a-positive-integer");
-  if (options.clearEscalation) {
-    // Clearing an absent marker stays exit 0: it is idempotent, not an error.
-    clearEscalationOnOperatorRequest({ path: ESCALATION_PATH, log });
+  deployMode = parseDeployArguments(process.argv.slice(2));
+  const invocation = await decideInvocation(createDeployStartup(), deployMode);
+  if (invocation.exitCode !== undefined) return invocation.exitCode;
+  if (invocation.mode === "prune-history") {
+    try {
+      pruneHistory();
+    } finally {
+      await invocation.lock.release();
+    }
     return 0;
   }
-  if (options.dryRun) return dryRun();
-  if (options.pruneHistory) {
-    loadBinaries();
-    const result = await runLocked({ acquireLock, log }, async () => {
-      pruneHistory();
-      return { ok: true };
-    });
-    return result.ok ? 0 : 1;
-  }
-
-  await loadEnvironment();
-  loadBinaries();
-  const startup = await resolveRemoteMainTarget({
-    acquireLock,
-    log,
-    checkEscalation: () => checkExistingEscalation({
-      escalationPath: ESCALATION_PATH,
-      retryEscalationNotification,
-      log,
-      retryableReasons: RETRYABLE_ESCALATION_REASONS,
-      retryCap: ESCALATION_RETRY_CAP,
-    }),
-    readRemoteMain: remoteMainRevision,
-    persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
-  });
-  if (startup.skipped === "lock-held") return 0;
-  if (startup.exitCode) return startup.exitCode;
-  const targetCommit = startup.targetCommit;
-
   const attempt = openDeploymentAttempt({
     deployRoot: REPOSITORY_ROOT,
-    targetCommit,
+    targetCommit: invocation.targetCommit,
     transactionId: randomUUID(),
   });
-  const result = await executeUpgrade(createDeployHost(), attempt);
+  attempt.establish({
+    retryEscalation: invocation.retryEscalation,
+    ...(invocation.lock === null ? {} : { resources: [invocation.lock] }),
+  });
+  const host = createDeployHost();
+  if (invocation.mode === "dry-run") {
+    const decision = await dryRunDecision(host, attempt);
+    for (const line of decision.lines) log(line);
+    return !decision.artifact.ok || !decision.services.ok || !decision.backup.ok ? 1 : 0;
+  }
+  const result = await executeUpgrade(host, attempt);
   if (result.ok && !result.skipped) pruneHistory();
-  return result.ok ? (attempt.fact("exitCode") ?? 0) : 1;
+  return result.ok ? 0 : 1;
 };
 
 const entrypoint = (() => {
@@ -991,7 +950,7 @@ if (entrypoint) {
   } catch (error) {
     const failure = failureOf(error);
     log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
-    const dryRunMode = process.argv.includes("--dry-run");
+    const dryRunMode = deployMode === "dry-run";
     if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason })) {
       await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
         .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));

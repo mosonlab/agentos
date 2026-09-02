@@ -46,7 +46,6 @@ const timeoutUpgrade = ({ phase, run, escalationFails = false, wait, barrierHeld
   };
   const host = {};
   for (const { hostMethod } of DEPLOY_PHASES) host[hostMethod] = async () => undefined;
-  host.acquireLock = async () => ({ resources: [{ release: async () => { calls.push("release-lock"); } }] });
   host.readRevisions = async () => ({ revisions });
   host.startDeploymentLedger = async () => ({ ledger: { start: async () => undefined, record: async () => undefined } });
   host.waitForQuiet = async () => ({ barrier, resources: [barrier] });

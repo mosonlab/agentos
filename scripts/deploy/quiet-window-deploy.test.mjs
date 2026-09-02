@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -14,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -24,9 +23,11 @@ import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment
 import {
   DeployFailure,
   SERVICE_LABELS,
+  decideInvocation,
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
+  parseDeployArguments,
   quietWindowIsOpen,
 } from "./quiet-window-lib.mjs";
 import {
@@ -53,6 +54,7 @@ import {
   autoDeployNoticeBody,
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
+  deployRootFromEnvironment,
 } from "./quiet-window-deploy.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
@@ -61,9 +63,6 @@ const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
 const EXPECTED_PHASES = [
-  "parse-arguments",
-  "check-escalation",
-  "acquire-deploy-lock",
   "read-revisions",
   "check-already-deployed",
   "start-deployment-ledger",
@@ -82,6 +81,8 @@ const EXPECTED_PHASES = [
   "restart-services",
   "verify-services",
 ];
+
+const RETRY_ESCALATION = Object.freeze({ reason: "remote-main-unreadable", attempts: 2 });
 
 const fixture = ({ failure = null, builderOutput = null } = {}) => {
   const calls = [];
@@ -117,9 +118,13 @@ const fixture = ({ failure = null, builderOutput = null } = {}) => {
     record: (name, metadata) => { records.push({ state: name, metadata }); },
   };
   const host = {
-    parseArgs: step("parse-arguments", async () => ({ options: {} })),
-    checkEscalation: step("check-escalation"),
-    acquireLock: step("acquire-deploy-lock", async () => ({ lock, resources: [lock] })),
+    blockingRuns: support("blocking-runs", async () => []),
+    artifactState: support("artifact-state", async (attempt) => ({
+      ok: true,
+      releaseName: `${attempt.targetCommit}-${"c".repeat(64)}`,
+    })),
+    serviceState: support("service-state", async () => ({ ok: true })),
+    backupState: support("backup-state", async () => ({ ok: true, mode: "container" })),
     readRevisions: step("read-revisions", async (attempt) => ({
       revisions: { from: revisions.from, to: attempt.targetCommit },
     })),
@@ -187,14 +192,16 @@ const fixture = ({ failure = null, builderOutput = null } = {}) => {
     escalate: async (record) => { calls.push("escalate"); state.escalated = record; },
     notify: async (record) => { calls.push(`notify-${record.outcome}`); },
   };
-  return { host, calls, phaseCalls, records, state, ledger };
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "fixture-transaction",
+  });
+  // Startup decides the invocation and hands the phases the lock it already
+  // holds; no phase acquires one.
+  attempt.establish({ retryEscalation: RETRY_ESCALATION, resources: [lock] });
+  return { host, attempt, calls, phaseCalls, records, state, ledger };
 };
-
-const attempt = () => openDeploymentAttempt({
-  deployRoot: "/fixture",
-  targetCommit: revisions.to,
-  transactionId: "fixture-transaction",
-});
 
 const minimalBuildTree = (root, revision) => {
   const dist = join(root, "packages/api/dist");
@@ -233,6 +240,181 @@ const removeTree = (root) => {
   makeWritable(root);
   rmSync(root, { recursive: true, force: true });
 };
+
+const startupFixture = (overrides = {}) => {
+  const calls = [];
+  const logs = [];
+  const lock = { release: async () => { calls.push("release-lock"); } };
+  return {
+    calls,
+    logs,
+    lock,
+    startup: {
+      pollIntervalMs: 60_000,
+      log: (line) => { logs.push(line); },
+      clearEscalation: () => { calls.push("clear-escalation"); },
+      loadEnvironment: async () => { calls.push("load-environment"); },
+      loadBinaries: () => { calls.push("load-binaries"); },
+      acquireLock: async () => { calls.push("acquire-lock"); return lock; },
+      checkEscalation: async () => {
+        calls.push("check-escalation");
+        return { active: false, retryEscalation: RETRY_ESCALATION };
+      },
+      readRemoteMain: async () => { calls.push("read-remote-main"); return revisions.to; },
+      persistFailure: async (failure) => { calls.push(`persist-failure-${failure.reason}`); },
+      ...overrides,
+    },
+  };
+};
+
+test("argv names exactly one mode", () => {
+  assert.equal(parseDeployArguments([]), "upgrade");
+  assert.equal(parseDeployArguments(["--dry-run"]), "dry-run");
+  assert.equal(parseDeployArguments(["--clear-escalation"]), "clear-escalation");
+  assert.equal(parseDeployArguments(["--prune-history"]), "prune-history");
+  assert.throws(
+    () => parseDeployArguments(["--force"]),
+    (error) => error instanceof DeployFailure
+      && error.reason === "usage"
+      && error.detail === "unknown-argument---force",
+  );
+  assert.throws(
+    () => parseDeployArguments(["--dry-run", "--prune-history"]),
+    (error) => error.reason === "usage" && error.detail === "modes-are-mutually-exclusive",
+  );
+});
+
+test("an upgrade decides mode, target and escalation state under one lock acquisition", async () => {
+  const state = startupFixture();
+
+  const invocation = await decideInvocation(state.startup, parseDeployArguments([]));
+
+  assert.deepEqual(invocation, {
+    mode: "upgrade",
+    targetCommit: revisions.to,
+    lock: state.lock,
+    retryEscalation: RETRY_ESCALATION,
+  });
+  // The failure this covers: the target read and the deployment each ran their
+  // own escalation check, argv parse and lock acquisition. Every one of these
+  // happens once, and the lock the phases run under is still held.
+  assert.deepEqual(state.calls, [
+    "load-environment",
+    "load-binaries",
+    "acquire-lock",
+    "check-escalation",
+    "read-remote-main",
+  ]);
+});
+
+test("a held deploy lock ends the invocation without reading the target", async () => {
+  const state = startupFixture({
+    acquireLock: async () => null,
+    readRemoteMain: async () => assert.fail("a held lock must not read the target"),
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 0 });
+  assert.deepEqual(state.logs, ["SKIP concurrent-run lock-held"]);
+});
+
+test("a recovered stale owner releases the lock and refuses the invocation", async () => {
+  const state = startupFixture({
+    checkEscalation: async () => assert.fail("a reclaimed owner must not admit a deployment"),
+  });
+  state.lock.recovered = { pid: 4242 };
+
+  await assert.rejects(
+    decideInvocation(state.startup, "upgrade"),
+    (error) => error instanceof DeployFailure
+      && error.reason === "stale-deploy-owner-recovered"
+      && error.detail === "pid-4242",
+  );
+  assert.deepEqual(state.calls, ["load-environment", "load-binaries", "acquire-lock", "release-lock"]);
+});
+
+test("an active escalation releases the lock and stops before the target read", async () => {
+  const state = startupFixture({
+    checkEscalation: async () => ({ active: true }),
+    readRemoteMain: async () => assert.fail("an active escalation must not read the target"),
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.deepEqual(state.calls, ["load-environment", "load-binaries", "acquire-lock", "release-lock"]);
+});
+
+test("an unreadable target persists the failure and releases the lock", async () => {
+  const state = startupFixture({
+    readRemoteMain: async () => { throw new DeployFailure("remote-main-unreadable", "exit-128"); },
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 1 });
+  assert.deepEqual(state.calls, [
+    "load-environment",
+    "load-binaries",
+    "acquire-lock",
+    "check-escalation",
+    "persist-failure-remote-main-unreadable",
+    "release-lock",
+  ]);
+});
+
+test("dry-run resolves the same target without taking the deploy lock", async () => {
+  const state = startupFixture({
+    acquireLock: async () => assert.fail("dry-run must not take the deploy lock"),
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "dry-run"), {
+    mode: "dry-run",
+    targetCommit: revisions.to,
+    lock: null,
+    retryEscalation: null,
+  });
+  assert.deepEqual(state.calls, ["load-environment", "load-binaries", "read-remote-main"]);
+});
+
+test("clear-escalation finishes startup without the environment, binaries or the lock", async () => {
+  const state = startupFixture({
+    loadEnvironment: async () => assert.fail("clearing a marker must not require the environment"),
+    loadBinaries: () => assert.fail("clearing a marker must not require the binaries"),
+    acquireLock: async () => assert.fail("clearing a marker must not take the deploy lock"),
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "clear-escalation"), {
+    mode: "clear-escalation",
+    exitCode: 0,
+  });
+  assert.deepEqual(state.calls, ["clear-escalation"]);
+});
+
+test("prune-history holds the lock without the environment or an escalation check", async () => {
+  const state = startupFixture({
+    loadEnvironment: async () => assert.fail("retention must stay usable while configuration is repaired"),
+    checkEscalation: async () => assert.fail("retention consumes no escalation state"),
+    readRemoteMain: async () => assert.fail("retention has no target commit"),
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "prune-history"), {
+    mode: "prune-history",
+    lock: state.lock,
+    retryEscalation: null,
+  });
+  assert.deepEqual(state.calls, ["load-binaries", "acquire-lock"]);
+});
+
+test("an unusable poll interval refuses before any mode work", async () => {
+  const state = startupFixture({
+    pollIntervalMs: Number.NaN,
+    clearEscalation: () => assert.fail("an unusable poll interval must refuse first"),
+  });
+
+  await assert.rejects(
+    decideInvocation(state.startup, "clear-escalation"),
+    (error) => error instanceof DeployFailure
+      && error.reason === "environment-invalid"
+      && error.detail === "QUIET_WINDOW_POLL_SECONDS-must-be-a-positive-integer",
+  );
+  assert.deepEqual(state.calls, []);
+});
 
 const RETRYABLE_ESCALATION_REASONS = new Set([
   "remote-main-unreadable",
@@ -443,35 +625,20 @@ test("--clear-escalation reports the path it looked at when no marker exists", (
   assert.deepEqual(logs, [`NO-ESCALATION-TO-CLEAR path=${escalationPath}`]);
 });
 
-test("--clear-escalation runs when invoked through the production current symlink", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-current-entrypoint-"));
-  const release = join(root, "releases", "reviewed");
-  mkdirSync(join(root, "releases"));
-  symlinkSync(REPOSITORY_ROOT, release);
-  symlinkSync("releases/reviewed", join(root, "current"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-
-  const result = spawnSync(process.execPath, [
-    join(root, "current", "scripts", "deploy", "quiet-window-deploy.mjs"),
-    "--clear-escalation",
-  ], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      AGENTOS_REPOSITORY_ROOT: root,
-      QUIET_WINDOW_POLL_SECONDS: "60",
-      DATABASE_URL: "",
-      FEISHU_DEFAULT_CHAT_ID: "",
-    },
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  // The marker path hangs off AGENTOS_REPOSITORY_ROOT: this is the only drive
-  // that proves the shipped entrypoint resolves it from that variable rather
-  // than from the release directory the symlink points into.
-  assert.match(
-    result.stdout,
-    new RegExp(`NO-ESCALATION-TO-CLEAR path=${root.replaceAll("\\", "\\\\")}/`, "u"),
+test("the deploy root is the configured appliance root, not the path reached through", () => {
+  // The failure this covers: an invocation through `current` resolved its
+  // state, marker and release paths inside the release directory the symlink
+  // points into instead of the operator root that owns them.
+  assert.equal(
+    deployRootFromEnvironment(
+      { AGENTOS_REPOSITORY_ROOT: "/srv/anneal" },
+      "/srv/anneal/releases/reviewed/scripts/deploy",
+    ),
+    "/srv/anneal",
+  );
+  assert.equal(
+    deployRootFromEnvironment({}, join(REPOSITORY_ROOT, "scripts", "deploy")),
+    resolve(REPOSITORY_ROOT),
   );
 });
 
@@ -507,9 +674,19 @@ test("canonical sync refusal output reaches the successful deploy Inbox notice",
   );
 });
 
-test("production host requires every deploy phase", () => {
-  assert.throws(() => createProductionHost({}), /production-host-adapter-missing:parseArgs/u);
-  for (const { hostMethod } of DEPLOY_PHASES) {
+test("production host requires every deploy phase and every read-only method", () => {
+  assert.throws(() => createProductionHost({}), /production-host-adapter-missing:readRevisions/u);
+  const required = [
+    ...DEPLOY_PHASES.map(({ hostMethod }) => hostMethod),
+    "blockingRuns",
+    "artifactState",
+    "serviceState",
+    "backupState",
+    "restorePreviousServices",
+    "escalate",
+    "notify",
+  ];
+  for (const hostMethod of required) {
     const { host } = fixture();
     delete host[hostMethod];
     assert.throws(
@@ -569,8 +746,8 @@ test("release artifact inventory copies and verifies deploy runtime and workspac
 });
 
 test("fixture executes the whole deploy sequence with explicit attempt facts", async () => {
-  const { host, calls, phaseCalls, records } = fixture();
-  assert.deepEqual(await executeUpgrade(host, attempt()), { ok: true });
+  const { host, attempt, calls, phaseCalls, records } = fixture();
+  assert.deepEqual(await executeUpgrade(host, attempt), { ok: true });
   assert.deepEqual(phaseCalls, EXPECTED_PHASES);
   assert.deepEqual(calls, [
     ...EXPECTED_PHASES,
@@ -585,44 +762,37 @@ test("fixture executes the whole deploy sequence with explicit attempt facts", a
 });
 
 test("a successful attempt invokes self-clear before releasing its resources", async () => {
-  const { host, calls } = fixture();
+  const { host, attempt, calls } = fixture();
   let clearCalls = 0;
-  host.selfClearEscalation = async () => {
+  // Startup decided the retryable escalation; the phases read it off the
+  // attempt rather than out of host state.
+  host.selfClearEscalation = async (deployment) => {
+    assert.equal(deployment.fact("retryEscalation"), RETRY_ESCALATION);
     clearCalls += 1;
     calls.push("self-clear");
   };
-  assert.deepEqual(await executeUpgrade(host, attempt()), { ok: true });
+  assert.deepEqual(await executeUpgrade(host, attempt), { ok: true });
   assert.equal(clearCalls, 1);
   assert.ok(calls.indexOf("self-clear") < calls.indexOf("release-lock"));
 });
 
 test("an already-deployed no-op also invokes self-clear", async () => {
-  const { host, calls } = fixture();
+  const { host, attempt, calls } = fixture();
   let clearCalls = 0;
   host.checkAlreadyDeployed = async () => ({ skip: "already-deployed" });
   host.selfClearEscalation = async () => {
     clearCalls += 1;
     calls.push("self-clear");
   };
-  const result = await executeUpgrade(host, attempt());
+  const result = await executeUpgrade(host, attempt);
   assert.deepEqual(result, { ok: true, skipped: "already-deployed" });
   assert.equal(clearCalls, 1);
   assert.ok(calls.indexOf("self-clear") < calls.indexOf("release-lock"));
 });
 
-test("a lock-held skip does not self-clear a retryable escalation", async () => {
-  const { host } = fixture();
-  let clearCalls = 0;
-  host.acquireLock = async () => ({ skip: "lock-held" });
-  host.selfClearEscalation = async () => { clearCalls += 1; };
-  const result = await executeUpgrade(host, attempt());
-  assert.deepEqual(result, { ok: true, skipped: "lock-held" });
-  assert.equal(clearCalls, 0);
-});
-
 test("missing artifact records FAILED without quiet-window, build, or activation", async () => {
-  const { host, calls, records } = fixture({ failure: "verify-release-artifact" });
-  const result = await executeUpgrade(host, attempt());
+  const { host, attempt, calls, records } = fixture({ failure: "verify-release-artifact" });
+  const result = await executeUpgrade(host, attempt);
   assert.equal(result.ok, false);
   assert.equal(result.failure.reason, "verify-release-artifact-failed");
   assert.equal(calls.includes("acquire-quiet-window"), false);
@@ -632,8 +802,8 @@ test("missing artifact records FAILED without quiet-window, build, or activation
 });
 
 test("malformed builder receipt records FAILED before the quiet window opens", async () => {
-  const { host, calls, records } = fixture({ builderOutput: "RELEASE-ARTIFACT {not-json}\n" });
-  const result = await executeUpgrade(host, attempt());
+  const { host, attempt, calls, records } = fixture({ builderOutput: "RELEASE-ARTIFACT {not-json}\n" });
+  const result = await executeUpgrade(host, attempt);
   assert.equal(result.ok, false);
   assert.equal(result.failure.reason, "release-artifact-build-failed");
   assert.equal(result.failure.detail, "builder-receipt-invalid");
@@ -643,16 +813,16 @@ test("malformed builder receipt records FAILED before the quiet window opens", a
 
 test("each independently listed deploy phase stops execution at its first failure", async () => {
   for (const [index, name] of EXPECTED_PHASES.entries()) {
-    const { host, phaseCalls } = fixture({ failure: name });
-    const result = await executeUpgrade(host, attempt());
+    const { host, attempt, phaseCalls } = fixture({ failure: name });
+    const result = await executeUpgrade(host, attempt);
     assert.equal(result.ok, false, name);
     assert.deepEqual(phaseCalls, EXPECTED_PHASES.slice(0, index + 1), name);
   }
 });
 
 test("service verification failure rolls back before restoring services", async () => {
-  const { host, calls, state } = fixture({ failure: "verify-services" });
-  const result = await executeUpgrade(host, attempt());
+  const { host, attempt, calls, state } = fixture({ failure: "verify-services" });
+  const result = await executeUpgrade(host, attempt);
   assert.equal(result.ok, false);
   assert.equal(state.serving, "previous");
   assert.ok(calls.indexOf("rollback-build") < calls.indexOf("restore-services"));
@@ -821,23 +991,25 @@ test("artifact verification reports content digest mismatch distinctly", () => {
   removeTree(deployRoot);
 });
 
-test("dry-run reports artifact readiness and performs no mutation", async () => {
-  const calls = [];
-  const execution = fixture();
-  assert.deepEqual(await executeUpgrade(execution.host, attempt()), { ok: true });
-  const result = await dryRunDecision({
-    revisions: async () => ({ from: revisions.from, to: revisions.to }),
-    blockingRuns: async () => [],
-    artifactState: async () => { calls.push("artifact"); return { ok: true, releaseName: "fixture" }; },
-    serviceState: async () => ({ ok: true }),
-    backupState: async () => ({ ok: true, mode: "container" }),
-  });
+test("dry-run reads the deployment host and drives no mutating phase", async () => {
+  const { host, attempt, calls } = fixture();
+
+  const result = await dryRunDecision(host, attempt);
+
   assert.equal(result.artifact.ok, true);
-  assert.deepEqual(calls, ["artifact"]);
+  assert.equal(result.artifact.releaseName, `${revisions.to}-${"c".repeat(64)}`);
+  assert.deepEqual(result.revisions, { from: revisions.from, to: revisions.to });
+  assert.equal(result.quiet, true);
+  // The mutating phases are reported, never called: the whole dry-run drive is
+  // the four read-only methods plus the shared revision read.
+  assert.deepEqual(
+    [...calls].sort(),
+    ["artifact-state", "backup-state", "blocking-runs", "read-revisions", "service-state"],
+  );
   const plannedPhases = result.lines
     .filter((line) => line.startsWith("DRY-RUN plan step="))
     .map((line) => line.match(/^DRY-RUN plan step=([^ ]+) mutation=skipped$/u)?.[1]);
-  assert.deepEqual(plannedPhases, EXPECTED_PHASES.slice(7));
+  assert.deepEqual(plannedPhases, EXPECTED_PHASES.slice(4));
 });
 
 test("deploy history prunes recognized backups and leaves unrelated entries", () => {
