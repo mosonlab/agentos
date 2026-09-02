@@ -27,13 +27,13 @@ after(async () => {
   else process.env.OPERATOR_TOKEN = priorOperatorToken;
 });
 
-const aggregateFor = async (projectId: string, taskId: string) => {
+const aggregateFor = async (projectId: string, chainId: string) => {
   const response = await createApp(db).request(`/tasks?projectId=${projectId}&view=board`, {
     headers: { Authorization: `Bearer ${CHAIN_OPERATOR_TOKEN}` },
   });
   const rows = await response.json() as Array<Record<string, any>>;
   assert.equal(response.status, 200, JSON.stringify(rows));
-  const row = rows.find((candidate) => candidate.id === taskId);
+  const row = rows.find((candidate) => candidate.chainAggregate?.chainId === chainId);
   assert.ok(row?.chainAggregate);
   return { row, aggregate: row.chainAggregate };
 };
@@ -44,8 +44,8 @@ test("the persisted board projection distinguishes held-before-first, settled-la
     layers: [0, 1],
     label: "board-held-before-first",
   });
-  const before = await aggregateFor(beforeFirst.project.id, beforeFirst.first.id);
-  assert.equal(before.row.status, TaskStatus.TODO);
+  const before = await aggregateFor(beforeFirst.project.id, beforeFirst.chainId);
+  assert.equal(before.aggregate.status, TaskStatus.TODO);
   assert.equal(before.aggregate.activation.state, "held");
   assert.equal(before.aggregate.activation.taskId, beforeFirst.first.id);
   assert.deepEqual(before.aggregate.activation.hold, {
@@ -58,8 +58,8 @@ test("the persisted board projection distinguishes held-before-first, settled-la
     statuses: [TaskStatus.DONE, TaskStatus.TODO],
     label: "board-held-after-layer",
   });
-  const after = await aggregateFor(afterLayer.project.id, afterLayer.first.id);
-  assert.equal(after.row.status, TaskStatus.TODO, "a held aggregate whose layer finished belongs in Todo");
+  const after = await aggregateFor(afterLayer.project.id, afterLayer.chainId);
+  assert.equal(after.aggregate.status, TaskStatus.TODO, "a held aggregate whose layer finished belongs in Todo");
   assert.equal(after.aggregate.activation.state, "held");
   assert.equal(after.aggregate.activation.taskId, afterLayer.first.id);
   assert.equal(after.aggregate.activation.hold.heldLayer, 1);
@@ -69,8 +69,8 @@ test("the persisted board projection distinguishes held-before-first, settled-la
     label: "board-running-held",
   });
   await seedRun(db, running, running.first.id);
-  const active = await aggregateFor(running.project.id, running.first.id);
-  assert.equal(active.row.status, TaskStatus.DOING);
+  const active = await aggregateFor(running.project.id, running.chainId);
+  assert.equal(active.aggregate.status, TaskStatus.DOING);
   assert.equal(active.aggregate.activation.state, "running");
   assert.equal(active.aggregate.activation.taskId, running.first.id);
   assert.equal(active.aggregate.activation.hold.heldLayer, 1);

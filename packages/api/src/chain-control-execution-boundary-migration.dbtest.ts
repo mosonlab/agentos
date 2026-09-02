@@ -16,6 +16,7 @@ import {
 } from "@anneal/db";
 
 import { seedBasicChain } from "./chain-hold-resume-fixture.js";
+import { splitSqlStatements } from "./sql-statements.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const migrationSql = readFileSync(fileURLToPath(new URL(
@@ -46,7 +47,7 @@ test("the execution-boundary migration converts a legacy unstarted one-based hol
     // Keeping the replay transactional restores the fully migrated test schema
     // even when an assertion fails on the old SQL.
     await tx.$executeRawUnsafe('ALTER TABLE "ChainControl" DROP COLUMN "heldExecutionLayer"');
-    await tx.$executeRawUnsafe(migrationSql);
+    for (const statement of splitSqlStatements(migrationSql)) await tx.$executeRawUnsafe(statement);
 
     const migrated = await tx.chainControl.findUniqueOrThrow({ where: { id: chain.control!.id } });
     assert.equal(migrated.heldLayer, 0);

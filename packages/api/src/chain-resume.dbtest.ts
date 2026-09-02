@@ -319,7 +319,14 @@ test("Resume refuses an approval successor when the completed layer has no succe
 });
 
 test("Resume leaves a BACKLOG successor parked and preserves the parked-skip narration", async () => {
-  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DONE, TaskStatus.BACKLOG, TaskStatus.TODO] });
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.BACKLOG, TaskStatus.TODO],
+    control: {
+      state: ChainControlState.HELD,
+      heldLayer: 1,
+      heldExecutionLayer: 1,
+    },
+  });
   const resumed = await resume(chain.first.id, "resume-backlog");
   assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.second.id } })).status, TaskStatus.BACKLOG);
@@ -332,7 +339,14 @@ test("Resume leaves a BACKLOG successor parked and preserves the parked-skip nar
 });
 
 test("Resume releases the hold when a human BACKLOG successor needs no source Run", async () => {
-  const chain = await seedBasicChain(db, { statuses: [TaskStatus.DONE, TaskStatus.BACKLOG] });
+  const chain = await seedBasicChain(db, {
+    statuses: [TaskStatus.DONE, TaskStatus.BACKLOG],
+    control: {
+      state: ChainControlState.HELD,
+      heldLayer: 1,
+      heldExecutionLayer: 1,
+    },
+  });
   await db.task.update({ where: { id: chain.second.id }, data: {
     assigneeType: AssigneeType.HUMAN,
     assigneeAgentId: null,
