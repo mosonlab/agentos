@@ -1,4 +1,4 @@
-import type { Authority, CancellationRequest, HeartbeatResult } from "./api.js";
+import { authorityFor, type Authority, type CancellationRequest } from "./api.js";
 import { deliveryDeadline, type RetryOptions } from "./network-retry.js";
 
 export type RunLeaseEvidence = {
@@ -28,9 +28,8 @@ export type RunLeaseOptions<ProviderHandle extends object> = {
   heartbeatIntervalMs: number;
   leaseSeconds: number;
   initialPhase: Extract<RunLeasePhase, { name: "provision" }>;
-  send: (evidence: RunLeaseEvidence) => Promise<HeartbeatResult>;
-  authorityFor: (error: unknown) => Authority;
-  authorityAfterHeartbeat: (result: HeartbeatResult) => Authority;
+  /** Renews the lease and reports the Run authority the control plane returned. */
+  send: (evidence: RunLeaseEvidence) => Promise<Authority>;
   stopProvider: (handle: ProviderHandle, reason: string) => Promise<ProviderStopResult>;
   acknowledgeCancellation: (request: CancellationRequest) => Promise<void>;
   onRevocationStopError?: (error: unknown) => void;
@@ -163,12 +162,11 @@ export const createRunLease = <ProviderHandle extends object>(
     if (!authority.held || closed) return;
     const sentAt = clock.now();
     try {
-      const result = await options.send(await evidenceFor(renewalPhase));
-      const next = options.authorityAfterHeartbeat(result);
+      const next = await options.send(await evidenceFor(renewalPhase));
       await adopt(next);
       if (next.held && authority.held) renewedAt = sentAt;
     } catch (error: unknown) {
-      const next = options.authorityFor(error);
+      const next = authorityFor(error);
       await adopt(next);
       if (next.held && authority.held) options.onRenewalError?.(error);
     } finally {
@@ -259,7 +257,7 @@ export const createRunLease = <ProviderHandle extends object>(
     },
     enterPhase,
     adoptError: async (error) => {
-      await adopt(options.authorityFor(error));
+      await adopt(authorityFor(error));
       return authority.held;
     },
     launch,

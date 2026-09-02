@@ -1,14 +1,14 @@
 import {
-  controlPlane as defaultControlPlane, type ClaimedTask, type CleanupStatus,
-  type ControlPlane, type ControlPlaneRunClaim,
+  openControlPlane, type ClaimedTask, type CleanupStatus,
+  type ControlPlane, type RunSessionClaim,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { salvageWorkspace, type DeliveryResult } from "./delivery.js";
 import { captureWorkspaceResult, cleanupWorkspace, type Workspace } from "./workspace.js";
 
-export type WorkspaceDisposalClaim = ControlPlaneRunClaim & {
+export type WorkspaceDisposalClaim = RunSessionClaim & {
   task: Pick<ClaimedTask["task"], "id">;
-  run: ControlPlaneRunClaim["run"] & Pick<ClaimedTask["run"], "runNumber">;
+  run: RunSessionClaim["run"] & Pick<ClaimedTask["run"], "runNumber">;
   repo: Pick<ClaimedTask["repo"], "remoteUrl">;
 };
 
@@ -72,31 +72,25 @@ const salvageIdentity = (
 };
 
 const acknowledgePublication = async (
-  config: RunnerConfig,
   identity: WorkspaceDisposalIdentity,
   pushedBranch: string,
   controlPlane: ControlPlane,
 ): Promise<void> => {
   if (identity.source === "runner") {
-    await controlPlane.recordPublishedBranch(config, identity.claim, pushedBranch);
+    await controlPlane.openRun(identity.claim).publishBranch(pushedBranch);
     return;
   }
-  await controlPlane.recordReclaimPublication(config, {
-    runnerId: config.runnerId,
-    runId: identity.runId,
-    pushedBranch,
-  });
+  await controlPlane.recordReclaimPublication({ runId: identity.runId, pushedBranch });
 };
 
 const recordNothingToSalvage = async (
-  config: RunnerConfig,
   identity: WorkspaceDisposalIdentity,
   reason: string,
   controlPlane: ControlPlane,
 ): Promise<void> => {
   audit("nothing-to-salvage", identity, { reason });
   if (identity.source !== "runner") return;
-  await controlPlane.appendActivity(config, identity.claim,
+  await controlPlane.openRun(identity.claim).note(
     `Workspace disposal verified there was nothing to salvage: ${reason}`,
     { stream: "runner" }).catch((error: unknown) => {
     audit("nothing-to-salvage-activity-failed", identity, { error: errorMessage(error) });
@@ -116,7 +110,7 @@ export const disposeWorkspace = async (
   identity: WorkspaceDisposalIdentity,
   workspace: DisposableWorkspace,
   policy: WorkspaceDisposalPolicy,
-  controlPlane: ControlPlane = defaultControlPlane,
+  controlPlane: ControlPlane = openControlPlane(config),
 ): Promise<WorkspaceDisposal> => {
   let salvage: DeliveryResult | null = null;
   if (!policy.alreadyDurable) {
@@ -126,7 +120,7 @@ export const disposeWorkspace = async (
         pinnedBaseSha: workspace.pinnedBaseSha,
       });
     } else if (workspace.baseSha === null) {
-      await recordNothingToSalvage(config, identity, "run never completed provisioning and has no clone base", controlPlane);
+      await recordNothingToSalvage(identity, "run never completed provisioning and has no clone base", controlPlane);
     } else {
       let captured: Workspace;
       try {
@@ -155,17 +149,17 @@ export const disposeWorkspace = async (
       }
       if (salvage?.pushedBranch) {
         try {
-          await acknowledgePublication(config, identity, salvage.pushedBranch, controlPlane);
+          await acknowledgePublication(identity, salvage.pushedBranch, controlPlane);
         } catch (error: unknown) {
           if (identity.source === "runner") {
-            await controlPlane.appendActivity(config, identity.claim,
+            await controlPlane.openRun(identity.claim).note(
               `Salvage ref '${salvage.pushedBranch}' is durable, but its publication ACK failed: ${errorMessage(error)}`,
               { stream: "runner" }).catch(() => undefined);
           }
           return failed(`Salvage publication ACK failed: ${errorMessage(error)}`, salvage);
         }
       } else {
-        await recordNothingToSalvage(config, identity, "clean tree with no commits past the clone base", controlPlane);
+        await recordNothingToSalvage(identity, "clean tree with no commits past the clone base", controlPlane);
       }
     }
   }

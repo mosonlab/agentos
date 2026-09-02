@@ -979,7 +979,9 @@ export const claimRun = async (
           executionMode,
           run: {
             id: run.id,
-            taskId: run.taskId,
+            // The candidate is the Run joined to its task, so this is that Run's
+            // own `taskId` read through the relation the claim was composed from.
+            taskId: candidate.task.id,
             runNumber: run.runNumber,
             opensPullRequest: run.opensPullRequest,
             requiresCommit: run.requiresCommit,

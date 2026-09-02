@@ -39,7 +39,7 @@ test("a faithful direct brief ending in the prior-output reminder remains claima
   const fixture = await instantiateDirect(brief);
   await completeImplementation(fixture, "reminder-implementation");
   const reviewed = await claim("reminder-review");
-  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId!));
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
 test("a faithful direct spec with one conventional final newline remains claimable", async () => {
@@ -48,7 +48,7 @@ test("a faithful direct spec with one conventional final newline remains claimab
   const fixture = await instantiateDirect(brief);
   await completeImplementation(fixture, "final-newline-implementation");
   const reviewed = await claim("final-newline-review");
-  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId!));
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
 test("a transient specification read failure retries and claims without parking", async () => {
@@ -473,7 +473,7 @@ test("a repository change between verification and claim triggers verification a
   const responseText = await response.text();
   assert.equal(response.status, 200, responseText);
   const reviewed = JSON.parse(responseText) as Claim;
-  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId!));
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
   assert.deepEqual(repositoriesRead, [
     "example/parallel-review",
     "example/replaced-review",
@@ -488,7 +488,7 @@ test("a faithful rolled-over compound chain still resolves the approved specific
   });
   await completeImplementation(fixture, "legacy-compound-implementation");
   const reviewed = await claim("legacy-compound-review");
-  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId!));
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
 test("an unreadable review candidate is parked without blocking an unrelated claim in the same poll", async () => {
@@ -579,7 +579,7 @@ test("tampered direct and compound materializations refuse claim with the named 
 
     setMaterializedSpecification(SPECIFICATION_BRIEF);
     const sibling = await claim(`${shape}-sibling`);
-    assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(sibling.run.taskId!));
+    assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(sibling.run.taskId));
     assert.notEqual(sibling.run.taskId, failed.taskId);
   }
 });

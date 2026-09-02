@@ -68,6 +68,7 @@ const claim = (
     id: `task-${runId}`,
     chainId: "chain-provenance",
     chainIndex: 3,
+    chainLayer: 3,
     name: "Implement provenance",
     description: "Add commit provenance",
     repoId: "repo-provenance",
@@ -75,7 +76,7 @@ const claim = (
     maxDurationMin: 30,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 2,
-    templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true },
+    templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
     ...overrides,
   },
   agent: {
@@ -95,6 +96,7 @@ const claim = (
   },
   run: {
     id: runId,
+    taskId: `task-${runId}`,
     runNumber: 1,
     opensPullRequest: true,
     requiresCommit: true,
