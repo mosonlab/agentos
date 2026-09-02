@@ -3,22 +3,13 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
 import type { GitIdentity, RunnerConfig } from "./config.js";
-import type { CommandOptions } from "./exec.js";
+import type { CommandRunner } from "./exec.js";
 
 /** The run and Chain identity used to author commit provenance. */
 export type GitProvenanceClaim = Pick<ClaimedTask, "executionMode" | "runner"> & {
   task: Pick<ClaimedTask["task"], "chainId" | "chainIndex" | "templateStep">;
   run: Pick<ClaimedTask["run"], "id">;
 };
-
-export type GitCommandExecutor = (
-  config: RunnerConfig,
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options?: CommandOptions,
-) => Promise<string>;
 
 const validIdentityPart = (value: string): boolean => value.trim().length > 0 && !/[\0\r\n]/u.test(value);
 
@@ -33,15 +24,13 @@ const requireIdentity = (identity: GitIdentity | null): GitIdentity => {
 };
 
 export const resolveRunnerGitIdentity = async (
-  config: RunnerConfig,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  execute: GitCommandExecutor,
+  config: Pick<RunnerConfig, "gitIdentity">,
+  run: CommandRunner,
 ): Promise<GitIdentity> => {
   if (config.gitIdentity !== null && config.gitIdentity !== undefined) return requireIdentity(config.gitIdentity);
   const read = async (key: "user.name" | "user.email"): Promise<string | null> => {
     try {
-      return await execute(config, "git", ["config", "--global", "--get", key], cwd, env);
+      return await run("git", ["config", "--global", "--get", key]);
     } catch {
       return null;
     }
@@ -148,19 +137,17 @@ ANNEAL_PROVENANCE
  * selected in local config: only the provider child environment activates it,
  * so a retained workspace cannot mislabel a later human commit. */
 export const configureWorkspaceGit = async (
-  config: RunnerConfig,
   claim: GitProvenanceClaim,
   workspacePath: string,
   identity: GitIdentity,
-  env: NodeJS.ProcessEnv,
-  execute: GitCommandExecutor,
+  run: CommandRunner,
 ): Promise<string | null> => {
-  await execute(config, "git", ["config", "--local", "user.name", identity.name], workspacePath, env);
-  await execute(config, "git", ["config", "--local", "user.email", identity.email], workspacePath, env);
+  await run("git", ["config", "--local", "user.name", identity.name]);
+  await run("git", ["config", "--local", "user.email", identity.email]);
 
   const provenance = provenanceFor(claim);
   if (!provenance) return null;
-  const rawCommonDir = await execute(config, "git", ["rev-parse", "--git-common-dir"], workspacePath, env);
+  const rawCommonDir = await run("git", ["rev-parse", "--git-common-dir"]);
   const commonDir = await realpath(isAbsolute(rawCommonDir) ? rawCommonDir : resolve(workspacePath, rawCommonDir));
   const canonicalWorkspace = await realpath(workspacePath);
   if (commonDir !== canonicalWorkspace && !commonDir.startsWith(`${canonicalWorkspace}${sep}`)) {
@@ -168,13 +155,10 @@ export const configureWorkspaceGit = async (
   }
   const hooksPath = join(commonDir, "anneal-hooks");
   const hookPath = join(hooksPath, "prepare-commit-msg");
-  await execute(config, "/bin/mkdir", ["-p", hooksPath], workspacePath, env);
-  await execute(
-    config,
+  await run("/bin/mkdir", ["-p", hooksPath]);
+  await run(
     "/bin/sh",
     ["-c", 'umask 077; cat > "$1"; chmod 700 "$1"', "anneal-commit-hook", hookPath],
-    workspacePath,
-    env,
     { input: hookBody(claim, canonicalWorkspace, commonDir, provenance) },
   );
   return hooksPath;

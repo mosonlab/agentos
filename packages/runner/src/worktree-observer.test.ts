@@ -5,10 +5,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
-import {
-  observeExternalWorktrees,
-  type WorktreeObserverCommandExecutor,
-} from "./worktree-observer.js";
+import type { CommandRunner } from "./exec.js";
+import { observeExternalWorktrees } from "./worktree-observer.js";
 
 const config = (root: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
@@ -40,9 +38,9 @@ test("reports every registered worktree outside the resolved run workspace", asy
     const workspace = join(root, "run");
     const outside = join(root, "operator", "pool");
     const newlinePath = join(root, "operator", "line\nbreak");
-    const calls: Array<{ executable: string; args: string[]; cwd: string }> = [];
-    const execute: WorktreeObserverCommandExecutor = async (_config, executable, args, cwd) => {
-      calls.push({ executable, args, cwd });
+    const calls: Array<{ executable: string; args: string[] }> = [];
+    const execute: CommandRunner = async (executable, args) => {
+      calls.push({ executable, args: [...args] });
       return porcelain(
         [
           `worktree ${workspace}`,
@@ -70,7 +68,6 @@ test("reports every registered worktree outside the resolved run workspace", asy
     assert.deepEqual(calls, [{
       executable: "git",
       args: ["worktree", "list", "--porcelain", "-z"],
-      cwd: workspace,
     }]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -81,7 +78,7 @@ test("returns no observation when all registered worktrees resolve inside the ru
   const root = await mkdtemp(join(tmpdir(), "agentos-worktree-observer-compliant-"));
   try {
     const workspace = join(root, "run");
-    const execute: WorktreeObserverCommandExecutor = async () => porcelain(
+    const execute: CommandRunner = async () => porcelain(
       [
         `worktree ${workspace}`,
         "HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -106,8 +103,8 @@ test("falls back to quoted porcelain output when Git does not support -z", async
     const workspace = join(root, "run");
     const newlinePath = join(root, "operator", "line\nbreak");
     const calls: string[][] = [];
-    const execute: WorktreeObserverCommandExecutor = async (_config, _executable, args) => {
-      calls.push(args);
+    const execute: CommandRunner = async (_executable, args) => {
+      calls.push([...args]);
       if (args.includes("-z")) throw new Error("git failed (129): error: unknown switch `z'");
       return [
         `worktree ${workspace}`,
@@ -135,7 +132,7 @@ test("an unresolvable worktree path does not hide other outside worktrees", asyn
     const notDirectory = join(root, "not-a-directory");
     const otherOutside = join(root, "operator", "linked");
     await writeFile(notDirectory, "file\n");
-    const execute: WorktreeObserverCommandExecutor = async () => porcelain(
+    const execute: CommandRunner = async () => porcelain(
       `worktree ${workspace}`,
       `worktree ${notDirectory}/linked`,
       `worktree ${otherOutside}`,

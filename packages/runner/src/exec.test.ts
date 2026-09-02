@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 
-import { CommandTimeoutError, KILL_GRACE_MS, platformCommitArgs, runCommand } from "./exec.js";
+import {
+  bindCommandRunner, commandRunnerIn, CommandTimeoutError, KILL_GRACE_MS, platformCommitArgs, runCommand,
+} from "./exec.js";
 import { isTransientNetworkError } from "./network-retry.js";
 
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
@@ -141,4 +143,37 @@ test("the runner's own CLI preflight timeout is not mistaken for a network timeo
 
 test("fetch transport failures are classified as transient", () => {
   assert.equal(isTransientNetworkError(new TypeError("fetch failed")), true);
+});
+
+test("a bound runner carries the run-as prefix, its directory and its environment into every call", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "agentos-bound-runner-")));
+  try {
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    const log = join(root, "launcher.log");
+    const launcher = join(root, "launcher.sh");
+    // Records the two prefix arguments it was handed, then becomes the command.
+    // A call that bypassed the prefix would leave the log one entry short.
+    await writeFile(launcher, `#!/bin/sh\nprintf '%s\\n' "$1" "$2" >> ${log}\nshift 2\nexec "$@"\n`);
+    await chmod(launcher, 0o755);
+    const probe = ["-c", 'printf "%s|%s|%s" "$(pwd -P)" "$MARK" "${EXTRA-}"'];
+    const run = bindCommandRunner([launcher, "--account", "agent-runner"], root, { ...env, MARK: "bound" });
+
+    assert.equal(await run("/bin/sh", probe), `${root}|bound|`);
+    // The per-call directory covers a command that belongs in a subdirectory;
+    // the per-call environment covers addressing git by GIT_DIR.
+    assert.equal(await run("/bin/sh", probe, { cwd: nested }), `${nested}|bound|`);
+    assert.equal(await run("/bin/sh", probe, { env: { EXTRA: "merged" } }), `${root}|bound|merged`);
+
+    const inNested = commandRunnerIn(run, nested);
+    assert.equal(await inNested("/bin/sh", probe), `${nested}|bound|`);
+    assert.equal(await inNested("/bin/sh", probe, { cwd: root }), `${root}|bound|`);
+
+    assert.deepEqual(
+      (await readFile(log, "utf8")).trimEnd().split("\n"),
+      Array.from({ length: 5 }, () => ["--account", "agent-runner"]).flat(),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

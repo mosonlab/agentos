@@ -9,25 +9,12 @@ import {
   type CacheEntryDocument, type CacheEntryExpectation, type CacheEntryInput, type CacheEntryStore,
   type CacheEntryTarget, type DependencyCacheToolchain,
 } from "./dependency-cache-store.js";
-import type { CommandOptions } from "./exec.js";
+import { commandRunnerIn, type CommandRunner } from "./exec.js";
 import {
   NPM_INSTALL_COMMAND_TIMEOUT_MS, NPM_INSTALL_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
 } from "./network-retry.js";
 
 const NPM_PROBE_TIMEOUT_MS = 10_000;
-
-export type DependencyCommandExecutor = (
-  config: RunnerConfig,
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options?: CommandOptions,
-) => Promise<string>;
-
-export type DependencyCacheDependencies = {
-  execute: DependencyCommandExecutor;
-};
 
 type DependencyProject = {
   inputs: CacheEntryInput[];
@@ -394,18 +381,10 @@ const validatedToolchain = (toolchain: DependencyCacheToolchain): DependencyCach
   return toolchain;
 };
 
-const currentToolchain = async (
-  config: RunnerConfig,
-  workspace: string,
-  env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
-): Promise<DependencyCacheToolchain> => {
-  const childCoordinates = parseJsonObject(await execute(
-    config,
+const currentToolchain = async (run: CommandRunner): Promise<DependencyCacheToolchain> => {
+  const childCoordinates = parseJsonObject(await run(
     "node",
     ["--input-type=commonjs", "-e", "process.stdout.write(JSON.stringify({node:process.version,operatingSystem:process.platform,architecture:process.arch}))"],
-    workspace,
-    env,
     { timeoutMs: NPM_PROBE_TIMEOUT_MS },
   ), "child Node toolchain");
   const coordinate = (name: "node" | "operatingSystem" | "architecture"): string => {
@@ -415,7 +394,7 @@ const currentToolchain = async (
   };
   return validatedToolchain({
     node: coordinate("node"),
-    npm: (await execute(config, "npm", ["--version"], workspace, env, { timeoutMs: NPM_PROBE_TIMEOUT_MS })).trim(),
+    npm: (await run("npm", ["--version"], { timeoutMs: NPM_PROBE_TIMEOUT_MS })).trim(),
     operatingSystem: coordinate("operatingSystem"),
     architecture: coordinate("architecture"),
   });
@@ -444,13 +423,8 @@ const canonicalValue = (value: unknown, key = ""): unknown => {
   return value;
 };
 
-const effectiveNpmConfigInput = async (
-  config: RunnerConfig,
-  workspace: string,
-  env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
-): Promise<CacheEntryInput> => {
-  const raw = await execute(config, "npm", ["config", "ls", "--json"], workspace, env, { timeoutMs: NPM_PROBE_TIMEOUT_MS });
+const effectiveNpmConfigInput = async (run: CommandRunner): Promise<CacheEntryInput> => {
+  const raw = await run("npm", ["config", "ls", "--json"], { timeoutMs: NPM_PROBE_TIMEOUT_MS });
   const parsed = parseJsonObject(raw, "effective npm configuration");
   const filtered = canonicalValue(parsed);
   return { path: "<effective-npm-config>", sha256: sha256(`${JSON.stringify(filtered)}\n`) };
@@ -469,31 +443,27 @@ export type DependencyCacheIdentity = {
 // configuration, and the toolchain. No caller can key a run on a smaller input
 // set than the one this module tests.
 export const deriveDependencyCacheKey = async (
-  config: RunnerConfig,
   workspacePath: string,
-  env: NodeJS.ProcessEnv,
-  dependencies: DependencyCacheDependencies,
+  run: CommandRunner,
   options: { toolchain?: DependencyCacheToolchain } = {},
 ): Promise<DependencyCacheIdentity | null> => {
-  const execute = dependencies.execute;
   const project = await inspectDependencyProject(workspacePath);
   if (project === null) return null;
   if (project.inputMissCondition) throw new DependencyCacheInputMissError(project.inputMissCondition, project.targets);
   const workspace = await realpath(resolve(workspacePath));
+  const inWorkspace = commandRunnerIn(run, workspace);
   const { inputs, targets, nativeWorkspaces } = project;
-  inputs.push(await effectiveNpmConfigInput(config, workspace, env, execute));
+  inputs.push(await effectiveNpmConfigInput(inWorkspace));
   inputs.sort((left, right) => left.path.localeCompare(right.path, "en"));
-  const toolchain = options.toolchain ?? await currentToolchain(config, workspace, env, execute);
+  const toolchain = options.toolchain ?? await currentToolchain(inWorkspace);
   const key = sha256(`${JSON.stringify({ format: CACHE_ENTRY_FORMAT, toolchain: validatedToolchain(toolchain), inputs })}\n`);
   return { key, toolchain, inputs, targets, nativeWorkspaces };
 };
 
 const clearTargets = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   workspace: string,
   targets: string[],
-  env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
 ): Promise<void> => {
   const existing: Array<{ absolute: string; target: string }> = [];
   for (const target of targets) {
@@ -505,7 +475,7 @@ const clearTargets = async (
     if (kind === "directory") existing.push({ absolute, target });
   }
   for (const { absolute, target } of existing) {
-    await execute(config, "/bin/rm", ["-rf", "--", absolute], workspace, env);
+    await run("/bin/rm", ["-rf", "--", absolute]);
     if (await pathKind(absolute) !== "missing") throw new Error(`Dependency target could not be cleared: ${target}`);
   }
 };
@@ -524,14 +494,12 @@ const installedTargetTrees = async (workspace: string, targets: string[]): Promi
 };
 
 const restoreEntry = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   store: CacheEntryStore,
   document: CacheEntryDocument,
   workspace: string,
-  env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
 ): Promise<void> => {
-  await clearTargets(config, workspace, document.targets.map(({ path }) => path), env, execute);
+  await clearTargets(run, workspace, document.targets.map(({ path }) => path));
   try {
     for (const target of document.targets) {
       if (!target.present) continue;
@@ -540,30 +508,28 @@ const restoreEntry = async (
       const args = platform() === "darwin"
         ? ["-c", "-R", source, destination]
         : ["-a", "--reflink=always", source, destination];
-      await execute(config, "/bin/cp", args, workspace, env);
-      await execute(config, "/bin/chmod", ["-R", "u+w", destination], workspace, env);
+      await run("/bin/cp", args);
+      await run("/bin/chmod", ["-R", "u+w", destination]);
     }
     const restored = await describeTargetTrees(workspace, document.targets.map(({ path }) => path));
     if (!sameJson(restored, document.targets)) throw new Error("Restored dependency target manifest differs from the cache entry");
   } catch (error: unknown) {
-    await clearTargets(config, workspace, document.targets.map(({ path }) => path), env, execute).catch(() => undefined);
+    await clearTargets(run, workspace, document.targets.map(({ path }) => path)).catch(() => undefined);
     throw error;
   }
 };
 
 const installDependencies = async (
-  config: RunnerConfig,
+  run: CommandRunner,
   workspace: string,
   targets: string[],
-  env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
   retryOptions: RetryOptions = {},
 ): Promise<CacheEntryTarget[]> => {
   const args = ["ci", "--prefer-offline", "--no-audit", "--no-fund"];
   try {
     await runWithNetworkRetry("npm", args, async ({ timeoutMs }) => {
-      await clearTargets(config, workspace, targets, env, execute);
-      return execute(config, "npm", args, workspace, env, { timeoutMs });
+      await clearTargets(run, workspace, targets);
+      return run("npm", args, { timeoutMs });
     }, {
       commandTimeoutMs: NPM_INSTALL_COMMAND_TIMEOUT_MS,
       budgetMs: NPM_INSTALL_OPERATION_BUDGET_MS,
@@ -571,25 +537,19 @@ const installDependencies = async (
     });
     return await installedTargetTrees(workspace, targets);
   } catch (error: unknown) {
-    await clearTargets(config, workspace, targets, env, execute).catch(() => undefined);
+    await clearTargets(run, workspace, targets).catch(() => undefined);
     throw error;
   }
 };
 
 const rebuildNativeWorkspaces = async (
-  config: RunnerConfig,
-  workspace: string,
+  run: CommandRunner,
   nativeWorkspaces: string[],
-  env: NodeJS.ProcessEnv,
-  execute: DependencyCommandExecutor,
 ): Promise<void> => {
   for (const name of nativeWorkspaces) {
-    await execute(
-      config,
+    await run(
       "npm",
       ["rebuild", "-w", name, "--no-audit", "--no-fund"],
-      workspace,
-      env,
       { timeoutMs: NPM_INSTALL_COMMAND_TIMEOUT_MS },
     );
   }
@@ -602,13 +562,11 @@ const rebuildNativeWorkspaces = async (
  * (`dependency-provisioning.ts`); reaching here means the answer was yes.
  */
 export const materializeWorkspaceDependencies = async (
-  config: RunnerConfig,
+  config: Pick<RunnerConfig, "workspaceRoot" | "dependencyCacheRoot">,
   workspacePath: string,
-  env: NodeJS.ProcessEnv,
-  dependencies: DependencyCacheDependencies,
+  run: CommandRunner,
   options: DependencyCacheOptions = {},
 ): Promise<DependencyCacheResult> => {
-  const execute = dependencies.execute;
   const started = Date.now();
   const report = options.report ?? progressReporter;
   const requestedWorkspace = resolve(workspacePath);
@@ -616,15 +574,16 @@ export const materializeWorkspaceDependencies = async (
     throw new Error("Run workspace is not a real directory");
   }
   const workspace = await realpath(requestedWorkspace);
+  const inWorkspace = commandRunnerIn(run, workspace);
   try {
     let identity: DependencyCacheIdentity | null;
     try {
-      identity = await timed("identity", report, () => deriveDependencyCacheKey(config, workspace, env, { execute }, options));
+      identity = await timed("identity", report, () => deriveDependencyCacheKey(workspace, inWorkspace, options));
     } catch (error: unknown) {
       if (!(error instanceof DependencyCacheInputMissError)) throw error;
       report({ event: "miss", condition: error.condition });
       await timed("install", report, () => installDependencies(
-        config, workspace, error.targets, env, execute, options.installRetryOptions,
+        inWorkspace, workspace, error.targets, options.installRetryOptions,
       ));
       return { status: "installed", condition: error.condition };
     }
@@ -650,8 +609,8 @@ export const materializeWorkspaceDependencies = async (
       if (await store.hasEntry(key)) {
         try {
           const document = await timed("validate", report, () => store.readEntry(expected));
-          await timed("restore", report, () => restoreEntry(config, store, document, workspace, env, execute));
-          await timed("rebuild", report, () => rebuildNativeWorkspaces(config, workspace, nativeWorkspaces, env, execute));
+          await timed("restore", report, () => restoreEntry(inWorkspace, store, document, workspace));
+          await timed("rebuild", report, () => rebuildNativeWorkspaces(inWorkspace, nativeWorkspaces));
           await store.recordUse(key);
           return {
             result: { status: "restored", key } as DependencyCacheResult,
@@ -669,7 +628,7 @@ export const materializeWorkspaceDependencies = async (
       }
 
       const targets = await timed("install", report, () => installDependencies(
-        config, workspace, targetPaths, env, execute, options.installRetryOptions,
+        inWorkspace, workspace, targetPaths, options.installRetryOptions,
       ));
       const publication = await timed("publish", report, () => store.publishEntry(expected, targets, workspace));
       if (publication === "refused") {

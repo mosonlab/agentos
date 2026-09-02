@@ -2,31 +2,8 @@ import { realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
-import { runCommand, type CommandOptions } from "./exec.js";
+import { bindCommandRunner, type CommandRunner } from "./exec.js";
 import { workspaceEnvironment } from "./adapters/environment.js";
-
-/**
- * The command surface used by worktree observation. Keeping this injectable
- * lets completion tests exercise the parser without creating a repository;
- * production uses the runner's single external-command implementation below.
- */
-export type WorktreeObserverCommandExecutor = (
-  config: RunnerConfig,
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options?: CommandOptions,
-) => Promise<string>;
-
-const command: WorktreeObserverCommandExecutor = (
-  config,
-  executable,
-  args,
-  cwd,
-  env,
-  options = {},
-): Promise<string> => runCommand(config.runAsPrefix, executable, args, cwd, env, options);
 
 const WORKTREE_FIELD = "worktree ";
 
@@ -109,32 +86,22 @@ const resolvedPath = async (path: string): Promise<ResolvedPath> => {
  * report-only: an outside path is data, never a reason to mutate or throw.
  * Callers should invoke it while the workspace is available, before disposing
  * it, and decide separately how to persist the returned observation.
+ *
+ * `run` is bound to the workspace by default; passing one lets completion tests
+ * exercise the parser without creating a repository.
  */
 export const observeExternalWorktrees = async (
   config: RunnerConfig,
   workspacePath: string,
-  execute: WorktreeObserverCommandExecutor = command,
+  run: CommandRunner = bindCommandRunner(config.runAsPrefix, workspacePath, workspaceEnvironment(config)),
 ): Promise<string[]> => {
-  const env = workspaceEnvironment(config);
   let worktreePaths: string[];
   try {
-    const output = await execute(
-      config,
-      "git",
-      ["worktree", "list", "--porcelain", "-z"],
-      workspacePath,
-      env,
-    );
+    const output = await run("git", ["worktree", "list", "--porcelain", "-z"]);
     worktreePaths = listedWorktreePaths(output);
   } catch (error: unknown) {
     if (!lacksNulWorktreeOutput(error)) throw error;
-    const output = await execute(
-      config,
-      "git",
-      ["-c", "core.quotePath=false", "worktree", "list", "--porcelain"],
-      workspacePath,
-      env,
-    );
+    const output = await run("git", ["-c", "core.quotePath=false", "worktree", "list", "--porcelain"]);
     worktreePaths = legacyListedWorktreePaths(output);
   }
   const lexicalRoot = resolve(workspacePath);

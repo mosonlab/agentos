@@ -3,7 +3,7 @@ import { canonicalOutputSchema, PR_TEMPLATE_NAME, type PrHandoffKind, type PrHan
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { isCommandTimeout, KILL_OVERHEAD_MS, platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
+import { bindCommandRunner, isCommandTimeout, KILL_OVERHEAD_MS, platformCommitArgs, type CommandRunner } from "./exec.js";
 import {
   boundedTimeout, budgetRemains, GH_PROBE_TIMEOUT_MS, MIN_ATTEMPT_TIMEOUT_MS, NETWORK_ATTEMPTS,
   NETWORK_COMMAND_TIMEOUT_MS, runWithNetworkRetry, transientBackoff, WORKSPACE_HEAD_TIMEOUT_MS,
@@ -50,14 +50,6 @@ export type DeliveryFailure = {
   error: unknown;
 };
 
-export type CommandExecutor = (
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options?: CommandOptions,
-) => Promise<string>;
-
 export type DeliveryClaim = {
   task: Pick<ClaimedTask["task"], "id" | "name" | "templateStep"> & {
     /** The full task description is used only by the canonical PR body. */
@@ -71,7 +63,7 @@ export type DeliveryClaim = {
 };
 
 export type DeliverWorkspaceDependencies = {
-  command?: CommandExecutor;
+  command?: CommandRunner;
   /** HEAD already captured by the runner before delivery. Direct callers may
    *  omit it and let delivery resolve the commit itself. */
   headSha?: string;
@@ -82,17 +74,9 @@ export type DeliverWorkspaceDependencies = {
 };
 
 export type SalvageWorkspaceDependencies = {
-  command?: CommandExecutor;
+  command?: CommandRunner;
   retryOptions?: RetryOptions;
 };
-
-export const executeCommand = (config: RunnerConfig): CommandExecutor => (
-  executable,
-  args,
-  cwd,
-  env,
-  options,
-) => runCommand(config.runAsPrefix, executable, args, cwd, env, options ?? {});
 
 const githubRepo = (remote: string): string | null => {
   const ssh = remote.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/i);
@@ -455,10 +439,10 @@ export const deliverWorkspace = async (
   workspace: Workspace,
   dependencies: DeliverWorkspaceDependencies = {},
 ): Promise<DeliveryResult> => {
-  const command = dependencies.command ?? executeCommand(config);
+  const command = dependencies.command
+    ?? bindCommandRunner(config.runAsPrefix, workspace.path, workspaceEnvironment(config));
   const recordPublication = dependencies.recordPublication ?? (async () => undefined);
   const retryOptions = dependencies.retryOptions ?? {};
-  const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
   const canonicalImplementation = isCanonicalPrImplementation(claim);
   const canonicalFinal = isCanonicalPrFinal(claim);
@@ -522,7 +506,7 @@ export const deliverWorkspace = async (
   // contract requires a commit. Optional-commit Runs still publish the shared
   // branch below so later Chain Steps have a durable remote ref.
   try {
-    const head = dependencies.headSha ?? await command("git", ["rev-parse", "HEAD"], workspace.path, env,
+    const head = dependencies.headSha ?? await command("git", ["rev-parse", "HEAD"],
       { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
     if (canonicalPr) {
       const currentOutput = canonicalOutputs?.at(-1);
@@ -558,7 +542,7 @@ export const deliverWorkspace = async (
   }
   if (canonicalFinal) {
     try {
-      const trackedChain = await command("git", ["ls-tree", "-r", "--name-only", "HEAD", "--", ".chain"], workspace.path, env,
+      const trackedChain = await command("git", ["ls-tree", "-r", "--name-only", "HEAD", "--", ".chain"],
         { timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS) });
       if (trackedChain.trim().length > 0) {
         const reason = "canonical PR final delivery requires a clean tracked .chain tree";
@@ -586,7 +570,7 @@ export const deliverWorkspace = async (
   // lets the *next* step of the chain clone it.
   try {
     await runWithNetworkRetry("git", ["push"],
-      ({ timeoutMs }) => command("git", ["push", "--set-upstream", "origin", workspace.branch], workspace.path, env, { timeoutMs }),
+      ({ timeoutMs }) => command("git", ["push", "--set-upstream", "origin", workspace.branch], { timeoutMs }),
       retryOptions,
     );
   } catch (error: unknown) {
@@ -631,7 +615,7 @@ export const deliverWorkspace = async (
     // Capped against the same phase deadline as everything else here: this is
     // the one command in delivery that is not on the retry allowlist, and a
     // hung `gh` would otherwise stall the phase before the budget applies.
-    await command("gh", ["--version"], workspace.path, env, { timeoutMs: boundedTimeout(retryOptions, GH_PROBE_TIMEOUT_MS) });
+    await command("gh", ["--version"], { timeoutMs: boundedTimeout(retryOptions, GH_PROBE_TIMEOUT_MS) });
   } catch (error: unknown) {
     if (!opensPullRequest && !canonicalFinal) return noPullRequest(workspace.branch, remote);
     const reason = messageOf(error);
@@ -657,7 +641,7 @@ export const deliverWorkspace = async (
       "pr", "list", "--repo", repo, "--head", workspace.branch, "--state", "open", "--limit", "1", "--json", "url,number",
     ];
     const raw = await runWithNetworkRetry("gh", args,
-      ({ timeoutMs }) => command("gh", args, workspace.path, env, { timeoutMs }),
+      ({ timeoutMs }) => command("gh", args, { timeoutMs }),
       { ...retryOptions, ...(inherited.deadline === undefined ? {} : { deadline: inherited.deadline }) },
     );
     let parsed: unknown;
@@ -688,14 +672,13 @@ export const deliverWorkspace = async (
     const editArguments = [
       "pr", "edit", String(pullRequest.number), "--repo", repo, "--body", body,
     ];
-    await command("gh", editArguments, workspace.path, env,
-      { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) });
+    await command("gh", editArguments, { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) });
     const readArguments = [
       "pr", "view", String(pullRequest.number), "--repo", repo, "--json", "body", "--jq", ".body",
     ];
     let readBack: string;
     try {
-      readBack = readPullRequestBody(await command("gh", readArguments, workspace.path, env,
+      readBack = readPullRequestBody(await command("gh", readArguments,
         { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) }));
     } catch (error: unknown) {
       throw new Error(`pull request body read-back was unreadable: ${messageOf(error)}`, { cause: error });
@@ -770,7 +753,7 @@ export const deliverWorkspace = async (
       ),
       attempt: async () => {
         try {
-          const stdout = await command("gh", createArguments, workspace.path, env,
+          const stdout = await command("gh", createArguments,
             { timeoutMs: boundedTimeout(retryOptions, NETWORK_COMMAND_TIMEOUT_MS) });
           // `gh pr create` prints the URL of the pull request it made. Taking
           // the identity from the write's own answer is what removes the
@@ -910,30 +893,25 @@ export const salvageWorkspace = async (
   workspace: Workspace,
   dependencies: SalvageWorkspaceDependencies = {},
 ): Promise<DeliveryResult | null> => {
-  const command = dependencies.command ?? executeCommand(config);
+  const command = dependencies.command
+    ?? bindCommandRunner(config.runAsPrefix, workspace.path, workspaceEnvironment(config));
   const retryOptions = dependencies.retryOptions ?? {};
-  const env = workspaceEnvironment(config);
   const remote = identity.remoteUrl ?? "origin";
   const branch = `agentos/${identity.taskId}/run-${identity.runNumber}`;
   try {
     // Respect .gitignore while including tracked deletions and untracked files.
-    await command("git", ["add", "-A"], workspace.path, env);
-    const status = await command("git", ["status", "--porcelain"], workspace.path, env);
+    await command("git", ["add", "-A"]);
+    const status = await command("git", ["status", "--porcelain"]);
     if (status) {
-      await command(
-        "git",
-        platformCommitArgs(`WIP salvage for Anneal run ${identity.runId}`),
-        workspace.path,
-        env,
-      );
+      await command("git", platformCommitArgs(`WIP salvage for Anneal run ${identity.runId}`));
     }
-    const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env);
+    const head = await command("git", ["rev-parse", "HEAD"]);
     // A clean run branch that never diverged from its base has nothing to push.
     if (head === workspace.baseSha) return null;
     // Plain push, never forced: the run branch is unique per (task, run), so a
     // rejection means something else is there and salvaging must not clobber it.
     await runWithNetworkRetry("git", ["push"],
-      ({ timeoutMs }) => command("git", ["push", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env, { timeoutMs }),
+      ({ timeoutMs }) => command("git", ["push", "origin", `HEAD:refs/heads/${branch}`], { timeoutMs }),
       retryOptions,
     );
     return {

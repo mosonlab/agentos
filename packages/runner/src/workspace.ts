@@ -12,7 +12,7 @@ import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } 
 import { runtimeToolPaths } from "./runtime-tools.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
-import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
+import { bindCommandRunner, commandRunnerIn, platformCommitArgs, type CommandRunner } from "./exec.js";
 import {
   configureWorkspaceGit, resolveRunnerGitIdentity, type GitProvenanceClaim,
 } from "./git-provenance.js";
@@ -58,11 +58,9 @@ const assertMaterializationPathIsPlain = async (workspace: string, path: string)
 };
 
 const materializePreparedSpecification = async (
-  config: RunnerConfig,
   prepared: ClaimedTask["specificationMaterialization"],
   workspace: Workspace,
-  execute: WorkspaceCommandExecutor,
-  env: NodeJS.ProcessEnv,
+  run: CommandRunner,
 ): Promise<Workspace> => {
   if (!prepared) return workspace;
   if (workspace.pinnedBaseSha) throw new Error("Pinned review workspace cannot materialize a direct implementation specification");
@@ -74,35 +72,17 @@ const materializePreparedSpecification = async (
   if (!inside(workspace.path, absolutePath)) throw new Error("Prepared specification escaped the controlled workspace");
   await assertMaterializationPathIsPlain(workspace.path, absolutePath);
 
-  await execute(
-    config,
+  await run(
     "/bin/sh",
     ["-c", 'umask 022; mkdir -p -- "$1"; cat > "$2"', "agentos-specification", dirname(absolutePath), absolutePath],
-    workspace.path,
-    env,
     { input: prepared.body },
   );
-  await execute(config, "git", ["add", "-f", "--", prepared.path], workspace.path, env);
-  const status = await execute(config, "git", ["status", "--porcelain", "--", prepared.path], workspace.path, env);
+  await run("git", ["add", "-f", "--", prepared.path]);
+  const status = await run("git", ["status", "--porcelain", "--", prepared.path]);
   if (!status) return workspace;
-  await execute(
-    config,
-    "git",
-    platformCommitArgs("Materialize direct-chain specification", prepared.path),
-    workspace.path,
-    env,
-  );
-  return { ...workspace, baseSha: await execute(config, "git", ["rev-parse", "HEAD"], workspace.path, env) };
+  await run("git", platformCommitArgs("Materialize direct-chain specification", prepared.path));
+  return { ...workspace, baseSha: await run("git", ["rev-parse", "HEAD"]) };
 };
-
-export type WorkspaceCommandExecutor = (
-  config: RunnerConfig,
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options?: CommandOptions,
-) => Promise<string>;
 
 export type WorkspaceProvisionClaim = GitProvenanceClaim & Pick<ClaimedTask, "specificationMaterialization"> & {
   task: GitProvenanceClaim["task"] & Pick<ClaimedTask["task"], "id">;
@@ -127,42 +107,21 @@ export type WorkspaceReuseClaim = GitProvenanceClaim & {
 };
 
 export type ProvisionWorkspaceDependencies = {
-  execute?: WorkspaceCommandExecutor;
+  /** Bound to the workspace root; provisioning rebinds it to the run directory
+   *  for the commands that belong there. */
+  run?: CommandRunner;
   retryOptions?: RetryOptions;
   dependencyCacheOptions?: DependencyCacheOptions;
   mirrorOptions?: RepoMirrorOptions;
 };
 
-/**
- * Every workspace mutation runs through here so that, when RUNNER_RUN_AS_PREFIX
- * is set, whatever it creates is owned by the launched account rather than by
- * the runner daemon's own uid. `input` exists for the same reason: a secret
- * reaches the launched account on stdin, never in argv, which `ps` shows to
- * every account on the host.
- *
- * It delegates to exec.ts's runCommand like every other external command in the
- * runner — the process-group kill and the timeout ceiling are not properties a
- * second spawn point should be allowed to miss.
- */
-const commandWithInput = (
-  config: Pick<RunnerConfig, "runAsPrefix">,
-  executable: string,
-  args: string[],
+/** The runner's commands for one directory, under the run-as prefix and the
+ *  provider child environment. See `CommandRunner` for why the prefix is bound
+ *  here rather than threaded through every internal call. */
+const workspaceCommands = (
+  config: Pick<RunnerConfig, "runAsPrefix" | "path" | "home">,
   cwd: string,
-  env: NodeJS.ProcessEnv,
-  input: string | null,
-): Promise<string> => runCommand(
-  config.runAsPrefix, executable, args, cwd, env, input === null ? {} : { input },
-);
-
-const command: WorkspaceCommandExecutor = (
-  config: RunnerConfig,
-  executable: string,
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options: CommandOptions = {},
-): Promise<string> => runCommand(config.runAsPrefix, executable, args, cwd, env, options);
+): CommandRunner => bindCommandRunner(config.runAsPrefix, cwd, workspaceEnvironment(config));
 
 export type AgentScratch = {
   /** The disposable directory both runner roots live in; removed when the run ends. */
@@ -280,8 +239,6 @@ trap - EXIT HUP INT TERM
 export type RuntimeToolsMaterializationOptions = {
   /** Override only for tests that construct a release fixture. */
   sourceRoot?: string;
-  /** Override the runner command for failure-injection tests. */
-  execute?: WorkspaceCommandExecutor;
 };
 
 export const sessionConfigBaselineRoot = defaultSessionConfigBaselineRoot;
@@ -328,13 +285,11 @@ export const sessionConfigRootExists = async (scratch: AgentScratch): Promise<bo
  */
 export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `anonymous-${randomUUID()}`): Promise<AgentScratch> => {
   const temporaryRoot = await realpath(tmpdir());
+  const run = workspaceCommands(config, temporaryRoot);
   const base = config.runAsPrefix.length > 0
-    ? await realpath((await command(
-      config,
+    ? await realpath((await run(
       "/usr/bin/mktemp",
       ["-d", join(temporaryRoot, "agentos-run-scratch-XXXXXX")],
-      temporaryRoot,
-      workspaceEnvironment(config),
     )).trim())
     : await realpath(await mkdtemp(join(temporaryRoot, "agentos-run-scratch-")));
   const workspaceRoot = join(base, "workspaces");
@@ -348,13 +303,14 @@ export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `a
     // base as well as both roots below it. No cross-account writable or
     // traversable scratch directory is left behind.
     try {
-      await command(config, "/bin/chmod", ["700", base], temporaryRoot, workspaceEnvironment(config));
-      // Node enters cwd before it execs the run-as launcher. The daemon cannot
-      // enter the target principal's 0700 base, so keep cwd on the shared temp
-      // root and let the launched principal mutate the absolute child paths.
-      await command(config, "/bin/mkdir", ["-m", "700", workspaceRoot, stateDir], temporaryRoot, workspaceEnvironment(config));
+      await run("/bin/chmod", ["700", base]);
+      // Node enters the bound directory before it execs the run-as launcher.
+      // The daemon cannot enter the target principal's 0700 base, so this
+      // runner stays bound to the shared temp root and lets the launched
+      // principal mutate the absolute child paths.
+      await run("/bin/mkdir", ["-m", "700", workspaceRoot, stateDir]);
     } catch (error: unknown) {
-      await command(config, "/bin/rm", ["-rf", "--", base], temporaryRoot, workspaceEnvironment(config)).catch(() => undefined);
+      await run("/bin/rm", ["-rf", "--", base]).catch(() => undefined);
       throw error;
     }
   } else {
@@ -382,17 +338,13 @@ export const materializeRuntimeTools = async (
   options: RuntimeToolsMaterializationOptions = {},
 ): Promise<void> => {
   const sourceRoot = options.sourceRoot ?? runtimeToolsSourceRoot;
-  const execute = options.execute ?? command;
-  // A prefixed command changes identity only after Node has entered cwd. The
-  // target-owned 0700 base is therefore valid as an argument, but not as cwd
-  // for the daemon that launches the command.
+  // A prefixed command changes identity only after Node has entered the bound
+  // directory. The target-owned 0700 base is therefore valid as an argument,
+  // but not as the directory the daemon launches the command from.
   const commandCwd = config.runAsPrefix.length > 0 ? await realpath(tmpdir()) : scratch.base;
-  await execute(
-    config,
+  await workspaceCommands(config, commandCwd)(
     "/bin/sh",
     ["-c", runtimeToolsMaterializationScript, "agentos-runtime-tools", sourceRoot, scratch.toolsDir],
-    commandCwd,
-    workspaceEnvironment(config),
   );
 };
 
@@ -409,8 +361,7 @@ export const cleanupAgentScratch = async (
       scratch.toolsDir,
       ...(options.retainConfigRoot ? [] : [scratch.configRoot]),
     ];
-    await command(
-      config,
+    await workspaceCommands(config, await realpath(tmpdir()))(
       "/bin/sh",
       [
         "-c",
@@ -419,8 +370,6 @@ export const cleanupAgentScratch = async (
         ...targetOwnedRoots,
         scratch.base,
       ],
-      await realpath(tmpdir()),
-      workspaceEnvironment(config),
     );
     if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   } else {
@@ -448,14 +397,14 @@ export const provisionWorkspace = async (
   provisioning: DependencyProvisioningDecision,
   dependencies: ProvisionWorkspaceDependencies = {},
 ): Promise<Workspace> => {
-  const execute = dependencies.execute ?? command;
   const retryOptions = dependencies.retryOptions ?? {};
   const dependencyCacheOptions = dependencies.dependencyCacheOptions ?? {};
   const mirrorOptions = dependencies.mirrorOptions ?? {};
   const root = resolve(config.workspaceRoot);
   const workspace = resolve(root, claim.run.id);
   if (!inside(root, workspace)) throw new Error("Resolved workspace escaped the controlled root");
-  const env = workspaceEnvironment(config);
+  const run = dependencies.run ?? workspaceCommands(config, root);
+  const inWorkspace = commandRunnerIn(run, workspace);
   if (config.runAsPrefix.length > 0) {
     const rootInfo = await stat(root);
     if (!rootInfo.isDirectory()) throw new Error("RUNNER_WORKSPACE_ROOT is not a directory");
@@ -473,13 +422,13 @@ export const provisionWorkspace = async (
     // sticky workspace root, which is what stops one account unlinking or
     // renaming another's run directory; the session token is protected by its
     // own 0600 mode, and CLI credentials by the per-account home.
-    await command(config, "/bin/sh", ["-c", 'mkdir "$1"; chmod 711 "$1"', "agentos-workspace", workspace], root, env);
+    await run("/bin/sh", ["-c", 'mkdir "$1"; chmod 711 "$1"', "agentos-workspace", workspace]);
   } else {
     await mkdir(root, { recursive: true, mode: 0o750 });
     await mkdir(workspace, { recursive: false, mode: 0o750 });
   }
   try {
-    const identity = await resolveRunnerGitIdentity(config, root, env, execute);
+    const identity = await resolveRunnerGitIdentity(config, run);
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
     const pinnedBaseSha = claim.run.pinnedBaseSha;
@@ -493,9 +442,7 @@ export const provisionWorkspace = async (
     const provisioned = await withRepoMirror(
       config,
       claim.repo.remoteUrl,
-      root,
-      env,
-      execute,
+      run,
       { fetchRetryOptions: retryOptions, ...mirrorOptions },
       async (mirror): Promise<Workspace> => {
         if (pinnedBaseSha) {
@@ -520,17 +467,15 @@ export const provisionWorkspace = async (
           // processes of its own user (see api/src/onboarding.ts). The property
           // is that provisioning does not *hand* a blind reviewer its
           // predecessor's report, and that is what the object-id fetch keeps.
-          await ensureMirrorRevisions(
-            config, mirror, [implementationBaseSha, pinnedBaseSha], root, env, execute, retryOptions,
-          );
-          await execute(config, "git", ["init"], workspace, env);
-          const commitHooksPath = await configureWorkspaceGit(config, claim, workspace, identity, env, execute);
-          await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
+          await ensureMirrorRevisions(run, mirror, [implementationBaseSha, pinnedBaseSha], retryOptions);
+          await inWorkspace("git", ["init"]);
+          const commitHooksPath = await configureWorkspaceGit(claim, workspace, identity, inWorkspace);
+          await inWorkspace("git", ["remote", "add", "origin", claim.repo.remoteUrl]);
           // Local transport: slow on a large range, but it cannot hang on a
           // network that is no longer in the path, so it carries no ceiling.
-          await execute(config, "git", ["fetch", "--no-tags", mirror, implementationBaseSha, pinnedBaseSha], workspace, env);
-          await execute(config, "git", ["checkout", "--detach", pinnedBaseSha], workspace, env);
-          const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
+          await inWorkspace("git", ["fetch", "--no-tags", mirror, implementationBaseSha, pinnedBaseSha]);
+          await inWorkspace("git", ["checkout", "--detach", pinnedBaseSha]);
+          const baseSha = await inWorkspace("git", ["rev-parse", "HEAD"]);
           if (baseSha !== pinnedBaseSha) {
             throw new Error(`Pinned workspace resolved ${baseSha}, expected ${pinnedBaseSha}`);
           }
@@ -547,10 +492,10 @@ export const provisionWorkspace = async (
         // the same answer `git ls-remote` used to make a round trip for.
         let cloneTarget = target;
         if (branch !== target && !claim.run.targetBranchPublished
-          && await mirrorHasBranch(config, mirror, branch, root, env, execute)) {
+          && await mirrorHasBranch(run, mirror, branch)) {
           cloneTarget = branch;
         }
-        if (!await mirrorHasBranch(config, mirror, cloneTarget, root, env, execute)) {
+        if (!await mirrorHasBranch(run, mirror, cloneTarget)) {
           // The mirror was pruned against the remote moments ago, so this is the
           // remote's answer, not a mirror fault: the branch the run was told to
           // start from does not exist.
@@ -563,11 +508,11 @@ export const provisionWorkspace = async (
         // refuses the link — Linux protected_hardlinks, with the mirror owned by
         // the daemon and the clone running as another account — git copies the
         // file instead. That is still local disk, and still not the remote.
-        await execute(config, "git", ["clone", "--branch", cloneTarget, "--single-branch", mirror, workspace], root, env);
-        const commitHooksPath = await configureWorkspaceGit(config, claim, workspace, identity, env, execute);
+        await run("git", ["clone", "--branch", cloneTarget, "--single-branch", mirror, workspace]);
+        const commitHooksPath = await configureWorkspaceGit(claim, workspace, identity, inWorkspace);
         // Delivery pushes to `origin`; the mirror is a provisioning detail and
         // must never become the run's publication target.
-        await execute(config, "git", ["remote", "set-url", "origin", claim.repo.remoteUrl], workspace, env);
+        await inWorkspace("git", ["remote", "set-url", "origin", claim.repo.remoteUrl]);
         // `clone --single-branch` writes one fetch refspec, covering only the
         // branch it cloned. When that branch is the run's own published head,
         // nothing in the workspace resolves `origin/<target>`: an agent asking
@@ -577,25 +522,23 @@ export const provisionWorkspace = async (
         // it from the mirror so the ref exists before the agent starts.
         if (cloneTarget !== target) {
           const targetRefspec = `+refs/heads/${target}:refs/remotes/origin/${target}`;
-          await execute(config, "git", ["config", "--add", "remote.origin.fetch", targetRefspec], workspace, env);
-          await execute(config, "git", ["fetch", "--no-tags", mirror, targetRefspec], workspace, env);
+          await inWorkspace("git", ["config", "--add", "remote.origin.fetch", targetRefspec]);
+          await inWorkspace("git", ["fetch", "--no-tags", mirror, targetRefspec]);
         }
-        const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
-        if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
+        const baseSha = await inWorkspace("git", ["rev-parse", "HEAD"]);
+        if (branch !== cloneTarget) await inWorkspace("git", ["switch", "-c", branch]);
         return { path: workspace, branch, baseSha, ...(commitHooksPath ? { commitHooksPath } : {}) };
       },
     );
     const materialized = await materializePreparedSpecification(
-      config,
       claim.specificationMaterialization,
       provisioned,
-      execute,
-      env,
+      inWorkspace,
     );
     // The decision was made when the claim was admitted; provisioning does not
     // re-read the template step or the repository policy.
     if (provisioning.provision) {
-      await materializeWorkspaceDependencies(config, workspace, env, { execute }, dependencyCacheOptions);
+      await materializeWorkspaceDependencies(config, workspace, inWorkspace, dependencyCacheOptions);
     }
     return materialized;
   } catch (error: unknown) {
@@ -611,9 +554,9 @@ export const reuseWorkspace = async (config: RunnerConfig, claim: WorkspaceReuse
   if (!inside(root, workspace)) throw new Error("Resumed workspace escaped the controlled root");
   const info = await stat(workspace);
   if (!info.isDirectory()) throw new Error("Resumed workspace is not a directory");
-  const env = workspaceEnvironment(config);
-  const identity = await resolveRunnerGitIdentity(config, workspace, env, command);
-  const commitHooksPath = await configureWorkspaceGit(config, claim, workspace, identity, env, command);
+  const run = workspaceCommands(config, workspace);
+  const identity = await resolveRunnerGitIdentity(config, run);
+  const commitHooksPath = await configureWorkspaceGit(claim, workspace, identity, run);
   return {
     path: workspace,
     branch: claim.run.branch,
@@ -653,10 +596,10 @@ export const writeSessionCredentials = async (
     // file it is able to read. Writing through the prefix is what makes the
     // file's owner and its reader the same account. `umask 077` closes the
     // window in which the token would exist under the default 0644.
-    const env = workspaceEnvironment(config);
-    await commandWithInput(config, "/bin/sh", ["-c", 'umask 077; mkdir -p "$1"; chmod 700 "$1"', "agentos-credentials", directory], workspace.path, env, null);
-    await commandWithInput(config, "/bin/sh", ["-c", 'umask 077; cat > "$1"; chmod 600 "$1"', "agentos-credentials", path], workspace.path, env, payload);
-    await commandWithInput(config, "/bin/sh", ["-c", 'cat >> "$1"', "agentos-credentials", exclude], workspace.path, env, "\n/.agentos/\n").catch(() => undefined);
+    const run = workspaceCommands(config, workspace.path);
+    await run("/bin/sh", ["-c", 'umask 077; mkdir -p "$1"; chmod 700 "$1"', "agentos-credentials", directory]);
+    await run("/bin/sh", ["-c", 'umask 077; cat > "$1"; chmod 600 "$1"', "agentos-credentials", path], { input: payload });
+    await run("/bin/sh", ["-c", 'cat >> "$1"', "agentos-credentials", exclude], { input: "\n/.agentos/\n" }).catch(() => undefined);
     return path;
   }
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -669,11 +612,11 @@ export const captureWorkspaceResult = async (
   config: RunnerConfig,
   workspace: Workspace,
 ): Promise<{ branch: string; baseSha: string; headSha: string }> => {
-  const env = workspaceEnvironment(config);
+  const run = workspaceCommands(config, workspace.path);
   const branch = workspace.pinnedBaseSha
     ? workspace.branch
-    : await command(config, "git", ["branch", "--show-current"], workspace.path, env);
-  const headSha = await command(config, "git", ["rev-parse", "HEAD"], workspace.path, env);
+    : await run("git", ["branch", "--show-current"]);
+  const headSha = await run("git", ["rev-parse", "HEAD"]);
   return { branch, baseSha: workspace.baseSha, headSha };
 };
 
@@ -692,17 +635,17 @@ export const captureWorkspaceSnapshot = async (
   config: RunnerConfig,
   workspace: Workspace,
 ): Promise<WorkspaceSnapshot> => {
-  const env = workspaceEnvironment(config);
+  const run = workspaceCommands(config, workspace.path);
   const [headSha, status, trackedDiff, untrackedOutput] = await Promise.all([
-    command(config, "git", ["rev-parse", "HEAD"], workspace.path, env),
-    command(config, "git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], workspace.path, env),
-    command(config, "git", ["diff", "--binary", "HEAD", "--"], workspace.path, env),
-    command(config, "git", ["ls-files", "-z", "--others", "--exclude-standard"], workspace.path, env),
+    run("git", ["rev-parse", "HEAD"]),
+    run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    run("git", ["diff", "--binary", "HEAD", "--"]),
+    run("git", ["ls-files", "-z", "--others", "--exclude-standard"]),
   ]);
   const untrackedPaths = untrackedOutput.split("\0").filter(Boolean);
   const untrackedFiles = await Promise.all(untrackedPaths.map(async (path) => ({
     path,
-    objectId: await command(config, "git", ["hash-object", "--", path], workspace.path, env),
+    objectId: await run("git", ["hash-object", "--", path]),
   })));
   return { headSha, status, trackedDiff, untrackedFiles };
 };
@@ -715,7 +658,7 @@ export const cleanupWorkspace = async (
   const workspace = resolve(workspacePath);
   if (!inside(root, workspace) || workspace === root) throw new Error("Refusing to clean a path outside the controlled workspace root");
   if (config.runAsPrefix.length > 0) {
-    await command(config, "/bin/rm", ["-rf", "--", workspace], root, workspaceEnvironment(config));
+    await workspaceCommands(config, root)("/bin/rm", ["-rf", "--", workspace]);
   } else {
     await rm(workspace, { recursive: true, force: true });
   }

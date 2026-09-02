@@ -153,3 +153,60 @@ export const runCommand = (
     else reject(new Error(`${executable} failed (${signal ?? code}): ${stderr.trim()}`));
   }));
 });
+
+/**
+ * Extra per-call knobs a bound runner accepts on top of `CommandOptions`.
+ *
+ * Both are deliberately narrow. `cwd` covers the two cases where one command
+ * of a workspace's sequence belongs somewhere else: the run directory a
+ * provisioning sequence rooted at the workspace root writes into, and the
+ * shared temporary root a prefixed command must be launched from because node
+ * chdirs as the daemon's uid before the prefix runs. `env` covers addressing
+ * git by `GIT_DIR` rather than by cwd.
+ */
+export type BoundCommandOptions = CommandOptions & {
+  /** Run this one command elsewhere, leaving the binding intact. */
+  cwd?: string | undefined;
+  /** Entries merged over the bound child environment for this call only. */
+  env?: NodeJS.ProcessEnv | undefined;
+};
+
+/**
+ * A command runner bound to one run-as prefix, working directory and child
+ * environment, so callers name only the program and its arguments.
+ *
+ * Every workspace mutation runs through here so that, when RUNNER_RUN_AS_PREFIX
+ * is set, whatever it creates is owned by the launched account rather than by
+ * the runner daemon's own uid. `input` exists for the same reason: a secret
+ * reaches the launched account on stdin, never in argv, which `ps` shows to
+ * every account on the host.
+ *
+ * It delegates to `runCommand` like every other external command in the runner
+ * — the process-group kill and the timeout ceiling are not properties a second
+ * spawn point should be allowed to miss. Binding the prefix once, where the
+ * workspace is opened, is what keeps the internals from being able to miss it:
+ * there is no parameter left for them to drop.
+ */
+export type CommandRunner = (
+  executable: string,
+  args: readonly string[],
+  options?: BoundCommandOptions,
+) => Promise<string>;
+
+export const bindCommandRunner = (
+  runAsPrefix: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): CommandRunner => (executable, args, options = {}) => runCommand(
+  runAsPrefix,
+  executable,
+  args,
+  options.cwd ?? cwd,
+  options.env === undefined ? env : { ...env, ...options.env },
+  options,
+);
+
+/** The same runner with a different bound working directory. A per-call `cwd`
+ *  still wins, so a rebound runner composes rather than freezing the choice. */
+export const commandRunnerIn = (run: CommandRunner, cwd: string): CommandRunner =>
+  (executable, args, options = {}) => run(executable, args, { ...options, cwd: options.cwd ?? cwd });
