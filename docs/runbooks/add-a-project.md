@@ -82,7 +82,10 @@ request. Do not retry with a different spelling of the same existing Project.
 
 Add the GitHub repository with `grantAgents: true`. The successful response is
 `{ repo, grants }`; the four active A1 workflow Agents receive `GIT_WRITE`
-access, and the mechanical integrator Agent is not granted access.
+access, and the mechanical integrator Agent is not granted access. That
+exclusion describes the A1 four-role workflow only. Direct and Full Assurance
+templates run a `merge-integrator` step against the repository and do need the
+grant; Tier 1 adds it below.
 
 ```sh
 REPO_BODY=$(jq -n \
@@ -98,6 +101,18 @@ test -n "$REPO_ID" -a "$REPO_ID" != null
 ```
 
 Choose `NPM_CI` only for repositories whose default branch has a root `package-lock.json`; otherwise choose `NONE`.
+
+`defaultBranch` is the branch a chain starts from, and nothing later reconciles
+it with the remote. Read the remote's actual HEAD branch before you send the
+request rather than assuming `main`:
+
+```sh
+git ls-remote --symref "$REPO_REMOTE" HEAD | sed -n 's#^ref: refs/heads/##p'
+```
+
+A registered branch the remote does not carry is accepted here and fails much
+later, when the first Run tries to start from a branch that does not exist.
+Rename the remote branch or register the name the remote actually has.
 
 If the response was not saved, obtain the created Repo id from the Project's
 Repo list:
@@ -152,6 +167,8 @@ automatic merge.
 
 Complete these steps before starting a Direct or Full Assurance workflow:
 
+- [ ] Run one `pr-engineer-workflow` chain end to end on this repository first,
+  and only then install the full inventory.
 - [ ] Run project-scoped canonical installation with
   `npm run db:sync-canonical-prompts -- --install-full <projectId>` when the
   Project needs the full post-A1 inventory.
@@ -165,11 +182,24 @@ Complete these steps before starting a Direct or Full Assurance workflow:
   runner-host authentication, plus an authenticated `gh`.
 - [ ] Provide `GITHUB_READ_TOKEN`, `RUNNER_GATE_SERVER`, and the target
   repository's test toolchain, with an SSH-reachable gate worker.
+- [ ] Verify that test toolchain on every gate worker the dispatcher may
+  select, not only on one of them.
 - [ ] Install the private merge-executor GitHub App on the target repository
   and run its isolated executor service.
 - [ ] Treat Node on the runner and the gate-worker test toolchain as documented
   prerequisites, not probes; provision them before starting a chain.
 - [ ] Confirm that Regression, not an in-Run agent, executes the gate.
+
+### Probe with A1 before installing the full inventory
+
+The Tier 0 workflow is the cheapest end-to-end proof that this Project, this
+Repo, and this host can carry a chain at all: it exercises the remote, the Git
+identity, the branch registration, and the runtime authentication without any
+of the full tail's infrastructure. Run it once and let it reach an open pull
+request before `--install-full`.
+
+Installing the full inventory first only moves the same failures later, into a
+longer chain with more roles and a gate to pay for.
 
 ### Canonical synchronization and verification
 
@@ -203,6 +233,15 @@ other grant. The ordinary synchronization and the installation share the
 addressed Project's transaction. If the explicitly requested Project refuses,
 `--install-full` exits non-zero; Projects committed before that refusal remain
 committed. A second successful installation is a no-op.
+
+Because it creates no grant, every Agent the newly installed templates assign
+needs an `AgentRepoAccess` row added by hand, including the `merge-integrator`
+step that Direct and compound templates carry. Instantiation refuses a template
+whose assignee lacks one with `template_agent_repo_grant_missing` and HTTP 400.
+Grant each of them with
+[`POST /agents/:agentId/repos/:repoId/access`](../operator-api.md#post-agentsagentidreposrepoidaccess),
+then re-read the Project's templates and confirm that every effective assignee
+is covered.
 
 Project-scoped verification checks exactly the canonical Agents and templates
 that are present and ignores absent and noncanonical inventory. With no
@@ -243,6 +282,24 @@ prerequisite.
 Node on the runner and the gate-worker test toolchain are documented prerequisites, not probes.
 Regression, not an in-Run agent, executes the gate.
 A missing prerequisite stops the chain rather than authorizing a weaker merge.
+
+A repository whose gate does not run on Node needs that repository's own
+toolchain present on every worker the dispatcher may select, and it needs the
+same versions on each of them. Verify it the way the gate will see it — one
+non-interactive command per worker, over `ssh`, not in a login shell you
+prepared by hand:
+
+```sh
+ssh <worker> '<interpreter> --version && <test-runner> --version'
+```
+
+Two workers running different versions of the same test runner are not one
+environment: a version that reports results the other does not changes the test
+identifiers a baseline matches against, so the same commit can pass on one
+worker and fail on the other. Pin the versions in the target repository — a
+`requirements-gate.txt` beside `scripts/merge-gate.sh` for a Python repository —
+so the pin is reviewable with the gate it serves rather than living in an
+operator's shell history.
 
 ### Reference merge-gate contract
 
