@@ -46,6 +46,11 @@ import {
 import { renderLaunchdPlist } from "./install-launchd.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
+import {
+  autoDeployNoticeBody,
+  canonicalSyncNoticeRecord,
+  canonicalSyncRefusedLines,
+} from "./quiet-window-deploy.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -462,6 +467,21 @@ test("deployed build stamps require an exact clean commit", () => {
   assert.equal(deployedBuildStampRefusal({ packageName: "@anneal/api", commit: revisions.to, dirty: false }), null);
   assert.equal(deployedBuildStampRefusal({ packageName: "@anneal/api", commit: revisions.to, dirty: true }), "dirty-build");
   assert.equal(deployedBuildStampRefusal({ packageName: "@other/api", commit: revisions.to, dirty: false }), "unexpected-package-name");
+});
+
+test("canonical sync refusal output reaches the successful deploy Inbox notice", () => {
+  const refusal = "REFUSED foreign-project: Agent prompt structure drift";
+  const record = canonicalSyncNoticeRecord({
+    outcome: "success",
+    reason: "deployed",
+    from: revisions.from,
+    to: revisions.to,
+  }, canonicalSyncRefusedLines(`SYNC foreign-project\n${refusal}\nSYNC healthy-project\n`));
+
+  assert.equal(
+    autoDeployNoticeBody(record),
+    `[auto-deploy] success: ${revisions.from} -> ${revisions.to}; reason=deployed; detail=${refusal}`,
+  );
 });
 
 test("production host requires every deploy phase", () => {
