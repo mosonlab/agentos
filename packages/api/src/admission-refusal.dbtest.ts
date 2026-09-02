@@ -397,14 +397,36 @@ test("fault: layer activation asked to raise rolls its whole transaction back", 
 test("stopped: layer activation parks a stopped integrator under its stop record", async () => {
   const seeded = await seedIntegratorChain(db, { label: "disposition-stopped", shape: "canonical-direct" });
   const integratorTask = seeded.integratorTask!;
-  // `head-drift` rather than `base-drift`: the drift condition defers its
-  // question to a recovery Run owned by the integrator Task itself, which this
-  // case has no reason to seed.
+  // The stop question is opened from a Session-bearing Run owned by the
+  // integrator Task itself, so the mechanical Run that stopped is part of the
+  // fixture. `head-drift` rather than `base-drift`: the drift condition defers
+  // its question to a recovery Run this case has no reason to seed.
+  const mechanicalRun = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: integratorTask.id,
+    agentId: seeded.integratorAgent.id,
+    repoId: seeded.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${integratorTask.id}:run:1`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "hash",
+    status: "SUCCEEDED",
+    maxRunsPerTask: 5,
+  } });
+  await db.session.create({ data: {
+    runId: mechanicalRun.id,
+    projectId: seeded.project.id,
+    agentId: seeded.integratorAgent.id,
+    taskId: integratorTask.id,
+    runner: "CLAUDE",
+    executionStatus: "SUCCEEDED",
+  } });
   await db.$transaction((tx) => recordIntegratorStop(tx, {
     integratorTaskId: integratorTask.id,
     condition: "head-drift",
     evidence: "head moved",
-    sourceRunId: seeded.gateRun.id,
+    sourceRunId: mechanicalRun.id,
   }));
 
   await db.$transaction((tx) => activateChainSuccessor(tx, seeded.readinessTask!, {}, new Date()));
@@ -415,7 +437,11 @@ test("stopped: layer activation parks a stopped integrator under its stop record
     parked.failureReason ?? "",
     /Merge integrator stopped on head-drift; predecessor success preserved and successor not activated/u,
   );
-  assert.equal(await db.run.count({ where: { taskId: integratorTask.id } }), 0);
+  // The stopped Run stays the only one: birth was refused, not retried.
+  assert.deepEqual(
+    (await db.run.findMany({ where: { taskId: integratorTask.id } })).map((run) => run.id),
+    [mechanicalRun.id],
+  );
 });
 
 test("the savepoint around one birth keeps the rest of the layer's transaction usable", async () => {

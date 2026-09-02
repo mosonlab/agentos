@@ -22,7 +22,9 @@ import {
 } from "./merge-tail.js";
 import {
   attemptRunBirth,
+  CompoundImplementationAssigneeError,
   errorForOpenRunRefusal,
+  isWorkflowRefusalError,
   type IntegratorStopBypass,
   WorkflowRefusalError,
   enqueueTaskRunInternal,
@@ -843,7 +845,16 @@ const activateChainSuccessorInternal = async (
           throw errorForOpenRunRefusal(refusal);
         }
         case "fault":
-          if (options.onRefusal === "raise") throw errorForOpenRunRefusal(refusal);
+          if (options.onRefusal === "raise") {
+            // A compound implementation step is bound to one Agent by
+            // construction, so a refusal carrying no error of its own is that
+            // invariant failing. The operator's answer is the compound-assignee
+            // refusal rather than a bare invalid-request.
+            const error = errorForOpenRunRefusal(refusal);
+            throw compoundImplementation && isWorkflowRefusalError(error)
+              ? new CompoundImplementationAssigneeError()
+              : error;
+          }
           break;
         default: {
           const unhandled: never = refusal.disposition;
