@@ -225,7 +225,7 @@ test("provisioning trusts an already-published intended head after its database 
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-1" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
       run: {
         id: "run-2",
         runNumber: 2,
@@ -272,7 +272,7 @@ test("provisioning commits the server-prepared direct specification before the a
     const specificationPath = `.chain/${branch}/spec.md`;
     const claim = workspaceClaim({
       task: { id: "task-specification" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
       run: {
         id: "run-specification",
         runNumber: 1,
@@ -322,7 +322,7 @@ test("prepared specification refuses a repository symlink that would escape the 
     const branch = "feature/platform-spec";
     const claim = workspaceClaim({
       task: { id: "task-specification-symlink" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
       run: { id: "run-specification-symlink", runNumber: 1, targetBranch: "main", branch },
       specificationMaterialization: {
         kind: "direct-implementation",
@@ -369,7 +369,7 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-1" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
       run: {
         id: "run-3", runNumber: 3, targetBranch: salvage,
         targetBranchPublished: true, branch: declared,
@@ -421,7 +421,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-blind" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
       run: {
         id: "run-blind",
         runNumber: 1,
@@ -468,7 +468,7 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       repo: {
         remoteUrl: "https://github.com/acme/app.git",
         defaultBranch: "main",
-        dependencyProvisioning: "NPM_CI",
+        dependencyProvisioning: "NONE",
       },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     });
@@ -526,7 +526,7 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       repo: {
         remoteUrl: "https://github.com/acme/app.git",
         defaultBranch: "main",
-        dependencyProvisioning: "NPM_CI",
+        dependencyProvisioning: "NONE",
       },
       run: { id: "run-timeout", runNumber: 1, targetBranch: "main", branch: "agentos/task-timeout/run-1" },
     });
@@ -582,7 +582,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       repo: {
         remoteUrl: "https://github.com/acme/app.git",
         defaultBranch: "main",
-        dependencyProvisioning: "NPM_CI",
+        dependencyProvisioning: "NONE",
       },
       run: {
         id: "run-pinned-timeout",
@@ -722,7 +722,7 @@ test("a run-as workspace is provisioned by the launched account and cannot be en
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-prefix" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
       run: { id: "run-prefix", runNumber: 1, targetBranch: "main", branch: "main" },
     });
 

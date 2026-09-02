@@ -129,6 +129,29 @@ const dependencyProvisioningInvalid = {
   code: "repository-dependency-provisioning-invalid",
 } as const;
 
+const repositoryPreflightRefusal = (context: Context, error: unknown): Response | undefined => {
+  if (!(error instanceof RepositoryPreflightError)) return undefined;
+  if (error.reason === "package-lock-missing") {
+    return context.json({
+      error: "Repository preflight failed",
+      code: "repository-package-lock-missing",
+      remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
+    }, 422);
+  }
+  if (error.reason === "dependency-provisioning-contradicts-lockfile") {
+    return context.json({
+      error: "Repository dependency provisioning contradicts lockfile",
+      code: "repository-dependency-provisioning-contradicts-lockfile",
+      remedy: "Choose dependencyProvisioning NPM_CI for repositories with a root package-lock.json.",
+    }, 400);
+  }
+  return context.json({
+    error: "Repository preflight failed",
+    code: "repository-preflight-failed",
+    reason: error.reason,
+  }, 422);
+};
+
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
@@ -137,9 +160,9 @@ const repoInput = z.object({
   credentialSecretId: id.nullable().default(null),
   dependencyProvisioning: dependencyProvisioningInput,
 });
-// Keep remoteUrl raw for POST /projects/:projectId/repos. The onboarding remote
-// policy must see exactly what the operator submitted; PATCH continues to use
-// repoInput above and therefore retains its established trimming behavior.
+// Keep remoteUrl raw wherever repository policy runs. A leading newline or
+// trailing tab is itself invalid input; trimming before parseRepoRemote would
+// silently turn it into a different, accepted value.
 const repoCreateInput = repoInput.extend({
   remoteUrl: z.string(),
   grantAgents: z.boolean().default(false),
@@ -148,7 +171,9 @@ const repoAccessInput = z.object({
   permissions: z.nativeEnum(RepoPermission).default(RepoPermission.GIT_WRITE),
   mountPath: z.string().trim().min(1).default("repo"),
 });
-const repoPatch = repoInput.partial().refine((value) => Object.keys(value).length > 0);
+const repoPatch = repoInput.partial().extend({
+  remoteUrl: z.string().refine((value) => value.trim().length > 0).optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const secretGrantInput = z.object({ secretId: id, envVar: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) });
 const skillBindingInput = z.object({ skillId: id });
 const mcpBindingInput = z.object({ mcpConnectionId: id });
@@ -566,20 +591,8 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         dependencyProvisioning,
       });
     } catch (error: unknown) {
-      if (error instanceof RepositoryPreflightError) {
-        if (error.reason === "package-lock-missing") {
-          return context.json({
-            error: "Repository preflight failed",
-            code: "repository-package-lock-missing",
-            remedy: "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE.",
-          }, 422);
-        }
-        return context.json({
-          error: "Repository preflight failed",
-          code: "repository-preflight-failed",
-          reason: error.reason,
-        }, 422);
-      }
+      const refusal = repositoryPreflightRefusal(context, error);
+      if (refusal) return refusal;
       throw error;
     }
     const { grantAgents, ...repoFields } = body;
@@ -609,16 +622,53 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     return context.json(result satisfies RepoResponse | { repo: RepoResponse; grants: AgentRepoAccessContract[] }, 201);
   });
   app.patch("/repos/:repoId", async (context) => {
-    const body = await readJson(context.req.raw, repoPatch);
+    const submitted = await readJson(context.req.raw, repoPatch);
+    const body = submitted.remoteUrl === undefined
+      ? submitted
+      : { ...submitted, remoteUrl: submitted.remoteUrl.trim() };
     if (body.dependencyProvisioning !== undefined && !isDependencyProvisioning(body.dependencyProvisioning)) {
       return context.json(dependencyProvisioningInvalid, 400);
     }
+    const repoId = id.parse(context.req.param("repoId"));
     if (body.credentialSecretId) {
       const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
+    if (body.dependencyProvisioning !== undefined) {
+      const stored = await db.repo.findUnique({
+        where: { id: repoId },
+        select: { remoteUrl: true, defaultBranch: true },
+      });
+      if (!stored) return refusalJson(context, refusal("not-found", "Resource not found"));
+      const remote = parseRepoRemote(submitted.remoteUrl ?? stored.remoteUrl);
+      if (!remote.ok) {
+        return context.json({
+          error: "Repository remote is invalid",
+          code: "repository-remote-invalid",
+          reason: remote.reason,
+        }, 400);
+      }
+      const defaultBranch = body.defaultBranch ?? stored.defaultBranch;
+      if (!isValidBranchName(defaultBranch)) {
+        return context.json({
+          error: "Repository default branch is invalid",
+          code: "repository-default-branch-invalid",
+        }, 400);
+      }
+      try {
+        await deps.repositoryPreflight({
+          remoteUrl: remote.remoteUrl,
+          defaultBranch,
+          dependencyProvisioning: body.dependencyProvisioning,
+        });
+      } catch (error: unknown) {
+        const refusal = repositoryPreflightRefusal(context, error);
+        if (refusal) return refusal;
+        throw error;
+      }
+    }
     return context.json((await db.repo.update({
-      where: { id: id.parse(context.req.param("repoId")) }, data: withoutUndefined(body),
+      where: { id: repoId }, data: withoutUndefined(body),
     })) satisfies RepoResponse);
   });
   app.delete("/repos/:repoId", async (context) => {

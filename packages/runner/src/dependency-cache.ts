@@ -126,6 +126,22 @@ export class DependencyCacheInputMissError extends Error {
   }
 }
 
+/**
+ * NPM_CI cannot be honoured without a root package manifest. This is a
+ * repository-policy failure, not an optional cache miss: falling through to
+ * `not-applicable` would let the provider start with an incomplete workspace.
+ */
+export const DEPENDENCY_PROVISIONING_MANIFEST_MISSING = "dependency-provisioning-manifest-missing" as const;
+
+export class DependencyProvisioningManifestMissingError extends Error {
+  readonly condition = DEPENDENCY_PROVISIONING_MANIFEST_MISSING;
+
+  constructor() {
+    super(DEPENDENCY_PROVISIONING_MANIFEST_MISSING);
+    this.name = "DependencyProvisioningManifestMissingError";
+  }
+}
+
 // Raised while reading one input, before the target list exists.
 class DependencyInputMissSignal extends Error {
   constructor(readonly condition: string) {
@@ -1343,8 +1359,9 @@ export const materializeWorkspaceDependencies = async (
       return { status: "installed", condition: error.condition };
     }
     if (identity === null) {
-      report({ event: "miss", condition: "root-package-manifest-missing" });
-      return { status: "not-applicable", condition: "root-package-manifest-missing" };
+      const error = new DependencyProvisioningManifestMissingError();
+      report({ event: "miss", condition: error.condition });
+      throw error;
     }
     const { key, toolchain, inputs, targets: targetPaths, nativeWorkspaces } = identity;
     const cacheRoot = await ensureCacheRoot(
