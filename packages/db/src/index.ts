@@ -32,6 +32,7 @@ export {
   lockAgentRows,
   lockChainRows,
   lockChainStructure,
+  lockProjectGateDefaults,
   lockRunRow,
   lockTemplateRow,
   lockTemplateStepRows,

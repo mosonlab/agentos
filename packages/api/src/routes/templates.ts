@@ -32,6 +32,10 @@ import {
 
 const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
 const stepOverridesInput = z.record(z.string(), stepOverrideInput);
+const gatesInput = z.object({
+  spec: z.boolean().optional(),
+  merge: z.boolean().optional(),
+}).strict();
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
@@ -40,6 +44,7 @@ const instantiateTemplateInput = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
   stepOverrides: stepOverridesInput.optional(),
+  gates: gatesInput.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;
   if (branchName !== undefined && !isValidBranchName(branchName)) {

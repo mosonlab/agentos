@@ -5,10 +5,12 @@ import {
   canonicalIntegratorBindingRefusal,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
+  gateSlotOf,
   isDirectImplementationStep,
   lockAgentRepoGrant,
   lockAgentRows,
   lockChainRows,
+  lockProjectGateDefaults,
   lockTemplateRow,
   Prisma,
   type PrismaClient,
@@ -37,6 +39,23 @@ export type InstantiateTemplateInput = {
   afterTaskId?: string | undefined;
   /** Per-instantiation assignee changes, keyed by template stepIndex. */
   stepOverrides?: Record<string, { assigneeAgentId: string }> | undefined;
+  /** Per-instantiation approval-gate changes for the two configurable slots. */
+  gates?: { spec?: boolean | undefined; merge?: boolean | undefined } | undefined;
+};
+
+type GateDefaults = { specGateDefault: boolean; mergeGateDefault: boolean };
+
+const DEFAULT_GATE_DEFAULTS: GateDefaults = { specGateDefault: false, mergeGateDefault: false };
+
+const resolvedApprovalGate = (
+  step: { outputKind: string; approvalGate: boolean },
+  gates: InstantiateTemplateInput["gates"],
+  defaults: GateDefaults,
+): boolean => {
+  const slot = gateSlotOf(step);
+  if (slot === "spec") return gates?.spec ?? defaults.specGateDefault ?? step.approvalGate;
+  if (slot === "merge") return gates?.merge ?? defaults.mergeGateDefault ?? step.approvalGate;
+  return step.approvalGate;
 };
 
 const stepOverrideKey = /^[1-9]\d*$/u;
@@ -94,6 +113,7 @@ type EffectiveTemplateStep = {
   override: { assigneeAgentId: string } | undefined;
   assigneeAgentId: string | null;
   assigneeAgent: OverrideAgent | EffectiveTemplateStep["step"]["assigneeAgent"];
+  approvalGate: boolean;
 };
 
 type DispatchPredecessor = {
@@ -121,6 +141,23 @@ const templateRefusal = (
   code: TemplateInstantiationRefusalCode,
   message: string,
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
+
+/**
+ * Read the project defaults while holding the same row mutex used by project
+ * PATCH. The delegate guard keeps the small unit-test doubles that predate
+ * project defaults useful; every real Prisma transaction has this delegate
+ * and therefore takes the lock before any Task can be written.
+ */
+const readProjectGateDefaults = async (
+  tx: Prisma.TransactionClient,
+  projectId: string,
+): Promise<GateDefaults> => {
+  const projectDelegate = (tx as unknown as { project?: unknown }).project;
+  if (projectDelegate === undefined) return DEFAULT_GATE_DEFAULTS;
+  const project = await lockProjectGateDefaults(tx, projectId);
+  if (!project) throw templateRefusal("template_not_found", "Project not found");
+  return project;
+};
 
 const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => layerOf({
   layer: task.chainLayer,
@@ -249,9 +286,26 @@ export const instantiateTemplate = async (
         include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
       });
       if (!template) throw templateRefusal("template_not_found", "Template not found in project");
+      if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
+      const projectGateDefaults = await readProjectGateDefaults(tx, projectId);
+      const slots = new Set(template.steps.map((step) => gateSlotOf(step)).filter((slot) => slot !== null));
+      // Check the slots in a fixed order. In particular, a request that names
+      // both absent slots must report the specification slot first and must
+      // finish before any materialisation write can occur.
+      if (input.gates && Object.prototype.hasOwnProperty.call(input.gates, "spec") && !slots.has("spec")) {
+        throw templateRefusal(
+          "gates_spec_step_absent",
+          `Cannot supply gates.spec for template ${template.name}: specification slot is absent`,
+        );
+      }
+      if (input.gates && Object.prototype.hasOwnProperty.call(input.gates, "merge") && !slots.has("merge")) {
+        throw templateRefusal(
+          "gates_merge_step_absent",
+          `Cannot supply gates.merge for template ${template.name}: merge readiness slot is absent`,
+        );
+      }
       const repo = await tx.repo.findFirst({ where: { id: input.repoId, projectId } });
       if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
-      if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
       if (template.name === "direct-engineer-workflow") {
         const malformedRouteLine = findMalformedRouteLine(input.description);
         if (malformedRouteLine !== null) {
@@ -347,6 +401,7 @@ export const instantiateTemplate = async (
           // assignment decisions. It is replaced with the Agent-row-locked
           // value below before any Task is written.
           assigneeAgent: null,
+          approvalGate: resolvedApprovalGate(step, input.gates, projectGateDefaults),
         };
       });
       const chainId = randomUUID();
@@ -566,7 +621,7 @@ export const instantiateTemplate = async (
             description: context,
             assigneeType: step.assigneeType,
             assigneeAgentId: effective.assigneeAgentId,
-            approvalGate: step.approvalGate,
+            approvalGate: effective.approvalGate,
             opensPullRequest: step.opensPullRequest,
             chainId,
             chainIndex: step.stepIndex - conditionalOrdinalOffset,
