@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  authorityAfterHeartbeat,
-  authorityFor,
   ControlPlaneError,
+  type Authority,
   type CancellationRequest,
-  type HeartbeatResult,
 } from "./api.js";
 import { DELIVERY_LEASE_RESERVE_MS, MIN_DELIVERY_BUDGET_MS } from "./network-retry.js";
 import {
@@ -65,15 +63,13 @@ const rejection = (code?: string): Error => new ControlPlaneError(409, "rejected
 
 const createLease = (
   clock: FakeClock,
-  send: (evidence: RunLeaseEvidence) => Promise<HeartbeatResult>,
+  send: (evidence: RunLeaseEvidence) => Promise<Authority>,
   overrides: Partial<Parameters<typeof createRunLease<Provider>>[0]> = {},
 ) => createRunLease<Provider>({
   heartbeatIntervalMs: 10,
   leaseSeconds: 60,
   initialPhase: { name: "provision", startedAt: new Date(clock.now()) },
   send,
-  authorityFor,
-  authorityAfterHeartbeat,
   stopProvider: async () => ({ processAlive: false }),
   acknowledgeCancellation: async () => undefined,
   clock,
@@ -90,7 +86,7 @@ test("one renewal loop stays continuous across provision, execute, and deliver",
       phase: String(evidence.inFlightTool?.name ?? "execute"),
       startRunInFlight,
     });
-    return { ok: true, cancellation: null };
+    return { held: true };
   });
 
   try {
@@ -158,7 +154,7 @@ test("revocation during an awaited launch drains the provider before launch retu
   let finishLaunch!: (provider: Provider) => void;
   const launchResult = new Promise<Provider>((resolve) => { finishLaunch = resolve; });
   const stops: Array<{ provider: Provider; reason: string }> = [];
-  const lease = createLease(clock, async () => ({ ok: true, cancellation: null }), {
+  const lease = createLease(clock, async () => ({ held: true }), {
     stopProvider: async (provider, reason) => {
       stops.push({ provider, reason });
       return { processAlive: false };
@@ -184,7 +180,7 @@ test("a cancellation stops the provider and acknowledges its durable request onc
   const acknowledgements: CancellationRequest[] = [];
   const stops: Provider[] = [];
   const request = cancellation("cancel-1");
-  const lease = createLease(clock, async () => ({ ok: false, cancellation: request }), {
+  const lease = createLease(clock, async () => ({ held: false, reason: "cancelled", request }), {
     stopProvider: async (provider) => { stops.push(provider); return { processAlive: false }; },
     acknowledgeCancellation: async (received) => { acknowledgements.push(received); },
   });
@@ -248,7 +244,7 @@ test("the delivery deadline is measured from when its renewal was sent", async (
   clock.time = 1_000;
   const lease = createLease(clock, async () => {
     clock.time += 9_000;
-    return { ok: true, cancellation: null };
+    return { held: true };
   });
   lease.abandonProviderLaunch();
   try {
@@ -278,7 +274,7 @@ test("a later renewal rejection blocks the next remote write", async () => {
   const lease = createLease(clock, async () => {
     calls += 1;
     if (calls > 1) throw rejection();
-    return { ok: true, cancellation: null };
+    return { held: true };
   });
   lease.abandonProviderLaunch();
   try {

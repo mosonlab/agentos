@@ -20,11 +20,15 @@ import {
   type RuntimeHandle,
 } from "./adapters.js";
 import {
-  controlPlane as defaultControlPlane,
   isDependencyProvisioning,
+  openControlPlane,
+  retriableStartupError,
   type ClaimedTask,
   type ControlPlane,
+  type PreflightReport,
+  type RunSession,
   type SessionEventPayload,
+  type SessionTaskOutput,
   type SessionTaskOutputStatus,
 } from "./api.js";
 import {
@@ -66,19 +70,17 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 const persistRegressionOutputHandoff = async (
-  controlPlane: ControlPlane,
-  config: RunnerConfig,
-  claim: ClaimedTask,
-  handoff: Parameters<ControlPlane["persistSessionTaskOutput"]>[2],
+  session: RunSession,
+  handoff: SessionTaskOutput,
   sink: (event: AdapterEvent) => void,
 ): Promise<void> => {
   const attempts = 3;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      await controlPlane.persistSessionTaskOutput(config, claim, handoff);
+      await session.publishOutput(handoff);
       return;
     } catch (error: unknown) {
-      if (attempt === attempts || !controlPlane.retriableStartupError(error)) throw error;
+      if (attempt === attempts || !retriableStartupError(error)) throw error;
       sink({
         source: "RUNNER",
         type: "REGRESSION_OUTPUT_HANDOFF_RETRYING",
@@ -125,7 +127,7 @@ const cleanup = async (
   workspace: Workspace | null,
   retain: boolean,
   alreadyDurable = false,
-  controlPlane: ControlPlane = defaultControlPlane,
+  controlPlane: ControlPlane = openControlPlane(config),
 ): Promise<WorkspaceDisposal> => {
   if (!workspace) return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage: null };
   return disposeWorkspace(config, { source: "runner", claim }, {
@@ -165,7 +167,8 @@ export const executeClaim = async (
   dependencies: ExecuteClaimDependencies = {},
 ): Promise<void> => {
   const adapter = dependencies.adapter ?? adapters[claim.runner];
-  const controlPlane = dependencies.controlPlane ?? defaultControlPlane;
+  const controlPlane = dependencies.controlPlane ?? openControlPlane(config);
+  const session = controlPlane.openRun(claim);
   let workspace: Workspace | null = null;
   let scratch: AgentScratch | null = null;
   let handle: RuntimeHandle | null = null;
@@ -202,9 +205,7 @@ export const executeClaim = async (
           workspace.path,
         );
       } catch (error: unknown) {
-        await controlPlane.appendActivity(
-          config,
-          claim,
+        await session.note(
           `Unable to observe run worktree containment: ${errorMessage(error)}`,
           { stream: "runner" },
         ).catch(() => undefined);
@@ -217,13 +218,9 @@ export const executeClaim = async (
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     leaseSeconds: config.leaseSeconds,
     initialPhase: { name: "provision", startedAt: claimStartedAt },
-    send: (evidence) => controlPlane.heartbeat(config, claim, evidence),
-    authorityFor: controlPlane.authorityFor,
-    authorityAfterHeartbeat: controlPlane.authorityAfterHeartbeat,
+    send: (evidence) => session.heartbeat(evidence),
     stopProvider: (target, reason) => adapter.kill(target, reason),
-    acknowledgeCancellation: async (request) => controlPlane.acknowledgeCancellation(
-      config,
-      claim,
+    acknowledgeCancellation: async (request) => session.acknowledgeCancellation(
       request,
       workspace,
       await worktreeContainmentReport(),
@@ -255,7 +252,7 @@ export const executeClaim = async (
         // therefore remains the head of the queue for the next flush attempt,
         // while the single worker prevents a later batch overtaking it.
         const batch = pendingEvents.slice(0, 250);
-        await controlPlane.appendEvents(config, claim, batch, handle?.providerConversationId);
+        await session.emit(batch, handle?.providerConversationId);
         pendingEvents.splice(0, batch.length);
       }
     })().finally(() => { eventFlushPromise = null; });
@@ -304,7 +301,7 @@ export const executeClaim = async (
     if (claimedTemplateStep === undefined
       || (claimedTemplateStep !== null && typeof claimedTemplateStep.provisionDependencies !== "boolean")) {
       const condition = "template-step-provision-dependencies-missing";
-      await controlPlane.completeRun(config, claim, {
+      await session.finish({
         exitCode: null,
         terminalEventSeen: false,
         terminalSuccess: false,
@@ -325,7 +322,7 @@ export const executeClaim = async (
     // both terminal fields so old and new control planes can expose it.
     if (!isDependencyProvisioning((claim.repo as { dependencyProvisioning?: unknown } | undefined)?.dependencyProvisioning)) {
       const condition = "dependency-provisioning-missing";
-      await controlPlane.completeRun(config, claim, {
+      await session.finish({
         exitCode: null,
         terminalEventSeen: false,
         terminalSuccess: false,
@@ -346,7 +343,7 @@ export const executeClaim = async (
     // misconfigured; the run is failed closed and non-retryable rather than
     // executed, because retrying it here would just repeat the violation.
     if (claim.executionMode === "mechanical") {
-      await controlPlane.completeRun(config, claim, {
+      await session.finish({
         exitCode: null,
         terminalEventSeen: false,
         terminalSuccess: false,
@@ -363,7 +360,7 @@ export const executeClaim = async (
     // this boot gate consumes that verdict and must not recompute a Task budget.
     if (claim.run.runNumber > claim.run.maxRunsPerTask) {
       const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, false, false, controlPlane);
-      await controlPlane.completeRun(config, claim, {
+      await session.finish({
         exitCode: null,
         terminalEventSeen: false,
         terminalSuccess: false,
@@ -388,9 +385,7 @@ export const executeClaim = async (
       // This is deliberately a fenced activity write with no fallback: the
       // reviewer must have durable evidence of the dependency-free checkout
       // before its adapter is preflighted or launched.
-      await controlPlane.appendActivity(
-        config,
-        claim,
+      await session.note(
         "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
         { stream: "runner" },
       );
@@ -410,7 +405,7 @@ export const executeClaim = async (
       if (!authority.held && authority.reason === "cancelled") return;
       const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-      await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+      await session.recordCleanup(cleanupOutcome).catch((error: unknown) => {
         console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
       });
       return;
@@ -422,7 +417,7 @@ export const executeClaim = async (
       const worktreeReport = await worktreeContainmentReport();
       const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0, false, controlPlane);
       const retainedPath = await sessionConfigLease.retainedPath();
-      await controlPlane.completeRun(config, claim, {
+      await session.finish({
         ...evidence,
         failureClass: classified.failureClass,
         failureReason: appendRetainedSessionConfig(preflight.error ?? "Preflight failed", retainedPath),
@@ -494,7 +489,7 @@ export const executeClaim = async (
     // invocation actually handed to the provider.
     const dispatchedPrompt = claim.resume?.input ?? prompt;
     const manifest = manifestFor(spec, dispatchedPrompt);
-    await controlPlane.startRun(config, claim, {
+    await session.start({
       adapterVersion: ADAPTER_VERSION,
       cliVersion: preflight.cliVersion ?? "unknown",
       authMode: preflight.authMode,
@@ -518,7 +513,7 @@ export const executeClaim = async (
       try {
         const handoff = await readRegressionOutputHandoff(config, claim, workspace);
         if (handoff) {
-          await persistRegressionOutputHandoff(controlPlane, config, claim, handoff, sink);
+          await persistRegressionOutputHandoff(session, handoff, sink);
           regressionHandoffPersisted = true;
           sink({
             source: "RUNNER",
@@ -543,7 +538,7 @@ export const executeClaim = async (
       let outputStatus: SessionTaskOutputStatus | null = null;
       let statusFailure: string | null = null;
       try {
-        outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
+        outputStatus = await session.outputStatus();
       } catch (error: unknown) {
         statusFailure = errorMessage(error);
       }
@@ -608,7 +603,7 @@ export const executeClaim = async (
               let statusCheckError: string | null = null;
               if (!workspaceChanged) {
                 try {
-                  const remediatedStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
+                  const remediatedStatus = await session.outputStatus();
                   remediated = remediatedStatus?.outputPersisted === true
                     || remediatedStatus?.outputSatisfiedByPriorRun === true;
                 } catch (error: unknown) {
@@ -681,7 +676,7 @@ export const executeClaim = async (
     } catch (error: unknown) {
       const message = `Unable to snapshot git result: ${errorMessage(error)}`;
       sink({ source: "RUNNER", type: "WORKSPACE_RESULT_SNAPSHOT_FAILED", payload: { message } });
-      await controlPlane.appendActivity(config, claim, message, { stream: "runner" }).catch((activityError: unknown) => {
+      await session.note(message, { stream: "runner" }).catch((activityError: unknown) => {
         sink({
           source: "RUNNER",
           type: "WORKSPACE_RESULT_SNAPSHOT_REPORT_FAILED",
@@ -699,7 +694,7 @@ export const executeClaim = async (
       && runLease.held;
     if (disconnectCandidate) {
       try {
-        const outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
+        const outputStatus = await session.outputStatus();
         const expectedKind = "result";
         if (outputStatus?.outputPersisted !== true) {
           throw new Error(`No persisted ${expectedKind} output exists for this Run`);
@@ -748,14 +743,12 @@ export const executeClaim = async (
       }
     }
     let prWorkflowOutputs: readonly PrWorkflowOutput[] | undefined;
-    const templateStep = claim.task.templateStep as (NonNullable<ClaimedTask["task"]["templateStep"]> & {
-      taskTemplate?: { name?: string };
-    }) | null;
-    const canonicalPrDelivery = templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
+    const templateStep = claim.task.templateStep;
+    const canonicalPrDelivery = templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
       && (templateStep.outputKind === "implementation" || templateStep.outputKind === "fixed-implementation");
     if (canonicalPrDelivery && runLease.held) {
       try {
-        const status = await controlPlane.readSessionTaskOutputStatus(config, claim) as (
+        const status = await session.outputStatus() as (
           SessionTaskOutputStatus & { prWorkflowOutputs?: readonly PrWorkflowOutput[] }
         ) | null;
         if (!status || !Array.isArray(status.prWorkflowOutputs)) {
@@ -783,7 +776,7 @@ export const executeClaim = async (
       if (!authority.held && (authority.reason === "cancelled" || authority.reason === "waiting-inbox")) return;
       const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-      await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+      await session.recordCleanup(cleanupOutcome).catch((error: unknown) => {
         console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
       });
       return;
@@ -823,7 +816,7 @@ export const executeClaim = async (
           {
             ...(capturedHeadSha ? { headSha: capturedHeadSha } : {}),
             ...(prWorkflowOutputs ? { prWorkflowOutputs } : {}),
-            recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
+            recordPublication: (branch) => session.publishBranch(branch),
             retryOptions,
           },
         ));
@@ -850,15 +843,13 @@ export const executeClaim = async (
     if (!succeeded && cleaned.salvage) {
       delivery = cleaned.salvage;
       if (cleaned.salvage.headSha) gitResult = { ...gitResult, headSha: cleaned.salvage.headSha };
-      await controlPlane.appendActivity(config, claim,
+      await session.note(
         cleaned.salvage.deliveryInstructions ?? cleaned.salvage.pushError ?? "WIP salvage attempted",
         { stream: "runner" }).catch(() => undefined);
     }
     if (succeeded && postDeliveryDisconnectTolerated) {
       const providerError = summarizeEvidence(evidence.providerError) ?? "no providerError reported";
-      await controlPlane.appendActivity(
-        config,
-        claim,
+      await session.note(
         `A provider disconnect after delivery was tolerated: ${providerError}`,
         { stream: "runner" },
       ).catch((error: unknown) => {
@@ -918,7 +909,7 @@ export const executeClaim = async (
     const completionEvidence = terminalFailureReason
       ? { ...acceptedEvidence, terminalSuccess: false }
       : acceptedEvidence;
-    await controlPlane.completeRun(config, claim, {
+    await session.finish({
       exitCode: completionEvidence.exitCode,
       signal: completionEvidence.signal,
       terminalEventSeen: completionEvidence.terminalEventSeen,
@@ -975,7 +966,7 @@ export const executeClaim = async (
       if (workspace) {
         const cleaned = await cleanup(config, claim, workspace, false, false, controlPlane);
         const { salvage: _salvage, ...cleanupOutcome } = cleaned;
-        await controlPlane.recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((reportError: unknown) => {
+        await session.recordCleanup(cleanupOutcome).catch((reportError: unknown) => {
           console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(reportError)}`);
         });
       }
@@ -996,8 +987,8 @@ export const executeClaim = async (
     if (sessionDisposal.cleanupFailureReason) {
       failureReason = `${failureReason}; scratch cleanup failed: ${sessionDisposal.cleanupFailureReason}`;
     }
-    await controlPlane.appendActivity(config, claim, message, { stream: "stderr" }).catch(() => undefined);
-    await controlPlane.completeRun(config, claim, {
+    await session.note(message, { stream: "stderr" }).catch(() => undefined);
+    await session.finish({
       exitCode: evidence.exitCode,
       signal: null,
       terminalEventSeen: false,
@@ -1044,9 +1035,9 @@ export const executeClaim = async (
 
 export const pollForTask = async (
   config: RunnerConfig,
-  controlPlane: ControlPlane = defaultControlPlane,
+  controlPlane: ControlPlane = openControlPlane(config),
 ): Promise<boolean> => {
-  const claim = await controlPlane.claim(config);
+  const claim = await controlPlane.claim();
   if (!claim) return false;
   console.log(`Claimed run ${claim.run.id} for task ${claim.task.id} via ${claim.runner.toLowerCase()}`);
   await executeClaim(config, claim, { controlPlane });
@@ -1076,7 +1067,6 @@ const reportStartupStateWithRetry = async (
   send: () => Promise<void>,
   options: StartupReportRetryOptions,
 ): Promise<void> => {
-  const controlPlane = options.controlPlane ?? defaultControlPlane;
   const attempts = options.attempts ?? STARTUP_REPORT_ATTEMPTS;
   if (!Number.isSafeInteger(attempts) || attempts < 1) throw new Error("startup report attempts must be a positive integer");
   const wait = options.wait ?? waitBeforeStartupReportRetry;
@@ -1089,7 +1079,7 @@ const reportStartupStateWithRetry = async (
       await send();
       return;
     } catch (error: unknown) {
-      if (attempt >= attempts || !controlPlane.retriableStartupError(error)) throw error;
+      if (attempt >= attempts || !retriableStartupError(error)) throw error;
       onRetry(runner, attempt, attempts);
       await wait(attempt);
     }
@@ -1099,10 +1089,10 @@ const reportStartupStateWithRetry = async (
 const reportPreflightWithRetry = async (
   config: RunnerConfig,
   runner: RunnerKind,
-  result: Parameters<ControlPlane["reportPreflight"]>[2],
+  result: PreflightReport,
   options: StartupReportRetryOptions,
 ): Promise<void> => reportStartupStateWithRetry(
-  runner, () => (options.controlPlane ?? defaultControlPlane).reportPreflight(config, runner, result), options,
+  runner, () => (options.controlPlane ?? openControlPlane(config)).reportPreflight(runner, result), options,
 );
 
 const reportAvailabilityWithRetry = async (
@@ -1111,7 +1101,7 @@ const reportAvailabilityWithRetry = async (
   options: StartupReportRetryOptions,
 ): Promise<void> => reportStartupStateWithRetry(
   availability.runner,
-  async () => { await (options.controlPlane ?? defaultControlPlane).reportCliAvailability(config, availability); },
+  async () => { await (options.controlPlane ?? openControlPlane(config)).reportCliAvailability(availability); },
   options,
 );
 
@@ -1165,7 +1155,7 @@ export const reportCliAvailabilityHeartbeat = async (
   config: RunnerConfig,
   options: AvailabilityHeartbeatOptions = {},
 ): Promise<void> => {
-  const controlPlane = options.controlPlane ?? defaultControlPlane;
+  const controlPlane = options.controlPlane ?? openControlPlane(config);
   const availability = await probeSupportedCliAvailability(config);
   const onReportError = options.onReportError ?? ((probe: CliAvailability, error: unknown) => {
     console.error(`Failed to report ${probe.runner.toLowerCase()} runner CLI availability`, error);
@@ -1176,14 +1166,14 @@ export const reportCliAvailabilityHeartbeat = async (
   for (const runner of SUPPORTED_RUNNERS) {
     let revalidatePreflight = false;
     try {
-      ({ revalidatePreflight } = await controlPlane.reportCliAvailability(config, availability[runner]));
+      ({ revalidatePreflight } = await controlPlane.reportCliAvailability(availability[runner]));
     } catch (error: unknown) {
       onReportError(availability[runner], error);
       continue;
     }
     if (revalidatePreflight && availability[runner].available) {
       try {
-        await controlPlane.reportPreflight(config, runner, await runBackendPreflight(config, runner));
+        await controlPlane.reportPreflight(runner, await runBackendPreflight(config, runner));
       } catch (error: unknown) {
         onPreflightError(availability[runner], error);
       }

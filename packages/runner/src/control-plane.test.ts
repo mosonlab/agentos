@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  authorityAfterHeartbeat,
   authorityFor,
   ControlPlaneError,
-  readSessionTaskOutputStatus,
+  openRunSession,
   retriableStartupError,
+  type RunSessionClaim,
 } from "./api.js";
+
+const session = (apiUrl = "http://anneal.test") => openRunSession(
+  { apiUrl, runnerToken: "runner-token", apiTimeoutMs: 1000 } as never,
+  { run: { id: "run-1" }, fencingToken: "fence", sessionToken: "session-token" } satisfies RunSessionClaim,
+);
 
 test("ControlPlaneError classifies Run authority without leaking HTTP casts to callers", () => {
   assert.deepEqual(authorityFor(new ControlPlaneError(409, "stale fence")), {
@@ -22,14 +27,23 @@ test("ControlPlaneError classifies Run authority without leaking HTTP casts to c
   assert.deepEqual(authorityFor(new Error("connection reset")), { held: true });
 });
 
-test("heartbeat cancellation is an Authority verdict with its durable request", () => {
+test("heartbeat cancellation is an Authority verdict with its durable request", async () => {
   const request = { requestId: "cancel-1", reason: "operator stop", requestedAt: new Date(0).toISOString() };
-  assert.deepEqual(authorityAfterHeartbeat({ ok: false, cancellation: request }), {
-    held: false,
-    reason: "cancelled",
-    request,
-  });
-  assert.deepEqual(authorityAfterHeartbeat({ ok: true, cancellation: null }), { held: true });
+  const originalFetch = globalThis.fetch;
+  const answer = (body: unknown): void => {
+    globalThis.fetch = async () => new Response(JSON.stringify(body), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  };
+  const progress = { processAlive: true, lastProgressEventAt: null, inFlightTool: null };
+  try {
+    answer({ ok: false, cancellation: request });
+    assert.deepEqual(await session().heartbeat(progress), { held: false, reason: "cancelled", request });
+    answer({ ok: true, cancellation: null });
+    assert.deepEqual(await session().heartbeat(progress), { held: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("startup retries only transport failures and control-plane server errors", () => {
@@ -60,14 +74,7 @@ test("session status validates and normalizes the nested PR workflow evidence pr
     },
   }), { status: 200, headers: { "Content-Type": "application/json" } });
   try {
-    const status = await readSessionTaskOutputStatus(
-      {
-        apiUrl: "http://anneal.test",
-        runnerToken: "runner-token",
-        apiTimeoutMs: 1000,
-      } as never,
-      { run: { id: "run-1" }, fencingToken: "fence", sessionToken: "session-token" },
-    );
+    const status = await session().outputStatus();
     assert.deepEqual(status?.prWorkflowOutputs, [output]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -95,14 +102,7 @@ test("session status rejects malformed PR workflow evidence entries", async () =
   }), { status: 200, headers: { "Content-Type": "application/json" } });
   try {
     await assert.rejects(
-      readSessionTaskOutputStatus(
-        {
-          apiUrl: "http://anneal.test",
-          runnerToken: "runner-token",
-          apiTimeoutMs: 1000,
-        } as never,
-        { run: { id: "run-1" }, fencingToken: "fence", sessionToken: "session-token" },
-      ),
+      session().outputStatus(),
       /invalid task output status/u,
     );
   } finally {
@@ -132,10 +132,7 @@ test("session status accepts the exact ordered final PR evidence set including S
     },
   }), { status: 200, headers: { "Content-Type": "application/json" } });
   try {
-    const status = await readSessionTaskOutputStatus(
-      { apiUrl: "http://anneal.test", runnerToken: "runner-token", apiTimeoutMs: 1000 } as never,
-      { run: { id: "run-1" }, fencingToken: "fence", sessionToken: "session-token" },
-    );
+    const status = await session().outputStatus();
     assert.deepEqual(status?.prWorkflowOutputs, outputs);
   } finally {
     globalThis.fetch = originalFetch;
@@ -165,10 +162,7 @@ for (const malformed of [
     }), { status: 200, headers: { "Content-Type": "application/json" } });
     try {
       await assert.rejects(
-        readSessionTaskOutputStatus(
-          { apiUrl: "http://anneal.test", runnerToken: "runner-token", apiTimeoutMs: 1000 } as never,
-          { run: { id: "run-1" }, fencingToken: "fence", sessionToken: "session-token" },
-        ),
+        session().outputStatus(),
         /invalid task output status/u,
       );
     } finally {

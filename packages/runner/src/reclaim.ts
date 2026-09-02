@@ -2,7 +2,7 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 import {
-  controlPlane as defaultControlPlane,
+  openControlPlane,
   type ControlPlane, type ReclaimOffer, type ReclaimResult,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -143,7 +143,7 @@ export const reclaimWorkspaces = async (
 ): Promise<ReclaimSweep> => {
   const root = resolve(config.workspaceRoot);
   const list = deps.listDirectories ?? listRunDirectories;
-  const controlPlane = deps.controlPlane ?? defaultControlPlane;
+  const controlPlane = deps.controlPlane ?? openControlPlane(config);
   // Pinned once, re-checked before every removal. A root that cannot be
   // resolved has not been provisioned yet, and an unreadable root is not
   // evidence that anything under it is gone — in both cases the sweep asks
@@ -155,7 +155,7 @@ export const reclaimWorkspaces = async (
   });
   if (physicalRoot === null) return { ...empty };
   const directories = await list(physicalRoot);
-  const plan = await controlPlane.fetchReclaimPlan(config, { runnerId: config.runnerId, workspaceRoot: root, directories });
+  const plan = await controlPlane.fetchReclaimPlan({ runnerId: config.runnerId, workspaceRoot: root, directories });
   // An API too old to know the route answers 404. Nothing is reclaimed, nothing
   // is deleted, and the directories stay until an API that speaks the protocol
   // asks for them — leaking beats guessing.
@@ -256,7 +256,7 @@ export const reclaimWorkspaces = async (
   }
 
   if (results.length > 0) {
-    await controlPlane.reportReclaimOutcomes(config, { runnerId: config.runnerId, workspaceRoot: root, results });
+    await controlPlane.reportReclaimOutcomes({ runnerId: config.runnerId, workspaceRoot: root, results });
   }
   return sweep;
 };

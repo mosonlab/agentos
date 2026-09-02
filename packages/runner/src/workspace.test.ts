@@ -141,7 +141,7 @@ test("an explicit false template step skips all dependency inspection after chec
     const workspace = await provisionWorkspace(config, workspaceClaim({
       task: {
         id: "task-review",
-        templateStep: { name: "Code review", provisionDependencies: false },
+        templateStep: { name: "Code review", outputKind: "result", provisionDependencies: false, taskTemplate: { name: "review-workflow" } },
       },
       repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
       run: { id: "run-review", runNumber: 1, targetBranch: "main", branch: "main" },
@@ -175,7 +175,7 @@ test("an explicit true template step keeps the repository dependency policy path
     const workspace = await provisionWorkspace(config, workspaceClaim({
       task: {
         id: "task-implementation",
-        templateStep: { name: "Implementation", provisionDependencies: true },
+        templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
       },
       repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
       run: { id: "run-implementation", runNumber: 1, targetBranch: "main", branch: "main" },

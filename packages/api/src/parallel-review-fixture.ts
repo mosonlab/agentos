@@ -398,8 +398,8 @@ const createParallelReviewHarness = ({
     const first = await claim(firstRunner);
     const second = await claim(secondRunner);
     const reviewTasks = new Set([fixture.solTaskId, fixture.blindTaskId]);
-    assert.ok(reviewTasks.has(first.run.taskId!));
-    assert.ok(reviewTasks.has(second.run.taskId!));
+    assert.ok(reviewTasks.has(first.run.taskId));
+    assert.ok(reviewTasks.has(second.run.taskId));
     assert.notEqual(first.run.taskId, second.run.taskId);
     assert.equal((await getDb().run.findUniqueOrThrow({ where: { id: first.run.id } })).runnerId, firstRunner);
     assert.equal((await getDb().run.findUniqueOrThrow({ where: { id: second.run.id } })).runnerId, secondRunner);

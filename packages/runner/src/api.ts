@@ -15,7 +15,7 @@ export const isDependencyProvisioning = (value: unknown): value is DependencyPro
   && (DEPENDENCY_PROVISIONING_VALUES as readonly string[]).includes(value);
 
 export type CancellationRequest = { requestId: string; reason: string; requestedAt: string };
-export type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null };
+type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null };
 
 export class ControlPlaneError extends Error {
   readonly status: number;
@@ -43,7 +43,7 @@ export const authorityFor = (error: unknown): Authority => {
     : { held: false, reason: "revoked" };
 };
 
-export const authorityAfterHeartbeat = (result: HeartbeatResult): Authority =>
+const authorityAfterHeartbeat = (result: HeartbeatResult): Authority =>
   result.cancellation
     ? { held: false, reason: "cancelled", request: result.cancellation }
     : { held: true };
@@ -60,13 +60,14 @@ export const retriableStartupError = (error: unknown): boolean =>
  */
 export type ClaimedTask = ClaimContract;
 
-/** The fenced Run identity consumed by runner-to-control-plane writes. */
-export type ControlPlaneRunClaim = Pick<ClaimedTask, "fencingToken"> & {
+/**
+ * The claimed Run identity a session is opened for: the fence every
+ * runner-principal write carries, and the session principal the two
+ * session-authenticated routes replace it with.
+ */
+export type RunSessionClaim = Pick<ClaimedTask, "fencingToken" | "sessionToken"> & {
   run: Pick<ClaimedTask["run"], "id">;
 };
-
-/** The session principal consumed by session-authenticated control-plane writes. */
-export type ControlPlaneSessionClaim = ControlPlaneRunClaim & Pick<ClaimedTask, "sessionToken">;
 
 export type SessionEventPayload = {
   seq: number;
@@ -133,7 +134,7 @@ export const claimRequestBody = async (config: RunnerConfig, readStats: StatFs =
   ...await runnerTelemetryBody(config, readStats),
 });
 
-export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | null> => {
+const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | null> => {
   const response = await request(config, "/runner/tasks/claim", {
     method: "POST",
     body: JSON.stringify(await claimRequestBody(config)),
@@ -141,10 +142,10 @@ export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | nul
   return response.status === 204 ? null : await response.json() as ClaimedTask;
 };
 
-export const startRun = async (
+const startRun = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
-  snapshot: Record<string, unknown> & { promptHash: string },
+  claim: RunSessionClaim,
+  snapshot: RunStartSnapshot,
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/start`, {
     method: "POST",
@@ -156,10 +157,10 @@ export const startRun = async (
   });
 };
 
-export const heartbeat = async (
+const heartbeat = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
-  state: { processAlive: boolean; lastProgressEventAt: Date | null; inFlightTool: Record<string, unknown> | null },
+  claim: RunSessionClaim,
+  state: RunProgress,
 ): Promise<HeartbeatResult> => {
   const response = await request(config, `/runner/runs/${claim.run.id}/heartbeat`, {
     method: "POST",
@@ -176,9 +177,9 @@ export const heartbeat = async (
   return response.json() as Promise<HeartbeatResult>;
 };
 
-export const acknowledgeCancellation = async (
+const acknowledgeCancellation = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
+  claim: RunSessionClaim,
   cancellation: CancellationRequest,
   workspace?: { path: string; branch: string; baseSha: string } | null,
   containment: { worktreeContainmentViolations?: string[] } = {},
@@ -228,9 +229,9 @@ export type SessionTaskOutput = {
 /** Persist a mechanically-authored deliverable through the Runner's existing
  * fenced control-plane transport. The script that derives the deliverable
  * never needs control-plane network access or session credentials. */
-export const persistSessionTaskOutput = async (
+const persistSessionTaskOutput = async (
   config: RunnerConfig,
-  claim: ControlPlaneSessionClaim,
+  claim: RunSessionClaim,
   output: SessionTaskOutput,
 ): Promise<void> => {
   await request(config, `/session/runs/${claim.run.id}/output`, {
@@ -242,9 +243,9 @@ export const persistSessionTaskOutput = async (
 
 /** Read the output fact through the Run's session principal. Completion is too
  * late for recovery: by then the provider process and workspace are gone. */
-export const readSessionTaskOutputStatus = async (
+const readSessionTaskOutputStatus = async (
   config: RunnerConfig,
-  claim: ControlPlaneSessionClaim,
+  claim: RunSessionClaim,
 ): Promise<SessionTaskOutputStatus | null> => {
   const response = await request(config, `/session/runs/${claim.run.id}/status`, {
     method: "GET",
@@ -330,9 +331,9 @@ export const readSessionTaskOutputStatus = async (
 /** Durably acknowledge the exact ref immediately after git accepts the push.
  * Terminal completion is intentionally not the first write of this fact: PR
  * work, cleanup, or process loss may happen after publication. */
-export const recordPublishedBranch = async (
+const recordPublishedBranch = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
+  claim: RunSessionClaim,
   pushedBranch: string,
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/publication`, {
@@ -348,10 +349,10 @@ export const recordPublishedBranch = async (
 /** Records cleanup after this runner has lost its live lease. The control plane
  * accepts this only from the recorded runner/fence for an expired or terminal
  * run; unlike completion, it carries no authority over run outcome. */
-export const recordLeaseIndependentCleanup = async (
+const recordLeaseIndependentCleanup = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
-  cleanup: { cleanupStatus: CleanupStatus; cleanupFailureReason?: string; workspaceRetained: boolean },
+  claim: RunSessionClaim,
+  cleanup: RunCleanupReport,
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/cleanup`, {
     method: "POST",
@@ -363,9 +364,9 @@ export const recordLeaseIndependentCleanup = async (
   });
 };
 
-export const appendEvents = async (
+const appendEvents = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
+  claim: RunSessionClaim,
   events: SessionEventPayload[],
   providerConversationId?: string | null,
 ): Promise<void> => {
@@ -381,9 +382,9 @@ export const appendEvents = async (
   });
 };
 
-export const appendActivity = async (
+const appendActivity = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
+  claim: RunSessionClaim,
   body: string,
   metadata: Record<string, unknown> = {},
 ): Promise<void> => {
@@ -440,9 +441,9 @@ export type Completion = {
   failureEnvelope?: FailureEnvelope;
 };
 
-export const completeRun = async (
+const completeRun = async (
   config: RunnerConfig,
-  claim: ControlPlaneRunClaim,
+  claim: RunSessionClaim,
   completion: Completion,
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/complete`, {
@@ -487,7 +488,7 @@ export type ReclaimResult = {
  * its directories, which leaks disk and deletes nothing, and the sweep succeeds
  * again the moment the API is upgraded.
  */
-export const fetchReclaimPlan = async (
+const fetchReclaimPlan = async (
   config: RunnerConfig,
   inventory: { runnerId: string; workspaceRoot: string; directories: string[] },
 ): Promise<ReclaimPlan | null> => {
@@ -501,7 +502,7 @@ export const fetchReclaimPlan = async (
   return response ? await response.json() as ReclaimPlan : null;
 };
 
-export const reportReclaimOutcomes = async (
+const reportReclaimOutcomes = async (
   config: RunnerConfig,
   report: { runnerId: string; workspaceRoot: string; results: ReclaimResult[] },
 ): Promise<void> => {
@@ -514,7 +515,7 @@ export const reportReclaimOutcomes = async (
   });
 };
 
-export const recordReclaimPublication = async (
+const recordReclaimPublication = async (
   config: RunnerConfig,
   body: { runnerId: string; runId: string; pushedBranch: string },
 ): Promise<void> => {
@@ -524,10 +525,10 @@ export const recordReclaimPublication = async (
   });
 };
 
-export const reportPreflight = async (
+const reportPreflight = async (
   config: RunnerConfig,
   runner: RunnerKind,
-  result: { ok: boolean; cliVersion?: string | null; authMode?: string | null; capabilities: Record<string, unknown>; error?: string | null },
+  result: PreflightReport,
 ): Promise<void> => {
   await request(config, "/runner/preflight", {
     method: "POST",
@@ -535,9 +536,9 @@ export const reportPreflight = async (
   });
 };
 
-export const reportCliAvailability = async (
+const reportCliAvailability = async (
   config: RunnerConfig,
-  availability: { runner: RunnerKind; binary: string; available: boolean; resolvedPath: string | null },
+  availability: CliAvailabilityReport,
 ): Promise<{ revalidatePreflight: boolean }> => {
   const response = await request(config, "/runner/availability", {
     method: "POST",
@@ -553,51 +554,117 @@ export const reportCliAvailability = async (
   return { revalidatePreflight: body.revalidatePreflight === true };
 };
 
+/** The launch facts a Run is started with. */
+export type RunStartSnapshot = Record<string, unknown> & { promptHash: string };
+
+/** What a renewal reports about the provider process it is renewing for. */
+export type RunProgress = {
+  processAlive: boolean;
+  lastProgressEventAt: Date | null;
+  inFlightTool: Record<string, unknown> | null;
+};
+
+/** Cleanup recorded after this runner has lost its live lease. */
+export type RunCleanupReport = {
+  cleanupStatus: CleanupStatus;
+  cleanupFailureReason?: string;
+  workspaceRetained: boolean;
+};
+
 /**
- * The runner-to-control-plane seam. The HTTP adapter below owns route paths,
- * fencing envelopes, timeout translation, and error decoding; callers consume
- * domain operations and classify authority through this interface.
+ * One claimed Run's conversation with the control plane.
+ *
+ * The configuration and the fenced claim are bound once, when the session is
+ * opened, so no caller repeats them and none of them can send a write under the
+ * wrong fence. Route paths, fencing envelopes, session credentials, timeout
+ * translation and error decoding stay inside the adapter that implements this;
+ * a caller sees the ten things a Run does and one `Authority` verdict.
  */
-export interface ControlPlane {
-  claim: typeof claimTask;
-  startRun: typeof startRun;
-  heartbeat: typeof heartbeat;
-  appendEvents: typeof appendEvents;
-  appendActivity: typeof appendActivity;
-  completeRun: typeof completeRun;
-  persistSessionTaskOutput: typeof persistSessionTaskOutput;
-  readSessionTaskOutputStatus: typeof readSessionTaskOutputStatus;
-  recordPublishedBranch: typeof recordPublishedBranch;
-  recordLeaseIndependentCleanup: typeof recordLeaseIndependentCleanup;
-  acknowledgeCancellation: typeof acknowledgeCancellation;
-  fetchReclaimPlan: typeof fetchReclaimPlan;
-  reportReclaimOutcomes: typeof reportReclaimOutcomes;
-  recordReclaimPublication: typeof recordReclaimPublication;
-  reportPreflight: typeof reportPreflight;
-  reportCliAvailability: typeof reportCliAvailability;
-  authorityFor(error: unknown): Authority;
-  authorityAfterHeartbeat(result: HeartbeatResult): Authority;
-  retriableStartupError(error: unknown): boolean;
+export interface RunSession {
+  /** Publish the launch manifest that makes the Run durable. */
+  start(snapshot: RunStartSnapshot): Promise<void>;
+  /** Renew the lease and report whether this runner still owns the Run. */
+  heartbeat(progress: RunProgress): Promise<Authority>;
+  /** Append one operator-visible activity line. An empty body is a no-op. */
+  note(body: string, metadata?: Record<string, unknown>): Promise<void>;
+  /** Append a batch of Session events. An empty batch is a no-op. */
+  emit(events: SessionEventPayload[], providerConversationId?: string | null): Promise<void>;
+  /** Persist a mechanically-authored deliverable under the Run's session principal. */
+  publishOutput(output: SessionTaskOutput): Promise<void>;
+  /** Read the output fact under the Run's session principal. */
+  outputStatus(): Promise<SessionTaskOutputStatus | null>;
+  /** Durably acknowledge the exact ref immediately after git accepts the push. */
+  publishBranch(pushedBranch: string): Promise<void>;
+  /** Record cleanup that carries no authority over the Run's outcome. */
+  recordCleanup(cleanup: RunCleanupReport): Promise<void>;
+  /** Settle a cancellation request against the workspace it stopped. */
+  acknowledgeCancellation(
+    cancellation: CancellationRequest,
+    workspace?: { path: string; branch: string; baseSha: string } | null,
+    containment?: { worktreeContainmentViolations?: string[] },
+  ): Promise<void>;
+  /** Write the Run's terminal outcome. */
+  finish(completion: Completion): Promise<void>;
 }
 
-export const controlPlane: ControlPlane = Object.freeze({
-  claim: claimTask,
-  startRun,
-  heartbeat,
-  appendEvents,
-  appendActivity,
-  completeRun,
-  persistSessionTaskOutput,
-  readSessionTaskOutputStatus,
-  recordPublishedBranch,
-  recordLeaseIndependentCleanup,
-  acknowledgeCancellation,
-  fetchReclaimPlan,
-  reportReclaimOutcomes,
-  recordReclaimPublication,
-  reportPreflight,
-  reportCliAvailability,
-  authorityFor,
-  authorityAfterHeartbeat,
-  retriableStartupError,
-});
+/**
+ * The runner-to-control-plane seam for everything outside one Run: claiming
+ * work, sweeping workspaces, and reporting what this daemon can execute. The
+ * configuration is bound once here too, and `openRun` is how a claim becomes
+ * the session above.
+ */
+export interface ControlPlane {
+  claim(): Promise<ClaimedTask | null>;
+  openRun(claim: RunSessionClaim): RunSession;
+  fetchReclaimPlan(
+    inventory: { runnerId: string; workspaceRoot: string; directories: string[] },
+  ): Promise<ReclaimPlan | null>;
+  reportReclaimOutcomes(report: { runnerId: string; workspaceRoot: string; results: ReclaimResult[] }): Promise<void>;
+  recordReclaimPublication(publication: { runId: string; pushedBranch: string }): Promise<void>;
+  reportPreflight(runner: RunnerKind, result: PreflightReport): Promise<void>;
+  reportCliAvailability(availability: CliAvailabilityReport): Promise<{ revalidatePreflight: boolean }>;
+}
+
+export type PreflightReport = {
+  ok: boolean;
+  cliVersion?: string | null;
+  authMode?: string | null;
+  capabilities: Record<string, unknown>;
+  error?: string | null;
+};
+
+export type CliAvailabilityReport = {
+  runner: RunnerKind;
+  binary: string;
+  available: boolean;
+  resolvedPath: string | null;
+};
+
+/** The HTTP implementation of one claimed Run's session. */
+export const openRunSession = (config: RunnerConfig, claim: RunSessionClaim): RunSession => Object.freeze({
+  start: (snapshot) => startRun(config, claim, snapshot),
+  heartbeat: async (progress) => authorityAfterHeartbeat(await heartbeat(config, claim, progress)),
+  note: (body, metadata) => appendActivity(config, claim, body, metadata),
+  emit: (events, providerConversationId) => appendEvents(config, claim, events, providerConversationId),
+  publishOutput: (output) => persistSessionTaskOutput(config, claim, output),
+  outputStatus: () => readSessionTaskOutputStatus(config, claim),
+  publishBranch: (pushedBranch) => recordPublishedBranch(config, claim, pushedBranch),
+  recordCleanup: (cleanup) => recordLeaseIndependentCleanup(config, claim, cleanup),
+  acknowledgeCancellation: (cancellation, workspace, containment) =>
+    acknowledgeCancellation(config, claim, cancellation, workspace, containment),
+  finish: (completion) => completeRun(config, claim, completion),
+} satisfies RunSession);
+
+/** The HTTP implementation of the runner-wide seam. */
+export const openControlPlane = (config: RunnerConfig): ControlPlane => Object.freeze({
+  claim: () => claimTask(config),
+  openRun: (claim) => openRunSession(config, claim),
+  fetchReclaimPlan: (inventory) => fetchReclaimPlan(config, inventory),
+  reportReclaimOutcomes: (report) => reportReclaimOutcomes(config, report),
+  recordReclaimPublication: (publication) => recordReclaimPublication(config, {
+    runnerId: config.runnerId,
+    ...publication,
+  }),
+  reportPreflight: (runner, result) => reportPreflight(config, runner, result),
+  reportCliAvailability: (availability) => reportCliAvailability(config, availability),
+} satisfies ControlPlane);

@@ -174,6 +174,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     id: "task-114",
     chainId: null,
     chainIndex: null,
+    chainLayer: null,
     name: "Find the inbox deadlock",
     description: "work",
     repoId: "repo-1",
@@ -195,6 +196,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   },
   run: {
     id: "run-114",
+    taskId: "task-114",
     runNumber: 1,
     opensPullRequest: false,
     requiresCommit: true,
@@ -236,7 +238,7 @@ const requiredOutputClaim = (remoteUrl: string): ClaimedTask => {
     ...base,
     task: {
       ...base.task,
-      templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true },
+      templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
     },
   };
 };
@@ -247,7 +249,7 @@ const resultOutputClaim = (remoteUrl: string): ClaimedTask => {
     ...base,
     task: {
       ...base.task,
-      templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true },
+      templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
     },
   };
 };
@@ -278,7 +280,7 @@ const regressionOutputClaim = (remoteUrl: string): ClaimedTask => {
       ...base.task,
       chainId: "chain-1",
       chainIndex: 5,
-      templateStep: { name: "Regression verification", outputKind: REGRESSION_OUTPUT_KIND, provisionDependencies: true },
+      templateStep: { name: "Regression verification", outputKind: REGRESSION_OUTPUT_KIND, provisionDependencies: true, taskTemplate: { name: "regression-workflow" } },
     },
   };
 };
@@ -608,7 +610,7 @@ test("a Regression mechanical output handoff retries a transient control-plane f
     await chmod(agentBinary, 0o755);
     let attempts = 0;
     const controlPlane = createControlPlaneDouble({
-      persistSessionTaskOutput: async () => {
+      publishOutput: async () => {
         attempts += 1;
         if (attempts === 1) throw new ControlPlaneError(500, "transaction expired");
       },
@@ -641,7 +643,7 @@ test("Regression v2 never resumes the model to remediate an absent mechanical ha
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({
+      outputStatus: async () => outputStatus({
         outputKind: REGRESSION_OUTPUT_KIND,
         outputRemediationAllowed: true,
       }).task,
@@ -679,7 +681,7 @@ test("a successful run remediates its missing required output in the same provid
 
     let statusReads = 0;
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => {
+      outputStatus: async () => {
         statusReads += 1;
         return outputStatus({ outputPersisted: statusReads >= 2 }).task;
       },
@@ -725,7 +727,7 @@ test("canonical PR evidence handoff failures are flushed before completion", asy
       // The regular required-output check succeeds. The canonical PR projection
       // is deliberately absent, which must fail closed and leave a durable
       // diagnostic event rather than silently proceeding with generic delivery.
-      readSessionTaskOutputStatus: async () => outputStatus({ outputPersisted: true }).task,
+      outputStatus: async () => outputStatus({ outputPersisted: true }).task,
     });
 
     await executeClaim(
@@ -756,7 +758,7 @@ test("canonical PR evidence handoff does not overwrite an earlier terminal failu
     await writeFile(agentBinary, succeedingAgent);
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({
+      outputStatus: async () => outputStatus({
         outputPersisted: false,
         outputRemediationAllowed: false,
       }).task,
@@ -788,7 +790,7 @@ test("an immutable output satisfied by a prior Run skips remediation", async () 
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({
+      outputStatus: async () => outputStatus({
           outputRemediationAllowed: false,
           outputSatisfiedByPriorRun: true,
       }).task,
@@ -814,7 +816,7 @@ test("missing output with no provider conversation reports remediation unavailab
     await writeFile(agentBinary, succeedingAgent);
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus().task,
+      outputStatus: async () => outputStatus().task,
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
@@ -841,7 +843,7 @@ test("a failed output status read is diagnosed without attempting remediation", 
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => {
+      outputStatus: async () => {
         throw new ControlPlaneError(503, "status unavailable");
       },
     });
@@ -880,7 +882,7 @@ test("remediation that still leaves output missing fails with provider evidence"
     await writeFile(agentBinary, remediatingAgent(remediationPrompt, [], remediationResult));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus().task,
+      outputStatus: async () => outputStatus().task,
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
@@ -934,13 +936,14 @@ test("cancellation during remediation drains the resumed handle before ACK", asy
     let acknowledgementCount = 0;
     const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus().task,
+      outputStatus: async () => outputStatus().task,
       heartbeat: async () => {
-        if (!resumeReturning || cancellationSent) return { ok: true, cancellation: null };
+        if (!resumeReturning || cancellationSent) return { held: true };
         cancellationSent = true;
         return {
-          ok: false,
-          cancellation: { requestId: "cancel-remediation", reason: "operator stop", requestedAt: new Date(0).toISOString() },
+          held: false,
+          reason: "cancelled",
+          request: { requestId: "cancel-remediation", reason: "operator stop", requestedAt: new Date(0).toISOString() },
         };
       },
       acknowledgeCancellation: async () => {
@@ -976,7 +979,7 @@ test("remediation cannot change workspace HEAD or publish its changes", async ()
     await chmod(agentBinary, 0o755);
     let statusReads = 0;
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => {
+      outputStatus: async () => {
         statusReads += 1;
         return outputStatus({ outputPersisted: statusReads >= 2 }).task;
       },
@@ -1012,7 +1015,7 @@ test("the original Run budget continues through remediation", async () => {
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus().task,
+      outputStatus: async () => outputStatus().task,
     });
     let initialHandle: RuntimeHandle | null = null;
     let remediationHandle: RuntimeHandle | null = null;
@@ -1144,7 +1147,7 @@ for (const fixture of explicitTerminalFailureFixtures) {
       await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
       await chmod(agentBinary, 0o755);
       const controlPlane = createControlPlaneDouble({
-        readSessionTaskOutputStatus: async () => matchingResultOutputStatus(root),
+        outputStatus: async () => matchingResultOutputStatus(root),
       });
 
       await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
@@ -1178,7 +1181,7 @@ test("a missing terminal event with matching server output succeeds without a lo
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("missing"));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => matchingResultOutputStatus(root),
+      outputStatus: async () => matchingResultOutputStatus(root),
     });
     const promotedClaim = resultOutputClaim(remote);
     promotedClaim.run.branch = "configured-delivery";
@@ -1224,7 +1227,7 @@ test("transport-noise stderr does not suppress post-delivery disconnect promotio
     ));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => matchingResultOutputStatus(root),
+      outputStatus: async () => matchingResultOutputStatus(root),
     });
     const promotedClaim = resultOutputClaim(remote);
     promotedClaim.run.branch = "configured-delivery";
@@ -1265,7 +1268,7 @@ test("a run-as reader includes an otherwise protected receipt in recovery audit"
     ].join("\n"));
     await chmod(launcher, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => matchingResultOutputStatus(root),
+      outputStatus: async () => matchingResultOutputStatus(root),
     });
     const promotedClaim = resultOutputClaim(remote);
     promotedClaim.run.branch = "configured-delivery";
@@ -1312,7 +1315,7 @@ test("the real task_output MCP receipt promotes a delivered disconnect", async (
     await writeFile(agentBinary, mcpDeliveredDisconnectAgent);
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => {
+      outputStatus: async () => {
         const delivered = receivedOutputs.at(-1);
         return outputStatus({
           outputKind: "result",
@@ -1355,7 +1358,7 @@ test("exit code 0 with no persisted output stays FAILED", async () => {
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: false }).task,
+      outputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: false }).task,
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
@@ -1380,7 +1383,7 @@ test("persisted output with no server-side identity stays FAILED even with a mat
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true, output: null }).task,
+      outputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true, output: null }).task,
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
@@ -1407,7 +1410,7 @@ for (const fixture of rejectedServerIdentityFixtures) {
       await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
       await chmod(agentBinary, 0o755);
       const controlPlane = createControlPlaneDouble({
-        readSessionTaskOutputStatus: async () => outputStatus({
+        outputStatus: async () => outputStatus({
           outputKind: "result",
           outputPersisted: true,
           output: fixture.output(root),
@@ -1448,8 +1451,8 @@ test("a tolerance-activity failure does not demote a qualified promotion", async
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => matchingResultOutputStatus(root),
-      appendActivity: async (_config, _claim, body) => {
+      outputStatus: async () => matchingResultOutputStatus(root),
+      note: async (body) => {
         if (body.includes("provider disconnect after delivery was tolerated")) throw new Error("activity unavailable");
       },
     });
@@ -1485,7 +1488,7 @@ test("a failed delivery never claims that its provider disconnect was tolerated"
     );
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => matchingResultOutputStatus(root),
+      outputStatus: async () => matchingResultOutputStatus(root),
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
@@ -1510,7 +1513,7 @@ test("output lookup errors preserve the original PROTOCOL_ERROR and are reported
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => {
+      outputStatus: async () => {
         throw new ControlPlaneError(503, "output status unavailable");
       },
     });
@@ -1539,7 +1542,7 @@ test("rewritten local receipt cannot override a mismatched server commit SHA", a
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("mismatched"));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({
+      outputStatus: async () => outputStatus({
         outputKind: "result",
         outputPersisted: true,
         output: { runId: "run-114", kind: "result", commitSha: "a".repeat(40) },
@@ -1568,7 +1571,7 @@ test("nonzero exit with persisted output stays FAILED", async () => {
     await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching", 1));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
+      outputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
@@ -1601,7 +1604,7 @@ test("timeout terminationReason with persisted output stays FAILED", async () =>
       },
     };
     const controlPlane = createControlPlaneDouble({
-      readSessionTaskOutputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
+      outputStatus: async () => outputStatus({ outputKind: "result", outputPersisted: true }).task,
     });
 
     await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
@@ -1629,7 +1632,7 @@ test("output the agent already produced survives a delivery-phase failure", asyn
     await chmod(agentBinary, 0o755);
 
     const controlPlane = createControlPlaneDouble({
-      appendEvents: async () => {
+      emit: async () => {
       // The event flush the runner performs once the agent is gone, on its way
       // into delivery. A dropped connection there is ordinary — and it throws
       // out of the try block, into the catch that reports the run.
