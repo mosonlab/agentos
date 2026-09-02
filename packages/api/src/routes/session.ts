@@ -10,6 +10,7 @@ import {
   runOwnsMergeOutcome,
   selectAuthorization,
   taskIsIntegratorStep,
+  isRegressionVerificationOutputKind,
   decidePrHandoff,
   decideRunOutputSatisfaction,
   PR_HANDOFF_KINDS,
@@ -300,6 +301,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         {
           outputKind: run.task ? requiredOutputKind(run.task.templateStep) : null,
           immutableOncePersisted: outputIsImmutableOncePersisted(run.task?.templateStep),
+          remediable: !isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind),
         },
         run.task?.stepOutput ?? null,
       ),

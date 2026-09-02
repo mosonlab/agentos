@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-import { isRegressionVerificationOutputKind } from "./merge-tail.js";
-
 /**
  * Whether the deliverable a Run's Step requires exists, decided once.
  *
@@ -48,12 +46,14 @@ export type PersistedRunOutput = {
   commitSha: string | null;
 };
 
-/** What a Step's own agent must author, and whether it may ever be replaced. */
+/** A Step's output contract: what its own agent must author, and on what terms. */
 export type RunOutputRequirement = {
   /** The output kind the agent must author, or null when completion may synthesize one. */
   outputKind: string | null;
   /** A findings artifact is immutable once persisted, whoever authored it. */
   immutableOncePersisted: boolean;
+  /** Whether the agent can be asked again for it. A mechanical verdict cannot. */
+  remediable: boolean;
 };
 
 /** The persisted Task output row, as the control plane holds it. */
@@ -76,7 +76,7 @@ export const decideRunOutputSatisfaction = (
   if (persisted && requirement.immutableOncePersisted) {
     return { case: "satisfied-by-prior-run", outputKind };
   }
-  return { case: "absent", outputKind, remediable: !isRegressionVerificationOutputKind(outputKind) };
+  return { case: "absent", outputKind, remediable: requirement.remediable };
 };
 
 /** The canonical PR workflow's four output kinds, in the order a chain authors them. */

@@ -11,10 +11,10 @@ import {
   type RunOutputSatisfaction,
 } from "./run-output-evidence.js";
 
-const required: RunOutputRequirement = { outputKind: "implementation", immutableOncePersisted: false };
-const findings: RunOutputRequirement = { outputKind: "sol-findings", immutableOncePersisted: true };
-const mechanical: RunOutputRequirement = { outputKind: "regression-verification-v2", immutableOncePersisted: false };
-const optional: RunOutputRequirement = { outputKind: null, immutableOncePersisted: false };
+const required: RunOutputRequirement = { outputKind: "implementation", immutableOncePersisted: false, remediable: true };
+const findings: RunOutputRequirement = { outputKind: "sol-findings", immutableOncePersisted: true, remediable: true };
+const mechanical: RunOutputRequirement = { outputKind: "regression-verification-v2", immutableOncePersisted: false, remediable: false };
+const optional: RunOutputRequirement = { outputKind: null, immutableOncePersisted: false, remediable: true };
 
 const persisted = (runId: string | null, kind = "implementation"): PersistedTaskOutput => ({
   runId,

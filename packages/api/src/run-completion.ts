@@ -389,6 +389,7 @@ export const completionEvidenceRefusal = (
     {
       outputKind: requirement.outputKind,
       immutableOncePersisted: outputIsImmutableOncePersisted(run.task?.templateStep),
+      remediable: !isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind),
     },
     persistedOutput,
   );
