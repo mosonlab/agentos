@@ -469,7 +469,32 @@ test("a gate without a verdict dies loudly without publishing a handoff or takin
   const finalized = run(seeded, "finalize");
   assert.notEqual(finalized.status, 0);
   assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 1 attempt\(s\) \(exit 143\)/u);
-  assert.doesNotMatch(finalized.stdout, /gate exited before verdict/u);
+  assert.match(finalized.stdout, /REGRESSION FINALIZE: gate dispatch log tail \(attempts=1, last exit status=143\)/u);
+  assert.match(finalized.stdout, /gate exited before verdict/u);
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
+  assert.equal(existsSync(seeded.output), false);
+});
+
+test("a retried no-verdict gate prints the bounded tail without publishing a handoff", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  const attemptsLog = join(seeded.root, "no-verdict-attempts.log");
+  const noVerdictGate = join(seeded.root, "bin", "no-verdict-gate");
+  writeFileSync(attemptsLog, "");
+  executable(noVerdictGate, `#!/bin/sh
+attempt="$(wc -l < '${attemptsLog}' | tr -d ' ')"
+attempt=$((attempt + 1))
+printf '%s\\n' "$attempt" >> '${attemptsLog}'
+printf 'stub no-verdict output %s\\n' "$attempt"
+exit 76
+`);
+  seeded.env.REGRESSION_GATE_DISPATCH = noVerdictGate;
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 1);
+  assert.match(finalized.stdout, /REGRESSION FINALIZE: gate dispatch log tail \(attempts=3, last exit status=76\)/u);
+  assert.match(finalized.stdout, /stub no-verdict output 3/u);
+  assert.match(finalized.stderr, /no admissible PASS\/FAIL verdict after 3 attempt\(s\) \(exit 76\)/u);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   assert.equal(existsSync(seeded.output), false);
 });

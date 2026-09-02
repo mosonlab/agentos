@@ -278,6 +278,56 @@ main().catch((error) => {
 NODE
 }
 
+# Keep a no-verdict dispatch diagnostic visible in the Run output without
+# turning it into durable verdict evidence. The tail uses the same UTF-8-safe
+# truncation as the failure excerpt above, but prioritizes the latest lines so
+# the final dispatch reason survives a noisy earlier attempt.
+extract_gate_no_verdict_tail() {
+  local log="$1"
+  node - "$log" <<'NODE'
+const { readFileSync } = require("node:fs");
+
+const [logPath] = process.argv.slice(2);
+const MAX_LINES = 60;
+const MAX_BYTES = 4000;
+
+const byteLength = (value) => Buffer.byteLength(value, "utf8");
+const truncateUtf8 = (value, limit) => {
+  if (byteLength(value) <= limit) return value;
+  let end = limit;
+  const bytes = Buffer.from(value);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+};
+
+const lines = readFileSync(logPath, "utf8").split(/\r?\n/u);
+if (lines.at(-1) === "") lines.pop();
+
+const selected = [];
+let bytes = 0;
+for (let index = lines.length - 1; index >= 0; index -= 1) {
+  if (selected.length >= MAX_LINES) break;
+  const separator = selected.length > 0 ? 1 : 0;
+  const remaining = MAX_BYTES - bytes - separator;
+  if (remaining <= 0) break;
+  const fitted = truncateUtf8(lines[index], remaining);
+  if (!fitted) break;
+  selected.push(fitted);
+  bytes += separator + byteLength(fitted);
+  if (fitted !== lines[index]) break;
+}
+
+process.stdout.write(selected.reverse().join("\n"));
+NODE
+}
+
+print_gate_no_verdict_tail() {
+  local log="$1" attempts="$2" status="$3" tail
+  tail="$(extract_gate_no_verdict_tail "$log")" || return 1
+  printf 'REGRESSION FINALIZE: gate dispatch log tail (attempts=%s, last exit status=%s)\n' "$attempts" "$status"
+  [ -z "$tail" ] || printf '%s' "$tail"
+}
+
 persist_output() {
   local verdict="$1" commit_sha="$2" output_dir temporary
   output_dir="$(dirname "$OUTPUT_FILE")"
@@ -427,6 +477,8 @@ finalize() {
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;
     *)
+      print_gate_no_verdict_tail "$gate_log" "$attempt" "$gate_status" \
+        || die "could not extract no-verdict gate log tail"
       die "gate dispatch produced no admissible PASS/FAIL verdict after $attempt attempt(s) (exit $gate_status)"
       ;;
   esac
