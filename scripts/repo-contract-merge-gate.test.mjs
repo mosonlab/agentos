@@ -178,15 +178,28 @@ test("an Anneal Run cannot bypass the reference gate with an environment value",
   assert.equal(existsSync(witness), false);
 });
 
-test("mismatched expect-head and invalid master are FAIL preconditions", (t) => {
+test("a mismatched expect-head is a FAIL precondition", (t) => {
   const data = fixture(t);
   const mismatch = run(t, data, "touch should-not-run", ["--expect-head", "0".repeat(40), "--master", data.master]);
   assert.equal(mismatch.status, 1, mismatch.output);
   assert.equal(finalLine(mismatch), `MERGE GATE: FAIL (HEAD is ${data.head} but --expect-head asked for ${"0".repeat(40)})`);
+});
 
-  const invalid = run(t, data, "touch should-not-run", ["--master", "not-an-object-id"]);
-  assert.equal(invalid.status, 1, invalid.output);
-  assert.equal(finalLine(invalid), "MERGE GATE: FAIL (--master must be a full 40-character object id)");
+test("malformed OID arguments are usage errors before the command", (t) => {
+  const data = fixture(t);
+  const witness = join(data.cwd, "command-ran");
+  const replacement = `touch "$GATE_FIXTURE_WITNESS"`;
+  for (const [flag, message] of [
+    ["--expect-head", "--expect-head must be a full 40-character object id"],
+    ["--master", "--master must be a full 40-character object id"],
+  ]) {
+    const result = run(t, data, replacement, [flag, "not-an-object-id"], { GATE_FIXTURE_WITNESS: witness });
+    assert.equal(result.status, 2, result.output);
+    assertNoVerdict(result);
+    assert.match(result.output, new RegExp(`merge-gate: ${message}`, "u"));
+    assert.match(result.output, /usage: /u);
+    assert.equal(existsSync(witness), false);
+  }
 });
 
 test("a missing or non-ancestor master is rejected before the command", (t) => {
