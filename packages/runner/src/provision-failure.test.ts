@@ -154,6 +154,8 @@ test("a transient mirror fetch failure escapes provisioning as a transient error
   const escaped = await provisionWorkspace(
     config(root),
     claim("https://example.test/repo.git"),
+    // The mirror fetch fails before dependencies are ever reached.
+    { provision: false, evidence: "Dependency provisioning skipped: Repo.dependencyProvisioning=NONE" },
     {
       execute: async (executorConfig, executable, args, cwd, env) => {
         // Only git is faked: the mirror's own filesystem bookkeeping is real work

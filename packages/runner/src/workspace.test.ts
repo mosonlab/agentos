@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
+import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import { runCommand } from "./exec.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
@@ -87,6 +88,21 @@ const workspaceClaim = (fixture: WorkspaceClaimFixture): WorkspaceProvisionClaim
   },
 });
 
+/**
+ * The decision most of these tests provision under. It is made when the claim
+ * is admitted, so provisioning takes it as an argument instead of re-reading
+ * the template step or the repository policy.
+ */
+const NO_DEPENDENCIES = {
+  provision: false,
+  evidence: "Dependency provisioning skipped: Repo.dependencyProvisioning=NONE",
+} as const satisfies DependencyProvisioningDecision;
+
+const NO_DEPENDENCIES_FOR_REVIEW = {
+  provision: false,
+  evidence: "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
+} as const satisfies DependencyProvisioningDecision;
+
 const seedPackageRemote = async (root: string): Promise<string> => {
   const remote = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -138,9 +154,9 @@ test("an explicit false template step skips all dependency inspection after chec
         id: "task-review",
         templateStep: { name: "Code review", outputKind: "result", provisionDependencies: false, taskTemplate: { name: "review-workflow" } },
       },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-review", runNumber: 1, targetBranch: "main", branch: "main" },
-    }), {
+    }), NO_DEPENDENCIES_FOR_REVIEW, {
       execute,
       dependencyCacheOptions: { cacheRoot: join(root, "dependency-cache"), report: (event) => progress.push(event) },
     });
@@ -172,9 +188,9 @@ test("an explicit true template step keeps the repository dependency policy path
         id: "task-implementation",
         templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
       },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-implementation", runNumber: 1, targetBranch: "main", branch: "main" },
-    }), {
+    }), { provision: true }, {
       dependencyCacheOptions: {
         cacheRoot: join(root, "dependency-cache"),
         report: (event) => progress.push(event),
@@ -223,11 +239,11 @@ test("a workspace cloned from its own published head still resolves the target b
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-target-refspec" },
-      repo: { remoteUrl: remote, defaultBranch: target, dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: target },
       run: { id: "run-target-refspec", runNumber: 2, targetBranch: target, branch },
     });
 
-    const workspace = await provisionWorkspace(config, claim);
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES);
     assert.equal(git(workspace.path, "rev-parse", `origin/${target}`), targetSha);
     assert.deepEqual(
       git(workspace.path, "config", "--get-all", "remote.origin.fetch").split("\n"),
@@ -281,7 +297,7 @@ test("provisioning trusts an already-published intended head after its database 
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-1" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "run-2",
         runNumber: 2,
@@ -292,7 +308,7 @@ test("provisioning trusts an already-published intended head after its database 
       },
     });
 
-    const workspace = await provisionWorkspace(config, claim);
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES);
     assert.equal(workspace.branch, "agentos/chain/demo-deadbeef");
     assert.equal(workspace.baseSha, publishedSha);
     assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "published\n");
@@ -328,7 +344,7 @@ test("provisioning commits the server-prepared direct specification before the a
     const specificationPath = `.chain/${branch}/spec.md`;
     const claim = workspaceClaim({
       task: { id: "task-specification" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "run-specification",
         runNumber: 1,
@@ -342,7 +358,7 @@ test("provisioning commits the server-prepared direct specification before the a
       },
     });
 
-    const workspace = await provisionWorkspace(config, claim);
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES);
     assert.equal(await readFile(join(workspace.path, specificationPath), "utf8"), "authoritative brief");
     assert.equal(git(workspace.path, "status", "--porcelain"), "");
     assert.equal(workspace.baseSha, git(workspace.path, "rev-parse", "HEAD"));
@@ -378,7 +394,7 @@ test("prepared specification refuses a repository symlink that would escape the 
     const branch = "feature/platform-spec";
     const claim = workspaceClaim({
       task: { id: "task-specification-symlink" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-specification-symlink", runNumber: 1, targetBranch: "main", branch },
       specificationMaterialization: {
         kind: "direct-implementation",
@@ -387,7 +403,7 @@ test("prepared specification refuses a repository symlink that would escape the 
       },
     });
 
-    await assert.rejects(provisionWorkspace(config, claim), /Prepared specification parent .* is a symlink/u);
+    await assert.rejects(provisionWorkspace(config, claim, NO_DEPENDENCIES), /Prepared specification parent .* is a symlink/u);
     await assert.rejects(readFile(join(escaped, branch, "spec.md")), /ENOENT/u);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -425,13 +441,13 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-1" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "run-3", runNumber: 3, targetBranch: salvage,
         targetBranchPublished: true, branch: declared,
       },
     });
-    const workspace = await provisionWorkspace(config, claim);
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES);
     assert.equal(workspace.branch, declared);
     assert.equal(workspace.baseSha, salvageSha);
     assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "newer salvage\n");
@@ -477,7 +493,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-blind" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "run-blind",
         runNumber: 1,
@@ -489,7 +505,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
       },
     });
 
-    const workspace = await provisionWorkspace(config, claim);
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES);
     assert.equal(workspace.baseSha, pinnedBaseSha);
     assert.equal(git(workspace.path, "branch", "--show-current"), "");
     assert.equal(git(workspace.path, "for-each-ref", "--format=%(refname)"), "");
@@ -524,7 +540,6 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       repo: {
         remoteUrl: "https://github.com/acme/app.git",
         defaultBranch: "main",
-        dependencyProvisioning: "NONE",
       },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     });
@@ -540,7 +555,7 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       if (executable === "git" && args[0] === "rev-parse") return "base-sha";
       return "";
     };
-    const workspace = await provisionWorkspace(config, claim, {
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES, {
       execute: fake,
       retryOptions: { wait: async () => undefined },
     });
@@ -582,7 +597,6 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       repo: {
         remoteUrl: "https://github.com/acme/app.git",
         defaultBranch: "main",
-        dependencyProvisioning: "NONE",
       },
       run: { id: "run-timeout", runNumber: 1, targetBranch: "main", branch: "agentos/task-timeout/run-1" },
     });
@@ -594,7 +608,7 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       if (args[0] === "rev-parse") return "base-sha";
       return "";
     });
-    await provisionWorkspace(config, claim, {
+    await provisionWorkspace(config, claim, NO_DEPENDENCIES, {
       execute: fake,
       retryOptions: { wait: async () => undefined },
     });
@@ -638,7 +652,6 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       repo: {
         remoteUrl: "https://github.com/acme/app.git",
         defaultBranch: "main",
-        dependencyProvisioning: "NONE",
       },
       run: {
         id: "run-pinned-timeout",
@@ -656,7 +669,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       if (args[0] === "rev-parse") return "pinned-sha";
       return "";
     });
-    await provisionWorkspace(config, claim, {
+    await provisionWorkspace(config, claim, NO_DEPENDENCIES, {
       execute: fake,
       retryOptions: { wait: async () => undefined },
     });
@@ -778,11 +791,11 @@ test("a run-as workspace is provisioned by the launched account and cannot be en
     } as unknown as RunnerConfig;
     const claim = workspaceClaim({
       task: { id: "task-prefix" },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NONE" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: { id: "run-prefix", runNumber: 1, targetBranch: "main", branch: "main" },
     });
 
-    const workspace = await provisionWorkspace(config, claim);
+    const workspace = await provisionWorkspace(config, claim, NO_DEPENDENCIES);
 
     // Traverse but not list. It cannot be 0700: node chdirs into `cwd` as the
     // daemon's uid before exec, so the CLI's own spawn would fail with EACCES

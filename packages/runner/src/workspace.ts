@@ -11,6 +11,7 @@ import type { SessionConfigOptions } from "./adapters/session-config.js";
 import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
+import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
 import {
   configureWorkspaceGit, resolveRunnerGitIdentity, type GitProvenanceClaim,
@@ -105,7 +106,7 @@ export type WorkspaceCommandExecutor = (
 
 export type WorkspaceProvisionClaim = GitProvenanceClaim & Pick<ClaimedTask, "specificationMaterialization"> & {
   task: GitProvenanceClaim["task"] & Pick<ClaimedTask["task"], "id">;
-  repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch" | "dependencyProvisioning">;
+  repo: Pick<ClaimedTask["repo"], "remoteUrl" | "defaultBranch">;
   run: GitProvenanceClaim["run"] & Pick<
     ClaimedTask["run"],
     | "runNumber"
@@ -444,6 +445,7 @@ export const provisionSessionConfig = async (
 export const provisionWorkspace = async (
   config: RunnerConfig,
   claim: WorkspaceProvisionClaim,
+  provisioning: DependencyProvisioningDecision,
   dependencies: ProvisionWorkspaceDependencies = {},
 ): Promise<Workspace> => {
   const execute = dependencies.execute ?? command;
@@ -590,18 +592,10 @@ export const provisionWorkspace = async (
       execute,
       env,
     );
-    // A canonical review step explicitly opts out of dependencies. Every
-    // other admitted path, including a null template step, remains governed
-    // by the repository policy supplied by the control plane.
-    if (claim.task.templateStep?.provisionDependencies !== false) {
-      await materializeWorkspaceDependencies(
-        config,
-        workspace,
-        claim.repo.dependencyProvisioning,
-        env,
-        { execute },
-        dependencyCacheOptions,
-      );
+    // The decision was made when the claim was admitted; provisioning does not
+    // re-read the template step or the repository policy.
+    if (provisioning.provision) {
+      await materializeWorkspaceDependencies(config, workspace, env, { execute }, dependencyCacheOptions);
     }
     return materialized;
   } catch (error: unknown) {

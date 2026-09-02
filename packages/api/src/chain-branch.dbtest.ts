@@ -1277,14 +1277,23 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
     };
     const runnerWorkspaceUrl = new URL("../../runner/src/workspace.js", import.meta.url).href;
     const { provisionWorkspace } = await import(runnerWorkspaceUrl) as {
-      provisionWorkspace: (config: RunnerConfig, claim: ClaimedTask) => Promise<{
+      provisionWorkspace: (
+        config: RunnerConfig,
+        claim: ClaimedTask,
+        provisioning: { provision: false; evidence: string },
+      ) => Promise<{
         path: string;
         branch: string;
         baseSha: string;
         commitHooksPath?: string;
       }>;
     };
-    const workspace = await provisionWorkspace(configured, claimed);
+    // The dependency decision is made when the claim is admitted; this test
+    // provisions a chain branch, not dependencies.
+    const workspace = await provisionWorkspace(configured, claimed, {
+      provision: false,
+      evidence: "Dependency provisioning skipped: Repo.dependencyProvisioning=NONE",
+    });
     const childEnvironment = buildChildEnvironment(configured, claimed, {
       base: join(root, "scratch"),
       workspaceRoot: join(root, "scratch", "workspaces"),

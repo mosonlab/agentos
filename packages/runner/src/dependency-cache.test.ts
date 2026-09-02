@@ -210,7 +210,7 @@ const publishFixtureVersions = async (root: string, versions: string[]) => {
     await createFixture(workspace);
     await writeFile(join(workspace, "package-lock.json"), packageLock(version));
     const result = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(result.key);
@@ -266,7 +266,7 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
     const events: DependencyCacheProgress[] = [];
     const configured = config(root);
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(first.status, "installed");
@@ -291,7 +291,7 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
     await writeFile(join(workspace, "node_modules/fake-package/index.js"), "workspace mutation\n");
 
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(second.status, "restored");
@@ -313,36 +313,6 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
   }
 });
 
-test("NONE skips dependency discovery, cache access, toolchain probes, and npm", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-none-"));
-  try {
-    const workspace = join(root, "workspace");
-    await mkdir(workspace);
-    // A malformed manifest proves that NONE does not inspect the workspace.
-    await writeFile(join(workspace, "package.json"), "not-json\n");
-    const fake = fakeInstallExecutor();
-    const events: DependencyCacheProgress[] = [];
-    const configured = config(root);
-    const result = await materializeWorkspaceDependencies(
-      configured,
-      workspace,
-      "NONE",
-      workspaceEnvironment(configured),
-      { execute: fake.execute },
-      { report: (event) => events.push(event) },
-    );
-    assert.deepEqual(result, { status: "not-applicable", condition: "dependency-provisioning-none" });
-    assert.deepEqual(events.filter(({ event }) => event === "miss"), [
-      { event: "miss", condition: "dependency-provisioning-none" },
-    ]);
-    assert.equal(events.filter(({ event }) => event === "elapsed").length, 1);
-    assert.deepEqual(fake.calls, []);
-    await assert.rejects(lstat(join(root, "cache")), /ENOENT/u, "NONE must not initialize the dependency cache");
-  } finally {
-    await cleanupRoot(root);
-  }
-});
-
 test("NPM_CI fails loudly when the root package manifest is missing and audits the miss", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-manifest-missing-"));
   try {
@@ -356,7 +326,6 @@ test("NPM_CI fails loudly when the root package manifest is missing and audits t
       materializeWorkspaceDependencies(
         configured,
         workspace,
-        "NPM_CI",
         workspaceEnvironment(configured),
         { execute: fake.execute },
         { report: (event) => events.push(event) },
@@ -402,7 +371,7 @@ test("a cache hit rebuilds binding.gyp workspaces whose install artifacts live o
     const configured = config(root);
 
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute },
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(first.status, "installed");
@@ -410,7 +379,7 @@ test("a cache hit rebuilds binding.gyp workspaces whose install artifacts live o
     await rm(join(workspace, "apps/web/build"), { recursive: true });
 
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute },
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(second.status, "restored");
@@ -462,7 +431,7 @@ test("the shipped cache key stays byte-identical to the recorded fixture key", a
     const configured = config(root);
     const fake = fakeInstallExecutor();
     const shipped = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(shipped.key, FIXTURE_CACHE_KEY, "a changed key misses every published cache entry");
@@ -512,7 +481,7 @@ test("missing required inputs are named misses while unreadable or ambiguous inp
     const configured = config(root);
     const events: DependencyCacheProgress[] = [];
     const installed = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(installed.status, "installed");
@@ -560,16 +529,16 @@ test("effective user npm configuration and the child Node tuple determine the pr
       return fake.execute(runnerConfig, executable, args, cwd, env, options);
     };
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute }, { report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute }, { report: () => undefined },
     );
     await writeFile(join(home, ".npmrc"), "omit=dev\n//registry.npmjs.org/:_authToken=second-secret\n");
     const configDrift = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute }, { report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute }, { report: () => undefined },
     );
     assert.notEqual(configDrift.key, first.key, "effective user config drift must change the key");
     child = { ...child, node: "v23.0.0", architecture: "x64" };
     const childDrift = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute }, { report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute }, { report: () => undefined },
     );
     assert.notEqual(childDrift.key, configDrift.key, "the key must follow child Node coordinates");
     assert.equal(fake.installs(), 3);
@@ -598,7 +567,7 @@ test("non-Prisma and alternate-schema repositories install and key their actual 
     const configured = config(root);
     const events: DependencyCacheProgress[] = [];
     const plain = await materializeWorkspaceDependencies(
-      configured, nonPrisma, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, nonPrisma, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(plain.status, "installed");
@@ -635,7 +604,7 @@ test("symlinked workspace targets and cache roots are rejected without following
     const configured = config(root);
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
       ),
       /Dependency target is a symlink: node_modules/u,
     );
@@ -647,7 +616,7 @@ test("symlinked workspace targets and cache roots are rejected without following
     await symlink(join(root, "outside-cache"), join(root, "cache-link"));
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
         { cacheRoot: join(root, "cache-link"), toolchain: TOOLCHAIN, report: () => undefined },
       ),
       /Dependency cache root is a symlink/u,
@@ -721,14 +690,14 @@ for (const corruption of corruptions) test(`refuses ${corruption.name} cache ent
     const fake = fakeInstallExecutor();
     const configured = config(root);
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(first.key);
     await corruption.corrupt(entryPath(root, first.key), root);
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       ),
       /(?:integrity|cache).*?(?:refusal|unsafe|malformed|missing|mismatch|escape|directory)/iu,
@@ -750,11 +719,11 @@ test("an unrelated malformed retention entry refuses the pass after a valid hit"
     await Promise.all([createFixture(firstWorkspace), createFixture(secondWorkspace)]);
     await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.0.0"));
     const first = await materializeWorkspaceDependencies(
-      configured, firstWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, firstWorkspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     const second = await materializeWorkspaceDependencies(
-      configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, secondWorkspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     const firstKey = first.key;
@@ -766,7 +735,7 @@ test("an unrelated malformed retention entry refuses the pass after a valid hit"
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, secondWorkspace, workspaceEnvironment(configured), { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       ),
       /(?:integrity|retention|malformed|unsafe)/iu,
@@ -818,7 +787,7 @@ for (const malformed of malformedRetentionMetadata) {
       const events: DependencyCacheProgress[] = [];
       await assert.rejects(
         materializeWorkspaceDependencies(
-          configured, current.workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+          configured, current.workspace, workspaceEnvironment(configured), { execute: fake.execute },
           { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
         ),
         /metadata-malformed/u,
@@ -908,7 +877,7 @@ for (const corruption of unrelatedRetentionCorruptions) {
       const events: DependencyCacheProgress[] = [];
       await assert.rejects(
         materializeWorkspaceDependencies(
-          configured, current.workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+          configured, current.workspace, workspaceEnvironment(configured), { execute: fake.execute },
           { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
         ),
         corruption.condition,
@@ -936,7 +905,7 @@ test("orphan publication stages and non-key usage files do not brick retention",
     await writeFile(strayUsage, "not a cache usage marker\n");
 
     const result = await materializeWorkspaceDependencies(
-      configured, current.workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, current.workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
 
@@ -985,11 +954,11 @@ test("an unsafe usage marker refuses retention instead of allowing an over-budge
     await Promise.all([createFixture(firstWorkspace), createFixture(secondWorkspace)]);
     await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.1.0"));
     const first = await materializeWorkspaceDependencies(
-      configured, firstWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, firstWorkspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     const second = await materializeWorkspaceDependencies(
-      configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, secondWorkspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     const firstKey = first.key;
@@ -1001,7 +970,7 @@ test("an unsafe usage marker refuses retention instead of allowing an over-budge
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, secondWorkspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, secondWorkspace, workspaceEnvironment(configured), { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       ),
       /(?:integrity|usage|marker|unsafe)/iu,
@@ -1021,7 +990,7 @@ test("a selected unsafe usage marker refuses before a missing entry can trigger 
     const configured = config(root);
     const fake = fakeInstallExecutor();
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(first.key);
@@ -1034,7 +1003,7 @@ test("a selected unsafe usage marker refuses before a missing entry can trigger 
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       ),
       /unsafe-usage-marker/u,
@@ -1058,11 +1027,11 @@ test("dependency-cache audit payloads retain stable event names and fields", asy
     const configured = config(root);
     const events: DependencyCacheProgress[] = [];
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
     assert.equal(second.status, "restored");
@@ -1104,7 +1073,7 @@ test("cache materialization blocks behind an existing exclusive root lock", asyn
     const configured = config(root);
     const fake = fakeInstallExecutor();
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(first.key);
@@ -1112,7 +1081,7 @@ test("cache materialization blocks behind an existing exclusive root lock", asyn
     try {
       let settled = false;
       const blocked = materializeWorkspaceDependencies(
-        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: () => undefined },
       ).finally(() => { settled = true; });
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1149,7 +1118,7 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
     });
     const configured = config(root);
     const results = await Promise.all(workspaces.map((workspace) => materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     )));
     assert.equal(fake.installs(), 2);
     assert.equal(new Set(results.map(({ key }) => key)).size, 1);
@@ -1386,7 +1355,7 @@ test("over-budget enforcement waits for an active restore and evicts only the sa
       return fake.execute(...args);
     };
     const restoring = materializeWorkspaceDependencies(
-      configured, active.workspace, "NPM_CI", workspaceEnvironment(configured), { execute },
+      configured, active.workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     await restoreStarted;
@@ -1442,7 +1411,7 @@ test("over-budget enforcement waits for concurrent publication convergence and p
       await writeFile(join(cwd, "packages/db/node_modules/nested-package/index.js"), "converged nested\n");
     });
     const resultsPromise = Promise.all(workspaces.map((workspace) => materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     )));
     await publishersStarted;
@@ -1484,7 +1453,7 @@ test("allocated-byte accounting includes metadata, trees, and safe symlink inode
     });
     const configured = config(root);
     const result = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(result.key);
@@ -1513,7 +1482,7 @@ test("allocated-byte accounting rejects special files instead of treating them a
     const fake = fakeInstallExecutor();
     const configured = config(root);
     const result = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.ok(result.key);
@@ -1544,7 +1513,7 @@ test("a malformed unrelated size walk emits integrity refusal without invoking n
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, current.workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+        configured, current.workspace, workspaceEnvironment(configured), { execute: fake.execute },
         { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       ),
       /special-file/u,
@@ -1569,10 +1538,10 @@ test("workspace mutations always flow through the configured run-as execution id
     const configured = config(root, prefix);
     const fake = fakeInstallExecutor();
     await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     );
     await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute }, { toolchain: TOOLCHAIN, report: () => undefined },
     );
     const mutations = fake.calls.filter(({ executable, args }) =>
       (executable === "npm" && args[0] === "ci") || ["/bin/rm", "/bin/cp", "/bin/chmod"].includes(executable));
@@ -1603,7 +1572,7 @@ test("dependency discovery does not enumerate a workspace root without read perm
     });
     const configured = config(root);
     const result = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute: fake.execute },
+      configured, workspace, workspaceEnvironment(configured), { execute: fake.execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(result.status, "installed");
@@ -1644,13 +1613,13 @@ test("a distinct run-as uid restores readable cache entries and owns the workspa
       return realExecutor(runnerConfig, executable, args, cwd, env, options);
     };
     const first = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute },
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(first.status, "installed");
     await runCommand(configured.runAsPrefix, "/bin/sh", ["-c", "printf changed > node_modules/owned-package/index.js"], workspace, workspaceEnvironment(configured));
     const second = await materializeWorkspaceDependencies(
-      configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute },
+      configured, workspace, workspaceEnvironment(configured), { execute },
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     assert.equal(second.status, "restored");
@@ -1678,7 +1647,7 @@ test("a non-terminating npm install receives a process-group timeout", async () 
     const started = Date.now();
     await assert.rejects(
       materializeWorkspaceDependencies(
-        configured, workspace, "NPM_CI", workspaceEnvironment(configured), { execute },
+        configured, workspace, workspaceEnvironment(configured), { execute },
         {
           toolchain: TOOLCHAIN,
           installRetryOptions: { attempts: 1, commandTimeoutMs: 50, budgetMs: 10_000 },
@@ -1733,7 +1702,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
       runner: "CODEX",
       specificationMaterialization: null,
       task: { id: "cache-task", chainId: null, chainIndex: null, templateStep: null },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "branch-run",
         runNumber: 1,
@@ -1748,6 +1717,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
     const branchWorkspace = await provisionWorkspace(
       configured,
       branchClaim,
+      { provision: true },
       {
         execute,
         retryOptions: { attempts: 1 },
@@ -1769,7 +1739,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
       runner: "CODEX",
       specificationMaterialization: null,
       task: { id: "cache-review", chainId: null, chainIndex: null, templateStep: null },
-      repo: { remoteUrl: remote, defaultBranch: "main", dependencyProvisioning: "NPM_CI" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
       run: {
         id: "pinned-run",
         runNumber: 1,
@@ -1784,6 +1754,7 @@ test("branch and pinned-detached provisioning materialize a usable scratch repos
     const pinnedWorkspace = await provisionWorkspace(
       configured,
       pinnedClaim,
+      { provision: true },
       {
         execute,
         retryOptions: { attempts: 1 },
