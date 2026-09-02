@@ -21,6 +21,7 @@ import {
 } from "./canonical-template-installation.js";
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import {
+  LEGACY_ALL_PRIOR_OUTPUTS,
   canonicalTemplateSourceSpec,
   loadAllTemplateStepSources,
   templateMetadataDifferences,
@@ -473,6 +474,31 @@ test("--project rejects every canonical template step field with template/step i
       assert.match(result.output, projectErrorPattern(fixture), mutation.name);
       assert.match(result.output, templateIdentifierPattern(fixture), mutation.name);
       assert.match(result.output, /pr-engineer-workflow step \d+ \([^)]+\)/u, mutation.name);
+    });
+  }
+});
+
+test("--project refuses the differences canonical sync would adopt", async () => {
+  const mutations: ReadonlyArray<{ name: string; stepIndex: number; data: Prisma.TaskTemplateStepUpdateInput }> = [
+    { name: "provisionDependencies", stepIndex: 2, data: { provisionDependencies: true } },
+    { name: "priorOutputKinds", stepIndex: 3, data: { priorOutputKinds: [LEGACY_ALL_PRIOR_OUTPUTS] } },
+  ];
+
+  for (const mutation of mutations) {
+    await withProject({ agents: partialRoleNames, template: true }, async (fixture) => {
+      const step = await prisma.taskTemplateStep.findUniqueOrThrow({
+        where: { taskTemplateId_stepIndex: { taskTemplateId: fixture.templateId!, stepIndex: mutation.stepIndex } },
+      });
+      await prisma.taskTemplateStep.update({ where: { id: step.id }, data: mutation.data });
+      const result = verify(fixture.id);
+      assert.notEqual(result.status, 0, `${mutation.name}: ${result.output}`);
+      assert.match(result.output, projectErrorPattern(fixture), mutation.name);
+      assert.match(result.output, templateIdentifierPattern(fixture), mutation.name);
+      assert.match(
+        result.output,
+        new RegExp(`${PR_TEMPLATE_NAME} step ${mutation.stepIndex} \\([^)]+\\) differs from canonical Markdown structure: ${mutation.name}`, "u"),
+        mutation.name,
+      );
     });
   }
 });
