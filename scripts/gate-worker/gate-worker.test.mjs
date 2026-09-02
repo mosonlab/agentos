@@ -579,6 +579,7 @@ const mergeGateScopeFixture = (t) => {
   mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
   writeFileSync(join(repo, "package.json"), '{"name": "anneal"}\n');
   cpSync(mergeGatePath, join(repo, "scripts", "merge-gate.sh"));
+  cpSync(join(here, "..", "run-scope-bypass.sh"), join(repo, "scripts", "run-scope-bypass.sh"));
   cpSync(join(here, "step-engine.sh"), join(repo, "scripts", "gate-worker", "step-engine.sh"));
   cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
   chmodSync(join(repo, "scripts", "merge-gate.sh"), 0o755);
