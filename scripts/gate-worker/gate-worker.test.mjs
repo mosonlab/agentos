@@ -580,7 +580,9 @@ const mergeGateScopeFixture = (t) => {
   writeFileSync(join(repo, "package.json"), '{"name": "anneal"}\n');
   cpSync(mergeGatePath, join(repo, "scripts", "merge-gate.sh"));
   cpSync(join(here, "..", "run-scope-bypass.sh"), join(repo, "scripts", "run-scope-bypass.sh"));
-  cpSync(join(here, "step-engine.sh"), join(repo, "scripts", "gate-worker", "step-engine.sh"));
+  for (const name of ["host-sizing.sh", "step-engine.sh", "verdict.sh"]) {
+    cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
+  }
   cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
   chmodSync(join(repo, "scripts", "merge-gate.sh"), 0o755);
   git(repo, "init", "-q", "-b", "main");
@@ -1073,10 +1075,14 @@ test("the share run-gate states is the one merge-gate sizes from, and nothing re
   // survived to the gate.
   //
   // The shape of that bug is two files computing one number. So: run-gate.sh
-  // states the share and names no fan-out, and merge-gate.sh reads the share
-  // and is the only place that turns it into lanes.
+  // states the share and names no fan-out, and the gate reads the share and is
+  // the only place that turns it into lanes. The gate is merge-gate.sh and the
+  // sizing module it sources, read here as the one side they are.
   const runGate = readFileSync(runGatePath, "utf8");
-  const mergeGate = readFileSync(join(here, "..", "merge-gate.sh"), "utf8");
+  const mergeGate = [
+    readFileSync(join(here, "..", "merge-gate.sh"), "utf8"),
+    readFileSync(join(here, "host-sizing.sh"), "utf8"),
+  ].join("\n");
 
   assert.match(runGate, /export AGENTOS_GATE_HOST_SHARE="\$WORKER_CAPACITY"/);
   assert.doesNotMatch(
@@ -1089,7 +1095,7 @@ test("the share run-gate states is the one merge-gate sizes from, and nothing re
   assert.doesNotMatch(
     mergeGate,
     /^\s*export\s+AGENTOS_GATE_HOST_SHARE/m,
-    "merge-gate.sh overwrites the share it was given instead of sizing from it",
+    "the gate overwrites the share it was given instead of sizing from it",
   );
   // The database wave states its lane count at the point of use. An ambient
   // export is what let run-gate.sh's value silently become something else.
@@ -1097,7 +1103,7 @@ test("the share run-gate states is the one merge-gate sizes from, and nothing re
   assert.doesNotMatch(
     mergeGate,
     /^\s*export\s+AGENTOS_DBTEST_CONCURRENCY/m,
-    "merge-gate.sh exports an ambient database fan-out instead of stating it where it is used",
+    "the gate exports an ambient database fan-out instead of stating it where it is used",
   );
 });
 
