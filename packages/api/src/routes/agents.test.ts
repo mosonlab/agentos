@@ -539,6 +539,7 @@ test("Repo dependency provisioning round-trips through GET and PATCH", async () 
     const database = {
       repo: {
         findMany: async () => [row()],
+        findUnique: async () => row(),
         update: async ({ data }: { data: { dependencyProvisioning?: "NONE" | "NPM_CI" } }) => {
           if (data.dependencyProvisioning !== undefined) stored = data.dependencyProvisioning;
           return row();
@@ -568,6 +569,157 @@ test("Repo dependency provisioning round-trips through GET and PATCH", async () 
     const listedAfterPatch = await app.request("/projects/project-1/repos", { headers });
     assert.equal(listedAfterPatch.status, 200);
     assert.equal((await listedAfterPatch.json() as Array<Record<string, unknown>>)[0]?.dependencyProvisioning, "NONE");
+  });
+});
+
+test("PATCH repo preflights stored and patched repository identity before writing", async () => {
+  await withTokens(async () => {
+    const events: string[] = [];
+    const preflightInputs: Array<{ remoteUrl: string; defaultBranch: string; dependencyProvisioning: "NONE" | "NPM_CI" }> = [];
+    const database = {
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/stored.git", defaultBranch: "main" }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          events.push("update");
+          return {
+            id: "repo-1", projectId: "project-1", credentialSecretId: null, name: "app",
+            remoteUrl: data.remoteUrl ?? "https://github.com/owner/stored.git",
+            mountPath: "repo", defaultBranch: data.defaultBranch ?? "main",
+            dependencyProvisioning: data.dependencyProvisioning ?? "NONE",
+            createdAt: new Date(0), updatedAt: new Date(0),
+          };
+        },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async (input) => {
+        events.push("preflight");
+        preflightInputs.push(input);
+      },
+    });
+    const response = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI", remoteUrl: "https://github.com/owner/patched.git", defaultBranch: "release/v1" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(preflightInputs, [{
+      remoteUrl: "https://github.com/owner/patched.git",
+      defaultBranch: "release/v1",
+      dependencyProvisioning: "NPM_CI",
+    }]);
+    assert.deepEqual(events, ["preflight", "update"]);
+
+    const storedValues: Array<{ remoteUrl: string; defaultBranch: string }> = [];
+    const storedApp = createApp({
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/stored.git", defaultBranch: "main" }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          storedValues.push({
+            remoteUrl: String(data.remoteUrl ?? "https://github.com/owner/stored.git"),
+            defaultBranch: String(data.defaultBranch ?? "main"),
+          });
+          return data;
+        },
+      },
+    } as unknown as PrismaClient, {
+      repositoryPreflight: async (input) => {
+        preflightInputs.push(input);
+      },
+    });
+    const storedResponse = await storedApp.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NONE" }),
+    });
+    assert.equal(storedResponse.status, 200);
+    assert.deepEqual(preflightInputs.at(-1), {
+      remoteUrl: "https://github.com/owner/stored.git",
+      defaultBranch: "main",
+      dependencyProvisioning: "NONE",
+    });
+    assert.deepEqual(storedValues, [{
+      remoteUrl: "https://github.com/owner/stored.git",
+      defaultBranch: "main",
+    }]);
+  });
+});
+
+test("PATCH repo applies remote policy to the raw value before preflight or writing", async () => {
+  await withTokens(async () => {
+    let preflights = 0;
+    let updates = 0;
+    const app = createApp({
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/stored.git", defaultBranch: "main" }),
+        update: async () => { updates += 1; return {}; },
+      },
+    } as unknown as PrismaClient, {
+      repositoryPreflight: async () => { preflights += 1; },
+    });
+
+    const response = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI", remoteUrl: "  https://github.com/owner/patched.git" }),
+    });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "Repository remote is invalid",
+      code: "repository-remote-invalid",
+      reason: "whitespace",
+    });
+    assert.equal(preflights, 0);
+    assert.equal(updates, 0);
+  });
+});
+
+test("PATCH repo uses the standard not-found refusal before dependency preflight", async () => {
+  await withTokens(async () => {
+    const app = createApp({
+      repo: { findUnique: async () => null },
+    } as unknown as PrismaClient, {
+      repositoryPreflight: async () => { throw new Error("must not preflight a missing Repo"); },
+    });
+    const response = await app.request("/repos/missing", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NONE" }),
+    });
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Resource not found" });
+  });
+});
+
+test("PATCH repo refuses a preflight failure before writing", async () => {
+  await withTokens(async () => {
+    let updates = 0;
+    const database = {
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/repo.git", defaultBranch: "main" }),
+        update: async () => {
+          updates += 1;
+          throw new Error("preflight refusal must prevent update");
+        },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database, {
+      repositoryPreflight: async () => { throw new RepositoryPreflightError("remote-unreachable"); },
+    });
+    const response = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI" }),
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      error: "Repository preflight failed",
+      code: "repository-preflight-failed",
+      reason: "remote-unreachable",
+    });
+    assert.equal(updates, 0);
   });
 });
 
@@ -745,13 +897,11 @@ test("POST repo runs successful dependency-policy preflights through to creation
       assert.equal(created[0]?.dependencyProvisioning, dependencyProvisioning);
       assert.deepEqual(calls.map(({ args }) => args[0]), dependencyProvisioning === "NPM_CI"
         ? ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]
-        : ["config", "config", "ls-remote", "init", "fetch", "push"]);
+        : ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]);
       assert.equal(calls.filter(({ args }) => args[0] === "fetch").length, 1);
       const lockfileProbes = calls.filter(({ args }) => args[0] === "ls-tree");
-      assert.equal(lockfileProbes.length, dependencyProvisioning === "NPM_CI" ? 1 : 0);
-      if (dependencyProvisioning === "NPM_CI") {
-        assert.notEqual(lockfileProbes[0]?.cwd, process.cwd(), "ls-tree must inspect the fetched scratch repository");
-      }
+      assert.equal(lockfileProbes.length, 1);
+      assert.notEqual(lockfileProbes[0]?.cwd, process.cwd(), "ls-tree must inspect the fetched scratch repository");
       const pushes = calls.filter(({ args }) => args[0] === "push");
       assert.equal(pushes.length, 1);
       assert.deepEqual(pushes[0]?.args.slice(0, 3), ["push", "--dry-run", remoteUrl]);

@@ -44,14 +44,14 @@ stopped() {
 trap 'stopped INT 130' INT
 trap 'stopped TERM 143' TERM
 
-if [ -n "${AGENTOS_RUN_ID:-}" ]; then
-  not_run "refused inside Anneal run ${AGENTOS_RUN_ID}" "$EXIT_NO_VERDICT"
-fi
 if [ "$EXPECT_HEAD_SET" -eq 1 ]; then
-  EXPECT_HEAD="$(normalise_oid "$EXPECT_HEAD")" || fail_gate "--expect-head must be a full 40-character object id"
+  EXPECT_HEAD="$(normalise_oid "$EXPECT_HEAD")" || die_usage "--expect-head must be a full 40-character object id"
 fi
 if [ "$MASTER_SET" -eq 1 ]; then
-  MASTER_OID="$(normalise_oid "$MASTER_OID")" || fail_gate "--master must be a full 40-character object id"
+  MASTER_OID="$(normalise_oid "$MASTER_OID")" || die_usage "--master must be a full 40-character object id"
+fi
+if [ -n "${AGENTOS_RUN_ID:-}" ]; then
+  not_run "refused inside Anneal run ${AGENTOS_RUN_ID}" "$EXIT_NO_VERDICT"
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail_gate "not inside a Git worktree"

@@ -190,6 +190,21 @@ test("a clean exit without a terminal event is protocol drift, and retryable", (
   assert.equal(verdict.retryable, true);
 });
 
+test("a missing NPM_CI manifest is a named non-retryable provisioning protocol error", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "PROVISION",
+    runnerClass: FailureClass.PROTOCOL_ERROR,
+    exitCode: 1,
+    terminationReason: "runner exception",
+    terminalEventSeen: false,
+    agentExited: false,
+    stderrSummary: "dependency-provisioning-manifest-missing",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.PROTOCOL_ERROR);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, true);
+});
+
 test("a tool failure may be read off stdout because it can change no decision", () => {
   const verdict = classifyEnvelope(envelope({ stdoutSummary: '{"type":"result","isError": true}' }));
   assert.equal(verdict.failureClass, FailureClass.TOOL_FAILED);

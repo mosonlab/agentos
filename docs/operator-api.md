@@ -651,9 +651,17 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
   { "error": "Repository preflight failed", "code": "repository-package-lock-missing", "remedy": "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE." }
   ```
 
-  This is a POST-only preflight refusal. For `NONE`, this dependency-specific
-  check is omitted; all other preflight checks still apply. Other failures use
-  the existing error path. Preflight is never skipped as a success fallback.
+  When `dependencyProvisioning` is `NONE`, a regular root
+  `package-lock.json` in the exact fetched default branch commit contradicts
+  that declaration. This returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning contradicts lockfile", "code": "repository-dependency-provisioning-contradicts-lockfile", "remedy": "Choose dependencyProvisioning NPM_CI for repositories with a root package-lock.json." }
+  ```
+
+  These two dependency-policy refusals apply to both this route and
+  `PATCH /repos/:repoId`; other failures use the existing error path. Preflight
+  is never skipped as a success fallback.
 - With `grantAgents: false` or when omitted, a successful request returns
   `201 Created` with the created Repo row itself (the existing response
   shape), and creates no grants. With `grantAgents: true`, the same transaction
@@ -680,6 +688,54 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
 
   ```json
   { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
+
+- When `dependencyProvisioning` is supplied, the route runs repository
+  preflight before writing the Repo row. It uses the stored `remoteUrl` and
+  `defaultBranch`, except that either value supplied in the same patch is used
+  for preflight. A preflight refusal leaves the Repo unchanged. For
+  a missing Repo, the route returns `404 Not Found` with exactly:
+
+  ```json
+  { "error": "Resource not found" }
+  ```
+
+  A patched `remoteUrl` is checked without first trimming the submitted value.
+  An invalid remote returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository remote is invalid", "code": "repository-remote-invalid", "reason": "<parseRepoRemote rejection reason>" }
+  ```
+
+  An invalid patched or stored default branch returns `400 Bad Request` with
+  exactly:
+
+  ```json
+  { "error": "Repository default branch is invalid", "code": "repository-default-branch-invalid" }
+  ```
+
+  Other preflight failures return `422 Unprocessable Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-preflight-failed", "reason": "<existing failure reason>" }
+  ```
+
+  The possible reasons are `git-unavailable`, `git-identity-missing`,
+  `remote-unreachable`, `default-branch-missing`, `push-not-authorized`, and
+  `command-timeout`. For
+  `NPM_CI`, a missing or non-regular root `package-lock.json` in the exact
+  fetched default branch commit returns `422 Unprocessable Entity` with
+  exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-package-lock-missing", "remedy": "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE." }
+  ```
+
+  For `NONE`, a regular root `package-lock.json` in that commit contradicts
+  the declaration and returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning contradicts lockfile", "code": "repository-dependency-provisioning-contradicts-lockfile", "remedy": "Choose dependencyProvisioning NPM_CI for repositories with a root package-lock.json." }
   ```
 
 ```sh
@@ -998,6 +1054,8 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
 - Optional JSON fields: `autoStart` (default `false`), `afterTaskId`, `name`,
   `description`, and `stepOverrides` (map of positive step indexes to
   `{assigneeAgentId}`). `afterTaskId` cannot be combined with `autoStart:true`.
+- An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
+  on the bound chain; archiving the bound chain does not release it.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1317,6 +1375,18 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
   `failureReason` may be `null`.
+- On a Chain step that carries a feature brief, `description` is the brief
+  alone. A task with both a `templateId` and a `chainId` whose Step authors a
+  brief — every step role except readiness and integrator — keeps its stored
+  step prompt and trailing reminders, and the route reframes the submitted text
+  as the brief between `<!-- agentos:task-brief:v1 length=<characters> -->` and
+  `<!-- /agentos:task-brief:v1 -->`, counting the length itself. Send the brief
+  body only: a whole description, prompt and fence included, is not refused but
+  becomes the brief inside a second fence, so read the task back and confirm it
+  carries one. A stored description the route cannot parse, or a Chain step
+  whose template Step metadata is missing, refuses with `400 Bad Request` and
+  `Cannot rewrite task brief: <reason>`. Every other task stores `description`
+  verbatim.
 
 ```sh
 curl -X PATCH "$BASE_URL/tasks/$TASK_ID" \
@@ -1347,6 +1417,8 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATO
 ### POST `/tasks/:taskId/start`
 
 - Required path parameter: `taskId`.
+- Refusals: `409 Conflict` when the task is the first step of a chain bound by
+  `afterTaskId` and the predecessor task is not `DONE`.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATOR_TOKEN"
