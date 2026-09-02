@@ -39,10 +39,13 @@ import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-l
 import { createProductionHost } from "./quiet-window-host.mjs";
 import {
   checkExistingEscalation,
-  ESCALATION_RETRY_CAP,
   selfClearEscalation,
   writeEscalationWithAttempts,
 } from "./quiet-window-escalation.mjs";
+import {
+  clearEscalationOnOperatorRequest,
+  ESCALATION_RETRY_CAP,
+} from "./quiet-window-escalation-record.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
@@ -54,7 +57,6 @@ import {
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
-const DEPLOY_SCRIPT = fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url));
 const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
@@ -402,7 +404,7 @@ test("self-clear notification failure keeps the escalation marker", async (t) =>
   assert.match(state.logs[0], /^STOP escalation-self-clear-failed /u);
 });
 
-test("--clear-escalation removes any marker without deployment environment initialization", (t) => {
+test("--clear-escalation removes a latched marker", (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-deploy-manual-clear-"));
   const stateDir = join(root, ".agentos-deploy");
   const escalationPath = join(stateDir, "escalated.json");
@@ -412,44 +414,33 @@ test("--clear-escalation removes any marker without deployment environment initi
     attempts: ESCALATION_RETRY_CAP,
   }), { mode: 0o600 });
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const logs = [];
 
-  const result = spawnSync(process.execPath, [DEPLOY_SCRIPT, "--clear-escalation"], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      AGENTOS_REPOSITORY_ROOT: root,
-      QUIET_WINDOW_POLL_SECONDS: "60",
-      DATABASE_URL: "",
-      FEISHU_DEFAULT_CHAT_ID: "",
-    },
+  const cleared = clearEscalationOnOperatorRequest({
+    path: escalationPath,
+    log: (line) => { logs.push(line); },
   });
 
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(cleared, true);
   assert.equal(existsSync(escalationPath), false);
-  assert.match(result.stdout, /CLEARED escalation operator-action-required-before-this-command/u);
+  assert.deepEqual(logs, ["CLEARED escalation operator-action-required-before-this-command"]);
 });
 
 test("--clear-escalation reports the path it looked at when no marker exists", (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-deploy-manual-clear-absent-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const escalationPath = join(root, ".agentos-deploy", "escalated.json");
+  const logs = [];
 
-  const result = spawnSync(process.execPath, [DEPLOY_SCRIPT, "--clear-escalation"], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      AGENTOS_REPOSITORY_ROOT: root,
-      QUIET_WINDOW_POLL_SECONDS: "60",
-      DATABASE_URL: "",
-      FEISHU_DEFAULT_CHAT_ID: "",
-    },
+  const cleared = clearEscalationOnOperatorRequest({
+    path: escalationPath,
+    log: (line) => { logs.push(line); },
   });
 
-  assert.equal(result.status, 0, result.stderr);
   // The failure this covers: an operator pointed at the wrong root reads
   // "CLEARED" while the real marker is still in place.
-  assert.doesNotMatch(result.stdout, /CLEARED escalation/u);
-  assert.match(result.stdout, /NO-ESCALATION-TO-CLEAR path=/u);
-  assert.match(result.stdout, new RegExp(`path=${root.replaceAll("\\", "\\\\")}`, "u"));
+  assert.equal(cleared, false);
+  assert.deepEqual(logs, [`NO-ESCALATION-TO-CLEAR path=${escalationPath}`]);
 });
 
 test("--clear-escalation runs when invoked through the production current symlink", (t) => {
@@ -475,7 +466,13 @@ test("--clear-escalation runs when invoked through the production current symlin
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /NO-ESCALATION-TO-CLEAR path=/u);
+  // The marker path hangs off AGENTOS_REPOSITORY_ROOT: this is the only drive
+  // that proves the shipped entrypoint resolves it from that variable rather
+  // than from the release directory the symlink points into.
+  assert.match(
+    result.stdout,
+    new RegExp(`NO-ESCALATION-TO-CLEAR path=${root.replaceAll("\\", "\\\\")}/`, "u"),
+  );
 });
 
 test("service inventory covers the thirteen production labels", () => {
