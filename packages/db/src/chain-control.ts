@@ -11,8 +11,10 @@ import {
   activateChainSuccessor,
 } from "./chain-activation.js";
 import { compare, layerOf } from "./chain-order.js";
-import { lockChainRows, lockChainStructure } from "./locks.js";
+import { enqueueTaskRunInternal, errorForOpenRunRefusal } from "./run-open.js";
+import { lockAgentRepoGrant, lockChainRows, lockChainStructure } from "./locks.js";
 import { markerFromMetadata } from "./merge-tail-markers.js";
+import { stepRole } from "./step-role.js";
 
 type ChainControlDb = Pick<Prisma.TransactionClient, "chainControl">;
 
@@ -52,6 +54,65 @@ export type ChainResumeRow = {
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   repoId: string | null;
+};
+
+type ResumeFirstLayerTask = {
+  id: string;
+  projectId: string;
+  name: string;
+  status: TaskStatus;
+  archivedAt: Date | null;
+  assigneeType: AssigneeType;
+  assigneeAgentId: string | null;
+  repoId: string | null;
+  maxSessionsPerTask: number;
+  dispatchAfterTaskId: string | null;
+  dispatchAfter: { status: TaskStatus } | null;
+  assigneeAgent: { name: string; archivedAt: Date | null } | null;
+  repo: { name: string } | null;
+  templateStep: {
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate: { name: string } | null;
+  } | null;
+};
+
+/**
+ * Resume of a held-before-first-layer Chain is the same operator admission as
+ * POST /tasks/:taskId/start. Keep this check in the database mutation because
+ * the API route cannot participate in the Chain mutex or the release CAS.
+ * `openRun` repeats its own birth-time guards after the release; this helper
+ * covers the Start-only status, budget, and repository-grant checklist before
+ * changing the control authority.
+ */
+const resumeFirstLayerRefusal = async (
+  tx: Prisma.TransactionClient,
+  task: ResumeFirstLayerTask,
+): Promise<ChainControlRefusal | null> => {
+  if (task.archivedAt !== null) return refusal("conflict", "Cannot start an archived task");
+  if (task.status === TaskStatus.DONE) return refusal("conflict", "Task is already done");
+  if (task.assigneeType !== AssigneeType.AGENT) return refusal("conflict", "Human steps cannot be started");
+  if (task.templateStep !== null && stepRole(task.templateStep) === "readiness") {
+    return refusal("conflict", "Merge readiness is server-owned and cannot be started as a model run");
+  }
+  if (task.status !== TaskStatus.TODO && task.status !== TaskStatus.BACKLOG) {
+    return refusal("conflict", "Only Todo and Backlog steps can be started");
+  }
+  if (task.repoId === null || task.repo === null) return refusal("conflict", "This task has no repository");
+  if (task.assigneeAgentId === null || task.assigneeAgent === null) return refusal("conflict", "This task has no assignee");
+  if (task.maxSessionsPerTask <= 0) return refusal("conflict", "Run budget exhausted");
+  if (!await lockAgentRepoGrant(tx, {
+    projectId: task.projectId,
+    agentId: task.assigneeAgentId,
+    repoId: task.repoId,
+  })) return refusal("conflict", "Assignee has no grant for this Repo");
+  if (task.assigneeAgent.archivedAt !== null) {
+    return refusal(
+      "conflict",
+      `Task ${task.name} assignee ${task.assigneeAgent.name} is archived; unarchive the agent to queue this step`,
+    );
+  }
+  return null;
 };
 
 const chainLayerOf = (
@@ -291,12 +352,28 @@ export const holdChain = async (
     return { control: chainControlMutationProjection(existing), duplicate: true };
   }
 
+  // Hold is a barrier after the highest layer that has already been admitted,
+  // not before the next unfinished layer. A TODO row is inert until its first
+  // Run is born; every other status (including DONE) is an admitted row, and a
+  // terminal Run is evidence of admission even if the Task was returned to
+  // TODO. The zero sentinel is the durable "before the first layer" barrier.
+  const runTaskIds = chainRows.map((row) => row.id);
+  const runRows = runTaskIds.length === 0
+    ? []
+    : await tx.run.findMany({
+      where: { taskId: { in: runTaskIds } },
+      select: { taskId: true },
+    });
+  const admittedTaskIds = new Set([
+    ...chainRows.filter((row) => row.status !== TaskStatus.TODO).map((row) => row.id),
+    ...runRows.map((row) => row.taskId),
+  ]);
   const heldLayer = chainRows
-    .filter((row) => row.status !== TaskStatus.DONE)
+    .filter((row) => admittedTaskIds.has(row.id))
     .map(chainLayerOf)
     .filter((layer): layer is number => layer !== null)
-    .sort((left, right) => left - right)[0];
-  if (heldLayer === undefined) {
+    .sort((left, right) => right - left)[0] ?? 0;
+  if (chainRows.every((row) => row.status === TaskStatus.DONE)) {
     return refusal("conflict", "Cannot hold a completed Chain; there is nothing left to hold");
   }
 
@@ -399,7 +476,50 @@ export const resumeChain = async (
   }
   if (existing.heldLayer === null) throw new Error("Held Chain control is missing its held layer");
 
-  const anchor = resumeActivationAnchor(chainRows, existing.heldLayer);
+  let firstLayerTask: ResumeFirstLayerTask | null = null;
+  let activateFirstLayer = false;
+  if (existing.heldLayer === 0) {
+    const firstLayerRows = chainRows
+      .filter((row) => chainLayerOf(row) === 1)
+      .sort(chainOrder);
+    const firstLayerRow = firstLayerRows[0] ?? null;
+    if (firstLayerRow === null) {
+      return refusal("conflict", "Cannot resume Chain before its first layer; layer 1 is missing");
+    }
+    firstLayerTask = await tx.task.findUnique({
+      where: { id: firstLayerRow.id },
+      include: {
+        assigneeAgent: { select: { name: true, archivedAt: true } },
+        repo: { select: { name: true } },
+        dispatchAfter: { select: { status: true } },
+        templateStep: {
+          select: {
+            stepIndex: true,
+            outputKind: true,
+            taskTemplate: { select: { name: true } },
+          },
+        },
+      },
+    });
+    if (firstLayerTask === null) throw new Error(`Chain first layer task ${firstLayerRow.id} disappeared while resuming`);
+
+    // A held-before-first Chain that is bound to an unfinished predecessor is
+    // released but deliberately not started. The predecessor's terminal
+    // completion owns the later bound dispatch. Likewise, any existing Run
+    // means another admission already won and Resume must not mint a second.
+    const predecessorDone = firstLayerTask.dispatchAfterTaskId === null
+      || firstLayerTask.dispatchAfter?.status === TaskStatus.DONE;
+    const firstLayerRunCount = await tx.run.count({ where: { taskId: { in: firstLayerRows.map((row) => row.id) } } });
+    if (predecessorDone && firstLayerRunCount === 0) {
+      const startRefusal = await resumeFirstLayerRefusal(tx, firstLayerTask);
+      if (startRefusal) return startRefusal;
+      activateFirstLayer = true;
+    }
+  }
+
+  const anchor = existing.heldLayer === 0
+    ? null
+    : resumeActivationAnchor(chainRows, existing.heldLayer);
   const anchorLayer = anchor === null ? null : chainLayerOf(anchor);
   const sourceRun = anchorLayer === null
     ? null
@@ -415,6 +535,15 @@ export const resumeChain = async (
   if (anchor !== null && sourceRun === null && resumeActivationNeedsSourceRun(chainRows, anchor)) {
     return refusal("conflict", "Cannot resume an approval layer without a succeeded source Run session");
   }
+
+  const rawTx = tx as Prisma.TransactionClient & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const hasSavepoint = activateFirstLayer && typeof rawTx.$executeRawUnsafe === "function";
+  const savepoint = "chain_resume_first_layer";
+  // A first-layer admission refusal after release must roll back the release
+  // and its event. Production Prisma transactions support savepoints; the
+  // fallback throws so a mocked transaction cannot silently commit a partial
+  // Resume.
+  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
 
   // The state and generation predicate is the compare-and-set authority even
   // though the Chain mutex is the ordinary serializer.
@@ -453,6 +582,33 @@ export const resumeChain = async (
       holdGeneration: existing.holdGeneration,
     },
   });
+
+  if (activateFirstLayer && firstLayerTask !== null) {
+    const opened = await enqueueTaskRunInternal(tx, firstLayerTask.id, now, null);
+    if (!opened.ok) {
+      if (hasSavepoint) {
+        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+        return refusal("conflict", opened.refusal.message);
+      }
+      throw errorForOpenRunRefusal(opened.refusal);
+    }
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    if (firstLayerTask.status === TaskStatus.BACKLOG) {
+      await tx.task.update({ where: { id: firstLayerTask.id }, data: { status: TaskStatus.TODO } });
+    }
+    await tx.taskActivity.create({ data: {
+      taskId: firstLayerTask.id,
+      actorType: "control-plane",
+      body: "Chain resumed; first step queued",
+    } });
+    return {
+      control: chainControlMutationProjection(released),
+      duplicate: false,
+      nextTaskId: firstLayerTask.id,
+      gated: false,
+    };
+  }
 
   const activated = anchor
     ? await activateChainSuccessor(tx, anchor, { sourceRunId: sourceRun?.id ?? null }, now)
