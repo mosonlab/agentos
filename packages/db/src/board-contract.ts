@@ -348,6 +348,7 @@ export type ChainAggregateState =
   | "parked-unactivated"
   | "waiting-on-predecessor"
   | "running"
+  | "held"
   | "idle"
   | "settled";
 export type BoardChainActivationState = ChainAggregateState;
@@ -387,6 +388,12 @@ export type ChainAggregate<DateTime = string> = {
     state: ChainAggregateState;
     predecessor: { taskId: string; taskName: string } | null;
     taskId: string | null;
+    /** Persisted ChainControl facts when the chain is currently held. */
+    hold: {
+      heldLayer: number;
+      heldAt: DateTime;
+      holdReason: string | null;
+    } | null;
   };
   totalCost: UsageCost | null;
   createdAt: DateTime;

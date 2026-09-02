@@ -11,8 +11,23 @@ export type ChainHoldControl = {
   projectId: string;
   chainId: string;
   state: ChainControlState;
+  /** Operator-facing dense ordinal. Zero means no layer was admitted. */
   heldLayer: number | null;
+  /** Stored effective layer used by producer barriers; null for before-first. */
+  heldExecutionLayer?: number | null;
 };
+
+const executionBarrier = (control: ChainHoldControl): number | null => (
+  control.heldLayer === 0 && control.heldExecutionLayer == null
+    ? null
+    : control.heldExecutionLayer ?? control.heldLayer
+);
+
+export const heldBeforeFirstLayer = (control: ChainHoldControl): boolean => (
+  control.state === ChainControlState.HELD
+  && control.heldLayer === 0
+  && control.heldExecutionLayer == null
+);
 
 /**
  * Answers whether one Step is beyond its persisted Chain hold. Unknown Step
@@ -28,22 +43,28 @@ export const heldPredicate = (
     || control.projectId !== subject.projectId
     || control.chainId !== subject.chainId) return false;
   const subjectLayer = layerOf(subject);
-  return control.heldLayer === null || subjectLayer === null || subjectLayer > control.heldLayer;
+  const barrier = executionBarrier(control);
+  return heldBeforeFirstLayer(control)
+    || control.heldLayer === null
+    || subjectLayer === null
+    || barrier === null
+    || subjectLayer > barrier;
 };
 
 /** Prisma expression for every Task refused by one persisted control row. */
 export const heldWhere = (control: ChainHoldControl): Prisma.TaskWhereInput | null => {
   if (control.state !== ChainControlState.HELD) return null;
   const address = { projectId: control.projectId, chainId: control.chainId };
-  if (control.heldLayer === null) return address;
+  const barrier = executionBarrier(control);
+  if (control.heldLayer === null || heldBeforeFirstLayer(control) || barrier === null) return address;
   return {
     ...address,
     OR: [
-      { chainLayer: { gt: control.heldLayer } },
+      { chainLayer: { gt: barrier } },
       {
         chainLayer: null,
         OR: [
-          { chainIndex: { gt: control.heldLayer } },
+          { chainIndex: { gt: barrier } },
           { chainIndex: null },
         ],
       },
@@ -61,7 +82,9 @@ export const heldSql = (task: Prisma.Sql, control: Prisma.Sql): Prisma.Sql => Pr
   AND ${control}."state" = lower(${ChainControlState.HELD})::"ChainControlState"
   AND (
     ${control}."heldLayer" IS NULL
+    OR (${control}."heldLayer" = 0 AND ${control}."heldExecutionLayer" IS NULL)
     OR COALESCE(${task}."chainLayer", ${task}."chainIndex") IS NULL
-    OR COALESCE(${task}."chainLayer", ${task}."chainIndex") > ${control}."heldLayer"
+    OR COALESCE(${task}."chainLayer", ${task}."chainIndex")
+      > COALESCE(${control}."heldExecutionLayer", ${control}."heldLayer")
   )
 `;

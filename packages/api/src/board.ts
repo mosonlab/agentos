@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  readChainControls,
   isIntegratorStep,
   markerFromMetadata,
   MERGE_TAIL_KIND,
@@ -11,6 +12,7 @@ import {
   sumUsageCosts,
   TaskStatus,
   type AssigneeType,
+  type ChainControlSnapshot,
   type Marker,
   type Prisma,
   type PrismaClient,
@@ -65,6 +67,7 @@ export type BoardCard = BoardContractCard<Date>;
 export type BoardLatestRun = BoardContractLatestRun<Date>;
 export type BoardChainActivationState = BoardContractChainActivationState;
 export type RepairBinding = BoardContractRepairBinding;
+export type BoardChainControl = Pick<ChainControlSnapshot, "state" | "held" | "heldLayer" | "heldAt" | "holdReason">;
 
 type JsonSerialized<T> = T extends Date
   ? string
@@ -339,6 +342,7 @@ export const chainAggregate = (
   primaryMembers: readonly BoardChainMember[],
   repairMembers: readonly BoardChainMember[],
   predecessorById: ReadonlyMap<string, BoardBlockedOnTask> = new Map(),
+  control: BoardChainControl | null = null,
 ): BoardContractChainAggregate<Date> => {
   const primary = [...primaryMembers].sort(chainMemberOrder);
   const repairs = [...repairMembers].sort(chainMemberOrder);
@@ -377,9 +381,23 @@ export const chainAggregate = (
   const predecessor = waitingMember?.dispatchAfterTaskId === null || waitingMember?.dispatchAfterTaskId === undefined
     ? null
     : predecessorById.get(waitingMember.dispatchAfterTaskId) ?? null;
+  const hold = control?.held === true
+    ? (() => {
+        if (control.heldLayer === null || control.heldAt === null) {
+          throw new Error(`Held Chain ${chainId} is missing its hold layer or timestamp`);
+        }
+        return {
+          heldLayer: control.heldLayer,
+          heldAt: control.heldAt,
+          holdReason: control.holdReason,
+        };
+      })()
+    : null;
   const activationState: BoardChainActivationState = active
     ? "running"
-    : waitingMember !== undefined
+    : hold !== null
+      ? "held"
+      : waitingMember !== undefined
       ? "waiting-on-predecessor"
       : allDone
         ? "settled"
@@ -431,6 +449,7 @@ export const chainAggregate = (
         ? null
         : { taskId: predecessor.id, taskName: predecessor.name },
       taskId: firstPrimary?.id ?? null,
+      hold,
     },
     totalCost: serializeUsageCost(totalCost),
     createdAt,
@@ -940,6 +959,18 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
   const displayByTask = chainDisplayByTask(displayInputs);
   const progressFor = chainProgressFromRows(primaryRows, true);
 
+  // ChainControl is the board's persisted hold authority. Read every control
+  // row represented by this page in one query; missing rows are the initial
+  // released state returned by readChainControls.
+  const chainControlKeys = [...new Map([...rows, ...primaryRows]
+    .flatMap((row) => row.chainId === null
+      ? []
+      : [{ projectId: row.projectId, chainId: row.chainId }])
+    .map((key) => [chainKey(key), key] as const)).values()];
+  const controls = chainControlKeys.length === 0
+    ? new Map<string, BoardChainControl>()
+    : await readChainControls(db, chainControlKeys);
+
   const predecessorIds = [...new Set([...rows, ...primaryRows]
     .map((row) => row.dispatchAfterTaskId)
     .filter((value): value is string => typeof value === "string" && value.length > 0))];
@@ -1034,6 +1065,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       group.primary,
       group.repairs,
       predecessorById,
+      controls.get(key) ?? null,
     ));
   }
 

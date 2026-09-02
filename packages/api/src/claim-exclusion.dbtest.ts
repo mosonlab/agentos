@@ -233,6 +233,36 @@ test("ordinary runners exclude above-layer held Runs while an unheld Chain remai
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: allowed.id } })).status, RunStatus.CLAIMED);
 });
 
+test("the run-claim query excludes stored layer zero under a before-first hold", async () => {
+  const owner = await seedRunner();
+  const chain = await seedChain(owner, [0]);
+  await db.chainControl.create({ data: {
+    projectId: owner.project.id,
+    chainId: chain.chainId,
+    state: ChainControlState.HELD,
+    heldLayer: 0,
+    heldExecutionLayer: null,
+    holdGeneration: 1,
+  } });
+  const task = chain.tasks[0]!;
+  const run = await db.run.create({ data: {
+    projectId: owner.project.id,
+    taskId: task.id,
+    agentId: owner.agent.id,
+    repoId: owner.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${task.id}:run:1`,
+    status: RunStatus.QUEUED,
+    runner: "CLAUDE",
+    model: "claude",
+    readyAt: EARLIER,
+  } });
+
+  const result = await claim("claim-before-first-zero");
+  assert.equal(result.status, 204, JSON.stringify(result.body));
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.QUEUED);
+});
+
 test("ordinary runners still claim held-Chain Runs at or below the held layer", async () => {
   const owner = await seedRunner();
   const chain = await seedChain(owner, [1, 2, 3]);
