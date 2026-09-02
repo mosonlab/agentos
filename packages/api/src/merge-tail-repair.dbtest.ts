@@ -271,10 +271,11 @@ const completeRepair = async (
   repairId: string,
   output: string,
   headSha: string | null = RESOLVED,
+  runNumber = 1,
 ) => {
-  const run = await db.run.findFirstOrThrow({ where: { taskId: repairId } });
+  const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
-  const runnerId = `repair-runner-${repairId}`;
+  const runnerId = `repair-runner-${run.id}`;
   const fencingToken = `repair:${run.id}:1`;
   await db.run.update({ where: { id: run.id }, data: {
     status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
@@ -304,6 +305,59 @@ const completeRepair = async (
     if (prior === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = prior;
   }
+};
+
+/**
+ * The failure the repair budget exists for: the agent delivered its commit and
+ * the provider stream dropped on the way out, so the completion arrives with a
+ * clean exit and no terminal success. It is retryable and it is the agent's own
+ * EXECUTE phase, so it neither refunds nor raises the ceiling.
+ */
+const failRepairAfterDelivery = async (
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
+  repairId: string,
+  runNumber: number,
+  headSha: string,
+) => {
+  const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
+  const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
+  const runnerId = `repair-runner-${run.id}`;
+  const fencingToken = `repair:${run.id}:1`;
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
+  } });
+  await db.session.create({ data: {
+    runId: run.id, projectId: seeded.project.id, agentId: repair.assigneeAgentId!, taskId: repair.id,
+    runner: "CODEX", executionStatus: "RUNNING",
+  } });
+  await db.task.update({ where: { id: repair.id }, data: { status: TaskStatus.DOING } });
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "merge-tail-repair-token";
+  try {
+    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId, fencingToken, exitCode: 0, terminalEventSeen: false, terminalSuccess: false,
+        cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+        pushStatus: "SUCCEEDED", headSha,
+        failureReason: "stream disconnected before completion: tls handshake eof",
+        failureEnvelope: {
+          version: 1, phase: "EXECUTE", agentExited: true, exitCode: 0, signal: null,
+          terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+          runnerClass: "PROTOCOL_ERROR",
+          providerError: "stream disconnected before completion: tls handshake eof",
+          stderrSummary: null, stdoutSummary: null,
+          terminalEventSeen: false, terminalSuccess: false,
+        },
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+  return db.run.findUniqueOrThrow({ where: { id: run.id } });
 };
 
 const completeDocumentation = async (
@@ -416,6 +470,52 @@ test("successful auxiliary repair completion preserves success when its chain ta
       where: { taskId: seeded.regression.id, body: { contains: mode === "task" ? "target is archived" : "assignee" } },
     }), 1, mode);
   }
+});
+
+test("a repair Run that fails retryably opens a second Run instead of stopping the tail", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  assert.equal(repair.maxSessionsPerTask, 2);
+
+  const failed = await failRepairAfterDelivery(seeded, repair.id, 1, REPAIRED);
+  assert.equal(failed.status, "FAILED");
+  assert.equal(failed.failureClass, "PROTOCOL_ERROR");
+  assert.equal(failed.retryable, true);
+
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 2 } });
+  assert.equal(retry.status, "QUEUED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).status, TaskStatus.DOING);
+  // The tail is still open: a stopped tail files this notice and moves its
+  // regression task out of the repair loop.
+  assert.equal(await db.inboxMessage.count({
+    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+  }), 0);
+  assert.equal(await repairCount(seeded), 1);
+
+  // The second Run closes the repair the first one had already delivered, and
+  // the tail reads the same four facts it reads after any healthy repair.
+  await completeRepair(seeded, repair.id, "repair completed", REPAIRED, 2);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).status, TaskStatus.DONE);
+  const closed = await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 2 } });
+  assert.equal(closed.status, "SUCCEEDED");
+  assert.equal(closed.pushedBranch, BRANCH);
+  const marker = latestMarker(await readMarkers(db, seeded.regression.id), "repairResult");
+  assert.equal(marker?.repairKind, "review-fix");
+  assert.equal(marker?.state, null);
+});
+
+test("a repair whose whole budget fails retryably still stops the tail", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+
+  await failRepairAfterDelivery(seeded, repair.id, 1, REPAIRED);
+  const exhausted = await failRepairAfterDelivery(seeded, repair.id, 2, REPAIRED);
+  assert.equal(exhausted.status, "FAILED");
+
+  assert.equal(await db.run.count({ where: { taskId: repair.id } }), 2);
+  assert.equal(await db.inboxMessage.count({
+    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+  }), 1);
 });
 
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
