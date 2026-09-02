@@ -325,7 +325,7 @@ print_gate_no_verdict_tail() {
   local log="$1" attempts="$2" status="$3" tail
   tail="$(extract_gate_no_verdict_tail "$log")" || return 1
   printf 'REGRESSION FINALIZE: gate dispatch log tail (attempts=%s, last exit status=%s)\n' "$attempts" "$status"
-  [ -z "$tail" ] || printf '%s' "$tail"
+  [ -z "$tail" ] || printf '%s\n' "$tail"
 }
 
 persist_output() {
