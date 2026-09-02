@@ -3,12 +3,12 @@
 # Gate a commit on one remote worker and bring the verdict home. Runs ON THE
 # LOCAL MACHINE (issue #132):
 #
-#   scripts/gate-worker/remote-gate.sh <server>                  # gate local HEAD
-#   scripts/gate-worker/remote-gate.sh <server> <oid>            # gate that commit
-#   scripts/gate-worker/remote-gate.sh <server> <oid> --verbose  # stream the log
-#   scripts/gate-worker/remote-gate.sh <server> <oid> --fetch-log # scp the log back
-#   scripts/gate-worker/remote-gate.sh <server> <oid> --master <oid> # state the baseline
-#   AGENTOS_GATE_SERVER=<server> scripts/gate-worker/remote-gate.sh <oid>
+#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server>                  # gate local HEAD
+#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid>            # gate that commit
+#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid> --verbose  # stream the log
+#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid> --fetch-log # scp the log back
+#   packages/runner/runtime-tools/gate-worker/remote-gate.sh <server> <oid> --master <oid> # state the baseline
+#   AGENTOS_GATE_SERVER=<server> packages/runner/runtime-tools/gate-worker/remote-gate.sh <oid>
 #
 # The gate's frozen-record rules are statements about what is already on the
 # default branch, so a verdict has to name the baseline it was formed against.
@@ -58,7 +58,7 @@
 #   spot-checked locally. docs/runbooks/gate-worker.md states the boundary.
 #
 # The commit must already be in the worker's mirror. The worker never fetches, so
-# push first: scripts/gate-worker/mirror-push.sh <server> --candidate <oid>
+# push first: packages/runner/runtime-tools/gate-worker/mirror-push.sh <server> --candidate <oid>
 # --baseline <baseline-oid>. Routine callers use gate-dispatch.sh, which freezes
 # and transports both before invoking this script.
 set -uo pipefail
@@ -142,10 +142,18 @@ if [ -n "$SSH_PORT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
-# shellcheck source=scripts/gate-worker/lib.sh
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+
+if [ -z "${AGENTOS_WORKSPACE_PATH:-}" ]; then
+  no_verdict "AGENTOS_WORKSPACE_PATH is required"
+fi
+[ -d "$AGENTOS_WORKSPACE_PATH" ] \
+  || no_verdict "AGENTOS_WORKSPACE_PATH is not a directory: $AGENTOS_WORKSPACE_PATH"
+REPO_ROOT="$(CDPATH= cd -- "$AGENTOS_WORKSPACE_PATH" && pwd -P)" \
+  || no_verdict "cannot enter AGENTOS_WORKSPACE_PATH: $AGENTOS_WORKSPACE_PATH"
+export AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
 
 # Nothing here forms a verdict, so nothing here may exit 1: a precondition that
 # fails means no gate ran, and lib.sh's GATE_EXIT_NO_VERDICT is the code for

@@ -117,9 +117,15 @@ test("Codex implementation steps receive the fixed native Luna child capability"
     outputKind: "implementation",
     taskTemplate: { name: "direct-engineer-workflow" },
   };
+  const pullRequestWorkflow = {
+    stepIndex: 1,
+    outputKind: "implementation",
+    taskTemplate: { name: "pr-engineer-workflow" },
+  };
   const expected = { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 };
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, compound), expected);
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, direct), expected);
+  assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, pullRequestWorkflow), null);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CLAUDE, direct), null);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, null), null);
 });
@@ -157,7 +163,10 @@ test("task creation leaves promptHash empty until the exact prompt is dispatched
           } : null,
         },
         taskActivity: { create: async () => ({ id: "activity-1" }) },
-        run: { create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; } },
+        run: {
+          findFirst: async () => null,
+          create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; },
+        },
       }),
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/projects/project-1/tasks", {

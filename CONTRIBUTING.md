@@ -49,7 +49,18 @@ runs, and a group passes only when all of its members do.
 scripts/merge-gate.sh --expect-head <oid>
 ```
 
-It holds a lock, so run one gate per worktree. A verdict belongs to the exact
+Inside an Anneal Run (`AGENTOS_RUN_ID` set), the root `build`, `lint`,
+`typecheck`, `test`, `test:db`, and `merge-gate` scripts refuse before doing
+work and exit **78**. Only the exact reserved value
+`AGENTOS_RUN_SCOPE_BYPASS=regression-verification`, set by the platform's
+Regression step, bypasses that guard; a direct `scripts/merge-gate.sh`
+invocation still refuses with `GATE NOT RUN:` and exits **76**. Run only the
+affected workspace checks and named test files inside a Run; the Regression
+step owns repository-wide proof and the Merge Gate.
+
+Per-workspace `build`, `typecheck`, `lint`, `test`, and `test:db` verification inside an Anneal Run shares a host-wide pool of three proof slots by default; set `AGENTOS_HOST_PROOF_SLOTS` to an integer from 1 through 1024 to override the count. Waiting is silent and a command exits **75** after 20 minutes if no slot becomes available. The exact `AGENTOS_RUN_SCOPE_BYPASS=regression-verification` value preserves the Regression host fast path, as does running outside a Run, so those commands execute immediately without acquiring a slot.
+
+The merge gate holds a lock, so run one gate per worktree. A verdict belongs to the exact
 commit it names — not to an earlier one on the same branch, and not to "the
 branch".
 
@@ -69,10 +80,11 @@ upstream repository.
 
 A merge requires `MERGE GATE: PASS <oid>` for the exact integrated head being
 merged (`scripts/merge-gate.sh --expect-head <oid>`). When another gate might
-be running and remote capacity has been configured explicitly, dispatch through
-`scripts/gate-worker/gate-dispatch.sh <oid>`; otherwise run the local gate. Read
-[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before operating
-any remote worker.
+be running and remote capacity has been configured explicitly, dispatch
+through `AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid>`;
+otherwise run the local gate. Read
+[`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before
+operating any remote worker.
 
 For one candidate, acquire `scripts/merge-lease.sh` before running the merge
 gate for the final integrated head and hold it until the merge consumes that
@@ -153,9 +165,10 @@ something outside the checkout.
 - A checkout named by a loaded Anneal service is an appliance checkout. Follow
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
-  use a separate worktree for development. A fresh worktree needs
-  `npm install && npm run db:generate && npm run build -w @anneal/db` before
-  anything else works.
+  use a separate worktree for development. In a fresh worktree, workspace
+  typecheck, unit-test, and focused API database-test commands need `npm install`
+  and `npm run db:generate`, but no prior workspace build. Workflows that execute
+  built artifacts run after the Merge Gate's preceding full build.
 
 ### Development database bootstrap
 

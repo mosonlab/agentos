@@ -172,10 +172,13 @@ test("startup reconciliation does not fail when archived notice persistence fail
   console.error = (...args: unknown[]) => { logged = args.map(String).join(" "); };
   try {
     const result = await reconcileAtStartup(database);
+    // Startup still survives the failure, but the count it could not read is
+    // `null` rather than `0`: a fabricated zero is indistinguishable from a
+    // healthy idle control plane in the startup line an operator reads.
     assert.deepEqual(result, {
       runs: 0,
       openReclaimIntents: 0,
-      archivedNotices: 0,
+      archivedNotices: null,
     });
     assert.match(logged, /Archived-run startup notice failed.*audit unavailable/);
   } finally {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+import { PR_TEMPLATE_NAME, REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
 
 import {
   ADAPTER_VERSION,
@@ -21,6 +21,7 @@ import {
 } from "./adapters.js";
 import {
   controlPlane as defaultControlPlane,
+  isDependencyProvisioning,
   type ClaimedTask,
   type ControlPlane,
   type SessionEventPayload,
@@ -33,7 +34,7 @@ import {
 } from "./availability.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { deliverWorkspace } from "./delivery.js";
+import { deliverWorkspace, type PrWorkflowOutput } from "./delivery.js";
 import { disposeWorkspace, type WorkspaceDisposal } from "./dispose-workspace.js";
 import {
   buildFailureEnvelope,
@@ -48,7 +49,7 @@ import { openSessionConfig, type SessionConfigLease } from "./session-config-lea
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
-  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
+  captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
   type AgentScratch, type Workspace, type WorkspaceSnapshot,
 } from "./workspace.js";
@@ -148,6 +149,7 @@ const preflightEvidence = (message: string): ExitEvidence => ({
 });
 
 export type ExecuteClaimDependencies = {
+  materializeRuntimeTools?: typeof materializeRuntimeTools;
   provisionSessionConfig?: typeof provisionSessionConfig;
   cleanupAgentScratch?: typeof cleanupAgentScratch;
   writeSessionCredentials?: typeof writeSessionCredentials;
@@ -168,7 +170,7 @@ export const executeClaim = async (
   let handle: RuntimeHandle | null = null;
   let sessionConfigLease: SessionConfigLease | null = null;
   let budgetReason: string | null = null;
-  let remediationFailureReason: string | null = null;
+  let terminalFailureReason: string | null = null;
   let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
@@ -289,8 +291,53 @@ export const executeClaim = async (
   };
 
   try {
+    // A template step carries an explicit dependency decision. A missing or
+    // malformed value is a protocol violation: no default is safe because it
+    // could either strip dependencies from an implementation step or expose a
+    // review step to the dependency materializer. Validate before any runner
+    // workspace, dependency, adapter, or provider operation.
+    const claimedTemplateStep = claim.task.templateStep as {
+      provisionDependencies?: unknown;
+    } | null | undefined;
+    if (claimedTemplateStep === undefined
+      || (claimedTemplateStep !== null && typeof claimedTemplateStep.provisionDependencies !== "boolean")) {
+      const condition = "template-step-provision-dependencies-missing";
+      await controlPlane.completeRun(config, claim, {
+        exitCode: null,
+        terminalEventSeen: false,
+        terminalSuccess: false,
+        terminationReason: condition,
+        failureClass: "PROTOCOL_ERROR",
+        failureReason: condition,
+        retryable: false,
+        cleanupStatus: "SUCCEEDED",
+        workspaceRetained: false,
+      });
+      return;
+    }
+    // Dependency provisioning is a required claim contract. A runner build
+    // that predates this field must fail closed: treating an omitted value as
+    // either policy would silently change whether a repository's dependencies
+    // are installed. Validate before any workspace, scratch, child environment
+    // or adapter preflight/launch work can happen, and keep the condition in
+    // both terminal fields so old and new control planes can expose it.
+    if (!isDependencyProvisioning((claim.repo as { dependencyProvisioning?: unknown } | undefined)?.dependencyProvisioning)) {
+      const condition = "dependency-provisioning-missing";
+      await controlPlane.completeRun(config, claim, {
+        exitCode: null,
+        terminalEventSeen: false,
+        terminalSuccess: false,
+        terminationReason: condition,
+        failureClass: "PROTOCOL_ERROR",
+        failureReason: condition,
+        retryable: false,
+        cleanupStatus: "SUCCEEDED",
+        workspaceRetained: false,
+      });
+      return;
+    }
     // §D-P1 rule 4 — defence in depth behind the claim-side allowlist, and the
-    // FIRST thing this function does. Everything below it constructs something a
+    // FIRST execution-mode check this function performs. Everything below it constructs something a
     // merge credential must never be near: a workspace, a prompt, a child
     // environment, an adapter preflight, a spawned CLI, a delivery push. A
     // mechanical run reaching an ordinary runner means the allowlist was
@@ -335,8 +382,20 @@ export const executeClaim = async (
     }
 
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
+    if (claim.task.templateStep?.provisionDependencies === false) {
+      // This is deliberately a fenced activity write with no fallback: the
+      // reviewer must have durable evidence of the dependency-free checkout
+      // before its adapter is preflighted or launched.
+      await controlPlane.appendActivity(
+        config,
+        claim,
+        "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
+        { stream: "runner" },
+      );
+    }
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
+    await (dependencies.materializeRuntimeTools ?? materializeRuntimeTools)(config, scratch);
     sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies);
     await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
       reuse: claim.resume !== null,
@@ -466,7 +525,7 @@ export const executeClaim = async (
           });
         }
       } catch (error: unknown) {
-        remediationFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        terminalFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
         sink({
           source: "RUNNER",
           type: "REGRESSION_OUTPUT_HANDOFF_FAILED",
@@ -477,7 +536,7 @@ export const executeClaim = async (
     if (adapterExecutionSucceeded(evidence)
       && claim.task.templateStep?.outputKind
       && runLease.held
-      && remediationFailureReason === null) {
+      && terminalFailureReason === null) {
       let outputStatus: SessionTaskOutputStatus | null = null;
       try {
         outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
@@ -492,7 +551,7 @@ export const executeClaim = async (
         const outputKind = outputStatus.outputKind;
         const providerConversationId = completedHandle.providerConversationId;
         if (claim.task.templateStep.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND) {
-          remediationFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
+          terminalFailureReason = `Regression verification finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
@@ -551,9 +610,9 @@ export const executeClaim = async (
               }
               if (workspaceChanged) {
                 workspacePublicationForbidden = true;
-                remediationFailureReason = `Task output remediation changed workspace HEAD or tree for Run ${claim.run.id}`;
+                terminalFailureReason = `Task output remediation changed workspace HEAD or tree for Run ${claim.run.id}`;
               } else if (!remediated) {
-                remediationFailureReason = statusCheckError
+                terminalFailureReason = statusCheckError
                   ? `Task output remediation status check failed for Run ${claim.run.id}: ${statusCheckError}`
                   : `Task output remediation finished without persisting ${outputKind} output for Run ${claim.run.id}`;
               }
@@ -576,7 +635,7 @@ export const executeClaim = async (
             }
           }
         } else {
-          remediationFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
+          terminalFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
             !outputStatus.outputRemediationAllowed ? "remediation is not allowed"
               : !outputKind ? "output kind is unavailable"
                 : "provider conversation id is unavailable"
@@ -622,26 +681,52 @@ export const executeClaim = async (
     const disconnectCandidate = evidence.exitCode === 0
       && evidence.signal === null
       && evidence.terminationReason === null
-      && (!evidence.terminalEventSeen || !evidence.terminalSuccess)
-      && remediationFailureReason === null
+      && evidence.terminalEventSeen === false
+      && terminalFailureReason === null
       && budgetReason === null
       && runLease.held;
     if (disconnectCandidate) {
       try {
         const outputStatus = await controlPlane.readSessionTaskOutputStatus(config, claim);
-        const receipt = outputStatus?.outputPersisted
-          ? await readTaskOutputReceipt(config, workspace)
-          : null;
         const expectedKind = "result";
-        postDeliveryDisconnectTolerated = outputStatus?.outputPersisted === true
-          && outputStatus.outputKind === expectedKind
-          && receipt?.runId === claim.run.id
-          && receipt.kind === expectedKind
-          && /^[0-9a-f]{40}$/u.test(receipt.commitSha)
-          && receipt.commitSha === capturedHeadSha;
-        if (outputStatus?.outputPersisted && !receipt) {
-          throw new Error(`Persisted ${expectedKind} output has no local delivery receipt`);
+        if (outputStatus?.outputPersisted !== true) {
+          throw new Error(`No persisted ${expectedKind} output exists for this Run`);
         }
+        const output = outputStatus.output;
+        if (!output) throw new Error(`Persisted ${expectedKind} output has no server-side identity`);
+        if (output.runId !== claim.run.id) {
+          throw new Error(`Persisted ${expectedKind} output belongs to Run ${output.runId}`);
+        }
+        if (output.kind !== expectedKind) {
+          throw new Error(`Persisted output kind ${output.kind} is not ${expectedKind}`);
+        }
+        if (typeof output.commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(output.commitSha)) {
+          throw new Error(`Persisted ${expectedKind} output has an invalid commit SHA`);
+        }
+        if (output.commitSha !== capturedHeadSha) {
+          throw new Error(`Persisted ${expectedKind} output does not match captured workspace HEAD`);
+        }
+        postDeliveryDisconnectTolerated = true;
+        let localReceipt = null;
+        let localReceiptReadError: string | null = null;
+        try {
+          localReceipt = await readTaskOutputReceipt(config, workspace);
+          if (!localReceipt) localReceiptReadError = "Local task output receipt is absent";
+        } catch (error: unknown) {
+          localReceiptReadError = errorMessage(error);
+        }
+        sink({
+          source: "RUNNER",
+          type: "POST_DELIVERY_DISCONNECT_ACCEPTED",
+          payload: {
+            runId: claim.run.id,
+            commitSha: output.commitSha,
+            providerError: evidence.providerError,
+            terminalEventSeen: evidence.terminalEventSeen,
+            localReceipt,
+            localReceiptReadError,
+          },
+        });
       } catch (error: unknown) {
         sink({
           source: "RUNNER",
@@ -650,6 +735,36 @@ export const executeClaim = async (
         });
       }
     }
+    let prWorkflowOutputs: readonly PrWorkflowOutput[] | undefined;
+    const templateStep = claim.task.templateStep as (NonNullable<ClaimedTask["task"]["templateStep"]> & {
+      taskTemplate?: { name?: string };
+    }) | null;
+    const canonicalPrDelivery = templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
+      && (templateStep.outputKind === "implementation" || templateStep.outputKind === "fixed-implementation");
+    if (canonicalPrDelivery && runLease.held) {
+      try {
+        const status = await controlPlane.readSessionTaskOutputStatus(config, claim) as (
+          SessionTaskOutputStatus & { prWorkflowOutputs?: readonly PrWorkflowOutput[] }
+        ) | null;
+        if (!status || !Array.isArray(status.prWorkflowOutputs)) {
+          throw new Error("session status omitted canonical PR workflow output evidence");
+        }
+        prWorkflowOutputs = status.prWorkflowOutputs;
+      } catch (error: unknown) {
+        if (terminalFailureReason === null) {
+          terminalFailureReason = `Canonical PR workflow evidence handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        }
+        sink({
+          source: "RUNNER",
+          type: "PR_WORKFLOW_EVIDENCE_HANDOFF_FAILED",
+          payload: { message: errorMessage(error) },
+        });
+      }
+    }
+    // Flush the handoff failure (if any) before checking authority or entering
+    // delivery. This status read happens after the provider's final events, so
+    // placing it after the existing drain would leave the new diagnostic event
+    // queued and then lose it when the run completes.
     await drainEventsUnderLease(runLease);
     if (!runLease.held) {
       const authority = await runLease.checkpoint();
@@ -661,16 +776,18 @@ export const executeClaim = async (
       });
       return;
     }
-    // A validated, fenced Regression handoff is the step's terminal product.
-    // Provider diagnostics that arrive after it must remain observable without
-    // turning the completed verification into another model retry.
+    // A validated, fenced Regression handoff is the step's terminal product
+    // only when the provider did not explicitly reject the session. Transport
+    // loss remains recoverable, but a terminal failure keeps its authority.
+    const explicitTerminalFailure = evidence.terminalEventSeen && !evidence.terminalSuccess;
     const regressionMechanicallySettled = regressionHandoffPersisted
-      && remediationFailureReason === null
+      && !explicitTerminalFailure
+      && terminalFailureReason === null
       && budgetReason === null;
     const executionSucceeded = (adapterExecutionSucceeded(evidence)
       || regressionMechanicallySettled
       || postDeliveryDisconnectTolerated)
-      && remediationFailureReason === null
+      && terminalFailureReason === null
       && budgetReason === null;
     let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     // Bound outside the closures below: `workspace` is nullable at the top of
@@ -693,6 +810,7 @@ export const executeClaim = async (
           delivered,
           {
             ...(capturedHeadSha ? { headSha: capturedHeadSha } : {}),
+            ...(prWorkflowOutputs ? { prWorkflowOutputs } : {}),
             recordPublication: (branch) => controlPlane.recordPublishedBranch(config, claim, branch),
             retryOptions,
           },
@@ -745,7 +863,7 @@ export const executeClaim = async (
     const classified = succeeded ? null
       : budgetReason
         ? { failureClass: "BUDGET_EXCEEDED" as const, retryable: false }
-        : remediationFailureReason
+        : terminalFailureReason
           ? { failureClass: "PROTOCOL_ERROR" as const, retryable: true }
           : primaryDelivery?.failureClass
             ? { failureClass: primaryDelivery.failureClass, retryable: false }
@@ -785,7 +903,7 @@ export const executeClaim = async (
     // the structured envelope too; otherwise the API correctly distrusts the
     // runner's asserted class and would classify the clean primary evidence as
     // TASK_FAILED instead of PROTOCOL_ERROR.
-    const completionEvidence = remediationFailureReason
+    const completionEvidence = terminalFailureReason
       ? { ...acceptedEvidence, terminalSuccess: false }
       : acceptedEvidence;
     await controlPlane.completeRun(config, claim, {
@@ -799,7 +917,7 @@ export const executeClaim = async (
       ...(!succeeded ? {
         failureReason: appendRetainedSessionConfig(
           budgetReason
-            ?? remediationFailureReason
+            ?? terminalFailureReason
             ?? (executionSucceeded ? primaryDelivery?.pushError : null)
             ?? failureReasonFromEvidence(evidence),
           retainedPath,

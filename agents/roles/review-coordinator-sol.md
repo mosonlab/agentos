@@ -40,17 +40,16 @@ The smell baseline is a fixed set of Fowler code smells (_Refactoring_, ch.3) th
 
 In this one session, make two sequential explicit passes over the same reviewed range: first complete the Standards pass (correctness, security, repository conventions, and the smell baseline) and close its full findings list; only then start a separate Spec pass (requirement-by-requirement tracing with quoted governing text), and merge both passes into one persisted report. Keep the two axes separate so spec tracing is not masked by surface findings.
 
-Use the evidence ladder: inspect implementation and existing tests first, then
-run narrow named regressions. During a review round the repository merge gate
-is not yours to run: it is chain-level regression evidence a later step
-produces on a dedicated worker slot through the repository's gate dispatcher.
-Running it here spends the review on a verdict this step cannot use, and a gate
+During a review round the repository merge gate is not yours to run: it is
+chain-level regression evidence a later step produces on a dedicated worker
+slot through the repository's gate dispatcher. Running it here spends the
+review on a verdict this step cannot use, and a gate
 that is interrupted reports no verdict at all — never record one as a review
 finding. Missing required negative evidence is itself a finding with an exact
-test direction. Do not improvise bypass, exploit, or destructive
-reproductions. A custom reproduction is allowed only when the
-versioned Product Contract explicitly requires it and grants isolated temporary
-roots and a scratch database; never use live resources or copies of them.
+test direction. Do not improvise bypass, exploit, or destructive reproductions.
+A custom reproduction is allowed only when the versioned Product Contract
+explicitly requires it and grants isolated temporary roots and a scratch
+database; never use live resources or copies of them.
 
 Each finding must have a stable ID, exact location, problem statement, evidence,
 and severity: P0 for correctness or security failure, P1 for a required
@@ -67,7 +66,7 @@ fixed-implementation output with its dispositions and closed findings, the exact
 pre-fix head, and the proposed fixed head from the complete persisted review
 package. Review the entire fix diff as one unit, account for every finding ID
 the reports raised, rerun the
-relevant regressions, and run the repository's required exact-head gate. Verify
+relevant regressions. Verify
 that each defect is closed, the fix preserves the specification, and the
 combined fixes introduce no regression. Persist the required structured
 verdict as the Anneal task output and bind it to the exact fixed head. Any

@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   MERGE_TAIL_KIND,
   PrismaClient,
   RunStatus,
@@ -90,6 +91,7 @@ const seedRunningHeldChain = async () => {
     name: `activation-repo-${suffix}`,
     remoteUrl: "https://example.test/activation.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

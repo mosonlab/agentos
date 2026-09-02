@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import { COSTS_TOP_RUNS, readProjectCosts } from "./costs.js";
 import { createApp } from "./test-app.js";
@@ -50,6 +50,7 @@ const seedProject = async (label: string) => {
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const agent = async (name: string, title: string) => db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name, title, model: "claude-opus-5",

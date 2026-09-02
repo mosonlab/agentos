@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { ControlPlaneError, type ControlPlane } from "./api.js";
 import type { RunnerConfig } from "./config.js";
+import { HOST_PROOF_SLOT_DIRECTORY_NAME } from "./host-proof-slots.js";
 import { authorizeOffer, reclaimWorkspaces, type ReclaimDeps } from "./reclaim.js";
 import { createControlPlaneDouble } from "./test-control-plane.js";
 
@@ -16,12 +17,14 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   runnerId: "runner-1",
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 1_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: workspaceRoot,
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot,
+  hostProofSlots: 3,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,
@@ -95,6 +98,18 @@ test("removes exactly the directory the control plane offered and reports it", a
   // a run id into a path, and it does so against its own configured root.
   assert.deepEqual([...calls[0]!.body.directories].sort(), ["bystander", "done-run"]);
   assert.deepEqual(calls[1]!.body.results, [{ runId: "done-run", outcome: "REMOVED" }]);
+});
+
+test("reclaim inventory excludes the persistent host proof slot directory", async () => {
+  const workspaceRoot = await root("proof-slots");
+  await mkdir(join(workspaceRoot, HOST_PROOF_SLOT_DIRECTORY_NAME));
+  await mkdir(join(workspaceRoot, "run-1"));
+  const calls = stubApi({ reclaim: [], verify: [], keep: [] });
+
+  await reclaimWith(calls, config(workspaceRoot));
+
+  assert.deepEqual(calls[0]!.body.directories, ["run-1"]);
+  await access(join(workspaceRoot, HOST_PROOF_SLOT_DIRECTORY_NAME));
 });
 
 test("a delayed reclaim salvages an unpublished retained workspace before deleting it", async () => {

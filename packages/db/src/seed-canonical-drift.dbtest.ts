@@ -85,6 +85,7 @@ test("seed rolls a registered canonical generation over inside its installation 
         stepIndex: step.stepIndex - 1,
         layer: (step.layer ?? 0) - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+        provisionDependencies: true,
       },
     });
   }
@@ -128,7 +129,7 @@ test("seed refuses an unregistered same-length drift graph and leaves its rows u
 
   const refused = seed();
   assert.notEqual(refused.status, 0, refused.output);
-  assert.match(refused.output, /has structural drift: step 1 differs from the canonical source in approvalGate/u);
+  assert.match(refused.output, /Template compound-engineer-workflow \([^)]+\), compound-engineer-workflow step 1 \([^)]+\) differs from the canonical source in approvalGate/u);
 
   const afterRefusal = await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: drifted.id } });
   assert.equal(afterRefusal.approvalGate, true);
@@ -136,7 +137,7 @@ test("seed refuses an unregistered same-length drift graph and leaves its rows u
   const templates = await prisma.taskTemplate.findMany({ where: { projectId: project.id }, select: { name: true } });
   assert.deepEqual(
     templates.map(({ name }) => name).sort(),
-    ["compound-engineer-workflow", "direct-engineer-workflow"],
+    ["compound-engineer-workflow", "direct-engineer-workflow", "pr-engineer-workflow"],
   );
 
   await prisma.taskTemplateStep.update({

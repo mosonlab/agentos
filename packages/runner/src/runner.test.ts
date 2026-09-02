@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
@@ -17,7 +18,7 @@ import {
 } from "./runner.js";
 import { createControlPlaneDouble, createRoutedControlPlaneDouble, type ControlPlaneFetchHandler } from "./test-control-plane.js";
 import {
-  cleanupAgentScratch, provisionSessionConfig, type AgentScratch,
+  cleanupAgentScratch, materializeRuntimeTools, provisionSessionConfig, type AgentScratch,
 } from "./workspace.js";
 
 const config = (workspaceRoot: string): RunnerConfig => ({
@@ -26,12 +27,14 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   runnerId: "runner-1",
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: workspaceRoot,
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot,
+  hostProofSlots: 3,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,
@@ -59,7 +62,7 @@ const mechanicalClaim: ClaimedTask = {
     maxDurationMin: 30,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 3,
-    templateStep: { name: "Merge execution" },
+    templateStep: { name: "Merge execution", provisionDependencies: true },
   },
   agent: {
     id: "agent-merge",
@@ -69,7 +72,13 @@ const mechanicalClaim: ClaimedTask = {
     rolePrompt: "",
     disabledTools: [],
   },
-  repo: { id: "repo-1", remoteUrl: "git@github.com:owner/name.git", defaultBranch: "master", mountPath: "/does/not/exist" },
+  repo: {
+    id: "repo-1",
+    remoteUrl: "git@github.com:owner/name.git",
+    defaultBranch: "master",
+    mountPath: "/does/not/exist",
+    dependencyProvisioning: "NPM_CI",
+  },
   run: {
     id: "run-10",
     runNumber: 1,
@@ -112,7 +121,13 @@ const setControlPlane = (handler: ControlPlaneFetchHandler): void => {
 };
 const executeClaim = (
   ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
-) => executeClaimProduction(runnerConfig, claim, { ...dependencies, controlPlane: injectedControlPlane });
+) => executeClaimProduction(runnerConfig, claim, {
+  materializeRuntimeTools: (config, scratch) => materializeRuntimeTools(config, scratch, {
+    sourceRoot: fileURLToPath(new URL("../runtime-tools/", import.meta.url)),
+  }),
+  ...dependencies,
+  controlPlane: injectedControlPlane,
+});
 const runStartupPreflight = (
   runnerConfig: Parameters<typeof runStartupPreflightProduction>[0],
   options: Parameters<typeof runStartupPreflightProduction>[1] = {},
@@ -146,6 +161,328 @@ test("a mechanical claim is refused before any adapter, workspace or child envir
   // No workspace was provisioned: `provisionWorkspace` creates its run directory
   // under the workspace root, and nothing else in this path writes there.
   assert.deepEqual(await readdir(workspaceRoot), []);
+});
+
+const malformedDependencyProvisioningClaim = (value: unknown): ClaimedTask => {
+  const repo = { ...mechanicalClaim.repo } as Record<string, unknown>;
+  if (value === undefined) delete repo.dependencyProvisioning;
+  else repo.dependencyProvisioning = value;
+  return {
+    ...mechanicalClaim,
+    executionMode: "agent",
+    repo,
+  } as unknown as ClaimedTask;
+};
+
+for (const [label, value] of [["missing", undefined], ["unknown", "PYTHON"]] as const) {
+  test(`a ${label} dependency-provisioning claim is rejected before provisioning or adapter launch`, async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-dependency-protocol-${label}-`));
+    const commandRoot = await mkdtemp(join(tmpdir(), `runner-dependency-command-${label}-`));
+    const npmSentinel = join(commandRoot, "npm-called");
+    const npm = join(commandRoot, "npm");
+    await writeFile(npm, `#!/bin/sh\nprintf called > ${JSON.stringify(npmSentinel)}\n`);
+    await chmod(npm, 0o755);
+    const controlPlane = createControlPlaneDouble();
+    let adapterCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        adapterCalls += 1;
+        throw new Error("adapter preflight must not be reached for a malformed dependency claim");
+      },
+      start: async () => {
+        adapterCalls += 1;
+        throw new Error("adapter start must not be reached for a malformed dependency claim");
+      },
+    };
+
+    try {
+      await executeClaimProduction(
+        { ...config(workspaceRoot), path: commandRoot },
+        malformedDependencyProvisioningClaim(value),
+        { adapter, controlPlane: controlPlane.controlPlane },
+      );
+      const completion = controlPlane.completions.at(-1);
+      assert.ok(completion, "malformed claims must complete the run");
+      assert.equal(completion.failureClass, "PROTOCOL_ERROR");
+      assert.equal(completion.retryable, false);
+      assert.equal(completion.failureReason, "dependency-provisioning-missing");
+      assert.equal(completion.terminationReason, "dependency-provisioning-missing");
+      assert.equal(completion.cleanupStatus, "SUCCEEDED");
+      assert.equal(completion.workspaceRetained, false);
+      assert.equal(adapterCalls, 0, "malformed claims must not reach adapter preflight or launch");
+      assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+      await assert.rejects(access(npmSentinel), { code: "ENOENT" }, "malformed claims must not invoke npm");
+    } finally {
+      await Promise.all([
+        rm(workspaceRoot, { recursive: true, force: true }),
+        rm(commandRoot, { recursive: true, force: true }),
+      ]);
+    }
+  });
+}
+
+const malformedTemplateProvisionDependenciesClaim = (value: unknown): ClaimedTask => {
+  const templateStep = { ...mechanicalClaim.task.templateStep! } as Record<string, unknown>;
+  if (value === undefined) delete templateStep.provisionDependencies;
+  else templateStep.provisionDependencies = value;
+  return {
+    ...mechanicalClaim,
+    executionMode: "agent",
+    task: { ...mechanicalClaim.task, templateStep },
+  } as unknown as ClaimedTask;
+};
+
+for (const [label, value] of [["missing", undefined], ["unknown", "yes"]] as const) {
+  test(`a ${label} template-step dependency decision is rejected before workspace or adapter work`, async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), `runner-template-step-protocol-${label}-`));
+    const controlPlane = createControlPlaneDouble();
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        preflightCalls += 1;
+        throw new Error("adapter preflight must not be reached for a malformed template step");
+      },
+      start: async () => {
+        startCalls += 1;
+        throw new Error("provider start must not be reached for a malformed template step");
+      },
+    };
+
+    try {
+      await executeClaimProduction(
+        config(workspaceRoot),
+        malformedTemplateProvisionDependenciesClaim(value),
+        { adapter, controlPlane: controlPlane.controlPlane },
+      );
+      const completion = controlPlane.completions.at(-1);
+      assert.ok(completion, "malformed claims must complete the run");
+      assert.equal(completion.failureClass, "PROTOCOL_ERROR");
+      assert.equal(completion.retryable, false);
+      assert.equal(completion.failureReason, "template-step-provision-dependencies-missing");
+      assert.equal(completion.terminationReason, "template-step-provision-dependencies-missing");
+      assert.equal(completion.cleanupStatus, "SUCCEEDED");
+      assert.equal(completion.workspaceRetained, false);
+      assert.equal(preflightCalls, 0);
+      assert.equal(startCalls, 0);
+      assert.deepEqual(await readdir(workspaceRoot), [], "malformed claims must not provision a workspace");
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a review step records the dependency skip before fake adapter preflight and launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-review-dependency-activity-"));
+  try {
+    const remote = await seedDependencyRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      dependencyCacheRoot: join(root, "dependency-cache"),
+    };
+    const controlPlane = createControlPlaneDouble();
+    const timeline: string[] = [];
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        timeline.push("preflight");
+        return { ok: true, cliVersion: "test", authMode: "test", capabilities: {} };
+      },
+      start: async () => {
+        timeline.push("provider");
+        const now = new Date();
+        return {
+          runId: "run-review",
+          runner: "CLAUDE",
+          child: null as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          providerState: null,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            terminalEventSeen: true,
+            terminalSuccess: true,
+            terminationReason: null,
+            finalOutput: null,
+            providerError: null,
+            stdout: "",
+            stderr: "",
+          }),
+        };
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    const claim = {
+      ...mechanicalClaim,
+      executionMode: "agent" as const,
+      runner: "CLAUDE" as const,
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      task: {
+        ...mechanicalClaim.task,
+        templateStep: { name: "Code review", provisionDependencies: false },
+      },
+      run: {
+        ...mechanicalClaim.run,
+        requiresCommit: false,
+        opensPullRequest: false,
+        targetBranch: "master",
+        maxRunsPerTask: 3,
+      },
+      session: testSession(root),
+    } satisfies ClaimedTask;
+
+    const originalAppendActivity = controlPlane.controlPlane.appendActivity;
+    controlPlane.controlPlane.appendActivity = async (...args) => {
+      timeline.push("activity");
+      await originalAppendActivity(...args);
+    };
+    await executeClaimProduction(configured, claim, {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => undefined,
+      provisionSessionConfig: async () => undefined,
+    });
+
+    assert.deepEqual(controlPlane.activities.map(({ body }) => body), [
+      "Dependency provisioning skipped: TaskTemplateStep.provisionDependencies=false",
+    ]);
+    assert.ok(timeline.indexOf("activity") < timeline.indexOf("preflight"));
+    assert.ok(timeline.indexOf("preflight") < timeline.indexOf("provider"));
+    assert.equal(controlPlane.preflightReports.length, 0, "claim preflight is the adapter seam, not startup reporting");
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+    await assert.rejects(access(join(root, "dependency-cache")), { code: "ENOENT" });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an implementation step provisions dependencies without recording the review skip", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-implementation-dependency-activity-"));
+  try {
+    const remote = await seedDependencyRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      dependencyCacheRoot: join(root, "dependency-cache"),
+    };
+    const controlPlane = createControlPlaneDouble();
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async ({ env }) => {
+        preflightCalls += 1;
+        assert.equal((await stat(join(env.AGENTOS_WORKSPACE_PATH!, "node_modules"))).isDirectory(), true);
+        assert.equal(
+          await readFile(join(env.AGENTOS_WORKSPACE_PATH!, "node_modules", "fixture-tool", "index.cjs"), "utf8"),
+          "module.exports = 'dependency fixture';\n",
+        );
+        return { ok: true, cliVersion: "test", authMode: "test", capabilities: {} };
+      },
+      start: async () => {
+        startCalls += 1;
+        const now = new Date();
+        return {
+          runId: "run-implementation",
+          runner: "CLAUDE",
+          child: null as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          providerState: null,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            terminalEventSeen: true,
+            terminalSuccess: true,
+            terminationReason: null,
+            finalOutput: null,
+            providerError: null,
+            stdout: "",
+            stderr: "",
+          }),
+        };
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    const claim = {
+      ...mechanicalClaim,
+      executionMode: "agent" as const,
+      runner: "CLAUDE" as const,
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      task: {
+        ...mechanicalClaim.task,
+        templateStep: { name: "Implementation", provisionDependencies: true },
+      },
+      run: {
+        ...mechanicalClaim.run,
+        requiresCommit: false,
+        opensPullRequest: false,
+        targetBranch: "master",
+        maxRunsPerTask: 3,
+      },
+      session: testSession(root),
+    } satisfies ClaimedTask;
+
+    await executeClaimProduction(configured, claim, {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => undefined,
+      provisionSessionConfig: async () => undefined,
+    });
+
+    assert.equal(preflightCalls, 1, JSON.stringify(controlPlane.completions));
+    assert.equal(startCalls, 1);
+    assert.deepEqual(controlPlane.activities
+      .filter(({ body }) => body.includes("Dependency provisioning skipped")), []);
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
+  } finally {
+    await cleanupTestSession(root);
+    try { execFileSync("/bin/chmod", ["-R", "u+w", join(root, "dependency-cache")]); } catch { /* absent cache */ }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("an ordinary claim is not short-circuited by the mechanical refusal", async () => {
@@ -301,6 +638,34 @@ const seedRemote = async (root: string): Promise<string> => {
   return remote;
 };
 
+const seedDependencyRemote = async (root: string): Promise<string> => {
+  const remote = await seedRemote(root);
+  const seed = join(root, "seed");
+  await mkdir(join(seed, "packages/tool"), { recursive: true });
+  await writeFile(join(seed, "package.json"), `${JSON.stringify({
+    name: "runner-dependency-fixture",
+    version: "1.0.0",
+    private: true,
+    workspaces: ["packages/*"],
+    dependencies: { "fixture-tool": "*" },
+  })}\n`);
+  await writeFile(join(seed, "packages/tool/package.json"), `${JSON.stringify({
+    name: "fixture-tool",
+    version: "1.0.0",
+    main: "index.cjs",
+  })}\n`);
+  await writeFile(join(seed, "packages/tool/index.cjs"), "module.exports = 'dependency fixture';\n");
+  execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], {
+    cwd: seed,
+    env: process.env,
+    stdio: "ignore",
+  });
+  git(seed, "add", ".");
+  git(seed, "commit", "-m", "dependency fixture");
+  git(seed, "push", "origin", "master");
+  return remote;
+};
+
 const commitFixtureChange = async (workspace: string): Promise<void> => {
   await writeFile(join(workspace, "runner-fixture.txt"), "delivered fixture change\n");
   git(workspace, "add", "runner-fixture.txt");
@@ -315,6 +680,33 @@ const seedCodexAuth = async (root: string): Promise<void> => {
 const seedPiAuth = async (root: string): Promise<void> => {
   await mkdir(join(root, ".pi", "agent"), { recursive: true });
   await writeFile(join(root, ".pi", "agent", "auth.json"), '{"openai-codex":{"type":"oauth"}}\n', { mode: 0o600 });
+};
+
+const runtimeToolSources = [
+  ["regression-verification.sh", "../runtime-tools/regression-verification.sh"],
+  ["gate-worker/gate-dispatch.sh", "../runtime-tools/gate-worker/gate-dispatch.sh"],
+  ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
+  ["gate-worker/mirror-push.sh", "../runtime-tools/gate-worker/mirror-push.sh"],
+  ["gate-worker/remote-gate.sh", "../runtime-tools/gate-worker/remote-gate.sh"],
+  ["gate-worker/run-gate.sh", "../runtime-tools/gate-worker/run-gate.sh"],
+] as const;
+
+const createRuntimeToolsFixture = async (): Promise<string> => {
+  const root = await mkdtemp(join(tmpdir(), "runner-runtime-tools-source-"));
+  await mkdir(join(root, "gate-worker"));
+  const sourceRoot = dirname(fileURLToPath(import.meta.url));
+  await Promise.all(runtimeToolSources.map(async ([relativePath, sourcePath]) => {
+    await copyFile(resolve(sourceRoot, sourcePath), join(root, relativePath));
+  }));
+  return root;
+};
+
+const pathWithFailingCommand = async (root: string, command: "cp" | "chmod"): Promise<string> => {
+  const bin = join(root, `${command}-fails`);
+  await mkdir(bin);
+  await writeFile(join(bin, command), `#!/bin/sh\n/bin/${command} "$@"\nexit 73\n`);
+  await chmod(join(bin, command), 0o755);
+  return `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
 };
 
 const removeRetainedSessionConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
@@ -408,6 +800,110 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("runtime-tool materialization failure is PROVISION and never reaches preflight or provider start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-runtime-tools-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const configured = codexOnly(join(root, "workspaces"), root, join(root, "codex-must-not-start"));
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    let materializeCalls = 0;
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+      start: async () => { startCalls += 1; throw new Error("provider must not spawn"); },
+    };
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    }, {
+      adapter,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => {
+        materializeCalls += 1;
+        assert.equal(scratch.toolsDir, join(scratch.base, "tools"));
+        throw new Error("release-local runtime tools are absent");
+      },
+    });
+    assert.equal(materializeCalls, 1);
+    assert.equal(preflightCalls, 0);
+    assert.equal(startCalls, 0);
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    assert.match(String(completion.body.failureReason), /release-local runtime tools are absent/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const failureCase of ["collision", "missing source", "wrong source type", "copy failure", "chmod failure"] as const) {
+  test(`a runtime-tool ${failureCase} fails before adapter preflight or provider start`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "runner-runtime-tools-failure-case-"));
+    const sourceRoot = await createRuntimeToolsFixture();
+    try {
+      const remote = await seedRemote(root);
+      const configured = {
+        ...codexOnly(join(root, "workspaces"), root, join(root, "codex-must-not-start")),
+        ...(failureCase === "copy failure" || failureCase === "chmod failure"
+          ? { path: await pathWithFailingCommand(root, failureCase === "copy failure" ? "cp" : "chmod") }
+          : {}),
+      };
+      if (failureCase === "missing source") await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+      if (failureCase === "wrong source type") {
+        await rm(join(sourceRoot, "gate-worker", "lib.sh"));
+        await mkdir(join(sourceRoot, "gate-worker", "lib.sh"));
+      }
+      const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+      setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
+        posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      });
+      let preflightCalls = 0;
+      let startCalls = 0;
+      const adapter: CliAdapter = {
+        ...adapters.CODEX,
+        preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+        start: async () => { startCalls += 1; throw new Error("provider must not spawn"); },
+      };
+      await executeClaim(configured, {
+        ...mechanicalClaim,
+        executionMode: "agent",
+        runner: "CODEX",
+        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+        session: testSession(root),
+      }, {
+        adapter,
+        materializeRuntimeTools: (runnerConfig, scratch) => {
+          if (failureCase === "collision") return mkdir(scratch.toolsDir).then(() =>
+            materializeRuntimeTools(runnerConfig, scratch, { sourceRoot }));
+          return materializeRuntimeTools(runnerConfig, scratch, { sourceRoot });
+        },
+      });
+      assert.equal(preflightCalls, 0);
+      assert.equal(startCalls, 0);
+      const completion = posts.find((post) => post.path.endsWith("/complete"));
+      assert.ok(completion);
+      assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("Codex rejects a run-as config-root symlink in PROVISION without copying host auth", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-config-symlink-"));

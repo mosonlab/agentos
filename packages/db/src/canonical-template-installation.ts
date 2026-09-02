@@ -48,6 +48,18 @@ export type CanonicalInstallationAction =
 export type CanonicalInstallationPlan = readonly CanonicalInstallationAction[];
 export type CanonicalInstallationSources = ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>;
 
+export const CANONICAL_REVIEW_STEP_IDENTITIES: ReadonlySet<string> = new Set([
+  "compound-engineer-workflow:6",
+  "compound-engineer-workflow:7",
+  "direct-engineer-workflow:3",
+  "direct-engineer-workflow:4",
+  "pr-engineer-workflow:2",
+  "pr-engineer-workflow:3",
+]);
+
+export const isCanonicalReviewStep = (templateName: CanonicalTemplateName, stepIndex: number): boolean =>
+  CANONICAL_REVIEW_STEP_IDENTITIES.has(`${templateName}:${stepIndex}`);
+
 const adoptionDifferenceAllowed = (
   templateName: CanonicalTemplateName,
   actual: PersistedTransitionStep,
@@ -72,27 +84,34 @@ const adoptionDifferenceAllowed = (
       && ((templateName === "compound-engineer-workflow" && actual.stepIndex === 6 && source.baseFromStepIndex === 5)
         || (templateName === "direct-engineer-workflow" && actual.stepIndex === 3 && source.baseFromStepIndex === 2));
   }
+  if (difference === "provisionDependencies") {
+    return isCanonicalReviewStep(templateName, actual.stepIndex)
+      && actual.provisionDependencies === true
+      && source.provisionDependencies === false;
+  }
   return false;
 };
 
 const currentGraphRefusal = (
   templateName: CanonicalTemplateName,
+  templateId: string,
   steps: readonly PersistedTransitionStep[],
   sources: readonly TemplateStepSource[],
 ): string | null => {
   if (steps.length !== sources.length) {
-    return `Canonical template ${templateName} has structural drift: expected ${sources.length} steps, found ${steps.length}`;
+    return `Template ${templateName} (${templateId}) has structural drift: expected ${sources.length} steps, found ${steps.length}`;
   }
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
-  if (ordered.some((step, index) => step.stepIndex !== index + 1)) {
-    return `Canonical template ${templateName} has structural drift: step indexes are not contiguous`;
+  const noncontiguous = ordered.find((step, index) => step.stepIndex !== index + 1);
+  if (noncontiguous) {
+    return `Template ${templateName} (${templateId}), ${templateName} step ${noncontiguous.stepIndex} (${noncontiguous.id}) has structural drift: step indexes are not contiguous`;
   }
   for (const [index, step] of ordered.entries()) {
     const source = sources[index]!;
     const differences = templateStepStructureDifferences(step, source)
       .filter((difference) => !adoptionDifferenceAllowed(templateName, step, source, difference));
     if (differences.length > 0) {
-      return `Canonical template ${templateName} has structural drift: step ${step.stepIndex} differs from the canonical source in ${differences.join(", ")}`;
+      return `Template ${templateName} (${templateId}), ${templateName} step ${step.stepIndex} (${step.id}) differs from the canonical source in ${differences.join(", ")}`;
     }
   }
   return null;
@@ -147,7 +166,7 @@ export const planCanonicalInstallation = (
         });
         continue;
       }
-      const refusal = currentGraphRefusal(templateName, row.steps, sourceSteps);
+      const refusal = currentGraphRefusal(templateName, row.id, row.steps, sourceSteps);
       plan.push(refusal === null
         ? { kind: "current", templateName, projectId: row.projectId, rowId: row.id }
         : { kind: "refused", templateName, projectId: row.projectId, rowId: row.id, reason: refusal });
@@ -162,6 +181,7 @@ const writeCanonicalTemplate = async (
   templateName: CanonicalTemplateName,
   steps: readonly TemplateStepSource[],
   currentRowId: string | null = null,
+  scopedError: (projectId: string, message: string) => Error = (_projectId, message) => new Error(message),
 ): Promise<void> => {
   const metadata = canonicalTemplateSourceSpec(templateName);
   const template = currentRowId === null
@@ -180,7 +200,7 @@ const writeCanonicalTemplate = async (
         select: { id: true },
       }))?.id ?? null;
     if (step.agentName !== null && assigneeAgentId === null) {
-      throw new Error(`Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found in project ${projectId}`);
+      throw scopedError(projectId, `Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found`);
     }
     const data = {
       layer: step.layer,
@@ -197,6 +217,7 @@ const writeCanonicalTemplate = async (
       priorOutputKinds: step.priorOutputKinds,
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy ?? Prisma.JsonNull,
+      provisionDependencies: step.provisionDependencies,
     } as const;
     await tx.taskTemplateStep.upsert({
       where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: step.stepIndex } },
@@ -211,19 +232,30 @@ export const applyCanonicalInstallation = async (
   tx: Prisma.TransactionClient,
   plan: CanonicalInstallationPlan,
   sources: CanonicalInstallationSources,
-  options: Readonly<{ synchronizeCurrent?: boolean }> = {},
+  options: Readonly<{
+    synchronizeCurrent?: boolean;
+    projectLabel?: (projectId: string) => string | undefined;
+  }> = {},
 ): Promise<{ created: number }> => {
+  const scopedError = (projectId: string, message: string): Error => {
+    const slug = options.projectLabel?.(projectId);
+    return new Error(slug ? `Project ${slug}: ${message}` : message);
+  };
   const refusal = plan.find((action) => action.kind === "refused");
-  if (refusal?.kind === "refused") throw new Error(refusal.reason);
+  if (refusal?.kind === "refused") {
+    throw scopedError(refusal.projectId, refusal.reason);
+  }
 
   let created = 0;
   for (const action of plan) {
     if (action.kind === "refused") continue;
     const sourceSteps = sources.get(action.templateName);
-    if (!sourceSteps) throw new Error(`No canonical source is loaded for ${action.templateName}`);
+    if (!sourceSteps) {
+      throw scopedError(action.projectId, `No canonical source is loaded for ${action.templateName}`);
+    }
     if (action.kind === "current") {
       if (options.synchronizeCurrent) {
-        await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps, action.rowId);
+        await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps, action.rowId, scopedError);
       }
       continue;
     }
@@ -246,24 +278,27 @@ export const applyCanonicalInstallation = async (
         activeRunCount: task._count.runs,
       })));
       if (blockers > 0) {
-        throw new Error(`${action.templateName} ${action.rowId} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
+        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
       }
-      const row = await tx.taskTemplate.findUniqueOrThrow({ where: { id: action.rowId } });
+      const row = await tx.taskTemplate.findUnique({ where: { id: action.rowId } });
+      if (!row) {
+        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) was not found`);
+      }
       if (row.webhookSecretId !== null || row.webhookRepoId !== null
         || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
         || row.webhookReplayWindowSec !== null) {
-        throw new Error(`${action.templateName} ${action.rowId} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) has webhook configuration; canonical rollover will not move operator-owned trigger state`);
       }
       const collision = await tx.taskTemplate.findUnique({
         where: { projectId_name: { projectId: action.projectId, name: action.legacyName } },
         select: { id: true },
       });
       if (collision) {
-        throw new Error(`Canonical template ${action.templateName} on project ${action.projectId} cannot rename to ${action.legacyName}: target already exists`);
+        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) cannot rename to ${action.legacyName}: target template already exists (${collision.id})`);
       }
       await tx.taskTemplate.update({ where: { id: action.rowId }, data: { name: action.legacyName } });
     }
-    await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps);
+    await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps, null, scopedError);
     created += 1;
   }
   return { created };

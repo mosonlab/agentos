@@ -159,6 +159,8 @@ change between previews, and the only upgrade path is a fresh install.
 The verified target is macOS on Apple Silicon. Linux and macOS on Intel
 are expected to work but are not yet release-verified; Windows is unsupported.
 
+For the pull-request workflow, follow [Add a project](docs/runbooks/add-a-project.md).
+
 **Read before pointing this at anything you care about:** Anneal
 launches coding CLIs with non-interactive permission bypass, as your
 macOS user, outside a sandbox. Use a disposable repository and a

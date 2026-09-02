@@ -11,6 +11,7 @@ import {
   FailureClass,
   failurePhases,
   gateQuestion,
+  INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_TEMPLATE_NAME,
   isIntegratorStep,
   isMergeReadinessStep,
@@ -35,6 +36,7 @@ import {
 import { z } from "zod";
 
 import {
+  canonicalImplementationOutputRefusal,
   canonicalOutputRefusal,
   isCanonicalAgentStep,
   outputIsImmutableOncePersisted,
@@ -302,6 +304,75 @@ export type CompleteRunInput = {
   claimantClass: ClaimantClass;
 };
 
+type CompletionEvidenceStep = {
+  outputKind: string;
+  requiresCommit: boolean;
+  taskTemplate?: { name: string };
+};
+
+type CompletionEvidenceRun = {
+  id: string;
+  runNumber: number;
+  maxRunsPerTask: number;
+  requiresCommit: boolean;
+  opensPullRequest: boolean;
+  baseSha: string | null;
+  task: { templateStep: CompletionEvidenceStep | null } | null;
+};
+
+type CompletionEvidenceOutput = Parameters<typeof canonicalOutputRefusal>[1];
+
+type CompletionEvidenceRequirement =
+  | { kind: "canonical-implementation"; headSha: string }
+  | { kind: "current-run-output"; outputKind: string }
+  | null;
+
+const completionEvidenceRequirement = (
+  run: CompletionEvidenceRun,
+  reportedSuccess: boolean,
+  completionHeadSha: string | null,
+): CompletionEvidenceRequirement => {
+  if (!reportedSuccess) return null;
+  // `requiresCommit` is the immutable Run-birth snapshot. Comparing it with
+  // the configured contract distinguishes the own-publication relaxation from
+  // Steps that were always non-committing, without re-deriving publication
+  // ownership after birth.
+  const configuredRequiresCommit = run.task?.templateStep?.requiresCommit ?? run.opensPullRequest;
+  if (
+    configuredRequiresCommit
+    && !run.requiresCommit
+    && run.baseSha !== null
+    && completionHeadSha === run.baseSha
+  ) {
+    return { kind: "canonical-implementation", headSha: run.baseSha };
+  }
+  const requiredKind = requiredOutputKind(run.task?.templateStep);
+  return requiredKind && run.runNumber < run.maxRunsPerTask
+    ? { kind: "current-run-output", outputKind: requiredKind }
+    : null;
+};
+
+export const completionEvidenceRefusal = (
+  run: CompletionEvidenceRun,
+  reportedSuccess: boolean,
+  completionHeadSha: string | null,
+  persistedOutput: CompletionEvidenceOutput,
+): string | null => {
+  const requirement = completionEvidenceRequirement(run, reportedSuccess, completionHeadSha);
+  if (!requirement) return null;
+  if (requirement.kind === "canonical-implementation") {
+    return canonicalImplementationOutputRefusal(
+      persistedOutput,
+      run.id,
+      requirement.headSha,
+    );
+  }
+  return persistedOutput?.runId !== run.id
+    && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
+    ? `missing ${requirement.outputKind} task output for current Run ${run.id}`
+    : null;
+};
+
 /**
  * Complete a run: one ReadCommitted transaction of 33 writes, and the
  * pre-transaction principal read that refuses a mechanical completion from the
@@ -355,6 +426,7 @@ export const completeRun = async (
       },
     });
     if (!run?.session) return null;
+    const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
     const reportedSuccess = completionSucceeded({
       exitCode: body.exitCode,
       signal: body.signal ?? null,
@@ -362,6 +434,27 @@ export const completeRun = async (
       terminalSuccess: body.terminalSuccess,
       terminationReason: body.terminationReason ?? null,
     });
+    // Mechanical output is the executor's durable account of whether it
+    // merged. It may be committed immediately before a transport failure in
+    // the separate completion request, so inspect it before classifying that
+    // request as a protocol failure. Ownership is exact: an output from any
+    // other Run (or an operator-created row without runId) is not evidence for
+    // this completion and must retain fail-loud behavior.
+    const persistedMechanicalOutput = mechanical && run.taskId
+      ? await tx.taskStepOutput.findUnique({
+          where: { taskId: run.taskId },
+          select: { runId: true, kind: true, body: true },
+        })
+      : null;
+    const persistedMechanicalOutcome = persistedMechanicalOutput?.runId === run.id
+      && persistedMechanicalOutput.kind === INTEGRATOR_OUTPUT_KIND
+      ? parseMergeResult(persistedMechanicalOutput)
+      : null;
+    const authoritativeMechanicalOutcome = !reportedSuccess
+      && persistedMechanicalOutcome
+      && persistedMechanicalOutcome.outcome !== "malformed"
+      ? persistedMechanicalOutcome
+      : null;
     // A step whose deliverable only its own agent can author is not done
     // because its session ended. An adapter reads the end of a turn as the end
     // of the session, so a step that parked on a background wait — a merge
@@ -382,19 +475,31 @@ export const completeRun = async (
     // before this — the terminal park naming the absent output, with the
     // chain-lease release, the merge-tail stop notice and the refusal activity
     // that park has always written.
-    const requiredKind = requiredOutputKind(run.task?.templateStep);
-    const outputTaskId = reportedSuccess && requiredKind && run.runNumber < run.maxRunsPerTask
-      ? run.taskId
-      : null;
+    // A Run whose immutable commit snapshot differs from its configured
+    // contract is an own-publication continuation. An unchanged completion of
+    // that Run always requires canonical implementation evidence, including a
+    // manual Task or a Task whose configured output kind is not implementation.
+    // Ordinary canonical Steps retain their prior retry-ceiling semantics.
+    const evidenceRequirement = completionEvidenceRequirement(
+      run,
+      reportedSuccess,
+      body.headSha ?? null,
+    );
+    const outputTaskId = evidenceRequirement ? run.taskId : null;
     const persistedOutput = outputTaskId
-      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId }, select: { runId: true } })
+      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId } })
       : null;
-    const missingOutputReason = outputTaskId && requiredKind
-      && persistedOutput?.runId !== run.id
-      && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
-      ? `missing ${requiredKind} task output for current Run ${run.id}`
-      : null;
-    const succeeded = reportedSuccess && !missingOutputReason;
+    const missingOutputReason = completionEvidenceRefusal(
+      run,
+      reportedSuccess,
+      body.headSha ?? null,
+      persistedOutput,
+    );
+    // A valid, same-Run mechanical result is terminal protocol success even
+    // when the later completion envelope says exit 1/PROTOCOL_ERROR. This is
+    // deliberately narrower than trusting the envelope: malformed, foreign,
+    // non-mechanical, or absent output remains a failure.
+    const succeeded = (reportedSuccess || authoritativeMechanicalOutcome !== null) && !missingOutputReason;
     // The runner is on the untrusted side of this boundary. When it reports a
     // structured envelope, the API classifies from the facts in it and
     // ignores the runner's own `failureClass`/`retryable`/`externalFailure`
@@ -409,7 +514,7 @@ export const completeRun = async (
     const known = body.failureEnvelope?.version === FAILURE_ENVELOPE_VERSION
       ? failureEnvelopeV1Input.safeParse(body.failureEnvelope)
       : null;
-    const envelope = !reportedSuccess && known?.success ? known.data : null;
+    const envelope = !succeeded && known?.success ? known.data : null;
     const verdict = envelope ? classifyEnvelope(envelope) : null;
     const failureClass = succeeded
       ? null
@@ -452,9 +557,12 @@ export const completeRun = async (
       failedRegressionVerdict?.status === "ok"
       && failedRegressionVerdict.verdict.outcome !== "pass",
     );
-    // One reason for the Run, the Session and — unless the budget replaces it
-    // with its own — the parked Task.
-    const failureReason = succeeded ? null : missingOutputReason ?? body.failureReason ?? "Execution failed";
+    // Preserve a failed completion's diagnostic reason even when a definitive
+    // mechanical result overrides its protocol classification. Ordinary
+    // reported success still carries no failure reason.
+    const failureReason = succeeded && reportedSuccess
+      ? null
+      : missingOutputReason ?? body.failureReason ?? "Execution failed";
     // §D-P5 / MF-5. For the integrator step that compensation is switched off
     // entirely, so the answer transaction is the *only* writer of a ceiling
     // above the task's original. Otherwise a run authorized once could buy
@@ -463,7 +571,6 @@ export const completeRun = async (
     // reachable interleaving rather than merely hard to reach. The failure
     // envelope's verdict decides *whether* the failure was external; it does
     // not get to raise the ceiling on this step either.
-    const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
     const refunded = external && !mechanical ? 1 : 0;
     const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, refunded);
     // One marker read for both completion outcomes; this handler used to
@@ -593,7 +700,7 @@ export const completeRun = async (
         // Stored whether or not this API understood it: an envelope from a
         // future runner is still the evidence of what happened, and the
         // reason a verdict can be re-decided later instead of re-run.
-        failureEnvelope: succeeded || !body.failureEnvelope ? Prisma.DbNull : jsonValue(body.failureEnvelope),
+        failureEnvelope: reportedSuccess || !body.failureEnvelope ? Prisma.DbNull : jsonValue(body.failureEnvelope),
         // Kept on the run that produced it, whatever became of that run. The
         // same tail used to reach this route on every completion and be read
         // only by the step-output synthesis below, which runs for successful
@@ -659,10 +766,11 @@ export const completeRun = async (
       // may touch it, because a synthesized body would read as a merge that
       // never happened.
       if (succeeded && mechanical && run.task) {
-        const persisted = await tx.taskStepOutput.findUnique({
-          where: { taskId: run.taskId }, select: { kind: true, body: true },
-        });
-        const outcome = parseMergeResult(persisted);
+        // Reuse the ownership-checked output read performed before completion
+        // classification. A foreign output is intentionally represented as a
+        // malformed result so a retry cannot advance the chain on another
+        // Run's merge.
+        const outcome = persistedMechanicalOutcome ?? parseMergeResult(null);
         if (outcome.outcome === "merged") {
           await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
         } else {
@@ -670,8 +778,6 @@ export const completeRun = async (
             integratorTaskId: run.taskId,
             condition: outcome.outcome === "stopped" ? outcome.condition : "missing-or-malformed-result",
             evidence: outcome.outcome === "stopped" ? outcome.evidence : outcome.reason,
-            agentId: run.agentId,
-            sessionId: run.session.id,
             sourceRunId: run.id,
           });
         }

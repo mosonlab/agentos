@@ -14,6 +14,7 @@ import {
 } from "./auth.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { releaseMergeLease } from "./merge-lease.js";
+import { preflightRepository } from "./onboarding-preflight.js";
 import { createArchivedRunNoticeScheduler } from "./reconcile.js";
 import { refusalFor } from "./refusal.js";
 import { revalidationCancelRequestId } from "./revalidation.js";
@@ -27,6 +28,7 @@ import { registerSystemRoutes } from "./routes/system.js";
 import { registerTasksRoutes } from "./routes/tasks.js";
 import { registerTemplateRoutes } from "./routes/templates.js";
 import { createRunnerRegistry } from "./runners.js";
+import { defaultProjectBootstrapLoaders } from "./project-bootstrap.js";
 import {
   createAppendFencedActivityHandler,
   refusal,
@@ -106,6 +108,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const routeDeps: RouteDeps = {
     db,
     options,
+    repositoryPreflight: options.repositoryPreflight ?? preflightRepository,
+    projectBootstrapLoaders: {
+      ...defaultProjectBootstrapLoaders,
+      ...options.projectBootstrapLoaders,
+    },
     releaseChainLease,
     runners,
     appendFencedActivity,
@@ -132,6 +139,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   registerSessionTail();
 
   app.onError((error, context) => {
+    if (error instanceof SyntaxError) {
+      return refusalJson(context, refusal("invalid-request", "Request body must be valid JSON", { code: "invalid-json" }));
+    }
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
     if (error instanceof SerializableTransactionExhaustedError) {
       return context.json({ error: "Transaction is busy; retry later" }, 503);

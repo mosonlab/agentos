@@ -6,6 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   enqueueTaskRun,
   lockChainRows,
   PrismaClient,
@@ -84,6 +85,7 @@ const seedRunner = async () => {
     name: "claim-exclusion-repo",
     remoteUrl: "https://example.test/claim-exclusion.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

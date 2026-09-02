@@ -8,13 +8,14 @@
   "exports": {
     ".": {
       "types": "./src/index.ts",
+      "development": "./src/index.ts",
       "import": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/*.test.ts"
+    "build": "bash ../../scripts/host-proof-slot.sh build @anneal/github-client -- tsc -p tsconfig.json",
+    "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/github-client -- tsc -p tsconfig.json --noEmit",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/github-client -- node --conditions=development --import tsx --test src/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

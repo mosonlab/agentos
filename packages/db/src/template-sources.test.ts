@@ -1,24 +1,39 @@
 import assert from "node:assert/strict";
-import { copyFile, cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 
-import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
+import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
+  loadAllTemplateStepSources,
   loadTemplateStepSources,
   templateStepStructureDifferences,
+  type CanonicalTemplateName,
   type PersistedTemplateStepStructure,
 } from "./template-sources.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
+const regressionToolPrefix = '"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh"';
+const regressionInvocations = [
+  `${regressionToolPrefix} prepare`,
+  `${regressionToolPrefix} review-fail '<concise finding IDs or defect>'`,
+  `${regressionToolPrefix} finalize`,
+];
+const checkoutRegressionToolPattern = ["scripts", "regression-verification\\.sh"].join("\\/");
+const regressionCommandPattern = new RegExp(
+  String.raw`(?:"\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}/regression-verification\.sh"|${checkoutRegressionToolPattern}) (?:prepare|review-fail '[^']+'|finalize)`,
+  "gu",
+);
 
 const withTemplateCopy = async (
-  templateName: typeof DIRECT_TEMPLATE_NAME | typeof INTEGRATOR_TEMPLATE_NAME,
+  templateName: CanonicalTemplateName,
   mutate: (root: string) => Promise<void>,
   assertion: (root: string) => Promise<void>,
 ): Promise<void> => {
@@ -34,7 +49,7 @@ const withTemplateCopy = async (
 
 const updateFrontmatter = async (
   root: string,
-  templateName: typeof DIRECT_TEMPLATE_NAME | typeof INTEGRATOR_TEMPLATE_NAME,
+  templateName: CanonicalTemplateName,
   filename: string,
   replace: (source: string) => string,
 ): Promise<void> => {
@@ -122,15 +137,178 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
     assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
     const regression = steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
-    assert.match(regression.prompt, /regression-verification\.sh prepare/u);
-    assert.match(regression.prompt, /regression-verification\.sh review-fail/u);
-    assert.match(regression.prompt, /regression-verification\.sh finalize/u);
+    assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
+    assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
+    assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
     assert.match(regression.prompt, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
     assert.match(regression.prompt, /finalize exit 0[\s\S]*`pass`, `gate-fail`,\s+or `refresh-conflict`/u);
     assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
   }
+});
+
+test("canonical regression commands require runner tools without a checkout fallback", async () => {
+  const templateNames = [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME] as const satisfies readonly CanonicalTemplateName[];
+  for (const templateName of templateNames) {
+    const regression = (await loadTemplateStepSources(templateName))
+      .find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(regression, `${templateName} must contain a v2 regression step`);
+    const invocations = [...regression.prompt.matchAll(regressionCommandPattern)].map(([invocation]) => invocation);
+
+    const root = await mkdtemp(join(tmpdir(), "agentos-regression-prompt-test-"));
+    const fallbackFixture = join(root, "scripts", "regression-verification.sh");
+    const marker = join(root, "checkout-fallback-invoked");
+    try {
+      await mkdir(join(root, "scripts"), { recursive: true });
+      await writeFile(
+        fallbackFixture,
+        `#!/usr/bin/env bash\nprintf 'fallback fixture invoked\\n' > ${JSON.stringify(marker)}\nexit 99\n`,
+        { mode: 0o755 },
+      );
+
+      for (const invocation of invocations) {
+        for (const toolsValue of ["unset", ""]) {
+          const env = { ...process.env };
+          if (toolsValue === "unset") delete env.AGENTOS_TOOLS;
+          else env.AGENTOS_TOOLS = toolsValue;
+          const result = spawnSync("bash", ["-c", invocation], { cwd: root, encoding: "utf8", env });
+          const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+          assert.notEqual(result.status, 0, `${templateName} ${invocation} unexpectedly succeeded`);
+          assert.equal(existsSync(marker), false, `${templateName} ${invocation} invoked a checkout copy`);
+          assert.match(output, /AGENTOS_TOOLS is required/u, `${templateName} ${invocation}: ${output}`);
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+    assert.doesNotMatch(regression.prompt, new RegExp(checkoutRegressionToolPattern, "u"));
+    assert.deepEqual(invocations, regressionInvocations, `${templateName} must use only the runner-owned invocations`);
+  }
+});
+
+test("the pull-request workflow source exposes its exact four-step graph and prompt contract", async () => {
+  const steps = await loadTemplateStepSources(PR_TEMPLATE_NAME);
+  assert.deepEqual(
+    steps.map((step) => ({
+      name: step.name,
+      stepIndex: step.stepIndex,
+      layer: step.layer,
+      agent: step.agentName,
+      approvalGate: step.approvalGate,
+      outputKind: step.outputKind,
+      priorOutputKinds: step.priorOutputKinds,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      provisionDependencies: step.provisionDependencies,
+      baseFromStepIndex: step.baseFromStepIndex,
+      spawnPolicy: step.spawnPolicy,
+    })),
+    [
+      {
+        name: "Implementation",
+        stepIndex: 1,
+        layer: 1,
+        agent: "senior-dev-luna",
+        approvalGate: false,
+        outputKind: "implementation",
+        priorOutputKinds: [],
+        attachmentsFromPrevious: false,
+        opensPullRequest: true,
+        requiresCommit: true,
+        provisionDependencies: true,
+        baseFromStepIndex: null,
+        spawnPolicy: null,
+      },
+      {
+        name: "Code review (Sol)",
+        stepIndex: 2,
+        layer: 2,
+        agent: "review-coordinator-sol",
+        approvalGate: false,
+        outputKind: "sol-findings",
+        priorOutputKinds: ["implementation"],
+        attachmentsFromPrevious: true,
+        opensPullRequest: false,
+        requiresCommit: false,
+        provisionDependencies: false,
+        baseFromStepIndex: 1,
+        spawnPolicy: null,
+      },
+      {
+        name: "Code review (Opus blind)",
+        stepIndex: 3,
+        layer: 2,
+        agent: "review-coordinator-opus",
+        approvalGate: false,
+        outputKind: "blind-findings",
+        priorOutputKinds: [],
+        attachmentsFromPrevious: false,
+        opensPullRequest: false,
+        requiresCommit: false,
+        provisionDependencies: false,
+        baseFromStepIndex: 1,
+        spawnPolicy: null,
+      },
+      {
+        name: "Apply review fixes",
+        stepIndex: 4,
+        layer: 3,
+        agent: "senior-dev",
+        approvalGate: false,
+        outputKind: "fixed-implementation",
+        priorOutputKinds: ["sol-findings", "blind-findings"],
+        attachmentsFromPrevious: true,
+        opensPullRequest: false,
+        requiresCommit: false,
+        provisionDependencies: true,
+        baseFromStepIndex: null,
+        spawnPolicy: null,
+      },
+    ],
+  );
+
+  const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
+  // The two review prompts remain shared with the direct workflow. The PR
+  // fix prompt is intentionally different: only this workflow cleans its
+  // chain bookkeeping before publishing the pull request.
+  assert.deepEqual(
+    steps.slice(1, 3).map(({ prompt }) => prompt),
+    direct.slice(2, 4).map(({ prompt }) => prompt),
+  );
+
+  const implementationPrompt = steps[0]!.prompt;
+  assert.match(implementationPrompt, /task description[^.]*specification of record/u);
+  assert.match(implementationPrompt, /\.chain\/\{\{branchName\}\}\/spec\.md/u);
+  assert.match(implementationPrompt, /leaves that file untouched/u);
+  assert.match(implementationPrompt, /commit/u);
+  assert.match(implementationPrompt, /Every `testsRun` entry must record the exact command and its observed exit\/result summary/u);
+  for (const field of ["schemaVersion", "headSha", "baseSha", "summary", "testsRun"]) {
+    assert.match(implementationPrompt, new RegExp(field, "u"));
+  }
+  assert.match(implementationPrompt, /exactly one.*implementation.*JSON output object/u);
+  assert.match(implementationPrompt, /publication and pull-request creation to the platform/u);
+  assert.doesNotMatch(implementationPrompt, /child|Route|revalidat/u);
+
+  const reviewPrompts = steps.slice(1, 3).map(({ prompt }) => prompt);
+  for (const prompt of [implementationPrompt, ...reviewPrompts]) {
+    assert.doesNotMatch(prompt, /remove the complete tracked `\.chain\/` directory[\s\S]*fixed-implementation/u);
+  }
+
+  const finalPrompt = steps[3]!.prompt;
+  assert.match(
+    finalPrompt,
+    /After using the review evidence[\s\S]*remove the complete tracked `\.chain\/` directory[\s\S]*commit that deletion together with any adopted fixes[\s\S]*fixed-implementation/u,
+  );
+  assert.match(finalPrompt, /Before persisting the output, verify that `git ls-tree -r --name-only HEAD -- \.chain` has no entries/u);
+  assert.match(finalPrompt, /only after that cleanup commit/u);
+  assert.match(finalPrompt, /`testsRun` entry[s]? [^\.]*exact command and its observed exit\/result summary/u);
+  assert.match(finalPrompt, /retry starts at the already-clean cleanup commit[\s\S]*preserve that head[\s\S]*do not recreate bookkeeping or invent another commit/u);
+  assert.notEqual(finalPrompt, direct[4]!.prompt);
+
+  const source = await readFile(join(templatesRoot, PR_TEMPLATE_NAME, "01-implementation.md"), "utf8");
+  assert.equal(implementationPrompt, source.slice(source.indexOf("\n---\n", 4) + 5).trim());
 });
 
 test("the canonical Regression v2 schema preserves an optional gate failure excerpt", () => {
@@ -195,6 +373,41 @@ test("missing prior output declaration frontmatter is refused by the source load
       /frontmatter must contain exactly .*priorOutputKinds/u,
     ),
   );
+});
+
+test("missing or malformed dependency provisioning frontmatter is refused by the source loader", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace(/^provisionDependencies: .*\n/mu, "")),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /frontmatter must contain exactly .*provisionDependencies/u,
+    ),
+  );
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("provisionDependencies: false\n", "provisionDependencies: no\n")),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /provisionDependencies must be true or false/u,
+    ),
+  );
+});
+
+test("only the six canonical code-review steps disable dependency provisioning", async () => {
+  const templates = await loadAllTemplateStepSources();
+  const disabled = [...templates].flatMap(([templateName, steps]) => steps
+    .filter((step) => !step.provisionDependencies)
+    .map((step) => `${templateName}:${step.stepIndex}`));
+  assert.deepEqual(disabled, [
+    `${INTEGRATOR_TEMPLATE_NAME}:6`,
+    `${INTEGRATOR_TEMPLATE_NAME}:7`,
+    `${DIRECT_TEMPLATE_NAME}:3`,
+    `${DIRECT_TEMPLATE_NAME}:4`,
+    `${PR_TEMPLATE_NAME}:2`,
+    `${PR_TEMPLATE_NAME}:3`,
+  ]);
+  assert.equal([...templates.values()].flat().every((step) => typeof step.provisionDependencies === "boolean"), true);
 });
 
 test("prior output declarations are unique and reference only earlier steps", async () => {
@@ -293,7 +506,7 @@ test("parallel nodes share one non-null base and never open a pull request", asy
   }
 });
 
-test("layer and requiresCommit are structural fields in canonical prompt drift comparison", async () => {
+test("layer, requiresCommit, and dependency provisioning are structural fields in canonical prompt drift comparison", async () => {
   const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[2]!;
   const persisted: PersistedTemplateStepStructure = {
     name: expected.name,
@@ -306,6 +519,7 @@ test("layer and requiresCommit are structural fields in canonical prompt drift c
     priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     requiresCommit: expected.requiresCommit,
+    provisionDependencies: expected.provisionDependencies,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy as PersistedTemplateStepStructure["spawnPolicy"],
   };
@@ -314,5 +528,9 @@ test("layer and requiresCommit are structural fields in canonical prompt drift c
   assert.deepEqual(
     templateStepStructureDifferences({ ...persisted, requiresCommit: !expected.requiresCommit }, expected),
     ["requiresCommit"],
+  );
+  assert.deepEqual(
+    templateStepStructureDifferences({ ...persisted, provisionDependencies: !expected.provisionDependencies }, expected),
+    ["provisionDependencies"],
   );
 });

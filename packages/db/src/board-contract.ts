@@ -205,6 +205,11 @@ export type MergeRecovery<DateTime = string> = {
   updatedAt: DateTime;
 };
 
+export type LatestAgentMessage<DateTime = string> = {
+  body: string;
+  at: DateTime;
+};
+
 /** A serialized Session as returned by the operator session routes. */
 export type Session<DateTime = string, DecimalValue = string> = {
   id: string;
@@ -232,6 +237,9 @@ export type Session<DateTime = string, DecimalValue = string> = {
   cachedInputTokens: number | null;
   totalTokens: number | null;
   usageCost?: UsageCost | null;
+  /** The newest reader-visible agent-authored message, when projected by a
+   *  task detail read. Other session projections may omit this derived field. */
+  latestAgentMessage?: LatestAgentMessage<DateTime> | null;
   failureReason: string | null;
   /** Relations GET /sessions and GET /sessions/:id include; absent on the
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
@@ -324,6 +332,9 @@ export type BoardLatestRun<DateTime = string> = {
   costUsd: string | null;
   startedAt: DateTime | null;
   endedAt: DateTime | null;
+  /** The pull request the Run published, or null when it opened none. Cards
+   *  link it; nothing on the board derives anything else from it. */
+  pullRequestUrl: string | null;
 };
 
 export type RepairBinding = {
@@ -364,6 +375,8 @@ export type ChainAggregate<DateTime = string> = {
   stepCount: number;
   /** Status counts for every primary-Step status. */
   statusCounts: Record<TaskStatus, number>;
+  /** The Step the aggregate card opens: the frontier, which is what the
+   * operator came to read. Always equal to `frontier.taskId`. */
   detailTaskId: string;
   /** Derived board column; this is not a persisted Task status. */
   status: TaskStatus;

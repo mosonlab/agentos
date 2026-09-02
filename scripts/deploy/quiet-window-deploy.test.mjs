@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { RUNTIME_TOOL_FILES } from "../../packages/runner/scripts/build-runtime-tools.mjs";
 import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
 import {
@@ -35,7 +48,11 @@ import { assembleReleaseDirectory } from "./release-directory.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
+const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const DEPLOY_SCRIPT = fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url));
+const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
+  .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
+  .sort();
 const EXPECTED_PHASES = [
   "parse-arguments",
   "check-escalation",
@@ -187,6 +204,16 @@ const minimalBuildTree = (root, revision) => {
   mkdirSync(source, { recursive: true });
   writeFileSync(join(prisma, "preflight.ts"), 'import { census } from "../src/schema-census.js";\nvoid census;\n');
   writeFileSync(join(source, "schema-census.ts"), "export const census = true;\n");
+  const runnerDist = join(root, "packages/runner/dist");
+  mkdirSync(join(runnerDist, "runtime-tools/gate-worker"), { recursive: true });
+  writeFileSync(join(runnerDist, "build-info.json"), `${JSON.stringify({
+    packageName: "@anneal/runner",
+    commit: revision,
+    dirty: false,
+  })}\n`);
+  for (const { source: sourcePath, destination } of RUNTIME_TOOL_FILES) {
+    cpSync(join(REPOSITORY_ROOT, sourcePath), join(runnerDist, "runtime-tools", destination));
+  }
 };
 
 const removeTree = (root) => {
@@ -397,6 +424,29 @@ test("--clear-escalation removes any marker without deployment environment initi
   assert.match(result.stdout, /CLEARED escalation operator-action-required-before-this-command/u);
 });
 
+test("--clear-escalation reports the path it looked at when no marker exists", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-manual-clear-absent-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const result = spawnSync(process.execPath, [DEPLOY_SCRIPT, "--clear-escalation"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      AGENTOS_REPOSITORY_ROOT: root,
+      QUIET_WINDOW_POLL_SECONDS: "60",
+      DATABASE_URL: "",
+      FEISHU_DEFAULT_CHAT_ID: "",
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  // The failure this covers: an operator pointed at the wrong root reads
+  // "CLEARED" while the real marker is still in place.
+  assert.doesNotMatch(result.stdout, /CLEARED escalation/u);
+  assert.match(result.stdout, /NO-ESCALATION-TO-CLEAR path=/u);
+  assert.match(result.stdout, new RegExp(`path=${root.replaceAll("\\", "\\\\")}`, "u"));
+});
+
 test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.length, 13);
   assert.equal(SERVICE_LABELS[0], "com.agentos.api");
@@ -452,6 +502,7 @@ test("release artifact inventory copies and verifies deploy runtime and workspac
       revision: revisions.to,
       artifactPaths: paths.filter((path) => [
         "packages/api/dist",
+        "packages/runner/dist",
         "packages/db/prisma",
         "packages/db/src",
         adapterPath,
@@ -574,8 +625,8 @@ test("standalone builder creates a verified exact-commit release", () => {
     gitBinary: "/git",
     nodeBinary: "/node",
     npmBinary: "/npm",
-    requiredPaths: ["packages/api/dist"],
-    artifactPaths: () => ["packages/api/dist", "packages/db/prisma", "packages/db/src"],
+    requiredPaths: ["packages/api/dist", "packages/runner/dist"],
+    artifactPaths: () => ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
     optionalArtifactPaths: () => [],
     execute: (program, args, options = {}) => {
       commands.push({ program, args });
@@ -586,11 +637,101 @@ test("standalone builder creates a verified exact-commit release", () => {
   assert.deepEqual(artifact.dbMaintenanceSourceImports, ["schema-census"]);
   assert.match(artifact.releaseName, new RegExp(`^${revisions.to}-[0-9a-f]{64}$`, "u"));
   assert.equal(findReleaseArtifact({ deployRoot, revision: revisions.to }).releaseName, artifact.releaseName);
+  for (const { source, destination } of RUNTIME_TOOL_FILES) {
+    assert.deepEqual(
+      readFileSync(join(artifact.releaseDirectory, "packages/runner/dist/runtime-tools", destination)),
+      readFileSync(join(REPOSITORY_ROOT, source)),
+    );
+  }
+  assert.deepEqual(
+    artifact.files.filter(({ path }) => path.includes("runtime-tools")).map(({ path }) => path),
+    EXPECTED_RUNTIME_PATHS,
+  );
   assert.equal(commands.length, 4);
   assert.deepEqual(commands.slice(1).map(({ args }) => args.slice(-2)), [
     ["--detach", revisions.to], ["/npm", "ci"], ["run", "build"],
   ]);
   removeTree(deployRoot);
+});
+
+const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-runtime-tools-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  mutate?.(source);
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths,
+      optionalArtifactPaths: [],
+    });
+    assert.throws(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+      (error) => error instanceof DeployFailure && error.reason === "release-artifact-runtime-incomplete",
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+};
+
+test("artifact verification rejects missing, extra, non-regular, and misplaced runtime tools", () => {
+  const completePaths = ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"];
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths.filter((path) => path !== "packages/runner/dist"),
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    mutate: (source) => writeFileSync(
+      join(source, "packages/runner/dist/runtime-tools/extra.sh"),
+      "unexpected\n",
+    ),
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    mutate: (source) => {
+      const path = join(source, "packages/runner/dist/runtime-tools/regression-verification.sh");
+      rmSync(path);
+      symlinkSync("gate-worker/lib.sh", path);
+    },
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: [...completePaths, "runtime-tools"],
+    mutate: (source) => {
+      mkdirSync(join(source, "runtime-tools"), { recursive: true });
+      writeFileSync(join(source, "runtime-tools/unexpected.sh"), "unexpected\n");
+    },
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: [...completePaths, "runtime-tool-alias"],
+    mutate: (source) => {
+      symlinkSync("packages/runner/dist/runtime-tools", join(source, "runtime-tool-alias"));
+    },
+  });
+});
+
+test("artifact verification accepts an unrelated nested lib.sh", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-unrelated-lib-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  writeFileSync(join(source, "packages/db/src/lib.sh"), "unrelated fixture\n");
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
+      optionalArtifactPaths: [],
+    });
+    assert.doesNotThrow(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
 });
 
 test("artifact verification rejects an incomplete DB maintenance runtime before activation", () => {

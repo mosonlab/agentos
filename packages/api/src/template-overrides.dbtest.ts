@@ -1,6 +1,6 @@
 import "./test-workspace-root.js";
 import assert from "node:assert/strict";
-import { PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 import { after, before, beforeEach, test } from "node:test";
 
 import { AssigneeType } from "@anneal/db";
@@ -45,7 +45,7 @@ const fixture = async (label: string) => {
     model: "gpt-5.6-sol:medium", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const repo = await db.repo.create({
-    data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" },
+    data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE },
   });
   for (const agent of [canonicalOne, canonicalTwo, replacement, archived]) {
     await db.agentRepoAccess.create({

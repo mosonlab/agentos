@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Run one merge gate against one commit. Runs ON THE SERVER, invoked over SSH by
-# scripts/gate-worker/remote-gate.sh. It lives in one repository's directory on
+# packages/runner/runtime-tools/gate-worker/remote-gate.sh. It lives in one repository's directory on
 # the worker — ~/gate/<repo>/ — next to that repository's mirror, worktrees and
 # logs, and operates on those and nothing else:
 #
@@ -63,7 +63,7 @@ set -uo pipefail
 # script's own directory rather than from $GATE_HOME, which an environment may
 # point elsewhere.
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=scripts/gate-worker/lib.sh
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "${HARNESS_DIR}/lib.sh"
 
 # 2 is this script's own argument parsing, not the gate's, so it stays here.
@@ -155,7 +155,7 @@ no_verdict() {
   exit "$GATE_EXIT_NO_VERDICT"
 }
 
-[ -d "$MIRROR_DIR" ] || no_verdict "no mirror at ${MIRROR_DIR}; run scripts/gate-worker/mirror-push.sh from the local machine first"
+[ -d "$MIRROR_DIR" ] || no_verdict "no mirror at ${MIRROR_DIR}; run packages/runner/runtime-tools/gate-worker/mirror-push.sh from the local machine first"
 command -v git >/dev/null 2>&1 || no_verdict "git is not installed on the worker"
 command -v node >/dev/null 2>&1 || no_verdict "node is not installed on the worker"
 command -v flock >/dev/null 2>&1 || no_verdict "flock is not installed on the worker"
@@ -169,14 +169,14 @@ command -v flock >/dev/null 2>&1 || no_verdict "flock is not installed on the wo
 # means the local machine has not pushed it yet, and saying so precisely is the
 # difference between a one-command fix and a debugging session.
 if ! git -C "$MIRROR_DIR" cat-file -e "${OID}^{commit}" 2>/dev/null; then
-  no_verdict "commit ${OID} is not in the mirror; run scripts/gate-worker/mirror-push.sh from the local machine"
+  no_verdict "commit ${OID} is not in the mirror; run packages/runner/runtime-tools/gate-worker/mirror-push.sh from the local machine"
 fi
 
 # The same is true of the master the caller bound the verdict to: an oid this
 # mirror cannot resolve would make the gate's own baseline unresolvable, and the
 # honest answer is that the mirror is behind the machine that asked.
 if [ -n "$MASTER_OID" ] && ! git -C "$MIRROR_DIR" cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null; then
-  no_verdict "master ${MASTER_OID} is not in the mirror; run scripts/gate-worker/mirror-push.sh from the local machine"
+  no_verdict "master ${MASTER_OID} is not in the mirror; run packages/runner/runtime-tools/gate-worker/mirror-push.sh from the local machine"
 fi
 
 mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || no_verdict "could not create the gate directories under ${GATE_HOME}"

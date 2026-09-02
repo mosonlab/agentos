@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { AssigneeType, Prisma, RunStatus } from "@prisma/client";
 
+import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { stepRole, type StepRole } from "./step-role.js";
 
 export type LegacyStepRecord = Readonly<{
@@ -44,6 +45,13 @@ export type LegacyStepRecord = Readonly<{
  * read-only revalidation node.
  * `pre-product-rename-anneal`: the graphs whose prompts still called the
  * platform by its former product name. Prompt-only in both templates.
+ * `pre-runner-provided-regression-tooling`: the graphs whose Regression
+ * prompts still resolved the platform script through the repository checkout.
+ * `pre-pr-handover-quality`: the pull-request graph whose prompts still used
+ * the placeholder delivery body and left chain bookkeeping in the published
+ * tree.
+ * `pre-pr-head-tree-check`: the first handover-quality prompt generation,
+ * whose cleanup verification inspected the index rather than committed HEAD.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
@@ -122,7 +130,7 @@ const legacyTemplateGenerations = {
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+      successorPromptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -136,7 +144,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-platform-spec-materialization",
       promptDigest: "c1a9ec1f8e783c3c814c0d0f5f4a9b91d5759b9dc39473dc200447aeb96677c5",
-      successorPromptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+      successorPromptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -152,7 +160,7 @@ const legacyTemplateGenerations = {
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+      successorPromptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -166,7 +174,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-internal-npm-scope-rename",
       promptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
-      successorPromptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+      successorPromptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -210,7 +218,22 @@ const legacyTemplateGenerations = {
       // `pre-revalidate-step` above and rolls over structurally as before.
       marker: "pre-product-rename-anneal",
       promptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
-      successorPromptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+      successorPromptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
+      shape: [
+        { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+      ],
+    },
+    {
+      marker: "pre-runner-provided-regression-tooling",
+      promptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+      successorPromptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -302,7 +325,7 @@ const legacyTemplateGenerations = {
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
-      successorPromptDigest: "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
+      successorPromptDigest: "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -321,7 +344,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-internal-npm-scope-rename",
       promptDigest: "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
-      successorPromptDigest: "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
+      successorPromptDigest: "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -340,7 +363,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-product-rename-anneal",
       promptDigest: "606f9b5a667781cde3400d114cc7f2ebf00bada6995eee07a7019b63e7dd8424",
-      successorPromptDigest: "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
+      successorPromptDigest: "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -354,6 +377,55 @@ const legacyTemplateGenerations = {
         { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
         { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
         { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
+      ],
+    },
+    {
+      marker: "pre-runner-provided-regression-tooling",
+      promptDigest: "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
+      successorPromptDigest: "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
+      shape: [
+        { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", agentName: "librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", agentName: "regression-verifier", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", agentName: "merge-integrator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
+      ],
+    },
+  ],
+  [PR_TEMPLATE_NAME]: [
+    {
+      // Prompt-only rollover: PR delivery now publishes the implementation
+      // evidence and cleans the tracked chain bookkeeping in the fix step.
+      // The graph is unchanged, so both prompt digests authenticate the
+      // outgoing and successor generations.
+      marker: "pre-pr-handover-quality",
+      promptDigest: "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6",
+      successorPromptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+      shape: [
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+      ],
+    },
+    {
+      // Prompt-only review fix: cleanup verification now authenticates the
+      // committed HEAD tree, not the mutable index.
+      marker: "pre-pr-head-tree-check",
+      promptDigest: "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906",
+      successorPromptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+      shape: [
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
+        { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
       ],
     },
   ],
@@ -371,6 +443,23 @@ export type CanonicalTemplateIdentity = Readonly<{
 }>;
 
 export type CanonicalStepOrdinals = Readonly<Partial<Record<StepRole, number>>>;
+
+/**
+ * Current graphs are deliberately kept apart from retired generations. A
+ * canonical template may be introduced with no history at all, so deriving
+ * its ordinals from `LEGACY_TEMPLATE_GENERATIONS` would incorrectly make it
+ * unaddressable by repair routing.
+ */
+export const CURRENT_CANONICAL_STEP_ORDINALS: Readonly<
+  Partial<Record<CanonicalTemplateRegistryName, CanonicalStepOrdinals>>
+> = {
+  [PR_TEMPLATE_NAME]: {
+    implementation: 1,
+    "sol-findings": 2,
+    "blind-findings": 3,
+    "fixed-implementation": 4,
+  },
+};
 
 const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGeneration[] | null =>
   Object.hasOwn(LEGACY_TEMPLATE_GENERATIONS, canonicalName)
@@ -409,7 +498,9 @@ export const canonicalStepOrdinals = (
   const registered = generation === null
     ? generations.at(-1)
     : generations.find((candidate) => candidate.marker === generation);
-  if (!registered) return null;
+  if (!registered) {
+    return generation === null ? CURRENT_CANONICAL_STEP_ORDINALS[canonicalName] ?? null : null;
+  }
   if (generation === null && registered.successorStepOrdinals !== undefined) return registered.successorStepOrdinals;
   if (generation === null && (registered.promptDigest === undefined || registered.successorPromptDigest === undefined)) {
     throw new Error(`Current ${canonicalName} Step ordinals are not derivable from its latest structural transition`);
@@ -496,6 +587,7 @@ export type PersistedTransitionStep = {
   priorOutputKinds: string[];
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
   prompt: string;
@@ -519,6 +611,7 @@ const shapeMatches = (
       || step.attachmentsFromPrevious !== expectedStep.attachmentsFromPrevious
       || step.opensPullRequest !== expectedStep.opensPullRequest
       || step.requiresCommit !== (expectedStep.outputKind === "plan" || expectedStep.outputKind === "implementation")
+      || step.provisionDependencies !== true
       || step.baseFromStepIndex !== expectedStep.baseFromStepIndex
       || step.layer !== expectedStep.layer
       || !isDeepStrictEqual(step.spawnPolicy, expectedStep.spawnPolicy)) {

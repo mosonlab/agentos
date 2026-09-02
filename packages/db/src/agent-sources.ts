@@ -39,6 +39,7 @@ export type RoleSource = {
 export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
 
 export type PersistedRoleStructure = {
+  name?: string;
   title: string;
   model: string;
   runnerPreference: RunnerPreference;
@@ -53,6 +54,7 @@ export const roleSourceStructureDifferences = (
   const actualCollaborators = actual.collaborators.map(({ allowedAgent }) => allowedAgent.name).sort();
   const expectedCollaborators = [...expected.collaborators].sort();
   const fields = [
+    ...(actual.name === undefined ? [] : [["name", actual.name, expected.name] as const]),
     ["title", actual.title, expected.title],
     ["model", actual.model, expected.model],
     ["runnerPreference", actual.runnerPreference, expected.runnerPreference],

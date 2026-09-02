@@ -140,7 +140,7 @@ const mechanicalStop = async (
         maxRunsPerTask: 5,
         targetBranch: "master",
       } });
-  const session = await db.session.create({ data: {
+  await db.session.create({ data: {
     runId: run.id,
     projectId: seeded.project.id,
     taskId: seeded.integratorTask!.id,
@@ -178,8 +178,6 @@ const mechanicalStop = async (
     integratorTaskId: seeded.integratorTask!.id,
     condition: "base-drift",
     evidence,
-    agentId: seeded.integratorAgent.id,
-    sessionId: session.id,
     sourceRunId: run.id,
   }));
   return run;

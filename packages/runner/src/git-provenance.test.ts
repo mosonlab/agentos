@@ -41,12 +41,14 @@ const config = (root: string, identity: RunnerConfig["gitIdentity"] = HUMAN): Ru
   runnerId: "runner-provenance",
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: process.env.PATH ?? "/usr/bin:/bin",
   home: join(root, "home"),
   gitIdentity: identity,
   workspaceRoot: join(root, "runs"),
+  hostProofSlots: 3,
   failedWorkspaceRetention: 0,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,
@@ -73,7 +75,7 @@ const claim = (
     maxDurationMin: 30,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 2,
-    templateStep: { name: "Implementation", outputKind: "implementation" },
+    templateStep: { name: "Implementation", outputKind: "implementation", provisionDependencies: true },
     ...overrides,
   },
   agent: {
@@ -84,7 +86,13 @@ const claim = (
     rolePrompt: "implement",
     disabledTools: [],
   },
-  repo: { id: "repo-provenance", remoteUrl, defaultBranch: "main", mountPath: "repo" },
+  repo: {
+    id: "repo-provenance",
+    remoteUrl,
+    defaultBranch: "main",
+    mountPath: "repo",
+    dependencyProvisioning: "NPM_CI",
+  },
   run: {
     id: runId,
     runNumber: 1,
@@ -134,6 +142,7 @@ const providerEnvironment = (configured: RunnerConfig, claimed: ClaimedTask, wor
     base: join(configured.workspaceRoot, "scratch"),
     workspaceRoot: join(configured.workspaceRoot, "scratch", "workspaces"),
     stateDir: join(configured.workspaceRoot, "scratch", "state"),
+    toolsDir: join(configured.workspaceRoot, "scratch", "tools"),
     configRoot: join(configured.workspaceRoot, "scratch", "config"),
   }, workspace.path, workspace.commitHooksPath);
 

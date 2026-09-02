@@ -8,6 +8,7 @@ priorOutputKinds: [implementation, sol-findings, blind-findings, fixed-implement
 attachmentsFromPrevious: true
 opensPullRequest: false
 requiresCommit: false
+provisionDependencies: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---
@@ -15,7 +16,7 @@ The platform script owns refresh/merge, merge-lease operations, gate dispatch
 and retries, verdict transcription, and the final `regression-verification-v2`
 task output. Do not perform or restate those mechanical operations yourself.
 
-Run `scripts/regression-verification.sh prepare`. If it reports
+Run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" prepare`. If it reports
 `refresh-conflict`, the final output is already persisted: record the outcome
 in the activity log and finish. Otherwise read the implementation summary,
 both review reports, and the fixed implementation with its dispositions from
@@ -26,8 +27,8 @@ a failure.
 
 If an adopted finding remains open, a rejection is unsupported, or a new
 defect exists, run
-`scripts/regression-verification.sh review-fail '<concise finding IDs or defect>'`
-and finish. Otherwise run `scripts/regression-verification.sh finalize`.
+`"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" review-fail '<concise finding IDs or defect>'`
+and finish. Otherwise run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" finalize`.
 
 A finalize exit 0 means the script persisted exactly one of `pass`, `gate-fail`,
 or `refresh-conflict`; report the bounded `REGRESSION FINALIZE` status line it

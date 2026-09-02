@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isCodexReconnectStatus } from "@anneal/db";
+
 import type { ClaimedTask } from "../api.js";
 import type { RunnerConfig, RunnerKind } from "../config.js";
 import type { AgentScratch } from "../workspace.js";
@@ -85,8 +87,6 @@ const codexPromptSections = (claim: ClaimedTask): string[] => {
     `- maximum concurrent child threads: ${profile.maxConcurrent} (root excluded)`,
     "- multi_agent_v2 is enabled by the runner. Spawn, message, wait for, and close native children through the session collaboration tools; do not launch nested Codex CLI processes.",
     "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
-    "- Implementation proof is limited to each assignment's focused tests, one affected-workspace compile or typecheck after integration, and tests for seams crossed by multiple assignments.",
-    "- Do not run repository-wide suites or the repository Merge Gate in Implementation; the later Regression step owns the formal Gate.",
   ];
 };
 
@@ -114,9 +114,6 @@ export const codexArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
       "--dangerously-bypass-approvals-and-sandbox", "-",
     ];
 };
-
-const isReconnectStatus = (message: string | null): boolean =>
-  /^Reconnecting\.\.\. \d+\/\d+$/u.test(message?.trim() ?? "");
 
 const observedNativeChild = (item: Record<string, unknown> | null): boolean => {
   if (!item) return false;
@@ -175,7 +172,7 @@ export const parseCodexEvent = (
     // the stream is disconnected, but do not make it an irreversible verdict:
     // a later turn.completed proves the reconnect recovered. Every other error
     // remains latched, including an unrecognised error with no message.
-    if (!isReconnectStatus(message)) state.sawError = true;
+    if (!isCodexReconnectStatus(message)) state.sawError = true;
     state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
   } else if (type === "turn.completed") {
@@ -190,7 +187,7 @@ export const parseCodexTranscript = (
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
   const state = createAdapterState("CODEX", "transcript");
-  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent);
+  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent, () => true);
   return state;
 };
 
@@ -277,6 +274,7 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   childEnvironment: codexChildEnvironment,
   provisionSessionConfig: provisionCodexSessionConfig,
   initialProviderState: () => undefined,
+  providerEventPersistence: () => true,
   parseEvent: parseCodexEvent,
   preflight,
 });

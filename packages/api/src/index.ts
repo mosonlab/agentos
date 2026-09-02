@@ -194,7 +194,10 @@ const main = async (): Promise<void> => {
 
   await ownership.assertHeld();
   const reconciliation = await reconcileAtStartup(prisma);
-  console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.openReclaimIntents} workspace reclaim intents awaiting their runner, ${reconciliation.archivedNotices} archived-run notices`);
+  // `unavailable` rather than a number the process never read: see
+  // `StartupReconciliation` in reconcile.ts.
+  const count = (value: number | null): string => (value === null ? "unavailable" : String(value));
+  console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${count(reconciliation.openReclaimIntents)} workspace reclaim intents awaiting their runner, ${count(reconciliation.archivedNotices)} archived-run notices`);
   await ensureStartupActive();
 
   const githubReader = createGitHubReader();

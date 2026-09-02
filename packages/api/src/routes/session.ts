@@ -1,4 +1,5 @@
 import {
+  PR_TEMPLATE_NAME,
   executionModeFor,
   isMergeExecutorRunnerId,
   loadIntegratorTask,
@@ -15,6 +16,7 @@ import {
   type DecisionRow,
   Prisma,
 } from "@anneal/db";
+import type { PrismaClient } from "@anneal/db";
 import type { Session as SessionContract } from "@anneal/db/board-contract";
 import { z } from "zod";
 
@@ -60,6 +62,101 @@ import {
 
 const SESSION_READ_LIMIT = 5 * 1024 * 1024;
 const SESSION_BASE64_BODY_LIMIT = 34 * 1024 * 1024;
+const PR_WORKFLOW_OUTPUT_KINDS = [
+  "implementation",
+  "sol-findings",
+  "blind-findings",
+  "fixed-implementation",
+] as const;
+const PR_DELIVERY_OUTPUT_KINDS = ["implementation", "fixed-implementation"] as const;
+
+type PrWorkflowOutputProjection = {
+  taskId: string;
+  chainIndex: number;
+  kind: string;
+  body: string;
+  commitSha: string;
+};
+
+const isPrDeliveryStep = (task: {
+  chainId: string | null;
+  chainIndex: number | null;
+  templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
+}): boolean => typeof task.chainId === "string"
+  && task.chainId.trim().length > 0
+  && task.chainIndex !== null
+  && Number.isInteger(task.chainIndex)
+  && task.chainIndex > 0
+  && task.templateStep?.taskTemplate?.name === PR_TEMPLATE_NAME
+  && PR_DELIVERY_OUTPUT_KINDS.includes(task.templateStep.outputKind as (typeof PR_DELIVERY_OUTPUT_KINDS)[number]);
+
+/**
+ * Project only the persisted canonical PR handoff bodies that the current
+ * delivery Run is allowed to consume. The project/chain predicates are part
+ * of the query rather than a post-query trust decision: a session can never
+ * receive a body from a same-index task in another Project or Chain.
+ *
+ * The implementation Run sees only its own output (there are no earlier PR
+ * outputs at its index); the final Run sees all four canonical outputs that
+ * exist through its chain index. Missing rows remain absent so delivery can
+ * fail loudly instead of treating an unavailable body as a success.
+ */
+const prWorkflowOutputsFor = async (
+  db: PrismaClient,
+  runId: string,
+  task: {
+    id: string;
+    projectId: string;
+    chainId: string | null;
+    chainIndex: number | null;
+    templateStep: { outputKind: string; taskTemplate: { name: string } } | null;
+  },
+): Promise<PrWorkflowOutputProjection[] | undefined> => {
+  if (!isPrDeliveryStep(task)) return undefined;
+
+  const rows = await db.task.findMany({
+    where: {
+      projectId: task.projectId,
+      chainId: task.chainId,
+      chainIndex: task.templateStep?.outputKind === "implementation"
+        ? task.chainIndex!
+        : { lte: task.chainIndex! },
+      templateStep: {
+        outputKind: { in: [...PR_WORKFLOW_OUTPUT_KINDS] },
+        taskTemplate: { name: PR_TEMPLATE_NAME },
+      },
+      stepOutput: task.templateStep?.outputKind === "implementation"
+        ? { is: { runId, kind: "implementation" } }
+        : { isNot: null },
+      ...(task.templateStep?.outputKind === "implementation" ? {} : {
+        OR: [
+          { id: { not: task.id } },
+          { id: task.id, stepOutput: { is: { runId } } },
+        ],
+      }),
+    },
+    orderBy: { chainIndex: "asc" },
+    select: {
+      id: true,
+      chainIndex: true,
+      templateStep: { select: { outputKind: true } },
+      stepOutput: { select: { kind: true, body: true, commitSha: true } },
+    },
+  });
+
+  return rows.flatMap((row) => (
+    row.chainIndex === null || row.stepOutput === null || row.templateStep === null
+      || typeof row.stepOutput.commitSha !== "string"
+      ? []
+      : [{
+        taskId: row.id,
+        chainIndex: row.chainIndex,
+        kind: row.stepOutput.kind,
+        body: row.stepOutput.body,
+        commitSha: row.stepOutput.commitSha,
+      }]
+  ));
+};
 const sessionWriteInput = z.object({
   path: z.string(),
   content: z.string(),
@@ -206,12 +303,23 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     if (boundImplementationTask && "message" in boundImplementationTask) {
       return refusalJson(context, boundImplementationTask);
     }
-    const outputPersisted = run.task?.stepOutput?.runId === run.id;
+    const taskOutput = run.task?.stepOutput;
+    const outputPersisted = taskOutput?.runId === run.id;
     const outputSatisfiedByPriorRun = Boolean(
-      run.task?.stepOutput
+      run.task && taskOutput
       && !outputPersisted
       && outputIsImmutableOncePersisted(run.task.templateStep),
     );
+    const output = outputPersisted && taskOutput
+      ? {
+        runId: taskOutput.runId,
+        kind: taskOutput.kind,
+        commitSha: taskOutput.commitSha,
+      }
+      : null;
+    const prWorkflowOutputs = run.task
+      ? await prWorkflowOutputsFor(db, run.id, run.task)
+      : undefined;
     return context.json({
       run: {
         id: run.id,
@@ -232,6 +340,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         chainIndex: run.task.chainIndex,
         stepName: run.task.templateStep?.name ?? null,
         outputKind: run.task.templateStep?.outputKind ?? null,
+        output,
         outputRequired: requiredOutputKind(run.task.templateStep) !== null,
         outputRemediationAllowed:
           !isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
@@ -240,6 +349,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         // A retry must not mistake an earlier Run's artifact for its own. This
         // is the same run-scoped fact completion validates before it advances.
         outputPersisted,
+        ...(prWorkflowOutputs === undefined ? {} : { prWorkflowOutputs }),
         ...(boundImplementationTask ? { boundImplementationTask } : {}),
       } : null,
     });

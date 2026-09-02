@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { activateChainSuccessor, PrismaClient, TaskStatus } from "@anneal/db";
+import { activateChainSuccessor, DependencyProvisioning, PrismaClient, TaskStatus } from "@anneal/db";
 import { buildChildEnvironment } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
 import type { RunnerConfig } from "@anneal/runner/config";
@@ -162,6 +162,7 @@ const seedProject = async (label: string) => {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",
@@ -464,6 +465,7 @@ test("T15: two repos in one chain each need their own published branch", async (
   const repoB = await db.repo.create({ data: {
     projectId: seed.project.id, name: "repo-b", remoteUrl: "https://example.test/repo-b.git", mountPath: "/repo-b",
     defaultBranch: "trunk",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: seed.project.id, agentId: seed.agent.id, repoId: repoB.id, mountPath: "/repo-b", permissions: "GIT_WRITE",
@@ -1210,12 +1212,14 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
       runnerId: "runner-1",
       daemonVersion: "0.0.0-dbtest",
       pollIntervalMs: 1_000,
+      claimMaxLoadAverage: 1.5,
       leaseSeconds: 60,
       heartbeatIntervalMs: 5_000,
       path: process.env.PATH ?? "/usr/bin:/bin",
       home: join(root, "home"),
       gitIdentity: { name: "Human Maintainer", email: "maintainer@example.invalid" },
       workspaceRoot: join(root, "runs"),
+      hostProofSlots: 3,
       failedWorkspaceRetention: 0,
       workspaceReclaimIntervalMs: 300_000,
       toolDeadlineMs: 60_000,
@@ -1237,6 +1241,7 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
       base: join(root, "scratch"),
       workspaceRoot: join(root, "scratch", "workspaces"),
       stateDir: join(root, "scratch", "state"),
+      toolsDir: join(root, "scratch", "tools"),
       configRoot: join(root, "scratch", "config"),
     }, workspace.path, workspace.commitHooksPath);
     await writeFile(join(workspace.path, "claimed.txt"), "claimed chain work\n");

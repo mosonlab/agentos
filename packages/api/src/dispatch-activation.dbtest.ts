@@ -8,6 +8,7 @@ import {
   activateChainSuccessor,
   applyInboxDecisionTx,
   COMPOUND_IMPLEMENTATION_AGENT_NAME,
+  DependencyProvisioning,
   enqueueTaskRun,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -74,6 +75,7 @@ const seedBinding = async (input: {
     name: `dispatch-repo-${suffix}`,
     remoteUrl: "https://example.test/dispatch.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

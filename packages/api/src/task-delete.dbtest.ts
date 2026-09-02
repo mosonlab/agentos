@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { CHAIN_STRUCTURE_LOCK_CLASS, MERGE_TAIL_KIND, PrismaClient, RunStatus } from "@anneal/db";
+import { CHAIN_STRUCTURE_LOCK_CLASS, DependencyProvisioning, MERGE_TAIL_KIND, PrismaClient, RunStatus } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -68,6 +68,7 @@ const seedContext = async (label: string) => {
     name: "repo",
     remoteUrl: "https://example.test/repo.git",
     mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   await db.agentRepoAccess.create({ data: {
     projectId: project.id,

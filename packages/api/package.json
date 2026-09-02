@@ -4,12 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node ../build-info/stamp.mjs dist",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build -w @anneal/github-client && npm run build -w @anneal/db",
-    "test": "node --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
-    "pretest:db": "npm run build -w @anneal/github-client && npm run build -w @anneal/db && npm run build -w @anneal/runner && npm run build -w @anneal/api",
-    "test:db": "node --import tsx scripts/dbtest.mjs",
+    "build": "bash ../../scripts/host-proof-slot.sh build @anneal/api -- /bin/sh -c 'tsc -p tsconfig.json && node ../build-info/stamp.mjs dist'",
+    "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/api -- tsc -p tsconfig.json --noEmit",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/api -- node --conditions=development --import tsx --test src/*.test.ts src/routes/*.test.ts src/files/*.test.ts",
+    "test:db": "bash ../../scripts/host-proof-slot.sh test:db @anneal/api -- node --conditions=development --import tsx scripts/dbtest.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

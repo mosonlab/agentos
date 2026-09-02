@@ -57,7 +57,7 @@ const main = async (): Promise<void> => {
   }
   await db.secret.deleteMany({ where: { OR: [{ id: ids.secret }, { name: "fixture-secret" }] } });
 
-  const repo = await db.repo.create({ data: { id:ids.repo, projectId:project.id, name:"fixture-repo", remoteUrl:"file:///tmp/agentos-fixture-repo.git", mountPath:"/workspace/fixture-repo", defaultBranch:"main" } });
+  const repo = await db.repo.create({ data: { id:ids.repo, projectId:project.id, name:"fixture-repo", remoteUrl:"file:///tmp/agentos-fixture-repo.git", mountPath:"/workspace/fixture-repo", defaultBranch:"main", dependencyProvisioning:"NONE" } });
   await db.agentRepoAccess.createMany({ data: agents.map((a) => ({ agentId:a.id, repoId:repo.id, projectId:project.id, mountPath:"/workspace/fixture-repo", permissions:RepoPermission.GIT_WRITE })) });
   const common = { projectId:project.id, assigneeAgentId:agent.id, repoId:repo.id, assigneeType:AssigneeType.AGENT, workingDirectory:".", targetBranch:"main" };
   await db.task.createMany({ data: [

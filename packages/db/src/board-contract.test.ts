@@ -25,6 +25,7 @@ test("the package publishes the board contract as an isolated subpath", () => {
   const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
   assert.deepEqual(manifest.exports["./board-contract"], {
     types: "./src/board-contract.ts",
+    development: "./src/board-contract.ts",
     import: "./dist/board-contract.js",
   });
 });

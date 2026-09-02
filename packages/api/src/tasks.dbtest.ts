@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -59,7 +59,7 @@ const seedTask = async (label: string, overrides: Record<string, unknown> = {}) 
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   await db.agentRepoAccess.create({ data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
   const task = await db.task.create({ data: {
     projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Step", description: "work",
@@ -80,6 +80,68 @@ const seedRun = async (
   runNumber, dedupeKey: `task:${context.task.id}:run:${runNumber}`, runner: "CLAUDE", model: "claude",
   promptHash: "hash", status, maxRunsPerTask: context.task.maxSessionsPerTask,
 } });
+
+test("task detail projects the newest non-empty agent message, preferring FINAL_OUTPUT", async () => {
+  const context = await seedTask("task-detail-latest-agent-message");
+  const run = await seedRun(context, 1, "SUCCEEDED");
+  const session = await db.session.create({ data: {
+    runId: run.id,
+    projectId: context.project.id,
+    agentId: context.agent.id,
+    taskId: context.task.id,
+    runner: "CLAUDE",
+  } });
+  const finalAt = new Date("2026-08-31T18:03:00.000Z");
+  await db.sessionEvent.createMany({ data: [
+    {
+      sessionId: session.id, runId: run.id, seq: 1, at: new Date("2026-08-31T18:01:00.000Z"),
+      source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { message: { content: [{ type: "text", text: "intermediate one" }] } },
+    },
+    {
+      sessionId: session.id, runId: run.id, seq: 2, at: new Date("2026-08-31T18:02:00.000Z"),
+      source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { message: { content: [{ type: "text", text: "intermediate two" }] } },
+    },
+    {
+      sessionId: session.id, runId: run.id, seq: 3, at: finalAt,
+      source: "CLAUDE", type: "FINAL_OUTPUT", payload: { type: "result", result: "The final output" },
+    },
+  ] });
+
+  const response = await call("GET", `/tasks/${context.task.id}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.runs[0].session.latestAgentMessage, {
+    body: "The final output",
+    at: finalAt.toISOString(),
+  });
+});
+
+test("task detail returns null when a session has no text events", async () => {
+  const context = await seedTask("task-detail-no-agent-message");
+  const run = await seedRun(context, 1, "SUCCEEDED");
+  const session = await db.session.create({ data: {
+    runId: run.id,
+    projectId: context.project.id,
+    agentId: context.agent.id,
+    taskId: context.task.id,
+    runner: "CLAUDE",
+  } });
+  await db.sessionEvent.createMany({ data: [
+    {
+      sessionId: session.id, runId: run.id, seq: 1,
+      source: "CLAUDE", type: "MODEL_COMPLETED", payload: { status: "completed" },
+    },
+    {
+      sessionId: session.id, runId: run.id, seq: 2,
+      source: "CLAUDE", type: "FINAL_OUTPUT", payload: { type: "result" },
+    },
+  ] });
+
+  const response = await call("GET", `/tasks/${context.task.id}`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.runs[0].session.latestAgentMessage, null);
+});
 
 // --- POST /runs/:runId/cancel ----------------------------------------------
 
@@ -533,6 +595,69 @@ test("archive and unarchive round-trip, and the board hides the archived task", 
   assert.equal((await call("GET", `/tasks?projectId=${context.project.id}`)).body.length, 1);
   // Unarchiving an already-live task is a no-op, not an error.
   assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
+});
+
+test("archiving or unarchiving one Chain task changes the whole Chain atomically", async () => {
+  const chainId = `archive-chain-${Date.now()}`;
+  const context = await seedTask("archive-chain", { chainId, chainIndex: 0, status: "DONE" });
+  const frontier = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Archive Chain frontier",
+    description: "d",
+    status: "REVIEW",
+    chainId,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+
+  assert.equal((await call("POST", `/tasks/${frontier.id}/archive`)).status, 200);
+  assert.equal((await db.task.count({ where: { chainId, archivedAt: null } })), 0);
+  assert.equal((await call("GET", `/tasks?projectId=${context.project.id}`)).body.length, 0);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: { in: [context.task.id, frontier.id] }, body: "Task archived" },
+  }), 2);
+
+  assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
+  assert.equal((await db.task.count({ where: { chainId, archivedAt: null } })), 2);
+  assert.equal((await call("GET", `/tasks?projectId=${context.project.id}`)).body.length, 2);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: { in: [context.task.id, frontier.id] }, body: "Task unarchived" },
+  }), 2);
+});
+
+test("a busy Chain member refuses the whole archive without partial writes", async () => {
+  const chainId = `archive-chain-busy-${Date.now()}`;
+  const context = await seedTask("archive-chain-busy", { chainId, chainIndex: 0, status: "DONE" });
+  const busy = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Busy Chain member",
+    description: "d",
+    status: "DOING",
+    chainId,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+  await db.run.create({ data: {
+    projectId: context.project.id,
+    taskId: busy.id,
+    agentId: context.agent.id,
+    repoId: context.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${busy.id}:run:1`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "h",
+    status: "RUNNING",
+  } });
+
+  const response = await call("POST", `/tasks/${context.task.id}/archive`);
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error, "Cannot archive a task with an active run");
+  assert.equal((await db.task.count({ where: { chainId, archivedAt: null } })), 2);
 });
 
 test("archive refuses a task with an active run", async () => {

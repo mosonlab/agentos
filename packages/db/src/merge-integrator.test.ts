@@ -391,6 +391,14 @@ test("absent, wrong-kind, unparseable and unknown-outcome bodies all fail closed
   assert.equal(parseMergeResult({ kind: "merge-result", body: "[]" }).outcome, "malformed");
   assert.equal(parseMergeResult({ kind: "merge-result", body: JSON.stringify({ outcome: "probably-fine" }) }).outcome, "malformed");
   assert.equal(parseMergeResult({ kind: "merge-result", body: JSON.stringify({ outcome: "stopped", condition: "invented" }) }).outcome, "malformed");
+  assert.equal(parseMergeResult({
+    kind: "merge-result",
+    body: JSON.stringify({ outcome: "stopped", condition: "base-drift-post-merge" }),
+  }).outcome, "malformed");
+  assert.equal(parseMergeResult({
+    kind: "merge-result",
+    body: JSON.stringify({ outcome: "stopped", condition: "base-drift-post-merge", evidence: 42 }),
+  }).outcome, "malformed");
 });
 
 test("the SF-1 projection separates a pre-merge stop from a post-merge incident", () => {

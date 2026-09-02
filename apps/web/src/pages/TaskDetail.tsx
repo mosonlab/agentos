@@ -1,7 +1,7 @@
 import { type ReactNode, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compactTokens, durationWithInboxWait, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
+import { compactTokens, durationWithInboxWait, formatDateTime, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
 import { useAction, usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
@@ -10,8 +10,10 @@ import { isRegressionStep } from "../lib/repair-subtimeline";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
+import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList } from "../components/chain-list";
+import { RunLine } from "../components/run-line";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
@@ -39,13 +41,6 @@ export const branchUrl = (remoteUrl: string | null | undefined, branch: string |
   return `${base}/tree/${branch}`;
 };
 
-/** `#39` from a `/pull/39` tail; the whole URL when it does not parse, because a
- *  link with no label is worse than a long one. */
-export const pullRequestLabel = (url: string): string => {
-  const parsed = /\/pull\/(\d+)\/?$/.exec(url);
-  return parsed === null ? url : `#${parsed[1]}`;
-};
-
 const BranchCell = ({ remoteUrl, branch }: { remoteUrl: string | null | undefined; branch: string | null | undefined }): ReactNode => {
   if (!branch) return <>—</>;
   const href = branchUrl(remoteUrl, branch);
@@ -55,7 +50,67 @@ const BranchCell = ({ remoteUrl, branch }: { remoteUrl: string | null | undefine
   );
 };
 
-export const StartabilityChecklist = ({ verdict }: { verdict: TaskStartability }): ReactNode => {
+const SessionCell = ({ session }: { session: Run["session"] }): ReactNode => {
+  const t = useT();
+  if (!session) return <>—</>;
+  // The row toggles on click; opening the session must not also expand it.
+  return (
+    <span onClick={(event) => event.stopPropagation()}>
+      <Link to={`/sessions/${session.id}`}>{t("taskDetail.run.openSession")}</Link>
+    </span>
+  );
+};
+
+/** The operator's answer to "what is the run doing now?" The message remains
+ * plain text even when it contains markdown-looking characters; agent text is
+ * data, not an instruction to build another document here. */
+export const NowBlock = ({ run }: { run: Run }): ReactNode => {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const message = run.session?.latestAgentMessage ?? null;
+  const body = message?.body ?? t("taskDetail.now.noMessage");
+  // Task-detail Runs carry cost on their nested Session, while RunLine's
+  // shared board projection keeps it at the top level. The line only needs the
+  // common run fields, so provide the projection's unavailable cost as null.
+  const runLine = { ...run, costUsd: run.session?.costUsd ?? null };
+
+  return (
+    <div data-task-now="">
+      <Card title={t("taskDetail.now.title")}>
+        <div className="grid gap-[12px]">
+          <RunLine run={runLine} mergeOutcome={run.mergeOutcome} showElapsed showModel />
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-[10px]">
+            {message === null ? (
+              <span className="min-w-0 [overflow-wrap:anywhere] text-secondary-foreground">{body}</span>
+            ) : (
+              <button
+                type="button"
+                aria-expanded={expanded}
+                title={t(expanded ? "taskDetail.now.collapse" : "taskDetail.now.expand")}
+                className={cn(
+                  "min-w-0 border-0 bg-transparent p-0 text-left text-secondary-foreground hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]",
+                  expanded ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "line-clamp-3 whitespace-pre-wrap [overflow-wrap:anywhere]",
+                )}
+                onClick={() => setExpanded((current) => !current)}
+              >
+                {body}
+              </button>
+            )}
+            {message === null ? null : <span className="ml-auto whitespace-nowrap text-right text-[11.5px] text-muted-foreground">{timeAgo(message.at)}</span>}
+          </div>
+          {run.session === null || run.session === undefined ? null : (
+            <Link to={`/sessions/${run.session.id}`}>{t("taskDetail.run.openSession")}</Link>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+/** Hidden once it has nothing left to say: every item satisfied on a task that
+ *  has already run is a card of green ticks nobody reads. A task with no run
+ *  keeps it, because that is when startability is still a question. */
+export const StartabilityChecklist = ({ verdict, hasRuns }: { verdict: TaskStartability; hasRuns: boolean }): ReactNode => {
   const t = useT();
   const items = [
     ["repoBound", "taskDetail.startability.repoBound"],
@@ -65,6 +120,7 @@ export const StartabilityChecklist = ({ verdict }: { verdict: TaskStartability }
     ["noActiveRun", "taskDetail.startability.noActiveRun"],
     ["predecessorsDone", "taskDetail.startability.predecessorsDone"],
   ] as const;
+  if (hasRuns && items.every(([key]) => verdict.checklist[key])) return null;
   return (
     <div className="mt-[16px] border-t border-[color:var(--border-soft)] pt-[14px]">
       <div className="mb-[9px] text-[12px] font-bold text-foreground">{t("taskDetail.startability.title")}</div>
@@ -91,13 +147,13 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
         <TableCell className={TABLE_TIGHT}><span className="text-muted-foreground"><IconChevron open={expanded} /></span></TableCell>
         <TableCell className={TABLE_NAME}>#{run.runNumber}<span className={TABLE_SUB}>{run.runner.toLowerCase()} · {run.model}{tierApplies ? ` · ${t(`serviceTier.${run.codexServiceTier}`)}` : ""}</span></TableCell>
         <TableCell><RunPill status={run.status} mergeOutcome={run.mergeOutcome} /></TableCell>
+        <TableCell><SessionCell session={run.session} /></TableCell>
         <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
         <TableCell>{durationWithInboxWait(
           run.startedAt,
           run.endedAt,
           run.session?.executionStatus === "WAITING_INBOX" || (run.session?.resumeAttempt ?? 0) > 0,
         )}</TableCell>
-        <TableCell><BranchCell remoteUrl={remoteUrl} branch={run.branch ?? run.targetBranch} /></TableCell>
         {/* No size class: this cell carried `.small` before the batch, but
             `.table td { font-size: 12.5px }` outranks `.small` on specificity, so
             11.5px never reached it. The four `.small` spans that survive as
@@ -106,10 +162,13 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
         <TableCell>{usageCostLabel(run.session?.usageCost)}</TableCell>
         <TableCell>{compactTokens(run.session?.totalTokens ?? null)}</TableCell>
         <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{t(`status.failure.${run.failureClass}`)}</Pill>}</TableCell>
+        {/* Last: the widest cell in the row, and the one an operator reads least
+            often. Anything after it pushes the columns that matter off-screen. */}
+        <TableCell><BranchCell remoteUrl={remoteUrl} branch={run.branch ?? run.targetBranch} /></TableCell>
       </TableRow>
       {expanded ? (
         <TableRow>
-          <TableCell colSpan={10} className="bg-[color:var(--surface-run-detail)]">
+          <TableCell colSpan={11} className="bg-[color:var(--surface-run-detail)]">
             <div className={STACK}>
               <KeyValue columns={3} items={[
                 { k: t("taskDetail.run.id"), v: <span className="text-[11.5px]">{run.id}</span> },
@@ -133,7 +192,6 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
                 { k: t("taskDetail.run.pullRequest"), v: run.pullRequestUrl === null ? "—"
                   : <ExternalLink href={run.pullRequestUrl}>{pullRequestLabel(run.pullRequestUrl)}</ExternalLink> },
                 { k: t("taskDetail.run.sessionStatus"), v: run.session ? t(`status.session.${run.session.executionStatus}`) : "—" },
-                { k: t("taskDetail.run.session"), v: run.session ? <Link to={`/sessions/${run.session.id}`}>{t("taskDetail.run.openSession")}</Link> : "—" },
                 { k: t("taskDetail.run.resumeAttempts"), v: `${run.session?.resumeAttempt ?? 0}` },
                 { k: t("taskDetail.run.termination"), v: run.terminationReason ?? "—" },
               ]} />
@@ -266,6 +324,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   );
   const repairActivities = regressionTaskId === taskId ? activity : auxiliaryRepairActivities;
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Deliberately not persisted: the collapsed default is the point.
+  const [configurationShown, setConfigurationShown] = useState(false);
   const chainControlInFlight = useRef(false);
   const { pending, error: actionError, run } = useAction();
   const t = useT();
@@ -389,7 +449,9 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           </Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>
-          <IconArchive />{t(task.archivedAt === null ? "tasks.menu.archive" : "archived.menu.unarchive")}
+          <IconArchive />{t(task.archivedAt === null
+            ? task.chainId === null ? "tasks.menu.archive" : "tasks.aggregate.menu.archive"
+            : task.chainId === null ? "archived.menu.unarchive" : "archived.menu.unarchiveChain")}
         </Button>
         <Button type="button" variant="legacy" size="legacy" onClick={reload}><IconRefresh />{t("common.refresh")}</Button>
       </div>
@@ -408,11 +470,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           <span className={STAT_PILL}>{t("taskDetail.stats.maxRuns", { n: task.maxSessionsPerTask })}</span>
         </div>
 
+        {newest === undefined ? null : <NowBlock run={newest} />}
+
         <Card title={t("taskDetail.details.title")}>
+          {/* Only these three move while a task runs. Everything else was fixed
+              at creation and sits behind the toggle below. */}
           <KeyValue items={[
             { k: t("taskDetail.details.executionOwner"), v: executionOwner },
-            { k: t("taskDetail.details.repo"), v: task.repo ? `${task.repo.name} · ${task.repo.remoteUrl}` : "—" },
-            { k: t("taskDetail.details.targetBranch"), v: task.targetBranch ?? task.repo?.defaultBranch ?? "—" },
             {
               k: t("taskDetail.details.branch"),
               v: newestBranch === null ? "—"
@@ -424,21 +488,35 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
               v: pullRequestUrl === null ? "—"
                 : <ExternalLink href={pullRequestUrl}>{pullRequestLabel(pullRequestUrl)}</ExternalLink>,
             },
-            { k: t("taskDetail.details.schedule"), v: t(`taskDetail.details.scheduleKind.${task.scheduleKind}`) },
-            { k: t("taskDetail.details.workingDirectory"), v: task.workingDirectory ?? "—" },
-            {
-              k: t("taskDetail.details.approval"),
-              v: task.chainId === null ? (
-                <span className={ROW}>
-                  <Toggle on={task.approvalGate} onChange={(next) => patch({ approvalGate: next })} label={t("taskDetail.details.approval")} />
-                  <span className="text-[11.5px] text-muted-foreground">{t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff")}</span>
-                </span>
-              ) : t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff"),
-            },
-            { k: t("taskDetail.details.created"), v: formatDateTime(task.createdAt) },
           ]} />
+          {configurationShown ? (
+            <div className="mt-[16px]">
+              <KeyValue items={[
+                { k: t("taskDetail.details.repo"), v: task.repo ? `${task.repo.name} · ${task.repo.remoteUrl}` : "—" },
+                { k: t("taskDetail.details.targetBranch"), v: task.targetBranch ?? task.repo?.defaultBranch ?? "—" },
+                { k: t("taskDetail.details.schedule"), v: t(`taskDetail.details.scheduleKind.${task.scheduleKind}`) },
+                { k: t("taskDetail.details.workingDirectory"), v: task.workingDirectory ?? "—" },
+                {
+                  k: t("taskDetail.details.approval"),
+                  v: task.chainId === null ? (
+                    <span className={ROW}>
+                      <Toggle on={task.approvalGate} onChange={(next) => patch({ approvalGate: next })} label={t("taskDetail.details.approval")} />
+                      <span className="text-[11.5px] text-muted-foreground">{t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff")}</span>
+                    </span>
+                  ) : t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff"),
+                },
+                { k: t("taskDetail.details.created"), v: formatDateTime(task.createdAt) },
+              ]} />
+            </div>
+          ) : null}
+          <div className="mt-[16px]">
+            <Button type="button" variant="legacy" size="legacy" aria-expanded={configurationShown}
+              onClick={() => setConfigurationShown(!configurationShown)}>
+              {t(configurationShown ? "taskDetail.details.hideConfiguration" : "taskDetail.details.showConfiguration")}
+            </Button>
+          </div>
           {startability.data
-            ? <StartabilityChecklist verdict={startability.data} />
+            ? <StartabilityChecklist verdict={startability.data} hasRuns={runs.length > 0} />
             : startability.error
               ? <ErrorNotice message={startability.error.message} onRetry={startability.reload} />
               : <EmptyState>{t("common.loading")}</EmptyState>}
@@ -449,8 +527,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             <TableHeader>
               <TableRow>
                 <TableHead />
-                <TableHead>{t("taskDetail.runs.table.run")}</TableHead><TableHead>{t("taskDetail.runs.table.status")}</TableHead><TableHead>{t("taskDetail.runs.table.started")}</TableHead><TableHead>{t("taskDetail.runs.table.duration")}</TableHead>
-                <TableHead>{t("taskDetail.runs.table.branch")}</TableHead><TableHead>base → head</TableHead><TableHead>{t("taskDetail.runs.table.cost")}</TableHead><TableHead>{t("taskDetail.runs.table.tokens")}</TableHead><TableHead>{t("taskDetail.runs.table.failureClass")}</TableHead>
+                <TableHead>{t("taskDetail.runs.table.run")}</TableHead><TableHead>{t("taskDetail.runs.table.status")}</TableHead><TableHead>{t("taskDetail.runs.table.session")}</TableHead><TableHead>{t("taskDetail.runs.table.started")}</TableHead><TableHead>{t("taskDetail.runs.table.duration")}</TableHead>
+                <TableHead>base → head</TableHead><TableHead>{t("taskDetail.runs.table.cost")}</TableHead><TableHead>{t("taskDetail.runs.table.tokens")}</TableHead><TableHead>{t("taskDetail.runs.table.failureClass")}</TableHead><TableHead>{t("taskDetail.runs.table.branch")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

@@ -1,12 +1,12 @@
 import { type ReactNode, memo, useEffect, useState } from "react";
 
 import { chainPositionMarker } from "../lib/chain";
-import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
+import { duration, money, timeAgo, usageCostAmount, usageCostLabel } from "../lib/format";
 import { chainBinding, chainBindingLabel, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
-import { BoardCardShell } from "./board-card-shell";
+import { BoardCardShell, CardPullRequest } from "./board-card-shell";
 import { IconRobot, IconUser } from "./icons";
 import { RunLine } from "./run-line";
 import { Pill, ROW, type RowMenuEntry } from "./ui";
@@ -73,12 +73,12 @@ const cardModelFast = (task: BoardTask, model: string): string => {
   return tier === "FAST" ? `${model} · fast` : model;
 };
 
-export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): string => {
+export const cardTime = (task: BoardTask, now = Date.now()): string => {
   const run = task.latestRun;
   if (!run) return timeAgo(task.updatedAt);
-  if (run.status === "RUNNING" && run.startedAt !== null) {
-    return t("tasks.card.runningDuration", { duration: duration(run.startedAt, null, now) });
-  }
+  // A live run says so with the run line's amber dot; the footer is left with
+  // the one thing the dot cannot say, which is how long it has been running.
+  if (run.status === "RUNNING" && run.startedAt !== null) return duration(run.startedAt, null, now);
   if (run.startedAt !== null && run.endedAt !== null) {
     return `${duration(run.startedAt, run.endedAt)} · ${timeAgo(task.updatedAt)}`;
   }
@@ -86,14 +86,14 @@ export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): strin
 };
 
 /** Only the changing text owns a clock. Memoized inactive cards never wake. */
-export const RunningCardTime = ({ task, t }: { task: BoardTask; t: Translate }): ReactNode => {
+export const RunningCardTime = ({ task }: { task: BoardTask }): ReactNode => {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [task.latestRun?.startedAt]);
-  return <>{cardTime(task, t, now)}</>;
+  return <>{cardTime(task, now)}</>;
 };
 
 const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => {
@@ -123,6 +123,10 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const modelLine = model === null ? null : cardModelFast(task, model);
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
+  // The task's own total where there is one, and the newest run's spend where
+  // the task cost is only a token count.
+  const costAmount = usageCostAmount(task.taskCost)
+    ?? (task.latestRun?.costUsd ? money(task.latestRun.costUsd) : null);
   const title = cardTitle(task);
   const chain = chainBinding(task);
   const chainLabel = chain === null ? null : chainBindingLabel(chain);
@@ -191,16 +195,13 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
             ? <><IconRobot /><span>{t("ui.chip.unassigned")}</span></>
             : <><IconRobot /><Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} /></>}
       </span>
+      <CardPullRequest url={task.latestRun?.pullRequestUrl} />
       <span className="flex-1" />
-      {task.taskCost !== null && !hasTokenFallback
-        ? <span className="whitespace-nowrap">{taskCostLabel}</span>
-        : task.latestRun?.costUsd
-          ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span>
-          : null}
       <span className="whitespace-nowrap">
+        {costAmount === null ? null : `${costAmount} · `}
         {task.latestRun?.status === "RUNNING" && task.latestRun.startedAt !== null
-          ? <RunningCardTime task={task} t={t} />
-          : cardTime(task, t)}
+          ? <RunningCardTime task={task} />
+          : cardTime(task)}
       </span>
   </>;
   const after = hasTokenFallback ? (

@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   ChainControlState,
+  DependencyProvisioning,
   lockChainRows,
   PrismaClient,
   RunStatus,
@@ -72,12 +73,14 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   runnerId,
   daemonVersion: "0.0.0-dbtest",
   pollIntervalMs: 1_000,
+  claimMaxLoadAverage: 1.5,
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: root,
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
   workspaceRoot: root,
+  hostProofSlots: 3,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,
@@ -130,6 +133,7 @@ const seedRun = async (options: {
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
   } });
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Task", description: "task", assigneeAgentId: agent.id, repoId: repo.id, status: "DOING",
@@ -420,6 +424,175 @@ test("reclaim salvage acknowledgement rebases an already-queued retry", async ()
   assert.equal(response.status, 200, JSON.stringify(response.body));
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, salvage);
+});
+
+test("a salvaged implementation continuation can deliver its unchanged base and activate the next layer", async () => {
+  const root = await scratchRoot("salvage-continuation");
+  const runnerId = "runner-salvage-continuation";
+  const seeded = await seedRun({ root, runnerId, status: "LOST", pushedBranch: null });
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seeded.project.id,
+    name: "direct-engineer-workflow",
+    description: "Salvage continuation delivery",
+    variables: [],
+  } });
+  const implementationStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: seeded.agent.id,
+    stepIndex: 2,
+    layer: 2,
+    name: "Implementation",
+    assigneeType: "AGENT",
+    prompt: "implement",
+    outputKind: "implementation",
+    opensPullRequest: true,
+    requiresCommit: true,
+  } });
+  const reviewStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: seeded.agent.id,
+    stepIndex: 3,
+    layer: 3,
+    name: "Code review",
+    assigneeType: "AGENT",
+    prompt: "review",
+    outputKind: "sol-findings",
+    opensPullRequest: false,
+    requiresCommit: false,
+    baseFromStepIndex: 2,
+  } });
+  const chainId = `salvage-continuation-${seeded.task.id}`;
+  const sharedBranch = `agentos/${seeded.project.id}/chain-${chainId}`;
+  const baseSha = "4".repeat(40);
+  const salvagedHead = "5".repeat(40);
+  await db.task.update({ where: { id: seeded.task.id }, data: {
+    templateId: template.id,
+    templateStepId: implementationStep.id,
+    chainId,
+    chainIndex: 2,
+    chainLayer: 2,
+    targetBranch: seeded.repo.defaultBranch,
+    opensPullRequest: true,
+  } });
+  const successor = await db.task.create({ data: {
+    projectId: seeded.project.id,
+    repoId: seeded.repo.id,
+    templateId: template.id,
+    templateStepId: reviewStep.id,
+    assigneeAgentId: seeded.agent.id,
+    name: "Code review",
+    description: "review the salvaged implementation",
+    chainId,
+    chainIndex: 3,
+    chainLayer: 3,
+    status: TaskStatus.TODO,
+    opensPullRequest: false,
+  } });
+  await db.run.update({ where: { id: seeded.run.id }, data: {
+    branch: sharedBranch,
+    baseSha,
+    headSha: salvagedHead,
+    workspaceReclaimAt: new Date(),
+    leaseExpiresAt: null,
+  } });
+  const staleReplacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    runner: "CLAUDE",
+    runnerId: "stale-replacement-runner",
+    fencingToken: `2:${seeded.task.id}:stale`,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    model: "claude",
+    promptHash: "hash-2",
+    status: RunStatus.CLAIMED,
+    branch: sharedBranch,
+    targetBranch: seeded.repo.defaultBranch,
+    requiresCommit: true,
+    maxRunsPerTask: 5,
+  } });
+  await db.session.create({ data: {
+    runId: staleReplacement.id,
+    projectId: seeded.project.id,
+    agentId: seeded.agent.id,
+    taskId: seeded.task.id,
+    runner: "CLAUDE",
+    executionStatus: SessionExecutionStatus.PROVISIONING,
+  } });
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+
+  const repaired = await acknowledgeReclaimSalvage(db, {
+    runnerId,
+    runId: seeded.run.id,
+    pushedBranch: salvage,
+  });
+
+  assert.equal(repaired, "requeued");
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: staleReplacement.id } })).status, RunStatus.CANCELLED);
+  const continuation = await db.run.findFirstOrThrow({ where: { taskId: seeded.task.id, runNumber: 3 } });
+  assert.equal(continuation.targetBranch, salvage);
+  assert.equal(continuation.requiresCommit, false);
+
+  const completionRunner = "runner-salvage-delivery";
+  const fencingToken = `3:${seeded.task.id}:delivery`;
+  await db.run.update({ where: { id: continuation.id }, data: {
+    status: RunStatus.RUNNING,
+    runnerId: completionRunner,
+    fencingToken,
+    leaseGeneration: 1,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    claimedAt: new Date(),
+    startedAt: new Date(),
+    promptHash: "hash-3",
+    baseSha: salvagedHead,
+  } });
+  await db.session.create({ data: {
+    runId: continuation.id,
+    projectId: seeded.project.id,
+    agentId: seeded.agent.id,
+    taskId: seeded.task.id,
+    runner: "CLAUDE",
+    executionStatus: SessionExecutionStatus.RUNNING,
+  } });
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.task.id,
+    runId: continuation.id,
+    kind: "implementation",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: salvagedHead,
+      baseSha: salvagedHead,
+      summary: "The salvaged head already satisfies the implementation brief.",
+      testsRun: ["focused"],
+    }),
+    commitSha: salvagedHead,
+    metadata: {},
+  } });
+
+  const completion = await call(root, `/runner/runs/${continuation.id}/complete`, {
+    runnerId: completionRunner,
+    fencingToken,
+    exitCode: 0,
+    signal: null,
+    terminalEventSeen: true,
+    terminalSuccess: true,
+    branch: sharedBranch,
+    pushedBranch: sharedBranch,
+    baseSha: salvagedHead,
+    headSha: salvagedHead,
+    pushStatus: "SUCCEEDED",
+    cleanupStatus: "SUCCEEDED",
+    workspaceRetained: false,
+  });
+
+  assert.equal(completion.status, 200, JSON.stringify(completion.body));
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: continuation.id } })).status, RunStatus.SUCCEEDED);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: RunStatus.QUEUED } }), 1);
 });
 
 test("a committed Chain Hold bars the fresh replacement after late salvage", async () => {

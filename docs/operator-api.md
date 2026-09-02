@@ -1,10 +1,19 @@
 # Operator API handbook
 
+## Conventions
+
 The operator drives Anneal through this HTTP API. Unless a route is marked
 **Public** or **Webhook**, send `Authorization: Bearer $OPERATOR_TOKEN`.
 Examples use `$BASE_URL` (for example, `http://127.0.0.1:3000`) and placeholder
 IDs such as `$PROJECT_ID`; replace them with values from your installation.
 JSON request bodies require `Content-Type: application/json`.
+
+Malformed JSON request bodies return `400 Bad Request` with code `invalid-json`
+and message `Request body must be valid JSON` on every JSON route. Empty bodies
+receive the same refusal when a route requires a JSON body; the manual-fire
+route is the exception because it intentionally treats an empty body as an
+empty object. A syntactically valid body that fails its route schema still
+returns the usual `400 Bad Request` validation response.
 
 The route list and input requirements below use the same method and path
 spelling as the route definitions in `packages/api/src/app.ts` and
@@ -154,6 +163,12 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 
 - Required JSON fields: `name`, `slug` (lowercase hyphenated form).
 - Optional JSON field: `yamlDocument` (default `""`).
+- A successful request creates the Project and, in the same transaction, one
+  `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
+  Agents (`senior-dev-luna`, `review-coordinator-sol`,
+  `review-coordinator-opus`, and `senior-dev`) bound to that Environment, and
+  the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
+- A duplicate slug returns `409 Conflict` with code `project-slug-taken`.
 
 ```sh
 curl -X POST "$BASE_URL/projects" \
@@ -576,21 +591,96 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
 ### POST `/projects/:projectId/repos`
 
 - Required path parameter: `projectId`.
-- Required JSON fields: `name`, `remoteUrl`.
+- Required JSON fields: `name`, `remoteUrl`, and `dependencyProvisioning`.
 - Optional JSON fields: `mountPath` (default `repo`), `defaultBranch`
-  (default `main`), `credentialSecretId` (default `null`).
+  (default `main`), `credentialSecretId` (default `null`), and `grantAgents`
+  (default `false`).
+- `dependencyProvisioning` must be exactly `NONE` or `NPM_CI`; it declares
+  whether the runner provisions the repository's Node dependencies. Missing or
+  unknown values return `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
+- `remoteUrl` is validated as the raw submitted string before any trim or
+  transform. The onboarding remote policy accepts HTTPS without userinfo,
+  `ssh://` and scp-like SSH remotes with no account or the `git` account, and
+  local `file:///` remotes. It rejects whitespace, control characters,
+  query/fragment data, option-like values, unsupported schemes or SSH
+  accounts, missing hosts or paths, and values over the maximum length. This
+  ordinary Repo route deliberately applies onboarding's SSH-account
+  restriction too.
+- `defaultBranch` is defaulted to `main` and must pass the API's
+  `isValidBranchName` policy. A rejected remote returns `400 Bad Request`
+  with exactly:
+
+  ```json
+  { "error": "Repository remote is invalid", "code": "repository-remote-invalid", "reason": "<parseRepoRemote rejection reason>" }
+  ```
+
+  A rejected branch returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository default branch is invalid", "code": "repository-default-branch-invalid" }
+  ```
+
+  Neither refusal echoes the rejected value, opens the Repo/grant transaction,
+  or invokes repository preflight. A duplicate `(projectId, name)` returns
+  `409 Conflict` with exactly `{ "error": "Unique constraint violated" }`.
+- After validation and before the database transaction opens, the route runs
+  repository preflight against
+  `{ remoteUrl, defaultBranch, dependencyProvisioning }`. The preflight uses
+  the API host's ambient Git identity and credentials for its identity,
+  remote/default-branch, fetch, and dry-run-push checks; it never receives,
+  reads, or decrypts `credentialSecretId` (that field's existing Secret
+  existence/enabled validation is unchanged). A preflight refusal returns
+  `422 Unprocessable Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-preflight-failed", "reason": "<existing failure reason>" }
+  ```
+
+  The possible reasons are `git-unavailable`, `git-identity-missing`,
+  `remote-unreachable`, `default-branch-missing`, `push-not-authorized`, and
+  `command-timeout`. When `dependencyProvisioning` is `NPM_CI`, preflight also
+  requires a regular root `package-lock.json` in the exact fetched default
+  branch commit. A missing or non-regular lockfile returns `422 Unprocessable
+  Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-package-lock-missing", "remedy": "Commit package-lock.json at the repository root on the default branch, or choose dependencyProvisioning NONE." }
+  ```
+
+  This is a POST-only preflight refusal. For `NONE`, this dependency-specific
+  check is omitted; all other preflight checks still apply. Other failures use
+  the existing error path. Preflight is never skipped as a success fallback.
+- With `grantAgents: false` or when omitted, a successful request returns
+  `201 Created` with the created Repo row itself (the existing response
+  shape), and creates no grants. With `grantAgents: true`, the same transaction
+  creates one `GIT_WRITE` `AgentRepoAccess` for every active Project Agent
+  (`archivedAt: null`) except `INTEGRATOR_AGENT_NAME`; each grant uses the
+  created Repo's `mountPath`. The response is `201 Created` with exactly
+  `{ "repo": <created Repo row>, "grants": <created access rows> }`. Any
+  Repo or grant write failure rolls back the Repo and all grants.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git"}'
+  -d '{"name":"demo","remoteUrl":"https://github.com/acme/demo.git","dependencyProvisioning":"NPM_CI"}'
 ```
 
 ### PATCH `/repos/:repoId`
 
 - Required path parameter: `repoId`.
 - Required JSON: at least one of `name`, `remoteUrl`, `mountPath`,
-  `defaultBranch`, `credentialSecretId`.
+  `defaultBranch`, `credentialSecretId`, or `dependencyProvisioning`.
+- `dependencyProvisioning` is optional and patchable. When supplied, it must
+  be exactly `NONE` or `NPM_CI`; omission preserves the stored value. An
+  unknown value returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository dependency provisioning is invalid", "code": "repository-dependency-provisioning-invalid" }
+  ```
 
 ```sh
 curl -X PATCH "$BASE_URL/repos/$REPO_ID" \
@@ -762,6 +852,52 @@ Templates can be cloned under a new project-local name, read, patched for
 webhook configuration, or instantiated. Cloning copies the description,
 variables, and complete Step graph, but clears webhook configuration; Tasks
 and trigger fires are never copied.
+
+### Canonical `pr-engineer-workflow` pull-request handover
+
+The current canonical `pr-engineer-workflow` is a four-step, GitHub pull-request
+workflow. Its handover rules are exact-name scoped: custom and retired
+templates, and direct or compound workflows, retain their own delivery
+behavior.
+
+The implementation Run leaves `.chain/<branchName>/spec.md` in the reviewed
+implementation commit. Both review Runs read that pinned specification before
+the final step. `Apply review fixes` uses the two review reports, adopts any
+requested fixes, removes the complete tracked `.chain/` directory, and commits
+the removal together with those fixes on top of the reviewed history. It then
+persists `fixed-implementation`; delivery refuses to publish while any tracked
+`.chain/` entry remains. The implementation commit remains immutable and
+reviewable, while the cleanup commit is the human-mergeable head. A retry after
+a successful push and failed pull-request edit may begin at that already-clean
+commit and must preserve it without creating another cleanup commit. The final
+Task output, completion head, pushed head, and pull-request head identify that
+same cleanup commit; delivery uses the ordinary non-force branch push.
+
+The pull-request body is one deterministic Markdown document with exactly these
+five sections, in order; no provider-generated or activity-log prose is added:
+
+- `Goal` is exactly the first line of the Task description.
+- `Summary` uses the implementation output's `summary`; after review it also
+  lists every adopted `closedFindings.codeEvidence` fix, or says that no
+  review-driven code change was required when the adopted set is empty.
+- `Verification` renders the implementation and fixed-step `testsRun` entries
+  verbatim. Each entry includes the exact command and its observed exit/result
+  summary. An empty reported list says `No commands reported in the task
+  output.`; a section not reached yet says exactly `Not available at this step.`.
+  Delivery never invents `PASS`.
+- `Review outcomes` initially says `Not available at this step.`. The final
+  body reports every Sol and blind finding with its existing id, severity, and
+  title, then its final disposition and reason, closed evidence when present,
+  and the fixed output's `residualRisks`.
+- `Anneal` contains the current Task id and non-null Chain id.
+
+Step 1 uses this body when it creates a pull request, and edits an already-open
+pull request on the shared head to the same initial body. After the final
+cleanup push, delivery looks up the open pull request, edits it with the
+complete post-review body, and reads the body back exactly. A missing or
+malformed canonical output, absent Chain id or final pull request, failed edit,
+unreadable read-back, body mismatch, failed cleanup, or retained tracked
+`.chain/` content is a delivery failure.
 
 ### GET `/projects/:projectId/task-templates`
 
@@ -993,6 +1129,10 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
 ### GET `/tasks/:taskId`
 
 - Required path parameter: `taskId`.
+- Each returned Run's `session.latestAgentMessage` is either `null` when the
+  session has no non-empty `MODEL_COMPLETED` or `FINAL_OUTPUT` text event, or
+  `{body, at}` containing the newest qualifying event's plain-text body and
+  timestamp. This is a derived read from the session event stream.
 - Each returned Run includes the report-only `worktreeContainmentViolations`
   fact: absolute worktree paths from that Run's checkout found outside its run
   workspace, or `null` when no observation was reported.
@@ -1215,6 +1355,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATO
 ### POST `/tasks/:taskId/archive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, archives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1223,6 +1364,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERA
 ### POST `/tasks/:taskId/unarchive`
 
 - Required path parameter: `taskId`.
+- If the task belongs to a Chain, unarchives every task in that Chain atomically.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/unarchive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1326,7 +1468,13 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
 ### GET `/inbox/messages`
 
 - Required parameters: none.
-- Optional query: `projectId`.
+- Optional query parameter: `projectId`.
+- With `projectId`, the list includes messages whose Agent, Task, Goal, or
+  Session belongs to that Project, plus global messages whose
+  `agentId`, `taskId`, `goalId`, and `sessionId` are all `null` (including
+  history whose nullable relation was removed; all four relation ids are
+  `null` for these global rows). It retains top-level-message
+  behavior. With no `projectId`, the list remains unfiltered by Project.
 
 ```sh
 curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1335,7 +1483,12 @@ curl "$BASE_URL/inbox/messages?projectId=$PROJECT_ID" -H "Authorization: Bearer 
 ### GET `/inbox/messages/summary`
 
 - Required parameters: none.
-- Returns the small global count used by the sidebar: `{ "needsReply": number }`.
+- Optional query parameter: `projectId`.
+- With `projectId`, the summary applies its existing open, top-level,
+  needs-reply rule to the same Project-plus-global scope as the list: a
+  related Agent, Task, Goal, or Session belongs to that Project, or all four
+  relation ids are `null`. With no `projectId`, it remains unfiltered by
+  Project. The response is `{ "needsReply": number }`.
 
 ```sh
 curl "$BASE_URL/inbox/messages/summary" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1403,6 +1556,20 @@ The two revalidation routes below are session-only capabilities; they are
 listed here so their authorization boundary is explicit even though operators
 cannot call them directly. A `spec-revalidator` session on a bound direct chain
 is the only caller accepted.
+The machine-only `/session/runs/:runId/status` projection used by PR-workflow
+delivery is run-bound and is not an operator read route. For the current
+canonical template, it carries persisted output bodies only for the current
+`implementation` or `fixed-implementation` Run at its chain index. Each entry
+contains the Task id, chain index, output kind, body, and commit SHA, and is
+accepted only when its `projectId` and `chainId` match the claimed Run.
+Malformed, foreign-chain, or missing required evidence is rejected rather than
+silently omitted or guessed. The implementation delivery receives only its
+current `implementation` entry; the final delivery receives exactly
+`implementation`, `sol-findings`, `blind-findings`, and `fixed-implementation`,
+in chain order. This projection does not widen prompt `priorOutputs`, expose
+sibling evidence to a blind review, or derive text from provider output,
+activity prose, or repository contents. Its source is persisted task output
+and its authentication is the claimed session/run identity.
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree

@@ -37,6 +37,7 @@ import {
   provisioningRequested,
 } from "../src/dbtest-plan.ts";
 import { runDbtest } from "../src/dbtest-runner.ts";
+import { dbtestInvocationDecision } from "../src/dbtest-scope.ts";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const sourceDirectory = join(packageRoot, "src");
@@ -61,7 +62,7 @@ const testFiles = () => {
  * them has to run.
  */
 const runNodeTest = ({ files, concurrency, environment, signal }) => new Promise((resolveRun) => {
-  const args = ["--import", "tsx"];
+  const args = ["--conditions=development", "--import", "tsx"];
   if (environment[planEnvironmentVariable]) args.push("--import", preamble);
   args.push("--test", `--test-concurrency=${concurrency}`, ...files);
   const child = spawn(process.execPath, args, { cwd: packageRoot, stdio: "inherit", env: environment });
@@ -81,6 +82,19 @@ const runNodeTest = ({ files, concurrency, environment, signal }) => new Promise
 });
 
 const main = async () => {
+  const requested = process.argv.slice(2);
+  const decision = dbtestInvocationDecision({
+    args: requested,
+    environment: process.env,
+    cpuCount: availableParallelism(),
+  });
+  if (decision.exitCode !== null) {
+    process.stderr.write(`${decision.refusal}\n`);
+    process.exitCode = decision.exitCode;
+    return;
+  }
+  if (decision.capLog) say(decision.capLog);
+
   const files = testFiles();
   if (files.length === 0) throw new Error("no *.dbtest.ts files to run");
 
@@ -105,7 +119,7 @@ const main = async () => {
   const { ScratchDatabaseManager } = await import("../src/testdb.ts");
   process.exitCode = await runDbtest({
     environment,
-    cpuCount: availableParallelism(),
+    concurrency: decision.concurrency,
     files,
     manager: new ScratchDatabaseManager(environment),
     runTests: runNodeTest,

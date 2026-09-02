@@ -394,20 +394,31 @@ export const reconcileDatabaseRuns = async (
  * runner asking, workspaces leak, and leaking is the direction this side of
  * the boundary is allowed to fail in.
  */
+/** A count that failed to be read is not a count of zero.
+ *
+ *  Both of these were `.catch(() => 0)`, which let a failed query render as
+ *  `0 archived-run notices` in the startup line — the shape a healthy, idle
+ *  control plane has. The 2026-09-01 credential drift was invisible partly for
+ *  that reason: the numbers a reader would have checked were manufactured by
+ *  the catch, not read from the schema. `null` keeps startup non-fatal (these
+ *  are advisory counts; `reconcileDatabaseRuns` above already throws when the
+ *  schema is unreachable) while refusing to state a number nobody read. */
+export type StartupReconciliation = {
+  runs: number;
+  openReclaimIntents: number | null;
+  archivedNotices: number | null;
+};
+
 export const reconcileAtStartup = async (
   db: PrismaClient,
-): Promise<{
-  runs: number;
-  openReclaimIntents: number;
-  archivedNotices: number;
-}> => ({
+): Promise<StartupReconciliation> => ({
   runs: await reconcileDatabaseRuns(db),
   openReclaimIntents: await openReclaimIntentCount(db).catch((error: unknown) => {
     console.error("Open reclaim intent count failed", error);
-    return 0;
+    return null;
   }),
   archivedNotices: await noteArchivedQueuedRuns(db).catch((error: unknown) => {
     console.error("Archived-run startup notice failed", error);
-    return 0;
+    return null;
   }),
 });

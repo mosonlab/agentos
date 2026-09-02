@@ -25,6 +25,7 @@ import {
   assertCanonicalAgentSources,
   catalogRunnerForModel,
   DIRECT_TEMPLATE_NAME,
+  PR_TEMPLATE_NAME,
 } from "../src/agent-contract.js";
 import {
   CANONICAL_TEMPLATE_SOURCE_SPECS,
@@ -82,6 +83,14 @@ test("canonical profiles start at Default and native child capability replaces A
   assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
+test("template-step dependency provisioning is a non-null true-default migration", async () => {
+  const schema = await readFile(`${prismaRoot}schema.prisma`, "utf8");
+  const migration = await readFile(`${prismaRoot}migrations/20260901010000_task_template_step_dependency_provisioning/migration.sql`, "utf8");
+  assert.match(schema, /provisionDependencies\s+Boolean\s+@default\(true\)/u);
+  assert.match(migration, /ALTER TABLE "TaskTemplateStep"[\s\S]*ADD COLUMN "provisionDependencies" BOOLEAN NOT NULL DEFAULT true;/u);
+  assert.doesNotMatch(migration, /DROP|UPDATE|CREATE TYPE/u);
+});
+
 test("named canonical roles use their model catalog runner and retired role names stay absent", async () => {
   const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
   for (const name of [
@@ -118,6 +127,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 
   assert.match(firstReview, /implementation step's persisted output/u);
   assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
+  assert.match(firstReview, /approved specification at\s+`\.chain\/<chain branch>\/spec\.md`/u);
   assert.match(firstReview, /only as the Anneal task output/u);
   assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
@@ -137,6 +147,8 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   assert.match(firstReview, /exact fixed head/u);
 
   assert.match(blindReview, /independent blind Opus review coordinator/u);
+  assert.match(blindReview, /Read the approved specification from `\.chain\/<chain branch>\/spec\.md`/u);
+  assert.match(blindReview, /reachable in the tree at `head`/u);
   assert.match(blindReview, /immutable `blind-findings` task output/u);
   assert.match(blindReview, /Do not read predecessor task outputs, sibling\s+task outputs/u);
   assert.match(blindReview, /entire task and provider\s+session, both before and after/u);
@@ -200,9 +212,9 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
   assert.match(compoundRegression, /platform script owns refresh\/merge[\s\S]*final `regression-verification-v2`/u);
-  assert.match(compoundRegression, /regression-verification\.sh prepare/u);
-  assert.match(compoundRegression, /regression-verification\.sh review-fail/u);
-  assert.match(compoundRegression, /regression-verification\.sh finalize/u);
+  assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
+  assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
+  assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   assert.match(compoundRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   assert.match(compoundRegression, /implementation summary,\s+both review reports/u);
   assert.match(compoundRegression, /fixed implementation with its dispositions/u);
@@ -244,6 +256,22 @@ test("only artifact-producing steps require a commit, only implementation opens 
   assert.equal(catalogRunnerForModel(sentinel.model), null);
 });
 
+test("only canonical code-review rows disable dependency provisioning", async () => {
+  const templates = await loadAllTemplateStepSources();
+  const disabled = [...templates].flatMap(([templateName, steps]) => steps
+    .filter((step) => !step.provisionDependencies)
+    .map((step) => `${templateName}:${step.stepIndex}`));
+  assert.deepEqual(disabled, [
+    `${INTEGRATOR_TEMPLATE_NAME}:6`,
+    `${INTEGRATOR_TEMPLATE_NAME}:7`,
+    `${DIRECT_TEMPLATE_NAME}:3`,
+    `${DIRECT_TEMPLATE_NAME}:4`,
+    `${PR_TEMPLATE_NAME}:2`,
+    `${PR_TEMPLATE_NAME}:3`,
+  ]);
+  assert.equal([...templates.values()].flat().every((step) => step.provisionDependencies === true || step.provisionDependencies === false), true);
+});
+
 test("the direct template sources expose the layered review spine and mechanical tail", async () => {
   const directTemplateSteps = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   assert.deepEqual(
@@ -271,9 +299,9 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directFix, /Read both immutable review outputs from the preceding layer/u);
   assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;
-  assert.match(directRegression, /regression-verification\.sh prepare/u);
-  assert.match(directRegression, /regression-verification\.sh review-fail/u);
-  assert.match(directRegression, /regression-verification\.sh finalize/u);
+  assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
+  assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
+  assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   assert.match(directRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   assert.doesNotMatch(directRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directImplementation = directTemplateSteps.find((step) => step.stepIndex === 2)!.prompt;
@@ -301,11 +329,12 @@ test("the direct template sources expose the layered review spine and mechanical
   }
 });
 
-test("the complete template source inventory contains only the twelve-step and direct workflows", async () => {
+test("the complete template source inventory contains exactly the three canonical workflows", async () => {
   const templates = await loadAllTemplateStepSources();
-  assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
+  assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME]);
   assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
   assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 8);
+  assert.equal(templates.get(PR_TEMPLATE_NAME)?.length, 4);
 });
 
 test("the complete template source inventory rejects an unregistered workflow directory", async () => {
@@ -353,6 +382,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     requiresCommit: expected.requiresCommit,
+    provisionDependencies: expected.provisionDependencies,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy,
   };
@@ -368,6 +398,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     ["priorOutputKinds", { ...persisted, priorOutputKinds: ["different-output"] }],
     ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
     ["requiresCommit", { ...persisted, requiresCommit: !persisted.requiresCommit }],
+    ["provisionDependencies", { ...persisted, provisionDependencies: !persisted.provisionDependencies }],
     ["baseFromStepIndex", { ...persisted, baseFromStepIndex: 0 }],
     ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],
   ];
@@ -379,6 +410,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
 test("canonical prompt sync can detect every role frontmatter field", async () => {
   const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian")!;
   const persisted: PersistedRoleStructure = {
+    name: role.name,
     title: role.title,
     model: role.model,
     runnerPreference: role.runnerPreference,
@@ -387,6 +419,7 @@ test("canonical prompt sync can detect every role frontmatter field", async () =
   };
   assert.deepEqual(roleSourceStructureDifferences(persisted, role), []);
   const mutations: Array<[string, PersistedRoleStructure]> = [
+    ["name", { ...persisted, name: "different-name" }],
     ["title", { ...persisted, title: "Different title" }],
     ["model", { ...persisted, model: "different-model" }],
     ["runnerPreference", { ...persisted, runnerPreference: RunnerPreference.CLAUDE }],

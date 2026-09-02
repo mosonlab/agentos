@@ -353,7 +353,6 @@ export const TasksPage = (): ReactNode => {
     pendingFocus.current = {
       id: task.id,
       before: orderColumn(
-        task.status,
         latest.current.filter((candidate) => candidate.status === task.status),
       ).map((candidate) => candidate.id),
     };
@@ -446,13 +445,12 @@ export const TasksPage = (): ReactNode => {
       void run(async () => { await start.requestForMove(taskId); });
     },
     onFilter: (aggregate) => setChainFilter({ id: aggregate.chainId, name: aggregate.chainName ?? aggregate.chainId.slice(0, 8) }),
-    // The aggregate owns the visible members returned by this board read.
-    // Archived siblings are already absent; settling the rest through the
-    // existing idempotent task route removes the aggregate without inventing a
-    // second chain-execution mutation.
-    onArchive: (_aggregate, taskIds) => {
+    // One member addresses the whole Chain. The API already holds every Chain
+    // row under one transaction, so the card cannot disappear halfway through
+    // a client-side request loop.
+    onArchive: (aggregate) => {
       void run(async () => {
-        for (const taskId of taskIds) await api.post(`/tasks/${taskId}/archive`, {});
+        await api.post(`/tasks/${aggregate.detailTaskId}/archive`, {});
         reload();
       });
     },

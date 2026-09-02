@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import type { Prisma } from "@prisma/client";
 
-import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
+import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
@@ -35,6 +35,15 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
       "Merge authorization", "Merge execution",
     ],
   },
+  {
+    name: PR_TEMPLATE_NAME,
+    description: "Four-step pull-request workflow: implement the task, run parallel independent code review, and apply review fixes before leaving an open pull request for the platform.",
+    stepCount: 4,
+    layers: [1, 2, 2, 3],
+    stepNames: [
+      "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
+    ],
+  },
 ] as const;
 export type CanonicalTemplateName = (typeof CANONICAL_TEMPLATE_SOURCE_SPECS)[number]["name"];
 export const canonicalTemplateSourceSpec = (name: CanonicalTemplateName) => {
@@ -52,6 +61,7 @@ const STRUCTURAL_FIELDS = [
   "priorOutputKinds",
   "opensPullRequest",
   "requiresCommit",
+  "provisionDependencies",
   "baseFromStepIndex",
   "spawnPolicy",
 ] as const;
@@ -67,6 +77,7 @@ export type TemplateStepSource = {
   priorOutputKinds: string[];
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.InputJsonObject | null;
   prompt: string;
@@ -88,8 +99,30 @@ export type PersistedTemplateStepStructure = {
   priorOutputKinds: string[];
   opensPullRequest: boolean;
   requiresCommit: boolean;
+  provisionDependencies: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
+};
+
+export type PersistedTemplateMetadata = {
+  name: string;
+  description: string;
+  variables: string[];
+};
+
+export const templateMetadataDifferences = (
+  actual: PersistedTemplateMetadata,
+  templateName: CanonicalTemplateName,
+): string[] => {
+  const expected = canonicalTemplateSourceSpec(templateName);
+  const fields = [
+    ["name", actual.name, templateName],
+    ["description", actual.description, expected.description],
+    ["variables", actual.variables, ["branchName"]],
+  ] as const;
+  return fields
+    .filter(([, actualValue, expectedValue]) => !isDeepStrictEqual(actualValue, expectedValue))
+    .map(([field]) => field);
 };
 
 export const templateStepStructureDifferences = (
@@ -108,6 +141,7 @@ export const templateStepStructureDifferences = (
     ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
     ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
     ["requiresCommit", actual.requiresCommit, expected.requiresCommit],
+    ["provisionDependencies", actual.provisionDependencies, expected.provisionDependencies],
     ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
     ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
   ] as const;
@@ -188,6 +222,7 @@ export const loadTemplateStepSources = async (
       priorOutputKinds: parseInlineList(document.attributes.priorOutputKinds, filePath, "priorOutputKinds"),
       opensPullRequest: parseBoolean(requiredFrontmatter(document, "opensPullRequest", filePath), filePath, "opensPullRequest"),
       requiresCommit: parseBoolean(requiredFrontmatter(document, "requiresCommit", filePath), filePath, "requiresCommit"),
+      provisionDependencies: parseBoolean(requiredFrontmatter(document, "provisionDependencies", filePath), filePath, "provisionDependencies"),
       baseFromStepIndex: parseOptionalStepIndex(requiredFrontmatter(document, "baseFromStepIndex", filePath), filePath),
       spawnPolicy: parseSpawnPolicy(requiredFrontmatter(document, "spawnPolicy", filePath), filePath),
       prompt: document.body,

@@ -22,6 +22,11 @@ enum RepoPermission {
   GIT_WRITE @map("git-write")
 }
 
+enum DependencyProvisioning {
+  NONE
+  NPM_CI
+}
+
 enum SecretPurpose {
   MCP     @map("mcp")
   REPO    @map("repo")
@@ -379,6 +384,7 @@ model Repo {
   remoteUrl          String
   mountPath          String
   defaultBranch      String            @default("main")
+  dependencyProvisioning DependencyProvisioning
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
   project            Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -519,6 +525,7 @@ model TaskTemplateStep {
   /// Whether a successful Run must advance the workspace commit. False still
   /// publishes the branch, because a later Chain Step may need to clone it.
   requiresCommit          Boolean      @default(true)
+  provisionDependencies   Boolean      @default(true)
   baseFromStepIndex       Int?
   layer                   Int
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
@@ -1008,9 +1015,10 @@ model Run {
   /// The structured account the runner gave of this failure: phase, exit facts,
   /// channel-separated evidence and typed timeout/transient markers. The API
   /// classifies from this and stores it verbatim, so a disputed verdict can be
-  /// re-decided against what was actually observed instead of re-run. NULL on
-  /// every successful run, and on every run reported by a runner too old to
-  /// send one. See packages/db/src/failure-envelope.ts.
+  /// re-decided against what was actually observed instead of re-run. A
+  /// definitive mechanical result may settle protocol success while retaining
+  /// a later failed completion envelope as diagnostics. See
+  /// packages/db/src/failure-envelope.ts.
   failureEnvelope               Json?
   /// The raw tail of what this run produced: the agent's final output when it
   /// emitted one, otherwise the run's stdout, capped at 500k by the runner that

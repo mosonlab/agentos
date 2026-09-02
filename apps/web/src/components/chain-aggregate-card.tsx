@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 
-import { timeAgo, usageCostLabel } from "../lib/format";
+import { timeAgo, usageCostAmount } from "../lib/format";
 import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
 import { navigate } from "../lib/router";
-import { BoardCardShell } from "./board-card-shell";
+import { BoardCardShell, CardPullRequest } from "./board-card-shell";
 import { IconLock } from "./icons";
 import { RunLine } from "./run-line";
 import { Pill, type RowMenuEntry } from "./ui";
@@ -13,13 +13,15 @@ import { useT, type Translate } from "../lib/i18n";
 export type ChainAggregateActions = {
   onActivate: (taskId: string) => void;
   onFilter: (aggregate: ChainAggregate) => void;
-  onArchive: (aggregate: ChainAggregate, memberTaskIds: readonly string[]) => void;
+  onArchive: (aggregate: ChainAggregate) => void;
 };
 
-const STATE_TONE: Record<ChainAggregateState, "green" | "amber" | "grey"> = {
+/** Every state that still names itself on the card. `running` is absent by
+ *  design: the run line's amber dot already says the chain is running, and the
+ *  pill beside it was the same fact a second time. */
+const STATE_TONE: Record<Exclude<ChainAggregateState, "running">, "green" | "amber" | "grey"> = {
   "parked-unactivated": "grey",
   "waiting-on-predecessor": "amber",
-  running: "amber",
   idle: "grey",
   settled: "green",
 };
@@ -38,15 +40,11 @@ const memberPosition = (aggregate: ChainAggregate, members: readonly BoardTask[]
   return aggregate.stepCount === 0 ? 0 : Math.min(aggregate.stepCount, done + 1);
 };
 
-const aggregateCost = (value: ChainAggregate["totalCost"]): string =>
-  value === null ? "—" : usageCostLabel(value);
-
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
 
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
-  memberTaskIds: readonly string[],
   actions: ChainAggregateActions,
   t: Translate,
 ): RowMenuEntry[] => [
@@ -56,7 +54,7 @@ const menu = (
     : []),
   { label: t("tasks.aggregate.menu.filter"), onSelect: () => actions.onFilter(aggregate) },
   ...(aggregate.activation.state === "settled"
-    ? [{ label: t("tasks.aggregate.menu.archive"), onSelect: () => actions.onArchive(aggregate, memberTaskIds) }]
+    ? [{ label: t("tasks.aggregate.menu.archive"), onSelect: () => actions.onArchive(aggregate) }]
     : []),
 ];
 
@@ -72,25 +70,20 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const position = memberPosition(aggregate, members);
   const state = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
-  const memberTaskIds = members.map((member) => member.id);
   const activeRepair = aggregate.activeRepair;
+  const cost = usageCostAmount(aggregate.totalCost);
   const handlers: ChainAggregateActions = actions ?? { onActivate: () => undefined, onFilter: () => undefined, onArchive: () => undefined };
   const metaRows: ReactNode[] = [
+      // Position and the step it names are one fact, so they are one line. The
+      // filtering the frontier row used to offer lives in the row menu, which is
+      // where the card's other actions already are.
       <span data-chain-progress="" className="contents">
-        <span>{t("tasks.aggregate.progress", { current: position, total: aggregate.stepCount })}</span>
-        <Pill tone={STATE_TONE[state]}>{t(`tasks.aggregate.state.${state}`)}</Pill>
-      </span>,
-      <span data-chain-frontier="" className="contents">
-        <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{aggregate.frontier.title}</span>
-        <button
-          type="button"
-          className="ml-auto flex-none rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
-          title={t("tasks.aggregate.filter")}
-          aria-label={t("tasks.card.filterChain", { name: title })}
-          onClick={(event) => { event.stopPropagation(); handlers.onFilter(aggregate); }}
-        >
-          {t("tasks.aggregate.filter")}
-        </button>
+        <span data-chain-frontier="" className="min-w-0 [overflow-wrap:anywhere]">
+          {t("tasks.aggregate.progress", { current: position, total: aggregate.stepCount })}
+          {" · "}
+          {aggregate.frontier.title}
+        </span>
+        {state === "running" ? null : <Pill tone={STATE_TONE[state]}>{t(`tasks.aggregate.state.${state}`)}</Pill>}
       </span>,
       ...(aggregate.frontier.latestRun === null ? [] : [
         <RunLine run={aggregate.frontier.latestRun} mergeOutcome={aggregate.frontier.mergeOutcome} showElapsed showModel />,
@@ -117,16 +110,18 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     chainId={aggregate.chainId}
     route={routeFor(representative)}
     title={title}
-    menuItems={menu(aggregate, representative, memberTaskIds, handlers, t)}
+    menuItems={menu(aggregate, representative, handlers, t)}
     menuLabel={t("tasks.aggregate.actionsFor", { name: title })}
     metaRows={metaRows}
     failure={aggregate.frontier.failureReason === null
       ? undefined
       : <span data-chain-failure="">{aggregate.frontier.failureReason}</span>}
     footer={<>
-      <span>{t("tasks.aggregate.cost", { amount: aggregateCost(aggregate.totalCost) })}</span>
+      <CardPullRequest url={aggregate.frontier.latestRun?.pullRequestUrl} />
       <span className="flex-1" />
-      <span>{timeAgo(aggregate.createdAt)}</span>
+      <span className="whitespace-nowrap">
+        {cost === null ? null : `${cost} · `}{timeAgo(aggregate.createdAt)}
+      </span>
     </>}
   />;
 };

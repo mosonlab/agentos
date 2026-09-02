@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+
+import { PR_TEMPLATE_NAME } from "@anneal/db";
 
 import type { ExitEvidence } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
 import {
   deliverWorkspace, pullRequestTitle, salvageWorkspace,
-  type CommandExecutor, type DeliveryClaim,
+  type CommandExecutor, type DeliveryClaim, type PrWorkflowOutput,
 } from "./delivery.js";
 import { completionEnvelope } from "./envelope.js";
 import { CommandTimeoutError, KILL_OVERHEAD_MS } from "./exec.js";
@@ -26,6 +32,585 @@ const salvageIdentity = {
   remoteUrl: "https://github.com/acme/app.git",
 };
 const workspace = { path: "/fake/work", branch: "feature/test", baseSha: "base" };
+
+const canonicalSha = (character: string): string => character.repeat(40);
+const canonicalBaseSha = canonicalSha("a");
+const canonicalImplementationSha = canonicalSha("b");
+const canonicalFixedSha = canonicalSha("c");
+
+const canonicalDescription = (
+  brief = "Ship PR\nThe complete feature brief continues here.",
+  prompt = "Canonical template step prompt that must not become the PR goal.",
+): string => `${prompt}\n<!-- agentos:task-brief:v1 length=${String(brief.length)} -->\n${brief}\n<!-- /agentos:task-brief:v1 -->`;
+
+const canonicalClaim = (
+  outputKind: "implementation" | "fixed-implementation",
+  id: string,
+  chainIndex: number,
+): DeliveryClaim => ({
+  task: {
+    id,
+    name: outputKind === "implementation" ? "Ship PR: Implementation" : "Ship PR: Apply review fixes",
+    description: canonicalDescription(),
+    chainId: "chain-pr",
+    chainIndex,
+    templateStep: {
+      name: outputKind === "implementation" ? "Implementation" : "Apply review fixes",
+      outputKind,
+      taskTemplate: { name: PR_TEMPLATE_NAME },
+    } as unknown as DeliveryClaim["task"]["templateStep"],
+  },
+  repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
+  run: { opensPullRequest: outputKind === "implementation", requiresCommit: outputKind === "implementation" },
+});
+
+const canonicalImplementationOutput = (
+  headSha = canonicalImplementationSha,
+  baseSha = canonicalBaseSha,
+  testsRun = ["npm test -- runner — exit 0: all focused tests passed"],
+): {
+  taskId: string;
+  chainIndex: number;
+  kind: "implementation";
+  body: string;
+  commitSha: string;
+} => ({
+  taskId: "task-implementation",
+  chainIndex: 1,
+  kind: "implementation",
+  body: JSON.stringify({
+    schemaVersion: 1,
+    headSha,
+    baseSha,
+    summary: "Implemented the requested change.",
+    testsRun,
+  }),
+  commitSha: headSha,
+});
+
+const canonicalFinalOutputs = (
+  baseSha = canonicalBaseSha,
+  implementationSha = canonicalImplementationSha,
+  fixedSha = canonicalFixedSha,
+) => [
+  canonicalImplementationOutput(implementationSha, baseSha),
+  {
+    taskId: "task-sol",
+    chainIndex: 2,
+    kind: "sol-findings" as const,
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: implementationSha,
+      reviewedBase: baseSha,
+      reviewedHead: implementationSha,
+      findings: [{
+        id: "SOL-1",
+        severity: "P1",
+        file: "src/change.ts",
+        line: 12,
+        title: "Close the handover gap",
+        evidence: "The old path drops evidence.",
+        requiredFix: "Carry the persisted body.",
+      }],
+      commandsRun: ["npm test -- review — exit 0: review passed"],
+    }),
+    commitSha: implementationSha,
+  },
+  {
+    taskId: "task-blind",
+    chainIndex: 3,
+    kind: "blind-findings" as const,
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: implementationSha,
+      reviewedBase: baseSha,
+      reviewedHead: implementationSha,
+      findings: [],
+    }),
+    commitSha: implementationSha,
+  },
+  {
+    taskId: "task-fixed",
+    chainIndex: 4,
+    kind: "fixed-implementation" as const,
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: fixedSha,
+      sourceHead: implementationSha,
+      dispositions: [{ id: "SOL-1", disposition: "ADOPTED", reason: "The runner now carries the persisted evidence." }],
+      closedFindings: [{
+        id: "SOL-1",
+        status: "CLOSED",
+        codeEvidence: "Added the run-bound evidence projection.",
+        testEvidence: "Added route and delivery coverage.",
+      }],
+      testsRun: ["npm test -- final — exit 0: final handover passed"],
+      residualRisks: ["GitHub API availability remains external."],
+    }),
+    commitSha: fixedSha,
+  },
+];
+
+test("canonical PR implementation creates the deterministic initial handover body", async () => {
+  const calls: Array<{ executable: string; args: string[] }> = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push({ executable, args });
+    if (executable === "gh" && args[1] === "list") return "[]";
+    if (executable === "gh" && args[1] === "create") return "https://github.com/acme/app/pull/1\n";
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("implementation", "task-implementation", 1),
+    { ...workspace, baseSha: canonicalBaseSha },
+    { command: fake, headSha: canonicalImplementationSha, prWorkflowOutputs: [canonicalImplementationOutput()] },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  const create = calls.find(({ executable, args }) => executable === "gh" && args[1] === "create");
+  assert.ok(create);
+  const expectedBody = [
+    "## Goal",
+    "Ship PR",
+    "## Summary",
+    "Implemented the requested change.",
+    "## Verification",
+    "- npm test -- runner — exit 0: all focused tests passed",
+    "## Review outcomes",
+    "Not available at this step.",
+    "## Anneal",
+    "Task: task-implementation",
+    "Chain: chain-pr",
+  ].join("\n\n");
+  assert.deepEqual(create.args, [
+    "pr", "create", "--repo", "acme/app", "--base", "main", "--head", "feature/test",
+    "--title", "Ship PR", "--body", expectedBody,
+  ]);
+});
+
+test("canonical PR implementation edits an existing PR and reads back the initial body", async () => {
+  const calls: Array<{ executable: string; args: string[] }> = [];
+  let body = "";
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push({ executable, args });
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/2", number: 2 }]);
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("implementation", "task-implementation", 1),
+    { ...workspace, baseSha: canonicalBaseSha },
+    { command: fake, headSha: canonicalImplementationSha, prWorkflowOutputs: [canonicalImplementationOutput()] },
+  );
+  assert.equal(result.pullRequestNumber, 2);
+  const edit = calls.find(({ executable, args }) => executable === "gh" && args[1] === "edit");
+  assert.ok(edit);
+  const expectedBody = [
+    "## Goal", "Ship PR",
+    "## Summary", "Implemented the requested change.",
+    "## Verification", "- npm test -- runner — exit 0: all focused tests passed",
+    "## Review outcomes", "Not available at this step.",
+    "## Anneal", "Task: task-implementation", "Chain: chain-pr",
+  ].join("\n\n");
+  assert.deepEqual(edit.args, ["pr", "edit", "2", "--repo", "acme/app", "--body", expectedBody]);
+  assert.equal(body, expectedBody);
+  const view = calls.find(({ executable, args }) => executable === "gh" && args[1] === "view");
+  assert.ok(view);
+});
+
+test("canonical PR final delivery publishes a clean head and the complete review handover body", async () => {
+  const calls: Array<{ executable: string; args: string[] }> = [];
+  let body = "";
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push({ executable, args });
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/3", number: 3 }]);
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pullRequestNumber, 3);
+  assert.deepEqual(calls.filter(({ executable }) => executable === "git").map(({ args }) => args), [
+    ["ls-tree", "-r", "--name-only", "HEAD", "--", ".chain"],
+    ["push", "--set-upstream", "origin", "feature/test"],
+  ]);
+  const expectedBody = [
+    "## Goal",
+    "Ship PR",
+    "## Summary",
+    "Implemented the requested change.\n\nReview-driven fixes:\n- SOL-1: Added the run-bound evidence projection.",
+    "## Verification",
+    "Implementation:\n- npm test -- runner — exit 0: all focused tests passed\n\nFixed implementation:\n- npm test -- final — exit 0: final handover passed",
+    "## Review outcomes",
+    "### Sol findings\n- SOL-1 [P1] Close the handover gap\n  Disposition: ADOPTED\n  Reason: The runner now carries the persisted evidence.\n  Code evidence: Added the run-bound evidence projection.\n  Test evidence: Added route and delivery coverage.\n\n### Blind findings\nNo findings reported.\n\nResidual risks:\n- GitHub API availability remains external.",
+    "## Anneal",
+    "Task: task-fixed",
+    "Chain: chain-pr",
+  ].join("\n\n");
+  assert.equal(body, expectedBody);
+  const edit = calls.find(({ executable, args }) => executable === "gh" && args[1] === "edit");
+  assert.ok(edit);
+  assert.equal(edit.args.at(-1), expectedBody);
+});
+
+test("canonical PR final body states when reviews required no code change", async () => {
+  const outputs = canonicalFinalOutputs();
+  const sol = JSON.parse(outputs[1]!.body) as Record<string, unknown>;
+  sol.findings = [];
+  outputs[1] = { ...outputs[1]!, body: JSON.stringify(sol) };
+  const fixed = JSON.parse(outputs[3]!.body) as Record<string, unknown>;
+  fixed.dispositions = [];
+  fixed.closedFindings = [];
+  outputs[3] = { ...outputs[3]!, body: JSON.stringify(fixed) };
+  let body = "";
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") {
+      return JSON.stringify([{ url: "https://github.com/acme/app/pull/8", number: 8 }]);
+    }
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: outputs },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.match(body, /Implemented the requested change\.\n\nNo review-driven code change was required\./u);
+});
+
+test("canonical PR final delivery rejects retained chain bookkeeping before push", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "git" && args[0] === "ls-tree") return ".chain/fix/pr-workflow/spec.md\n";
+    throw new Error(`unexpected command: ${executable} ${args.join(" ")}`);
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "git ls-tree HEAD -- .chain");
+  assert.deepEqual(calls, ["git ls-tree -r --name-only HEAD -- .chain"]);
+});
+
+test("canonical PR final delivery allows an already-pushed clean retry without a new commit", async () => {
+  const calls: string[] = [];
+  let body = "";
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/4", number: 4 }]);
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalFixedSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.ok(calls.includes("git push --set-upstream origin feature/test"));
+  assert.equal(calls.some((call) => call.includes("commit") || call.includes("reset") || call.includes("rebase") || call.includes("force")), false);
+  assert.match(body, /## Review outcomes/u);
+});
+
+test("canonical PR implementation refuses an unchanged required-commit head before publication", async () => {
+  const calls: string[] = [];
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("implementation", "task-implementation", 1),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    {
+      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+      headSha: canonicalImplementationSha,
+      prWorkflowOutputs: [canonicalImplementationOutput()],
+    },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "workspace head comparison");
+  assert.deepEqual(calls, []);
+});
+
+test("canonical PR implementation reports an empty command list factually", async () => {
+  let body = "";
+  const output = canonicalImplementationOutput(canonicalImplementationSha, canonicalBaseSha, []);
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") return "[]";
+    if (executable === "gh" && args[1] === "create") { body = args.at(-1)!; return "https://github.com/acme/app/pull/5\n"; }
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("implementation", "task-implementation", 1),
+    { ...workspace, baseSha: canonicalBaseSha },
+    { command: fake, headSha: canonicalImplementationSha, prWorkflowOutputs: [output] },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.match(body, /## Verification\n\nNo commands reported in the task output\./u);
+});
+
+for (const failure of [
+  { name: "edit failure", operation: "gh pr edit", edit: new Error("edit refused"), view: "" },
+  { name: "unreadable read-back", operation: "gh pr view", edit: null, view: new Error("view unavailable") },
+  { name: "unequal read-back", operation: "gh pr view", edit: null, view: "stale body" },
+] as const) {
+  test(`canonical PR final delivery fails on ${failure.name}`, async () => {
+    const fake: CommandExecutor = async (executable, args) => {
+      if (executable === "git" && args[0] === "ls-tree") return "";
+      if (executable === "gh" && args[1] === "list") {
+        return JSON.stringify([{ url: "https://github.com/acme/app/pull/6", number: 6 }]);
+      }
+      if (executable === "gh" && args[1] === "edit") {
+        if (failure.edit) throw failure.edit;
+        return "";
+      }
+      if (executable === "gh" && args[1] === "view") {
+        if (failure.view instanceof Error) throw failure.view;
+        return failure.view;
+      }
+      return "";
+    };
+    const result = await deliverWorkspace(
+      config,
+      canonicalClaim("fixed-implementation", "task-fixed", 4),
+      { ...workspace, baseSha: canonicalImplementationSha },
+      { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+    );
+    assert.equal(result.pushStatus, "FAILED");
+    assert.equal(result.failure?.operation, failure.operation);
+    assert.equal(result.pushedBranch, workspace.branch);
+  });
+}
+
+test("canonical PR final delivery fails when no open pull request exists", async () => {
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") return "[]";
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "gh pr list");
+  assert.equal(result.pushedBranch, workspace.branch);
+});
+
+test("canonical PR final delivery fails when open-PR lookup is malformed", async () => {
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") return "not-json";
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "gh pr list");
+  assert.equal(result.pushedBranch, workspace.branch);
+});
+
+test("canonical PR final delivery fails for a non-GitHub remote after publishing", async () => {
+  const finalClaim = canonicalClaim("fixed-implementation", "task-fixed", 4);
+  finalClaim.repo.remoteUrl = "ssh://git.example.test/acme/app.git";
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    finalClaim,
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "GitHub remote validation");
+  assert.equal(result.pushedBranch, workspace.branch);
+});
+
+test("canonical PR malformed evidence is refused before git or gh", async () => {
+  const calls: string[] = [];
+  const malformed: PrWorkflowOutput[] = [...canonicalFinalOutputs()];
+  malformed[3] = { ...malformed[3]!, commitSha: null };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    {
+      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+      headSha: canonicalFixedSha,
+      prWorkflowOutputs: malformed,
+    },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "canonical PR output validation");
+  assert.deepEqual(calls, []);
+});
+
+test("canonical PR final output and completion head mismatches are refused before publication", async () => {
+  for (const candidate of [
+    {
+      name: "output commit mismatch",
+      headSha: canonicalFixedSha,
+      outputs: canonicalFinalOutputs().map((output, index) => index === 3
+        ? { ...output, commitSha: canonicalSha("d") }
+        : output),
+      operation: "canonical PR output validation",
+    },
+    {
+      name: "completion head mismatch",
+      headSha: canonicalSha("d"),
+      outputs: canonicalFinalOutputs(),
+      operation: "canonical PR output/head comparison",
+    },
+  ]) {
+    const calls: string[] = [];
+    const result = await deliverWorkspace(
+      config,
+      canonicalClaim("fixed-implementation", "task-fixed", 4),
+      { ...workspace, baseSha: canonicalImplementationSha },
+      {
+        command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+        headSha: candidate.headSha,
+        prWorkflowOutputs: candidate.outputs,
+      },
+    );
+    assert.equal(result.pushStatus, "FAILED", candidate.name);
+    assert.equal(result.failure?.operation, candidate.operation, candidate.name);
+    assert.deepEqual(calls, [], candidate.name);
+  }
+});
+
+for (const templateName of ["direct-engineer-workflow", "compound-engineer-workflow", "custom-pr-workflow"] as const) {
+  test(`${templateName} keeps ordinary delivery behavior despite a canonical-looking output kind`, async () => {
+    const calls: string[] = [];
+    const ordinaryClaim: DeliveryClaim = {
+      task: {
+        id: "ordinary-task",
+        name: "Ordinary step",
+        templateStep: {
+          name: "Apply review fixes",
+          outputKind: "fixed-implementation",
+          taskTemplate: { name: templateName },
+        } as unknown as DeliveryClaim["task"]["templateStep"],
+      },
+      repo: { remoteUrl: "ssh://git.example.test/acme/app.git", defaultBranch: "main" },
+      run: { opensPullRequest: false, requiresCommit: false },
+    };
+    const result = await deliverWorkspace(config, ordinaryClaim, workspace, {
+      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+      headSha: workspace.baseSha,
+    });
+    assert.equal(result.pushStatus, "SUCCEEDED");
+    assert.equal(result.failure, undefined);
+    assert.deepEqual(calls, ["git push --set-upstream origin feature/test"]);
+  });
+}
+
+test("canonical PR final delivery pushes the exact descendant cleanup commit from a real repository", async () => {
+  const root = await mkdtemp(join(tmpdir(), "anneal-pr-delivery-"));
+  try {
+    const remote = join(root, "remote.git");
+    const repository = join(root, "work");
+    execFileSync("git", ["init", "--bare", remote]);
+    await mkdir(repository);
+    execFileSync("git", ["init", "-b", "feature/test"], { cwd: repository });
+    execFileSync("git", ["config", "user.name", "Anneal Test"], { cwd: repository });
+    execFileSync("git", ["config", "user.email", "anneal@example.test"], { cwd: repository });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: repository });
+    await writeFile(join(repository, "README.md"), "fixture\n");
+    execFileSync("git", ["add", "README.md"], { cwd: repository });
+    execFileSync("git", ["commit", "-m", "base"], { cwd: repository });
+    const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
+    await mkdir(join(repository, ".chain", "feature"), { recursive: true });
+    await writeFile(join(repository, ".chain", "feature", "spec.md"), "review evidence\n");
+    execFileSync("git", ["add", ".chain/feature/spec.md"], { cwd: repository });
+    execFileSync("git", ["commit", "-m", "implementation"], { cwd: repository });
+    const implementationSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
+    const calls: string[] = [];
+    let body = "";
+    const command: CommandExecutor = async (executable, args, cwd, env) => {
+      calls.push(`${executable} ${args.join(" ")}`);
+      if (executable === "gh" && args[1] === "list") {
+        return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+      }
+      if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+      if (executable === "gh" && args[1] === "view") return body;
+      if (executable === "gh") return "gh version fixture";
+      return execFileSync(executable, args, {
+        cwd,
+        env: { ...env, PATH: process.env.PATH },
+        encoding: "utf8",
+      });
+    };
+    await rm(join(repository, ".chain"), { recursive: true });
+    execFileSync("git", ["add", "-A", ".chain"], { cwd: repository });
+    const stagedDeletion = await deliverWorkspace(
+      config,
+      canonicalClaim("fixed-implementation", "task-fixed", 4),
+      { path: repository, branch: "feature/test", baseSha },
+      {
+        command,
+        headSha: implementationSha,
+        prWorkflowOutputs: canonicalFinalOutputs(baseSha, implementationSha, implementationSha),
+      },
+    );
+    assert.equal(stagedDeletion.pushStatus, "FAILED");
+    assert.equal(stagedDeletion.failure?.operation, "git ls-tree HEAD -- .chain");
+    assert.equal(calls.some((call) => call.startsWith("git push") || call.startsWith("gh ")), false);
+    calls.length = 0;
+    execFileSync("git", ["commit", "-m", "remove chain bookkeeping"], { cwd: repository });
+    const fixedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
+    const result = await deliverWorkspace(
+      config,
+      canonicalClaim("fixed-implementation", "task-fixed", 4),
+      { path: repository, branch: "feature/test", baseSha: implementationSha },
+      { command, headSha: fixedSha, prWorkflowOutputs: canonicalFinalOutputs(baseSha, implementationSha, fixedSha) },
+    );
+    assert.equal(result.pushStatus, "SUCCEEDED", result.pushError);
+    execFileSync("git", ["merge-base", "--is-ancestor", implementationSha, fixedSha], { cwd: repository });
+    assert.equal(execFileSync("git", ["rev-parse", "refs/remotes/origin/feature/test"], { cwd: repository, encoding: "utf8" }).trim(), fixedSha);
+    assert.equal(execFileSync("git", ["ls-tree", "-r", "--name-only", fixedSha, "--", ".chain"], { cwd: repository, encoding: "utf8" }).trim(), "");
+    assert.equal(calls.some((call) => /(?:--force|\bcommit\b|\breset\b|\brebase\b)/u.test(call)), false);
+    const commitCount = execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
+    calls.length = 0;
+    const retry = await deliverWorkspace(
+      config,
+      canonicalClaim("fixed-implementation", "task-fixed", 4),
+      { path: repository, branch: "feature/test", baseSha: fixedSha },
+      { command, headSha: fixedSha, prWorkflowOutputs: canonicalFinalOutputs(baseSha, implementationSha, fixedSha) },
+    );
+    assert.equal(retry.pushStatus, "SUCCEEDED", retry.pushError);
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim(), fixedSha);
+    assert.equal(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: repository, encoding: "utf8" }).trim(), commitCount);
+    assert.equal(calls.some((call) => /(?:--force|\bcommit\b|\breset\b|\brebase\b)/u.test(call)), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("a missing requiresCommit defaults to required and fails before publication", async () => {
   const calls: string[] = [];
@@ -186,7 +771,7 @@ test("delivery opens one pull request titled after the chain, not the step", asy
   };
   const chained = {
     ...claim,
-    task: { ...claim.task, name: "lines subcommand: Write spec", templateStep: { name: "Write spec" } },
+    task: { ...claim.task, name: "lines subcommand: Write spec", templateStep: { name: "Write spec", provisionDependencies: true } },
   } satisfies DeliveryClaim;
   const result = await deliverWorkspace(config, chained, workspace, { command: fake });
   assert.equal(result.pullRequestNumber, 8);

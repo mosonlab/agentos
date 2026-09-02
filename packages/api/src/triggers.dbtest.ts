@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import type { PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, type PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { encryptSecret } from "./secrets.js";
@@ -56,7 +56,7 @@ const seedTrigger = async (label: string, overrides: {
     projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
   await db.agentRepoAccess.create({ data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
   const secret = await db.secret.create({ data: {
     name: `trigger-${unique}`, encryptedValue: encryptSecret("wh-secret-batch25"), purpose: "WEBHOOK",
@@ -365,7 +365,7 @@ test("an empty-string default is treated as absent, matching the required badge"
 
 // --- review fixes: a malformed body is a client error (CODE-REVIEW S3) -------
 
-test("a malformed JSON body on fire is 400, not 500", async () => {
+test("a malformed JSON body on fire is a named 400 refusal", async () => {
   const { template } = await seedTrigger("fire-bad-json");
   const response = await asOperator(() => createApp(db).request(`/task-templates/${template.id}/fire`, {
     method: "POST",
@@ -373,7 +373,10 @@ test("a malformed JSON body on fire is 400, not 500", async () => {
     body: "{not json",
   }));
   assert.equal(response.status, 400);
-  assert.equal((await response.json() as any).error, "Invalid JSON payload");
+  assert.deepEqual(await response.json(), {
+    error: "Request body must be valid JSON",
+    code: "invalid-json",
+  });
   // An empty body is still the `Fire now` happy path and must keep working.
   assert.equal((await call("POST", `/task-templates/${template.id}/fire`)).status, 201);
 });

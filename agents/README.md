@@ -4,6 +4,13 @@ Source-of-truth files for canonical agent prompts and initial runtime defaults, 
 
 The chain prompts with an upstream counterpart in [mattpocock/skills](https://github.com/mattpocock/skills) do carry that text verbatim, wrapped in paragraphs written here for this platform's contracts; the notice is in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
+## Canonical synchronization and verification
+
+The canonical synchronization, project-scoped installation and verification,
+and full-tail readiness contract are maintained in the
+[Tier 0 / Tier 1 onboarding runbook](../docs/runbooks/add-a-project.md).
+Follow its Tier 1 checklist when onboarding another Project.
+
 ## Layout
 
 - `foundational.md` — the shared foundational prompt. Body maps to `Agent.foundationalPrompt` for every agent.
@@ -33,6 +40,7 @@ priorOutputKinds: []         # Prior TaskStepOutput kinds required by this promp
 attachmentsFromPrevious: true
 opensPullRequest: true
 requiresCommit: true          # false when a valid Step outcome may leave HEAD unchanged
+provisionDependencies: true   # false only when this step must skip workspace dependency materialization
 baseFromStepIndex: null                # null or a step in a strictly earlier layer
 spawnPolicy: null                      # null or an inline JSON object
 ```
@@ -57,15 +65,17 @@ task's `approvalGate`; they do not hard-code a pause or send a second Inbox
 question to simulate one. The Full Assurance template's gate placement and
 shorter-route rules live only in the routing contract.
 
-The seed installs two templates over these roles: the twelve-step Full
-Assurance chain, and the eight-step bound-capable direct chain
+The seed installs three templates over these roles: the twelve-step Full
+Assurance chain, the eight-step bound-capable direct chain
 (`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
 `senior-dev-luna` from the task brief, parallel Sol and blind review siblings
 whose findings the fix step adjudicates itself, exact-head regression,
-server-side readiness, and mechanical merge. Unbound direct instantiation
-omits the revalidation row and retains the historical seven-step prompts. Both
-step contracts live in their
-Markdown directories under `templates/`.
+server-side readiness, and mechanical merge — and the four-step pull-request
+chain (`pr-engineer-workflow`), which runs implementation, Sol and blind
+reviews, and review-fix application before ending at an open pull request with
+no regression or merge step. Unbound direct instantiation omits the
+revalidation row and retains the historical seven-step prompts. All three step
+contracts live in their Markdown directories under `templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities. Keep

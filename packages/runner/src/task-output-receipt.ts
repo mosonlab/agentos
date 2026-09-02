@@ -31,9 +31,9 @@ const receipt = (value: unknown): TaskOutputReceipt => {
 };
 
 /**
- * Record the exact output binding only after the session output request has
- * succeeded. The runner later combines this local receipt with the API's
- * current-Run `outputPersisted` fact; neither is sufficient on its own.
+ * Record the delivered output identity only after the session output request
+ * has succeeded. The runner includes this Agent-writable receipt in recovery
+ * audit evidence; the server-returned output identity alone authorizes recovery.
  */
 export const writeTaskOutputReceipt = async (
   workspacePath: string,

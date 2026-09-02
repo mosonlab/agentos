@@ -8,6 +8,7 @@ priorOutputKinds: [implementation, fixed-implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
 requiresCommit: false
+provisionDependencies: true
 baseFromStepIndex: null
 spawnPolicy: null
 ---

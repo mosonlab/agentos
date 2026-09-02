@@ -183,21 +183,36 @@ test("the defense list covers tracked merge-tail machinery", () => {
     const source = readFileSync(`../..\/${path}`, "utf8");
     return sourcePatterns.some((pattern) => pattern.test(source));
   });
-  const regressionPromptPaths = tracked.filter((path) => (
-    /^agents\/templates\/(?:direct|compound)-engineer-workflow\/\d+-regression-verification\.md$/u.test(path)
-  ));
-  const promptScriptPaths = regressionPromptPaths.flatMap((path) => (
-    [...readFileSync(`../..\/${path}`, "utf8").matchAll(/`(scripts\/[^\s`]+)[\s`]/gu)]
-      .flatMap((match) => match[1] ? [match[1]] : [])
-  ));
+  const runnerSourcePaths = [
+    "packages/runner/runtime-tools/regression-verification.sh",
+    "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh",
+    "packages/runner/runtime-tools/gate-worker/lib.sh",
+    "packages/runner/runtime-tools/gate-worker/mirror-push.sh",
+    "packages/runner/runtime-tools/gate-worker/remote-gate.sh",
+  ];
+  const runnerContractPaths = [
+    "packages/runner/scripts/build-runtime-tools.mjs",
+    "packages/runner/src/workspace.ts",
+    "packages/runner/src/adapters.ts",
+    "packages/runner/src/adapters/runtime.ts",
+  ];
 
   assert.ok(structuralPaths.length > 0);
-  assert.ok(promptScriptPaths.length > 0);
-  for (const path of new Set([...structuralPaths, ...promptScriptPaths])) {
+  for (const path of [...runnerSourcePaths, ...runnerContractPaths]) {
+    assert.ok(tracked.includes(path), `${path} must remain tracked`);
+  }
+  for (const path of new Set([...structuralPaths, ...runnerSourcePaths, ...runnerContractPaths])) {
     assert.notEqual(defenseListReason(path), null, path);
   }
+  assert.equal(defenseListReason("packages/runner/runtime-tools/regression-verification.sh"), "merge-tail-machinery");
+  for (const path of runnerSourcePaths.slice(1)) {
+    assert.equal(defenseListReason(path), "gate-worker", path);
+  }
+  for (const path of runnerContractPaths) {
+    assert.equal(defenseListReason(path), "merge-tail-machinery", path);
+  }
   assert.equal(defenseListReason("apps/web/src/app.tsx"), null);
-  assert.equal(defenseListReason("scripts/regression-verification.sh"), "merge-tail-machinery");
+  assert.equal(defenseListReason("agents/templates/pr-engineer-workflow/01-implementation.md"), "template-step-set");
 });
 
 test("renames preserve guarded source identities", () => {

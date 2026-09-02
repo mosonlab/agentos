@@ -7,6 +7,7 @@ import {
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { disposeWorkspace } from "./dispose-workspace.js";
+import { HOST_PROOF_SLOT_DIRECTORY_NAME } from "./host-proof-slots.js";
 
 /**
  * Workspace GC, from the side that owns the disk (issue #115).
@@ -45,7 +46,9 @@ const listRunDirectories = async (root: string): Promise<string[]> => {
   const entries = await readdir(root, { withFileTypes: true });
   // Directories only, and never a symlink: `isDirectory` is false for one, so a
   // symlinked entry can never become a path this code hands to rm.
-  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name !== HOST_PROOF_SLOT_DIRECTORY_NAME)
+    .map((entry) => entry.name);
 };
 
 const audit = (event: string, detail: Record<string, unknown>): void => {

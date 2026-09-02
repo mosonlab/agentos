@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
+import { cpus, homedir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,27 @@ test("the default workspace root matches the API's definition of it", () => {
     apiSource("workspace-root.ts"),
     /export const defaultWorkspaceRoot = \(\): string => join\(homedir\(\), "\.agentos", "runs"\);/u,
   );
+});
+
+test("host proof slots default to three and accept strict positive integer overrides", () => {
+  const previous = process.env.AGENTOS_HOST_PROOF_SLOTS;
+  try {
+    delete process.env.AGENTOS_HOST_PROOF_SLOTS;
+    assert.equal(loadRunnerConfig().hostProofSlots, 3);
+
+    for (const [raw, expected] of [["1", 1], ["7", 7], ["1024", 1024]] as const) {
+      process.env.AGENTOS_HOST_PROOF_SLOTS = raw;
+      assert.equal(loadRunnerConfig().hostProofSlots, expected);
+    }
+
+    for (const raw of ["", "0", "-1", "1.5", "1slot", " 3", "3 ", "1025", "9007199254740991", "9007199254740992"]) {
+      process.env.AGENTOS_HOST_PROOF_SLOTS = raw;
+      assert.throws(loadRunnerConfig, /AGENTOS_HOST_PROOF_SLOTS must be a positive integer no greater than 1024/u);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.AGENTOS_HOST_PROOF_SLOTS;
+    else process.env.AGENTOS_HOST_PROOF_SLOTS = previous;
+  }
 });
 
 test("the dependency cache defaults beside the workspace root and accepts an explicit runner-owned root", () => {
@@ -75,6 +96,53 @@ test("the repository mirror defaults into the task account's home and accepts an
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
+});
+
+const withClaimMaxLoadAverage = (value: string | undefined, body: () => void): void => {
+  const previous = process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE;
+  if (value === undefined) delete process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE;
+  else process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE = value;
+  try {
+    body();
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE;
+    else process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE = previous;
+  }
+};
+
+test("claim load threshold defaults from CPU count and accepts integer or decimal overrides", () => {
+  withClaimMaxLoadAverage(undefined, () => {
+    assert.equal(loadRunnerConfig().claimMaxLoadAverage, cpus().length * 1.5);
+  });
+  withClaimMaxLoadAverage("12", () => {
+    assert.equal(loadRunnerConfig().claimMaxLoadAverage, 12);
+  });
+  withClaimMaxLoadAverage("2.75", () => {
+    assert.equal(loadRunnerConfig().claimMaxLoadAverage, 2.75);
+  });
+});
+
+test("claim load threshold rejects malformed or non-positive overrides", () => {
+  for (const value of ["0", "-1", "", "NaN", "Infinity", "2.5x"]) {
+    withClaimMaxLoadAverage(value, () => {
+      assert.throws(
+        () => loadRunnerConfig(),
+        (error: unknown) => error instanceof Error
+          && error.message === "RUNNER_CLAIM_MAX_LOAD_AVERAGE must be a positive finite number",
+        `${value || "empty"} was accepted`,
+      );
+    });
+  }
+});
+
+test("claim load threshold fails loudly when CPU information is unavailable", () => {
+  withClaimMaxLoadAverage(undefined, () => {
+    assert.throws(
+      () => loadRunnerConfig({ cpuCount: 0 }),
+      (error: unknown) => error instanceof Error
+        && error.message === "RUNNER_CLAIM_MAX_LOAD_AVERAGE must be a positive finite number",
+    );
+  });
 });
 
 test("an explicit runner Git identity is accepted only as a complete pair", () => {

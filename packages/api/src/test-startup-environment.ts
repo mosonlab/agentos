@@ -36,6 +36,21 @@
 export const SPAWNED_OPERATOR_TOKEN = "spawned-fixture-operator-token-000000";
 export const SPAWNED_RUNNER_TOKEN = "spawned-fixture-runner-token-000000";
 
+/**
+ * The Node argv for a test child that executes an API source entrypoint.
+ *
+ * A condition on the parent test process is not inherited by a child started
+ * through `process.execPath`, so source entrypoints must carry it explicitly.
+ * Keep this beside the startup environment so every production-shaped test
+ * child has one canonical launch contract.
+ */
+export const spawnedSourceEntrypointArgv = (entrypoint: string): string[] => [
+  "--conditions=development",
+  "--import",
+  "tsx",
+  entrypoint,
+];
+
 const postgresVariablesFor = (databaseUrl: string | undefined): NodeJS.ProcessEnv => {
   if (databaseUrl === undefined) {
     return { POSTGRES_DB: undefined, POSTGRES_USER: undefined, POSTGRES_PASSWORD: undefined };

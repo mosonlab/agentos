@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
@@ -47,6 +48,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     priorOutputKinds: step.priorOutputKinds,
     opensPullRequest: step.opensPullRequest,
     requiresCommit: step.requiresCommit,
+    provisionDependencies: step.provisionDependencies,
     baseFromStepIndex: step.baseFromStepIndex,
     spawnPolicy: step.spawnPolicy as PersistedTransitionStep["spawnPolicy"],
     prompt: step.prompt,
@@ -57,6 +59,29 @@ const generationOf = (templateName: CanonicalTemplateRegistryName, marker: strin
   assert.ok(generation, `${templateName} must register ${marker}`);
   return generation;
 };
+
+const persistedGeneration = (
+  generation: ReturnType<typeof generationOf>,
+  provisionDependencies: unknown,
+): PersistedTransitionStep[] => generation.shape.map((step, index) => ({
+  id: `legacy-${String(index + 1)}`,
+  taskTemplateId: "template",
+  stepIndex: index + 1,
+  name: step.name,
+  assigneeAgent: step.agentName === null ? null : { name: step.agentName },
+  assigneeType: step.assigneeType,
+  layer: step.layer,
+  approvalGate: step.approvalGate,
+  outputKind: step.outputKind,
+  attachmentsFromPrevious: step.attachmentsFromPrevious,
+  priorOutputKinds: [],
+  opensPullRequest: step.opensPullRequest,
+  requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+  provisionDependencies,
+  baseFromStepIndex: step.baseFromStepIndex,
+  spawnPolicy: step.spawnPolicy,
+  prompt: "retired",
+})) as unknown as PersistedTransitionStep[];
 
 const PROMPT_ROLLOVER_TEMPLATES = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
 
@@ -72,6 +97,18 @@ test("canonical identity parses current names and every registered generation", 
   }
   assert.equal(canonicalTemplateIdentity("compound-engineer-workflow-legacy-pre-zero-gate-"), null);
   assert.equal(canonicalTemplateIdentity("unregistered-workflow"), null);
+});
+
+test("registered generations require an explicit true dependency-provisioning value", () => {
+  const generation = generationOf("direct-engineer-workflow", "pre-adjudication");
+  assert.equal(legacyGenerationMatches(generation, persistedGeneration(generation, true)), true);
+  for (const value of [false, undefined, "true"]) {
+    assert.equal(
+      legacyGenerationMatches(generation, persistedGeneration(generation, value)),
+      false,
+      `historical field ${String(value)} must not match`,
+    );
+  }
 });
 
 test("every registered compound generation derives its repair Step ordinals", () => {
@@ -128,7 +165,8 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
     priorOutputKinds: [],
-    opensPullRequest: true, requiresCommit: true, baseFromStepIndex: null, spawnPolicy: null, prompt,
+    opensPullRequest: true, requiresCommit: true, provisionDependencies: true,
+    baseFromStepIndex: null, spawnPolicy: null, prompt,
   }];
   const outgoing = stepsWith("the retired instruction");
   const successor = stepsWith("the replacement instruction");
@@ -165,12 +203,12 @@ test("the regression step split is registered as a prompt-only rollover that can
     assert.ok(current, `${templateName} must load from source`);
     const successor = asPersisted(current);
 
-    // Compound remains structure-identical. Direct's later revalidation
-    // rollover intentionally changed its shape, but the old prompt generation
-    // must still target the current source digest.
+    // The explicit dependency-provisioning field makes the review rows
+    // structurally different from every pre-field generation, so neither
+    // current source graph can match the retired shape by fallback.
     assert.equal(
       legacyGenerationMatches({ marker: generation.marker, shape: generation.shape }, successor),
-      templateName === "compound-engineer-workflow",
+      false,
       `${templateName} rollover shape expectation`,
     );
     // But not the generation, because the prompts moved on.
@@ -204,19 +242,19 @@ test("a rollover refuses a source that is not the successor it was registered to
     assert.ok(current);
 
     // The source as registered: no drift.
-    assert.equal(successorPromptDrift(templateName, "pre-regression-step-split", current), null);
+    assert.equal(successorPromptDrift(templateName, "pre-runner-provided-regression-tooling", current), null);
 
     // The same rollover, with the prompts edited again after registration.
     const driftedSource = current.map((step) => (
       step.stepIndex === current[0]!.stepIndex ? { ...step, prompt: `${step.prompt}\n\nlater edit` } : step
     ));
-    const refusal = successorPromptDrift(templateName, "pre-regression-step-split", driftedSource);
+    const refusal = successorPromptDrift(templateName, "pre-runner-provided-regression-tooling", driftedSource);
     assert.ok(refusal, `${templateName} must refuse an unregistered successor`);
     assert.match(refusal, /registered to install prompt generation/u);
 
     // The outgoing row is unaffected by that edit and still matches, which is
     // exactly why the successor has to be checked separately.
-    const generation = generationOf(templateName, "pre-regression-step-split");
+    const generation = generationOf(templateName, "pre-runner-provided-regression-tooling");
     assert.ok(generation.successorPromptDigest);
     assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
   }
@@ -252,6 +290,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       opensPullRequest: step.opensPullRequest,
       requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+      provisionDependencies: true,
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy,
       priorOutputKinds: [],
@@ -260,6 +299,43 @@ test("bound direct revalidation is a registered structural rollover", async () =
     "pre-revalidate-step",
   );
   assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
+});
+
+test("the pull-request workflow has a registered prompt-only generation and current ordinals", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const current = sources.get(PR_TEMPLATE_NAME);
+  assert.ok(current);
+  const generation = generationOf(PR_TEMPLATE_NAME, "pre-pr-handover-quality");
+  assert.equal(generation.promptDigest, "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6");
+  assert.equal(generation.successorPromptDigest, "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8");
+  assert.equal(generation.shape.length, 4);
+  assert.deepEqual(
+    generation.shape,
+    current.map(({ name, agentName, approvalGate, outputKind, attachmentsFromPrevious, opensPullRequest, baseFromStepIndex, layer, spawnPolicy }) => ({
+      name,
+      agentName,
+      assigneeType: agentName === null ? "HUMAN" : "AGENT",
+      approvalGate,
+      outputKind,
+      attachmentsFromPrevious,
+      opensPullRequest,
+      baseFromStepIndex,
+      layer,
+      spawnPolicy,
+    })),
+  );
+  assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+  assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
+  assert.deepEqual(canonicalStepOrdinals(PR_TEMPLATE_NAME, null), {
+    implementation: 1,
+    "sol-findings": 2,
+    "blind-findings": 3,
+    "fixed-implementation": 4,
+  });
+  const reviewedGeneration = generationOf(PR_TEMPLATE_NAME, "pre-pr-head-tree-check");
+  assert.equal(reviewedGeneration.promptDigest, "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906");
+  assert.equal(reviewedGeneration.successorPromptDigest, templatePromptGenerationDigest(current));
+  assert.deepEqual(reviewedGeneration.shape, generation.shape);
 });
 
 test("the internal npm scope rename is a registered prompt-only rollover", async () => {
@@ -299,6 +375,24 @@ test("the product rename is a registered prompt-only rollover in both templates"
   }
 });
 
+test("runner-provided Regression tooling is a registered prompt-only rollover in both templates", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const retiredDigests = {
+    "direct-engineer-workflow": "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
+    "compound-engineer-workflow": "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
+  } as const;
+
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+    const generation = generationOf(templateName, "pre-runner-provided-regression-tooling");
+    assert.equal(generation.promptDigest, retiredDigests[templateName]);
+    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+  }
+});
+
 test("every prompt-only generation can roll straight to the current source", async () => {
   const sources = await loadAllTemplateStepSources();
   const markers = {
@@ -308,11 +402,13 @@ test("every prompt-only generation can roll straight to the current source", asy
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
       "pre-product-rename-anneal",
+      "pre-runner-provided-regression-tooling",
     ],
     "compound-engineer-workflow": [
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
       "pre-product-rename-anneal",
+      "pre-runner-provided-regression-tooling",
     ],
   } as const;
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {

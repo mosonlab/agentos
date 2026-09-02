@@ -46,6 +46,9 @@ including its filesystem, port, runner identity and repository preflights. Then
 start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`, in that
 order, in three terminals, and open `http://127.0.0.1:5173`.
 
+Once the installation is running, follow [Add a project](runbooks/add-a-project.md)
+to add a GitHub repository and run A1's pull-request workflow.
+
 `npm ci` must be allowed to run the lockfile's lifecycle scripts — this
 repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
 is not supported. The Inbox service is optional. No launchd definition is
@@ -56,6 +59,14 @@ LaunchDaemon and Linux systemd profiles in the public
 [`docs/runbooks/merge-executor.md`](runbooks/merge-executor.md) runbook.
 Those procedures do not change the platform classifications above or the
 authoritative support matrix.
+
+## Project onboarding
+
+The canonical Tier 0 and Tier 1 onboarding contract — including canonical
+prompt synchronization, project-scoped installation and verification,
+and full-tail readiness — lives in the
+[Tier 0 / Tier 1 onboarding runbook](runbooks/add-a-project.md).
+Follow that runbook after completing the installation sequence above.
 
 ## Advanced delivery infrastructure
 
@@ -163,10 +174,10 @@ npm run snapshot:scan
 ```
 
 `npm test` runs every workspace's unit tests and needs no database and no
-running service. It does need `npm run build` to have run first: the web CSS
-regression test reads the built stylesheet out of `apps/web/dist/`, and without
-it that one file fails with `Build apps/web before running CSS regression
-tests`.
+running service. It requires installed dependencies and a generated Prisma
+client, but no prior build. Until the Merge Gate's build has run, the web CSS
+and bundle artifact assertions report `Merge Gate build required` skips while
+their source and fixture assertions continue to run.
 
 `npm run test:db` is separate on purpose and is **not** part of `npm test`. It
 runs the API's database tests against a live PostgreSQL that the caller

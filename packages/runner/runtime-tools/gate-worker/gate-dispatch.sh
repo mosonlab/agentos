@@ -4,10 +4,10 @@
 # fallback worker. The local machine is used only with explicit opt-in. Runs ON
 # THE LOCAL MACHINE:
 #
-#   scripts/gate-worker/gate-dispatch.sh <oid>
-#   scripts/gate-worker/gate-dispatch.sh <oid> --master <oid>
-#   scripts/gate-worker/gate-dispatch.sh <oid> --allow-local
-#   scripts/gate-worker/gate-dispatch.sh <oid> --server <one-server>
+#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid>
+#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --master <oid>
+#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --allow-local
+#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --server <one-server>
 #
 # The slot model rations measured host capacity, not arbitrary processes. An
 # explicitly configured primary worker contributes two fixed slots and an
@@ -172,14 +172,22 @@ case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a p
 case "$ALLOW_LOCAL" in 0|1) ;; *) die "AGENTOS_GATE_ALLOW_LOCAL must be 0 or 1, got: $ALLOW_LOCAL" ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
 # Sourced before the first check that reports a code: the slot locks, the values
 # that reach a remote shell and the verdict's codes all live here, and this
 # script transports verdicts rather than forming them, so every failure of its
 # own is GATE_EXIT_NO_VERDICT.
-# shellcheck source=scripts/gate-worker/lib.sh
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+
+if [ -z "${AGENTOS_WORKSPACE_PATH:-}" ]; then
+  die "AGENTOS_WORKSPACE_PATH is required" "$GATE_EXIT_NO_VERDICT"
+fi
+[ -d "$AGENTOS_WORKSPACE_PATH" ] \
+  || die "AGENTOS_WORKSPACE_PATH is not a directory: $AGENTOS_WORKSPACE_PATH" "$GATE_EXIT_NO_VERDICT"
+REPO_ROOT="$(CDPATH= cd -- "$AGENTOS_WORKSPACE_PATH" && pwd -P)" \
+  || die "cannot enter AGENTOS_WORKSPACE_PATH: $AGENTOS_WORKSPACE_PATH" "$GATE_EXIT_NO_VERDICT"
+export AGENTOS_WORKSPACE_PATH="$REPO_ROOT"
 
 [ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
   || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch and no verdict exists" "$GATE_EXIT_NO_VERDICT"

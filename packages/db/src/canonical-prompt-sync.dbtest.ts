@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
-import { PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
+import { Prisma, PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { loadAgentSources } from "./agent-sources.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
@@ -129,10 +129,256 @@ const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): 
         stepIndex: step.stepIndex - 1,
         layer: step.layer - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+        provisionDependencies: true,
       },
     });
   }
 };
+
+test("sync creates the pull-request template when the pre-existing canonical installation has none", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const preExistingTemplateSnapshot = JSON.stringify(await prisma.taskTemplate.findMany({
+    where: {
+      projectId: project.id,
+      name: { in: ["compound-engineer-workflow", "direct-engineer-workflow"] },
+    },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
+  }));
+  const existing = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "pr-engineer-workflow" } },
+  });
+  await prisma.taskTemplate.delete({ where: { id: existing.id } });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":1/u);
+
+  const created = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "pr-engineer-workflow" } },
+    include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
+  });
+  assert.deepEqual(created.variables, ["branchName"]);
+  assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
+    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev",
+  ]);
+  assert.equal(JSON.stringify(await prisma.taskTemplate.findMany({
+    where: {
+      projectId: project.id,
+      name: { in: ["compound-engineer-workflow", "direct-engineer-workflow"] },
+    },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
+  })), preExistingTemplateSnapshot);
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdCanonicalTemplates":0/u);
+
+  const canonicalPrompt = created.steps[0]!.prompt;
+  await prisma.taskTemplateStep.update({
+    where: { id: created.steps[0]!.id },
+    data: { prompt: "controlled PR prompt drift" },
+  });
+  const restored = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(restored.status, 0, restored.output);
+  assert.equal(
+    (await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: created.steps[0]!.id } })).prompt,
+    canonicalPrompt,
+  );
+});
+
+test("sync creates the canonical-project PR template when a same-name row exists elsewhere", async () => {
+  const canonicalProject = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const canonicalTemplate = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "pr-engineer-workflow" } },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  const foreignProject = await prisma.project.create({
+    data: { name: "Foreign PR template", slug: `foreign-pr-${randomBytes(4).toString("hex")}` },
+  });
+  const environment = await prisma.environment.create({
+    data: { projectId: foreignProject.id, name: "local", allowedHosts: [] },
+  });
+  const foreignAgents = new Map<string, string>();
+  for (const source of canonicalTemplate.steps.map(({ assigneeAgent }) => assigneeAgent!)) {
+    if (foreignAgents.has(source.name)) continue;
+    const created = await prisma.agent.create({ data: {
+      projectId: foreignProject.id,
+      environmentId: environment.id,
+      name: source.name,
+      title: source.title,
+      model: source.model,
+      runnerPreference: source.runnerPreference,
+      inboxAccess: source.inboxAccess,
+      foundationalPrompt: source.foundationalPrompt,
+      rolePrompt: source.rolePrompt,
+      disabledTools: source.disabledTools,
+    } });
+    foreignAgents.set(source.name, created.id);
+  }
+  const foreignTemplate = await prisma.taskTemplate.create({ data: {
+    projectId: foreignProject.id,
+    name: canonicalTemplate.name,
+    description: canonicalTemplate.description,
+    variables: canonicalTemplate.variables,
+  } });
+  for (const step of canonicalTemplate.steps) {
+    await prisma.taskTemplateStep.create({ data: {
+      taskTemplateId: foreignTemplate.id,
+      stepIndex: step.stepIndex,
+      layer: step.layer,
+      name: step.name,
+      assigneeAgentId: foreignAgents.get(step.assigneeAgent!.name)!,
+      assigneeType: step.assigneeType,
+      runner: step.runner,
+      approvalGate: step.approvalGate,
+      outputKind: step.outputKind,
+      prompt: step.prompt,
+      opensPullRequest: step.opensPullRequest,
+      requiresCommit: step.requiresCommit,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      priorOutputKinds: step.priorOutputKinds,
+      baseFromStepIndex: step.baseFromStepIndex,
+      spawnPolicy: step.spawnPolicy === null ? Prisma.JsonNull : step.spawnPolicy,
+    } });
+  }
+  await prisma.taskTemplate.delete({ where: { id: canonicalTemplate.id } });
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":1/u);
+  await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: canonicalProject.id, name: "pr-engineer-workflow" } },
+  });
+  const syncedForeign = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { id: foreignTemplate.id },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.ok(syncedForeign.steps
+    .filter(({ stepIndex }) => stepIndex === 2 || stepIndex === 3)
+    .every(({ provisionDependencies }) => provisionDependencies === false));
+  assert.ok(syncedForeign.steps
+    .filter(({ stepIndex }) => stepIndex !== 2 && stepIndex !== 3)
+    .every(({ provisionDependencies }) => provisionDependencies === true));
+  await prisma.project.delete({ where: { id: foreignProject.id } });
+});
+
+test("sync rolls the checkout Regression prompt generation once and preserves chain prompt lineage", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const templateNames = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
+  const runnerResolver = '"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh"';
+  // Rebuild the registered predecessor spelling without leaving the retired
+  // path as a source-tree reference. Its exact bytes are the prompt-generation
+  // identity that authorizes this one-time canonical rollover.
+  const retiredResolver = ["scripts", "regression-verification.sh"].join("/");
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...templateNames] } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
+  });
+  assert.equal(templates.length, templateNames.length);
+
+  const taskIds: string[] = [];
+  const legacyTemplateIds: string[] = [];
+  const retired = new Map<string, { templateId: string; regressionTaskId: string; prompt: string }>();
+  t.after(async () => {
+    await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
+    await prisma.taskTemplate.deleteMany({ where: { id: { in: legacyTemplateIds } } });
+  });
+
+  for (const template of templates) {
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
+    const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(regression);
+    assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
+    const outgoingPrompt = regression.prompt.replaceAll(runnerResolver, retiredResolver);
+    assert.doesNotMatch(outgoingPrompt, /AGENTOS_TOOLS/u);
+    await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingPrompt } });
+
+    const chainId = `pre-runner-tools-${template.name}-${randomBytes(4).toString("hex")}`;
+    let regressionTaskId = "";
+    for (const step of template.steps) {
+      const task = await prisma.task.create({ data: {
+        projectId: project.id,
+        templateId: template.id,
+        templateStepId: step.id,
+        name: `retired tooling ${template.name} ${step.stepIndex}`,
+        description: "prompt-generation rollover fixture",
+        assigneeAgentId: step.assigneeAgentId,
+        assigneeType: step.assigneeType,
+        status: TaskStatus.DONE,
+        chainId,
+        chainIndex: step.stepIndex,
+        chainLayer: step.layer,
+      } });
+      taskIds.push(task.id);
+      if (step.id === regression.id) regressionTaskId = task.id;
+    }
+    assert.notEqual(regressionTaskId, "");
+    retired.set(template.name, { templateId: template.id, regressionTaskId, prompt: outgoingPrompt });
+  }
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":2/u);
+
+  for (const templateName of templateNames) {
+    const old = retired.get(templateName)!;
+    const legacyName = `${templateName}-legacy-pre-runner-provided-regression-tooling-${old.templateId}`;
+    const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: legacyName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(legacy.id, old.templateId);
+    legacyTemplateIds.push(legacy.id);
+    assert.equal(legacy.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")?.prompt, old.prompt);
+    const oldTask = await prisma.task.findUniqueOrThrow({
+      where: { id: old.regressionTaskId },
+      include: { templateStep: true },
+    });
+    assert.equal(oldTask.templateStep?.prompt, old.prompt);
+
+    const current = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: templateName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.notEqual(current.id, old.templateId);
+    const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(currentRegression);
+    assert.equal(currentRegression.prompt.split(runnerResolver).length - 1, 3);
+    assert.equal(currentRegression.prompt.includes(retiredResolver), false);
+
+    const newTask = await prisma.task.create({ data: {
+      projectId: project.id,
+      templateId: current.id,
+      templateStepId: currentRegression.id,
+      name: `current tooling ${templateName}`,
+      description: "successor prompt fixture",
+      assigneeAgentId: currentRegression.assigneeAgentId,
+      assigneeType: currentRegression.assigneeType,
+      status: TaskStatus.DONE,
+      chainId: `runner-tools-current-${templateName}-${randomBytes(4).toString("hex")}`,
+      chainIndex: currentRegression.stepIndex,
+      chainLayer: currentRegression.layer,
+    } });
+    taskIds.push(newTask.id);
+    const instantiated = await prisma.task.findUniqueOrThrow({
+      where: { id: newTask.id },
+      include: { templateStep: true },
+    });
+    assert.equal(instantiated.templateStep?.prompt, currentRegression.prompt);
+  }
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdCanonicalTemplates":0/u);
+  assert.equal(await prisma.taskTemplate.count({
+    where: { projectId: project.id, name: { contains: "legacy-pre-runner-provided-regression-tooling" } },
+  }), 2);
+});
 
 test("sync rolls parked and not-yet-started v1 chains forward without changing them", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
@@ -147,6 +393,10 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
   const oldPrompt = "Acquire before fetch and emit the v1 Regression contract.";
   const legacyTaskIds: string[] = [];
   for (const template of templates) {
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
       data: { outputKind: "regression-verification", prompt: oldPrompt },
@@ -232,7 +482,8 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
     });
     assert.notEqual(current.id, template.id);
     const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
-    assert.match(currentRegression.prompt, /regression-verification\.sh prepare/u);
+    assert.match(currentRegression.prompt, /AGENTOS_TOOLS:\?AGENTOS_TOOLS is required/u);
+    assert.doesNotMatch(currentRegression.prompt, /Run `scripts\/regression-verification\.sh/u);
     assert.match(currentRegression.prompt, /script persists the one allowed v2 outcome/u);
   }
 
@@ -269,6 +520,10 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
   for (const template of templates) {
     legacyNames.set(template.name, `${template.name}-legacy-pre-adjudication-${template.id}`);
     const adjudication = ADJUDICATION_STEPS[template.name as keyof typeof ADJUDICATION_STEPS];
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true },
+    });
     // Walk down so the (template, stepIndex) unique never collides while the
     // hole opens; every step the adjudication node preceded also sat one layer
     // later than it does now.
@@ -405,6 +660,10 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
   });
   // Regate spec and revise-plan: that is exactly the graph that preceded the
   // zero-gate transition, and nothing else about it moved.
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: full.id },
+    data: { provisionDependencies: true },
+  });
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },
     data: { approvalGate: true },
@@ -783,6 +1042,7 @@ test("sync recreates a missing spec revalidator with read-only repository covera
       name: `canonical-sync-revalidator-${randomBytes(4).toString("hex")}`,
       remoteUrl: "file:///tmp/agentos-canonical-sync-revalidator.git",
       mountPath: "/workspace/canonical-sync-revalidator",
+      dependencyProvisioning: "NONE",
     },
   });
   await prisma.agentRepoAccess.create({
@@ -818,6 +1078,172 @@ test("sync recreates a missing spec revalidator with read-only repository covera
     where: { agentId: revalidator.id, repoId: repo.id },
     select: { mountPath: true, permissions: true },
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
+});
+
+test("sync adopts review dependency provisioning across current templates with referenced tasks", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const reviewSteps = new Map([
+    ["compound-engineer-workflow", new Set([6, 7])],
+    ["direct-engineer-workflow", new Set([3, 4])],
+    ["pr-engineer-workflow", new Set([2, 3])],
+  ]);
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...reviewSteps.keys()] } },
+    include: { steps: { include: { assigneeAgent: true } } },
+  });
+  assert.equal(templates.length, reviewSteps.size);
+  const foreignProject = await prisma.project.create({
+    data: { name: "Foreign dependency adoption", slug: `foreign-dependency-${randomBytes(4).toString("hex")}` },
+  });
+  const foreignEnvironment = await prisma.environment.create({
+    data: { projectId: foreignProject.id, name: "local", allowedHosts: [] },
+  });
+  const foreignAgents = new Map<string, string>();
+  const taskIds: string[] = [];
+  try {
+    for (const source of templates.flatMap(({ steps }) => steps.map(({ assigneeAgent }) => assigneeAgent!))) {
+      if (foreignAgents.has(source.name)) continue;
+      const created = await prisma.agent.create({ data: {
+        projectId: foreignProject.id,
+        environmentId: foreignEnvironment.id,
+        name: source.name,
+        title: source.title,
+        model: source.model,
+        runnerPreference: source.runnerPreference,
+        inboxAccess: source.inboxAccess,
+        foundationalPrompt: source.foundationalPrompt,
+        rolePrompt: source.rolePrompt,
+        disabledTools: source.disabledTools,
+      } });
+      foreignAgents.set(source.name, created.id);
+    }
+
+    for (const template of templates) {
+      const indexes = reviewSteps.get(template.name)!;
+      const foreignTemplate = await prisma.taskTemplate.create({ data: {
+        projectId: foreignProject.id,
+        name: template.name,
+        description: template.description,
+        variables: template.variables,
+      } });
+      for (const step of template.steps.filter(({ stepIndex }) => indexes.has(stepIndex))) {
+        await prisma.taskTemplateStep.update({
+          where: { id: step.id },
+          data: { provisionDependencies: true },
+        });
+        const task = await prisma.task.create({ data: {
+          projectId: project.id,
+          templateId: template.id,
+          templateStepId: step.id,
+          name: `dependency-provisioning-review-${template.name}-${step.stepIndex}`,
+          description: "dependency-provisioning canonical sync fixture",
+          assigneeAgentId: step.assigneeAgentId,
+          assigneeType: step.assigneeType,
+          status: TaskStatus.TODO,
+        } });
+        taskIds.push(task.id);
+      }
+      for (const step of template.steps) {
+        const foreignStep = await prisma.taskTemplateStep.create({ data: {
+          taskTemplateId: foreignTemplate.id,
+          stepIndex: step.stepIndex,
+          layer: step.layer,
+          name: step.name,
+          assigneeAgentId: foreignAgents.get(step.assigneeAgent!.name)!,
+          assigneeType: step.assigneeType,
+          runner: step.runner,
+          approvalGate: step.approvalGate,
+          outputKind: step.outputKind,
+          prompt: step.prompt,
+          opensPullRequest: step.opensPullRequest,
+          requiresCommit: step.requiresCommit,
+          provisionDependencies: true,
+          attachmentsFromPrevious: step.attachmentsFromPrevious,
+          priorOutputKinds: step.priorOutputKinds,
+          baseFromStepIndex: step.baseFromStepIndex,
+          spawnPolicy: step.spawnPolicy === null ? Prisma.JsonNull : step.spawnPolicy,
+        } });
+        if (!indexes.has(step.stepIndex)) continue;
+        await prisma.task.create({ data: {
+          projectId: foreignProject.id,
+          templateId: foreignTemplate.id,
+          templateStepId: foreignStep.id,
+          name: `dependency-provisioning-review-foreign-${template.name}-${step.stepIndex}`,
+          description: "foreign dependency-provisioning canonical sync fixture",
+          assigneeAgentId: foreignStep.assigneeAgentId,
+          assigneeType: foreignStep.assigneeType,
+          status: TaskStatus.TODO,
+        } });
+      }
+    }
+
+    const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+    assert.equal(synced.status, 0, synced.output);
+    assert.match(synced.output, /"adoptedDependencyProvisioning":12/u);
+
+    const current = await prisma.taskTemplate.findMany({
+      where: { projectId: { in: [project.id, foreignProject.id] }, name: { in: [...reviewSteps.keys()] } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(current.length, reviewSteps.size * 2);
+    for (const template of current) {
+      const indexes = reviewSteps.get(template.name)!;
+      assert.ok(template.steps.filter(({ stepIndex }) => indexes.has(stepIndex))
+        .every(({ provisionDependencies }) => provisionDependencies === false));
+      assert.ok(template.steps.filter(({ stepIndex }) => !indexes.has(stepIndex))
+        .every(({ provisionDependencies }) => provisionDependencies === true));
+    }
+
+    const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+    assert.equal(second.status, 0, second.output);
+    assert.match(second.output, /"adoptedDependencyProvisioning":0/u);
+  } finally {
+    await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
+    await prisma.project.delete({ where: { id: foreignProject.id } });
+  }
+});
+
+test("sync refuses mixed dependency provisioning drift before mutation", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const template = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  const reviewStep = template.steps.find(({ stepIndex }) => stepIndex === 3)!;
+  const implementationStep = template.steps.find(({ stepIndex }) => stepIndex === 2)!;
+  await prisma.taskTemplateStep.update({
+    where: { id: reviewStep.id },
+    data: { provisionDependencies: true },
+  });
+  await prisma.taskTemplateStep.update({
+    where: { id: implementationStep.id },
+    data: { provisionDependencies: false },
+  });
+  try {
+    const before = await prisma.taskTemplateStep.findMany({
+      where: { taskTemplateId: template.id },
+      select: { id: true, provisionDependencies: true },
+      orderBy: { stepIndex: "asc" },
+    });
+
+    const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+    assert.notEqual(refused.status, 0, refused.output);
+    assert.match(refused.output, /direct-engineer-workflow.*provisionDependencies/u);
+    assert.deepEqual(await prisma.taskTemplateStep.findMany({
+      where: { taskTemplateId: template.id },
+      select: { id: true, provisionDependencies: true },
+      orderBy: { stepIndex: "asc" },
+    }), before);
+  } finally {
+    await prisma.taskTemplateStep.update({
+      where: { id: reviewStep.id },
+      data: { provisionDependencies: false },
+    });
+    await prisma.taskTemplateStep.update({
+      where: { id: implementationStep.id },
+      data: { provisionDependencies: true },
+    });
+  }
 });
 
 test("sync refuses canonical step drift when instantiated tasks would be mutated", async () => {
@@ -866,7 +1292,10 @@ test("sync refuses an eight-step canonical shape with structural drift before mu
   const beforeLegacyCount = await prisma.taskTemplate.count({ where: { projectId: project.id, name: { startsWith: "direct-engineer-workflow-legacy" } } });
   const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refused.status, 0, refused.output);
-  assert.match(refused.output, /direct-engineer-workflow has structural drift: step 7 differs from the canonical source in outputKind/u);
+  assert.match(
+    refused.output,
+    new RegExp(`Project ${project.slug}: Template direct-engineer-workflow \\(${template.id}\\), direct-engineer-workflow step 7 \\(${step.id}\\) differs from the canonical source in outputKind`, "u"),
+  );
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: project.id, name: { startsWith: "direct-engineer-workflow-legacy" } } }), beforeLegacyCount);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } })).outputKind, "drifted-output");
 });
