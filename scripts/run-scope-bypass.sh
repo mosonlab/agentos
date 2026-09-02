@@ -8,7 +8,8 @@ agentos_regression_bypass_is_authenticated() {
 
   [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]] || return 1
 
-  local expected_script="${AGENTOS_TOOLS%/}/regression-verification.sh"
+  local expected_script="${AGENTOS_TOOLS:-}"
+  expected_script="${expected_script%/}/regression-verification.sh"
   local ps_command
   local current_pid="$$"
   local process_record
@@ -47,9 +48,11 @@ agentos_regression_bypass_is_authenticated() {
       read -r -a command_words <<< "$command_line"
       for command_word in "${command_words[@]:1}"; do
         # The script path must be Bash's first non-option argument. This rejects
-        # command strings and argv[0] spoofing without narrowing legitimate
-        # `bash -x /runner/tools/regression-verification.sh` invocations.
-        [[ "$command_word" == "-c" || "$command_word" == "--command" ]] && break
+        # command strings, stdin programs and argv[0] spoofing without narrowing
+        # legitimate `bash -x /runner/tools/regression-verification.sh` calls.
+        case "$command_word" in
+          -c|--command|-s|-) break ;;
+        esac
         if [[ "$command_word" != -* ]]; then
           [[ "$command_word" == "$expected_script" ]] && return 0
           break

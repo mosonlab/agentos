@@ -17,6 +17,10 @@ if [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
 fi
 
 script="${1:-unknown}"
+workspace_script="$script"
+if [[ "$script" == "lint:biome" || "$script" == "lint:types" ]]; then
+  workspace_script="lint"
+fi
 printf 'run-scope-guard: %s refused for Run %s: inside an Anneal Run, verify only the affected workspace using npm run %s -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.\n' \
-  "${script}" "${AGENTOS_RUN_ID}" "${script}" >&2
+  "${script}" "${AGENTOS_RUN_ID}" "${workspace_script}" >&2
 exit 78

@@ -28,8 +28,10 @@ const run = (command, args, overrides = {}) => spawnSync(command, args, {
   env: environment(overrides),
 });
 
-const expectedRefusal = (script, runId) =>
-  `run-scope-guard: ${script} refused for Run ${runId}: inside an Anneal Run, verify only the affected workspace using npm run ${script} -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.\n`;
+const expectedRefusal = (script, runId) => {
+  const workspaceScript = ["lint:biome", "lint:types"].includes(script) ? "lint" : script;
+  return `run-scope-guard: ${script} refused for Run ${runId}: inside an Anneal Run, verify only the affected workspace using npm run ${workspaceScript} -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.\n`;
+};
 
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
@@ -80,6 +82,26 @@ test("RUN-SCOPE-GUARD accepts the bypass only for a regression-verification.sh a
   assert.equal(result.stderr, "");
 });
 
+test("RUN-SCOPE-GUARD rejects a Bash stdin program that only names the regression tool as an argument", (t) => {
+  const toolsDirectory = mkdtempSync(join(tmpdir(), "run-scope-stdin-spoof."));
+  t.after(() => rmSync(toolsDirectory, { recursive: true, force: true }));
+  const expectedTool = join(toolsDirectory, "regression-verification.sh");
+
+  const result = spawnSync("bash", ["-s", expectedTool], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: environment({
+      AGENTOS_RUN_ID: "run-stdin-spoof",
+      AGENTOS_RUN_SCOPE_BYPASS: regressionVerificationBypass,
+      AGENTOS_TOOLS: toolsDirectory,
+    }),
+    input: `bash "${guard}" build\n`,
+  });
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /run-scope-bypass: refused forged Regression bypass/u);
+  assert.match(result.stderr, new RegExp(escapeRegExp(expectedRefusal("build", "run-stdin-spoof").trim()), "u"));
+});
+
 test("RUN-SCOPE-GUARD wrong, empty, and missing bypass values refuse once", () => {
   for (const bypass of [undefined, "", "regression", "regression-verification "]) {
     const overrides = { AGENTOS_RUN_ID: "run-refused" };
@@ -91,8 +113,8 @@ test("RUN-SCOPE-GUARD wrong, empty, and missing bypass values refuse once", () =
   }
 });
 
-test("RUN-SCOPE-GUARD prefixes all six repository-wide root scripts", () => {
-  for (const script of ["build", "lint", "typecheck", "test", "test:db", "merge-gate"]) {
+test("RUN-SCOPE-GUARD prefixes all eight repository-wide root scripts", () => {
+  for (const script of ["build", "lint", "lint:biome", "lint:types", "typecheck", "test", "test:db", "merge-gate"]) {
     const result = run("npm", ["run", script, "--", "a-named-file-does-not-narrow-root-scope"], {
       AGENTOS_RUN_ID: "root-script-run",
     });

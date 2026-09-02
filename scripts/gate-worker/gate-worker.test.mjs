@@ -605,24 +605,44 @@ const mergeGateScopeFixture = (t) => {
   return { repo, forgedCaller, regressionTool, tools };
 };
 
-const runMergeGateScopeFixture = (fixture, caller, runId) => spawnSync(caller, [], {
+const runMergeGateScopeFixture = (fixture, caller, runId, { includeTools = true } = {}) => spawnSync(caller, [], {
   cwd: fixture.repo,
   encoding: "utf8",
   env: {
     ...FIXTURE_ENV,
     AGENTOS_RUN_ID: runId,
     AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
-    AGENTOS_TOOLS: fixture.tools,
+    ...(includeTools ? { AGENTOS_TOOLS: fixture.tools } : {}),
   },
 });
+
+const stripAnsi = (output) => {
+  const ansiEscape = String.fromCharCode(27);
+  return output.replaceAll(new RegExp(`${ansiEscape}\\[[0-9;]*m`, "gu"), "");
+};
 
 test("merge-gate refuses a forged bypass and audits the invoking command line", (t) => {
   const fixture = mergeGateScopeFixture(t);
   const result = runMergeGateScopeFixture(fixture, fixture.forgedCaller, "forged-gate-run");
   const output = `${result.stdout}${result.stderr}`;
-  const plain = output.replaceAll(/\u001b\[[0-9;]*m/gu, "");
+  const plain = stripAnsi(output);
   assert.equal(result.status, 76, output);
   assert.match(plain, /^GATE NOT RUN: refused inside Anneal run forged-gate-run$/m);
+  assert.match(output, /forged-caller\.sh/u, "the refusal did not record the caller command line");
+});
+
+test("merge-gate refuses and audits a forged bypass when AGENTOS_TOOLS is absent", (t) => {
+  const fixture = mergeGateScopeFixture(t);
+  const result = runMergeGateScopeFixture(
+    fixture,
+    fixture.forgedCaller,
+    "missing-tools-gate-run",
+    { includeTools: false },
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  const plain = stripAnsi(output);
+  assert.equal(result.status, 76, output);
+  assert.match(plain, /^GATE NOT RUN: refused inside Anneal run missing-tools-gate-run$/m);
   assert.match(output, /forged-caller\.sh/u, "the refusal did not record the caller command line");
 });
 
