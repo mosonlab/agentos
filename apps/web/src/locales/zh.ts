@@ -152,6 +152,8 @@ export const zh = {
   "chain.currentExecution": "当前执行",
   "chain.error": "无法加载任务链。",
   "chain.gate": "在解除后续步骤阻塞前需要审批",
+  "chain.gate.specification": "规格审批闸门",
+  "chain.gate.merge": "合并就绪审批闸门",
   "chain.heldAfter": "已暂停于层级 {n} 之后",
   "chain.holdReason": "原因：{reason}",
   "chain.humanAssignee": "人工职责",

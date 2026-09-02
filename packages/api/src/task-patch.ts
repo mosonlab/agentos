@@ -4,6 +4,9 @@ import {
   COMPOUND_IMPLEMENTATION_AGENT_NAME,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   compoundImplementationAssigneeValid,
+  gateSlotOf,
+  gateToggleActivity,
+  gateToggleRefusal,
   InboxStatus,
   integratorBindingRefusalFor,
   Prisma,
@@ -120,6 +123,15 @@ type GateWinner = {
   runId: string;
 } | null;
 
+/** The approval-gate check is deliberately evaluated by every locked write
+ * path. The unlocked task read is only a fast route input snapshot; status and
+ * template-step identity are authoritative after `writeTask` takes the Task
+ * (or whole Chain) mutex. */
+type GatePatchPlan = {
+  refusal: Refusal | null;
+  activity: TaskActivityInput | null;
+};
+
 /** A refusal from `writeTask` in this action's terms: the task is gone, or the
  *  assignee the request named may not be written onto it. */
 const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => (
@@ -127,6 +139,35 @@ const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => (
     ? { reason: "not-found", message: "Task not found" }
     : { reason: "invalid-request", message: refusal.reason }
 );
+
+const gatePatchPlan = (
+  locked: {
+    chainId: string | null;
+    status: TaskStatus;
+    templateStep: Parameters<typeof gateSlotOf>[0];
+  },
+  requested: boolean,
+  changed: boolean,
+): GatePatchPlan => {
+  if (!changed || locked.chainId === null) return { refusal: null, activity: null };
+  const slot = gateSlotOf(locked.templateStep);
+  if (slot === null) {
+    return {
+      refusal: { reason: "conflict", message: gateToggleRefusal(null, locked.status) },
+      activity: null,
+    };
+  }
+  if (locked.status !== TaskStatus.TODO) {
+    return {
+      refusal: { reason: "conflict", message: gateToggleRefusal(slot, locked.status) },
+      activity: null,
+    };
+  }
+  return {
+    refusal: null,
+    activity: { actorType: "operator", body: gateToggleActivity(slot, requested) },
+  };
+};
 
 /**
  * Patch a task. The action owns its preflight refusals and all four of its
@@ -143,9 +184,7 @@ export const patchTask = async (
   body: TaskPatchInput,
 ): Promise<TaskPatchResult> => {
   const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
-  if (before.chainId !== null && body.approvalGate !== undefined && body.approvalGate !== before.approvalGate) {
-    return { reason: "conflict", message: "Approval gates on dispatched chain tasks are controlled by the chain" };
-  }
+  const approvalGateChanged = body.approvalGate !== undefined && body.approvalGate !== before.approvalGate;
   // Held for the whole route: whichever of the three write paths below runs
   // re-reads this assignee under the Agent-row mutex before it commits.
   const assignee = body.assigneeAgentId
@@ -286,6 +325,10 @@ export const patchTask = async (
           activity: null,
           value: { reason: "conflict" as const, message },
         });
+        const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+        if (gatePatch.refusal) {
+          return { update: null, activity: null, value: gatePatch.refusal };
+        }
         // These reads stay inside the Task/Chain mutex. Board projection can
         // answer from its snapshot, but PATCH revalidates the two dynamic
         // residues (`active-run`, `stop-state`) at the write's serialization
@@ -375,9 +418,9 @@ export const patchTask = async (
         }
         return {
           update: updateData,
-          activity: statusChanged
+          activity: gatePatch.activity ?? (statusChanged
             ? taskStatusChangedActivity(locked.status, nextStatus)
-            : null,
+            : null),
           value: { gate, previousStatus: locked.status },
         };
       });
@@ -435,32 +478,47 @@ export const patchTask = async (
     // requeues; otherwise a request that commits first can still be missed by
     // a creator holding a stale task relation.
     const updated = await db.$transaction(
-      async (tx) => writeTask(tx, taskId, async () => ({ update: updateData, activity: null, value: null })),
+      async (tx) => writeTask(tx, taskId, async (locked) => {
+        const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+        if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
+        return { update: updateData, activity: gatePatch.activity, value: null };
+      }),
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
     if (!updated.ok) {
       return taskWriteRefusal(updated.refusal);
     }
+    if (updated.value !== null) return updated.value;
     return { task: updated.written! };
   }
   // A plain field edit that hands the task to an agent is still an assignment
   // writer, so it joins the same protocol: Task row first, Agent row second.
   if (assignee) {
     const written = await db.$transaction(
-      async (tx) => writeTask(tx, taskId, async () => ({ update: updateData, activity: null, value: null })),
+      async (tx) => writeTask(tx, taskId, async (locked) => {
+        const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+        if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
+        return { update: updateData, activity: gatePatch.activity, value: null };
+      }),
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
     if (!written.ok) {
       return taskWriteRefusal(written.refusal);
     }
+    if (written.value !== null) return written.value;
     return { task: written.written! };
   }
   const written = await db.$transaction(
-    async (tx) => writeTask(tx, taskId, async () => ({ update: updateData, activity: null, value: null })),
+    async (tx) => writeTask(tx, taskId, async (locked) => {
+      const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+      if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
+      return { update: updateData, activity: gatePatch.activity, value: null };
+    }),
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
   );
   if (!written.ok) {
     return taskWriteRefusal(written.refusal);
   }
+  if (written.value !== null) return written.value;
   return { task: written.written! };
 };

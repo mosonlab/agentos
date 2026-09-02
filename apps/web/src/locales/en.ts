@@ -153,6 +153,8 @@ export const en = {
   "chain.currentExecution": "Current execution",
   "chain.error": "The chain could not be loaded.",
   "chain.gate": "requires approval before unblocking dependents",
+  "chain.gate.specification": "Specification approval gate",
+  "chain.gate.merge": "Merge readiness approval gate",
   "chain.heldAfter": "Held after layer {n}",
   "chain.holdReason": "Reason: {reason}",
   "chain.humanAssignee": "Human responsibility",
