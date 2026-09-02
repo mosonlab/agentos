@@ -27,12 +27,28 @@ test("repository preflight checks identity, exact head, fetch, and dry-run push 
 
   await preflightOnboardingRepository(input, run);
 
-  assert.deepEqual(calls.map((args) => args[0]), ["config", "config", "ls-remote", "init", "fetch", "ls-tree", "push"]);
+  assert.deepEqual(calls.map((args) => args[0]), ["config", "config", "ls-remote", "init", "fetch", "push"]);
   assert.deepEqual(calls[2], ["ls-remote", "--exit-code", "--heads", input.repo.remoteUrl, "refs/heads/main"]);
-  assert.equal(calls[6]?.[0], "push");
-  assert.equal(calls[6]?.[1], "--dry-run");
-  assert.equal(calls[6]?.[2], input.repo.remoteUrl);
-  assert.match(calls[6]?.[3] ?? "", /^FETCH_HEAD:refs\/heads\/agentos-preflight-[0-9a-f]{16}$/u);
+  assert.equal(calls[5]?.[0], "push");
+  assert.equal(calls[5]?.[1], "--dry-run");
+  assert.equal(calls[5]?.[2], input.repo.remoteUrl);
+  assert.match(calls[5]?.[3] ?? "", /^FETCH_HEAD:refs\/heads\/agentos-preflight-[0-9a-f]{16}$/u);
+});
+
+test("first-run onboarding preserves its existing behavior for a repository with a root lockfile", async () => {
+  const calls: string[][] = [];
+  const run: RepositoryPreflightCommand = async (_executable, args) => {
+    calls.push(args);
+    if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+    if (args[0] === "ls-tree") return { code: 0, stdout: `100644 blob ${"b".repeat(40)}\tpackage-lock.json\0` };
+    return { code: 0, stdout: "" };
+  };
+
+  await preflightOnboardingRepository(input, run);
+
+  assert.equal(calls.some((args) => args[0] === "ls-tree"), false);
+  assert.equal(calls.some((args) => args[0] === "push"), true);
 });
 
 test("repository preflight classifies a missing branch and never attempts a write", async () => {

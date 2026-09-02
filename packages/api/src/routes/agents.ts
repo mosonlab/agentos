@@ -160,9 +160,9 @@ const repoInput = z.object({
   credentialSecretId: id.nullable().default(null),
   dependencyProvisioning: dependencyProvisioningInput,
 });
-// Keep remoteUrl raw for POST /projects/:projectId/repos. The onboarding remote
-// policy must see exactly what the operator submitted; PATCH continues to use
-// repoInput above and therefore retains its established trimming behavior.
+// Keep remoteUrl raw wherever repository policy runs. A leading newline or
+// trailing tab is itself invalid input; trimming before parseRepoRemote would
+// silently turn it into a different, accepted value.
 const repoCreateInput = repoInput.extend({
   remoteUrl: z.string(),
   grantAgents: z.boolean().default(false),
@@ -171,7 +171,9 @@ const repoAccessInput = z.object({
   permissions: z.nativeEnum(RepoPermission).default(RepoPermission.GIT_WRITE),
   mountPath: z.string().trim().min(1).default("repo"),
 });
-const repoPatch = repoInput.partial().refine((value) => Object.keys(value).length > 0);
+const repoPatch = repoInput.partial().extend({
+  remoteUrl: z.string().refine((value) => value.trim().length > 0).optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const secretGrantInput = z.object({ secretId: id, envVar: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) });
 const skillBindingInput = z.object({ skillId: id });
 const mcpBindingInput = z.object({ mcpConnectionId: id });
@@ -620,7 +622,10 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     return context.json(result satisfies RepoResponse | { repo: RepoResponse; grants: AgentRepoAccessContract[] }, 201);
   });
   app.patch("/repos/:repoId", async (context) => {
-    const body = await readJson(context.req.raw, repoPatch);
+    const submitted = await readJson(context.req.raw, repoPatch);
+    const body = submitted.remoteUrl === undefined
+      ? submitted
+      : { ...submitted, remoteUrl: submitted.remoteUrl.trim() };
     if (body.dependencyProvisioning !== undefined && !isDependencyProvisioning(body.dependencyProvisioning)) {
       return context.json(dependencyProvisioningInvalid, 400);
     }
@@ -634,8 +639,8 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         where: { id: repoId },
         select: { remoteUrl: true, defaultBranch: true },
       });
-      if (!stored) return context.json({ error: "Repo not found" }, 404);
-      const remote = parseRepoRemote(body.remoteUrl ?? stored.remoteUrl);
+      if (!stored) return refusalJson(context, refusal("not-found", "Resource not found"));
+      const remote = parseRepoRemote(submitted.remoteUrl ?? stored.remoteUrl);
       if (!remote.ok) {
         return context.json({
           error: "Repository remote is invalid",

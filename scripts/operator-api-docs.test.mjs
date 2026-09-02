@@ -155,6 +155,20 @@ test("PATCH /repos/:repoId documents the optional dependency policy and exact re
   assert.match(text, /omission preserves the stored value/iu);
   assert.match(text, /\{\s*"error": "Repository dependency provisioning is invalid",\s*"code": "repository-dependency-provisioning-invalid"\s*\}/u);
   assert.match(text, /stored `remoteUrl` and\s*`defaultBranch`[\s\S]*same patch/iu);
+  assert.match(text, /\{\s*"error": "Resource not found"\s*\}/u);
+  assert.match(text, /\{\s*"error": "Repository remote is invalid",\s*"code": "repository-remote-invalid",\s*"reason": "<parseRepoRemote rejection reason>"\s*\}/u);
+  assert.match(text, /\{\s*"error": "Repository default branch is invalid",\s*"code": "repository-default-branch-invalid"\s*\}/u);
+  assert.match(text, /\{\s*"error": "Repository preflight failed",\s*"code": "repository-preflight-failed",\s*"reason": "<existing failure reason>"\s*\}/u);
+  for (const reason of [
+    "git-unavailable",
+    "git-identity-missing",
+    "remote-unreachable",
+    "default-branch-missing",
+    "push-not-authorized",
+    "command-timeout",
+  ]) {
+    assert.match(text, new RegExp("`" + reason + "`", "u"));
+  }
   assert.match(text, /\{\s*"error": "Repository preflight failed",\s*"code": "repository-package-lock-missing",\s*"remedy": "Commit package-lock\.json at the repository root on the default branch, or choose dependencyProvisioning NONE\."\s*\}/u);
   assert.match(text, /\{\s*"error": "Repository dependency provisioning contradicts lockfile",\s*"code": "repository-dependency-provisioning-contradicts-lockfile",\s*"remedy": "Choose dependencyProvisioning NPM_CI for repositories with a root package-lock\.json\."\s*\}/u);
 });

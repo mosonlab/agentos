@@ -694,6 +694,35 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/repos" \
   preflight before writing the Repo row. It uses the stored `remoteUrl` and
   `defaultBranch`, except that either value supplied in the same patch is used
   for preflight. A preflight refusal leaves the Repo unchanged. For
+  a missing Repo, the route returns `404 Not Found` with exactly:
+
+  ```json
+  { "error": "Resource not found" }
+  ```
+
+  A patched `remoteUrl` is checked without first trimming the submitted value.
+  An invalid remote returns `400 Bad Request` with exactly:
+
+  ```json
+  { "error": "Repository remote is invalid", "code": "repository-remote-invalid", "reason": "<parseRepoRemote rejection reason>" }
+  ```
+
+  An invalid patched or stored default branch returns `400 Bad Request` with
+  exactly:
+
+  ```json
+  { "error": "Repository default branch is invalid", "code": "repository-default-branch-invalid" }
+  ```
+
+  Other preflight failures return `422 Unprocessable Entity` with exactly:
+
+  ```json
+  { "error": "Repository preflight failed", "code": "repository-preflight-failed", "reason": "<existing failure reason>" }
+  ```
+
+  The possible reasons are `git-unavailable`, `git-identity-missing`,
+  `remote-unreachable`, `default-branch-missing`, `push-not-authorized`, and
+  `command-timeout`. For
   `NPM_CI`, a missing or non-regular root `package-lock.json` in the exact
   fetched default branch commit returns `422 Unprocessable Entity` with
   exactly:

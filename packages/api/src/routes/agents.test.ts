@@ -600,7 +600,7 @@ test("PATCH repo preflights stored and patched repository identity before writin
     const response = await app.request("/repos/repo-1", {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ dependencyProvisioning: "NPM_CI", remoteUrl: "  https://github.com/owner/patched.git  ", defaultBranch: "release/v1" }),
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI", remoteUrl: "https://github.com/owner/patched.git", defaultBranch: "release/v1" }),
     });
     assert.equal(response.status, 200);
     assert.deepEqual(preflightInputs, [{
@@ -638,12 +638,58 @@ test("PATCH repo preflights stored and patched repository identity before writin
       defaultBranch: "main",
       dependencyProvisioning: "NONE",
     });
-    assert.equal(storedValues.length, 1);
-    assert.deepEqual(preflightInputs.at(-1), {
+    assert.deepEqual(storedValues, [{
       remoteUrl: "https://github.com/owner/stored.git",
       defaultBranch: "main",
-      dependencyProvisioning: "NONE",
+    }]);
+  });
+});
+
+test("PATCH repo applies remote policy to the raw value before preflight or writing", async () => {
+  await withTokens(async () => {
+    let preflights = 0;
+    let updates = 0;
+    const app = createApp({
+      repo: {
+        findUnique: async () => ({ remoteUrl: "https://github.com/owner/stored.git", defaultBranch: "main" }),
+        update: async () => { updates += 1; return {}; },
+      },
+    } as unknown as PrismaClient, {
+      repositoryPreflight: async () => { preflights += 1; },
     });
+
+    const response = await app.request("/repos/repo-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NPM_CI", remoteUrl: "  https://github.com/owner/patched.git" }),
+    });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "Repository remote is invalid",
+      code: "repository-remote-invalid",
+      reason: "whitespace",
+    });
+    assert.equal(preflights, 0);
+    assert.equal(updates, 0);
+  });
+});
+
+test("PATCH repo uses the standard not-found refusal before dependency preflight", async () => {
+  await withTokens(async () => {
+    const app = createApp({
+      repo: { findUnique: async () => null },
+    } as unknown as PrismaClient, {
+      repositoryPreflight: async () => { throw new Error("must not preflight a missing Repo"); },
+    });
+    const response = await app.request("/repos/missing", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyProvisioning: "NONE" }),
+    });
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Resource not found" });
   });
 });
 
