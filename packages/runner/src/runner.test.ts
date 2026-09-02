@@ -55,6 +55,7 @@ const mechanicalClaim: ClaimedTask = {
     id: "task-10",
     chainId: null,
     chainIndex: null,
+    chainLayer: null,
     name: "Merge execution",
     description: "Execute the authorized merge",
     repoId: "repo-1",
@@ -62,7 +63,7 @@ const mechanicalClaim: ClaimedTask = {
     maxDurationMin: 30,
     stallTimeoutMin: 10,
     maxSessionsPerTask: 3,
-    templateStep: { name: "Merge execution", provisionDependencies: true },
+    templateStep: { name: "Merge execution", outputKind: "result", provisionDependencies: true, taskTemplate: { name: "merge-workflow" } },
   },
   agent: {
     id: "agent-merge",
@@ -84,6 +85,7 @@ const mechanicalClaim: ClaimedTask = {
   },
   run: {
     id: "run-10",
+    taskId: "task-10",
     runNumber: 1,
     opensPullRequest: false,
     requiresCommit: false,
@@ -118,9 +120,31 @@ const mechanicalClaim: ClaimedTask = {
   regressionRepairHandoff: null,
 };
 
+/** The output status of a step whose agent persisted what it declared. */
+const persistedResultOutput = {
+  outputKind: "result",
+  outputRequired: true,
+  outputRemediationAllowed: true,
+  outputSatisfiedByPriorRun: false,
+  outputPersisted: true,
+  output: null,
+};
+
+/**
+ * The same claim as an ordinary agent run of an ad-hoc task. A task with no
+ * template step declares no task output, which is what most scenarios below
+ * want: the ones that do declare one also answer the output status the runner
+ * then reads.
+ */
+const agentClaim: ClaimedTask = {
+  ...mechanicalClaim,
+  executionMode: "agent",
+  task: { ...mechanicalClaim.task, templateStep: null },
+};
+
 let injectedControlPlane: ControlPlane = createControlPlaneDouble().controlPlane;
 const setControlPlane = (handler: ControlPlaneFetchHandler): void => {
-  injectedControlPlane = createRoutedControlPlaneDouble(handler).controlPlane;
+  injectedControlPlane = createRoutedControlPlaneDouble(config(""), handler).controlPlane;
 };
 const executeClaim = (
   ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
@@ -171,8 +195,7 @@ const malformedDependencyProvisioningClaim = (value: unknown): ClaimedTask => {
   if (value === undefined) delete repo.dependencyProvisioning;
   else repo.dependencyProvisioning = value;
   return {
-    ...mechanicalClaim,
-    executionMode: "agent",
+    ...agentClaim,
     repo,
   } as unknown as ClaimedTask;
 };
@@ -230,8 +253,7 @@ const malformedTemplateProvisionDependenciesClaim = (value: unknown): ClaimedTas
   if (value === undefined) delete templateStep.provisionDependencies;
   else templateStep.provisionDependencies = value;
   return {
-    ...mechanicalClaim,
-    executionMode: "agent",
+    ...agentClaim,
     task: { ...mechanicalClaim.task, templateStep },
   } as unknown as ClaimedTask;
 };
@@ -287,8 +309,11 @@ test("a review step records the dependency skip before fake adapter preflight an
       path: process.env.PATH ?? "/usr/bin:/bin",
       dependencyCacheRoot: join(root, "dependency-cache"),
     };
-    const controlPlane = createControlPlaneDouble();
     const timeline: string[] = [];
+    const controlPlane = createControlPlaneDouble({
+      note: async () => { timeline.push("activity"); },
+      outputStatus: async () => persistedResultOutput,
+    });
     const adapter: CliAdapter = {
       ...adapters.CLAUDE,
       preflight: async () => {
@@ -339,13 +364,12 @@ test("a review step records the dependency skip before fake adapter preflight an
       kill: async () => ({ signal: null, processAlive: false }),
     };
     const claim = {
-      ...mechanicalClaim,
-      executionMode: "agent" as const,
+      ...agentClaim,
       runner: "CLAUDE" as const,
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       task: {
         ...mechanicalClaim.task,
-        templateStep: { name: "Code review", provisionDependencies: false },
+        templateStep: { name: "Code review", outputKind: "result", provisionDependencies: false, taskTemplate: { name: "review-workflow" } },
       },
       run: {
         ...mechanicalClaim.run,
@@ -357,11 +381,6 @@ test("a review step records the dependency skip before fake adapter preflight an
       session: testSession(root),
     } satisfies ClaimedTask;
 
-    const originalAppendActivity = controlPlane.controlPlane.appendActivity;
-    controlPlane.controlPlane.appendActivity = async (...args) => {
-      timeline.push("activity");
-      await originalAppendActivity(...args);
-    };
     await executeClaimProduction(configured, claim, {
       adapter,
       controlPlane: controlPlane.controlPlane,
@@ -393,7 +412,7 @@ test("an implementation step provisions dependencies without recording the revie
       path: process.env.PATH ?? "/usr/bin:/bin",
       dependencyCacheRoot: join(root, "dependency-cache"),
     };
-    const controlPlane = createControlPlaneDouble();
+    const controlPlane = createControlPlaneDouble({ outputStatus: async () => persistedResultOutput });
     let preflightCalls = 0;
     let startCalls = 0;
     const adapter: CliAdapter = {
@@ -451,8 +470,7 @@ test("an implementation step provisions dependencies without recording the revie
       kill: async () => ({ signal: null, processAlive: false }),
     };
     const claim = {
-      ...mechanicalClaim,
-      executionMode: "agent" as const,
+      ...agentClaim,
       runner: "CLAUDE" as const,
       repo: {
         ...mechanicalClaim.repo,
@@ -462,7 +480,7 @@ test("an implementation step provisions dependencies without recording the revie
       },
       task: {
         ...mechanicalClaim.task,
-        templateStep: { name: "Implementation", provisionDependencies: true },
+        templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
       },
       run: {
         ...mechanicalClaim.run,
@@ -518,13 +536,12 @@ test("NPM_CI manifest failure reaches the Run outcome as a non-retryable protoco
       },
     };
     const claim = {
-      ...mechanicalClaim,
-      executionMode: "agent" as const,
+      ...agentClaim,
       runner: "CLAUDE" as const,
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master", dependencyProvisioning: "NPM_CI" as const },
       task: {
         ...mechanicalClaim.task,
-        templateStep: { name: "Implementation", provisionDependencies: true },
+        templateStep: { name: "Implementation", outputKind: "result", provisionDependencies: true, taskTemplate: { name: "implementation-workflow" } },
       },
       run: {
         ...mechanicalClaim.run,
@@ -569,8 +586,7 @@ test("an ordinary claim is not short-circuited by the mechanical refusal", async
   // Over budget, so it exits on the very next guard — enough to prove the
   // mechanical branch did not swallow it, without provisioning anything.
   await executeClaim(config(workspaceRoot), {
-    ...mechanicalClaim,
-    executionMode: "agent",
+    ...agentClaim,
     run: { ...mechanicalClaim.run, runNumber: 9, maxRunsPerTask: 3 },
   });
   assert.deepEqual(calls, ["http://api.invalid/runner/runs/run-10/complete"]);
@@ -809,8 +825,7 @@ test("Codex provision auth failure is PROVISION, retains its root, and never spa
       start: async () => { startCalls += 1; throw new Error("CLI must not spawn"); },
     };
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -854,8 +869,7 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
       start: async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); },
     };
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -895,8 +909,7 @@ test("runtime-tool materialization failure is PROVISION and never reaches prefli
       start: async () => { startCalls += 1; throw new Error("provider must not spawn"); },
     };
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -952,8 +965,7 @@ for (const failureCase of ["collision", "missing source", "wrong source type", "
         start: async () => { startCalls += 1; throw new Error("provider must not spawn"); },
       };
       await executeClaim(configured, {
-        ...mechanicalClaim,
-        executionMode: "agent",
+        ...agentClaim,
         runner: "CODEX",
         repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
         agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1019,8 +1031,7 @@ test("Codex rejects a run-as config-root symlink in PROVISION without copying ho
       start: async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); },
     };
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1145,8 +1156,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     };
 
     const execution = executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CLAUDE",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1354,8 +1364,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     // process that has just reported two of three backends blocked.
     assert.deepEqual(await runStartupPreflight(configured), { CLAUDE: false, CODEX: true, PI: false });
     const codexClaim = {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1403,8 +1412,7 @@ test("an outside worktree is reported without changing a successful run outcome"
     });
 
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1450,8 +1458,7 @@ test("Codex records success after reconnecting and reaching terminal completion"
     });
 
     await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1490,8 +1497,7 @@ test("Codex preserves reconnect evidence when the stream ends before terminal co
     });
 
     await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1534,8 +1540,7 @@ test("Codex preserves reconnect evidence when terminal completion is followed by
     });
 
     await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1575,8 +1580,7 @@ test("a failed first completion request restores and retains CODEX_HOME", async 
     });
 
     await executeClaim(codexOnly(join(root, "workspaces"), root, binary), {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1607,8 +1611,7 @@ test("a suspended PI claim retains the session config root for reuse", async () 
     configured.home = root;
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "PI",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "openai-codex/gpt-5.1-codex-max" },
@@ -1647,8 +1650,7 @@ test("session-config cleanup failure does not turn delivered work into a failed 
     });
 
     await executeClaim(codexOnly(join(root, "workspaces"), root, binary), {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -1695,8 +1697,7 @@ test("default failed-workspace retention still salvages and records the exact du
     const configured = codexOnly(workspaces, root, binary);
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -1744,8 +1745,7 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -1802,8 +1802,7 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
     const configured = { ...codexOnly(workspaces, root, binary), heartbeatIntervalMs: 20 };
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -1844,8 +1843,7 @@ test("a clean failed run records that there is nothing to salvage before cleanup
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -1887,8 +1885,7 @@ test("failed-run salvage excludes worktrees created at the instructed in-workspa
     });
 
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -1927,8 +1924,7 @@ test("a failed salvage keeps the workspace and reports cleanup failure", async (
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -1973,8 +1969,7 @@ test("successful execution with failed delivery salvages before removing the wor
     });
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -2035,8 +2030,7 @@ test("a pull-request failure after publication keeps the primary delivery eviden
     };
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: githubRemote, defaultBranch: "master" },
@@ -2083,8 +2077,7 @@ test("a successful pinned review never publishes its dirty detached checkout", a
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     });
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -2126,8 +2119,7 @@ test("a failed pinned review reports failure without publishing its dirty detach
     });
 
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -2180,8 +2172,7 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     });
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
@@ -2243,8 +2234,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     // rather than as a generic task failure, which is what tells the operator to
     // go and run `codex login`.
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
@@ -2290,8 +2280,7 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
     assert.equal(codex.body.resolvedPath, null);
 
     await executeClaim(configured, {
-      ...mechanicalClaim,
-      executionMode: "agent",
+      ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },

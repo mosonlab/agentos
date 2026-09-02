@@ -1,37 +1,46 @@
 import {
-  authorityFor,
-  authorityAfterHeartbeat,
   ControlPlaneError,
-  retriableStartupError,
+  type CancellationRequest,
   type ClaimedTask,
+  type CliAvailabilityReport,
   type Completion,
   type ControlPlane,
+  type PreflightReport,
   type ReclaimResult,
+  type RunCleanupReport,
+  type RunSession,
+  type RunSessionClaim,
+  type RunStartSnapshot,
   type SessionEventPayload,
   type SessionTaskOutput,
   type SessionTaskOutputStatus,
 } from "./api.js";
-import type { RunnerKind } from "./config.js";
+import type { RunnerConfig, RunnerKind } from "./config.js";
 
-type AsyncMethodName = {
-  [K in keyof ControlPlane]: ControlPlane[K] extends (...args: never[]) => Promise<unknown> ? K : never
-}[keyof ControlPlane];
-
-export type ControlPlaneOverrides = Partial<Pick<ControlPlane, AsyncMethodName>>;
+/**
+ * Every operation of both seams, in the bound form production consumes. A test
+ * overrides the ones its scenario is about; the rest record and answer with the
+ * ordinary success of an unremarkable control plane. `openRun` is how an
+ * override reaches the claim its session was opened for — the one thing a bound
+ * session hides from a caller that only sees the operations.
+ */
+export type ControlPlaneOverrides = Partial<RunSession> & Partial<Omit<ControlPlane, "openRun">> & {
+  openRun?: (claim: RunSessionClaim) => Partial<RunSession>;
+};
 
 export type ControlPlaneDouble = {
   controlPlane: ControlPlane;
   completions: Completion[];
-  starts: Array<Record<string, unknown> & { promptHash: string }>;
+  starts: RunStartSnapshot[];
   eventBatches: SessionEventPayload[][];
   activities: Array<{ body: string; metadata: Record<string, unknown> }>;
   taskOutputs: SessionTaskOutput[];
   publishedBranches: string[];
-  leaseIndependentCleanups: Array<{ cleanupStatus: string; cleanupFailureReason?: string; workspaceRetained: boolean }>;
+  leaseIndependentCleanups: RunCleanupReport[];
   reclaimReports: ReclaimResult[][];
   reclaimPublications: string[];
-  preflightReports: Array<{ runner: RunnerKind; result: Parameters<ControlPlane["reportPreflight"]>[2] }>;
-  availabilityReports: Parameters<ControlPlane["reportCliAvailability"]>[1][];
+  preflightReports: Array<{ runner: RunnerKind; result: PreflightReport }>;
+  availabilityReports: CliAvailabilityReport[];
   heartbeatCount: () => number;
   outputStatusReadCount: () => number;
 };
@@ -41,12 +50,12 @@ export const createControlPlaneDouble = (
   overrides: ControlPlaneOverrides = {},
 ): ControlPlaneDouble => {
   const completions: Completion[] = [];
-  const starts: Array<Record<string, unknown> & { promptHash: string }> = [];
+  const starts: RunStartSnapshot[] = [];
   const eventBatches: SessionEventPayload[][] = [];
   const activities: Array<{ body: string; metadata: Record<string, unknown> }> = [];
   const taskOutputs: SessionTaskOutput[] = [];
   const publishedBranches: string[] = [];
-  const leaseIndependentCleanups: Array<{ cleanupStatus: string; cleanupFailureReason?: string; workspaceRetained: boolean }> = [];
+  const leaseIndependentCleanups: RunCleanupReport[] = [];
   const reclaimReports: ReclaimResult[][] = [];
   const reclaimPublications: string[] = [];
   const preflightReports: ControlPlaneDouble["preflightReports"] = [];
@@ -54,67 +63,71 @@ export const createControlPlaneDouble = (
   let heartbeats = 0;
   let outputStatusReads = 0;
 
+  const openRun = (claim: RunSessionClaim): RunSession => {
+    const session: Partial<RunSession> = { ...overrides, ...overrides.openRun?.(claim) };
+    return {
+      start: async (snapshot) => {
+        starts.push(snapshot);
+        await session.start?.(snapshot);
+      },
+      heartbeat: async (progress) => {
+        heartbeats += 1;
+        return await session.heartbeat?.(progress) ?? { held: true };
+      },
+      note: async (body, metadata) => {
+        activities.push({ body, metadata: metadata ?? {} });
+        await session.note?.(body, metadata);
+      },
+      emit: async (events, providerConversationId) => {
+        eventBatches.push(events);
+        await session.emit?.(events, providerConversationId);
+      },
+      publishOutput: async (output) => {
+        taskOutputs.push(output);
+        await session.publishOutput?.(output);
+      },
+      outputStatus: async () => {
+        outputStatusReads += 1;
+        return await session.outputStatus?.() ?? null;
+      },
+      publishBranch: async (pushedBranch) => {
+        publishedBranches.push(pushedBranch);
+        await session.publishBranch?.(pushedBranch);
+      },
+      recordCleanup: async (cleanup) => {
+        leaseIndependentCleanups.push(cleanup);
+        await session.recordCleanup?.(cleanup);
+      },
+      acknowledgeCancellation: async (cancellation, workspace, containment) => {
+        await session.acknowledgeCancellation?.(cancellation, workspace, containment);
+      },
+      finish: async (completion) => {
+        completions.push(completion);
+        await session.finish?.(completion);
+      },
+    };
+  };
+
   const controlPlane: ControlPlane = {
-    claim: async (config) => overrides.claim?.(config) ?? null,
-    startRun: async (config, claim, snapshot) => {
-      starts.push(snapshot);
-      await overrides.startRun?.(config, claim, snapshot);
-    },
-    heartbeat: async (config, claim, state) => {
-      heartbeats += 1;
-      return await overrides.heartbeat?.(config, claim, state) ?? { ok: true, cancellation: null };
-    },
-    appendEvents: async (config, claim, events, providerConversationId) => {
-      eventBatches.push(events);
-      await overrides.appendEvents?.(config, claim, events, providerConversationId);
-    },
-    appendActivity: async (config, claim, body, metadata) => {
-      activities.push({ body, metadata: metadata ?? {} });
-      await overrides.appendActivity?.(config, claim, body, metadata);
-    },
-    completeRun: async (config, claim, completion) => {
-      completions.push(completion);
-      await overrides.completeRun?.(config, claim, completion);
-    },
-    persistSessionTaskOutput: async (config, claim, output) => {
-      taskOutputs.push(output);
-      await overrides.persistSessionTaskOutput?.(config, claim, output);
-    },
-    readSessionTaskOutputStatus: async (config, claim) => {
-      outputStatusReads += 1;
-      return await overrides.readSessionTaskOutputStatus?.(config, claim) ?? null;
-    },
-    recordPublishedBranch: async (config, claim, branch) => {
-      publishedBranches.push(branch);
-      await overrides.recordPublishedBranch?.(config, claim, branch);
-    },
-    recordLeaseIndependentCleanup: async (config, claim, cleanup) => {
-      leaseIndependentCleanups.push(cleanup);
-      await overrides.recordLeaseIndependentCleanup?.(config, claim, cleanup);
-    },
-    acknowledgeCancellation: async (config, claim, cancellation, workspace, containment) => {
-      await overrides.acknowledgeCancellation?.(config, claim, cancellation, workspace, containment);
-    },
-    fetchReclaimPlan: async (config, inventory) => overrides.fetchReclaimPlan?.(config, inventory) ?? null,
-    reportReclaimOutcomes: async (config, report) => {
+    claim: async () => await overrides.claim?.() ?? null,
+    openRun,
+    fetchReclaimPlan: async (inventory) => await overrides.fetchReclaimPlan?.(inventory) ?? null,
+    reportReclaimOutcomes: async (report) => {
       reclaimReports.push(report.results);
-      await overrides.reportReclaimOutcomes?.(config, report);
+      await overrides.reportReclaimOutcomes?.(report);
     },
-    recordReclaimPublication: async (config, body) => {
-      reclaimPublications.push(body.pushedBranch);
-      await overrides.recordReclaimPublication?.(config, body);
+    recordReclaimPublication: async (publication) => {
+      reclaimPublications.push(publication.pushedBranch);
+      await overrides.recordReclaimPublication?.(publication);
     },
-    reportPreflight: async (config, runner, result) => {
+    reportPreflight: async (runner, result) => {
       preflightReports.push({ runner, result });
-      await overrides.reportPreflight?.(config, runner, result);
+      await overrides.reportPreflight?.(runner, result);
     },
-    reportCliAvailability: async (config, availability) => {
+    reportCliAvailability: async (availability) => {
       availabilityReports.push(availability);
-      return await overrides.reportCliAvailability?.(config, availability) ?? { revalidatePreflight: false };
+      return await overrides.reportCliAvailability?.(availability) ?? { revalidatePreflight: false };
     },
-    authorityFor,
-    authorityAfterHeartbeat,
-    retriableStartupError,
   };
 
   return {
@@ -151,10 +164,10 @@ export type ControlPlaneFetchHandler = (
  * operation overrides above.
  */
 export const createRoutedControlPlaneDouble = (
+  config: Pick<RunnerConfig, "apiUrl" | "runnerId">,
   handler: ControlPlaneFetchHandler,
 ): ControlPlaneDouble => {
   const request = async <T>(
-    config: Parameters<ControlPlane["completeRun"]>[0],
     path: string,
     body: Record<string, unknown>,
     method: "POST" | "PUT" = "POST",
@@ -173,70 +186,68 @@ export const createRoutedControlPlaneDouble = (
   };
 
   return createControlPlaneDouble({
-    startRun: async (config, claim, snapshot) => {
-      await request(config, `/runner/runs/${claim.run.id}/start`, {
-        runnerId: config.runnerId, fencingToken: claim.fencingToken, ...snapshot,
-      });
+    reportPreflight: async (runner, result) => {
+      await request("/runner/preflight", { runner, ...result });
     },
-    heartbeat: async (config, claim, state) => request(config, `/runner/runs/${claim.run.id}/heartbeat`, {
-      runnerId: config.runnerId, fencingToken: claim.fencingToken, ...state,
-    }),
-    appendEvents: async (config, claim, events, providerConversationId) => {
-      await request(config, `/runner/runs/${claim.run.id}/events`, {
-        runnerId: config.runnerId, fencingToken: claim.fencingToken, providerConversationId: providerConversationId ?? null, events,
-      });
-    },
-    appendActivity: async (config, claim, body, metadata) => {
-      await request(config, `/runner/runs/${claim.run.id}/activity`, {
-        fencingToken: claim.fencingToken, actorId: config.runnerId, body, metadata: metadata ?? {},
-      });
-    },
-    completeRun: async (config, claim, completion) => {
-      await request(config, `/runner/runs/${claim.run.id}/complete`, {
-        runnerId: config.runnerId, fencingToken: claim.fencingToken, ...completion,
-      });
-    },
-    persistSessionTaskOutput: async (config, claim, output) => {
-      await request(config, `/session/runs/${claim.run.id}/output`, {
-        fencingToken: claim.fencingToken,
-        ...output,
-      }, "PUT");
-    },
-    readSessionTaskOutputStatus: async (config, claim) => {
-      const payload = await request<{ task: SessionTaskOutputStatus | null }>(
-        config,
-        `/session/runs/${claim.run.id}/status`,
-        {},
-      );
-      return payload.task;
-    },
-    recordPublishedBranch: async (config, claim, pushedBranch) => {
-      await request(config, `/runner/runs/${claim.run.id}/publication`, {
-        runnerId: config.runnerId, fencingToken: claim.fencingToken, pushedBranch,
-      });
-    },
-    recordLeaseIndependentCleanup: async (config, claim, cleanup) => {
-      await request(config, `/runner/runs/${claim.run.id}/cleanup`, {
-        runnerId: config.runnerId, fencingToken: claim.fencingToken, ...cleanup,
-      });
-    },
-    acknowledgeCancellation: async (config, claim, cancellation, workspace, containment) => {
-      await request(config, `/runner/runs/${claim.run.id}/cancel/acknowledge`, {
-        runnerId: config.runnerId,
-        fencingToken: claim.fencingToken,
-        requestId: cancellation.requestId,
-        ...(workspace ? { workspacePath: workspace.path, branch: workspace.branch, baseSha: workspace.baseSha } : {}),
-        ...containment,
-      });
-    },
-    reportPreflight: async (config, runner, result) => {
-      await request(config, "/runner/preflight", { runner, ...result });
-    },
-    reportCliAvailability: async (config, availability) => {
-      const body = await request<{ revalidatePreflight?: boolean }>(config, "/runner/availability", {
+    reportCliAvailability: async (availability) => {
+      const body = await request<{ revalidatePreflight?: boolean }>("/runner/availability", {
         runnerId: config.runnerId, ...availability,
       });
       return { revalidatePreflight: body.revalidatePreflight === true };
+    },
+    openRun: (claim) => {
+      const fenced = { runnerId: config.runnerId, fencingToken: claim.fencingToken };
+      return {
+        start: async (snapshot) => {
+          await request(`/runner/runs/${claim.run.id}/start`, { ...fenced, ...snapshot });
+        },
+        heartbeat: async (progress) => {
+          const result = await request<{ ok: boolean; cancellation: CancellationRequest | null }>(
+            `/runner/runs/${claim.run.id}/heartbeat`, { ...fenced, ...progress },
+          );
+          return result.cancellation ? { held: false, reason: "cancelled", request: result.cancellation } : { held: true };
+        },
+        emit: async (events, providerConversationId) => {
+          await request(`/runner/runs/${claim.run.id}/events`, {
+            ...fenced, providerConversationId: providerConversationId ?? null, events,
+          });
+        },
+        note: async (body, metadata) => {
+          await request(`/runner/runs/${claim.run.id}/activity`, {
+            fencingToken: claim.fencingToken, actorId: config.runnerId, body, metadata: metadata ?? {},
+          });
+        },
+        finish: async (completion) => {
+          await request(`/runner/runs/${claim.run.id}/complete`, { ...fenced, ...completion });
+        },
+        publishOutput: async (output) => {
+          await request(`/session/runs/${claim.run.id}/output`, {
+            fencingToken: claim.fencingToken,
+            ...output,
+          }, "PUT");
+        },
+        outputStatus: async () => {
+          const payload = await request<{ task: SessionTaskOutputStatus | null }>(
+            `/session/runs/${claim.run.id}/status`,
+            {},
+          );
+          return payload.task;
+        },
+        publishBranch: async (pushedBranch) => {
+          await request(`/runner/runs/${claim.run.id}/publication`, { ...fenced, pushedBranch });
+        },
+        recordCleanup: async (cleanup) => {
+          await request(`/runner/runs/${claim.run.id}/cleanup`, { ...fenced, ...cleanup });
+        },
+        acknowledgeCancellation: async (cancellation, workspace, containment) => {
+          await request(`/runner/runs/${claim.run.id}/cancel/acknowledge`, {
+            ...fenced,
+            requestId: cancellation.requestId,
+            ...(workspace ? { workspacePath: workspace.path, branch: workspace.branch, baseSha: workspace.baseSha } : {}),
+            ...containment,
+          });
+        },
+      };
     },
   });
 };

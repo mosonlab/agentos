@@ -62,6 +62,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     id: "task-113",
     chainId: null,
     chainIndex: null,
+    chainLayer: null,
     name: "Rate limit the inbox poller",
     description: "work",
     repoId: "repo-1",
@@ -83,6 +84,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   },
   run: {
     id: "run-113",
+    taskId: "task-113",
     runNumber: 1,
     opensPullRequest: true,
     requiresCommit: true,

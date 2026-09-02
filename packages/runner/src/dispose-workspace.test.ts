@@ -35,6 +35,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
 
 const runnerClaim = (runId: string): WorkspaceDisposalClaim => ({
   fencingToken: `fence-${runId}`,
+  sessionToken: `session-${runId}`,
   task: { id: "task-1" },
   run: { id: runId, runNumber: 2 },
   repo: { remoteUrl: "origin" },
