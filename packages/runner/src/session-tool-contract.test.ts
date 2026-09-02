@@ -17,7 +17,7 @@ import {
   type SessionToolName,
   type SessionToolRequest,
 } from "./session-tool-contract.js";
-import { taskOutputReceiptPath } from "./task-output-receipt.js";
+import { parseTaskOutputReceipt, taskOutputReceiptPath } from "./task-output-receipt.js";
 
 const piExtension = fileURLToPath(new URL("../assets/pi-agentos-extension.ts", import.meta.url));
 
@@ -192,7 +192,7 @@ test("the dependency-free PI adapter inlines the canonical definitions and reque
       ...(name === "task_output" ? { commitSha } : {}),
       ...(name === "inbox_ask" ? { requestIdPrefix: `pi:${runId}` } : {}),
     }))));
-    assert.deepEqual(JSON.parse(readFileSync(taskOutputReceiptPath(workspace), "utf8")), {
+    assert.deepEqual(parseTaskOutputReceipt(readFileSync(taskOutputReceiptPath(workspace), "utf8")), {
       runId,
       kind: "result",
       commitSha,
