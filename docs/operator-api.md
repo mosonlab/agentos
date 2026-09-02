@@ -1319,6 +1319,18 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
   `failureReason` may be `null`.
+- On a Chain step that carries a feature brief, `description` is the brief
+  alone. A task with both a `templateId` and a `chainId` whose Step authors a
+  brief — every step role except readiness and integrator — keeps its stored
+  step prompt and trailing reminders, and the route reframes the submitted text
+  as the brief between `<!-- agentos:task-brief:v1 length=<characters> -->` and
+  `<!-- /agentos:task-brief:v1 -->`, counting the length itself. Send the brief
+  body only: a whole description, prompt and fence included, is not refused but
+  becomes the brief inside a second fence, so read the task back and confirm it
+  carries one. A stored description the route cannot parse, or a Chain step
+  whose template Step metadata is missing, refuses with `400 Bad Request` and
+  `Cannot rewrite task brief: <reason>`. Every other task stores `description`
+  verbatim.
 
 ```sh
 curl -X PATCH "$BASE_URL/tasks/$TASK_ID" \
