@@ -21,26 +21,7 @@ export type ChainAggregateActions = {
   onArchive: (aggregate: ChainAggregate) => void;
 };
 
-type ChainActivationHold = {
-  heldLayer: number;
-  heldAt: string;
-  holdReason: string | null;
-};
-
-/**
- * The hold projection is added to the shared board contract alongside this
- * card. Keeping the narrow structural view here lets the card remain usable
- * by provider-free tests and by a stale response while the API/browser
- * contracts are rolled forward together. A missing value is treated as the
- * released state; the API never omits it once it serves the new contract.
- */
-type ChainAggregateWithHold = ChainAggregate & {
-  activation: ChainAggregate["activation"] & {
-    hold?: ChainActivationHold | null;
-  };
-};
-
-type ChainCardState = ChainAggregateState | "held";
+type ChainCardState = ChainAggregateState;
 
 /** Every state that still names itself on the card. `running` is absent by
  *  design: the run line's amber dot already says the chain is running, and the
@@ -76,8 +57,8 @@ const menu = (
   t: Translate,
 ): RowMenuEntry[] => {
   const activation = aggregate.activation;
-  const state = activation.state as ChainCardState;
-  const hold = (activation as ChainAggregateWithHold["activation"]).hold ?? null;
+  const state: ChainCardState = activation.state;
+  const hold = activation.hold;
   const controlTaskId = activation.taskId;
   const canHold = controlTaskId !== null
     && hold === null
@@ -112,9 +93,9 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const representative = representativeTaskId ?? aggregate.frontier.taskId;
   const title = chainName(aggregate);
   const position = memberPosition(aggregate, members);
-  const state = aggregate.activation.state as ChainCardState;
+  const state: ChainCardState = aggregate.activation.state;
   const predecessor = aggregate.activation.predecessor;
-  const hold = (aggregate.activation as ChainAggregateWithHold["activation"]).hold ?? null;
+  const hold = aggregate.activation.hold;
   const controlTaskId = aggregate.activation.taskId;
   const activeRepair = aggregate.activeRepair;
   const cost = usageCostAmount(aggregate.totalCost);
@@ -183,7 +164,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
           data-chain-hold=""
           onClick={(event) => { event.stopPropagation(); handlers.onHold(controlTaskId!); }}
         >
-          {t("tasks.aggregate.hold")}
+          {t(state === "running" ? "tasks.aggregate.stopAfter" : "tasks.aggregate.hold")}
         </Button>,
       ] : []),
       ...(canResume ? [
