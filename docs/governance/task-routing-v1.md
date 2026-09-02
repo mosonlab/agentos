@@ -1,8 +1,8 @@
 # Task Routing Contract v1
 
-Version: 1.8 (2026-09-02: dependency qualification names parallel dispatch as the default, narrows the true-dependency test to code and deploy order, and records that an `afterTaskId` binding is one-way)
+Version: 1.9 (2026-09-02: configurable approval gates add project defaults, per-dispatch overrides, and TODO-only slot toggles while preserving exact-head merge-tail authorization)
 
-Previous: 1.7 (2026-08-27: absorbs the dispatch rules formerly split into `AGENTS.md` — tier selection detail, implementation-assignee routing, and `afterTaskId` mechanics; `AGENTS.md` now carries a pointer only)
+Previous: 1.8 (2026-09-02: dependency qualification names parallel dispatch as the default, narrows the true-dependency test to code and deploy order, and records that an `afterTaskId` binding is one-way)
 
 Status: Active
 
@@ -71,12 +71,44 @@ Chains instantiated before a template change keep their stored prompts, assignme
 
 `Task.approvalGate` is the sole runtime authority for an Agent step. A role persists its output and finishes; the control plane moves a gated task to REVIEW and an ungated task to DONE. An Agent may ask a blocking Product Contract question, but it does not create a second approval request merely because its artifact is a specification or plan.
 
+Both configurable approval gates are off by default, so a newly created project
+and its chains remain fully autonomous unless an operator enables a gate. The
+two configurable slots are the specification step (`outputKind: spec`, the
+specification step in the Full Assurance/compound chain) and the server-owned
+merge readiness step (the step recognised by `isMergeReadinessStep`, step 11 in
+the compound chain and step 7 in the direct chain). No other step is a gate
+slot.
+
+Each project has independent `specGateDefault` and `mergeGateDefault` boolean
+defaults, both initially `false`. At dispatch, the optional `gates.spec` and
+`gates.merge` values override the corresponding project default for that chain
+only. For either slot, resolution is exactly: dispatch override, then project
+default, then the template step's frontmatter `approvalGate`. Every other step
+keeps its frontmatter value. An operator may toggle a slot task's
+`approvalGate` after dispatch only while that task is still `TODO`; a non-slot
+chain task or a slot already `DOING`, `REVIEW`, or `DONE` is refused. Existing
+chains retain their stored gate values.
+
 Place the fewest gates that preserve human judgment:
 
 - Add a specification gate only when the spec step resolves product behavior, acceptance semantics, or a data-contract ambiguity left open by the approved Product Contract.
 - Do not gate the plan step before independent review. In Full Assurance, put implementation authorization after reviewed-plan closure at the revise-plan step.
 - Keep implementation, review, adjudication, repair, regression, and documentation automatic inside approved boundaries.
-- No human gate guards the merge tail: server-owned readiness and the mechanical integrator enforce exact-head authorization, and head, base, required-check, or material-evidence drift stops them without a human decision.
+For a gated merge-readiness slot, completion of regression opens the existing
+integrator-feeding gate with regression evidence and server-read evidence (the
+pull-request head, base, and required-check conclusions) shown before approval.
+Approval records an
+exact-head operator authorization and releases the readiness task to its
+ordinary server-owned readiness worker; it does not mark readiness `DONE` or
+activate merge execution directly. The worker performs its ordinary
+exact-head, base, ancestry, defense, and lease re-verification before the sole
+integrator authorization is produced. If the head or base drifts after
+approval, the tail stops without merging and regression/readiness reopen the
+gate with a fresh evidence card for the changed state; the old authorization is
+not reused. Rejecting the merge gate ends the chain terminal, never activates
+the merge execution step, and leaves the pull request open and unmerged. A
+specification-gate rejection keeps the existing requeue behavior and consumes
+the task's normal `maxSessionsPerTask` budget.
 
 Direct has no planning gates. Gate selection is recorded at dispatch; an active Agent does not rewrite it.
 

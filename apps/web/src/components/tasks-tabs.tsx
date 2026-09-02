@@ -56,7 +56,7 @@ export const TasksPageHead = ({ active, onCreated }: {
       <Segmented options={tabs} value={active} onChange={(value) => navigate(`/${value}`)} />
 
       {creating && projectId !== "" ? (
-        <NewTask projectId={projectId} agents={agents ?? []} repos={repos ?? []}
+        <NewTask projectId={projectId} project={project} agents={agents ?? []} repos={repos ?? []}
           onClose={() => setCreating(false)} onCreated={() => onCreated?.()} />
       ) : null}
     </>

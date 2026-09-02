@@ -20,22 +20,16 @@ Use the current repository instructions as authority. Bind every report to an ex
 
 ## Model and delegation contract
 
-The skill cannot reconfigure its own parent task or session, so the launch contract below binds whoever starts the survey. Record the effective parent model and effort when the runtime exposes them, and stop before surveying only when they conflict with the contract for that harness. When the runtime exposes neither field, record `requested <contract>; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
+Launch the discovery task with `gpt-5.6-sol` at `high` reasoning effort; the skill cannot reconfigure its parent task. If runtime metadata explicitly exposes the effective parent model and effort, record them and stop before surveying only when they conflict with this launch contract. If the runtime does not expose either field, record `requested gpt-5.6-sol/high; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
 
-Pick the contract from the harness the skill is running in:
+When the runtime supports subagents, use available capacity to widen the read-only survey:
 
-- Codex: launch the discovery task with `gpt-5.6-sol` at `high` reasoning effort, and spawn every survey worker with explicit `gpt-5.6-luna` and `max`.
-- Claude Code: run the parent in the main window on `opus`; a subagent inherits the session effort, so start the survey from a high-effort session. Spawn every survey worker as an `Explore` subagent with explicit `opus`. `Explore` carries no write tools, which enforces this skill's read-only boundary structurally. Never downgrade a worker to `sonnet` or `haiku`: workers trace re-exports, entrypoints, reflection, and dynamic registration, and a consumer a shallow worker misses becomes a false zero-reference deletion lead.
-
-Either way, never rely on inherited or default model settings, and apply the same worker rules:
-
+- Spawn every survey worker with explicit `gpt-5.6-luna` and `max`; never rely on inherited or default model settings.
 - Give each worker a disjoint tracked corpus or subsystem and the same evidence fields required by the candidate report.
 - Workers gather coverage, consumers, dynamic entrypoints, intent, history, candidate leads, and unresolved ambiguity. They do not assign final verdicts or authorize deletion.
-- Wait for every worker, then have the parent inspect the returned evidence, fill coverage gaps, reject thin leads, deduplicate candidates, and assign the final classifications.
+- Wait for every worker, then have the Sol parent inspect the returned evidence, fill coverage gaps, reject thin leads, deduplicate candidates, and assign the final classifications.
 
-Corpus partitioning, `git ls-files` inventory, and churn statistics are parent work; do not open a worker for them.
-
-Choose the worker count from the available runtime capacity and independently useful partitions; do not encode a product version or fixed pool size. If subagents are unavailable, the parent completes the same coverage serially and records that fact. Delegation changes throughput, not the evidence bar.
+Choose the worker count from the available runtime capacity and independently useful partitions; do not encode a product version or fixed pool size. If subagents are unavailable, the Sol parent completes the same coverage serially and records that fact. Delegation changes throughput, not the evidence bar.
 
 ## Survey the whole tracked tree
 

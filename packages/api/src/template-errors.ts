@@ -6,6 +6,8 @@ export type TemplateInstantiationRefusalCode =
   | "after_task_not_found"
   | "after_task_not_terminal"
   | "dispatch_conflicts_with_auto_start"
+  | "gates_merge_step_absent"
+  | "gates_spec_step_absent"
   | "implementation_route_agent_renamed"
   | "implementation_route_conflicts_with_step_override"
   | "implementation_route_malformed"

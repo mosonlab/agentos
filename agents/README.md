@@ -64,8 +64,15 @@ Exact canonical model and runner defaults live in the role frontmatter; `package
 
 Approval is task metadata, not an Agent personality. Roles read the current
 task's `approvalGate`; they do not hard-code a pause or send a second Inbox
-question to simulate one. The Full Assurance template's gate placement and
-shorter-route rules live only in the routing contract.
+question to simulate one. Only two structural slots are configurable: the
+specification slot (`stepRole: spec`, the `outputKind: spec` step) and the merge
+slot (the merge readiness step recognised by `isMergeReadinessStep`, with
+`stepRole: readiness`). For either slot, the exact resolution order is the
+dispatch override (`gates.spec` or `gates.merge`), then the project default
+(`specGateDefault` or `mergeGateDefault`), then the template frontmatter
+`approvalGate`; every other step keeps its frontmatter value. The Full
+Assurance template's gate placement and shorter-route rules live only in the
+routing contract.
 
 The seed installs three templates over these roles: the twelve-step Full
 Assurance chain, the eight-step bound-capable direct chain
