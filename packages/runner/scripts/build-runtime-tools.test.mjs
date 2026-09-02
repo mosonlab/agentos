@@ -13,10 +13,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { buildRuntimeTools, RUNTIME_TOOL_FILES } from "./build-runtime-tools.mjs";
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 const fixture = (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-runner-runtime-tools-"));
@@ -46,16 +49,17 @@ const inventory = (root) => {
   return files.sort();
 };
 
-// Clean build at c7a843c4847d6f74b0a9cbcc296918fbe8744c15.
+// Runtime-tool bytes at c7a843c4847d6f74b0a9cbcc296918fbe8744c15.
 const targetBundleDigests = new Map([
   ["gate-worker/gate-dispatch.sh", "ad317307a57ba723099423b468e21f7af4c96b9f1bf3f1d2b60265e378078e38"],
   ["gate-worker/lib.sh", "65bd4791208879523c75bf8f1e29ea539dbd1f54b482e851cf466720e7650bf2"],
   ["gate-worker/mirror-push.sh", "8974c7bd2a82c35df8f8b6bde243ac45de1d779063c172a8e24c3a1413fbb07b"],
   ["gate-worker/remote-gate.sh", "ecfba015e3dac6c62ff8039aa97d6831772800d568ed1be8e3489c4243470695"],
+  ["gate-worker/run-gate.sh", "955be958438badbe2a141f42f64c556080e6dae692fcc6ff5e7b14811df0b447"],
   ["regression-verification.sh", "53dacc7438dbb9da350904c4d9955ebea1c111cf8b1400597510e867aef3134a"],
 ]);
 
-test("buildRuntimeTools preserves the target commit's exact bundle bytes", (t) => {
+test("buildRuntimeTools preserves the target commit's exact runtime-tool bytes", (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-runner-target-runtime-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const { outputRoot } = buildRuntimeTools({ packageRoot: join(root, "packages", "runner") });
@@ -67,6 +71,18 @@ test("buildRuntimeTools preserves the target commit's exact bundle bytes", (t) =
   }
 });
 
+test("buildRuntimeTools bundles the run-gate harness installed by mirror-push", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-runner-harness-runtime-tools-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { outputRoot } = buildRuntimeTools({ packageRoot: join(root, "packages", "runner") });
+
+  assert.equal(
+    readFileSync(join(outputRoot, "gate-worker/run-gate.sh"), "utf8"),
+    readFileSync(join(repositoryRoot, "packages/runner/runtime-tools/gate-worker/run-gate.sh"), "utf8")
+      .replaceAll("packages/runner/runtime-tools/", "scripts/"),
+  );
+});
+
 test("buildRuntimeTools creates the exact byte-identical tree and purges stale files", (t) => {
   const context = fixture(t);
   const first = buildRuntimeTools(context);
@@ -76,6 +92,7 @@ test("buildRuntimeTools creates the exact byte-identical tree and purges stale f
     "gate-worker/lib.sh",
     "gate-worker/mirror-push.sh",
     "gate-worker/remote-gate.sh",
+    "gate-worker/run-gate.sh",
     "regression-verification.sh",
   ]);
   for (const { source, destination } of RUNTIME_TOOL_FILES) {

@@ -23,6 +23,7 @@ const canonicalRuntimeTools = [
   ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
   ["gate-worker/mirror-push.sh", "../runtime-tools/gate-worker/mirror-push.sh"],
   ["gate-worker/remote-gate.sh", "../runtime-tools/gate-worker/remote-gate.sh"],
+  ["gate-worker/run-gate.sh", "../runtime-tools/gate-worker/run-gate.sh"],
 ] as const;
 
 const createRuntimeToolsFixture = async (): Promise<string> => {
@@ -856,7 +857,7 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
       );
       assert.deepEqual(
         (await readdir(join(scratch.toolsDir, "gate-worker"))).sort(),
-        ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh"],
+        ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"],
       );
       for (const [relativePath] of canonicalRuntimeTools) {
         assert.deepEqual(

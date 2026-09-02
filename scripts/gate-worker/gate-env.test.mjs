@@ -59,8 +59,8 @@ test("hostNeutralEnv strips the gate's configuration and keeps the rest", () => 
 const GATE_SCRIPTS = [
   join(here, "..", "merge-gate.sh"),
   join(runtimeGateWorker, "lib.sh"),
-  ...["step-engine.sh", "run-gate.sh"].map((name) => join(here, name)),
-  ...["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"].map((name) => join(runtimeGateWorker, name)),
+  join(here, "step-engine.sh"),
+  ...["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"].map((name) => join(runtimeGateWorker, name)),
 ];
 
 // A shell script reads an environment variable by defaulting it —

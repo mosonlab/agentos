@@ -688,6 +688,7 @@ const runtimeToolSources = [
   ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
   ["gate-worker/mirror-push.sh", "../runtime-tools/gate-worker/mirror-push.sh"],
   ["gate-worker/remote-gate.sh", "../runtime-tools/gate-worker/remote-gate.sh"],
+  ["gate-worker/run-gate.sh", "../runtime-tools/gate-worker/run-gate.sh"],
 ] as const;
 
 const createRuntimeToolsFixture = async (): Promise<string> => {

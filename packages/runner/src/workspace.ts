@@ -199,7 +199,8 @@ tool_paths='regression-verification.sh
 gate-worker/gate-dispatch.sh
 gate-worker/lib.sh
 gate-worker/mirror-push.sh
-gate-worker/remote-gate.sh'
+gate-worker/remote-gate.sh
+gate-worker/run-gate.sh'
 
 is_tool_path() {
   for tool_path in $tool_paths; do

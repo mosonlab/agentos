@@ -20,10 +20,11 @@ const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
   "gate-worker/lib.sh",
   "gate-worker/mirror-push.sh",
   "gate-worker/remote-gate.sh",
+  "gate-worker/run-gate.sh",
 ]);
 const RUNTIME_TOOL_ENTRIES = new Map([
   ["", new Set(["gate-worker", "regression-verification.sh"])],
-  ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh"])],
+  ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"])],
 ]);
 
 const fail = (reason, detail) => {

@@ -48,10 +48,10 @@ import { fixtureEnv } from "./gate-env.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const runtimeTools = join(here, "..", "..", "packages", "runner", "runtime-tools");
 const runtimeGateWorker = join(runtimeTools, "gate-worker");
-const runnerToolNames = new Set(["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]);
+const runnerToolNames = new Set(["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]);
 const toolPath = (name) => join(runnerToolNames.has(name) ? runtimeGateWorker : here, name);
 const libPath = toolPath("lib.sh");
-const runGatePath = join(here, "run-gate.sh");
+const runGatePath = toolPath("run-gate.sh");
 const dispatchPath = toolPath("gate-dispatch.sh");
 const mirrorPushPath = toolPath("mirror-push.sh");
 const remoteGatePath = toolPath("remote-gate.sh");
@@ -923,7 +923,6 @@ test("the sweep leaves a worktree whose gate is still running", (t) => {
 
 test("every gate-worker script parses", () => {
   for (const name of [
-    "run-gate.sh",
     "provision.sh",
     "bench-postgres.sh",
     "bench-dbtest-concurrency.sh",
@@ -931,7 +930,7 @@ test("every gate-worker script parses", () => {
     const result = spawnSync("bash", ["-n", join(here, name)], { encoding: "utf8" });
     assert.equal(result.status, 0, `${name}: ${result.stderr}`);
   }
-  for (const name of ["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh"]) {
+  for (const name of ["lib.sh", "gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]) {
     const result = spawnSync("bash", ["-n", join(runtimeGateWorker, name)], { encoding: "utf8" });
     assert.equal(result.status, 0, `${name}: ${result.stderr}`);
   }

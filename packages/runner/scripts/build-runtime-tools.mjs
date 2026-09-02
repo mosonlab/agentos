@@ -15,6 +15,7 @@ export const RUNTIME_TOOL_FILES = Object.freeze([
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/run-gate.sh", destination: "gate-worker/run-gate.sh" }),
 ]);
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -61,7 +62,7 @@ const directory = (filesystem, path, label) => {
 
 const expectedDirectoryEntries = new Map([
   ["", ["gate-worker", "regression-verification.sh"]],
-  ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh"]],
+  ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]],
 ]);
 
 const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
