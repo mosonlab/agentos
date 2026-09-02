@@ -249,8 +249,7 @@ type PrFixedArtifact = {
 };
 
 const canonicalPrTemplateName = (claim: DeliveryClaim): boolean => (
-  (claim.task.templateStep as { taskTemplate?: { name?: string } } | null | undefined)
-    ?.taskTemplate?.name === PR_TEMPLATE_NAME
+  claim.task.templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
 );
 
 const canonicalPrOutputKind = (claim: DeliveryClaim): string | null => (

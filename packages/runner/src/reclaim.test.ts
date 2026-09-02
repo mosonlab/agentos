@@ -53,17 +53,17 @@ const stubApi = (
     }
     : plan;
   const double = createControlPlaneDouble({
-    fetchReclaimPlan: async (_config, inventory) => {
+    fetchReclaimPlan: async (inventory) => {
       calls.push({ path: "controlPlane.fetchReclaimPlan", body: inventory });
       return status === 200 ? compatiblePlan as Awaited<ReturnType<ControlPlane["fetchReclaimPlan"]>> : null;
     },
-    recordReclaimPublication: async (_config, body) => {
+    recordReclaimPublication: async (body) => {
       calls.push({ path: "controlPlane.recordReclaimPublication", body });
       if (salvageStatus !== 200) {
         throw new ControlPlaneError(salvageStatus, "Salvage is durable, but the replacement already started from its prior base");
       }
     },
-    reportReclaimOutcomes: async (_config, report) => {
+    reportReclaimOutcomes: async (report) => {
       calls.push({ path: "controlPlane.reportReclaimOutcomes", body: report });
     },
   });
@@ -146,7 +146,7 @@ test("a delayed reclaim salvages an unpublished retained workspace before deleti
   const salvage = "agentos/task-1/run-3";
   assert.match(git(workspaceRoot, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
   assert.equal(calls[1]!.path, "controlPlane.recordReclaimPublication");
-  assert.deepEqual(calls[1]!.body, { runnerId: "runner-1", runId: "run-1", pushedBranch: salvage });
+  assert.deepEqual(calls[1]!.body, { runId: "run-1", pushedBranch: salvage });
   assert.deepEqual(calls[2]!.body.results, [{ runId: "run-1", outcome: "REMOVED" }]);
 });
 
