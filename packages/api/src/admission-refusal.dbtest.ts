@@ -2,8 +2,19 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { ChainControlState, DependencyProvisioning, PrismaClient } from "@anneal/db";
+import {
+  activateChainSuccessor,
+  ChainControlState,
+  DependencyProvisioning,
+  INTEGRATOR_AGENT_NAME,
+  PrismaClient,
+  recordIntegratorStop,
+  ScheduleKind,
+  TaskStatus,
+} from "@anneal/db";
 
+import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import { fireAtTask } from "./scheduler.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
@@ -35,7 +46,7 @@ const call = async (
   return { status: response.status, body: response.status === 204 ? null : await response.json() };
 });
 
-const seedChain = async (label: string, count = 3) => {
+const seedChain = async (label: string, count = 3, agentName = "agent") => {
   const project = await db.project.create({
     data: { name: label, slug: `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}` },
   });
@@ -43,7 +54,7 @@ const seedChain = async (label: string, count = 3) => {
   const agent = await db.agent.create({ data: {
     projectId: project.id,
     environmentId: environment.id,
-    name: "agent",
+    name: agentName,
     title: "Agent",
     model: "claude",
     foundationalPrompt: "foundation",
@@ -252,4 +263,199 @@ test("unheld, released, and chainless Tasks retain ordinary admission", async ()
   const standaloneRead = await call("GET", `/tasks/${standalone.id}/startability`);
   assert.equal(standaloneRead.status, 200);
   assert.equal(standaloneRead.body.startable, true);
+});
+
+// ---------------------------------------------------------------------------
+// Disposition of a refused Run birth
+//
+// `openRun` answers with one of three dispositions, and each caller states its
+// policy for the three rather than for all fifteen codes. One case per
+// disposition per caller class, plus the savepoint the attempt is wrapped in.
+// ---------------------------------------------------------------------------
+
+const activityBodies = async (taskId: string): Promise<string[]> =>
+  (await db.taskActivity.findMany({ where: { taskId }, orderBy: { createdAt: "asc" } }))
+    .map((row) => row.body);
+
+test("held: the scheduler leaves an AT schedule due and fires it after release", async () => {
+  const chain = await seedChain("disposition-held-at", 2);
+  await seedControl(chain, ChainControlState.HELD, 1);
+  const target = chain.tasks[1]!;
+  const runAt = new Date("2026-09-02T10:00:00Z");
+  const scheduled = await db.task.update({
+    where: { id: target.id },
+    data: { scheduleKind: ScheduleKind.AT, runAt },
+  });
+
+  assert.equal(await fireAtTask(db, scheduled, runAt), false);
+  const held = await db.task.findUniqueOrThrow({ where: { id: target.id } });
+  assert.deepEqual(
+    { runAt: held.runAt?.toISOString(), status: held.status, runs: await db.run.count({ where: { taskId: target.id } }) },
+    { runAt: runAt.toISOString(), status: TaskStatus.TODO, runs: 0 },
+  );
+  assert.deepEqual(await activityBodies(target.id), []);
+
+  await release(chain);
+  assert.equal(await fireAtTask(db, held, runAt), true);
+  assert.equal(await db.run.count({ where: { taskId: target.id } }), 1);
+});
+
+test("fault: the scheduler quarantines an AT schedule whose assignee was archived", async () => {
+  const chain = await seedChain("disposition-fault-at", 2);
+  const target = chain.tasks[1]!;
+  const runAt = new Date("2026-09-02T10:00:00Z");
+  const scheduled = await db.task.update({
+    where: { id: target.id },
+    data: { scheduleKind: ScheduleKind.AT, runAt },
+  });
+  await db.agent.update({ where: { id: chain.agent.id }, data: { archivedAt: new Date() } });
+
+  assert.equal(await fireAtTask(db, scheduled, runAt), false);
+  const quarantined = await db.task.findUniqueOrThrow({ where: { id: target.id } });
+  assert.equal(quarantined.runAt, null);
+  assert.equal(await db.run.count({ where: { taskId: target.id } }), 0);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: target.id } });
+  assert.match(activity.body, /Schedule quarantined after Run birth refusal/u);
+  assert.deepEqual(activity.metadata, { refusal: "assignee-archived" });
+});
+
+/**
+ * A successor bound to a predecessor in another Chain. The bound dispatch owns
+ * no stop record and no hold of its own, so every refusal it can reach is a
+ * fault and parks the successor.
+ */
+const seedBound = async (label: string, agentName = "agent") => {
+  const base = await seedChain(label, 1, agentName);
+  const successor = await db.task.create({ data: {
+    projectId: base.project.id,
+    repoId: base.repo.id,
+    assigneeAgentId: base.agent.id,
+    name: "Bound successor",
+    description: "work",
+    status: TaskStatus.TODO,
+    chainId: `${label}-successor-chain`,
+    chainIndex: 0,
+    chainLayer: 0,
+    dispatchAfterTaskId: base.tasks[0]!.id,
+  } });
+  return { ...base, successor };
+};
+
+test("fault: a bound dispatch parks the successor in REVIEW under the refusal code", async () => {
+  const bound = await seedBound("disposition-fault-bound", INTEGRATOR_AGENT_NAME);
+
+  await db.$transaction((tx) => activateChainSuccessor(tx, bound.tasks[0]!, {}, new Date()));
+
+  const parked = await db.task.findUniqueOrThrow({ where: { id: bound.successor.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.match(parked.failureReason ?? "", /may bind only a merge-execution step/u);
+  assert.equal(await db.run.count({ where: { taskId: bound.successor.id } }), 0);
+  const parkedActivity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: bound.successor.id, body: { contains: "parked in REVIEW" } },
+  });
+  assert.equal(
+    (parkedActivity.metadata as Record<string, unknown>).refusal,
+    "integrator-binding-invalid",
+  );
+});
+
+test("fault: layer activation parks the successor in REVIEW under the refusal code", async () => {
+  const chain = await seedChain("disposition-fault-layer", 2, INTEGRATOR_AGENT_NAME);
+  const successor = chain.tasks[1]!;
+
+  await db.$transaction((tx) => activateChainSuccessor(tx, chain.tasks[0]!, {}, new Date()));
+
+  const parked = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.match(parked.failureReason ?? "", /may bind only a merge-execution step/u);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  const refused = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: successor.id, body: { contains: "Run birth was refused" } },
+  });
+  assert.deepEqual(refused.metadata, { refusal: "integrator-binding-invalid" });
+});
+
+test("fault: layer activation asked to raise rolls its whole transaction back", async () => {
+  const chain = await seedChain("disposition-raise-layer", 2, INTEGRATOR_AGENT_NAME);
+  const successor = chain.tasks[1]!;
+
+  await assert.rejects(
+    db.$transaction((tx) => activateChainSuccessor(tx, chain.tasks[0]!, { onRefusal: "raise" }, new Date())),
+    /may bind only a merge-execution step/u,
+  );
+
+  // The refusal is raised instead of absorbed, so nothing the activation wrote
+  // survives: the caller's own decision rolls back with it.
+  const untouched = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  assert.deepEqual(
+    { status: untouched.status, failureReason: untouched.failureReason },
+    { status: TaskStatus.TODO, failureReason: null },
+  );
+  assert.deepEqual(await activityBodies(successor.id), []);
+});
+
+test("stopped: layer activation parks a stopped integrator under its stop record", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "disposition-stopped", shape: "canonical-direct" });
+  const integratorTask = seeded.integratorTask!;
+  // `head-drift` rather than `base-drift`: the drift condition defers its
+  // question to a recovery Run owned by the integrator Task itself, which this
+  // case has no reason to seed.
+  await db.$transaction((tx) => recordIntegratorStop(tx, {
+    integratorTaskId: integratorTask.id,
+    condition: "head-drift",
+    evidence: "head moved",
+    sourceRunId: seeded.gateRun.id,
+  }));
+
+  await db.$transaction((tx) => activateChainSuccessor(tx, seeded.readinessTask!, {}, new Date()));
+
+  const parked = await db.task.findUniqueOrThrow({ where: { id: integratorTask.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.match(
+    parked.failureReason ?? "",
+    /Merge integrator stopped on head-drift; predecessor success preserved and successor not activated/u,
+  );
+  assert.equal(await db.run.count({ where: { taskId: integratorTask.id } }), 0);
+});
+
+test("the savepoint around one birth keeps the rest of the layer's transaction usable", async () => {
+  const chain = await seedChain("disposition-savepoint", 2);
+  const colliding = chain.tasks[1]!;
+  const sibling = await db.task.create({ data: {
+    projectId: chain.project.id,
+    assigneeAgentId: chain.agent.id,
+    repoId: chain.repo.id,
+    name: "Step 2b",
+    description: "work",
+    status: TaskStatus.TODO,
+    chainId: chain.chainId,
+    chainIndex: 2,
+    chainLayer: 2,
+  } });
+  // A terminal Run whose dedupe key is the one the next birth will derive. The
+  // birth reaches `Run.create` and loses the unique key exactly as a concurrent
+  // activation would, which is the only refusal that aborts the transaction.
+  await db.run.create({ data: {
+    projectId: chain.project.id,
+    taskId: colliding.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${colliding.id}:run:2`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "hash",
+    status: "SUCCEEDED",
+    maxRunsPerTask: 5,
+  } });
+
+  await db.$transaction((tx) => activateChainSuccessor(tx, chain.tasks[0]!, {}, new Date()));
+
+  // Without the rollback the collision poisons the transaction and the sibling
+  // never gets its Run.
+  assert.equal(await db.run.count({ where: { taskId: sibling.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: colliding.id } }), 1);
+  const untouched = await db.task.findUniqueOrThrow({ where: { id: colliding.id } });
+  assert.equal(untouched.status, TaskStatus.TODO);
+  assert.equal(untouched.failureReason, null);
 });

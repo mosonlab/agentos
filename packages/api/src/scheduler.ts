@@ -174,46 +174,29 @@ export const fireCronTask = async (
       const opened = await openRun(tx, copy.id, { kind: "enqueue", readyAt: now });
       if (!opened.ok) {
         const refusal = opened.refusal;
-        switch (refusal.code) {
-          case "assignee-archived":
-          case "chain-held":
-          case "compound-implementation-assignee":
-          case "initial-run-already-exists":
-          case "integrator-binding-invalid":
-          case "integrator-stopped":
-          case "prior-run-required":
-          case "repo-required":
-          case "run-budget-exhausted":
-          case "source-run-stale":
-          case "task-archived":
-          case "task-assignee-missing":
-          case "task-assignee-type-invalid":
-          case "task-not-found":
-          case "task-not-integrator":
-            await tx.task.update({
-              where: { id: copy.id },
-              data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
-            });
-            await tx.taskActivity.createMany({ data: [
-              {
-                taskId: task.id,
-                actorType: "scheduler",
-                body: `Recurring schedule advanced without a Run: ${refusal.message}`,
-                metadata: { recurringTaskId: task.id, copyTaskId: copy.id, refusal: refusal.code },
-              },
-              {
-                taskId: copy.id,
-                actorType: "scheduler",
-                body: `Created from recurring task ${task.id}; Run birth refused: ${refusal.message}`,
-                metadata: { recurringTaskId: task.id, refusal: refusal.code },
-              },
-            ] });
-            return false;
-          default: {
-            const unhandled: never = refusal;
-            return unhandled;
-          }
-        }
+        // Every disposition parks the copy. The copy is chainless and belongs
+        // to no integrator, so `held` and `stopped` cannot reach here, and a
+        // fired schedule that produced no Run is something an operator has to
+        // see whatever refused it.
+        await tx.task.update({
+          where: { id: copy.id },
+          data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+        });
+        await tx.taskActivity.createMany({ data: [
+          {
+            taskId: task.id,
+            actorType: "scheduler",
+            body: `Recurring schedule advanced without a Run: ${refusal.message}`,
+            metadata: { recurringTaskId: task.id, copyTaskId: copy.id, refusal: refusal.code },
+          },
+          {
+            taskId: copy.id,
+            actorType: "scheduler",
+            body: `Created from recurring task ${task.id}; Run birth refused: ${refusal.message}`,
+            metadata: { recurringTaskId: task.id, refusal: refusal.code },
+          },
+        ] });
+        return false;
       }
     }
     const metadata = { recurringTaskId: task.id, firedAt: now.toISOString() };
@@ -258,23 +241,13 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       const opened = await openRun(tx, task.id, { kind: "enqueue", readyAt: now });
       if (opened.ok) return true;
       const refusal = opened.refusal;
-      switch (refusal.code) {
-        case "chain-held":
+      switch (refusal.disposition) {
+        case "held":
+          // The schedule stays due. Nothing is wrong with it, and the next tick
+          // after the hold releases fires it.
           return false;
-        case "assignee-archived":
-        case "compound-implementation-assignee":
-        case "initial-run-already-exists":
-        case "integrator-binding-invalid":
-        case "integrator-stopped":
-        case "prior-run-required":
-        case "repo-required":
-        case "run-budget-exhausted":
-        case "source-run-stale":
-        case "task-archived":
-        case "task-assignee-missing":
-        case "task-assignee-type-invalid":
-        case "task-not-found":
-        case "task-not-integrator":
+        case "stopped":
+        case "fault":
           await tx.task.update({ where: { id: task.id }, data: { runAt: null } });
           await tx.taskActivity.create({ data: {
             taskId: task.id,
@@ -284,7 +257,7 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
           } });
           return false;
         default: {
-          const unhandled: never = refusal;
+          const unhandled: never = refusal.disposition;
           return unhandled;
         }
       }

@@ -542,9 +542,27 @@ export type OpenRunIntent =
     sourceBudgetGrants: number;
   };
 
+/**
+ * What a caller has to do about a refused Run birth.
+ *
+ * Fifteen codes answer three questions, and no caller of `openRun` has ever
+ * needed a finer answer than these:
+ *
+ * - `held`: a live Chain authority is withholding birth on purpose. The Task
+ *   keeps its place and a later attempt succeeds once the hold is released, so
+ *   a caller records the refusal and leaves the Task alone.
+ * - `stopped`: an integrator stop condition refuses birth. The stop record is
+ *   the operator's own instrument, so a caller that owns stop records parks the
+ *   Task under the stop; any other caller treats it as a fault.
+ * - `fault`: birth cannot succeed until an operator changes something. The Task
+ *   must be surfaced, never left looking queued.
+ */
+export type OpenRunDisposition = "held" | "stopped" | "fault";
+
 type OpenRunRefusalShape<Code extends string, Reason extends string> = {
   code: Code;
   reason: Reason;
+  disposition: OpenRunDisposition;
   message: string;
   detail?: Readonly<Record<string, string | number | boolean | null>>;
   context?: Readonly<{
@@ -576,6 +594,29 @@ export type OpenRunRefusal =
   | OpenRunRefusalShape<"run-budget-exhausted", "conflict">
   | OpenRunRefusalShape<"chain-held", "chain-held">;
 
+/**
+ * The disposition each code carries. Declared beside the union so a new code
+ * fails to compile until its handling is stated once, here, instead of being
+ * added to every caller's roster.
+ */
+const dispositionByCode = {
+  "task-not-found": "fault",
+  "task-assignee-type-invalid": "fault",
+  "task-assignee-missing": "fault",
+  "repo-required": "fault",
+  "task-archived": "fault",
+  "integrator-stopped": "stopped",
+  "assignee-archived": "fault",
+  "compound-implementation-assignee": "fault",
+  "integrator-binding-invalid": "fault",
+  "initial-run-already-exists": "fault",
+  "prior-run-required": "fault",
+  "source-run-stale": "fault",
+  "task-not-integrator": "fault",
+  "run-budget-exhausted": "fault",
+  "chain-held": "held",
+} as const satisfies Record<OpenRunRefusal["code"], OpenRunDisposition>;
+
 export type OpenRunResult =
   | { ok: true; run: Run }
   | { ok: false; refusal: OpenRunRefusal };
@@ -590,6 +631,7 @@ const openRunRefusal = <Code extends OpenRunRefusal["code"]>(
   const refusal = {
     code,
     reason,
+    disposition: dispositionByCode[code],
     message,
     ...(detail ? { detail } : {}),
     ...(context ? { context } : {}),
@@ -891,6 +933,62 @@ export const openRun = async (
   return { ok: true, run };
 };
 
+/** What one savepoint-guarded birth attempt did. */
+export type RunBirthAttempt =
+  | { outcome: "opened"; run: Run }
+  | { outcome: "refused"; refusal: OpenRunRefusal }
+  | { outcome: "already-queued" };
+
+// Each attempt rolls back or releases before the caller does anything else, so
+// one bounded literal serves every call site and no external identifier is ever
+// interpolated into SQL.
+const RUN_BIRTH_SAVEPOINT = "run_birth_attempt";
+
+/**
+ * Open a Run without forfeiting the transaction the caller still has to write
+ * in.
+ *
+ * A refused birth and a lost dedupe race both leave PostgreSQL's transaction
+ * unusable for the writes every caller makes next — park the Task, record the
+ * refusal, advance the chain. Rolling back to a savepoint is the only way those
+ * writes survive, so the savepoint belongs to the birth rather than to each
+ * caller that has to remember it.
+ *
+ * `already-queued` is the dedupe key losing a race: another writer created the
+ * same Run. Nothing is wrong with the Task, so it is not a refusal.
+ */
+export const attemptRunBirth = async (
+  tx: Tx,
+  open: (tx: Tx) => Promise<OpenRunResult>,
+): Promise<RunBirthAttempt> => {
+  const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const executeRaw = typeof rawTx.$executeRawUnsafe === "function"
+    ? rawTx.$executeRawUnsafe.bind(rawTx)
+    : null;
+  if (executeRaw) await executeRaw(`SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
+  const rollback = async (): Promise<void> => {
+    if (!executeRaw) return;
+    await executeRaw(`ROLLBACK TO SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
+    await executeRaw(`RELEASE SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
+  };
+  let opened: OpenRunResult;
+  try {
+    opened = await open(tx);
+  } catch (error: unknown) {
+    await rollback();
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return { outcome: "already-queued" };
+    }
+    throw error;
+  }
+  if (!opened.ok) {
+    await rollback();
+    return { outcome: "refused", refusal: opened.refusal };
+  }
+  if (executeRaw) await executeRaw(`RELEASE SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
+  return { outcome: "opened", run: opened.run };
+};
+
 export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
   if (refusal.reason === "archived-task") {
     return new ArchivedTaskError(
@@ -932,6 +1030,13 @@ export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
   }
   if (refusal.context?.code === "INTEGRATOR_BINDING_INVALID") {
     return new IntegratorBindingError(refusal.message);
+  }
+  // A caller that raises a refusal instead of parking it must still answer with
+  // the refusal's own family. Only `not-found` has none: a Task that vanished
+  // between the caller's read and the birth is an invariant violation, and an
+  // opaque error is the honest answer to it.
+  if (refusal.reason === "invalid-request" || refusal.reason === "conflict") {
+    return new WorkflowRefusalError(refusal.reason, refusal.message);
   }
   return new Error(refusal.message);
 };

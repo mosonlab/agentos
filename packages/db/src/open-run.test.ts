@@ -11,6 +11,7 @@ import {
 
 import {
   type OpenRunIntent,
+  type OpenRunDisposition,
   type OpenRunRefusal,
   enqueueTaskRun,
   openRun,
@@ -442,13 +443,14 @@ test("integrator-authorized is the named human reauthorization exit from an unre
   assert.equal(creates[0]?.maxRunsPerTask, 4);
 });
 
-test("every OpenRunRefusal code comes from a real guard and creates no Run", async () => {
+test("every OpenRunRefusal code comes from a real guard, carries a disposition, and creates no Run", async () => {
   type RefusalFixtures = {
     [Code in OpenRunRefusal["code"]]: {
       task: ReturnType<typeof taskRow> | null;
       intent: OpenRunIntent;
       options?: Parameters<typeof fakeTx>[1];
       reason: Extract<OpenRunRefusal, { code: Code }>["reason"];
+      disposition: OpenRunDisposition;
       message: string;
       detail?: OpenRunRefusal["detail"];
       context?: OpenRunRefusal["context"];
@@ -462,30 +464,35 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
       task: null,
       intent: { kind: "enqueue", readyAt: now },
       reason: "not-found",
+      disposition: "fault",
       message: "Task not found",
     },
     "task-assignee-type-invalid": {
       task: taskRow({ assigneeType: AssigneeType.HUMAN, assigneeAgent: null, assigneeAgentId: null }),
       intent: { kind: "retry", readyAt: now },
       reason: "invalid-request",
+      disposition: "fault",
       message: "Task task-1 cannot open a Run without an Agent assignee",
     },
     "task-assignee-missing": {
       task: taskRow({ assigneeAgent: null }),
       intent: { kind: "retry", readyAt: now },
       reason: "conflict",
+      disposition: "fault",
       message: "Task assignee no longer exists; assign an agent before retrying",
     },
     "repo-required": {
       task: taskRow(),
       intent: { kind: "enqueue", readyAt: now },
       reason: "invalid-request",
+      disposition: "fault",
       message: "Task task-1 cannot open a enqueue Run without a Repo",
     },
     "task-archived": {
       task: taskRow({ archivedAt: now, repoId: repo.id, repo }),
       intent: { kind: "enqueue", readyAt: now },
       reason: "archived-task",
+      disposition: "fault",
       message: "Task Implement seam is archived; unarchive it before queueing a run",
       context: { taskId: "task-1", taskName: "Implement seam" },
     },
@@ -514,6 +521,7 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
         }],
       },
       reason: "integrator-stopped",
+      disposition: "stopped",
       message: "Merge integrator stopped on head-drift; answer the stop question before starting another run",
       context: { taskId: "task-1", condition: "head-drift" },
     },
@@ -522,6 +530,7 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
       intent: { kind: "enqueue", readyAt: now },
       options: { lockedAgent: agent({ archivedAt: now }) },
       reason: "archived-assignee",
+      disposition: "fault",
       message: "Task Implement seam assignee senior-dev is archived; unarchive the agent to queue this step",
       context: { taskId: "task-1", taskName: "Implement seam", agentName: "senior-dev" },
     },
@@ -540,6 +549,7 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
       }),
       intent: { kind: "enqueue", readyAt: now },
       reason: "compound-implementation-assignee",
+      disposition: "fault",
       message: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
       detail: { code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID" },
     },
@@ -548,6 +558,7 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
       intent: { kind: "enqueue", readyAt: now },
       options: { lockedAgent: integrator },
       reason: "invalid-request",
+      disposition: "fault",
       message: "Agent merge-integrator may bind only a merge-execution step",
       context: { code: "INTEGRATOR_BINDING_INVALID" },
     },
@@ -555,12 +566,14 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
       task: taskRow({ repoId: repo.id, repo, runs: [priorRun()] }),
       intent: { kind: "task-created", readyAt: now },
       reason: "conflict",
+      disposition: "fault",
       message: "Task Implement seam already has a Run",
     },
     "prior-run-required": {
       task: taskRow(),
       intent: { kind: "retry", readyAt: now },
       reason: "conflict",
+      disposition: "fault",
       message: "Task Implement seam has no Run to continue",
     },
     "source-run-stale": {
@@ -574,18 +587,21 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
         budgetGrant: 0,
       },
       reason: "conflict",
+      disposition: "fault",
       message: "Run run-3 is no longer the latest Run for task Implement seam",
     },
     "task-not-integrator": {
       task: taskRow({ repoId: repo.id, repo, runs: [priorRun()] }),
       intent: { kind: "integrator-authorized", readyAt: now },
       reason: "invalid-request",
+      disposition: "fault",
       message: "Task Implement seam is not an integrator Step",
     },
     "run-budget-exhausted": {
       task: taskRow({ maxSessionsPerTask: 2, runs: [priorRun({ runNumber: 3, budgetGrants: 1 })] }),
       intent: { kind: "retry", readyAt: now },
       reason: "conflict",
+      disposition: "fault",
       message: "Run budget exhausted",
     },
     "chain-held": {
@@ -612,6 +628,7 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
         }],
       },
       reason: "chain-held",
+      disposition: "held",
       message: "Chain chain-1 is held after layer 1; Task task-1 at layer 2 cannot queue a Run",
       detail: { chainId: "chain-1", taskLayer: 2, heldLayer: 1 },
       context: { taskId: "task-1", chainId: "chain-1", taskLayer: 2, heldLayer: 1 },
@@ -625,6 +642,7 @@ test("every OpenRunRefusal code comes from a real guard and creates no Run", asy
     assert.equal(opened.ok, false, code);
     assert.deepEqual({ ok: opened.ok, code: opened.refusal.code }, { ok: false, code });
     assert.equal(opened.refusal.reason, fixture.reason, code);
+    assert.equal(opened.refusal.disposition, fixture.disposition, `${code} disposition`);
     assert.equal(opened.refusal.message, fixture.message, code);
     assert.deepEqual(opened.refusal.detail, fixture.detail, `${code} detail`);
     assert.deepEqual(opened.refusal.context, fixture.context, `${code} context`);

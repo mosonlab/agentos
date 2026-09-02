@@ -21,8 +21,7 @@ import {
   transitionMergeRecovery,
 } from "./merge-tail.js";
 import {
-  ArchivedAssigneeError,
-  CompoundImplementationAssigneeError,
+  attemptRunBirth,
   errorForOpenRunRefusal,
   type IntegratorStopBypass,
   WorkflowRefusalError,
@@ -120,10 +119,6 @@ export const agentArchiveBlocker = async (tx: Tx, agentId: string): Promise<stri
   }
   return null;
 };
-
-const isUniqueConflict = (error: unknown): boolean => (
-  error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
-);
 
 type BoundDispatchMetadata = {
   predecessorTaskId: string;
@@ -370,67 +365,36 @@ const dispatchBoundSuccessor = async (
     return;
   }
 
-  const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
-  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
-  const savepoint = "chain_dispatch_enqueue";
-  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
-  try {
-    const opened = await enqueueTaskRunInternal(tx, successor.id, now, null);
-    if (!opened.ok) {
-      if (hasSavepoint) {
-        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-      }
-      const refusal = opened.refusal;
-      switch (refusal.code) {
-        case "chain-held":
-          await tx.taskActivity.create({ data: {
-            taskId: successor.id,
-            actorType: "control-plane",
-            body: `Bound predecessor completed; ${refusal.message}`,
-          } });
-          return;
-        case "assignee-archived":
-        case "compound-implementation-assignee":
-        case "initial-run-already-exists":
-        case "integrator-binding-invalid":
-        case "integrator-stopped":
-        case "prior-run-required":
-        case "repo-required":
-        case "run-budget-exhausted":
-        case "source-run-stale":
-        case "task-archived":
-        case "task-assignee-missing":
-        case "task-assignee-type-invalid":
-        case "task-not-found":
-        case "task-not-integrator":
-          await parkBoundSuccessor(tx, predecessor, successor, refusal.message, {
-            refusal: refusal.code,
-          });
-          return;
-        default: {
-          const unhandled: never = refusal;
-          return unhandled;
-        }
-      }
-    }
-    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", opened.run.id);
-  } catch (error: unknown) {
-    if (isUniqueConflict(error)) {
-      if (hasSavepoint) {
-        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-      }
-      await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", null);
-      return;
-    }
-    if (hasSavepoint) {
-      await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-      await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    }
-    throw error;
+  const attempt = await attemptRunBirth(tx, (tx) => enqueueTaskRunInternal(tx, successor.id, now, null));
+  if (attempt.outcome === "already-queued") {
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", null);
+    return;
   }
+  if (attempt.outcome === "refused") {
+    const refusal = attempt.refusal;
+    switch (refusal.disposition) {
+      case "held":
+        await tx.taskActivity.create({ data: {
+          taskId: successor.id,
+          actorType: "control-plane",
+          body: `Bound predecessor completed; ${refusal.message}`,
+        } });
+        return;
+      // A bound dispatch owns no stop record of its own, so a stop reads here
+      // exactly as any other fault: the successor is parked for an operator.
+      case "stopped":
+      case "fault":
+        await parkBoundSuccessor(tx, predecessor, successor, refusal.message, {
+          refusal: refusal.code,
+        });
+        return;
+      default: {
+        const unhandled: never = refusal.disposition;
+        return unhandled;
+      }
+    }
+  }
+  await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", attempt.run.id);
 };
 
 /**
@@ -540,7 +504,13 @@ const resumeParkedSuccessor = async (
 type ChainSuccessorOptions = {
   sourceRunId?: string | null;
   chatId?: string | null;
-  archivedAssignee?: "park" | "throw";
+  /**
+   * What a `fault` refusal does. `park` leaves the successor in REVIEW for an
+   * operator; `raise` throws the refusal's own error so the caller's whole
+   * transaction rolls back, which is what an Inbox gate approval needs — the
+   * decision stays open instead of committing onto a chain that cannot advance.
+   */
+  onRefusal?: "park" | "raise";
   /** The Documentation -> Regression hop after a merge-tail repair. */
   mergeTailRequeue?: boolean;
 };
@@ -838,105 +808,58 @@ const activateChainSuccessorInternal = async (
       continue;
     }
 
-    const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
-    const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
-    // Each successor is handled serially and the savepoint is released before
-    // the next one, so one bounded identifier avoids interpolating an external
-    // task id into SQL (and stays below PostgreSQL's identifier limit).
-    const savepoint = "chain_layer_enqueue";
-    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
-    try {
-      const opened = await enqueueTaskRunInternal(
-        tx,
-        successor.id,
-        now,
-        stopBypass,
-        options.mergeTailRequeue && isRegressionVerificationOutputKind(successorStep?.outputKind)
-          ? { budgetGrant: 1 }
-          : {},
-      );
-      if (!opened.ok) {
-        if (hasSavepoint) {
-          await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-          await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-        }
-        const refusal = opened.refusal;
-        switch (refusal.code) {
-          case "chain-held":
-            await tx.taskActivity.create({ data: {
-              taskId: successor.id,
-              actorType: "control-plane",
-              body: `Predecessor layer completed; ${refusal.message}`,
-            } });
+    const attempt = await attemptRunBirth(tx, (tx) => enqueueTaskRunInternal(
+      tx,
+      successor.id,
+      now,
+      stopBypass,
+      options.mergeTailRequeue && isRegressionVerificationOutputKind(successorStep?.outputKind)
+        ? { budgetGrant: 1 }
+        : {},
+    ));
+    if (attempt.outcome === "already-queued") continue;
+    if (attempt.outcome === "refused") {
+      const refusal = attempt.refusal;
+      switch (refusal.disposition) {
+        case "held":
+          await tx.taskActivity.create({ data: {
+            taskId: successor.id,
+            actorType: "control-plane",
+            body: `Predecessor layer completed; ${refusal.message}`,
+          } });
+          continue;
+        case "stopped": {
+          const stoppedAfterRollback = await stopStateFor(tx, successor.id);
+          if (stoppedAfterRollback) {
+            await parkStoppedIntegratorSuccessor(
+              tx,
+              current,
+              successor,
+              stoppedAfterRollback,
+              options.sourceRunId ?? null,
+            );
             continue;
-          case "integrator-stopped": {
-            const stoppedAfterRollback = await stopStateFor(tx, successor.id);
-            if (stoppedAfterRollback) {
-              await parkStoppedIntegratorSuccessor(
-                tx,
-                current,
-                successor,
-                stoppedAfterRollback,
-                options.sourceRunId ?? null,
-              );
-              continue;
-            }
-            throw errorForOpenRunRefusal(refusal);
           }
-          case "assignee-archived":
-            if (options.archivedAssignee === "throw") {
-              throw new ArchivedAssigneeError(
-                String(refusal.context?.taskId ?? successor.id),
-                String(refusal.context?.taskName ?? successor.name),
-                String(refusal.context?.agentName ?? successor.assigneeAgent?.name ?? "unknown"),
-              );
-            }
-            break;
-          case "compound-implementation-assignee":
-            if (options.archivedAssignee === "throw") {
-              throw new CompoundImplementationAssigneeError();
-            }
-            break;
-          case "initial-run-already-exists":
-          case "integrator-binding-invalid":
-          case "prior-run-required":
-          case "repo-required":
-          case "run-budget-exhausted":
-          case "source-run-stale":
-          case "task-archived":
-          case "task-assignee-missing":
-          case "task-assignee-type-invalid":
-            if (options.archivedAssignee === "throw" && compoundImplementation) {
-              throw new CompoundImplementationAssigneeError();
-            }
-            break;
-          case "task-not-found":
-          case "task-not-integrator":
-            break;
-          default: {
-            const unhandled: never = refusal;
-            return unhandled;
-          }
+          throw errorForOpenRunRefusal(refusal);
         }
-        await tx.task.update({
-          where: { id: successor.id },
-          data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
-        });
-        await tx.taskActivity.create({ data: {
-          taskId: successor.id,
-          actorType: "control-plane",
-          body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
-          metadata: { refusal: refusal.code },
-        } });
-        continue;
+        case "fault":
+          if (options.onRefusal === "raise") throw errorForOpenRunRefusal(refusal);
+          break;
+        default: {
+          const unhandled: never = refusal.disposition;
+          return unhandled;
+        }
       }
-      if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-    } catch (error: unknown) {
-      if (!isUniqueConflict(error)) throw error;
-      if (hasSavepoint) {
-        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-      }
+      await tx.task.update({
+        where: { id: successor.id },
+        data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+      });
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
+        metadata: { refusal: refusal.code },
+      } });
       continue;
     }
     await tx.taskActivity.create({ data: {
