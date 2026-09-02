@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  CleanupStatus,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
   PrismaClient,
+  PushStatus,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   TaskStatus,
   applyInboxDecisionTx,
@@ -13,6 +15,7 @@ import {
 } from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
+import { persistSessionTaskOutput } from "./canonical-task-output.js";
 import {
   withMergeLease,
   type ReleaseMergeLease,
@@ -20,6 +23,8 @@ import {
 } from "./merge-lease.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { readinessTick } from "./merge-readiness-worker.js";
+import { claimRun } from "./run-claim.js";
+import { completeRun, completionInput } from "./run-completion.js";
 import { patchTask } from "./task-patch.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -156,6 +161,63 @@ const approveInbox = (cardId: string, externalEventId: string) => db.$transactio
 const authorizationRows = async (taskId: string) => (await db.taskActivity.findMany({ where: { taskId } }))
   .filter((row) => (row.metadata as Record<string, unknown> | null)?.kind === MERGE_INTEGRATOR_KIND.authorization);
 
+const recordRegressionRetry = async (
+  chain: Awaited<ReturnType<typeof seedIntegratorChain>>,
+  headSha = HEAD,
+  baseHeadSha = BASE,
+) => {
+  const previous = await db.run.findFirstOrThrow({
+    where: { taskId: chain.gateTask.id },
+    orderBy: { runNumber: "desc" },
+  });
+  const run = await db.run.create({ data: {
+    projectId: chain.project.id,
+    taskId: chain.gateTask.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: previous.runNumber + 1,
+    dedupeKey: `task:${chain.gateTask.id}:run:${previous.runNumber + 1}`,
+    runner: "CLAUDE",
+    model: chain.agent.model,
+    promptHash: "retry-hash",
+    status: "SUCCEEDED",
+    pullRequestNumber: 123,
+    pullRequestUrl: "https://github.com/acme/widgets/pull/123",
+    targetBranch: "master",
+    branch: "agentos/chain/demo",
+    headSha,
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: chain.project.id,
+    agentId: chain.agent.id,
+    taskId: chain.gateTask.id,
+    runner: "CLAUDE",
+    executionStatus: "SUCCEEDED",
+  } });
+  await db.taskStepOutput.update({
+    where: { taskId: chain.gateTask.id },
+    data: {
+      runId: run.id,
+      body: JSON.stringify({
+        schemaVersion: 2,
+        outcome: "pass",
+        headSha,
+        baseHeadSha,
+        gateVerdict: "PASS",
+        gateProof: `MERGE GATE: PASS ${headSha}`,
+      }),
+      commitSha: headSha,
+    },
+  });
+  await db.mergeGateAttestation.update({
+    where: { chainId_headSha: { chainId: chain.chainId, headSha } },
+    data: { taskId: chain.gateTask.id, runId: run.id, baseHeadSha },
+  });
+  await db.task.update({ where: { id: chain.gateTask.id }, data: { status: TaskStatus.DONE } });
+  return run;
+};
+
 test("Inbox approval releases gated readiness only after exact-head authorization", async () => {
   const chain = await seedIntegratorChain(db, {
     label: "merge-gate-approval-inbox",
@@ -195,6 +257,64 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
   assert.ok(mechanical.some((row) => (
     ((row.metadata as Record<string, unknown>).decision as Record<string, unknown>).channel === "mechanical"
   )));
+
+  const priorExecutors = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+  process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-gated-happy";
+  try {
+    const claimed = await claimRun(db, {
+      body: { runnerId: "merge-executor-gated-happy", leaseSeconds: 60 },
+      claimantClass: "merge-executor",
+      now: new Date("2026-08-31T00:00:04.000Z"),
+      specificationReader: null,
+    });
+    assert.ok(claimed && "run" in claimed);
+    assert.equal(claimed.run.taskId, chain.integratorTask!.id);
+    assert.equal(claimed.executionMode, "mechanical");
+    const mergedBody = JSON.stringify({ outcome: "merged", mergeCommitSha: "e".repeat(40) });
+    const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
+      task: { id: chain.integratorTask!.id },
+      fence: { runId: claimed.run.id, fencingToken: claimed.fencingToken, at: new Date("2026-08-31T00:00:05.000Z") },
+      kind: "merge-result",
+      body: mergedBody,
+      commitSha: null,
+    }));
+    assert.ok("ok" in persisted && persisted.ok, JSON.stringify(persisted));
+    const completed = await completeRun(db, {
+      runId: claimed.run.id,
+      claimantClass: "merge-executor",
+      body: completionInput.parse({
+        runnerId: "merge-executor-gated-happy",
+        fencingToken: claimed.fencingToken,
+        exitCode: 0,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        pushStatus: PushStatus.NOT_REQUESTED,
+        cleanupStatus: CleanupStatus.SUCCEEDED,
+      }),
+    }, releaseLease);
+    assert.deepEqual(completed, {
+      taskId: chain.integratorTask!.id,
+      succeeded: true,
+      retryCreated: false,
+      failureClass: null,
+    });
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, TaskStatus.DONE);
+    assert.equal((await db.run.findUniqueOrThrow({ where: { id: claimed.run.id } })).status, "SUCCEEDED");
+    const mergeResult = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: chain.integratorTask!.id } });
+    assert.equal(mergeResult.runId, claimed.run.id);
+    assert.equal(mergeResult.kind, "merge-result");
+    assert.deepEqual(JSON.parse(mergeResult.body), { outcome: "merged", mergeCommitSha: "e".repeat(40) });
+    assert.deepEqual(
+      (await db.task.findMany({
+        where: { projectId: chain.project.id, chainId: chain.chainId },
+        orderBy: { chainIndex: "asc" },
+      })).map(({ status }) => status),
+      [TaskStatus.DONE, TaskStatus.DONE, TaskStatus.DONE],
+    );
+  } finally {
+    if (priorExecutors === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    else process.env.MERGE_EXECUTOR_RUNNER_IDS = priorExecutors;
+  }
 });
 
 test("task PATCH approval shares the Inbox disposition and leaves readiness worker-owned", async () => {
@@ -362,6 +482,52 @@ test("an old gate authorization cannot release a fresh gate after the state is r
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 0);
   assert.equal(await authorizationRows(chain.readinessTask.id).then((rows) => rows.length), 1);
+});
+
+test("a hard-stopped gated readiness tail reopens a fresh gate after regression completes again", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-hard-stop-reopen",
+    shape: "canonical-compound-readiness",
+    gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const firstCard = await fillGate(chain);
+  await approveInbox(firstCard.id, "merge-gate-hard-stop-approve");
+
+  const stopped = await readinessTick(
+    db,
+    {
+      readPullRequest: async () => snapshot(),
+      compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: false, files: [] }),
+    },
+    new Date("2026-08-31T00:00:03.000Z"),
+    5,
+    releaseLease,
+    runWithMergeLease,
+  );
+  assert.deepEqual(stopped, { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, TaskStatus.REVIEW);
+  assert.equal(await db.inboxMessage.count({ where: { gateTaskId: chain.readinessTask.id, status: "OPEN" } }), 0);
+
+  const retry = await recordRegressionRetry(chain);
+  await db.$transaction((tx) => advanceTemplateTask(
+    tx,
+    chain.gateTask.id,
+    retry.id,
+    null,
+    new Date("2026-08-31T00:00:04.000Z"),
+  ));
+
+  const fresh = await db.inboxMessage.findFirst({
+    where: { gateTaskId: chain.readinessTask.id, status: "OPEN" },
+    orderBy: { createdAt: "desc" },
+  });
+  assert.ok(fresh, "the production successor transition must reopen the stopped readiness gate");
+  assert.notEqual(fresh.id, firstCard.id);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).failureReason, null);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 0);
 });
 
 test("missing or mismatched operator approval stops a gated readiness settlement closed", async () => {

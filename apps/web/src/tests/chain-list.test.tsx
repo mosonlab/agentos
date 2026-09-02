@@ -179,6 +179,17 @@ test("a non-TODO gate slot is disabled and names its state", () => {
   assert.match(markup, /title="The specification gate is already DONE; approval gates may only be changed while the step is TODO"/u);
 });
 
+test("a non-TODO gate slot localizes its disabled reason in Chinese", () => {
+  const markup = renderLocale(chain([
+    step(1, { gateSlot: "spec", status: "DOING" }),
+    step(2, { gateSlot: "merge", status: "REVIEW", approvalGate: true }),
+  ]), "t1", "zh");
+
+  assert.match(markup, /title="规格审批闸门已处于 DOING；仅可在步骤为 TODO 时更改审批闸门"/u);
+  assert.match(markup, /title="合并就绪审批闸门已处于 REVIEW；仅可在步骤为 TODO 时更改审批闸门"/u);
+  assert.doesNotMatch(markup, /approval gates may only be changed/u);
+});
+
 test("a human step uses semantic human presentation and offers no start action", () => {
   const markup = render(chain([step(1, { assigneeType: "HUMAN", executionOwner: "human", agent: null, startable: false })]), "t1");
   assert.match(markup, new RegExp(`>${en("executionOwner.human")}<`));

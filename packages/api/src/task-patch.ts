@@ -152,11 +152,12 @@ const gatePatchPlan = (
   locked: {
     chainId: string | null;
     status: TaskStatus;
+    approvalGate: boolean;
     templateStep: Parameters<typeof gateSlotOf>[0];
   },
-  requested: boolean,
-  changed: boolean,
+  requested: boolean | undefined,
 ): GatePatchPlan => {
+  const changed = requested !== undefined && requested !== locked.approvalGate;
   if (!changed || locked.chainId === null) return { refusal: null, activity: null };
   const slot = gateSlotOf(locked.templateStep);
   if (slot === null) {
@@ -192,7 +193,6 @@ export const patchTask = async (
   body: TaskPatchInput,
 ): Promise<TaskPatchResult> => {
   const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
-  const approvalGateChanged = body.approvalGate !== undefined && body.approvalGate !== before.approvalGate;
   // Held for the whole route: whichever of the three write paths below runs
   // re-reads this assignee under the Agent-row mutex before it commits.
   const assignee = body.assigneeAgentId
@@ -333,7 +333,7 @@ export const patchTask = async (
           activity: null,
           value: { reason: "conflict" as const, message },
         });
-        const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+        const gatePatch = gatePatchPlan(locked, body.approvalGate);
         if (gatePatch.refusal) {
           return { update: null, activity: null, value: gatePatch.refusal };
         }
@@ -550,7 +550,7 @@ export const patchTask = async (
     // a creator holding a stale task relation.
     const updated = await db.$transaction(
       async (tx) => writeTask(tx, taskId, async (locked) => {
-        const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+        const gatePatch = gatePatchPlan(locked, body.approvalGate);
         if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
         return { update: updateData, activity: gatePatch.activity, value: null };
       }),
@@ -567,7 +567,7 @@ export const patchTask = async (
   if (assignee) {
     const written = await db.$transaction(
       async (tx) => writeTask(tx, taskId, async (locked) => {
-        const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+        const gatePatch = gatePatchPlan(locked, body.approvalGate);
         if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
         return { update: updateData, activity: gatePatch.activity, value: null };
       }),
@@ -581,7 +581,7 @@ export const patchTask = async (
   }
   const written = await db.$transaction(
     async (tx) => writeTask(tx, taskId, async (locked) => {
-      const gatePatch = gatePatchPlan(locked, body.approvalGate!, approvalGateChanged);
+      const gatePatch = gatePatchPlan(locked, body.approvalGate);
       if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
       return { update: updateData, activity: gatePatch.activity, value: null };
     }),

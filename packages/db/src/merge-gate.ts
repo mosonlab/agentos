@@ -10,6 +10,7 @@ import {
   settleIntegratorTerminal,
 } from "./merge-integrator-db.js";
 import {
+  MERGE_INTEGRATOR_KIND,
   parseAuthorizationMetadata,
   selectAuthorization,
 } from "./merge-integrator.js";
@@ -127,15 +128,11 @@ export const requireMergeGateAuthorization = async (
   tx: Tx,
   input: { taskId: string; headSha: string; baseSha: string },
 ): Promise<void> => {
-  const activities = await tx.taskActivity.findMany({
-    where: { taskId: input.taskId },
+  const candidates = await tx.taskActivity.findMany({
+    where: { taskId: input.taskId, actorType: "operator" },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     select: { id: true, taskId: true, createdAt: true, actorType: true, metadata: true },
   });
-  const gateRequest = activities
-    .map((activity) => parseEvidenceRequest(activity))
-    .find((request) => request?.purpose === "gate");
-  const candidates = activities.filter((activity) => activity.actorType === "operator");
   const decisionIds = candidates.flatMap((candidate) => {
     const parsed = parseAuthorizationMetadata(candidate.metadata);
     return parsed.status === "ok" && parsed.payload.decision.channel !== "mechanical"
@@ -165,6 +162,19 @@ export const requireMergeGateAuthorization = async (
       `Merge gate operator authorization is ${detail} for verified head ${input.headSha} and base ${input.baseSha}`,
     );
   }
+  const gateRequestActivity = await tx.taskActivity.findFirst({
+    where: {
+      taskId: input.taskId,
+      AND: [
+        { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.evidenceRequest } },
+        { metadata: { path: ["nonce"], equals: selected.authorization.nonce } },
+        { metadata: { path: ["purpose"], equals: "gate" } },
+      ],
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, taskId: true, metadata: true },
+  });
+  const gateRequest = gateRequestActivity ? parseEvidenceRequest(gateRequestActivity) : null;
   if (!gateRequest
     || selected.authorization.decision.inboxMessageId !== gateRequest.cardId
     || selected.authorization.nonce !== gateRequest.nonce) {

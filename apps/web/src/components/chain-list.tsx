@@ -173,7 +173,13 @@ export const ChainRow = ({
   const showStart = step.startAction !== null || blockedOn !== null || held;
   const isGateSlot = step.gateSlot !== null && step.gateSlot !== undefined;
   const gateToggleDisabledReason = isGateSlot && step.status !== "TODO"
-    ? gateToggleRefusal(step.gateSlot, step.status)
+    ? gateToggleRefusal(step.gateSlot, step.status, {
+      nonSlot: t("chain.gate.refusal.nonSlot"),
+      pastTodo: (slot, status) => t("chain.gate.refusal.pastTodo", {
+        slot: t(slot === "spec" ? "chain.gate.slotName.specification" : "chain.gate.slotName.merge"),
+        status,
+      }),
+    })
     : null;
   const gateToggleLabel = step.gateSlot === "spec"
     ? t("chain.gate.specification")

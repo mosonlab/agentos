@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  InboxStatus,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
@@ -735,16 +736,24 @@ const activateChainSuccessorInternal = async (
     }
     // A REVIEW successor at dispatch time is normally a stalled chain rather
     // than a decision anyone made, so it is returned to the queue under a
-    // bounded ceiling. An approval-gated REVIEW is the deliberate exception:
-    // replaying predecessor completion must not resume it behind the
-    // operator's back (or try to create a duplicate evidence card).
+    // bounded ceiling. An approval-gated REVIEW is the deliberate exception
+    // only while its durable Inbox decision is still OPEN. A readiness hard
+    // stop also parks the task in REVIEW, but its prior card is already
+    // answered; that state must resume and open fresh evidence instead of
+    // silently dead-ending the tail.
     if (successor.status === TaskStatus.REVIEW && successor.approvalGate) {
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: "Predecessor layer completed; approval gate remains open",
-      } });
-      continue;
+      const openGate = await tx.inboxMessage.findFirst({
+        where: { gateTaskId: successor.id, status: InboxStatus.OPEN },
+        select: { id: true },
+      });
+      if (openGate) {
+        await tx.taskActivity.create({ data: {
+          taskId: successor.id,
+          actorType: "control-plane",
+          body: "Predecessor layer completed; approval gate remains open",
+        } });
+        continue;
+      }
     }
     if (successor.status === TaskStatus.REVIEW && !await resumeParkedSuccessor(tx, current, successor)) continue;
 
