@@ -29,7 +29,7 @@ const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => (
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
   activeRepair: null,
-  activation: { state: "running", predecessor: null, taskId: "step-1" }, totalCost: null,
+  activation: { state: "running", predecessor: null, taskId: "step-1", hold: null }, totalCost: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z", ...overrides,
 });
 
@@ -133,7 +133,7 @@ test("aggregate placement follows API-derived frontier status and counts entries
 });
 
 test("aggregate card exposes progress, frontier, activation/lock state, and no drag or Move To", () => {
-  const parked = aggregate({ activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1" } });
+  const parked = aggregate({ activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1", hold: null } });
   const parkedMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={parked} />);
   assert.match(parkedMarkup, /Step 3\/12/);
   assert.match(parkedMarkup, /Implement release/);
@@ -141,7 +141,7 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.doesNotMatch(parkedMarkup, /draggable/);
   assert.doesNotMatch(parkedMarkup, /Move to/);
 
-  const waitingMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({ activation: { state: "waiting-on-predecessor", predecessor: { taskId: "previous", taskName: "Prepare release" }, taskId: "step-1" } })} />);
+  const waitingMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({ activation: { state: "waiting-on-predecessor", predecessor: { taskId: "previous", taskName: "Prepare release" }, taskId: "step-1", hold: null } })} />);
   assert.match(waitingMarkup, /Prepare release/);
   assert.match(waitingMarkup, /Locked by/);
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
@@ -172,7 +172,7 @@ test("a running aggregate drops the state pill and the frontier row's filter but
   assert.doesNotMatch(running, /Filter steps/u);
 
   const parked = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
-    activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1" },
+    activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1", hold: null },
   })} />);
   assert.match(parked, /data-slot="badge"[^>]*>Parked</u);
 });
@@ -309,7 +309,7 @@ test("aggregate translations keep the state and action copy localized", () => {
 
 const AggregateActivationHarness = (): ReactNode => {
   const start = useTaskStartConfirmation(noop);
-  const projection = aggregate({ activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1" } });
+  const projection = aggregate({ activation: { state: "parked-unactivated", predecessor: null, taskId: "step-1", hold: null } });
   return <>
     <ChainAggregateCard
       aggregate={projection}
