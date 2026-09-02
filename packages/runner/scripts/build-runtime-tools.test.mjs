@@ -78,8 +78,7 @@ test("buildRuntimeTools bundles the run-gate harness installed by mirror-push", 
 
   assert.equal(
     readFileSync(join(outputRoot, "gate-worker/run-gate.sh"), "utf8"),
-    readFileSync(join(repositoryRoot, "packages/runner/runtime-tools/gate-worker/run-gate.sh"), "utf8")
-      .replaceAll("packages/runner/runtime-tools/", "scripts/"),
+    readFileSync(join(repositoryRoot, "packages/runner/runtime-tools/gate-worker/run-gate.sh"), "utf8"),
   );
 });
 
@@ -96,8 +95,7 @@ test("buildRuntimeTools creates the exact byte-identical tree and purges stale f
     "regression-verification.sh",
   ]);
   for (const { source, destination } of RUNTIME_TOOL_FILES) {
-    const expected = readFileSync(join(context.repositoryRoot, source), "utf8")
-      .replaceAll("packages/runner/runtime-tools/", "scripts/");
+    const expected = readFileSync(join(context.repositoryRoot, source), "utf8");
     assert.equal(readFileSync(join(context.outputRoot, destination), "utf8"), expected);
   }
 

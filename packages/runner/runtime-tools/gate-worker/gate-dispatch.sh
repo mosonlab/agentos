@@ -4,10 +4,10 @@
 # fallback worker. The local machine is used only with explicit opt-in. Runs ON
 # THE LOCAL MACHINE:
 #
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid>
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --master <oid>
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --allow-local
-#   packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid> --server <one-server>
+#   scripts/gate-worker/gate-dispatch.sh <oid>
+#   scripts/gate-worker/gate-dispatch.sh <oid> --master <oid>
+#   scripts/gate-worker/gate-dispatch.sh <oid> --allow-local
+#   scripts/gate-worker/gate-dispatch.sh <oid> --server <one-server>
 #
 # The slot model rations measured host capacity, not arbitrary processes. An
 # explicitly configured primary worker contributes two fixed slots and an
@@ -177,7 +177,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # that reach a remote shell and the verdict's codes all live here, and this
 # script transports verdicts rather than forming them, so every failure of its
 # own is GATE_EXIT_NO_VERDICT.
-# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
+# shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
 if [ -z "${AGENTOS_WORKSPACE_PATH:-}" ]; then

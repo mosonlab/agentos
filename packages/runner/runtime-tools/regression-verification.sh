@@ -36,7 +36,7 @@ STATE_FILE="${AGENTOS_REGRESSION_STATE:-$AGENTOS_WORKSPACE_PATH/.git/agentos-reg
 OUTPUT_FILE="$AGENTOS_WORKSPACE_PATH/.agentos/regression-output.json"
 GATE_DISPATCH="${REGRESSION_GATE_DISPATCH:-$SCRIPT_DIR/gate-worker/gate-dispatch.sh}"
 GATE_LOG=""
-# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
+# shellcheck source=scripts/gate-worker/lib.sh
 . "$SCRIPT_DIR/gate-worker/lib.sh"
 
 cleanup() {
