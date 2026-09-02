@@ -265,8 +265,7 @@ The public, color-insensitive final-line wire format is:
 | SIGINT interrupts the gate | `GATE NOT RUN: <reason>` | 130 |
 | SIGTERM interrupts the gate | `GATE NOT RUN: <reason>` | 143 |
 
-The Anneal-run refusal happens before `run_repository_tests` unless
-`AGENTOS_RUN_SCOPE_BYPASS=regression-verification` is set. A passing manual
+The Anneal-run refusal happens before `run_repository_tests`. A passing manual
 run without `--master` is never authoritative. Every completed run emits the
 corresponding line as its final line; ANSI color does not change its meaning.
 If the repository test command is stopped from outside by SIGHUP, SIGINT,

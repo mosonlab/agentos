@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -28,19 +28,78 @@ const run = (command, args, overrides = {}) => spawnSync(command, args, {
   env: environment(overrides),
 });
 
-const expectedRefusal = (script, runId) =>
-  `run-scope-guard: ${script} refused for Run ${runId}: inside an Anneal Run, verify only the affected workspace using npm run ${script} -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.\n`;
+const expectedRefusal = (script, runId) => {
+  const workspaceScript = ["lint:biome", "lint:types"].includes(script) ? "lint" : script;
+  return `run-scope-guard: ${script} refused for Run ${runId}: inside an Anneal Run, verify only the affected workspace using npm run ${workspaceScript} -w <workspace> and named test files; the Regression step owns repository-wide proof and the Merge Gate.\n`;
+};
 
-test("RUN-SCOPE-GUARD host fast path and exact Regression bypass are silent", () => {
-  for (const overrides of [{}, {
-    AGENTOS_RUN_ID: "run-1",
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+const makeCallerFixture = (name) => {
+  const directory = mkdtempSync(join(tmpdir(), "run-scope-caller."));
+  const script = join(directory, name);
+  writeFileSync(script, "#!/usr/bin/env bash\nbash \"$@\" &\nchild=$!\nwait \"$child\"\nstatus=$?\nexit \"$status\"\n", { mode: 0o755 });
+  chmodSync(script, 0o755);
+  return { directory, script };
+};
+
+test("RUN-SCOPE-GUARD host fast path is silent", () => {
+  const result = run("bash", [guard, "build"]);
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
+test("RUN-SCOPE-GUARD refuses a forged Regression bypass and audits the caller command line", (t) => {
+  const caller = makeCallerFixture("forged-run-scope-bypass-caller.sh");
+  t.after(() => rmSync(caller.directory, { recursive: true, force: true }));
+
+  const result = run("bash", [caller.script, guard, "build"], {
+    AGENTOS_RUN_ID: "run-forged-bypass",
     AGENTOS_RUN_SCOPE_BYPASS: regressionVerificationBypass,
-  }]) {
-    const result = run("bash", [guard, "build"], overrides);
-    assert.equal(result.status, 0);
-    assert.equal(result.stdout, "");
-    assert.equal(result.stderr, "");
-  }
+    AGENTOS_TOOLS: caller.directory,
+  });
+  assert.equal(result.status, 78);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, new RegExp(escapeRegExp(expectedRefusal("build", "run-forged-bypass").trim()), "u"));
+  assert.ok(
+    result.stderr.split("\n").some((line) => line.includes(caller.script)),
+    `forged bypass audit did not include caller command line: ${result.stderr}`,
+  );
+});
+
+test("RUN-SCOPE-GUARD accepts the bypass only for a regression-verification.sh ancestor under AGENTOS_TOOLS", (t) => {
+  const caller = makeCallerFixture("regression-verification.sh");
+  t.after(() => rmSync(caller.directory, { recursive: true, force: true }));
+
+  const result = run("bash", [caller.script, guard, "build"], {
+    AGENTOS_RUN_ID: "run-legitimate-bypass",
+    AGENTOS_RUN_SCOPE_BYPASS: regressionVerificationBypass,
+    AGENTOS_TOOLS: caller.directory,
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
+test("RUN-SCOPE-GUARD rejects a Bash stdin program that only names the regression tool as an argument", (t) => {
+  const toolsDirectory = mkdtempSync(join(tmpdir(), "run-scope-stdin-spoof."));
+  t.after(() => rmSync(toolsDirectory, { recursive: true, force: true }));
+  const expectedTool = join(toolsDirectory, "regression-verification.sh");
+
+  const result = spawnSync("bash", ["-s", expectedTool], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: environment({
+      AGENTOS_RUN_ID: "run-stdin-spoof",
+      AGENTOS_RUN_SCOPE_BYPASS: regressionVerificationBypass,
+      AGENTOS_TOOLS: toolsDirectory,
+    }),
+    input: `bash "${guard}" build\n`,
+  });
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /run-scope-bypass: refused forged Regression bypass/u);
+  assert.match(result.stderr, new RegExp(escapeRegExp(expectedRefusal("build", "run-stdin-spoof").trim()), "u"));
 });
 
 test("RUN-SCOPE-GUARD wrong, empty, and missing bypass values refuse once", () => {
@@ -54,8 +113,8 @@ test("RUN-SCOPE-GUARD wrong, empty, and missing bypass values refuse once", () =
   }
 });
 
-test("RUN-SCOPE-GUARD prefixes all six repository-wide root scripts", () => {
-  for (const script of ["build", "lint", "typecheck", "test", "test:db", "merge-gate"]) {
+test("RUN-SCOPE-GUARD prefixes all eight repository-wide root scripts", () => {
+  for (const script of ["build", "lint", "lint:biome", "lint:types", "typecheck", "test", "test:db", "merge-gate"]) {
     const result = run("npm", ["run", script, "--", "a-named-file-does-not-narrow-root-scope"], {
       AGENTOS_RUN_ID: "root-script-run",
     });
