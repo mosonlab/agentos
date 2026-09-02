@@ -1,5 +1,5 @@
-// Fixtures for the slot locks in scripts/gate-worker/lib.sh and for the exit
-// codes scripts/gate-worker/gate-dispatch.sh reports.
+// Fixtures for the slot locks in the runner-owned lib.sh and for the exit
+// codes the runner-owned gate-dispatch.sh reports.
 //
 // Two things are under test and both are mechanisms, not text.
 //
@@ -43,8 +43,9 @@ import { fileURLToPath } from "node:url";
 import { fixtureEnv } from "./gate-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const libPath = join(here, "lib.sh");
-const dispatchPath = join(here, "gate-dispatch.sh");
+const runtimeGateWorker = join(here, "..", "..", "packages", "runner", "runtime-tools", "gate-worker");
+const libPath = join(runtimeGateWorker, "lib.sh");
+const dispatchPath = join(runtimeGateWorker, "gate-dispatch.sh");
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
@@ -294,21 +295,23 @@ test("a killed holder's lock is released by the signal traps", (t) => {
 
 // A repository the dispatcher will accept: it has scripts/merge-gate.sh, a
 // clean tree and a resolvable HEAD, so the local slot is eligible. The three
-// scripts the dispatcher shells out to are stubs; lib.sh and gate-dispatch.sh
-// are the real ones.
+// runtime-tool siblings the dispatcher shells out to are stubs; lib.sh and
+// gate-dispatch.sh are the real ones.
 const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
   const root = scratch(t);
-  mkdirSync(join(root, "scripts", "gate-worker"), { recursive: true });
+  const fixtureTools = join(root, "packages", "runner", "runtime-tools", "gate-worker");
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  mkdirSync(fixtureTools, { recursive: true });
   const put = (path, body) => {
     writeFileSync(join(root, path), `#!/usr/bin/env bash\n${body}\n`);
     chmodSync(join(root, path), 0o755);
   };
   put("scripts/merge-gate.sh", mergeGate ?? 'printf "MERGE GATE: PASS stub\\n"; exit 0');
-  put("scripts/gate-worker/mirror-push.sh", mirrorPush ?? 'printf "MIRROR PUSH: OK\\n"; exit 0');
-  put("scripts/gate-worker/remote-gate.sh", remoteGate ?? 'printf "MERGE GATE: PASS stub\\n"; exit 0');
-  cpSync(libPath, join(root, "scripts", "gate-worker", "lib.sh"));
-  cpSync(dispatchPath, join(root, "scripts", "gate-worker", "gate-dispatch.sh"));
-  chmodSync(join(root, "scripts", "gate-worker", "gate-dispatch.sh"), 0o755);
+  put("packages/runner/runtime-tools/gate-worker/mirror-push.sh", mirrorPush ?? 'printf "MIRROR PUSH: OK\\n"; exit 0');
+  put("packages/runner/runtime-tools/gate-worker/remote-gate.sh", remoteGate ?? 'printf "MERGE GATE: PASS stub\\n"; exit 0');
+  cpSync(libPath, join(fixtureTools, "lib.sh"));
+  cpSync(dispatchPath, join(fixtureTools, "gate-dispatch.sh"));
+  chmodSync(join(fixtureTools, "gate-dispatch.sh"), 0o755);
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: FIXTURE_ENV });
   execFileSync("git", ["add", "-A"], { cwd: root, env: FIXTURE_ENV });
   execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: root, env: FIXTURE_ENV });
@@ -352,7 +355,7 @@ const externalTooling = (t, { mirrorPush, remoteGate }) => {
 // are about the wait itself pass their own --timeout-minutes, which wins.
 const DISPATCH_KILL_MS = 120_000;
 
-const runDispatch = (repo, cache, args, env = {}, { cwd = repo.root, script = join(repo.root, "scripts/gate-worker/gate-dispatch.sh") } = {}) =>
+const runDispatch = (repo, cache, args, env = {}, { cwd = repo.root, script = join(repo.root, "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh") } = {}) =>
   spawnSync("bash", [script, ...args], {
     cwd,
     encoding: "utf8",
@@ -784,7 +787,7 @@ test("a destination that is not an ssh destination is refused before anything is
 
 test("documented gate-worker invocations name their checkout explicitly", () => {
   const workspacePrefix = 'AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)"';
-  const commandPath = "scripts/(?:gate-worker/)?(?:gate-dispatch|mirror-push|remote-gate|regression-verification)\\.sh";
+  const commandPath = "packages/runner/runtime-tools/(?:gate-worker/)?(?:gate-dispatch|mirror-push|remote-gate|regression-verification)\\.sh";
   const files = [
     join(here, "..", "..", "docs", "runbooks", "gate-worker.md"),
     join(here, "..", "..", "CONTRIBUTING.md"),
@@ -793,7 +796,9 @@ test("documented gate-worker invocations name their checkout explicitly", () => 
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const codeBlocks = [...source.matchAll(/```sh\n([\s\S]*?)```/gu)].map((match) => match[1]);
-    const inlineCommands = [...source.matchAll(/`([^`]*scripts\/(?:gate-worker\/)?[^`]+)`/gu)].map((match) => match[1]);
+    const inlineCommands = [
+      ...source.matchAll(/`([^`]*(?:scripts\/|packages\/runner\/runtime-tools\/)[^`]+)`/gu),
+    ].map((match) => match[1]);
     const commands = [...codeBlocks, ...inlineCommands]
       .flatMap((block) => block.replace(/\\\r?\n[ \t]*/gu, " ").split(/\r?\n/gu))
       .filter((line) => new RegExp(commandPath, "u").test(line));

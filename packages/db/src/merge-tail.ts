@@ -282,7 +282,7 @@ export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean =>
 const DEFENSE_EXACT = new Set([
   "scripts/merge-gate.sh",
   "scripts/merge-lease.sh",
-  "scripts/regression-verification.sh",
+  "packages/runner/runtime-tools/regression-verification.sh",
   "packages/runner/scripts/build-runtime-tools.mjs",
   "packages/runner/src/workspace.ts",
   "packages/runner/src/adapters.ts",
@@ -314,7 +314,7 @@ const DEFENSE_EXACT = new Set([
 export const defenseListReason = (path: string): string | null => {
   if (DEFENSE_EXACT.has(path)) return "merge-tail-machinery";
   if (path.startsWith("packages/api/src/merge-")) return "merge-tail-machinery";
-  if (path.startsWith("scripts/gate-worker/")) return "gate-worker";
+  if (path.startsWith("scripts/gate-worker/") || path.startsWith("packages/runner/runtime-tools/gate-worker/")) return "gate-worker";
   if (path.startsWith("packages/db/prisma/migrations/")) return "database-migration";
   if (path.startsWith("packages/merge-executor/")) return "merge-execution";
   if (path.startsWith("agents/templates/direct-engineer-workflow/")

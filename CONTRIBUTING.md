@@ -81,7 +81,7 @@ upstream repository.
 A merge requires `MERGE GATE: PASS <oid>` for the exact integrated head being
 merged (`scripts/merge-gate.sh --expect-head <oid>`). When another gate might
 be running and remote capacity has been configured explicitly, dispatch
-through `AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" scripts/gate-worker/gate-dispatch.sh <oid>`;
+through `AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid>`;
 otherwise run the local gate. Read
 [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md) before
 operating any remote worker.

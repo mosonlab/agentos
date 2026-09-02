@@ -26,7 +26,11 @@ const regressionInvocations = [
   `${regressionToolPrefix} review-fail '<concise finding IDs or defect>'`,
   `${regressionToolPrefix} finalize`,
 ];
-const regressionCommandPattern = /(?:"\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh"|scripts\/regression-verification\.sh) (?:prepare|review-fail '[^']+'|finalize)/gu;
+const checkoutRegressionToolPattern = ["scripts", "regression-verification\\.sh"].join("\\/");
+const regressionCommandPattern = new RegExp(
+  String.raw`(?:"\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}/regression-verification\.sh"|${checkoutRegressionToolPattern}) (?:prepare|review-fail '[^']+'|finalize)`,
+  "gu",
+);
 
 const withTemplateCopy = async (
   templateName: CanonicalTemplateName,
@@ -153,13 +157,13 @@ test("canonical regression commands require runner tools without a checkout fall
     const invocations = [...regression.prompt.matchAll(regressionCommandPattern)].map(([invocation]) => invocation);
 
     const root = await mkdtemp(join(tmpdir(), "agentos-regression-prompt-test-"));
-    const checkoutCopy = join(root, "scripts", "regression-verification.sh");
-    const marker = join(root, "checkout-copy-invoked");
+    const fallbackFixture = join(root, "scripts", "regression-verification.sh");
+    const marker = join(root, "checkout-fallback-invoked");
     try {
       await mkdir(join(root, "scripts"), { recursive: true });
       await writeFile(
-        checkoutCopy,
-        `#!/usr/bin/env bash\nprintf 'checkout copy invoked\\n' > ${JSON.stringify(marker)}\nexit 99\n`,
+        fallbackFixture,
+        `#!/usr/bin/env bash\nprintf 'fallback fixture invoked\\n' > ${JSON.stringify(marker)}\nexit 99\n`,
         { mode: 0o755 },
       );
 
@@ -178,8 +182,8 @@ test("canonical regression commands require runner tools without a checkout fall
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+    assert.doesNotMatch(regression.prompt, new RegExp(checkoutRegressionToolPattern, "u"));
     assert.deepEqual(invocations, regressionInvocations, `${templateName} must use only the runner-owned invocations`);
-    assert.doesNotMatch(regression.prompt, /scripts\/regression-verification\.sh/u);
   }
 });
 

@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const script = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/regression-verification.sh");
+const script = resolve(dirname(fileURLToPath(import.meta.url)), "../runtime-tools/regression-verification.sh");
 const workerLib = resolve(dirname(script), "gate-worker/lib.sh");
 const SHA = /^[0-9a-f]{40}$/u;
 

@@ -28,7 +28,7 @@ const executeClaim = (
   ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
 ) => executeClaimProduction(runnerConfig, claim, {
   materializeRuntimeTools: (config, scratch) => materializeRuntimeTools(config, scratch, {
-    sourceRoot: fileURLToPath(new URL("../../../scripts/", import.meta.url)),
+    sourceRoot: fileURLToPath(new URL("../runtime-tools/", import.meta.url)),
   }),
   ...dependencies,
 });

@@ -164,8 +164,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 # its exit codes and the four lines that carry them — is written by lib.sh's
 # emit functions, because run-gate.sh reads those lines back and one format
 # needs one writer.
-# shellcheck source=scripts/gate-worker/lib.sh
-. "${SCRIPT_DIR}/gate-worker/lib.sh"
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
+. "${REPO_ROOT}/packages/runner/runtime-tools/gate-worker/lib.sh"
 if [[ -n "${AGENTOS_RUN_ID:-}" && "${AGENTOS_RUN_SCOPE_BYPASS:-}" != "regression-verification" ]]; then
   gate_verdict_not_run "refused inside Anneal run ${AGENTOS_RUN_ID}"
   exit "${GATE_EXIT_NO_VERDICT}"

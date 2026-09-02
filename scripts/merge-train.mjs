@@ -94,7 +94,7 @@ const defaultFetchCandidate = async (repoRoot, candidate) => {
 };
 
 const defaultGate = async (_repoRoot, prefix, checkout) => {
-  const script = path.join(checkout, "scripts", "gate-worker", "gate-dispatch.sh");
+  const script = path.join(checkout, "packages", "runner", "runtime-tools", "gate-worker", "gate-dispatch.sh");
   const result = await runProcess("bash", [script, prefix.oid, "--master", prefix.predecessor], {
     cwd: checkout,
     env: { ...process.env, AGENTOS_WORKSPACE_PATH: checkout },

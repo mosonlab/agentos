@@ -184,11 +184,11 @@ test("the defense list covers tracked merge-tail machinery", () => {
     return sourcePatterns.some((pattern) => pattern.test(source));
   });
   const runnerSourcePaths = [
-    "scripts/regression-verification.sh",
-    "scripts/gate-worker/gate-dispatch.sh",
-    "scripts/gate-worker/lib.sh",
-    "scripts/gate-worker/mirror-push.sh",
-    "scripts/gate-worker/remote-gate.sh",
+    "packages/runner/runtime-tools/regression-verification.sh",
+    "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh",
+    "packages/runner/runtime-tools/gate-worker/lib.sh",
+    "packages/runner/runtime-tools/gate-worker/mirror-push.sh",
+    "packages/runner/runtime-tools/gate-worker/remote-gate.sh",
   ];
   const runnerContractPaths = [
     "packages/runner/scripts/build-runtime-tools.mjs",
@@ -204,7 +204,7 @@ test("the defense list covers tracked merge-tail machinery", () => {
   for (const path of new Set([...structuralPaths, ...runnerSourcePaths, ...runnerContractPaths])) {
     assert.notEqual(defenseListReason(path), null, path);
   }
-  assert.equal(defenseListReason("scripts/regression-verification.sh"), "merge-tail-machinery");
+  assert.equal(defenseListReason("packages/runner/runtime-tools/regression-verification.sh"), "merge-tail-machinery");
   for (const path of runnerSourcePaths.slice(1)) {
     assert.equal(defenseListReason(path), "gate-worker", path);
   }

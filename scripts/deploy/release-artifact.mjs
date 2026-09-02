@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { join, sep } from "node:path";
 
 import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
@@ -13,9 +13,97 @@ import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const RELEASE = /^(?<commit>[0-9a-f]{40})-(?<digest>[0-9a-f]{64})$/u;
+const RUNTIME_TOOL_ROOT = "packages/runner/dist/runtime-tools";
+const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
+  "regression-verification.sh",
+  "gate-worker/gate-dispatch.sh",
+  "gate-worker/lib.sh",
+  "gate-worker/mirror-push.sh",
+  "gate-worker/remote-gate.sh",
+  "gate-worker/run-gate.sh",
+]);
+const RUNTIME_TOOL_ENTRIES = new Map([
+  ["", new Set(["gate-worker", "regression-verification.sh"])],
+  ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"])],
+]);
 
 const fail = (reason, detail) => {
   throw new DeployFailure(reason, detail);
+};
+
+const runtimeFailure = (detail) => fail("release-artifact-runtime-incomplete", detail);
+
+const runtimeToolStatus = (releaseDirectory, relativePath) => {
+  const path = join(releaseDirectory, relativePath);
+  let status;
+  try {
+    status = lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") runtimeFailure(`${relativePath}-missing`);
+    runtimeFailure(`${relativePath}-unreadable`);
+  }
+  return { path, status };
+};
+
+const assertRuntimeToolDirectory = (releaseDirectory, relativePath) => {
+  const { status } = runtimeToolStatus(releaseDirectory, relativePath);
+  if (status.isSymbolicLink() || !status.isDirectory()) runtimeFailure(`${relativePath}-not-a-directory`);
+  return status;
+};
+
+const assertRuntimeToolFile = (releaseDirectory, relativePath) => {
+  const { status } = runtimeToolStatus(releaseDirectory, relativePath);
+  if (status.isSymbolicLink() || !status.isFile()) runtimeFailure(`${relativePath}-not-a-regular-file`);
+  return status;
+};
+
+const sortedEntryNames = (path) => readdirSync(path, { withFileTypes: true }).map(({ name }) => name).sort();
+
+const assertRuntimeToolInventory = (releaseDirectory) => {
+  const runtimeRoot = join(releaseDirectory, RUNTIME_TOOL_ROOT);
+  assertRuntimeToolDirectory(releaseDirectory, RUNTIME_TOOL_ROOT);
+  for (const [directory, expectedNames] of RUNTIME_TOOL_ENTRIES) {
+    const relativeDirectory = directory ? `${RUNTIME_TOOL_ROOT}/${directory}` : RUNTIME_TOOL_ROOT;
+    const directoryPath = join(releaseDirectory, relativeDirectory);
+    if (directory) assertRuntimeToolDirectory(releaseDirectory, relativeDirectory);
+    const observedNames = sortedEntryNames(directoryPath);
+    const expected = [...expectedNames].sort();
+    if (JSON.stringify(observedNames) !== JSON.stringify(expected)) {
+      runtimeFailure(`${relativeDirectory}-inventory-mismatch`);
+    }
+    for (const name of expectedNames) {
+      if (name === "gate-worker") continue;
+      assertRuntimeToolFile(releaseDirectory, `${relativeDirectory}/${name}`);
+    }
+  }
+
+  // Runtime tools are runner-owned. Reject another runtime-tools component or
+  // a symlink alias to the canonical tree, without treating an unrelated file
+  // that happens to share a generic basename (such as lib.sh) as tooling.
+  const canonicalRuntimeRoot = realpathSync(runtimeRoot);
+  const walk = (directory, prefix) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (relativePath === RUNTIME_TOOL_ROOT) continue;
+      if (relativePath.split("/").includes("runtime-tools")) runtimeFailure(`misplaced-${relativePath}`);
+      const entryPath = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        const resolved = realpathSync(entryPath);
+        if (resolved === canonicalRuntimeRoot || resolved.startsWith(`${canonicalRuntimeRoot}${sep}`)) {
+          runtimeFailure(`misplaced-${relativePath}`);
+        }
+      }
+      // Dependency trees are independent artifacts and cannot be a runner
+      // bundle destination. Avoid turning their size or basenames into deploy
+      // verification inputs.
+      if (entry.isDirectory() && entry.name !== "node_modules") walk(entryPath, relativePath);
+    }
+  };
+  walk(releaseDirectory, "");
+  return Object.freeze({
+    root: runtimeRoot,
+    files: Object.freeze(RUNTIME_TOOL_DESTINATIONS.map((destination) => `${RUNTIME_TOOL_ROOT}/${destination}`)),
+  });
 };
 
 const maintenanceSourceImports = (releaseDirectory) => {
@@ -64,11 +152,13 @@ export const verifyReleaseArtifact = ({ deployRoot, revision, releaseName }) => 
   try {
     const verified = verifyReleaseDirectory({ releaseDirectory, revision, digest: identity.digest });
     const dbMaintenanceSourceImports = maintenanceSourceImports(verified.releaseDirectory);
+    const runtimeTools = assertRuntimeToolInventory(verified.releaseDirectory);
     return Object.freeze({
       ...verified,
       releaseDirectoryIdentity: verified.releaseName,
       buildStamp: verified.apiBuildStamp,
       dbMaintenanceSourceImports,
+      runtimeTools,
     });
   } catch (error) {
     if (error instanceof DeployFailure && error.reason === "release-digest-mismatch") {

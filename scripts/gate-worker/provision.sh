@@ -331,7 +331,7 @@ if [ -n "$repo_dirs" ]; then
 $repo_dirs
 EOF2
 else
-  note "no repository mirrors yet — run scripts/gate-worker/mirror-push.sh from the local machine"
+  note "no repository mirrors yet — run packages/runner/runtime-tools/gate-worker/mirror-push.sh from the local machine"
 fi
 
 # --- verdict ----------------------------------------------------------------
@@ -343,7 +343,7 @@ if [ "$failures" -gt 0 ]; then
 fi
 if [ "$APPLY" = 1 ]; then
   printf 'PROVISION: OK\n'
-  printf 'Next, from the local machine: scripts/gate-worker/gate-dispatch.sh <candidate-oid>\n'
+  printf 'Next, from the local machine: packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <candidate-oid>\n'
 else
   printf 'PROVISION: DRY RUN OK — re-run with --apply\n'
 fi

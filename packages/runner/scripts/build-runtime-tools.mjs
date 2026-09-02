@@ -10,16 +10,27 @@ import { fileURLToPath } from "node:url";
  * gate-worker helper part of the runner's release contract by accident.
  */
 export const RUNTIME_TOOL_FILES = Object.freeze([
-  Object.freeze({ source: "scripts/regression-verification.sh", destination: "regression-verification.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
-  Object.freeze({ source: "scripts/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/regression-verification.sh", destination: "regression-verification.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/run-gate.sh", destination: "gate-worker/run-gate.sh" }),
 ]);
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");
 const defaultPackageRoot = resolve(scriptDirectory, "..");
+const sourceRuntimeToolPrefix = "packages/runner/runtime-tools/";
+const bundledRuntimeToolPrefix = "scripts/";
+
+// The package-owned sources name their canonical home, while Acceptance 2
+// freezes the release-local bundle to the target commit's bytes. Rewriting only
+// the moved prefix preserves that bundle and leaves every payload edit visible.
+const generatedBytes = (sourceBytes) => Buffer.from(
+  sourceBytes.toString("utf8").replaceAll(sourceRuntimeToolPrefix, bundledRuntimeToolPrefix),
+  "utf8",
+);
 
 const failure = (detail, cause) => {
   const error = new Error(`runner-runtime-tools: ${detail}`);
@@ -51,7 +62,7 @@ const directory = (filesystem, path, label) => {
 
 const expectedDirectoryEntries = new Map([
   ["", ["gate-worker", "regression-verification.sh"]],
-  ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh"]],
+  ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]],
 ]);
 
 const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
@@ -73,7 +84,7 @@ const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
     const sourcePath = resolve(sourceRoot, source);
     const destinationPath = join(outputRoot, destination);
     regularFile(filesystem, destinationPath, `generated-file:${destination}`);
-    const sourceBytes = filesystem.readFileSync(sourcePath);
+    const sourceBytes = generatedBytes(filesystem.readFileSync(sourcePath));
     const destinationBytes = filesystem.readFileSync(destinationPath);
     if (!sourceBytes.equals(destinationBytes)) failure(`byte-mismatch:${destination}`);
   }
@@ -134,9 +145,9 @@ export const buildRuntimeTools = ({
       const sourcePath = resolve(sourceRoot, source);
       const destinationPath = join(stageRoot, destination);
       try {
-        filesystem.copyFileSync(sourcePath, destinationPath);
-        // copyFileSync does not promise to retain the source mode. Preserve it
-        // here so generated scripts remain useful when inspected directly;
+        filesystem.writeFileSync(destinationPath, generatedBytes(filesystem.readFileSync(sourcePath)));
+        // Preserve the source mode so generated scripts remain useful when
+        // inspected directly;
         // per-Run materialization applies its stricter 0500 mode later.
         filesystem.chmodSync(destinationPath, sourceStats.get(source).mode & 0o777);
       } catch (error) {

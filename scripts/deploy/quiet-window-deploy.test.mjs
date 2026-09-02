@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +50,9 @@ import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const DEPLOY_SCRIPT = fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url));
+const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
+  .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
+  .sort();
 const EXPECTED_PHASES = [
   "parse-arguments",
   "check-escalation",
@@ -487,6 +502,7 @@ test("release artifact inventory copies and verifies deploy runtime and workspac
       revision: revisions.to,
       artifactPaths: paths.filter((path) => [
         "packages/api/dist",
+        "packages/runner/dist",
         "packages/db/prisma",
         "packages/db/src",
         adapterPath,
@@ -627,11 +643,95 @@ test("standalone builder creates a verified exact-commit release", () => {
       readFileSync(join(REPOSITORY_ROOT, source)),
     );
   }
+  assert.deepEqual(
+    artifact.files.filter(({ path }) => path.includes("runtime-tools")).map(({ path }) => path),
+    EXPECTED_RUNTIME_PATHS,
+  );
   assert.equal(commands.length, 4);
   assert.deepEqual(commands.slice(1).map(({ args }) => args.slice(-2)), [
     ["--detach", revisions.to], ["/npm", "ci"], ["run", "build"],
   ]);
   removeTree(deployRoot);
+});
+
+const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-runtime-tools-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  mutate?.(source);
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths,
+      optionalArtifactPaths: [],
+    });
+    assert.throws(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+      (error) => error instanceof DeployFailure && error.reason === "release-artifact-runtime-incomplete",
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+};
+
+test("artifact verification rejects missing, extra, non-regular, and misplaced runtime tools", () => {
+  const completePaths = ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"];
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths.filter((path) => path !== "packages/runner/dist"),
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    mutate: (source) => writeFileSync(
+      join(source, "packages/runner/dist/runtime-tools/extra.sh"),
+      "unexpected\n",
+    ),
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    mutate: (source) => {
+      const path = join(source, "packages/runner/dist/runtime-tools/regression-verification.sh");
+      rmSync(path);
+      symlinkSync("gate-worker/lib.sh", path);
+    },
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: [...completePaths, "runtime-tools"],
+    mutate: (source) => {
+      mkdirSync(join(source, "runtime-tools"), { recursive: true });
+      writeFileSync(join(source, "runtime-tools/unexpected.sh"), "unexpected\n");
+    },
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: [...completePaths, "runtime-tool-alias"],
+    mutate: (source) => {
+      symlinkSync("packages/runner/dist/runtime-tools", join(source, "runtime-tool-alias"));
+    },
+  });
+});
+
+test("artifact verification accepts an unrelated nested lib.sh", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-unrelated-lib-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  writeFileSync(join(source, "packages/db/src/lib.sh"), "unrelated fixture\n");
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
+      optionalArtifactPaths: [],
+    });
+    assert.doesNotThrow(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
 });
 
 test("artifact verification rejects an incomplete DB maintenance runtime before activation", () => {

@@ -41,7 +41,7 @@ const removeTree = (root) => {
   rmSync(root, { recursive: true, force: true });
 };
 
-const runtimeToolContents = (destination) => readFileSync(join(repositoryRoot, "scripts", destination), "utf8");
+const runtimeToolContents = (source) => readFileSync(join(repositoryRoot, source), "utf8");
 
 const releaseFixture = () => {
   const root = mkdtempSync(join(tmpdir(), "anneal-release-snapshot-"));
@@ -65,7 +65,7 @@ const releaseFixture = () => {
   })}\n`);
   mkdirSync(join(tree, "packages/runner/dist/runtime-tools/gate-worker"), { recursive: true });
   for (const { source, destination } of RUNTIME_TOOL_FILES) {
-    writeFileSync(join(tree, "packages/runner/dist/runtime-tools", destination), runtimeToolContents(source.replace(/^scripts\//u, "")));
+    writeFileSync(join(tree, "packages/runner/dist/runtime-tools", destination), runtimeToolContents(source));
   }
   writeFileSync(join(cacheRoot, "builds", buildKey, "READY"), `${buildKey}\n`);
   return { root, cacheRoot, tree };
@@ -89,7 +89,7 @@ const expectedRuntimePaths = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
 
-test("release snapshots and deploy releases carry exactly the five runner runtime tools", (t) => {
+test("release snapshots and deploy releases carry exactly the six runner runtime tools", (t) => {
   const context = releaseFixture();
   const stageRoot = join(context.root, "stage");
   const deployRoot = join(context.root, "deploy");
@@ -107,7 +107,7 @@ test("release snapshots and deploy releases carry exactly the five runner runtim
     for (const { source, destination } of RUNTIME_TOOL_FILES) {
       assert.equal(
         readFileSync(join(stageRoot, "packages/runner/dist/runtime-tools", destination), "utf8"),
-        runtimeToolContents(source.replace(/^scripts\//u, "")),
+        runtimeToolContents(source),
       );
     }
 
@@ -125,7 +125,7 @@ test("release snapshots and deploy releases carry exactly the five runner runtim
     for (const { source, destination } of RUNTIME_TOOL_FILES) {
       assert.equal(
         readFileSync(join(assembled.releaseDirectory, "packages/runner/dist/runtime-tools", destination), "utf8"),
-        runtimeToolContents(source.replace(/^scripts\//u, "")),
+        runtimeToolContents(source),
       );
     }
     assert.equal(existsSync(join(assembled.releaseDirectory, "runtime-tools")), false);

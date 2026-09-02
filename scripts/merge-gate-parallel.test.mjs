@@ -31,7 +31,7 @@ const gatePath = fileURLToPath(new URL("./merge-gate.sh", import.meta.url));
 // exit codes and the four lines that carry them live in one file, and a fixture
 // that re-typed them would keep passing while the gate's real output changed
 // underneath it — which is the whole reason the module exists.
-const libPath = fileURLToPath(new URL("./gate-worker/lib.sh", import.meta.url));
+const libPath = fileURLToPath(new URL("../packages/runner/runtime-tools/gate-worker/lib.sh", import.meta.url));
 // The engine itself. What a step is, what a group of them is, and what the run
 // learned are all behind this one interface, so a fixture declares its inputs
 // and nothing else.

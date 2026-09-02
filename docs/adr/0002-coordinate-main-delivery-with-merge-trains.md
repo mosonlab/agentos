@@ -211,5 +211,5 @@ path as required by the single-entry rule.
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md), "Delivering to main"
 - [`scripts/merge-train.mjs`](../../scripts/merge-train.mjs)
 - [`scripts/merge-lease.sh`](../../scripts/merge-lease.sh)
-- [`scripts/gate-worker/gate-dispatch.sh`](../../scripts/gate-worker/gate-dispatch.sh)
+- [`packages/runner/runtime-tools/gate-worker/gate-dispatch.sh`](../../packages/runner/runtime-tools/gate-worker/gate-dispatch.sh)
 - [`scripts/merge-gate.sh`](../../scripts/merge-gate.sh)

@@ -123,7 +123,7 @@ const executeClaim = (
   ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
 ) => executeClaimProduction(runnerConfig, claim, {
   materializeRuntimeTools: (config, scratch) => materializeRuntimeTools(config, scratch, {
-    sourceRoot: fileURLToPath(new URL("../../../scripts/", import.meta.url)),
+    sourceRoot: fileURLToPath(new URL("../runtime-tools/", import.meta.url)),
   }),
   ...dependencies,
   controlPlane: injectedControlPlane,
@@ -683,11 +683,12 @@ const seedPiAuth = async (root: string): Promise<void> => {
 };
 
 const runtimeToolSources = [
-  ["regression-verification.sh", "../../../scripts/regression-verification.sh"],
-  ["gate-worker/gate-dispatch.sh", "../../../scripts/gate-worker/gate-dispatch.sh"],
-  ["gate-worker/lib.sh", "../../../scripts/gate-worker/lib.sh"],
-  ["gate-worker/mirror-push.sh", "../../../scripts/gate-worker/mirror-push.sh"],
-  ["gate-worker/remote-gate.sh", "../../../scripts/gate-worker/remote-gate.sh"],
+  ["regression-verification.sh", "../runtime-tools/regression-verification.sh"],
+  ["gate-worker/gate-dispatch.sh", "../runtime-tools/gate-worker/gate-dispatch.sh"],
+  ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
+  ["gate-worker/mirror-push.sh", "../runtime-tools/gate-worker/mirror-push.sh"],
+  ["gate-worker/remote-gate.sh", "../runtime-tools/gate-worker/remote-gate.sh"],
+  ["gate-worker/run-gate.sh", "../runtime-tools/gate-worker/run-gate.sh"],
 ] as const;
 
 const createRuntimeToolsFixture = async (): Promise<string> => {
