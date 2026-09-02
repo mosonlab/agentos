@@ -9,6 +9,7 @@ import { RUNNER_DEFINITIONS } from "./adapters.js";
 import { workspaceEnvironment } from "./adapters/environment.js";
 import type { SessionConfigOptions } from "./adapters/session-config.js";
 import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
+import { runtimeToolPaths } from "./runtime-tools.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import { platformCommitArgs, runCommand, type CommandOptions } from "./exec.js";
 import {
@@ -195,12 +196,7 @@ require_file() {
   [ -f "$1" ] && [ ! -L "$1" ] || fail "expected a regular file: $1"
 }
 
-tool_paths='regression-verification.sh
-gate-worker/gate-dispatch.sh
-gate-worker/lib.sh
-gate-worker/mirror-push.sh
-gate-worker/remote-gate.sh
-gate-worker/run-gate.sh'
+tool_paths='${runtimeToolPaths.join("\n")}'
 
 is_tool_path() {
   for tool_path in $tool_paths; do
