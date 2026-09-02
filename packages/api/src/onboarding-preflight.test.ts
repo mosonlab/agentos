@@ -35,6 +35,22 @@ test("repository preflight checks identity, exact head, fetch, and dry-run push 
   assert.match(calls[5]?.[3] ?? "", /^FETCH_HEAD:refs\/heads\/agentos-preflight-[0-9a-f]{16}$/u);
 });
 
+test("first-run onboarding preserves its existing behavior for a repository with a root lockfile", async () => {
+  const calls: string[][] = [];
+  const run: RepositoryPreflightCommand = async (_executable, args) => {
+    calls.push(args);
+    if (args[0] === "config") return { code: 0, stdout: "configured\n" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
+    if (args[0] === "ls-tree") return { code: 0, stdout: `100644 blob ${"b".repeat(40)}\tpackage-lock.json\0` };
+    return { code: 0, stdout: "" };
+  };
+
+  await preflightOnboardingRepository(input, run);
+
+  assert.equal(calls.some((args) => args[0] === "ls-tree"), false);
+  assert.equal(calls.some((args) => args[0] === "push"), true);
+});
+
 test("repository preflight classifies a missing branch and never attempts a write", async () => {
   const calls: string[][] = [];
   const run: RepositoryPreflightCommand = async (_executable, args) => {
@@ -100,7 +116,7 @@ test("NPM_CI reports a failed lockfile probe as a remote failure", async () => {
   assert.equal(calls.some((args) => args[0] === "push"), false);
 });
 
-test("NPM_CI accepts a regular root lockfile and NONE skips the lockfile probe", async () => {
+test("NPM_CI accepts a regular root lockfile and NONE refuses one", async () => {
   const calls: string[][] = [];
   const run: RepositoryPreflightCommand = async (_executable, args) => {
     calls.push(args);
@@ -113,7 +129,11 @@ test("NPM_CI accepts a regular root lockfile and NONE skips the lockfile probe",
   assert.equal(calls.some((args) => args[0] === "push"), true);
 
   calls.length = 0;
-  await preflightRepository({ ...input.repo, dependencyProvisioning: "NONE" }, run);
-  assert.equal(calls.some((args) => args[0] === "ls-tree"), false);
-  assert.equal(calls.some((args) => args[0] === "push"), true);
+  await assert.rejects(
+    preflightRepository({ ...input.repo, dependencyProvisioning: "NONE" }, run),
+    (error) => error instanceof RepositoryPreflightError
+      && error.reason === "dependency-provisioning-contradicts-lockfile",
+  );
+  assert.equal(calls.some((args) => args[0] === "ls-tree"), true);
+  assert.equal(calls.some((args) => args[0] === "push"), false);
 });

@@ -16,6 +16,7 @@ export type RepositoryPreflightFailure =
   | "default-branch-missing"
   | "push-not-authorized"
   | "package-lock-missing"
+  | "dependency-provisioning-contradicts-lockfile"
   | "command-timeout";
 
 export class RepositoryPreflightError extends Error {
@@ -109,6 +110,7 @@ const hasRootPackageLockBlob = (stdout: string): boolean => stdout.split("\0").s
 export const preflightRepository = async (
   input: RepositoryPreflightInput,
   run: RepositoryPreflightCommand = runCommand,
+  options: { checkDependencyPolicy?: boolean } = {},
 ): Promise<void> => {
   const env = controlledGitEnvironment();
   const cwd = process.cwd();
@@ -127,7 +129,7 @@ export const preflightRepository = async (
   try {
     await expectSuccess(run, ["init", "--bare", scratch], cwd, env, "git-unavailable");
     await expectSuccess(run, ["fetch", "--depth=1", remote, ref], scratch, env, "remote-unreachable");
-    if (input.dependencyProvisioning === "NPM_CI") {
+    if (options.checkDependencyPolicy !== false) {
       const lockfile = await expectSuccess(
         run,
         ["ls-tree", "-z", "FETCH_HEAD", "--", "package-lock.json"],
@@ -135,7 +137,11 @@ export const preflightRepository = async (
         env,
         "remote-unreachable",
       );
-      if (!hasRootPackageLockBlob(lockfile.stdout)) {
+      if (hasRootPackageLockBlob(lockfile.stdout)) {
+        if (input.dependencyProvisioning === "NONE") {
+          throw new RepositoryPreflightError("dependency-provisioning-contradicts-lockfile");
+        }
+      } else if (input.dependencyProvisioning === "NPM_CI") {
         throw new RepositoryPreflightError("package-lock-missing");
       }
     }
@@ -153,4 +159,4 @@ export const preflightOnboardingRepository = async (
   remoteUrl: input.repo.remoteUrl,
   defaultBranch: input.repo.defaultBranch,
   dependencyProvisioning: "NONE",
-}, run);
+}, run, { checkDependencyPolicy: false });

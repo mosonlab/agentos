@@ -48,6 +48,7 @@ import { createRunLease, deliverUnderLease, type RunLease } from "./run-lease.js
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
+import { DependencyProvisioningManifestMissingError } from "./dependency-cache.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
@@ -965,7 +966,9 @@ export const executeClaim = async (
       return;
     }
     const evidence = preflightEvidence(message);
-    const classified = adapter.classifyError(evidence);
+    const classified = error instanceof DependencyProvisioningManifestMissingError
+      ? { failureClass: "PROTOCOL_ERROR" as const, retryable: false }
+      : adapter.classifyError(evidence);
     const worktreeReport = await worktreeContainmentReport();
     const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0, false, controlPlane);
     const { salvage, ...finishedCleanup } = cleaned;
