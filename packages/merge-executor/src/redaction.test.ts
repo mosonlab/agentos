@@ -47,3 +47,37 @@ test("a run-scoped logger adds installation-token redaction on the same sink", (
   assert.equal(lines[0]!.includes(startupSecret), false);
   assert.equal(lines[0]!.includes(installationToken), false);
 });
+
+test("an Error inside a context object is readable rather than `{}`", () => {
+  // Every crash this daemon reports is logged as `log.error(msg, { runId, error })`,
+  // and an Error carries no enumerable own properties: this is the one line an
+  // operator reads after a crash, and it used to read `"error":{}`.
+  const lines: string[] = [];
+  const sink = { log: (line: string) => lines.push(line), warn: (line: string) => lines.push(line), error: (line: string) => lines.push(line) };
+  makeLog(makeRedactor(), sink).error("mechanical run crashed", { runId: "run-1", error: new Error("Anneal API 409: fencing token refused") });
+  assert.equal(lines[0]!.includes('"error":{}'), false, lines[0]);
+  assert.match(lines[0]!, /"name":"Error"/u);
+  assert.match(lines[0]!, /"message":"Anneal API 409: fencing token refused"/u);
+  assert.match(lines[0]!, /"stack":"Error: Anneal API 409/u);
+});
+
+test("a nested Error keeps its whole cause chain, aggregate members included", () => {
+  // `fetch` reports a refused connection as a message-less AggregateError under
+  // the cause of a bare "fetch failed"; the reason exists nowhere else.
+  const text = makeRedactor()({
+    error: new Error("fetch failed", { cause: new AggregateError([new Error("connect ECONNREFUSED 127.0.0.1:3000")], "") }),
+  });
+  assert.match(text, /"message":"fetch failed"/u);
+  assert.match(text, /"name":"AggregateError"/u);
+  assert.match(text, /connect ECONNREFUSED 127\.0\.0\.1:3000/u);
+});
+
+test("a token inside a nested Error's message, stack or cause is redacted", () => {
+  const text = makeRedactor(TOKEN)({
+    runId: "run-1",
+    error: new Error(`request failed with Bearer ${TOKEN}`, { cause: new Error(`minted ${TOKEN}`) }),
+  });
+  assert.equal(text.includes(TOKEN), false, text);
+  assert.ok(text.includes(`request failed with Bearer ${REDACTED}`), text);
+  assert.ok(text.includes(`minted ${REDACTED}`), text);
+});

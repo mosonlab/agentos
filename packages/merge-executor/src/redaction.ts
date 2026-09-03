@@ -15,11 +15,36 @@ export const REDACTED = "[redacted-merge-credential]";
 
 export type Redactor = (value: unknown) => string;
 
+/**
+ * An Error has no enumerable own properties, so `JSON.stringify` renders one as
+ * `{}`. Every crash line this daemon writes passes the thrown value inside a
+ * context object — `log.error("mechanical run crashed", { runId, error })` —
+ * which is exactly the line an operator reads first and exactly the line that
+ * said `{"runId":"...","error":{}}` until this replacer existed.
+ *
+ * What is returned here is walked by the same replacer, so a `cause` that is
+ * itself an Error is expanded in place and the whole chain survives. An
+ * `AggregateError` is unwrapped too: `fetch` reports a failed connection as an
+ * otherwise message-less aggregate whose `errors` hold the only readable
+ * reason.
+ */
+const errorReplacer = (_key: string, value: unknown): unknown => {
+  if (!(value instanceof Error)) return value;
+  const { name, message, stack, cause } = value;
+  const aggregated = (value as { errors?: unknown }).errors;
+  return {
+    name,
+    message,
+    ...(stack === undefined ? {} : { stack }),
+    ...(cause === undefined ? {} : { cause }),
+    ...(Array.isArray(aggregated) ? { errors: aggregated } : {}),
+  };
+};
+
 const stringify = (value: unknown): string => {
   if (typeof value === "string") return value;
-  if (value instanceof Error) return `${value.name}: ${value.message}${value.stack ? `\n${value.stack}` : ""}`;
   try {
-    return JSON.stringify(value) ?? String(value);
+    return JSON.stringify(value, errorReplacer) ?? String(value);
   } catch {
     return String(value);
   }
