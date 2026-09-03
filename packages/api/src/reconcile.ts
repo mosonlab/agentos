@@ -1,4 +1,5 @@
 import {
+  executionModeFor,
   isRegressionVerificationOutputKind,
   lockTaskRow,
   openRun,
@@ -18,6 +19,10 @@ import {
   type LeaseOutcomePostCommitFailure,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
+import {
+  COMPLETION_REJECTION_ACTIVITY_KIND,
+  parseCompletionRejection,
+} from "./completion-rejection.js";
 import { handleRegressionCompletion, regressionVerdictForRun } from "./merge-tail-actions.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 import { terminalizeRun } from "./run-terminal.js";
@@ -224,6 +229,34 @@ export const reconcileDatabaseRuns = async (
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
+      const lockedTask = run.taskId
+        ? await tx.task.findUnique({
+            where: { id: run.taskId },
+            select: { templateStep: { select: {
+              stepIndex: true,
+              outputKind: true,
+              taskTemplate: { select: { name: true } },
+            } } },
+          })
+        : null;
+      const completionRejectionActivities = run.taskId
+        && executionModeFor(lockedTask?.templateStep ?? null) === "mechanical"
+        ? await tx.taskActivity.findMany({
+            where: {
+              taskId: run.taskId,
+              metadata: { path: ["kind"], equals: COMPLETION_REJECTION_ACTIVITY_KIND },
+            },
+            select: { id: true, metadata: true },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          })
+        : [];
+      const parsedCompletionRejections = completionRejectionActivities.map((activity) => ({
+        activityId: activity.id,
+        parsed: parseCompletionRejection(activity.metadata, run.id),
+      }));
+      const completionRejection = parsedCompletionRejections.find(({ parsed }) => parsed.status === "malformed")
+        ?? parsedCompletionRejections.find(({ parsed }) => parsed.status === "ok")
+        ?? null;
       const durableRegressionVerdict = run.task?.templateId
         && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
         ? await regressionVerdictForRun(tx, {
@@ -245,6 +278,11 @@ export const reconcileDatabaseRuns = async (
       // gates an operator reaches can still tell it from the configured budget
       // after that budget changes. See `runBudgetCeiling`.
       const budgetGrants = run.budgetGrants + 1;
+      const rejectionFailureReason = completionRejection?.parsed.status === "ok"
+        ? `Mechanical completion rejected with HTTP ${completionRejection.parsed.rejection.status}: ${completionRejection.parsed.rejection.responseBody}`
+        : completionRejection?.parsed.status === "malformed"
+          ? `Mechanical completion rejection record ${completionRejection.activityId} for Run ${run.id} could not be parsed`
+          : null;
       const lost = await terminalizeRun(tx, {
         runId: run.id,
         at: now,
@@ -256,13 +294,30 @@ export const reconcileDatabaseRuns = async (
             status: { in: [...activeStatuses] },
             OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
           },
-          reason: leaseLossReason,
+          reason: rejectionFailureReason ?? leaseLossReason,
           maxRunsPerTask: budgetCeiling,
           budgetGrants,
         },
       });
       if (lost === null || "message" in lost) continue;
       if (!run.taskId) continue;
+      if (completionRejection) {
+        leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
+        await tx.task.update({
+          where: { id: run.taskId },
+          data: { status: TaskStatus.REVIEW, failureReason: rejectionFailureReason },
+        });
+        await tx.taskActivity.create({
+          data: {
+            taskId: run.taskId,
+            actorType: "control-plane",
+            body: completionRejection.parsed.status === "ok"
+              ? `Run ${run.runNumber} lost after its completion was rejected (${completionRejection.parsed.rejection.status}); automatic retry refused, operator action required`
+              : `Run ${run.runNumber} lost after its completion rejection record could not be parsed; automatic retry refused, operator action required`,
+          },
+        });
+        continue;
+      }
       if (durableNegativeRegressionVerdict && run.task && run.session) {
         await handleRegressionCompletion(tx, {
           task: run.task,
