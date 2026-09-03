@@ -14,7 +14,7 @@ The title is the Backlog card's name and the chain's name. Write one line of at
 most 120 characters, shaped `<Area>: <what exists after the chain>`. Name the
 outcome that exists after the chain; do not name a step, template, or tier.
 
-Examples from the board:
+Examples:
 
 - `API: Chain names are required`
 - `Web: Task details stay task-scoped`

@@ -1060,8 +1060,8 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
 
 - Required path parameters: `projectId`, `templateId`.
 - Required JSON fields: `repoId`, `variables` (string-to-string record; values
-  must not be blank), and `name` (a non-blank, single-line string of at most
-  120 characters after trimming).
+  must not be blank), and `name` (the chain's title; constraints and refusal
+  codes below).
 - Optional JSON fields: `autoStart` (default `false`), `afterTaskId`,
   `description`, `stepOverrides` (map of positive step indexes to
   `{assigneeAgentId}`), and `gates` (a strict object with optional boolean
