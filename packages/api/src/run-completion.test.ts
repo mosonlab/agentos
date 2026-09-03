@@ -96,6 +96,7 @@ test("three capped external failures refund the task and the fourth records the 
     const decision = externalFailureRefundDecision({
       runNumber,
       external: true,
+      refundable: true,
       mechanical: false,
       capped: true,
       priorCappedRefunds: cappedRefunds,
@@ -111,6 +112,7 @@ test("three capped external failures refund the task and the fourth records the 
   const fourth = externalFailureRefundDecision({
     runNumber: EXTERNAL_FAILURE_REFUND_CAP + 1,
     external: true,
+    refundable: true,
     mechanical: false,
     capped: true,
     priorCappedRefunds: cappedRefunds,
@@ -124,6 +126,7 @@ test("legacy external refunds do not consume the capped allowance", () => {
   const decision = externalFailureRefundDecision({
     runNumber: 8,
     external: true,
+    refundable: true,
     mechanical: false,
     capped: false,
     priorCappedRefunds: EXTERNAL_FAILURE_REFUND_CAP,
@@ -133,10 +136,27 @@ test("legacy external refunds do not consume the capped allowance", () => {
   assert.equal(decision.activity?.metadata.policy, "uncapped");
 });
 
+test("ineligible and mechanical failures never receive a refund", () => {
+  for (const input of [
+    { refundable: false, mechanical: false },
+    { refundable: true, mechanical: true },
+  ]) {
+    const decision = externalFailureRefundDecision({
+      runNumber: 2,
+      external: true,
+      capped: false,
+      priorCappedRefunds: 0,
+      ...input,
+    });
+    assert.equal(decision.refunded, 0);
+    assert.equal(decision.activity?.metadata.granted, false);
+  }
+});
+
 test("a Regression target-fetch block keeps its git diagnostic and is externally refundable", () => {
   const policy = completionOutputFailurePolicy({
     outputKind: "regression-verification-v2",
-    missingOutputReason: "missing regression-verification-v2 task output for current Run run-4",
+    missingOutputReason: null,
     outcome: {
       case: "required-output-unsatisfied",
       reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username for 'https://github.com'",

@@ -187,8 +187,7 @@ export const completionOutputFailurePolicy = ({
   externalFailure: boolean;
   cappedExternalFailure: boolean;
 } => {
-  const targetFetchFailed = missingOutputReason !== null
-    && isRegressionVerificationOutputKind(outputKind)
+  const targetFetchFailed = isRegressionVerificationOutputKind(outputKind)
     && outcome.case === "required-output-unsatisfied"
     && outcome.reason.includes(TARGET_FETCH_BLOCK_REASON);
   return {
@@ -201,6 +200,7 @@ export const completionOutputFailurePolicy = ({
 type RefundDecisionInput = {
   runNumber: number;
   external: boolean;
+  refundable: boolean;
   mechanical: boolean;
   capped: boolean;
   priorCappedRefunds: number;
@@ -230,6 +230,7 @@ export type ExternalFailureRefundDecision = {
 export const externalFailureRefundDecision = ({
   runNumber,
   external,
+  refundable,
   mechanical,
   capped,
   priorCappedRefunds,
@@ -242,6 +243,23 @@ export const externalFailureRefundDecision = ({
       capReached: false,
       activity: {
         body: `Run ${runNumber} external failure was not refunded because the step is mechanical`,
+        metadata: {
+          kind: "externalFailureRefund.refused",
+          schemaVersion: 1,
+          policy,
+          granted: false,
+          cap: EXTERNAL_FAILURE_REFUND_CAP,
+          capReached: false,
+        },
+      },
+    };
+  }
+  if (!refundable) {
+    return {
+      refunded: 0,
+      capReached: false,
+      activity: {
+        body: `Run ${runNumber} external failure was not eligible for a budget refund`,
         metadata: {
           kind: "externalFailureRefund.refused",
           schemaVersion: 1,
@@ -647,9 +665,8 @@ export const completeRun = async (
     // one. Missing deliverables remain agent failures except for Regression's
     // machine-readable target-fetch block, where git failed before the script
     // could produce its mechanical handoff.
-    const external = missingOutputReason
-      ? outputFailurePolicy.externalFailure
-      : failureClass !== null && reported.externalFailure;
+    const external = outputFailurePolicy.externalFailure
+      || (missingOutputReason ? false : failureClass !== null && reported.externalFailure);
     const cappedExternalFailure = outputFailurePolicy.cappedExternalFailure
       || (body.outcome.case === "provider-failure"
         && body.outcome.envelope.phase === "EXECUTE"
@@ -706,6 +723,9 @@ export const completeRun = async (
     const refundDecision = externalFailureRefundDecision({
       runNumber: run.runNumber,
       external,
+      refundable: failureClass !== FailureClass.NO_CHANGES_PRODUCED
+        && failureClass !== FailureClass.BUDGET_EXCEEDED
+        && failureClass !== FailureClass.TASK_FAILED,
       mechanical,
       capped: cappedExternalFailure,
       priorCappedRefunds,
