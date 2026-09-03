@@ -45,24 +45,26 @@ type DbTx = Prisma.TransactionClient;
  */
 export const recordMergeTailRequeue = async (
   tx: DbTx,
-  input: { taskId: string; runId: string },
+  input: { taskId: string; runId: string; recoverySourceRunId?: string },
 ): Promise<void> => {
   await writeMarker(tx, input.taskId, "requeue", {
     actorType: "control-plane",
     body: `Merge-tail target requeued with one budget grant (Run ${input.runId})`,
-    metadata: { runId: input.runId },
+    metadata: {
+      runId: input.runId,
+      ...(input.recoverySourceRunId === undefined
+        ? {}
+        : { recoverySourceRunId: input.recoverySourceRunId }),
+    },
   });
 };
 
-/**
- * Qualifies the durable authority for a Documentation-to-Regression grant.
- * Activity metadata authored by agents or operators is never control-plane
- * authority, and an exact Run binding avoids propagating a prior requeue.
- */
-export const mergeTailRequeueForRun = async (
+export type MergeTailRequeueContext = { recoverySourceRunId: string | null };
+
+export const mergeTailRequeueContextForRun = async (
   tx: DbTx,
   input: { taskId: string; runId: string },
-): Promise<boolean> => {
+): Promise<MergeTailRequeueContext | null> => {
   const row = await tx.taskActivity.findFirst({
     where: {
       taskId: input.taskId,
@@ -76,10 +78,25 @@ export const mergeTailRequeueForRun = async (
     select: { metadata: true },
   });
   const metadata = asJsonObject(row?.metadata);
-  return metadata?.kind === MERGE_TAIL_KIND.requeue
-    && metadata.schemaVersion === MERGE_TAIL_SCHEMA_VERSION
-    && metadata.runId === input.runId;
+  if (metadata?.kind !== MERGE_TAIL_KIND.requeue
+    || metadata.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION
+    || metadata.runId !== input.runId) return null;
+  return {
+    recoverySourceRunId: typeof metadata.recoverySourceRunId === "string"
+      ? metadata.recoverySourceRunId
+      : null,
+  };
 };
+
+/**
+ * Qualifies the durable authority for a Documentation-to-Regression grant.
+ * Activity metadata authored by agents or operators is never control-plane
+ * authority, and an exact Run binding avoids propagating a prior requeue.
+ */
+export const mergeTailRequeueForRun = async (
+  tx: DbTx,
+  input: { taskId: string; runId: string },
+): Promise<boolean> => (await mergeTailRequeueContextForRun(tx, input)) !== null;
 
 type RegressionTaskIdentity = {
   id: string;
@@ -674,6 +691,32 @@ export const createMergeTailRepairTask = async (
   return { taskId: task.id };
 };
 
+/** Resolves the implementation repair assignee shared by automatic repair and
+ * operator reentry. Keeping this lookup in one place prevents the two repair
+ * entrypoints from drifting when a template binds its fixed implementation
+ * step to a non-default Agent. */
+export const mergeTailRepairAgentName = async (
+  tx: DbTx,
+  input: {
+    projectId: string;
+    chainId: string | null;
+    templateId: string | null;
+    repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
+  },
+): Promise<string> => {
+  if (input.repairKind === "refresh-conflict") return "merge-resolver";
+  const fixTask = await tx.task.findFirst({
+    where: {
+      projectId: input.projectId,
+      chainId: input.chainId,
+      templateId: input.templateId,
+      templateStep: { outputKind: "fixed-implementation" },
+    },
+    select: { assigneeAgent: { select: { name: true } } },
+  });
+  return fixTask?.assigneeAgent?.name ?? "senior-dev";
+};
+
 export const handleRegressionCompletion = async (
   tx: DbTx,
   input: {
@@ -776,19 +819,7 @@ export const handleRegressionCompletion = async (
         ? `semantic regression FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`
         : `merge gate FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`);
   }
-  let agentName = "merge-resolver";
-  if (repairKind === "gate-fix" || repairKind === "review-fix") {
-    const fixTask = await tx.task.findFirst({
-      where: {
-        projectId: input.task.projectId,
-        chainId: input.task.chainId,
-        templateId: input.task.templateId,
-        templateStep: { outputKind: "fixed-implementation" },
-      },
-      select: { assigneeAgent: { select: { name: true } } },
-    });
-    agentName = fixTask?.assigneeAgent?.name ?? "senior-dev";
-  }
+  const agentName = await mergeTailRepairAgentName(tx, { ...input.task, repairKind });
   const repair = await createMergeTailRepairTask(tx, {
     regressionTask: input.task,
     sourceRun: input.run,

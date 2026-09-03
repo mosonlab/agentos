@@ -10,6 +10,7 @@ import {
 } from "@anneal/db";
 
 import {
+  handleRegressionCompletion,
   openDefenseAuditNotice,
   openMergeTailStopNotice,
   settleMergeTailCompletion,
@@ -40,6 +41,7 @@ const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
   const activities: Array<Record<string, any>> = [];
   const notices: Array<Record<string, any>> = [];
   const recoveryUpdates: Array<Record<string, any>> = [];
+  const taskUpdates: Array<Record<string, any>> = [];
   const tx = {
     mergeRecoveryAttempt: {
       findUnique: async () => ({ status: recoveryStatus }),
@@ -58,7 +60,10 @@ const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
           taskTemplate: { name: "direct-engineer-workflow" },
         },
       }),
-      update: async () => ({}),
+      update: async (args: Record<string, any>) => {
+        taskUpdates.push(args);
+        return {};
+      },
       updateMany: async () => ({ count: 1 }),
     },
     taskActivity: {
@@ -74,7 +79,7 @@ const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
       },
     },
   } as unknown as Prisma.TransactionClient;
-  return { tx, activities, notices, recoveryUpdates };
+  return { tx, activities, notices, recoveryUpdates, taskUpdates };
 };
 
 const repairAttempt = (repairKind: "refresh-conflict" | "gate-fix" | "review-fix"): Marker => ({
@@ -284,6 +289,99 @@ test("settleMergeTailCompletion moves Documentation back before Regression", asy
       failureReason: "documentation invalidated by review-fix repair repair-1",
     },
   }]);
+});
+
+const recoveredRegressionTx = () => {
+  const observed = stopTx(MergeRecoveryStatus.REPAIRING);
+  const aggregate = {
+    id: recoveryContext.aggregateId,
+    integratorTaskId: recoveryContext.integratorTaskId,
+    sourceStopId: recoveryContext.sourceStopId,
+    attempt: recoveryContext.attempt,
+    status: MergeRecoveryStatus.REPAIRING,
+    boundSourceRunId: recoveryContext.sourceRunId,
+    authorizationActivityId: recoveryContext.authorizationActivityId,
+    recoveryRunId: recoveryContext.recoveryRunId,
+    readinessTaskId: recoveryContext.readinessTaskId,
+    regressionTaskId: recoveryContext.regressionTaskId,
+    repository: recoveryContext.repository,
+    prNumber: recoveryContext.prNumber,
+    targetBranch: recoveryContext.targetBranch,
+    authorizedHeadSha: recoveryContext.authorizedHeadSha,
+    authorizedBaseSha: recoveryContext.authorizedBaseSha,
+    observedBaseSha: recoveryContext.observedBaseSha,
+    currentBaseSha: recoveryContext.currentBaseSha,
+  };
+  const tx = observed.tx as unknown as {
+    mergeRecoveryAttempt: { findFirst: (args: unknown) => Promise<typeof aggregate> };
+  };
+  tx.mergeRecoveryAttempt.findFirst = async () => aggregate;
+  return observed;
+};
+
+const recoveredRegressionInput = {
+  task: {
+    id: recoveryContext.regressionTaskId,
+    projectId: "project-1",
+    repoId: "repo-1",
+    templateId: "template-1",
+    chainId: "chain-1",
+    chainIndex: 5,
+    targetBranch: "main",
+  },
+  run: {
+    id: recoveryContext.recoveryRunId,
+    agentId: "regression-agent-1",
+    branch: "feat/shared",
+    headSha: "e".repeat(40),
+    sessionId: "session-1",
+  },
+  now: new Date("2026-09-03T12:00:00Z"),
+};
+
+test("a passing repaired recovery Regression returns to authorization", async () => {
+  const observed = recoveredRegressionTx();
+
+  const result = await handleRegressionCompletion(observed.tx, {
+    ...recoveredRegressionInput,
+    qualifiedVerdict: {
+      schemaVersion: 2,
+      outcome: "pass",
+      headSha: "e".repeat(40),
+      baseHeadSha: "f".repeat(40),
+      gateVerdict: "PASS",
+      gateProof: `MERGE GATE: PASS ${"e".repeat(40)}`,
+    },
+  });
+
+  assert.equal(result, "advance");
+  assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.AWAITING_AUTHORIZATION);
+  assert.equal(observed.activities[0]?.metadata.outcome, "pass");
+  assert.deepEqual(observed.notices, []);
+});
+
+test("a second FAIL after repaired recovery parks downstream again", async () => {
+  const observed = recoveredRegressionTx();
+
+  const result = await handleRegressionCompletion(observed.tx, {
+    ...recoveredRegressionInput,
+    qualifiedVerdict: {
+      schemaVersion: 2,
+      outcome: "review-fail",
+      headSha: "e".repeat(40),
+      baseHeadSha: "f".repeat(40),
+      summary: "the repair exposed another defect",
+    },
+  });
+
+  assert.equal(result, "handled");
+  assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
+  assert.deepEqual(observed.taskUpdates.map((update) => update.where.id), [
+    recoveryContext.regressionTaskId,
+    recoveryContext.readinessTaskId,
+    recoveryContext.integratorTaskId,
+  ]);
+  assert.match(observed.notices[0]?.create.body, /stopped at regression/u);
 });
 
 test("stopMergeTail owns the phase by recovery matrix", async () => {

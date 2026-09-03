@@ -15,6 +15,7 @@ import { lockAgentRepoGrant, lockChainRows } from "./locks.js";
 import { parseAuthorizationMetadata } from "./merge-integrator.js";
 import { stopStateFor } from "./merge-integrator-db.js";
 import {
+  carryMergeRecoveryRun,
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
   MERGE_TAIL_KIND,
@@ -515,6 +516,8 @@ type ChainSuccessorOptions = {
   onRefusal?: "park" | "raise";
   /** The Documentation -> Regression hop after a merge-tail repair. */
   mergeTailRequeue?: boolean;
+  /** The recovery Regression Run whose genuine repair caused that hop. */
+  mergeTailRecoverySourceRunId?: string;
 };
 
 const parkStoppedIntegratorSuccessor = async (
@@ -873,6 +876,15 @@ const activateChainSuccessorInternal = async (
       } });
       continue;
     }
+    if (options.mergeTailRequeue
+      && options.mergeTailRecoverySourceRunId !== undefined
+      && isRegressionVerificationOutputKind(successorStep?.outputKind)) {
+      await carryMergeRecoveryRun(tx, {
+        regressionTaskId: successor.id,
+        recoveryRunId: attempt.run.id,
+        previousRecoveryRunId: options.mergeTailRecoverySourceRunId,
+      });
+    }
     await tx.taskActivity.create({ data: {
       taskId: successor.id,
       actorType: "control-plane",
@@ -1040,7 +1052,7 @@ export const advanceTemplateTask = async (
   chatId: string | null,
   now = new Date(),
   expectedStatus?: TaskStatus,
-  options: Pick<ChainSuccessorOptions, "mergeTailRequeue"> = {},
+  options: Pick<ChainSuccessorOptions, "mergeTailRequeue" | "mergeTailRecoverySourceRunId"> = {},
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },

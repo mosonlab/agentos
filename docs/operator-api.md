@@ -1383,7 +1383,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   on any of them.
 - On success, the API returns `200 OK` with the repair result, including the
   created detached `repairTaskId`, `repairKind` (`review-fix` or `gate-fix`),
-  verdict `headSha`, and `baseSha`. The same `requestId` is idempotent: a
+  verdict `headSha`, and `baseHeadSha`. The same `requestId` is idempotent: a
   replay returns the original `200` result and creates no task, marker, or
   activity. A request whose recovery `sourceRunId` already has a matching
   `repairAttempt` marker is refused as already open.
@@ -1398,8 +1398,8 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   effect:
 
   - `merge_tail_repair_not_blocked`: the task has no matching latest recovery
-    attempt in `BLOCKED_DOWNSTREAM` (including an inconsistent or already
-    repairing aggregate).
+    attempt in `BLOCKED_DOWNSTREAM`, including an inconsistent aggregate with
+    no repair bound to its recovery Run.
   - `merge_tail_repair_verdict_missing`: the stored output is absent, is a
     pass/unsupported verdict, or was produced by a Run other than
     `recoveryRunId`.
@@ -1410,7 +1410,8 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   - `merge_tail_repair_budget_exhausted`: the existing repair-attempt count for
     this repair kind has reached `MAX_MERGE_TAIL_REPAIR_ATTEMPTS`.
   - `merge_tail_repair_already_open`: a repair attempt for this recovery
-    `sourceRunId` is already present.
+    `sourceRunId` is already present. This takes precedence over the aggregate
+    having already moved to `REPAIRING`.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
