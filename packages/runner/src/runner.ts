@@ -58,7 +58,7 @@ import {
 } from "./envelope.js";
 import { createRunLease, deliverUnderLease, type RunLease } from "./run-lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
-import { readRegressionOutputHandoff } from "./regression-output-handoff.js";
+import { readRegressionOutputHandoff, type RegressionOutputHandoffBlock } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
@@ -187,6 +187,7 @@ export const executeClaim = async (
   const budget: { refusal: { gate: BudgetGate; reason: string } | null } = { refusal: null };
   let terminalFailureReason: string | null = null;
   let taskOutputStatusCheckFailed = false;
+  let regressionHandoffBlock: RegressionOutputHandoffBlock | null = null;
   let workspacePublicationForbidden = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
@@ -488,13 +489,17 @@ export const executeClaim = async (
       try {
         const handoff = await readRegressionOutputHandoff(config, claim, workspace);
         if (handoff) {
-          await persistRegressionOutputHandoff(session, handoff, sink);
-          regressionHandoffPersisted = true;
-          sink({
-            source: "RUNNER",
-            type: "REGRESSION_OUTPUT_HANDOFF_PERSISTED",
-            payload: { kind: handoff.kind, commitSha: handoff.commitSha },
-          });
+          if ("reason" in handoff) {
+            regressionHandoffBlock = handoff;
+          } else {
+            await persistRegressionOutputHandoff(session, handoff, sink);
+            regressionHandoffPersisted = true;
+            sink({
+              source: "RUNNER",
+              type: "REGRESSION_OUTPUT_HANDOFF_PERSISTED",
+              payload: { kind: handoff.kind, commitSha: handoff.commitSha },
+            });
+          }
         }
       } catch (error: unknown) {
         terminalFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
@@ -542,7 +547,9 @@ export const executeClaim = async (
         if (!satisfaction.remediable) {
           // Only a mechanical verdict is undeliverable by asking again, and
           // the control plane says so; the runner does not re-test the kind.
-          terminalFailureReason = `A step declaring output kind '${outputKind}' finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
+          terminalFailureReason = regressionHandoffBlock
+            ? `A step declaring output kind '${outputKind}' finished without a current-Run mechanical output handoff for Run ${claim.run.id}; block reason: ${regressionHandoffBlock.reason}; git stderr: ${regressionHandoffBlock.stderr}`
+            : `A step declaring output kind '${outputKind}' finished without a current-Run mechanical output handoff for Run ${claim.run.id}`;
           sink({
             source: "RUNNER",
             type: "TASK_OUTPUT_REMEDIATION_UNAVAILABLE",
@@ -550,7 +557,9 @@ export const executeClaim = async (
               outputKind,
               outputRemediationAllowed: false,
               providerConversationIdAvailable: providerConversationId !== null,
-              reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent",
+              ...(regressionHandoffBlock
+                ? { reason: regressionHandoffBlock.reason, stderr: regressionHandoffBlock.stderr }
+                : { reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent" }),
             },
           });
         } else if (providerConversationId && runLease.held) {
