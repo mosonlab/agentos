@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FailureClass, type FailureEnvelope, type RunOutcome, runOutcomeVerdict } from "@anneal/db";
+import {
+  EXTERNAL_FAILURE_REFUND_CAP,
+  FailureClass,
+  type FailureEnvelope,
+  type RunOutcome,
+  runOutcomeVerdict,
+} from "@anneal/db";
 
 import { classifyEnvelope } from "./execution.js";
-import { completionEvidenceRefusal } from "./run-completion.js";
+import {
+  completionEvidenceRefusal,
+  completionOutputFailurePolicy,
+  externalFailureRefundDecision,
+} from "./run-completion.js";
 
 const baseSha = "5".repeat(40);
 
@@ -76,6 +86,81 @@ test("a configured non-committing Step keeps its ordinary completion semantics",
   });
 
   assert.equal(completionEvidenceRefusal(run, true, baseSha, null), null);
+});
+
+test("three capped external failures refund the task and the fourth records the cap", () => {
+  let cappedRefunds = 0;
+  let budgetGrants = 0;
+
+  for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP; runNumber += 1) {
+    const decision = externalFailureRefundDecision({
+      runNumber,
+      external: true,
+      mechanical: false,
+      capped: true,
+      priorCappedRefunds: cappedRefunds,
+    });
+    assert.equal(decision.refunded, 1);
+    assert.equal(decision.capReached, false);
+    assert.match(decision.activity?.body ?? "", new RegExp(`${runNumber} of ${EXTERNAL_FAILURE_REFUND_CAP}`));
+    cappedRefunds += decision.refunded;
+    budgetGrants += decision.refunded;
+  }
+
+  assert.equal(budgetGrants, EXTERNAL_FAILURE_REFUND_CAP);
+  const fourth = externalFailureRefundDecision({
+    runNumber: EXTERNAL_FAILURE_REFUND_CAP + 1,
+    external: true,
+    mechanical: false,
+    capped: true,
+    priorCappedRefunds: cappedRefunds,
+  });
+  assert.equal(fourth.refunded, 0);
+  assert.equal(fourth.capReached, true);
+  assert.match(fourth.activity?.body ?? "", /external-failure refund cap was reached/i);
+});
+
+test("legacy external refunds do not consume the capped allowance", () => {
+  const decision = externalFailureRefundDecision({
+    runNumber: 8,
+    external: true,
+    mechanical: false,
+    capped: false,
+    priorCappedRefunds: EXTERNAL_FAILURE_REFUND_CAP,
+  });
+  assert.equal(decision.refunded, 1);
+  assert.equal(decision.capReached, false);
+  assert.equal(decision.activity?.metadata.policy, "uncapped");
+});
+
+test("a Regression target-fetch block keeps its git diagnostic and is externally refundable", () => {
+  const policy = completionOutputFailurePolicy({
+    outputKind: "regression-verification-v2",
+    missingOutputReason: "missing regression-verification-v2 task output for current Run run-4",
+    outcome: {
+      case: "required-output-unsatisfied",
+      reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username for 'https://github.com'",
+    },
+  });
+  assert.equal(policy.externalFailure, true);
+  assert.equal(policy.cappedExternalFailure, true);
+  assert.match(policy.failureReason ?? "", /target-fetch-failed/);
+  assert.match(policy.failureReason ?? "", /could not read Username/);
+});
+
+test("an ordinary missing-output refusal remains non-external and byte-for-byte unchanged", () => {
+  const missingOutputReason = "missing implementation task output for current Run run-2";
+  const policy = completionOutputFailurePolicy({
+    outputKind: "implementation",
+    missingOutputReason,
+    outcome: {
+      case: "required-output-unsatisfied",
+      reason: "A step finished without a handoff",
+    },
+  });
+  assert.equal(policy.externalFailure, false);
+  assert.equal(policy.cappedExternalFailure, false);
+  assert.equal(policy.failureReason, missingOutputReason);
 });
 
 // --- Run outcome -----------------------------------------------------------
