@@ -27,7 +27,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
-  mergeOutcome: null, repairOf: null, chainAggregate: null,
+  mergeOutcome: null, repairOf: null, chainAggregate: null, strandedSalvageBranches: [],
   ...overrides,
 });
 
@@ -53,6 +53,16 @@ test("a member card links its newest run's pull request, after the assignee", ()
   assert.match(withPr, /href="https:\/\/github\.com\/mosonlab\/anneal\/pull\/351"/u);
   assert.match(withPr.replace(/<[^>]*>/gu, ""), /#351/u);
   assert.doesNotMatch(card(), /data-card-pull-request/u);
+});
+
+test("a board card marks stranded salvage only when the projected count is non-zero", () => {
+  const withSalvage = card({
+    id: "t1",
+    strandedSalvageBranches: [{ branch: "agentos/t1/run-1", lostRunNumber: 1 }],
+  });
+  assert.match(withSalvage, /data-card-stranded-salvage=""/u);
+  assert.match(withSalvage.replace(/<[^>]*>/gu, ""), /Salvage 1/u);
+  assert.doesNotMatch(card(), /data-card-stranded-salvage/u);
 });
 
 test("a card shows cumulative dollars bare and falls back to token counts", () => {

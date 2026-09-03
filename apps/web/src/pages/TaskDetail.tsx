@@ -304,6 +304,39 @@ export const TaskPrompt = ({ description }: { description: string }): ReactNode 
   );
 };
 
+/** A salvage ref remains useful to an operator even though the replacement
+ * Run was already started from its old base. The projection sends an empty
+ * list for ordinary Tasks, so the surface disappears entirely in that case. */
+export type StrandedSalvageBranch = { branch: string; lostRunNumber: number };
+
+export const StrandedSalvageList = ({
+  branches,
+  remoteUrl,
+}: {
+  branches: StrandedSalvageBranch[];
+  remoteUrl: string | null | undefined;
+}): ReactNode => {
+  const t = useT();
+  if (branches.length === 0) return null;
+  return (
+    <Card title={t("taskDetail.salvage.title")} extra={<span className={COUNT}>{branches.length}</span>}>
+      <div data-task-stranded-salvage="" className="grid gap-[10px]">
+        {branches.map(({ branch, lostRunNumber }) => {
+          const href = branchUrl(remoteUrl, branch);
+          return (
+            <div key={`${branch}-${lostRunNumber}`} className="flex min-w-0 flex-wrap items-baseline gap-x-[10px] gap-y-[3px]">
+              <span className="min-w-0 [overflow-wrap:anywhere]">
+                {href === null ? branch : <ExternalLink href={href}>{branch}</ExternalLink>}
+              </span>
+              <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.salvage.lostRun", { n: lostRunNumber })}</span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+};
+
 const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<TaskDetail>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
@@ -408,6 +441,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
   const pullRequestUrl = newest?.pullRequestUrl ?? null;
+  const strandedSalvageBranches = task.strandedSalvageBranches;
   const executionOwner = task.executionOwner === "agent"
     ? task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("executionOwner.unassigned")
     : t(`executionOwner.${task.executionOwner}`);
@@ -524,6 +558,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
               ? <ErrorNotice message={startability.error.message} onRetry={startability.reload} />
               : <EmptyState>{t("common.loading")}</EmptyState>}
         </Card>
+
+        <StrandedSalvageList branches={strandedSalvageBranches} remoteUrl={task.repo?.remoteUrl} />
 
         <Card title={t("taskDetail.runs.title")} extra={<span className={COUNT}>{runs.length}</span>} flush>
           <Table>

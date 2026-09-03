@@ -53,9 +53,23 @@ export const boardDatabase = (
         if ((args?.where as Record<string, unknown> | undefined)?.id !== undefined) return extras.related ?? [];
         if (call++ !== 0) return [];
         assert.deepEqual(args?.orderBy, [{ createdAt: "desc" }, { id: "asc" }]);
-        return taskRows;
+        const take = ((args?.include as any)?.runs as any)?.take;
+        return take === 1
+          ? taskRows.map((row) => ({ ...row, runs: (row.runs as unknown[] | undefined)?.slice(0, 1) ?? [] }))
+          : taskRows;
       },
       groupBy: async () => [],
+    },
+    run: {
+      findMany: async () => taskRows.flatMap((task) => (
+        (task.runs as Array<Record<string, unknown>> | undefined ?? []).map((run) => ({
+          taskId: task.id,
+          runNumber: run.runNumber,
+          status: run.status,
+          pushedBranch: run.pushedBranch ?? null,
+          baseSha: run.baseSha ?? null,
+        }))
+      )),
     },
     agentRepoAccess: { findMany: async () => [] },
     taskActivity: { findMany: async () => extras.activity ?? [] },
