@@ -936,6 +936,44 @@ test("a target runtime-tool addition passes its target inventory verifier", () =
   }
 });
 
+test("standalone builder verifies with the target tree before cleanup", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-build-verifier-"));
+  const commands = [];
+  const targetVerifier = [
+    "export const verifyReleaseArtifact = ({ revision, releaseName }) => ({",
+    '  verifier: "target-build",',
+    "  revision,",
+    "  releaseName,",
+    "});",
+    "",
+  ].join("\n");
+  try {
+    const artifact = buildReleaseArtifact({
+      deployRoot,
+      revision: revisions.to,
+      sourceRemote: "https://example.invalid/anneal.git",
+      gitBinary: "/git",
+      nodeBinary: "/node",
+      npmBinary: "/npm",
+      requiredPaths: ["packages/api/dist", "packages/runner/dist"],
+      artifactPaths: () => ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src", "scripts/deploy"],
+      optionalArtifactPaths: () => [],
+      execute: (program, args, options = {}) => {
+        commands.push({ program, args });
+        if (args.join(" ") === "/npm run build") {
+          minimalBuildTree(options.cwd, revisions.to);
+          mkdirSync(join(options.cwd, "scripts/deploy"), { recursive: true });
+          writeFileSync(join(options.cwd, "scripts/deploy/release-artifact.mjs"), targetVerifier);
+        }
+      },
+    });
+    assert.deepEqual(artifact.verifier, "target-build");
+    assert.equal(commands.length, 4);
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
 test("target verifier failures retain their deploy failure reason", () => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-verifier-failure-"));
   const source = join(deployRoot, "source");
