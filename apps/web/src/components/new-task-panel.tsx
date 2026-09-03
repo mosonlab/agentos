@@ -152,10 +152,10 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
     if (!template) return;
     const gates = changedGateValues(activeGateSelection);
     const ok = await run(() => api.post(`/projects/${projectId}/task-templates/${template.id}/instantiate`, {
+      name: form.name,
       repoId: form.repoId,
       variables,
       autoStart: false,
-      ...(form.name.trim() === "" ? {} : { name: form.name }),
       ...(gates === undefined ? {} : { gates }),
     }));
     if (ok) { onCreated(); onClose(); }
@@ -163,7 +163,7 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
 
   return (
     <FullPanel title={t("newTask.title")} onClose={onClose} actions={
-      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || (mode === "blank" ? form.name.trim() === "" : template === null)}
+      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || form.name.trim() === "" || (mode === "template" && template === null)}
         onClick={() => void (mode === "blank" ? createBlank() : createFromTemplate())}>
         {t("newTask.create")}
       </Button>
@@ -240,6 +240,9 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
             ? <EmptyState>{t("newTask.templates.empty")}</EmptyState>
             : (
               <div className={STACK}>
+                <Field label={t("newTask.field.title.label")}>
+                  <Input type="text" value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={t("newTask.field.title.placeholder")} />
+                </Field>
                 <Field label={t("newTask.field.template.label")}>
                   <Select value={template?.id ?? ""} onChange={(event) => { setTemplateId(event.target.value); setVariables({}); }}>
                     {(templates.data ?? []).map((candidate) => (
