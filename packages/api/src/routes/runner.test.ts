@@ -3,11 +3,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  InboxStatus,
   RunStatus,
   RunnerKind,
   type PrismaClient,
 } from "@anneal/db";
-import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import {
+  MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX,
+  RUN_COMPLETION_CONTRACT_VERSION,
+} from "@anneal/db/claim-contract";
 
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
@@ -126,6 +130,8 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
       const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
       process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
       const activities: Array<Record<string, unknown>> = [];
+      const inboxMessages: Array<Record<string, unknown>> = [];
+      let requestedVersionForActivity = contractVersion ?? null;
       let runMutations = 0;
       const candidate = {
         id: "run-mechanical", projectId: "project-1", taskId: "task-mechanical", repoId: "repo-1",
@@ -157,8 +163,28 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
           create: async () => { runMutations += 1; return {}; },
         },
         taskActivity: {
-          findFirst: async () => activities.length === 0 ? null : { metadata: activities.at(-1)?.metadata },
+          findFirst: async () => activities.find((activity) => (
+            (activity.metadata as Record<string, unknown> | undefined)?.executorVersion
+            === requestedVersionForActivity
+          )) ?? null,
           create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+        },
+        inboxThread: {
+          findFirst: async () => null,
+          create: async () => ({ id: "thread-1" }),
+        },
+        inboxMessage: {
+          findFirst: async ({ where }: { where: { status: InboxStatus; dedupeKey: { startsWith: string } } }) => (
+            inboxMessages.find((message) => (
+              message.status === where.status
+              && String(message.dedupeKey).startsWith(where.dedupeKey.startsWith)
+            )) ?? null
+          ),
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            const message = { ...data, status: InboxStatus.OPEN, answeredAt: null };
+            inboxMessages.push(message);
+            return message;
+          },
         },
       };
       const database = {
@@ -168,15 +194,18 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
       } as unknown as PrismaClient;
       try {
         const app = createApp(database);
-        const request = () => app.request("/runner/tasks/claim", {
-          method: "POST",
-          headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
-          body: JSON.stringify({
-            runnerId: "merge-executor-1",
-            leaseSeconds: 60,
-            ...(contractVersion === undefined ? {} : { contractVersion }),
-          }),
-        });
+        const request = (requestedContractVersion = contractVersion) => {
+          requestedVersionForActivity = requestedContractVersion ?? null;
+          return app.request("/runner/tasks/claim", {
+            method: "POST",
+            headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+            body: JSON.stringify({
+              runnerId: "merge-executor-1",
+              leaseSeconds: 60,
+              ...(requestedContractVersion === undefined ? {} : { contractVersion: requestedContractVersion }),
+            }),
+          });
+        };
 
         const response = await request();
         assert.equal(response.status, 409);
@@ -193,6 +222,23 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
         assert.match(String(activities[0]?.body), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
         assert.equal((await request()).status, 409);
         assert.equal(activities.length, 1);
+        assert.equal(inboxMessages.length, 1);
+        assert.equal(inboxMessages[0]?.status, InboxStatus.OPEN);
+        assert.match(String(inboxMessages[0]?.dedupeKey), new RegExp(`^${MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX}`, "u"));
+        assert.match(String(inboxMessages[0]?.body), /^merge executor completion contract mismatch:/u);
+        assert.match(String(inboxMessages[0]?.body), new RegExp(`executor version ${contractVersion ?? "missing"}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.match(String(inboxMessages[0]?.body), /task task-mechanical/u);
+        if (contractVersion === undefined) {
+          const differentVersion = RUN_COMPLETION_CONTRACT_VERSION + 1;
+          assert.equal((await request(differentVersion)).status, 409);
+          assert.equal(inboxMessages.length, 2);
+          assert.equal(inboxMessages.filter(({ status }) => status === InboxStatus.OPEN).length, 2);
+          assert.match(
+            String(inboxMessages[1]?.dedupeKey),
+            new RegExp(`^${MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${differentVersion}:`, "u"),
+          );
+          assert.equal(activities.length, 2);
+        }
       } finally {
         if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
         else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
@@ -201,7 +247,7 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
   });
 }
 
-test("a mechanical claim with the matching completion contract version claims normally", async () => {
+test("a matching mechanical claim closes an alert opened by a prior refused claim", async () => {
   await withTokens(async () => {
     const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
     process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
@@ -236,6 +282,7 @@ test("a mechanical claim with the matching completion contract version claims no
       },
     };
     const activities: Array<Record<string, unknown>> = [];
+    const inboxMessages: Array<Record<string, unknown>> = [];
     let runMutations = 0;
     const claimedRun = {
       ...candidate,
@@ -275,6 +322,37 @@ test("a mechanical claim with the matching completion contract version claims no
         findFirst: async () => null,
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
+      inboxMessage: {
+        findFirst: async ({ where }: { where: { status: InboxStatus; dedupeKey: { startsWith: string } } }) => (
+          inboxMessages.find((message) => (
+            message.status === where.status
+            && String(message.dedupeKey).startsWith(where.dedupeKey.startsWith)
+          )) ?? null
+        ),
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          const message = { ...data, status: InboxStatus.OPEN, answeredAt: null };
+          inboxMessages.push(message);
+          return message;
+        },
+        updateMany: async ({ where, data }: {
+          where: { status: InboxStatus; dedupeKey: { startsWith: string } };
+          data: { status: InboxStatus; answeredAt: Date };
+        }) => {
+          let count = 0;
+          for (const message of inboxMessages) {
+            if (message.status === where.status && String(message.dedupeKey).startsWith(where.dedupeKey.startsWith)) {
+              message.status = data.status;
+              message.answeredAt = data.answeredAt;
+              count += 1;
+            }
+          }
+          return { count };
+        },
+      },
+      inboxThread: {
+        findFirst: async () => null,
+        create: async () => ({ id: "thread-1" }),
+      },
     };
     const database = {
       run: { findMany: async () => [] },
@@ -283,7 +361,17 @@ test("a mechanical claim with the matching completion contract version claims no
       $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
     } as unknown as PrismaClient;
     try {
-      const response = await createApp(database).request("/runner/tasks/claim", {
+      const app = createApp(database);
+      const refused = await app.request("/runner/tasks/claim", {
+        method: "POST",
+        headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ runnerId: "merge-executor-1", leaseSeconds: 60 }),
+      });
+      assert.equal(refused.status, 409);
+      assert.equal(inboxMessages.length, 1);
+      assert.equal(inboxMessages[0]?.status, InboxStatus.OPEN);
+
+      const response = await app.request("/runner/tasks/claim", {
         method: "POST",
         headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -300,7 +388,9 @@ test("a mechanical claim with the matching completion contract version claims no
       assert.equal(runMutations, 1);
       assert.equal(activities.filter((activity) => (
         (activity.metadata as Record<string, unknown> | undefined)?.code === "mechanical_contract_mismatch"
-      )).length, 0);
+      )).length, 1);
+      assert.equal(inboxMessages[0]?.status, InboxStatus.CLOSED);
+      assert.ok(inboxMessages[0]?.answeredAt instanceof Date);
     } finally {
       if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
       else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;

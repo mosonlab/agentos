@@ -9,6 +9,7 @@ import {
   deployBarrierAllowsClaim,
   executionModeFor,
   FailureClass,
+  InboxStatus,
   integratorBindingRefusal,
   INTEGRATOR_OUTPUT_KIND,
   isMergeReadinessStep,
@@ -29,6 +30,7 @@ import {
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
 import {
+  MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX,
   MECHANICAL_CONTRACT_MISMATCH_CODE,
   RUN_COMPLETION_CONTRACT_VERSION,
 } from "@anneal/db/claim-contract";
@@ -38,6 +40,7 @@ import { issueSessionToken } from "./auth.js";
 import { isCanonicalBlindFindingsStep, previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { makeFencingToken } from "./execution.js";
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
+import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
 import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
@@ -585,6 +588,7 @@ export const claimRun = async (
         const receivedVersion = body.contractVersion ?? null;
         const displayedVersion = receivedVersion ?? "missing";
         const message = `Mechanical completion contract mismatch: executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`;
+        const alertKeyPrefix = `${MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${displayedVersion}:`;
         const existingActivity = await tx.taskActivity.findFirst({
           where: {
             taskId: candidate.task.id,
@@ -614,6 +618,17 @@ export const claimRun = async (
                 apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
               },
             },
+          });
+        }
+        await tx.$queryRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX}, 0)
+          )::text AS locked
+        `;
+        if (!await hasOpenOperatorAlert(tx, alertKeyPrefix)) {
+          await openOperatorAlert(tx, {
+            body: `merge executor completion contract mismatch: executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}; task ${candidate.task.id}`,
+            dedupeKey: `${alertKeyPrefix}${now.toISOString()}`,
           });
         }
         return {
@@ -885,6 +900,20 @@ export const claimRun = async (
         },
       });
       if (won.count !== 1) return SKIP;
+      if (executionMode === "mechanical") {
+        await tx.$queryRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX}, 0)
+          )::text AS locked
+        `;
+        await tx.inboxMessage.updateMany({
+          where: {
+            status: InboxStatus.OPEN,
+            dedupeKey: { startsWith: MECHANICAL_CONTRACT_MISMATCH_ALERT_PREFIX },
+          },
+          data: { status: InboxStatus.CLOSED, answeredAt: now },
+        });
+      }
       const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
         providerConversationId: candidate.session.providerConversationId,
         input: candidate.session.resumeInput,
