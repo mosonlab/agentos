@@ -606,6 +606,53 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         await tx.taskActivity.createMany({ data: archiveIds.map((archivedTaskId) => ({
           taskId: archivedTaskId, actorType: "operator", body: "Task archived",
         })) });
+
+        // Stop notices are owned by the task archive lifecycle. Restrict the
+        // query to tasks that this request actually archived: re-running the
+        // route on a historical archive must not become a backfill operation.
+        const stopNotices = await tx.inboxMessage.findMany({
+          where: {
+            taskId: { in: archiveIds },
+            status: InboxStatus.OPEN,
+            dedupeKey: { startsWith: "merge-tail-stop:" },
+          },
+          select: { id: true, taskId: true },
+          orderBy: [{ taskId: "asc" }, { id: "asc" }],
+        });
+        if (stopNotices.length > 0) {
+          const stopNoticeIds = stopNotices.map((notice) => notice.id);
+          const answeredAt = new Date();
+          const closed = await tx.inboxMessage.updateMany({
+            where: {
+              id: { in: stopNoticeIds },
+              taskId: { in: archiveIds },
+              status: InboxStatus.OPEN,
+              dedupeKey: { startsWith: "merge-tail-stop:" },
+            },
+            data: { status: InboxStatus.CLOSED, answeredAt },
+          });
+          if (closed.count !== stopNotices.length) {
+            throw new Error(
+              `Archive found ${stopNotices.length} OPEN merge-tail stop notices but closed ${closed.count}`,
+            );
+          }
+
+          const closedByTask = new Map<string, string[]>();
+          for (const notice of stopNotices) {
+            if (notice.taskId === null) {
+              throw new Error(`Merge-tail stop notice ${notice.id} has no task binding`);
+            }
+            const ids = closedByTask.get(notice.taskId) ?? [];
+            ids.push(notice.id);
+            closedByTask.set(notice.taskId, ids);
+          }
+          await tx.taskActivity.createMany({ data: [...closedByTask].map(([closedTaskId, messageIds]) => ({
+            taskId: closedTaskId,
+            actorType: "control-plane",
+            body: `Closed merge-tail stop notices: ${messageIds.join(", ")}`,
+            metadata: { inboxMessageIds: messageIds },
+          })) });
+        }
       }
       return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
     });

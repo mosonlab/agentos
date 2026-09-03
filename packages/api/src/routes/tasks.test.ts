@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  InboxStatus,
   RunnerKind,
   RunnerPreference,
   type PrismaClient,
@@ -18,6 +19,94 @@ import {
   taskRow,
   withTokens,
 } from "./test-support.js";
+
+type ArchiveTestMessage = {
+  id: string;
+  taskId: string;
+  dedupeKey: string;
+  status: InboxStatus;
+  answeredAt: Date | null;
+};
+
+const archiveRouteDatabase = (input: {
+  messages?: ArchiveTestMessage[];
+  activeRuns?: number;
+}) => {
+  const chainId = "archive-chain";
+  const tasks: Array<{
+    id: string;
+    projectId: string;
+    chainId: string;
+    status: string;
+    archivedAt: Date | null;
+  }> = [
+    {
+      id: "implementation-task", projectId: "project-1", chainId, status: "DONE", archivedAt: null,
+    },
+    {
+      id: "regression-task", projectId: "project-1", chainId, status: "DONE", archivedAt: null,
+    },
+  ];
+  const messages = input.messages ?? [];
+  const activities: Array<Record<string, unknown>> = [];
+  let inboxFindManyCalls = 0;
+  let inboxUpdateManyCalls = 0;
+  const lockedTask = {
+    ...tasks[1], approvalGate: false, dispatchAfterTaskId: null, dispatchAfter: null,
+    assigneeType: "AGENT", assigneeAgentId: "agent-1", templateStep: null,
+  };
+  const tx = {
+    $queryRaw: async () => tasks.map(({ id }) => ({ id })),
+    task: {
+      findUnique: async ({ select }: { select?: Record<string, unknown> }) => (
+        select && "status" in select ? lockedTask : { projectId: "project-1", chainId }
+      ),
+      findMany: async () => tasks,
+      updateMany: async ({ data }: { data: { archivedAt: Date } }) => {
+        for (const task of tasks) task.archivedAt = data.archivedAt;
+        return { count: tasks.length };
+      },
+      findUniqueOrThrow: async () => tasks[1],
+    },
+    run: { count: async () => input.activeRuns ?? 0 },
+    inboxMessage: {
+      count: async () => {
+        throw new Error("Inbox must not be read after an active-run refusal");
+      },
+      findMany: async () => {
+        inboxFindManyCalls += 1;
+        return messages
+          .filter((message) => message.status === InboxStatus.OPEN && message.dedupeKey.startsWith("merge-tail-stop:"))
+          .map(({ id, taskId }) => ({ id, taskId }));
+      },
+      updateMany: async ({ where, data }: {
+        where: { id: { in: string[] } };
+        data: { status: InboxStatus; answeredAt: Date };
+      }) => {
+        inboxUpdateManyCalls += 1;
+        let count = 0;
+        for (const message of messages) {
+          if (where.id.in.includes(message.id) && message.status === InboxStatus.OPEN) {
+            message.status = data.status;
+            message.answeredAt = data.answeredAt;
+            count += 1;
+          }
+        }
+        return { count };
+      },
+    },
+    taskActivity: {
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        activities.push(...data);
+        return { count: data.length };
+      },
+    },
+  };
+  const database = {
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+  return { database, messages, activities, get inboxFindManyCalls() { return inboxFindManyCalls; }, get inboxUpdateManyCalls() { return inboxUpdateManyCalls; } };
+};
 
 const retryRequest = async (
   assigneeAgent: {
@@ -663,6 +752,71 @@ test("task create and patch reject an archived assignee with a named 400", async
     });
     assert.equal(patched.status, 400);
     assert.deepEqual(await patched.json(), { error: "Assignee Archived Ada is archived" });
+  });
+});
+
+test("archiving a Chain closes only its OPEN merge-tail stop notices", async () => {
+  await withTokens(async () => {
+    const fixture = archiveRouteDatabase({ messages: [
+      { id: "stop-1", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:one", status: InboxStatus.OPEN, answeredAt: null },
+      { id: "stop-2", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:two", status: InboxStatus.OPEN, answeredAt: null },
+      { id: "question-1", taskId: "regression-task", dedupeKey: "question:regression-task", status: InboxStatus.OPEN, answeredAt: null },
+    ] });
+    const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal(response.status, 200);
+    const stopNotices = fixture.messages.filter((message) => message.id.startsWith("stop-"));
+    assert.equal(stopNotices.length, 2);
+    for (const notice of stopNotices) {
+      assert.equal(notice.status, InboxStatus.CLOSED);
+      assert.ok(notice.answeredAt instanceof Date);
+    }
+    const unrelated = fixture.messages.find((message) => message.id === "question-1");
+    assert.equal(unrelated?.status, InboxStatus.OPEN);
+    assert.equal(unrelated?.answeredAt, null);
+
+    const closureActivities = fixture.activities.filter((activity) => activity.actorType === "control-plane");
+    assert.deepEqual(closureActivities, [{
+      taskId: "regression-task",
+      actorType: "control-plane",
+      body: "Closed merge-tail stop notices: stop-1, stop-2",
+      metadata: { inboxMessageIds: ["stop-1", "stop-2"] },
+    }]);
+  });
+});
+
+test("archiving a Chain with no merge-tail stop notices writes no Inbox closure", async () => {
+  await withTokens(async () => {
+    const fixture = archiveRouteDatabase({ messages: [] });
+    const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(fixture.inboxUpdateManyCalls, 0);
+    assert.equal(fixture.activities.some((activity) => activity.actorType === "control-plane"), false);
+  });
+});
+
+test("archive refuses an active Chain run before touching Inbox messages", async () => {
+  await withTokens(async () => {
+    const fixture = archiveRouteDatabase({ activeRuns: 1, messages: [
+      { id: "stop-1", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:one", status: InboxStatus.OPEN, answeredAt: null },
+    ] });
+    const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal(fixture.inboxFindManyCalls, 0);
+    assert.equal(fixture.inboxUpdateManyCalls, 0);
+    assert.equal(fixture.messages[0]?.status, InboxStatus.OPEN);
+    assert.equal(fixture.activities.length, 0);
   });
 });
 
