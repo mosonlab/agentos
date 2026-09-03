@@ -107,7 +107,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
         }),
         findUniqueOrThrow: async () => run.task,
       },
-      taskActivity: { findMany: async () => [], create: async () => ({}) },
+      taskActivity: { findMany: async () => [], count: async () => 0, create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     };
