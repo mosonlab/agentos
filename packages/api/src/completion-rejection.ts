@@ -18,10 +18,10 @@ export const parseCompletionRejection = (
     return { status: "malformed" };
   }
   const record = metadata as Record<string, unknown>;
-  if (record.kind !== COMPLETION_REJECTION_ACTIVITY_KIND
-    || typeof record.sourceRunId !== "string") {
+  if (record.kind !== COMPLETION_REJECTION_ACTIVITY_KIND) {
     return { status: "malformed" };
   }
+  if (typeof record.sourceRunId !== "string") return { status: "different-run" };
   if (record.sourceRunId !== sourceRunId) return { status: "different-run" };
   if (record.schemaVersion !== 1
     || typeof record.status !== "number"

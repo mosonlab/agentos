@@ -28,10 +28,16 @@ test("completion rejection parsing distinguishes malformed and different-Run rec
     { ...valid, status: 99 },
     { ...valid, status: 600 },
     { ...valid, responseBody: null },
-    { ...valid, sourceRunId: null },
   ]) {
     assert.deepEqual(parseCompletionRejection(metadata, "run-1"), { status: "malformed" });
   }
+  const { sourceRunId: _sourceRunId, ...unattributed } = valid;
+  assert.deepEqual(parseCompletionRejection(unattributed, "run-1"), {
+    status: "different-run",
+  });
+  assert.deepEqual(parseCompletionRejection({ ...valid, sourceRunId: null }, "run-1"), {
+    status: "different-run",
+  });
   assert.deepEqual(parseCompletionRejection({ ...valid, sourceRunId: "run-2" }, "run-1"), {
     status: "different-run",
   });

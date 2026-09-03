@@ -347,6 +347,18 @@ test("a rejected mechanical completion is lost once and waits for operator retry
   await db.taskActivity.create({ data: {
     taskId: chain.task.id,
     actorType: "session",
+    body: "older malformed completion rejection",
+    metadata: {
+      kind: "mergeExecutor.completionRejected",
+      schemaVersion: 2,
+      sourceRunId: run.id,
+      status: 400,
+      responseBody: "older incompatible payload",
+    },
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: chain.task.id,
+    actorType: "session",
     body: "Mechanical completion rejected with HTTP 400: incompatible payload",
     metadata: {
       kind: "mergeExecutor.completionRejected",
@@ -371,6 +383,9 @@ test("a rejected mechanical completion is lost once and waits for operator retry
     taskId: chain.task.id,
     body: "Run 1 lost after its completion was rejected (400); automatic retry refused, operator action required",
   } }), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
+  await assertConfirmedHold(chain.task.id);
 
   const retried = await call("POST", `/tasks/${chain.task.id}/retry`, OPERATOR);
   assert.equal(retried.status, 201, JSON.stringify(retried.body));
@@ -390,7 +405,8 @@ test("a malformed completion rejection refuses automatic retry loudly", async ()
     body: "malformed completion rejection",
     metadata: {
       kind: "mergeExecutor.completionRejected",
-      schemaVersion: 1,
+      schemaVersion: 2,
+      sourceRunId: run.id,
       status: 400,
       responseBody: "incompatible payload",
     },
@@ -405,6 +421,9 @@ test("a malformed completion rejection refuses automatic retry loudly", async ()
     taskId: chain.task.id,
     body: "Run 1 lost after its completion rejection record could not be parsed; automatic retry refused, operator action required",
   } }), 1);
+  assert.deepEqual(releasedChainLeases, [chain.chainId]);
+  assert.deepEqual(releasedLeaseTargets, [{ chainId: chain.chainId, projectId: chain.project.id }]);
+  await assertConfirmedHold(chain.task.id);
 });
 
 test("completion rejection evidence does not change unrelated lost-Run retries", async () => {
@@ -438,8 +457,20 @@ test("completion rejection evidence does not change unrelated lost-Run retries",
       responseBody: "incompatible payload",
     },
   } });
+  await db.taskActivity.create({ data: {
+    taskId: mechanicalChain.task.id,
+    actorType: "session",
+    body: "unattributable completion rejection",
+    metadata: {
+      kind: "mergeExecutor.completionRejected",
+      schemaVersion: 1,
+      status: 400,
+      responseBody: "incompatible payload",
+    },
+  } });
   assert.equal(await reconcileDatabaseRuns(db, now, collectRelease), 1);
   assert.ok(await db.run.findFirst({ where: { taskId: mechanicalChain.task.id, runNumber: 2 } }));
+  assert.deepEqual(releasedChainLeases, [], "an unrelated retry retains the merge lease");
 });
 
 test("a lost merge-tail run with no attempts left releases the lease", async () => {

@@ -229,18 +229,8 @@ export const reconcileDatabaseRuns = async (
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
-      const lockedTask = run.taskId
-        ? await tx.task.findUnique({
-            where: { id: run.taskId },
-            select: { templateStep: { select: {
-              stepIndex: true,
-              outputKind: true,
-              taskTemplate: { select: { name: true } },
-            } } },
-          })
-        : null;
       const completionRejectionActivities = run.taskId
-        && executionModeFor(lockedTask?.templateStep ?? null) === "mechanical"
+        && executionModeFor(run.task?.templateStep ?? null) === "mechanical"
         ? await tx.taskActivity.findMany({
             where: {
               taskId: run.taskId,
@@ -254,8 +244,8 @@ export const reconcileDatabaseRuns = async (
         activityId: activity.id,
         parsed: parseCompletionRejection(activity.metadata, run.id),
       }));
-      const completionRejection = parsedCompletionRejections.find(({ parsed }) => parsed.status === "malformed")
-        ?? parsedCompletionRejections.find(({ parsed }) => parsed.status === "ok")
+      const completionRejection = parsedCompletionRejections.find(({ parsed }) => parsed.status === "ok")
+        ?? parsedCompletionRejections.find(({ parsed }) => parsed.status === "malformed")
         ?? null;
       const durableRegressionVerdict = run.task?.templateId
         && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
