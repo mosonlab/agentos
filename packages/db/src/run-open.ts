@@ -30,6 +30,10 @@ import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
 
+/** Newly refundable provider-transport and Regression target-fetch failures
+ * are bounded so a persistently broken external dependency cannot create an
+ * unbounded retry loop. Existing plumbing refunds remain outside this cap. */
+export const EXTERNAL_FAILURE_REFUND_CAP = 3;
 
 export const runBudgetCeiling = (
   maxSessionsPerTask: number,

@@ -23,7 +23,7 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW", runAt: null,
   cron: null, timezone: null, maxDurationMin: 120, stallTimeoutMin: 10,
   maxSessionsPerTask: 3, createdAt: now, updatedAt: now, assigneeAgent: null,
-  repo: null, runs: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
+  repo: null, runs: [], strandedSalvageBranches: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
   archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null,
   templateStep: null, taskCost: null, mergeOutcome: null, mergeRecovery: null,
 });

@@ -13,12 +13,21 @@ import { workspaceEnvironment, type Workspace } from "./workspace.js";
 const HANDOFF_SCHEMA_VERSION = 1;
 const MAX_HANDOFF_BYTES = 32 * 1024;
 const SHA = /^[0-9a-f]{40}$/u;
+const TARGET_FETCH_FAILURE_REASON = "target-fetch-failed" as const;
 
-export type RegressionOutputHandoff = {
+type RegressionOutputHandoffSuccess = {
   kind: typeof REGRESSION_VERIFICATION_OUTPUT_KIND;
   body: string;
   commitSha: string;
 };
+
+export type RegressionOutputHandoffBlock = {
+  kind: typeof REGRESSION_VERIFICATION_OUTPUT_KIND;
+  reason: typeof TARGET_FETCH_FAILURE_REASON;
+  stderr: string;
+};
+
+export type RegressionOutputHandoff = RegressionOutputHandoffSuccess | RegressionOutputHandoffBlock;
 
 /** The exact Run and output contract used to qualify a Regression handoff. */
 export type RegressionHandoffClaim = {
@@ -96,6 +105,16 @@ export const readRegressionOutputHandoff = async (
   if (value.schemaVersion !== HANDOFF_SCHEMA_VERSION) throw new Error("Regression output handoff has an unsupported schemaVersion");
   if (value.runId !== claim.run.id) throw new Error(`Regression output handoff belongs to Run ${String(value.runId)}, not ${claim.run.id}`);
   if (value.kind !== REGRESSION_VERIFICATION_OUTPUT_KIND) throw new Error(`Regression output handoff has unexpected kind ${String(value.kind)}`);
+  if (value.reason === TARGET_FETCH_FAILURE_REASON) {
+    if (typeof value.stderr !== "string" || value.stderr.length === 0) {
+      throw new Error("Regression output handoff target-fetch-failed block stderr is not a non-empty string");
+    }
+    return {
+      kind: REGRESSION_VERIFICATION_OUTPUT_KIND,
+      reason: TARGET_FETCH_FAILURE_REASON,
+      stderr: value.stderr,
+    };
+  }
   if (typeof value.body !== "string") throw new Error("Regression output handoff body is not a string");
   if (typeof value.commitSha !== "string" || !SHA.test(value.commitSha)) {
     throw new Error("Regression output handoff commitSha is invalid");

@@ -52,6 +52,7 @@ import {
   readRepairChainByTask,
   readTaskList,
   serializeUsageCost,
+  strandedSalvageBranchesFromRuns,
   type TaskReadScope,
 } from "../board.js";
 import { chainExecutionOwner } from "../chain-execution-owner.js";
@@ -360,6 +361,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       executionOwner: chainExecutionOwner(task),
       moveTargets: operatorMoveTargets(task, admission.verdict),
       taskCost: serializeUsageCost(sumUsageCosts(usageCosts.filter((cost) => cost !== null))),
+      strandedSalvageBranches: strandedSalvageBranchesFromRuns(task.runs),
       mergeOutcome,
       mergeRecovery,
       runs,

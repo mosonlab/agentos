@@ -29,6 +29,7 @@ import type {
   ChainAggregate as BoardContractChainAggregate,
   RepairBinding as BoardContractRepairBinding,
   RunStatus as BoardRunStatus,
+  StrandedSalvageBranch as BoardContractStrandedSalvageBranch,
   TaskList as TaskListContract,
   UsageCost as BoardUsageCost,
 } from "@anneal/db/board-contract";
@@ -69,6 +70,7 @@ export type BoardMoveTarget = BoardContractMoveTarget;
  * reads as a `string`, fails where the projection is written. */
 export type BoardCard = SerializesTo<BoardContractCard<Date>, BoardContractCard>;
 export type BoardLatestRun = BoardContractLatestRun<Date>;
+export type StrandedSalvageBranch = BoardContractStrandedSalvageBranch;
 export type BoardChainActivationState = BoardContractChainActivationState;
 export type RepairBinding = BoardContractRepairBinding;
 export type BoardChainControl = Pick<ChainControlSnapshot, "state" | "held" | "heldLayer" | "heldAt" | "holdReason">;
@@ -119,6 +121,10 @@ export type BoardRow = {
      *  let a select that forgets it type-check and project null, dropping the
      *  card's pull request link with no compile error. */
     pullRequestUrl: string | null;
+    /** Salvage evidence is required so a select that forgets either column
+     * cannot silently erase the operator-facing stranded-salvage signal. */
+    pushedBranch: string | null;
+    baseSha: string | null;
     session: {
       nativeChildUsed: boolean;
       costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
@@ -149,6 +155,35 @@ export type SerializedUsageCost = BoardUsageCost;
 
 export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
   cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
+
+type StrandedSalvageRun = Pick<BoardRow["runs"][number], "runNumber" | "status" | "pushedBranch" | "baseSha">;
+
+/**
+ * Derive durable salvage refs that were stranded by a later Run starting from
+ * the LOST Run's original base. Run rows belong to one Task by construction;
+ * `runNumber` is the persisted ordering that identifies a later attempt.
+ *
+ * A missing base SHA cannot establish the race, even when both rows happen to
+ * be null, so both sides of the comparison must be populated. The result is
+ * oldest-first to give operators a stable chronological list.
+ */
+export const strandedSalvageBranchesFromRuns = (
+  runs: readonly StrandedSalvageRun[],
+): StrandedSalvageBranch[] => runs
+  .filter((run) => (
+    run.status === "LOST"
+    && typeof run.pushedBranch === "string"
+    && run.pushedBranch.length > 0
+    && typeof run.baseSha === "string"
+    && run.baseSha.length > 0
+    && runs.some((later) => (
+      later.runNumber > run.runNumber
+      && typeof later.baseSha === "string"
+      && later.baseSha === run.baseSha
+    ))
+  ))
+  .sort((left, right) => left.runNumber - right.runNumber)
+  .map((run) => ({ branch: run.pushedBranch!, lostRunNumber: run.runNumber }));
 
 type MoveProjectionFacts = {
   dispatchAfter?: BoardBlockedOnTask | null;
@@ -543,6 +578,7 @@ export const boardCard = (
       chainPredecessor: moveContext.chainPredecessor ?? null,
     }),
     latestRun: latestRunProjection(row.runs),
+    strandedSalvageBranches: strandedSalvageBranchesFromRuns(row.runs),
     taskCost: serializeUsageCost(taskCost),
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
     // run 2's outcome, and the card's only run line is the newest run's.
@@ -830,6 +866,8 @@ const boardChainRows = async (
           subagentModel: true,
           budgetGrants: true,
           pullRequestUrl: true,
+          pushedBranch: true,
+          baseSha: true,
           session: {
             select: {
               nativeChildUsed: true,
@@ -873,7 +911,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         orderBy: { runNumber: "desc" },
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
-          codexServiceTier: true, pullRequestUrl: true,
+          codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
@@ -1113,6 +1151,23 @@ export const readTaskList = async (
     orderBy: taskOrderBy,
     include: taskListInclude,
   });
+  const salvageRuns = tasks.length === 0 ? [] : await db.run.findMany({
+    where: { taskId: { in: tasks.map((task) => task.id) } },
+    select: {
+      taskId: true,
+      runNumber: true,
+      status: true,
+      pushedBranch: true,
+      baseSha: true,
+    },
+  });
+  const salvageRunsByTask = new Map<string, typeof salvageRuns>();
+  for (const run of salvageRuns) {
+    if (run.taskId === null) continue;
+    const grouped = salvageRunsByTask.get(run.taskId) ?? [];
+    grouped.push(run);
+    salvageRunsByTask.set(run.taskId, grouped);
+  }
   const progressFor = await chainProgressLookup(db, tasks, scope, options.enrich);
   const cronIds = !options.enrich ? [] : tasks
     .filter((task) => task.scheduleKind === "CRON")
@@ -1127,6 +1182,7 @@ export const readTaskList = async (
 
   return tasks.map((task) => ({
     ...task,
+    strandedSalvageBranches: strandedSalvageBranchesFromRuns(salvageRunsByTask.get(task.id) ?? []),
     executionOwner: chainExecutionOwner(task),
     chainProgress: progressFor(task),
     recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
