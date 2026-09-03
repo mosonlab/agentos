@@ -4,9 +4,21 @@ A direct chain carries no spec or plan phase: the brief passed as the
 `description` at template instantiation is the specification of record. Every
 step of the chain reads it — the implementer builds from it, reviewers judge
 the diff against it, the fix step treats it as the boundary. Write it with the
-six sections below, in this order.
+seven sections below, in this order.
 
 ## Sections
+
+### Title
+
+The title is the Backlog card's name and the chain's name. Write one line of at
+most 120 characters, shaped `<Area>: <what exists after the chain>`. Name the
+outcome that exists after the chain; do not name a step, template, or tier.
+
+Examples from the board:
+
+- `API: Chain names are required`
+- `Web: Task details stay task-scoped`
+- `Release: Pull request delivery is ready`
 
 ### Goal
 
@@ -91,6 +103,8 @@ Route-looking prose.
 ## Skeleton
 
 ```
+<Title — one line, at most 120 characters, shaped `<Area>: <what exists after the chain>`.>
+
 <Goal — one sentence.>
 
 Background: <current behavior, mechanism, root cause.>

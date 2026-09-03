@@ -1060,12 +1060,18 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
 
 - Required path parameters: `projectId`, `templateId`.
 - Required JSON fields: `repoId`, `variables` (string-to-string record; values
-  must not be blank).
-- Optional JSON fields: `autoStart` (default `false`), `afterTaskId`, `name`,
+  must not be blank), and `name` (a non-blank, single-line string of at most
+  120 characters after trimming).
+- Optional JSON fields: `autoStart` (default `false`), `afterTaskId`,
   `description`, `stepOverrides` (map of positive step indexes to
   `{assigneeAgentId}`), and `gates` (a strict object with optional boolean
   fields `spec` and `merge`). `afterTaskId` cannot be combined with
   `autoStart:true`.
+- A missing, blank, or whitespace-only `name` returns `400 Bad Request` with
+  code `instantiate_name_required`. A name longer than 120 characters after
+  trimming or containing a line break returns `400 Bad Request` with code
+  `instantiate_name_invalid`. Both refusals happen before task creation; the
+  API does not derive a name from the description or template.
 - For the specification slot and merge readiness slot, the created task's
   `approvalGate` resolves in exactly this order: the corresponding dispatch
   override (`gates.spec` or `gates.merge`), then the project's corresponding
@@ -1096,7 +1102,7 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"feature/demo"},"gates":{"spec":true,"merge":false},"autoStart":true}'
+  -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"feature/demo"},"name":"Demo delivery","gates":{"spec":true,"merge":false},"autoStart":true}'
 ```
 
 ## Triggers and automations
@@ -1150,6 +1156,9 @@ curl -X POST "$BASE_URL/triggers/$TEMPLATE_ID/enable" -H "Authorization: Bearer 
 - Required path parameter: `templateId`.
 - Optional JSON body: `variables` (string-to-string record). An empty body is
   accepted; configured defaults resolve omitted variables.
+- Each fire gives the instantiated chain an explicit name made from the
+  trigger's template name and fire identifier, so fired chains remain
+  distinguishable from one another and never use the bare template name.
 
 ```sh
 curl -X POST "$BASE_URL/task-templates/$TEMPLATE_ID/fire" \
