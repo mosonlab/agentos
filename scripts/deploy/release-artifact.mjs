@@ -157,18 +157,9 @@ const validatedReleaseArtifact = ({ deployRoot, revision, releaseName }) => {
   return Object.freeze({ deployRoot, revision, releaseName, releaseDirectory, digest: identity.digest });
 };
 
-const verifyReleaseArtifactContents = ({ releaseDirectory, revision, digest }) => {
+const verifyReleaseIntegrity = ({ releaseDirectory, revision, digest }) => {
   try {
-    const verified = verifyReleaseDirectory({ releaseDirectory, revision, digest });
-    const dbMaintenanceSourceImports = maintenanceSourceImports(verified.releaseDirectory);
-    const runtimeTools = assertRuntimeToolInventory(verified.releaseDirectory);
-    return Object.freeze({
-      ...verified,
-      releaseDirectoryIdentity: verified.releaseName,
-      buildStamp: verified.apiBuildStamp,
-      dbMaintenanceSourceImports,
-      runtimeTools,
-    });
+    return verifyReleaseDirectory({ releaseDirectory, revision, digest });
   } catch (error) {
     if (error instanceof DeployFailure && error.reason === "release-digest-mismatch") {
       fail("release-artifact-digest-mismatch", error.detail);
@@ -177,13 +168,26 @@ const verifyReleaseArtifactContents = ({ releaseDirectory, revision, digest }) =
   }
 };
 
+const verifyReleaseArtifactContents = (artifact) => {
+  const verified = verifyReleaseIntegrity(artifact);
+  const dbMaintenanceSourceImports = maintenanceSourceImports(verified.releaseDirectory);
+  const runtimeTools = assertRuntimeToolInventory(verified.releaseDirectory);
+  return Object.freeze({
+    ...verified,
+    releaseDirectoryIdentity: verified.releaseName,
+    buildStamp: verified.apiBuildStamp,
+    dbMaintenanceSourceImports,
+    runtimeTools,
+  });
+};
+
 const loadTargetVerifier = (root) => {
   const verifierPath = join(root, RELEASE_ARTIFACT_SCRIPT);
   let status;
   try {
     status = lstatSync(verifierPath);
   } catch (error) {
-    if (error?.code === "ENOENT") return null;
+    if (error?.code === "ENOENT") fail("release-artifact-invalid", "target-verifier-missing");
     fail("release-artifact-invalid", `target-verifier-${error?.code ?? "unreadable"}`);
   }
   if (status.isSymbolicLink() || !status.isFile()) {
@@ -203,7 +207,7 @@ const loadTargetVerifier = (root) => {
 
 const normalizeTargetVerifierFailure = (error) => {
   if (error instanceof DeployFailure) return error;
-  if (typeof error?.reason === "string") {
+  if (error?.name === "DeployFailure" && typeof error.reason === "string") {
     return new DeployFailure(
       error.reason,
       typeof error.detail === "string" ? error.detail : String(error.detail ?? ""),
@@ -222,8 +226,12 @@ const normalizeTargetVerifierFailure = (error) => {
 export const verifyReleaseArtifact = (options = {}) => {
   const validated = validatedReleaseArtifact(options);
   if (options.useTargetVerifier !== false) {
+    // The target verifier is executable code inside the artifact on reuse and
+    // activation paths. Authenticate the complete finalized tree before
+    // importing that code so tampering cannot bypass the release boundary.
+    verifyReleaseIntegrity(validated);
     const verifier = loadTargetVerifier(options.verifierRoot ?? validated.releaseDirectory);
-    if (verifier && verifier !== verifyReleaseArtifact) {
+    if (verifier !== verifyReleaseArtifact) {
       try {
         return verifier({
           deployRoot: validated.deployRoot,
@@ -310,7 +318,7 @@ export const buildReleaseArtifact = ({
       deployRoot,
       revision,
       releaseName: result.releaseName,
-      ...(verify === verifyReleaseArtifact ? { verifierRoot: buildRoot } : {}),
+      verifierRoot: buildRoot,
     });
   } finally {
     rmSync(buildRoot, { recursive: true, force: true });

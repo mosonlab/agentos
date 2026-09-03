@@ -62,6 +62,13 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
+const COMPLETE_ARTIFACT_PATHS = Object.freeze([
+  "packages/api/dist",
+  "packages/runner/dist",
+  "packages/db/prisma",
+  "packages/db/src",
+  "scripts/deploy",
+]);
 const EXPECTED_PHASES = [
   "read-revisions",
   "check-already-deployed",
@@ -228,6 +235,7 @@ const minimalBuildTree = (root, revision) => {
   for (const { source: sourcePath, destination } of RUNTIME_TOOL_FILES) {
     cpSync(join(REPOSITORY_ROOT, sourcePath), join(runnerDist, "runtime-tools", destination));
   }
+  cpSync(join(REPOSITORY_ROOT, "scripts/deploy"), join(root, "scripts/deploy"), { recursive: true });
 };
 
 const removeTree = (root) => {
@@ -721,10 +729,7 @@ test("release artifact inventory copies and verifies deploy runtime and workspac
       deployRoot,
       revision: revisions.to,
       artifactPaths: paths.filter((path) => [
-        "packages/api/dist",
-        "packages/runner/dist",
-        "packages/db/prisma",
-        "packages/db/src",
+        ...COMPLETE_ARTIFACT_PATHS,
         adapterPath,
       ].includes(path)),
       optionalArtifactPaths: [],
@@ -839,7 +844,7 @@ test("standalone builder creates a verified exact-commit release", () => {
     nodeBinary: "/node",
     npmBinary: "/npm",
     requiredPaths: ["packages/api/dist", "packages/runner/dist"],
-    artifactPaths: () => ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
+    artifactPaths: () => COMPLETE_ARTIFACT_PATHS,
     optionalArtifactPaths: () => [],
     execute: (program, args, options = {}) => {
       commands.push({ program, args });
@@ -857,7 +862,8 @@ test("standalone builder creates a verified exact-commit release", () => {
     );
   }
   assert.deepEqual(
-    artifact.files.filter(({ path }) => path.includes("runtime-tools")).map(({ path }) => path),
+    artifact.files.filter(({ path }) => path.startsWith("packages/runner/dist/runtime-tools/"))
+      .map(({ path }) => path),
     EXPECTED_RUNTIME_PATHS,
   );
   assert.equal(commands.length, 4);
@@ -892,6 +898,30 @@ test("artifact verification loads the verifier shipped by the target release", (
     assert.deepEqual(
       verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
       { verifier: "target", revision: revisions.to, releaseName: assembled.releaseName },
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
+test("artifact verification rejects a missing target verifier", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-missing-target-verifier-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: COMPLETE_ARTIFACT_PATHS.filter((path) => path !== "scripts/deploy"),
+      optionalArtifactPaths: [],
+    });
+    assert.throws(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+      (error) => error instanceof DeployFailure
+        && error.reason === "release-artifact-invalid"
+        && error.detail === "target-verifier-missing",
     );
   } finally {
     removeTree(deployRoot);
@@ -974,6 +1004,36 @@ test("standalone builder verifies with the target tree before cleanup", () => {
   }
 });
 
+test("standalone builder passes the target tree to an injected verifier", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-injected-verifier-root-"));
+  let verifierRoot;
+  try {
+    buildReleaseArtifact({
+      deployRoot,
+      revision: revisions.to,
+      sourceRemote: "https://example.invalid/anneal.git",
+      gitBinary: "/git",
+      nodeBinary: "/node",
+      npmBinary: "/npm",
+      requiredPaths: ["packages/api/dist", "packages/runner/dist"],
+      artifactPaths: () => COMPLETE_ARTIFACT_PATHS,
+      optionalArtifactPaths: () => [],
+      execute: (_program, args, options = {}) => {
+        if (args.join(" ") === "/npm run build") minimalBuildTree(options.cwd, revisions.to);
+      },
+      verify: (options) => {
+        verifierRoot = options.verifierRoot;
+        assert.equal(existsSync(join(verifierRoot, "scripts/deploy/release-artifact.mjs")), true);
+        return { verified: true };
+      },
+    });
+    assert.equal(typeof verifierRoot, "string");
+    assert.equal(existsSync(verifierRoot), false);
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
 test("target verifier failures retain their deploy failure reason", () => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-verifier-failure-"));
   const source = join(deployRoot, "source");
@@ -983,6 +1043,7 @@ test("target verifier failures retain their deploy failure reason", () => {
   writeFileSync(join(source, "scripts/deploy/release-artifact.mjs"), [
     "export const verifyReleaseArtifact = () => {",
     '  const error = new Error("target inventory mismatch");',
+    '  error.name = "DeployFailure";',
     '  error.reason = "release-artifact-runtime-incomplete";',
     '  error.detail = "target-inventory-mismatch";',
     "  throw error;",
@@ -1008,7 +1069,39 @@ test("target verifier failures retain their deploy failure reason", () => {
   }
 });
 
-const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
+test("target verifier errors with an unrelated reason property remain unexpected", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-unexpected-error-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  writeFileSync(join(source, "scripts/deploy/release-artifact.mjs"), [
+    "export const verifyReleaseArtifact = () => {",
+    '  const error = new Error("unrelated target error");',
+    '  error.reason = "coincidental-reason";',
+    "  throw error;",
+    "};",
+    "",
+  ].join("\n"));
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: COMPLETE_ARTIFACT_PATHS,
+      optionalArtifactPaths: [],
+    });
+    assert.throws(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+      (error) => !(error instanceof DeployFailure)
+        && error.name === "Error"
+        && error.reason === "coincidental-reason",
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
+const assertRuntimeInventoryFailure = ({ artifactPaths, expectedDetail, mutate }) => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-runtime-tools-"));
   const source = join(deployRoot, "source");
   mkdirSync(source);
@@ -1019,12 +1112,14 @@ const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
       stageRoot: source,
       deployRoot,
       revision: revisions.to,
-      artifactPaths,
+      artifactPaths: [...new Set([...artifactPaths, "scripts/deploy"])],
       optionalArtifactPaths: [],
     });
     assert.throws(
       () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
-      (error) => error instanceof DeployFailure && error.reason === "release-artifact-runtime-incomplete",
+      (error) => error instanceof DeployFailure
+        && error.reason === "release-artifact-runtime-incomplete"
+        && error.detail === expectedDetail,
     );
   } finally {
     removeTree(deployRoot);
@@ -1032,12 +1127,14 @@ const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
 };
 
 test("artifact verification rejects missing, extra, non-regular, and misplaced runtime tools", () => {
-  const completePaths = ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"];
+  const completePaths = COMPLETE_ARTIFACT_PATHS;
   assertRuntimeInventoryFailure({
     artifactPaths: completePaths.filter((path) => path !== "packages/runner/dist"),
+    expectedDetail: "packages/runner/dist/runtime-tools-missing",
   });
   assertRuntimeInventoryFailure({
     artifactPaths: completePaths,
+    expectedDetail: "packages/runner/dist/runtime-tools-inventory-mismatch",
     mutate: (source) => writeFileSync(
       join(source, "packages/runner/dist/runtime-tools/extra.sh"),
       "unexpected\n",
@@ -1045,6 +1142,14 @@ test("artifact verification rejects missing, extra, non-regular, and misplaced r
   });
   assertRuntimeInventoryFailure({
     artifactPaths: completePaths,
+    expectedDetail: "packages/runner/dist/runtime-tools-inventory-mismatch",
+    mutate: (source) => {
+      rmSync(join(source, "packages/runner/dist/runtime-tools/regression-verification.sh"));
+    },
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    expectedDetail: "packages/runner/dist/runtime-tools/regression-verification.sh-not-a-regular-file",
     mutate: (source) => {
       const path = join(source, "packages/runner/dist/runtime-tools/regression-verification.sh");
       rmSync(path);
@@ -1053,6 +1158,7 @@ test("artifact verification rejects missing, extra, non-regular, and misplaced r
   });
   assertRuntimeInventoryFailure({
     artifactPaths: [...completePaths, "runtime-tools"],
+    expectedDetail: "misplaced-runtime-tools",
     mutate: (source) => {
       mkdirSync(join(source, "runtime-tools"), { recursive: true });
       writeFileSync(join(source, "runtime-tools/unexpected.sh"), "unexpected\n");
@@ -1060,6 +1166,7 @@ test("artifact verification rejects missing, extra, non-regular, and misplaced r
   });
   assertRuntimeInventoryFailure({
     artifactPaths: [...completePaths, "runtime-tool-alias"],
+    expectedDetail: "misplaced-runtime-tool-alias",
     mutate: (source) => {
       symlinkSync("packages/runner/dist/runtime-tools", join(source, "runtime-tool-alias"));
     },
@@ -1077,7 +1184,7 @@ test("artifact verification accepts an unrelated nested lib.sh", () => {
       stageRoot: source,
       deployRoot,
       revision: revisions.to,
-      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src"],
+      artifactPaths: COMPLETE_ARTIFACT_PATHS,
       optionalArtifactPaths: [],
     });
     assert.doesNotThrow(
@@ -1097,7 +1204,7 @@ test("artifact verification rejects an incomplete DB maintenance runtime before 
     stageRoot: source,
     deployRoot,
     revision: revisions.to,
-    artifactPaths: ["packages/api/dist", "packages/db/prisma"],
+    artifactPaths: ["packages/api/dist", "packages/db/prisma", "scripts/deploy"],
     optionalArtifactPaths: [],
   });
   assert.throws(
@@ -1109,7 +1216,7 @@ test("artifact verification rejects an incomplete DB maintenance runtime before 
   removeTree(deployRoot);
 });
 
-test("artifact verification reports content digest mismatch distinctly", () => {
+test("artifact verification authenticates the target verifier before executing it", () => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-digest-"));
   const source = join(deployRoot, "source");
   mkdirSync(source);
@@ -1118,17 +1225,24 @@ test("artifact verification reports content digest mismatch distinctly", () => {
     stageRoot: source,
     deployRoot,
     revision: revisions.to,
-    artifactPaths: ["packages/api/dist"],
+    artifactPaths: COMPLETE_ARTIFACT_PATHS,
     optionalArtifactPaths: [],
   });
-  const index = join(assembled.releaseDirectory, "packages/api/dist/index.js");
-  chmodSync(index, 0o600);
-  writeFileSync(index, "export const changed = true;\n");
-  chmodSync(index, 0o400);
+  const sentinel = join(deployRoot, "target-verifier-executed");
+  const verifier = join(assembled.releaseDirectory, "scripts/deploy/release-artifact.mjs");
+  chmodSync(verifier, 0o600);
+  writeFileSync(verifier, [
+    'import { writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(sentinel)}, "executed\\n");`,
+    "export const verifyReleaseArtifact = () => ({ tamperedVerificationAccepted: true });",
+    "",
+  ].join("\n"));
+  chmodSync(verifier, 0o400);
   assert.throws(
     () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
     (error) => error instanceof DeployFailure && error.reason === "release-artifact-digest-mismatch",
   );
+  assert.equal(existsSync(sentinel), false);
   removeTree(deployRoot);
 });
 
