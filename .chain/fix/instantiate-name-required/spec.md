@@ -1,0 +1,22 @@
+Every instantiated chain carries an operator-chosen title: instantiation without a `name` is refused at the API, the web dispatch form cannot submit without one, and the brief template defines what the title is.
+
+Depends on: chain dfcff199 (Route line: refuse instantiation on templates that do not consume it) - both chains rewrite the instantiate path in `packages/api/src/templates.ts`; serialized to avoid a refresh conflict on the same function.
+
+Background: `POST /projects/:projectId/task-templates/:templateId/instantiate` takes `name` as optional and `packages/api/src/templates.ts` composes each step's task name as `${input.name ?? template.name}: ${step.name}`. The web form (`apps/web/src/components/new-task-panel.tsx`, `createFromTemplate`) omits the field when the input is blank. On 2026-09-03 five chains were instantiated from the operator API without `name`; every one of their 35 tasks was called `direct-engineer-workflow: <step>` and the Doing column showed five identical cards. The board's chain grouping (`packages/api/src/board.ts`) treats the persisted name prefix as the chain title, so an omitted name is not cosmetic: it is the only human-readable identity a chain has on the board, in TaskActivity, and on merge-tail repair cards. The Backlog card lifecycle (`docs/governance/task-routing-v1.md`) already says the brief becomes the instantiate description but never says what `name` is; `docs/BRIEF-TEMPLATE.md` has no title section.
+
+Changes:
+1. The instantiate route requires `name`: a non-blank string of at most 120 characters after trimming, containing no line break. A missing, blank, or over-long name is refused with `400 Bad Request`, code `instantiate_name_required` (or `instantiate_name_invalid` for over-long or multi-line), before any task is created. The `?? template.name` fallback is removed.
+2. Trigger fires (`POST /task-templates/:templateId/fire`) and any other internal caller of `instantiateTemplate` pass an explicit name; a trigger fire uses the trigger's template name plus the fire identifier so fired chains stay distinguishable. No caller relies on a default.
+3. `apps/web` new-task panel: in template mode the create button is disabled until the name is non-blank, and the name is always sent.
+4. `docs/BRIEF-TEMPLATE.md` gains a `Title` section before `Goal`: the title is the Backlog card's name and the chain's name, one line of at most 120 characters, shaped `<Area>: <what exists after the chain>` (examples from the board), naming no step, template, or tier. `docs/governance/task-routing-v1.md` Backlog card lifecycle states that dispatch passes the card's name as the instantiate `name`. `docs/operator-api.md` marks `name` required and documents the refusal codes.
+
+Out of scope: renaming existing tasks or chains; the `Route:` line grammar and its refusal (predecessor chain); the blank-task creation path (`POST /projects/:projectId/tasks`), whose name rules stay as they are; task name composition for merge-tail repair cards.
+
+Constraints: fail loud, no derived default from the description or the template. The refusal happens before the transaction that creates tasks. Existing instantiate tests that omit `name` are updated to pass one; a test that asserts the refusal is added rather than substituting a default in fixtures.
+
+Acceptance:
+- `packages/api` test at the instantiate route boundary: a body without `name` returns 400 with code `instantiate_name_required` and creates no task; a blank or whitespace-only name returns the same; a 121-character or multi-line name returns 400 with code `instantiate_name_invalid`; a valid name creates tasks whose names all start with `<name>: `.
+- A trigger fire test shows the fired chain's tasks carry the explicit trigger-derived name and never the bare template name.
+- `apps/web` test: template mode with an empty name cannot submit; with a name the request body carries `name`.
+- `docs/BRIEF-TEMPLATE.md` contains the `Title` section; `docs/governance/task-routing-v1.md` and `docs/operator-api.md` carry the sentences above; `npm run test:snapshot-scan` is green if the change touches a snapshot-covered document.
+- `npm run test -w packages/api` and `-w apps/web` are green; `lint` and `typecheck` for those workspaces are green.
