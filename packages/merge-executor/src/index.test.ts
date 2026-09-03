@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import type { Stats } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import type { RunOutcome } from "@anneal/db";
 
@@ -294,4 +299,33 @@ test("a minted installation token cannot escape through run evidence or completi
   assert.ok(completion);
   assert.equal(completion.body.includes(installationToken), false);
   assert.match(completion.body, /crashed during mechanical execution/u);
+});
+
+test("the daemon still starts when it is reached through a symlinked release directory", () => {
+  // The operator runbook installs versioned releases and starts the daemon
+  // through a `current` -> releases/<oid> symlink. ESM resolves that before it
+  // sets import.meta.url, so an entrypoint guard comparing raw strings skipped
+  // `main` entirely: node exited 0 with no output at all and the service
+  // manager respawned the silence forever. Assert the loud behaviour, because
+  // silence is the failure this is standing in front of.
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const scratch = mkdtempSync(join(tmpdir(), "merge-executor-entrypoint-"));
+  try {
+    const link = join(scratch, "current");
+    symlinkSync(here, link, "dir");
+    const started = spawnSync(
+      process.execPath,
+      ["--conditions=development", "--import", import.meta.resolve("tsx"), join(link, "index.ts")],
+      {
+        // No configuration and an empty working directory, so the startup gate
+        // refuses immediately and this never reaches a control plane.
+        cwd: scratch,
+        env: { PATH: process.env.PATH ?? "" },
+        encoding: "utf8",
+      },
+    );
+    assert.match(started.stderr, /merge-executor startup refused:/u, `stderr was ${JSON.stringify(started.stderr)}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });

@@ -12,6 +12,9 @@
 
 import "dotenv/config";
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
 import { makeAgentOsClient, type MechanicalCancellation, type MechanicalClaim } from "./agentos.js";
@@ -252,6 +255,20 @@ export const main = async (): Promise<void> => {
   log.info("merge executor stopped");
 };
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * `import.meta.url` is the *resolved* location: ESM follows symlinks before it
+ * is set, while `process.argv[1]` is the path as spelled on the command line.
+ * Comparing those two strings made this condition false in exactly the layout
+ * this package's operator runbook prescribes — the daemon is started through a
+ * `current` symlink into `releases/<oid>` — so `main` was never called, node
+ * exited 0 having written nothing to either log, and the service manager
+ * respawned that silence forever under KeepAlive.
+ *
+ * Resolve the invoked path the same way the loader did, and build the URL with
+ * `pathToFileURL` rather than string concatenation, which also gets a path
+ * containing a space or a non-ASCII character right.
+ */
+const invokedAs = process.argv[1];
+if (invokedAs && import.meta.url === pathToFileURL(realpathSync(invokedAs)).href) {
   await main();
 }
