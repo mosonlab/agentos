@@ -868,6 +868,8 @@ const boardChainRows = async (
           subagentModel: true,
           budgetGrants: true,
           pullRequestUrl: true,
+          pushedBranch: true,
+          baseSha: true,
           session: {
             select: {
               nativeChildUsed: true,

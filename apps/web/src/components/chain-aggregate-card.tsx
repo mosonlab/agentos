@@ -37,10 +37,6 @@ const chainName = (aggregate: ChainAggregate): string => aggregate.chainName ?? 
 
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
 
-type BoardTaskWithStrandedSalvage = BoardTask & {
-  strandedSalvageBranches?: Array<unknown>;
-};
-
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
@@ -85,7 +81,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   // salvage signal by counting the member-level projection entries rather than
   // making the aggregate contract duplicate per-task evidence.
   const strandedSalvageCount = members.reduce(
-    (count, member) => count + ((member as BoardTaskWithStrandedSalvage).strandedSalvageBranches?.length ?? 0),
+    (count, member) => count + (member.strandedSalvageBranches?.length ?? 0),
     0,
   );
   const cost = usageCostAmount(aggregate.totalCost);

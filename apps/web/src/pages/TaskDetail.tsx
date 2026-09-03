@@ -337,10 +337,6 @@ export const StrandedSalvageList = ({
   );
 };
 
-type TaskDetailWithStrandedSalvage = TaskDetail & {
-  strandedSalvageBranches?: StrandedSalvageBranch[];
-};
-
 const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<TaskDetail>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
@@ -445,7 +441,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
   const pullRequestUrl = newest?.pullRequestUrl ?? null;
-  const strandedSalvageBranches = (task as TaskDetailWithStrandedSalvage).strandedSalvageBranches ?? [];
+  const strandedSalvageBranches = task.strandedSalvageBranches ?? [];
   const executionOwner = task.executionOwner === "agent"
     ? task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("executionOwner.unassigned")
     : t(`executionOwner.${task.executionOwner}`);

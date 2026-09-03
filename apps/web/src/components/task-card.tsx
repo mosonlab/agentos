@@ -13,13 +13,6 @@ import { Pill, ROW, type RowMenuEntry } from "./ui";
 
 const TASK_PILL = "py-0";
 
-/** The projection adds this list to every board task. Keep the local shape
- * structural until the shared contract lands on the integration branch. */
-type StrandedSalvageBranch = { branch: string; lostRunNumber: number };
-type BoardTaskWithStrandedSalvage = BoardTask & {
-  strandedSalvageBranches?: StrandedSalvageBranch[];
-};
-
 /**
  * The assignee, one line, with the rest of the name a keypress away.
  *
@@ -124,7 +117,7 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
-  const strandedSalvageBranches = (task as BoardTaskWithStrandedSalvage).strandedSalvageBranches ?? [];
+  const strandedSalvageBranches = task.strandedSalvageBranches ?? [];
   const assignee = task.assigneeAgent?.title ?? null;
   const schedule = scheduleLabel(task);
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
