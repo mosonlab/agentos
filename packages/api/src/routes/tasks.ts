@@ -49,6 +49,7 @@ import { z } from "zod";
 import {
   operatorMoveTargets,
   readBoard,
+  readChainRepairTaskIds,
   readRepairChainByTask,
   readTaskList,
   serializeUsageCost,
@@ -81,7 +82,7 @@ import { OPERATOR_NOTE_METADATA_FIELD } from "../run-claim.js";
 import { requestMergeTailRepair } from "../merge-tail-repair-reentry.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
-import { isLiveStatus, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
+import { isLiveStatus, lockTask, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
 import { readCommitted, serializable } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
@@ -592,6 +593,32 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   app.post("/tasks/:taskId/archive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await readCommitted(db, async (tx) => {
+      // Detached repair completion takes its own Task lock before the primary
+      // Chain lock. Join that order so a completion that already owns the
+      // repair row can emit its notice before archive closes notices, while an
+      // archive that wins can refuse the still-active repair Run. Chain
+      // identity and repair markers are immutable, but resolve repairs again
+      // after the Chain lock to catch one created between these two reads.
+      const identity = await tx.task.findUnique({
+        where: { id: taskId },
+        select: { projectId: true, chainId: true },
+      });
+      if (!identity) return refusal("not-found", "Task not found");
+      if (identity.chainId !== null) {
+        const unlockedChainTaskIds = (await tx.task.findMany({
+          where: { projectId: identity.projectId, chainId: identity.chainId },
+          select: { id: true },
+        })).map((task) => task.id);
+        const unlockedRepairTaskIds = await readChainRepairTaskIds(tx, {
+          projectId: identity.projectId,
+          chainTaskIds: unlockedChainTaskIds,
+        });
+        for (const repairTaskId of unlockedRepairTaskIds) {
+          if (!await lockTask(tx, repairTaskId)) {
+            throw new Error(`Chain repair task ${repairTaskId} disappeared while archive acquired its lock`);
+          }
+        }
+      }
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return refusal("not-found", "Task not found");
       const taskIds = locked.chainId === null
@@ -600,8 +627,17 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
             where: { projectId: locked.projectId, chainId: locked.chainId },
             select: { id: true },
           })).map((task) => task.id);
+      const repairTaskIds = locked.chainId === null
+        ? []
+        : await readChainRepairTaskIds(tx, {
+            projectId: locked.projectId,
+            chainTaskIds: taskIds,
+          });
       const activeRuns = await tx.run.count({
-        where: { taskId: { in: taskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+        where: {
+          taskId: { in: [...new Set([...taskIds, ...repairTaskIds])] },
+          status: { in: ACTIVE_RUN_STATUSES },
+        },
       });
       if (activeRuns > 0) {
         return refusal("conflict", "Cannot archive a task with an active run");
@@ -623,6 +659,63 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         await tx.taskActivity.createMany({ data: archiveIds.map((archivedTaskId) => ({
           taskId: archivedTaskId, actorType: "operator", body: "Task archived",
         })) });
+
+        // Stop notices are owned by the task archive lifecycle. Restrict the
+        // query to tasks that this request actually archived: re-running the
+        // route on a historical archive must not become a backfill operation.
+        const stopNotices = await tx.inboxMessage.findMany({
+          where: {
+            taskId: { in: archiveIds },
+            status: InboxStatus.OPEN,
+            dedupeKey: { startsWith: "merge-tail-stop:" },
+          },
+          select: { id: true, taskId: true },
+          orderBy: [{ taskId: "asc" }, { id: "asc" }],
+        });
+        if (stopNotices.length > 0) {
+          const stopNoticeIds = stopNotices.map((notice) => notice.id);
+          const answeredAt = new Date();
+          const closed = await tx.inboxMessage.updateMany({
+            where: {
+              id: { in: stopNoticeIds },
+              taskId: { in: archiveIds },
+              status: InboxStatus.OPEN,
+              dedupeKey: { startsWith: "merge-tail-stop:" },
+            },
+            data: { status: InboxStatus.CLOSED, answeredAt },
+          });
+          if (closed.count !== stopNotices.length) {
+            // Inbox close is a compare-and-set that does not take the Task
+            // mutex. A concurrent operator close is already the desired final
+            // state; only an initially selected notice that remains OPEN is an
+            // inconsistency worth rolling the archive back for.
+            const remainingOpen = await tx.inboxMessage.findMany({
+              where: { id: { in: stopNoticeIds }, status: InboxStatus.OPEN },
+              select: { id: true },
+            });
+            if (remainingOpen.length > 0) {
+              throw new Error(
+                `Archive found ${stopNotices.length} OPEN merge-tail stop notices but ${remainingOpen.length} remained OPEN`,
+              );
+            }
+          }
+
+          const closedByTask = new Map<string, string[]>();
+          for (const notice of stopNotices) {
+            if (notice.taskId === null) {
+              throw new Error(`Merge-tail stop notice ${notice.id} has no task binding`);
+            }
+            const ids = closedByTask.get(notice.taskId) ?? [];
+            ids.push(notice.id);
+            closedByTask.set(notice.taskId, ids);
+          }
+          await tx.taskActivity.createMany({ data: [...closedByTask].map(([closedTaskId, messageIds]) => ({
+            taskId: closedTaskId,
+            actorType: "control-plane",
+            body: `Closed merge-tail stop notices: ${messageIds.join(", ")}`,
+            metadata: { inboxMessageIds: messageIds },
+          })) });
+        }
       }
       return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
     });
