@@ -214,4 +214,11 @@ export type ClaimContract = {
 };
 
 /** The refusal `claimRun` reports instead of a claim, rendered as a 409. */
-export type ClaimRefusal = { error: string; reason: string };
+export type ClaimRefusal = {
+  error: string;
+  reason: string;
+  /** Present only for a mechanical completion-contract mismatch. */
+  expectedVersion?: number;
+  /** Null means the mechanical executor omitted its version. */
+  receivedVersion?: number | null;
+};

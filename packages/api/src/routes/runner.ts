@@ -197,7 +197,16 @@ export const registerRunnerRoutes = (
     if (claimed && "error" in claimed) {
       if (typeof claimed.error !== "string") throw new TypeError("Run claim refusal has no message");
       if (typeof claimed.reason !== "string") throw new TypeError("Run claim refusal has no reason");
-      return refusalJson(context, refusal("conflict", claimed.error, { reason: claimed.reason }));
+      return refusalJson(context, refusal("conflict", claimed.error, {
+        reason: claimed.reason,
+        ...(claimed.reason === "mechanical_contract_mismatch"
+          ? {
+            code: claimed.reason,
+            expectedVersion: claimed.expectedVersion,
+            receivedVersion: claimed.receivedVersion,
+          }
+          : {}),
+      }));
     }
     return claimed ? context.json(claimed) : context.body(null, 204);
   });

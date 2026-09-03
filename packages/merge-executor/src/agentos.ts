@@ -11,6 +11,7 @@
  */
 
 import type { MergeOutcome } from "@anneal/db/merge-integrator";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import type { ExecutorConfig } from "./config.js";
 import type { ChainEnvelope, IntentRecord } from "./decision-table.js";
@@ -37,6 +38,37 @@ export type MechanicalHeartbeat = {
 
 export type AgentOsClient = ReturnType<typeof makeAgentOsClient>;
 
+export class AgentOsResponseError extends Error {
+  override readonly name = "AgentOsResponseError";
+
+  constructor(
+    readonly status: number,
+    readonly responseBody: string,
+  ) {
+    super(`Anneal API ${status}: ${responseBody}`);
+  }
+}
+
+export class MechanicalContractMismatchError extends Error {
+  override readonly name = "MechanicalContractMismatchError";
+
+  constructor(
+    readonly executorVersion: number | null,
+    readonly apiVersion: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export class CompletionTransportError extends Error {
+  override readonly name = "CompletionTransportError";
+
+  constructor(override readonly cause: unknown) {
+    super("Anneal completion request failed twice without an HTTP response");
+  }
+}
+
 const jsonHeaders = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
   "Content-Type": "application/json",
@@ -54,17 +86,45 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
       signal: AbortSignal.timeout(config.apiTimeoutMs),
     });
     if (!response.ok && response.status !== 204) {
-      throw new Error(`Anneal API ${response.status}: ${await response.text()}`);
+      throw new AgentOsResponseError(response.status, await response.text());
     }
     return response;
   };
 
   const claim = async (): Promise<MechanicalClaim | null> => {
-    const response = await request("/runner/tasks/claim", {
-      method: "POST",
-      token: config.executorToken,
-      body: { runnerId: config.runnerId, leaseSeconds: config.leaseSeconds },
-    });
+    let response: Response;
+    try {
+      response = await request("/runner/tasks/claim", {
+        method: "POST",
+        token: config.executorToken,
+        body: {
+          runnerId: config.runnerId,
+          leaseSeconds: config.leaseSeconds,
+          contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+        },
+      });
+    } catch (error: unknown) {
+      if (error instanceof AgentOsResponseError && error.status === 409) {
+        let refusal: Record<string, unknown> | null = null;
+        try {
+          const parsed = JSON.parse(error.responseBody) as unknown;
+          if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) refusal = parsed as Record<string, unknown>;
+        } catch {
+          // A malformed refusal is not the named compatibility result; surface
+          // the original response error through the ordinary claim-loop path.
+        }
+        if (refusal?.code === "mechanical_contract_mismatch"
+          && typeof refusal.expectedVersion === "number"
+          && (typeof refusal.receivedVersion === "number" || refusal.receivedVersion === null)) {
+          throw new MechanicalContractMismatchError(
+            refusal.receivedVersion,
+            refusal.expectedVersion,
+            typeof refusal.error === "string" ? refusal.error : error.message,
+          );
+        }
+      }
+      throw error;
+    }
     return response.status === 204 ? null : await response.json() as MechanicalClaim;
   };
 
@@ -177,26 +237,58 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
     claimed: MechanicalClaim,
     completion: { succeeded: boolean; outcome: MergeOutcome | null; failureReason?: string },
   ): Promise<void> => {
-    await request(`/runner/runs/${claimed.run.id}/complete`, {
-      method: "POST",
-      token: config.executorToken,
-      body: {
-        runnerId: config.runnerId,
-        fencingToken: claimed.fencingToken,
-        outcome: completion.succeeded
-          ? { case: "succeeded" }
-          // A crashed executor persisted no merge result, which is exactly the
-          // output its step requires; the control plane may attempt it again.
-          : {
-            case: "required-output-unsatisfied",
-            reason: completion.failureReason ?? "merge executor crashed",
-          },
-        exitCode: completion.succeeded ? 0 : 1,
-        pushStatus: "NOT_REQUESTED",
-        cleanupStatus: "SUCCEEDED",
-        workspaceRetained: false,
-      },
-    });
+    const body = {
+      runnerId: config.runnerId,
+      fencingToken: claimed.fencingToken,
+      outcome: completion.succeeded
+        ? { case: "succeeded" }
+        // A crashed executor persisted no merge result, which is exactly the
+        // output its step requires; the control plane may attempt it again.
+        : {
+          case: "required-output-unsatisfied",
+          reason: completion.failureReason ?? "merge executor crashed",
+        },
+      exitCode: completion.succeeded ? 0 : 1,
+      pushStatus: "NOT_REQUESTED",
+      cleanupStatus: "SUCCEEDED",
+      workspaceRetained: false,
+    };
+    const attempt = async (): Promise<void> => {
+      await request(`/runner/runs/${claimed.run.id}/complete`, {
+        method: "POST",
+        token: config.executorToken,
+        body,
+      });
+    };
+    const recordRejection = async (error: AgentOsResponseError): Promise<void> => {
+      await writeActivity(
+        claimed,
+        `Mechanical completion rejected with HTTP ${error.status}: ${error.responseBody}`,
+        {
+          kind: "mergeExecutor.completionRejected",
+          schemaVersion: 1,
+          status: error.status,
+          responseBody: error.responseBody,
+        },
+      );
+    };
+    try {
+      await attempt();
+    } catch (firstError: unknown) {
+      if (firstError instanceof AgentOsResponseError) {
+        await recordRejection(firstError).catch(() => undefined);
+        throw firstError;
+      }
+      try {
+        await attempt();
+      } catch (secondError: unknown) {
+        if (secondError instanceof AgentOsResponseError) {
+          await recordRejection(secondError).catch(() => undefined);
+          throw secondError;
+        }
+        throw new CompletionTransportError(secondError);
+      }
+    }
   };
 
   return { claim, start, heartbeat, acknowledgeCancellation, readChain, readOwnIntents, writeActivity, writeOutput, complete };

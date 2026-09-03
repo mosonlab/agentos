@@ -17,7 +17,14 @@ import { pathToFileURL } from "node:url";
 
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
-import { makeAgentOsClient, type MechanicalCancellation, type MechanicalClaim } from "./agentos.js";
+import {
+  AgentOsResponseError,
+  CompletionTransportError,
+  makeAgentOsClient,
+  MechanicalContractMismatchError,
+  type MechanicalCancellation,
+  type MechanicalClaim,
+} from "./agentos.js";
 import { loadExecutorConfig, type ExecutorConfig } from "./config.js";
 import { execute, type Deps } from "./decision-table.js";
 import { mintInstallationToken } from "./github-app-auth.js";
@@ -52,16 +59,38 @@ export const runClaim = async (
   } = {},
 ): Promise<void> => {
   const agentos = makeAgentOsClient(config, fetchImpl);
+  let runLog = log;
+  const complete = async (
+    completion: { succeeded: boolean; outcome: Awaited<ReturnType<typeof execute>> | null; failureReason?: string },
+  ): Promise<boolean> => {
+    try {
+      await agentos.complete(claimed, completion);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof AgentOsResponseError) {
+        runLog.error(`mechanical completion rejected with HTTP ${error.status}: ${error.responseBody}`, {
+          runId: claimed.run.id,
+          status: error.status,
+          responseBody: error.responseBody,
+        });
+        return false;
+      }
+      if (error instanceof CompletionTransportError) {
+        runLog.error("mechanical completion failed after network retry", { runId: claimed.run.id, error: error.cause });
+        return false;
+      }
+      throw error;
+    }
+  };
   const chainIndex = claimed.task.chainIndex ?? null;
   if (chainIndex === null) {
     // Fail closed and loudly: a mechanical run outside a chain has no
     // predecessor to read an authorization from, so there is nothing to execute.
-    await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason: "mechanical run is not part of a chain" });
+    await complete({ succeeded: false, outcome: null, failureReason: "mechanical run is not part of a chain" });
     return;
   }
 
   const startedAt = new Date();
-  let runLog = log;
   let pendingCancellation: MechanicalCancellation | null = null;
   const checkCancellation = async (): Promise<void> => {
     if (pendingCancellation) throw new MechanicalCancellationObserved(pendingCancellation);
@@ -102,7 +131,7 @@ export const runClaim = async (
       const suffix = minted.httpStatus === undefined ? "" : ` (HTTP ${minted.httpStatus})`;
       const failureReason = `GitHub App installation-token mint failed: ${minted.failure}${suffix}`;
       log.error("GitHub App installation-token mint failed", { runId: claimed.run.id, failure: minted.failure, ...(minted.httpStatus === undefined ? {} : { httpStatus: minted.httpStatus }) });
-      await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason });
+      await complete({ succeeded: false, outcome: null, failureReason });
       return;
     }
 
@@ -173,7 +202,7 @@ export const runClaim = async (
     );
     // Every executed contract ends SUCCESS, stop or merge alike. FAILURE is for
     // crashes only, so a recorded stop is never automatically retried.
-    await agentos.complete(claimed, { succeeded: true, outcome });
+    if (!await complete({ succeeded: true, outcome })) return;
     runLog.info("mechanical run completed", { runId: claimed.run.id, outcome: outcome.outcome });
   } catch (error: unknown) {
     if (error instanceof MechanicalCancellationObserved) {
@@ -183,7 +212,7 @@ export const runClaim = async (
     }
     if (error instanceof MechanicalApiIncompatible) {
       runLog.error("mechanical run refused incompatible control plane", { runId: claimed.run.id });
-      await agentos.complete(claimed, {
+      await complete({
         succeeded: false,
         outcome: null,
         failureReason: "control plane does not enforce mechanical cancellation refusal",
@@ -194,8 +223,7 @@ export const runClaim = async (
     // Deep transport errors can contain request headers. The run record names
     // the failed phase without serialising the thrown value into control-plane
     // evidence; the token-aware logger above remains the diagnostic backstop.
-    await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason: "merge executor crashed during mechanical execution" })
-      .catch((completionError: unknown) => { runLog.error("completion after crash failed", { error: completionError }); });
+    await complete({ succeeded: false, outcome: null, failureReason: "merge executor crashed during mechanical execution" });
   } finally {
     clearInterval(heartbeat);
   }
@@ -207,9 +235,19 @@ export const claimOnce = async (
   log: ExecutorLog,
   fetchImpl: typeof fetch = fetch,
   runClaimImpl: typeof runClaim = runClaim,
-): Promise<"idle" | "handled"> => {
+): Promise<"idle" | "handled" | "contract-mismatch"> => {
   const agentos = makeAgentOsClient(config, fetchImpl);
-  const claimed = await agentos.claim();
+  let claimed: MechanicalClaim | null;
+  try {
+    claimed = await agentos.claim();
+  } catch (error: unknown) {
+    if (!(error instanceof MechanicalContractMismatchError)) throw error;
+    log.error("mechanical completion contract mismatch", {
+      executorVersion: error.executorVersion,
+      apiVersion: error.apiVersion,
+    });
+    return "contract-mismatch";
+  }
   if (!claimed) return "idle";
   if (claimed.executionMode !== "mechanical") {
     // Symmetric to the ordinary runner's refusal: an allowlisted runner id
@@ -244,6 +282,10 @@ export const main = async (): Promise<void> => {
   while (running) {
     try {
       const result = await claimOnce(config, gate.privateKeyFile, log);
+      if (result === "contract-mismatch") {
+        running = false;
+        continue;
+      }
       if (result === "idle") {
         await sleep(config.pollIntervalMs);
       }

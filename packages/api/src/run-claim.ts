@@ -28,6 +28,7 @@ import {
 } from "@anneal/db";
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import { issueSessionToken } from "./auth.js";
@@ -67,6 +68,7 @@ export const runnerTelemetryFields = {
 export const claimInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   leaseSeconds: z.number().int().min(15).max(3600).default(60),
+  contractVersion: z.number().int().optional(),
   ...runnerTelemetryFields,
 });
 
@@ -576,6 +578,29 @@ export const claimRun = async (
       // empty — the shipped default — or with `MERGE_EXECUTOR_TOKEN` unset or
       // aliased onto the runner token, no integrator run is claimable at all.
       if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
+      if (executionMode === "mechanical" && body.contractVersion !== RUN_COMPLETION_CONTRACT_VERSION) {
+        const receivedVersion = body.contractVersion ?? null;
+        const displayedVersion = receivedVersion ?? "missing";
+        const message = `Mechanical completion contract mismatch: executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`;
+        await tx.taskActivity.create({
+          data: {
+            taskId: candidate.task.id,
+            actorType: "control-plane",
+            body: message,
+            metadata: {
+              code: "mechanical_contract_mismatch",
+              executorVersion: receivedVersion,
+              apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
+            },
+          },
+        });
+        return {
+          error: message,
+          reason: "mechanical_contract_mismatch",
+          expectedVersion: RUN_COMPLETION_CONTRACT_VERSION,
+          receivedVersion,
+        };
+      }
       // The backend circuit breaker tracks model-CLI health. A mechanical run
       // spawns no CLI, so an open CLI circuit is not evidence about it; the
       // `runner` on its row is an inert artifact of the sentinel Agent.

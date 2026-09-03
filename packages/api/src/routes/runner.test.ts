@@ -7,6 +7,7 @@ import {
   RunnerKind,
   type PrismaClient,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
@@ -64,6 +65,82 @@ test("merge-executor start maps an omitted promptHash to null and dispatches", a
     assert.equal(promptHash, null);
   });
 });
+
+for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) {
+  test(`a mechanical claim with ${contractVersion === undefined ? "no" : "a mismatched"} completion contract version is visibly refused`, async () => {
+    await withTokens(async () => {
+      const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+      process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
+      const activities: Array<Record<string, unknown>> = [];
+      let runMutations = 0;
+      const candidate = {
+        id: "run-mechanical", projectId: "project-1", taskId: "task-mechanical", repoId: "repo-1",
+        leaseGeneration: 0,
+        task: {
+          id: "task-mechanical",
+          targetBranch: "main",
+          templateStep: {
+            stepIndex: 7,
+            outputKind: "merge-result",
+            taskTemplate: { name: "direct-engineer-workflow" },
+          },
+        },
+        repo: { id: "repo-1", defaultBranch: "main" },
+        agent: {
+          id: "agent-mechanical",
+          name: "merge-integrator",
+          repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
+        },
+      };
+      const tx = {
+        $queryRaw: async () => [{ granted: true }],
+        $executeRawUnsafe: async () => 0,
+        chainControl: { findMany: async () => [] },
+        mergeLeaseEvent: { findMany: async () => [] },
+        run: {
+          findMany: async () => [candidate],
+          updateMany: async () => { runMutations += 1; return { count: 1 }; },
+          create: async () => { runMutations += 1; return {}; },
+        },
+        taskActivity: {
+          create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+        },
+      };
+      const database = {
+        run: { findMany: async () => [] },
+        taskActivity: { createMany: async () => ({ count: 0 }) },
+        $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      } as unknown as PrismaClient;
+      try {
+        const response = await createApp(database).request("/runner/tasks/claim", {
+          method: "POST",
+          headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runnerId: "merge-executor-1",
+            leaseSeconds: 60,
+            ...(contractVersion === undefined ? {} : { contractVersion }),
+          }),
+        });
+
+        assert.equal(response.status, 409);
+        const refusal = await response.json() as Record<string, unknown>;
+        assert.equal(refusal.code, "mechanical_contract_mismatch");
+        assert.equal(refusal.expectedVersion, RUN_COMPLETION_CONTRACT_VERSION);
+        assert.equal(refusal.receivedVersion, contractVersion ?? null);
+        assert.match(String(refusal.error), new RegExp(`executor version ${contractVersion ?? "missing"}`, "u"));
+        assert.match(String(refusal.error), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.equal(runMutations, 0);
+        assert.equal(activities.length, 1);
+        assert.equal(activities[0]?.taskId, "task-mechanical");
+        assert.match(String(activities[0]?.body), new RegExp(`executor version ${contractVersion ?? "missing"}`, "u"));
+        assert.match(String(activities[0]?.body), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+      } finally {
+        if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+        else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+      }
+    });
+  });
+}
 
 test("completion refunds an external failure but refuses an automatic retry for an archived Agent", async () => {
   const previousRoot = process.env.RUNNER_WORKSPACE_ROOT;

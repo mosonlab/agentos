@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FailureClass, type FailureEnvelope, type RunOutcome, runOutcomeVerdict } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { classifyEnvelope } from "./execution.js";
-import { completionEvidenceRefusal } from "./run-completion.js";
+import { completionEvidenceRefusal, completionInput } from "./run-completion.js";
 
 const baseSha = "5".repeat(40);
+
+test("the completion input schema references the shared contract version", () => {
+  assert.equal(completionInput.description, `Run completion contract version ${RUN_COMPLETION_CONTRACT_VERSION}`);
+});
 
 const implementationStep = {
   outputKind: "implementation",
