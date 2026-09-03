@@ -268,6 +268,10 @@ mechanical checks.
 The target repository carries exactly one repository-owned Tier 1 file,
 `scripts/merge-gate.sh`. The runner supplies the Regression verification
 tooling; the target file follows the standalone reference contract below.
+For Python gates, the excerpt recognizes pytest `FAILED` and `ERROR` lines
+with `.py::` node IDs, assertion-detail lines beginning `E   `, and repository
+verdict lines such as `PYTEST-REGRESSION: UNMET`; the gate does not need to emit
+TAP.
 
 #### 2. Control-plane prerequisites
 

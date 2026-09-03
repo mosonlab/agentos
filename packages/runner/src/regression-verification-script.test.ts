@@ -422,6 +422,111 @@ test("gate FAIL preserves its proof without touching the merge lease", () => {
   });
 });
 
+test("gate FAIL records pytest node ids, assertion details, and repository verdicts", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = [
+    "=================================== FAILURES ===================================",
+    "_________________________________ test_alpha __________________________________",
+    ">       assert actual == expected",
+    "E   assert actual == expected",
+    "__________________________________ test_beta __________________________________",
+    "E   RuntimeError: business rule unmet",
+    "=========================== short test summary info ============================",
+    "FAILED tests/test_alpha.py::test_alpha - assert actual == expected",
+    "FAILED tests/test_beta.py::test_beta - business rule unmet",
+    "PYTEST-REGRESSION: UNMET business failure",
+  ].join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (python tests)";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  const excerpt = verdict.gateFailureExcerpt;
+  assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
+  assert.match(excerpt, /tests\/test_alpha\.py::test_alpha/u);
+  assert.match(excerpt, /tests\/test_beta\.py::test_beta/u);
+  assert.match(excerpt, /E   assert actual == expected/u);
+  assert.match(excerpt, /PYTEST-REGRESSION: UNMET business failure/u);
+  assert.doesNotMatch(excerpt, /python tests: no per-test output in gate log/u);
+});
+
+test("gate FAIL preserves a terminal repository verdict after forty pytest failures", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = [
+    "=========================== short test summary info ============================",
+    ...Array.from(
+      { length: 45 },
+      (_, index) => `FAILED tests/test_module_${index}.py::test_case_${index} - assertion failed`,
+    ),
+    "PYTEST-REGRESSION: UNMET business failures=45 unknown=0",
+  ].join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (python tests)";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  const excerpt = verdict.gateFailureExcerpt;
+  assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
+  assert.match(excerpt, /PYTEST-REGRESSION: UNMET business failures=45 unknown=0/u);
+  assert.ok(excerpt.split("\n").length <= 40, "failure excerpt exceeded its line cap");
+  assert.ok(Buffer.byteLength(excerpt, "utf8") <= 4000, "failure excerpt exceeded its byte cap");
+});
+
+test("gate FAIL omits passing pytest node ids from failure context", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = [
+    "== python tests",
+    ...Array.from(
+      { length: 20 },
+      (_, index) => `tests/test_module_${index}.py::test_case_${index} PASSED [${index + 1}%]`,
+    ),
+    "FAILED tests/test_failure.py::test_failure - assert false",
+  ].join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (python tests)";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  const excerpt = verdict.gateFailureExcerpt;
+  assert.equal(typeof excerpt, "string");
+  if (typeof excerpt !== "string") throw new Error("gate failure excerpt was not persisted as a string");
+  assert.match(excerpt, /FAILED tests\/test_failure\.py::test_failure/u);
+  assert.doesNotMatch(excerpt, /\bPASSED\b/u);
+});
+
+test("gate FAIL extracts a node:test subtest, not ok, and assertion block", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  seeded.env.REGRESSION_FIXTURE_GATE_NOISE = [
+    "== unit tests (all workspaces)",
+    "# Subtest: packages/example.test.ts",
+    "    not ok 1 - broken assertion",
+    "      AssertionError: broken assertion",
+  ].join("\n");
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (unit tests (all workspaces))";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(
+    verdict.gateFailureExcerpt,
+    [
+      "# Subtest: packages/example.test.ts",
+      "    not ok 1 - broken assertion",
+      "      AssertionError: broken assertion",
+    ].join("\n"),
+  );
+});
+
 test("gate FAIL records bounded node:test failures and missing-stage output", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);

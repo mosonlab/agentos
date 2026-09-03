@@ -237,6 +237,8 @@ const fallbackStages = stages.length > 0 ? stages : [summary.trim() || "gate"];
 const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/gu, "");
 const records = [];
 const recordsByLine = new Map();
+const repositoryFailures = [];
+const repositoryFailuresByLine = new Set();
 const stageOutput = new Set();
 const pendingContexts = [];
 let currentStage = null;
@@ -266,6 +268,14 @@ const addRecord = (line, index, stage) => {
   records.push(record);
 };
 
+const addRepositoryFailure = (line, index, stage) => {
+  if (stage) stageOutput.add(stage);
+  else if (stages.length === 1) stageOutput.add(stages[0]);
+  if (repositoryFailuresByLine.has(line)) return;
+  repositoryFailuresByLine.add(line);
+  repositoryFailures.push({ line, index });
+};
+
 const readLog = async () => {
   let index = 0;
   const lines = createInterface({ input: createReadStream(logPath, { encoding: "utf8" }), crlfDelay: Infinity });
@@ -278,17 +288,26 @@ const readLog = async () => {
   // Node's TAP reporter uses `# Subtest`, while the default reporter prints
   // `test at ...`/`location: ...` and a marked failure. Accept either shape so
   // a file path is retained even when the worker forwards only a short tail.
-  const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(visible);
-  if (isSubtestContext || isFileContext) {
+  const isFileContext = /(?:\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b|\S+\.py::\S+)/u.test(visible);
+  const isPytestNonFailureResult = /\S+\.py::\S+.*\b(?:PASSED|SKIPPED|XFAIL|XPASS)\b/u.test(visible);
+  if ((isSubtestContext || isFileContext) && !isPytestNonFailureResult) {
     pendingContexts.push({ line: visible, index, stage: currentStage });
     if (pendingContexts.length > 12) pendingContexts.shift();
   }
 
   const isNotOk = /\bnot ok\b/u.test(visible);
+  const isPytestFailure = /^\s*(?:FAILED|ERROR)\s+\S+\.py::/u.test(visible);
+  const isRepositoryFailure = /^[A-Z][A-Z0-9-]*: (?:UNMET|FAIL|FAILED|ERROR)\b/u.test(visible);
   const isFailureMarker = /^\s*[✖×]\s+(?!failing tests?:)/u.test(visible);
   const isAssertion = /\bAssertionError\b/u.test(visible);
   const isError = /\bError:/u.test(visible);
-  if (isNotOk || isFailureMarker) {
+  const isPytestAssertion = /^E {3}/u.test(visible);
+  const isPytestFailureSection = /^\s*_{4,}.+_{4,}\s*$/u.test(visible);
+  if (isPytestFailureSection) {
+    failureOpen = true;
+    failureAge = 0;
+  }
+  if (isNotOk || isFailureMarker || isPytestFailure || isRepositoryFailure) {
     const failureStage = currentStage;
     for (const context of pendingContexts) {
       if (context.stage === failureStage || !context.stage || !failureStage) {
@@ -296,10 +315,11 @@ const readLog = async () => {
       }
     }
     pendingContexts.length = 0;
-    addRecord(visible, index, failureStage);
+    if (isRepositoryFailure) addRepositoryFailure(visible, index, failureStage);
+    else addRecord(visible, index, failureStage);
     failureOpen = true;
     failureAge = 0;
-  } else if (isAssertion || (failureOpen && isError)) {
+  } else if (isAssertion || (failureOpen && (isError || isPytestAssertion))) {
     addRecord(visible, index, currentStage);
   }
 
@@ -331,6 +351,7 @@ if (mode !== "failure") throw new Error(`unknown gate log extraction mode: ${mod
 await readLog();
 
 records.sort((left, right) => left.index - right.index);
+repositoryFailures.sort((left, right) => left.index - right.index);
 for (const record of records) {
   for (const stage of record.stages) stageOutput.add(stage);
 }
@@ -338,18 +359,19 @@ for (const record of records) {
 const missingStages = fallbackStages.filter((stage) => !stageOutput.has(stage));
 const fallbackLines = missingStages.map((stage) => `${stage}: no per-test output in gate log`);
 
-// Reserve room for notices before taking log lines. Otherwise forty noisy test
-// lines could crowd out the explicit "no per-test output" fact for another stage.
-const boundedFallback = takeBounded(fallbackLines, MAX_LINES, MAX_BYTES);
+// Reserve room for repository verdicts and notices before taking ordinary log
+// lines. Otherwise forty noisy test lines could crowd out either durable fact.
+const reservedLines = [...repositoryFailures.map((record) => record.line), ...fallbackLines];
+const boundedReserved = takeBounded(reservedLines, MAX_LINES, MAX_BYTES);
 
-const candidateLimit = Math.max(0, MAX_LINES - boundedFallback.lines.length);
+const candidateLimit = Math.max(0, MAX_LINES - boundedReserved.lines.length);
 const candidateBudget = Math.max(
   0,
-  MAX_BYTES - boundedFallback.bytes - (boundedFallback.lines.length > 0 ? 1 : 0),
+  MAX_BYTES - boundedReserved.bytes - (boundedReserved.lines.length > 0 ? 1 : 0),
 );
 const selected = takeBounded(records.map((record) => record.line), candidateLimit, candidateBudget);
 
-process.stdout.write([...selected.lines, ...boundedFallback.lines].join("\n"));
+process.stdout.write([...selected.lines, ...boundedReserved.lines].join("\n"));
 };
 
 main().catch((error) => {
