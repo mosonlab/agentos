@@ -140,15 +140,18 @@ const lostTlsEnvelope = {
   transient: true,
 } as const;
 
-/** The same failure after the agent had started work: the agent's attempt, so
- *  it has to cost a session. */
+/** A retryable protocol miss after the agent had started work: the agent's
+ * attempt, so it has to cost a session without resembling transport evidence. */
 const executeEnvelope = {
   ...lostTlsEnvelope,
   phase: "EXECUTE",
+  runnerClass: "PROTOCOL_ERROR",
+  exitCode: 0,
   terminationReason: null,
   agentExited: true,
-  terminalEventSeen: true,
-  stderrSummary: "Error: read ECONNRESET",
+  terminalEventSeen: false,
+  stderrSummary: "agent stream ended without a terminal event",
+  transient: false,
 } as const;
 
 /** The rest of the completion payload exactly as `runner.ts`'s catch sends it:
@@ -255,14 +258,13 @@ test("a failure the agent's own work produced still spends a session", async () 
   assert.equal(started.body.error, "Run budget exhausted", "the ceiling still closes when the agent is the one failing");
 });
 
-test("a clone that cannot succeed is refunded but not retried", async () => {
+test("a deterministic TASK_FAILED clone neither refunds nor retries", async () => {
   const context = await seedTask("provision-deterministic", 2);
   const closed = await failProvisioning(context, 1, unreachableRemoteEnvelope as unknown as FailureEnvelope);
-  // No agent decided anything, so the task is not charged...
-  assert.equal(closed.maxRunsPerTask, 3, "budget 2 + one refunded attempt");
-  // ...but git could not find a repository there, and retrying that is not a
-  // second chance, it is the same failure again. The refund and the retry are
-  // separate questions and this envelope answers them differently.
+  // Deterministic TASK_FAILED outcomes cannot raise the ceiling, even when
+  // they happened before agent launch, and retrying cannot repair this one.
+  assert.equal(closed.maxRunsPerTask, 2, "TASK_FAILED never grants a refund");
+  assert.equal(closed.budgetGrants, 0);
   assert.equal(closed.failureClass, "TASK_FAILED");
   assert.equal(closed.retryable, false);
   assert.equal(await db.run.count({ where: { taskId: context.task.id, runNumber: 2 } }), 0);

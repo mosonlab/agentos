@@ -225,6 +225,15 @@ export type ExternalFailureRefundDecision = {
   activity: RefundActivity | null;
 };
 
+export const completionBudgetAfterRefund = (
+  maxRunsPerTask: number,
+  budgetGrants: number,
+  refunded: 0 | 1,
+): { maxRunsPerTask: number; budgetGrants: number } => ({
+  maxRunsPerTask: runBudgetCeiling(maxRunsPerTask, refunded),
+  budgetGrants: budgetGrants + refunded,
+});
+
 /** Decide and narrate one budget refund. `priorCappedRefunds` counts only the
  * grants emitted with the capped policy; legacy plumbing refunds do not
  * consume this allowance. */
@@ -740,7 +749,12 @@ export const completeRun = async (
     // envelope's verdict decides *whether* the failure was external; it does
     // not get to raise the ceiling on this step either.
     const refunded = refundDecision.refunded;
-    const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, refunded);
+    const completionBudget = completionBudgetAfterRefund(
+      run.maxRunsPerTask,
+      run.budgetGrants,
+      refunded,
+    );
+    const budgetCeiling = completionBudget.maxRunsPerTask;
     // One marker read for both completion outcomes; this handler used to
     // declare `tailRows` twice and scan twice. The success path consults it
     // only for a standalone auxiliary task — an automatic repair, which is not
@@ -818,7 +832,7 @@ export const completeRun = async (
     // budget changes. The in-flight ceiling stays derived from the run's own
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
-    const budgetGrants = run.budgetGrants + refunded;
+    const budgetGrants = completionBudget.budgetGrants;
     let leaseOutcome: "continue" | "stop" = "continue";
     if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
       await lockTaskMutationRows(tx, auxiliaryTargetTaskId);

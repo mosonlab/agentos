@@ -11,6 +11,7 @@ import {
 
 import { classifyEnvelope } from "./execution.js";
 import {
+  completionBudgetAfterRefund,
   completionEvidenceRefusal,
   completionOutputFailurePolicy,
   externalFailureRefundDecision,
@@ -90,7 +91,7 @@ test("a configured non-committing Step keeps its ordinary completion semantics",
 
 test("three capped external failures refund the task and the fourth records the cap", () => {
   let cappedRefunds = 0;
-  let budgetGrants = 0;
+  let completionBudget = { maxRunsPerTask: 1, budgetGrants: 0 };
 
   for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP; runNumber += 1) {
     const decision = externalFailureRefundDecision({
@@ -105,10 +106,16 @@ test("three capped external failures refund the task and the fourth records the 
     assert.equal(decision.capReached, false);
     assert.match(decision.activity?.body ?? "", new RegExp(`${runNumber} of ${EXTERNAL_FAILURE_REFUND_CAP}`));
     cappedRefunds += decision.refunded;
-    budgetGrants += decision.refunded;
+    completionBudget = completionBudgetAfterRefund(
+      completionBudget.maxRunsPerTask,
+      completionBudget.budgetGrants,
+      decision.refunded,
+    );
+    assert.equal(completionBudget.budgetGrants, runNumber);
+    assert.equal(completionBudget.maxRunsPerTask, runNumber + 1);
   }
 
-  assert.equal(budgetGrants, EXTERNAL_FAILURE_REFUND_CAP);
+  assert.equal(completionBudget.budgetGrants, EXTERNAL_FAILURE_REFUND_CAP);
   const fourth = externalFailureRefundDecision({
     runNumber: EXTERNAL_FAILURE_REFUND_CAP + 1,
     external: true,
@@ -120,6 +127,14 @@ test("three capped external failures refund the task and the fourth records the 
   assert.equal(fourth.refunded, 0);
   assert.equal(fourth.capReached, true);
   assert.match(fourth.activity?.body ?? "", /external-failure refund cap was reached/i);
+  assert.deepEqual(
+    completionBudgetAfterRefund(
+      completionBudget.maxRunsPerTask,
+      completionBudget.budgetGrants,
+      fourth.refunded,
+    ),
+    completionBudget,
+  );
 });
 
 test("legacy external refunds do not consume the capped allowance", () => {
