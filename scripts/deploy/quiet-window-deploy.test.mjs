@@ -898,6 +898,44 @@ test("artifact verification loads the verifier shipped by the target release", (
   }
 });
 
+test("a target runtime-tool addition passes its target inventory verifier", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-runtime-tool-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  const targetDeployScripts = join(source, "scripts/deploy");
+  cpSync(join(REPOSITORY_ROOT, "scripts/deploy"), targetDeployScripts, { recursive: true });
+  const targetVerifierPath = join(targetDeployScripts, "release-artifact.mjs");
+  const targetVerifier = readFileSync(targetVerifierPath, "utf8")
+    .replace(
+      '  "git-credential-runner.sh",\n',
+      '  "git-credential-runner.sh",\n  "new-target-tool.sh",\n',
+    )
+    .replace(
+      '["", new Set(["gate-worker", "git-credential-runner.sh", "regression-verification.sh"])]',
+      '["", new Set(["gate-worker", "git-credential-runner.sh", "new-target-tool.sh", "regression-verification.sh"])]',
+    );
+  writeFileSync(targetVerifierPath, targetVerifier);
+  writeFileSync(join(source, "packages/runner/dist/runtime-tools/new-target-tool.sh"), "target tool\n");
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src", "scripts/deploy"],
+      optionalArtifactPaths: [],
+    });
+    const verified = verifyReleaseArtifact({
+      deployRoot,
+      revision: revisions.to,
+      releaseName: assembled.releaseName,
+    });
+    assert.ok(verified.runtimeTools.files.includes("packages/runner/dist/runtime-tools/new-target-tool.sh"));
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
 test("target verifier failures retain their deploy failure reason", () => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-verifier-failure-"));
   const source = join(deployRoot, "source");
