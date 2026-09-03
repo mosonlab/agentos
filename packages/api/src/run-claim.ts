@@ -9,6 +9,7 @@ import {
   deployBarrierAllowsClaim,
   executionModeFor,
   FailureClass,
+  InboxStatus,
   integratorBindingRefusal,
   INTEGRATOR_OUTPUT_KIND,
   isMergeReadinessStep,
@@ -29,7 +30,9 @@ import {
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
 import {
+  MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX,
   MECHANICAL_CONTRACT_MISMATCH_CODE,
+  MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX,
   RUN_COMPLETION_CONTRACT_VERSION,
 } from "@anneal/db/claim-contract";
 import { z } from "zod";
@@ -38,6 +41,7 @@ import { issueSessionToken } from "./auth.js";
 import { isCanonicalBlindFindingsStep, previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { makeFencingToken } from "./execution.js";
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
+import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
 import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
@@ -84,6 +88,13 @@ class PinnedRunTargetError extends Error {
   }
 }
 
+class MechanicalContractMismatchAlertError extends Error {
+  constructor(cause: unknown) {
+    super("Mechanical completion contract mismatch Inbox alert failed", { cause });
+    this.name = "MechanicalContractMismatchAlertError";
+  }
+}
+
 type CandidateActivationFailure = PinnedBaseCommitError | PinnedRunTargetError;
 
 const isCandidateActivationFailure = (error: unknown): error is CandidateActivationFailure =>
@@ -112,6 +123,31 @@ export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
 const SPECIFICATION_READ_DEFERRAL_CONDITION = "specification-read-claim-deferred";
 const SPECIFICATION_READ_DEFERRAL_BUDGET_MS = 5 * 60_000;
 const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
+
+const openMechanicalContractMismatchAlert = async (
+  tx: Prisma.TransactionClient,
+  input: { body: string; dedupeKey: string; dedupeKeyPrefix: string },
+): Promise<void> => {
+  try {
+    // The existence check and insert are one invariant across all claim polls.
+    // Serialize them until their shared claim transaction commits so concurrent
+    // tasks cannot both observe that the version pair has no OPEN alert.
+    await tx.$queryRaw`
+      SELECT 1 AS locked
+      FROM (
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}, 0)
+        )
+      ) AS mismatch_alert_lock
+    `;
+    if (!await hasOpenOperatorAlert(tx, input.dedupeKeyPrefix)) {
+      await openOperatorAlert(tx, { body: input.body, dedupeKey: input.dedupeKey });
+    }
+  } catch (cause: unknown) {
+    if (isSerializationConflict(cause)) throw cause;
+    throw new MechanicalContractMismatchAlertError(cause);
+  }
+};
 
 /**
  * The Prisma claim lane cannot express the comparison between a candidate
@@ -585,6 +621,7 @@ export const claimRun = async (
         const receivedVersion = body.contractVersion ?? null;
         const displayedVersion = receivedVersion ?? "missing";
         const message = `Mechanical completion contract mismatch: executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`;
+        const alertKeyPrefix = `${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${displayedVersion}:`;
         const existingActivity = await tx.taskActivity.findFirst({
           where: {
             taskId: candidate.task.id,
@@ -616,6 +653,11 @@ export const claimRun = async (
             },
           });
         }
+        await openMechanicalContractMismatchAlert(tx, {
+          body: `${MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX} executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}; task ${candidate.task.id}`,
+          dedupeKey: `${alertKeyPrefix}${now.toISOString()}`,
+          dedupeKeyPrefix: alertKeyPrefix,
+        });
         return {
           error: message,
           reason: MECHANICAL_CONTRACT_MISMATCH_CODE,
@@ -885,6 +927,15 @@ export const claimRun = async (
         },
       });
       if (won.count !== 1) return SKIP;
+      if (executionMode === "mechanical") {
+        await tx.inboxMessage.updateMany({
+          where: {
+            status: InboxStatus.OPEN,
+            dedupeKey: { startsWith: MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX },
+          },
+          data: { status: InboxStatus.CLOSED, answeredAt: now },
+        });
+      }
       const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
         providerConversationId: candidate.session.providerConversationId,
         input: candidate.session.resumeInput,
@@ -1090,7 +1141,7 @@ export const claimRun = async (
       try {
         decided = await activateCandidate(candidate);
       } catch (error: unknown) {
-        if (isSerializationConflict(error)) throw error;
+        if (isSerializationConflict(error) || error instanceof MechanicalContractMismatchAlertError) throw error;
         await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         console.error(`Claim candidate ${candidate.id} failed and was isolated from the claim`, error);
         isolated ??= error;
