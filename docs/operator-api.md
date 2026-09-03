@@ -1415,14 +1415,17 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
 
 3. (c) Instantiate a new direct Chain on the same repository with a fresh
    `branchName`. Set `description` to the new brief following the linked
-   pattern, with its first Change merging the delivered branch.
+   pattern, with its first Change merging the delivered branch. Set
+   `SUCCESSOR_NAME` to an operator-chosen, one-line successor title of at most
+   120 characters.
 
    ```sh
    SUCCESSOR_BODY=$(jq -n \
      --arg repoId "$REPO_ID" \
      --arg branchName "$NEW_BRANCH_NAME" \
+     --arg name "$SUCCESSOR_NAME" \
      --arg description "$SUCCESSOR_BRIEF" \
-     '{repoId: $repoId, variables: {branchName: $branchName}, description: $description, autoStart: true}')
+     '{repoId: $repoId, variables: {branchName: $branchName}, name: $name, description: $description, autoStart: true}')
    curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$DIRECT_CHAIN_TEMPLATE_ID/instantiate" \
      -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
      -d "$SUCCESSOR_BODY"

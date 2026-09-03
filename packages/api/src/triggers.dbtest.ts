@@ -80,7 +80,7 @@ const seedTrigger = async (label: string, overrides: {
 // --- POST /task-templates/:templateId/fire ----------------------------------
 
 test("Fire now on a fully-defaulted trigger creates one chain, one queued run, one manual fire", async () => {
-  const { template } = await seedTrigger("fire-happy", { steps: 3 });
+  const { template } = await seedTrigger("fire-happy", { template: { name: "Ticket\nQueue" }, steps: 3 });
   const { status, body } = await call("POST", `/task-templates/${template.id}/fire`);
   assert.equal(status, 201);
   assert.equal(body.taskIds.length, 3);
@@ -99,7 +99,7 @@ test("Fire now on a fully-defaulted trigger creates one chain, one queued run, o
     include: { templateStep: { select: { name: true } } },
     orderBy: { chainIndex: "asc" },
   });
-  assert.ok(firedTasks.every((task) => task.name.startsWith(`${template.name}: ${body.fireId}: `)));
+  assert.ok(firedTasks.every((task) => task.name.startsWith(`Ticket Queue: ${body.fireId}: `)));
   assert.ok(firedTasks.every((task) => task.name !== `${template.name}: ${task.templateStep?.name}`));
   // The chain is operator-made; only webhook-born chains carry the WEBHOOK source.
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: body.taskIds[0]! } })).source, "MANUAL");

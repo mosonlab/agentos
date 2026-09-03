@@ -315,7 +315,7 @@ test("clone, replace, instantiate, and activate an edited fan-out chain end to e
   assert.deepEqual(
     tasks.map((task) => ({ name: task.name, layer: task.chainLayer, assigneeAgentId: task.assigneeAgentId })),
     graph.map((step) => ({
-      name: `authored-fan-out: ${step.name}`,
+      name: `authored fan-out: ${step.name}`,
       layer: step.layer,
       assigneeAgentId: step.assigneeAgentId,
     })),

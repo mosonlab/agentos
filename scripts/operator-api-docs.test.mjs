@@ -199,6 +199,8 @@ test("the add-project runbook and public links cover A1 pull-request onboarding"
   assert.match(addProjectRunbook, /GET "\$BASE_URL\/projects\/\$PROJECT_ID\/task-templates"/u);
   assert.match(addProjectRunbook, /POST[\s\S]*\/projects\/\$PROJECT_ID\/task-templates\/\$TEMPLATE_ID\/instantiate/u);
   assert.match(addProjectRunbook, /"repoId"[\s\S]*"variables"[\s\S]*"branchName"/u);
+  assert.match(addProjectRunbook, /--arg name "\$CHAIN_NAME"/u);
+  assert.match(addProjectRunbook, /"name":\$name/u);
   assert.match(addProjectRunbook, /--arg name "\$PROJECT_NAME"/u);
   assert.match(addProjectRunbook, /--arg slug "\$PROJECT_SLUG"/u);
   assert.match(addProjectRunbook, /--arg name "\$REPO_NAME"/u);

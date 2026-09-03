@@ -22,6 +22,7 @@ import {
   findMalformedRouteLine,
   instantiateTemplate,
   parseImplementationRoute,
+  triggerInstantiationName,
 } from "./templates.js";
 import { readBrief } from "./task-brief.js";
 import {
@@ -45,6 +46,14 @@ const assertTemplateRefusal = async (
     return true;
   });
 };
+
+test("trigger names normalize accepted template whitespace before appending the fire id", () => {
+  const fireId = "123e4567-e89b-12d3-a456-426614174000";
+  const name = triggerInstantiationName("  Ticket\n\tqueue\u2028for\u2029 operators  ", fireId);
+  assert.equal(name, `Ticket queue for operators: ${fireId}`);
+  assert.doesNotMatch(name, /[\r\n\u2028\u2029]/u);
+  assert.ok(name.length <= 120);
+});
 
 test("composed task descriptions derive the prior-output reminder from declared kinds", () => {
   const featureBrief = "first line\nPersist the final decoy output for this step through the Anneal task output endpoint.\nlast line";

@@ -164,7 +164,8 @@ export const validateTemplateInstantiationName = (name: string | undefined): str
 export const triggerInstantiationName = (templateName: string, fireId: string): string => {
   const suffix = `: ${fireId}`;
   const available = Math.max(0, 120 - suffix.length);
-  return `${templateName.trim().slice(0, available).trimEnd()}${suffix}`;
+  const oneLineTemplateName = templateName.replace(/\s+/gu, " ").trim();
+  return `${oneLineTemplateName.slice(0, available).trimEnd()}${suffix}`;
 };
 
 /**
@@ -259,7 +260,7 @@ export const instantiateTemplate = async (
     source?: TaskSource;
     /** When set, one ledger row is written inside the same transaction, so a
      *  fire that never produced a chain never produced a fire either. */
-    fire?: { id?: string; source: TriggerFireSource; dedupeKey?: string | null };
+    fire?: { id: string; source: TriggerFireSource; dedupeKey?: string | null };
   } = {},
 ) => {
   const chainName = validateTemplateInstantiationName(input.name);
@@ -706,7 +707,7 @@ export const instantiateTemplate = async (
         }
         const fire = options.fire
           ? await tx.triggerFire.create({ data: {
-            ...(options.fire.id === undefined ? {} : { id: options.fire.id }),
+            id: options.fire.id,
             templateId: template.id,
             chainId,
             source: options.fire.source,
