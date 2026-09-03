@@ -898,6 +898,40 @@ test("artifact verification loads the verifier shipped by the target release", (
   }
 });
 
+test("target verifier failures retain their deploy failure reason", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-verifier-failure-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  mkdirSync(join(source, "scripts/deploy"), { recursive: true });
+  writeFileSync(join(source, "scripts/deploy/release-artifact.mjs"), [
+    "export const verifyReleaseArtifact = () => {",
+    '  const error = new Error("target inventory mismatch");',
+    '  error.reason = "release-artifact-runtime-incomplete";',
+    '  error.detail = "target-inventory-mismatch";',
+    "  throw error;",
+    "};",
+    "",
+  ].join("\n"));
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src", "scripts/deploy"],
+      optionalArtifactPaths: [],
+    });
+    assert.throws(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+      (error) => error instanceof DeployFailure
+        && error.reason === "release-artifact-runtime-incomplete"
+        && error.detail === "target-inventory-mismatch",
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
 const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-runtime-tools-"));
   const source = join(deployRoot, "source");

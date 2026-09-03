@@ -201,6 +201,17 @@ const loadTargetVerifier = (root) => {
   return targetModule.verifyReleaseArtifact;
 };
 
+const normalizeTargetVerifierFailure = (error) => {
+  if (error instanceof DeployFailure) return error;
+  if (typeof error?.reason === "string") {
+    return new DeployFailure(
+      error.reason,
+      typeof error.detail === "string" ? error.detail : String(error.detail ?? ""),
+    );
+  }
+  return error;
+};
+
 /**
  * Verify an artifact with the verifier shipped by the artifact's target
  * commit. The deployed process starts from `current`, so its own module may
@@ -213,12 +224,16 @@ export const verifyReleaseArtifact = (options = {}) => {
   if (options.useTargetVerifier !== false) {
     const verifier = loadTargetVerifier(options.verifierRoot ?? validated.releaseDirectory);
     if (verifier && verifier !== verifyReleaseArtifact) {
-      return verifier({
-        deployRoot: validated.deployRoot,
-        revision: validated.revision,
-        releaseName: validated.releaseName,
-        useTargetVerifier: false,
-      });
+      try {
+        return verifier({
+          deployRoot: validated.deployRoot,
+          revision: validated.revision,
+          releaseName: validated.releaseName,
+          useTargetVerifier: false,
+        });
+      } catch (error) {
+        throw normalizeTargetVerifierFailure(error);
+      }
     }
   }
   return verifyReleaseArtifactContents(validated);
