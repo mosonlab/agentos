@@ -31,6 +31,10 @@ type ArchiveTestMessage = {
 const archiveRouteDatabase = (input: {
   messages?: ArchiveTestMessage[];
   activeRuns?: number;
+  activeRunTaskIds?: string[];
+  repairTaskIds?: string[];
+  closeDuringUpdateIds?: string[];
+  skipUpdateIds?: string[];
 }) => {
   const chainId = "archive-chain";
   const tasks: Array<{
@@ -48,6 +52,10 @@ const archiveRouteDatabase = (input: {
     },
   ];
   const messages = input.messages ?? [];
+  const repairs = (input.repairTaskIds ?? []).map((id) => ({
+    id, projectId: "project-1", chainId: null, status: "DOING", archivedAt: null,
+  }));
+  const allTasks = [...tasks, ...repairs];
   const activities: Array<Record<string, unknown>> = [];
   let inboxFindManyCalls = 0;
   let inboxUpdateManyCalls = 0;
@@ -56,37 +64,80 @@ const archiveRouteDatabase = (input: {
     assigneeType: "AGENT", assigneeAgentId: "agent-1", templateStep: null,
   };
   const tx = {
-    $queryRaw: async () => tasks.map(({ id }) => ({ id })),
+    $queryRaw: async () => allTasks.map(({ id }) => ({ id })),
     task: {
-      findUnique: async ({ select }: { select?: Record<string, unknown> }) => (
-        select && "status" in select ? lockedTask : { projectId: "project-1", chainId }
-      ),
-      findMany: async () => tasks,
+      findUnique: async ({ where, select }: { where: { id: string }; select?: Record<string, unknown> }) => {
+        const task = allTasks.find((candidate) => candidate.id === where.id);
+        if (!task) return null;
+        if (select && "status" in select) return task.id === lockedTask.id ? lockedTask : task;
+        return { projectId: task.projectId, chainId: task.chainId };
+      },
+      findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
+        const task = allTasks.find((candidate) => candidate.id === where.id);
+        if (!task) throw new Error(`Missing task ${where.id}`);
+        return task;
+      },
+      findMany: async ({ where }: { where?: {
+        id?: { in: string[] };
+        projectId?: string;
+        chainId?: string | null;
+      } } = {}) => allTasks.filter((task) => (
+        (!where?.id || where.id.in.includes(task.id))
+        && (where?.projectId === undefined || task.projectId === where.projectId)
+        && (where?.chainId === undefined || task.chainId === where.chainId)
+      )),
       updateMany: async ({ data }: { data: { archivedAt: Date } }) => {
         for (const task of tasks) task.archivedAt = data.archivedAt;
         return { count: tasks.length };
       },
-      findUniqueOrThrow: async () => tasks[1],
     },
-    run: { count: async () => input.activeRuns ?? 0 },
+    run: { count: async ({ where }: { where: { taskId: { in: string[] } } }) => (
+      input.activeRunTaskIds
+        ? input.activeRunTaskIds.filter((taskId) => where.taskId.in.includes(taskId)).length
+        : input.activeRuns ?? 0
+    ) },
     inboxMessage: {
       count: async () => {
         throw new Error("Inbox must not be read after an active-run refusal");
       },
-      findMany: async () => {
+      findMany: async ({ where }: { where: {
+        id?: { in: string[] };
+        taskId?: { in: string[] };
+        status?: InboxStatus;
+        dedupeKey?: { startsWith: string };
+      } }) => {
         inboxFindManyCalls += 1;
         return messages
-          .filter((message) => message.status === InboxStatus.OPEN && message.dedupeKey.startsWith("merge-tail-stop:"))
+          .filter((message) => (
+            (!where.id || where.id.in.includes(message.id))
+            && (!where.taskId || where.taskId.in.includes(message.taskId))
+            && (where.status === undefined || message.status === where.status)
+            && (!where.dedupeKey || message.dedupeKey.startsWith(where.dedupeKey.startsWith))
+          ))
           .map(({ id, taskId }) => ({ id, taskId }));
       },
       updateMany: async ({ where, data }: {
-        where: { id: { in: string[] } };
+        where: {
+          id: { in: string[] };
+          taskId: { in: string[] };
+          status: InboxStatus;
+          dedupeKey: { startsWith: string };
+        };
         data: { status: InboxStatus; answeredAt: Date };
       }) => {
         inboxUpdateManyCalls += 1;
+        for (const message of messages) {
+          if (input.closeDuringUpdateIds?.includes(message.id)) message.status = InboxStatus.CLOSED;
+        }
         let count = 0;
         for (const message of messages) {
-          if (where.id.in.includes(message.id) && message.status === InboxStatus.OPEN) {
+          if (
+            where.id.in.includes(message.id)
+            && where.taskId.in.includes(message.taskId)
+            && message.status === where.status
+            && message.dedupeKey.startsWith(where.dedupeKey.startsWith)
+            && !input.skipUpdateIds?.includes(message.id)
+          ) {
             message.status = data.status;
             message.answeredAt = data.answeredAt;
             count += 1;
@@ -96,6 +147,12 @@ const archiveRouteDatabase = (input: {
       },
     },
     taskActivity: {
+      findMany: async () => repairs.map((repair) => ({ metadata: {
+        schemaVersion: 1,
+        kind: "mergeTail.repairAttempt",
+        repairKind: "gate-fix",
+        repairTaskId: repair.id,
+      } })),
       createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
         activities.push(...data);
         return { count: data.length };
@@ -761,6 +818,8 @@ test("archiving a Chain closes only its OPEN merge-tail stop notices", async () 
       { id: "stop-1", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:one", status: InboxStatus.OPEN, answeredAt: null },
       { id: "stop-2", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:two", status: InboxStatus.OPEN, answeredAt: null },
       { id: "question-1", taskId: "regression-task", dedupeKey: "question:regression-task", status: InboxStatus.OPEN, answeredAt: null },
+      { id: "readiness-1", taskId: "regression-task", dedupeKey: "merge-readiness-stop:regression-task", status: InboxStatus.OPEN, answeredAt: null },
+      { id: "other-task-stop", taskId: "other-task", dedupeKey: "merge-tail-stop:other-task:one", status: InboxStatus.OPEN, answeredAt: null },
     ] });
     const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
       method: "POST",
@@ -777,6 +836,8 @@ test("archiving a Chain closes only its OPEN merge-tail stop notices", async () 
     const unrelated = fixture.messages.find((message) => message.id === "question-1");
     assert.equal(unrelated?.status, InboxStatus.OPEN);
     assert.equal(unrelated?.answeredAt, null);
+    assert.equal(fixture.messages.find((message) => message.id === "readiness-1")?.status, InboxStatus.OPEN);
+    assert.equal(fixture.messages.find((message) => message.id === "other-task-stop")?.status, InboxStatus.OPEN);
 
     const closureActivities = fixture.activities.filter((activity) => activity.actorType === "control-plane");
     assert.deepEqual(closureActivities, [{
@@ -817,6 +878,67 @@ test("archive refuses an active Chain run before touching Inbox messages", async
     assert.equal(fixture.inboxUpdateManyCalls, 0);
     assert.equal(fixture.messages[0]?.status, InboxStatus.OPEN);
     assert.equal(fixture.activities.length, 0);
+  });
+});
+
+test("archive refuses an active chain-detached repair run before touching Inbox messages", async () => {
+  await withTokens(async () => {
+    const fixture = archiveRouteDatabase({
+      repairTaskIds: ["repair-task"],
+      activeRunTaskIds: ["repair-task"],
+      messages: [
+        { id: "stop-1", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:one", status: InboxStatus.OPEN, answeredAt: null },
+      ],
+    });
+    const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal(fixture.inboxFindManyCalls, 0);
+    assert.equal(fixture.inboxUpdateManyCalls, 0);
+    assert.equal(fixture.messages[0]?.status, InboxStatus.OPEN);
+    assert.equal(fixture.activities.length, 0);
+  });
+});
+
+test("a concurrent close of a selected stop notice does not roll back archive", async () => {
+  await withTokens(async () => {
+    const fixture = archiveRouteDatabase({
+      closeDuringUpdateIds: ["stop-2"],
+      messages: [
+        { id: "stop-1", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:one", status: InboxStatus.OPEN, answeredAt: null },
+        { id: "stop-2", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:two", status: InboxStatus.OPEN, answeredAt: null },
+      ],
+    });
+    const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal(response.status, 200);
+    assert.ok(fixture.messages.every((message) => message.status === InboxStatus.CLOSED));
+    assert.equal(fixture.activities.filter((activity) => activity.actorType === "control-plane").length, 1);
+  });
+});
+
+test("archive fails loud when a selected stop notice remains OPEN", async () => {
+  await withTokens(async () => {
+    const fixture = archiveRouteDatabase({
+      skipUpdateIds: ["stop-2"],
+      messages: [
+        { id: "stop-1", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:one", status: InboxStatus.OPEN, answeredAt: null },
+        { id: "stop-2", taskId: "regression-task", dedupeKey: "merge-tail-stop:regression-task:two", status: InboxStatus.OPEN, answeredAt: null },
+      ],
+    });
+    const response = await createApp(fixture.database).request("/tasks/regression-task/archive", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    assert.equal(response.status, 500);
+    assert.equal(fixture.messages.find((message) => message.id === "stop-2")?.status, InboxStatus.OPEN);
   });
 });
 

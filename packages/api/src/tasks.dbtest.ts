@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DependencyProvisioning, PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, InboxStatus, MERGE_TAIL_KIND, PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -47,6 +47,24 @@ const call = async (
   });
   return { status: response.status, body: response.status === 204 ? null : await response.json() };
 });
+
+const blockedLockCount = async (): Promise<number> => {
+  const [row] = await db.$queryRaw<Array<{ count: number }>>`
+    SELECT count(*)::int AS "count"
+    FROM pg_stat_activity
+    WHERE datname = current_database() AND wait_event_type = 'Lock'
+  `;
+  return row?.count ?? 0;
+};
+
+const waitForBlockedLocks = async (minimum: number): Promise<void> => {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await blockedLockCount() >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`timed out waiting for ${minimum} blocked database lock(s)`);
+};
 
 const seedBareProject = (label: string) => db.project.create({
   data: { name: label, slug: `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}` },
@@ -625,6 +643,183 @@ test("archiving or unarchiving one Chain task changes the whole Chain atomically
   assert.equal(await db.taskActivity.count({
     where: { taskId: { in: [context.task.id, frontier.id] }, body: "Task unarchived" },
   }), 2);
+});
+
+test("archiving a Chain closes its merge-tail stop notices and audits each affected task", async () => {
+  const chainId = `archive-stop-notices-${Date.now()}`;
+  const context = await seedTask("archive-stop-notices", { chainId, chainIndex: 0, status: "DONE" });
+  const regression = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Regression",
+    description: "d",
+    status: "DONE",
+    chainId,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+  const first = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: regression.id, kind: "TEXT", body: "first stop",
+    dedupeKey: `merge-tail-stop:${regression.id}:first`,
+  } });
+  const second = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: regression.id, kind: "TEXT", body: "second stop",
+    dedupeKey: `merge-tail-stop:${regression.id}:second`,
+  } });
+  const unrelated = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: regression.id, kind: "TEXT", body: "operator question",
+    dedupeKey: `question:${regression.id}`,
+  } });
+
+  assert.equal((await call("POST", `/tasks/${regression.id}/archive`)).status, 200);
+
+  const messages = await db.inboxMessage.findMany({
+    where: { id: { in: [first.id, second.id, unrelated.id] } },
+    orderBy: { id: "asc" },
+  });
+  for (const notice of messages.filter((message) => message.id !== unrelated.id)) {
+    assert.equal(notice.status, InboxStatus.CLOSED);
+    assert.ok(notice.answeredAt instanceof Date);
+  }
+  assert.equal(messages.find((message) => message.id === unrelated.id)?.status, InboxStatus.OPEN);
+  assert.equal(messages.find((message) => message.id === unrelated.id)?.answeredAt, null);
+  const closure = await db.taskActivity.findMany({
+    where: { taskId: regression.id, actorType: "control-plane" },
+  });
+  assert.equal(closure.length, 1);
+  assert.deepEqual((closure[0]?.metadata as { inboxMessageIds: string[] }).inboxMessageIds.sort(), [first.id, second.id].sort());
+});
+
+test("archiving a Chain without merge-tail stop notices writes no closure activity", async () => {
+  const chainId = `archive-no-stop-notices-${Date.now()}`;
+  const context = await seedTask("archive-no-stop-notices", { chainId, chainIndex: 0, status: "DONE" });
+
+  assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: context.task.id, actorType: "control-plane" },
+  }), 0);
+});
+
+test("an active chain-detached repair run refuses archive before Inbox mutation", async () => {
+  const chainId = `archive-active-repair-${Date.now()}`;
+  const context = await seedTask("archive-active-repair", { chainId, chainIndex: 0, status: "DONE" });
+  const repair = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Autonomous merge tail: gate-fix",
+    description: "d",
+    status: "DOING",
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: context.task.id,
+    actorType: "control-plane",
+    body: "Automatic gate-fix attempt queued",
+    metadata: {
+      schemaVersion: 1, kind: MERGE_TAIL_KIND.repairAttempt,
+      repairKind: "gate-fix", repairTaskId: repair.id,
+    },
+  } });
+  await db.run.create({ data: {
+    projectId: context.project.id,
+    taskId: repair.id,
+    agentId: context.agent.id,
+    repoId: context.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${repair.id}:run:1`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "h",
+    status: "RUNNING",
+  } });
+  const notice = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: context.task.id, kind: "TEXT", body: "existing stop",
+    dedupeKey: `merge-tail-stop:${context.task.id}:existing`,
+  } });
+
+  const response = await call("POST", `/tasks/${context.task.id}/archive`);
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error, "Cannot archive a task with an active run");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).archivedAt, null);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: notice.id } })).status, InboxStatus.OPEN);
+});
+
+test("archive waits for detached repair completion and closes the notice it emits", { timeout: 20_000 }, async () => {
+  const chainId = `archive-repair-race-${Date.now()}`;
+  const context = await seedTask("archive-repair-race", { chainId, chainIndex: 0, status: "DONE" });
+  const repair = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    name: "Autonomous merge tail: review-fix",
+    description: "d",
+    status: "DOING",
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: context.task.id,
+    actorType: "control-plane",
+    body: "Automatic review-fix attempt queued",
+    metadata: {
+      schemaVersion: 1, kind: MERGE_TAIL_KIND.repairAttempt,
+      repairKind: "review-fix", repairTaskId: repair.id,
+    },
+  } });
+  const run = await db.run.create({ data: {
+    projectId: context.project.id,
+    taskId: repair.id,
+    agentId: context.agent.id,
+    repoId: context.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${repair.id}:run:1`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "h",
+    status: "RUNNING",
+  } });
+  const producer = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let releaseProducer!: () => void;
+  let producerLocked!: () => void;
+  const release = new Promise<void>((resolve) => { releaseProducer = resolve; });
+  const locked = new Promise<void>((resolve) => { producerLocked = resolve; });
+  const noticeKey = `merge-tail-stop:${context.task.id}:repair-completion`;
+  const producing = producer.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${repair.id} FOR UPDATE`;
+    producerLocked();
+    await release;
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "projectId" = ${context.project.id} AND "chainId" = ${chainId} FOR UPDATE`;
+    await tx.run.update({ where: { id: run.id }, data: { status: "FAILED", endedAt: new Date() } });
+    await tx.inboxMessage.create({ data: {
+      from: "AGENT", taskId: context.task.id, kind: "TEXT", body: "repair failed",
+      dedupeKey: noticeKey,
+    } });
+  });
+  try {
+    await locked;
+    const baseline = await blockedLockCount();
+    const archiving = call("POST", `/tasks/${context.task.id}/archive`);
+    try {
+      await waitForBlockedLocks(baseline + 1);
+    } finally {
+      releaseProducer();
+    }
+    await producing;
+    assert.equal((await archiving).status, 200);
+    const notice = await db.inboxMessage.findUniqueOrThrow({ where: { dedupeKey: noticeKey } });
+    assert.equal(notice.status, InboxStatus.CLOSED);
+    assert.ok(notice.answeredAt instanceof Date);
+    assert.equal(await db.taskActivity.count({
+      where: {
+        taskId: context.task.id,
+        actorType: "control-plane",
+        metadata: { path: ["inboxMessageIds"], array_contains: [notice.id] },
+      },
+    }), 1);
+  } finally {
+    releaseProducer();
+    await Promise.allSettled([producing]);
+    await producer.$disconnect();
+  }
 });
 
 test("a busy Chain member refuses the whole archive without partial writes", async () => {
