@@ -1803,7 +1803,11 @@ must agree on this value. A mechanical claim with an omitted or mismatched
 version and the API's version. The refusal claims or creates no Run and writes
 one TaskActivity on the Task that would have been claimed, recording both
 versions so the board shows why the step did not move. This version check is
-fail-closed; ordinary agent claims are unaffected.
+fail-closed; ordinary agent claims are unaffected. The refusal also opens one
+deduplicated operator Inbox alert per API/executor version pair while that
+pair remains mismatched. Its body starts with `merge executor completion
+contract mismatch:` and names the executor version, API version, and refused
+Task. A later matching mechanical claim closes all open mismatch alerts.
 
 ### GET `/sessions`
 

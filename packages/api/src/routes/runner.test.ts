@@ -3,11 +3,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  InboxStatus,
+  Prisma,
   RunStatus,
   RunnerKind,
   type PrismaClient,
 } from "@anneal/db";
-import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import {
+  MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX,
+  MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX,
+  RUN_COMPLETION_CONTRACT_VERSION,
+} from "@anneal/db/claim-contract";
 
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
@@ -126,6 +132,7 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
       const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
       process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
       const activities: Array<Record<string, unknown>> = [];
+      const inboxMessages: Array<Record<string, unknown>> = [];
       let runMutations = 0;
       const candidate = {
         id: "run-mechanical", projectId: "project-1", taskId: "task-mechanical", repoId: "repo-1",
@@ -157,8 +164,39 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
           create: async () => { runMutations += 1; return {}; },
         },
         taskActivity: {
-          findFirst: async () => activities.length === 0 ? null : { metadata: activities.at(-1)?.metadata },
+          findFirst: async ({ where }: {
+            where: {
+              taskId: string;
+              actorType: string;
+              AND: Array<{ metadata: { path: string[]; equals: unknown } }>;
+            };
+          }) => activities.find((activity) => (
+            activity.taskId === where.taskId
+            && activity.actorType === where.actorType
+            && where.AND.every(({ metadata: condition }) => {
+              const metadata = activity.metadata as Record<string, unknown> | undefined;
+              const expected = condition.equals === Prisma.JsonNull ? null : condition.equals;
+              return metadata?.[condition.path[0] ?? ""] === expected;
+            })
+          )) ?? null,
           create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+        },
+        inboxThread: {
+          findFirst: async () => null,
+          create: async () => ({ id: "thread-1" }),
+        },
+        inboxMessage: {
+          findFirst: async ({ where }: { where: { status: InboxStatus; dedupeKey: { startsWith: string } } }) => (
+            inboxMessages.find((message) => (
+              message.status === where.status
+              && String(message.dedupeKey).startsWith(where.dedupeKey.startsWith)
+            )) ?? null
+          ),
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            const message = { ...data, status: InboxStatus.OPEN, answeredAt: null };
+            inboxMessages.push(message);
+            return message;
+          },
         },
       };
       const database = {
@@ -168,15 +206,15 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
       } as unknown as PrismaClient;
       try {
         const app = createApp(database);
-        const request = () => app.request("/runner/tasks/claim", {
-          method: "POST",
-          headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
-          body: JSON.stringify({
-            runnerId: "merge-executor-1",
-            leaseSeconds: 60,
-            ...(contractVersion === undefined ? {} : { contractVersion }),
-          }),
-        });
+        const request = (requestedContractVersion = contractVersion) => app.request("/runner/tasks/claim", {
+            method: "POST",
+            headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+            body: JSON.stringify({
+              runnerId: "merge-executor-1",
+              leaseSeconds: 60,
+              ...(requestedContractVersion === undefined ? {} : { contractVersion: requestedContractVersion }),
+            }),
+          });
 
         const response = await request();
         assert.equal(response.status, 409);
@@ -193,6 +231,23 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
         assert.match(String(activities[0]?.body), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
         assert.equal((await request()).status, 409);
         assert.equal(activities.length, 1);
+        assert.equal(inboxMessages.length, 1);
+        assert.equal(inboxMessages[0]?.status, InboxStatus.OPEN);
+        assert.match(String(inboxMessages[0]?.dedupeKey), new RegExp(`^${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}`, "u"));
+        assert.ok(String(inboxMessages[0]?.body).startsWith(MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX));
+        assert.match(String(inboxMessages[0]?.body), new RegExp(`executor version ${contractVersion ?? "missing"}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.match(String(inboxMessages[0]?.body), /task task-mechanical/u);
+        if (contractVersion === undefined) {
+          const differentVersion = RUN_COMPLETION_CONTRACT_VERSION + 1;
+          assert.equal((await request(differentVersion)).status, 409);
+          assert.equal(inboxMessages.length, 2);
+          assert.equal(inboxMessages.filter(({ status }) => status === InboxStatus.OPEN).length, 2);
+          assert.match(
+            String(inboxMessages[1]?.dedupeKey),
+            new RegExp(`^${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${differentVersion}:`, "u"),
+          );
+          assert.equal(activities.length, 2);
+        }
       } finally {
         if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
         else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
@@ -201,111 +256,286 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
   });
 }
 
-test("a mechanical claim with the matching completion contract version claims normally", async () => {
+test("a mismatch Inbox failure aborts the claim before a later candidate is considered", async () => {
   await withTokens(async () => {
     const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    const previousChatId = process.env.FEISHU_DEFAULT_CHAT_ID;
     process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
-    const now = new Date("2026-09-02T23:00:00.000Z");
-    const task = {
-      id: "task-mechanical", projectId: "project-1", repoId: "repo-1",
-      status: "TODO", assigneeType: "AGENT", archivedAt: null,
-      chainId: null, chainIndex: null, chainLayer: null, templateId: null,
-      createdAt: now, name: "Merge execution", description: "Mechanical merge",
-      targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3,
-      templateStep: {
-        name: "Merge execution", stepIndex: 7, outputKind: "merge-result",
-        provisionDependencies: false, priorOutputKinds: [], baseFromStepIndex: null,
-        taskTemplate: { name: "direct-engineer-workflow" },
-      },
-    };
-    const candidate = {
-      id: "run-mechanical", projectId: "project-1", taskId: task.id, goalId: null,
-      agentId: "agent-mechanical", repoId: "repo-1", runNumber: 1,
-      runner: RunnerKind.CLAUDE, leaseGeneration: 0, maxDurationMin: 120, stallTimeoutMin: 10,
-      readyAt: now, createdAt: now, session: null, branch: "fix/merge", targetBranch: "main",
-      task,
-      repo: {
-        id: "repo-1", remoteUrl: "https://github.test/acme/repo.git", defaultBranch: "main",
-        mountPath: "repo", dependencyProvisioning: "NONE",
-      },
-      agent: {
-        id: "agent-mechanical", name: "merge-integrator", model: "mechanical/merge-executor-v1",
-        foundationalPrompt: "", rolePrompt: "", disabledTools: [], archivedAt: null,
-        repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
-        environment: { secrets: [] }, secretGrants: [],
-      },
-    };
+    process.env.FEISHU_DEFAULT_CHAT_ID = "operator-chat";
     const activities: Array<Record<string, unknown>> = [];
-    let runMutations = 0;
-    const claimedRun = {
-      ...candidate,
-      opensPullRequest: false, requiresCommit: false, maxRunsPerTask: 3,
-      model: candidate.agent.model, codexServiceTier: "DEFAULT",
-      subagentModel: null, subagentMaxConcurrent: null, promptHash: null,
-      workspacePath: null, baseSha: null,
-    };
-    const tx = {
-      $queryRaw: async (query: unknown) => {
-        const sql = Array.isArray(query)
-          ? query.join("?")
-          : (query as { strings?: string[] }).strings?.join("?") ?? "";
-        if (sql.includes("pg_try_advisory_xact_lock_shared")) return [{ granted: true }];
-        if (sql.includes("pg_try_advisory_xact_lock")) return [{ locked: true }];
-        if (sql.includes('SELECT "id" FROM "Task"')) return [{ id: task.id }];
-        return [];
+    const inboxMessages: Array<Record<string, unknown>> = [];
+    const inboxThreads: Array<Record<string, unknown>> = [];
+    const activityAttempts: string[] = [];
+    let inboxCreateAttempts = 0;
+    const candidate = (suffix: string) => ({
+      id: `run-${suffix}`, projectId: "project-1", taskId: `task-${suffix}`, repoId: "repo-1",
+      leaseGeneration: 0,
+      task: {
+        id: `task-${suffix}`,
+        targetBranch: "main",
+        templateStep: {
+          stepIndex: 7,
+          outputKind: "merge-result",
+          taskTemplate: { name: "direct-engineer-workflow" },
+        },
       },
+      repo: { id: "repo-1", defaultBranch: "main" },
+      agent: {
+        id: "agent-mechanical",
+        name: "merge-integrator",
+        repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
+      },
+    });
+    const tx = {
+      $queryRaw: async () => [{ granted: true }],
       $executeRawUnsafe: async () => 0,
       chainControl: { findMany: async () => [] },
       mergeLeaseEvent: { findMany: async () => [] },
       run: {
-        findMany: async ({ where }: { where: { id?: { not?: string } } }) => where.id?.not ? [] : [candidate],
-        updateMany: async () => { runMutations += 1; return { count: 1 }; },
-        findFirst: async () => null,
-        findUniqueOrThrow: async () => claimedRun,
-      },
-      session: { create: async () => ({ id: "session-mechanical" }) },
-      sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
-      task: {
-        findUnique: async () => task,
-        findUniqueOrThrow: async () => task,
-        update: async () => ({}),
+        findMany: async () => [candidate("first"), candidate("second")],
       },
       taskActivity: {
-        findMany: async () => [],
         findFirst: async () => null,
-        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          activityAttempts.push(String(data.taskId));
+          activities.push(data);
+          return {};
+        },
+      },
+      inboxThread: {
+        findFirst: async () => null,
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          const thread = { id: `thread-${inboxThreads.length + 1}`, ...data };
+          inboxThreads.push(thread);
+          return thread;
+        },
+      },
+      inboxMessage: {
+        findFirst: async () => null,
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          inboxCreateAttempts += 1;
+          if (inboxCreateAttempts === 1) throw new Error("inbox-create-failed");
+          const message = { ...data, status: InboxStatus.OPEN };
+          inboxMessages.push(message);
+          return message;
+        },
       },
     };
     const database = {
       run: { findMany: async () => [] },
-      chainControl: { findUnique: async () => null },
       taskActivity: { createMany: async () => ({ count: 0 }) },
-      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => {
+        const activityCount = activities.length;
+        const messageCount = inboxMessages.length;
+        const threadCount = inboxThreads.length;
+        try {
+          return await operation(tx);
+        } catch (error: unknown) {
+          activities.length = activityCount;
+          inboxMessages.length = messageCount;
+          inboxThreads.length = threadCount;
+          throw error;
+        }
+      },
     } as unknown as PrismaClient;
     try {
       const response = await createApp(database).request("/runner/tasks/claim", {
         method: "POST",
         headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          runnerId: "merge-executor-1",
-          leaseSeconds: 60,
-          contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
-        }),
+        body: JSON.stringify({ runnerId: "merge-executor-1", leaseSeconds: 60 }),
       });
 
-      assert.equal(response.status, 200);
-      const claim = await response.json() as { executionMode: string; run: { id: string } };
-      assert.equal(claim.executionMode, "mechanical");
-      assert.equal(claim.run.id, candidate.id);
-      assert.equal(runMutations, 1);
-      assert.equal(activities.filter((activity) => (
-        (activity.metadata as Record<string, unknown> | undefined)?.code === "mechanical_contract_mismatch"
-      )).length, 0);
+      assert.equal(response.status, 500);
+      assert.equal(inboxCreateAttempts, 1);
+      assert.deepEqual(activityAttempts, ["task-first"]);
+      assert.equal(activities.length, 0);
+      assert.equal(inboxMessages.length, 0);
+      assert.equal(inboxThreads.length, 0);
     } finally {
       if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
       else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+      if (previousChatId === undefined) delete process.env.FEISHU_DEFAULT_CHAT_ID;
+      else process.env.FEISHU_DEFAULT_CHAT_ID = previousChatId;
     }
   });
+});
+
+const matchingMechanicalClaimHarness = () => {
+  const now = new Date("2026-09-02T23:00:00.000Z");
+  const task = {
+    id: "task-mechanical", projectId: "project-1", repoId: "repo-1",
+    status: "TODO", assigneeType: "AGENT", archivedAt: null,
+    chainId: null, chainIndex: null, chainLayer: null, templateId: null,
+    createdAt: now, name: "Merge execution", description: "Mechanical merge",
+    targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3,
+    templateStep: {
+      name: "Merge execution", stepIndex: 7, outputKind: "merge-result",
+      provisionDependencies: false, priorOutputKinds: [], baseFromStepIndex: null,
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  };
+  const candidate = {
+    id: "run-mechanical", projectId: "project-1", taskId: task.id, goalId: null,
+    agentId: "agent-mechanical", repoId: "repo-1", runNumber: 1,
+    runner: RunnerKind.CLAUDE, leaseGeneration: 0, maxDurationMin: 120, stallTimeoutMin: 10,
+    readyAt: now, createdAt: now, session: null, branch: "fix/merge", targetBranch: "main",
+    task,
+    repo: {
+      id: "repo-1", remoteUrl: "https://github.test/acme/repo.git", defaultBranch: "main",
+      mountPath: "repo", dependencyProvisioning: "NONE",
+    },
+    agent: {
+      id: "agent-mechanical", name: "merge-integrator", model: "mechanical/merge-executor-v1",
+      foundationalPrompt: "", rolePrompt: "", disabledTools: [], archivedAt: null,
+      repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
+      environment: { secrets: [] }, secretGrants: [],
+    },
+  };
+  const activities: Array<Record<string, unknown>> = [];
+  const inboxMessages: Array<Record<string, unknown>> = [];
+  let runMutations = 0;
+  const claimedRun = {
+    ...candidate,
+    opensPullRequest: false, requiresCommit: false, maxRunsPerTask: 3,
+    model: candidate.agent.model, codexServiceTier: "DEFAULT",
+    subagentModel: null, subagentMaxConcurrent: null, promptHash: null,
+    workspacePath: null, baseSha: null,
+  };
+  const tx = {
+    $queryRaw: async (query: unknown) => {
+      const sql = Array.isArray(query)
+        ? query.join("?")
+        : (query as { strings?: string[] }).strings?.join("?") ?? "";
+      if (sql.includes("pg_try_advisory_xact_lock_shared")) return [{ granted: true }];
+      if (sql.includes("pg_try_advisory_xact_lock")) return [{ locked: true }];
+      if (sql.includes('SELECT "id" FROM "Task"')) return [{ id: task.id }];
+      return [];
+    },
+    $executeRawUnsafe: async () => 0,
+    chainControl: { findMany: async () => [] },
+    mergeLeaseEvent: { findMany: async () => [] },
+    run: {
+      findMany: async ({ where }: { where: { id?: { not?: string } } }) => where.id?.not ? [] : [candidate],
+      updateMany: async () => { runMutations += 1; return { count: 1 }; },
+      findFirst: async () => null,
+      findUniqueOrThrow: async () => claimedRun,
+    },
+    session: { create: async () => ({ id: "session-mechanical" }) },
+    sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
+    task: {
+      findUnique: async () => task,
+      findUniqueOrThrow: async () => task,
+      update: async () => ({}),
+    },
+    taskActivity: {
+      findMany: async () => [],
+      findFirst: async () => null,
+      create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+    },
+    inboxMessage: {
+      findFirst: async ({ where }: { where: { status: InboxStatus; dedupeKey: { startsWith: string } } }) => (
+        inboxMessages.find((message) => (
+          message.status === where.status
+          && String(message.dedupeKey).startsWith(where.dedupeKey.startsWith)
+        )) ?? null
+      ),
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const message = { ...data, status: InboxStatus.OPEN, answeredAt: null };
+        inboxMessages.push(message);
+        return message;
+      },
+      updateMany: async ({ where, data }: {
+        where: { status: InboxStatus; dedupeKey: { startsWith: string } };
+        data: { status: InboxStatus; answeredAt: Date };
+      }) => {
+        let count = 0;
+        for (const message of inboxMessages) {
+          if (message.status === where.status && String(message.dedupeKey).startsWith(where.dedupeKey.startsWith)) {
+            message.status = data.status;
+            message.answeredAt = data.answeredAt;
+            count += 1;
+          }
+        }
+        return { count };
+      },
+    },
+    inboxThread: {
+      findFirst: async () => null,
+      create: async () => ({ id: "thread-1" }),
+    },
+  };
+  const database = {
+    run: { findMany: async () => [] },
+    chainControl: { findUnique: async () => null },
+    taskActivity: { createMany: async () => ({ count: 0 }) },
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+  const request = (contractVersion?: number) => createApp(database).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "merge-executor-1",
+      leaseSeconds: 60,
+      ...(contractVersion === undefined ? {} : { contractVersion }),
+    }),
+  });
+  return {
+    activities,
+    candidate,
+    inboxMessages,
+    request,
+    runMutations: () => runMutations,
+  };
+};
+
+const withMechanicalRunnerId = async (callback: () => Promise<void>): Promise<void> => {
+  const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+  process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
+  try {
+    await callback();
+  } finally {
+    if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+  }
+};
+
+test("a mechanical claim with the matching completion contract version claims normally", async () => {
+  await withTokens(async () => withMechanicalRunnerId(async () => {
+    const harness = matchingMechanicalClaimHarness();
+    const response = await harness.request(RUN_COMPLETION_CONTRACT_VERSION);
+
+    assert.equal(response.status, 200);
+    const claim = await response.json() as { executionMode: string; run: { id: string } };
+    assert.equal(claim.executionMode, "mechanical");
+    assert.equal(claim.run.id, harness.candidate.id);
+    assert.equal(harness.runMutations(), 1);
+    assert.equal(harness.activities.filter((activity) => (
+      (activity.metadata as Record<string, unknown> | undefined)?.code === "mechanical_contract_mismatch"
+    )).length, 0);
+  }));
+});
+
+test("a matching mechanical claim closes an alert opened by a prior refused claim", async () => {
+  await withTokens(async () => withMechanicalRunnerId(async () => {
+    const harness = matchingMechanicalClaimHarness();
+    const refused = await harness.request();
+    assert.equal(refused.status, 409);
+    assert.equal(harness.inboxMessages.length, 1);
+    assert.equal(harness.inboxMessages[0]?.status, InboxStatus.OPEN);
+
+    const response = await harness.request(RUN_COMPLETION_CONTRACT_VERSION);
+
+    assert.equal(response.status, 200);
+    const claim = await response.json() as { executionMode: string; run: { id: string } };
+    assert.equal(claim.executionMode, "mechanical");
+    assert.equal(claim.run.id, harness.candidate.id);
+    assert.equal(harness.runMutations(), 1);
+    assert.equal(harness.activities.filter((activity) => (
+      (activity.metadata as Record<string, unknown> | undefined)?.code === "mechanical_contract_mismatch"
+    )).length, 1);
+    assert.equal(harness.inboxMessages[0]?.status, InboxStatus.CLOSED);
+    assert.ok(harness.inboxMessages[0]?.answeredAt instanceof Date);
+  }));
 });
 
 test("completion refunds an external failure but refuses an automatic retry for an archived Agent", async () => {
