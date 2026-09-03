@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 
 import {
@@ -13,6 +14,7 @@ import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const RELEASE = /^(?<commit>[0-9a-f]{40})-(?<digest>[0-9a-f]{64})$/u;
+const RELEASE_ARTIFACT_SCRIPT = "scripts/deploy/release-artifact.mjs";
 const RUNTIME_TOOL_ROOT = "packages/runner/dist/runtime-tools";
 const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
   "git-credential-runner.sh",
@@ -31,6 +33,8 @@ const RUNTIME_TOOL_ENTRIES = new Map([
 const fail = (reason, detail) => {
   throw new DeployFailure(reason, detail);
 };
+
+const require = createRequire(import.meta.url);
 
 const runtimeFailure = (detail) => fail("release-artifact-runtime-incomplete", detail);
 
@@ -142,7 +146,7 @@ const maintenanceSourceImports = (releaseDirectory) => {
   return Object.freeze([...imports].sort());
 };
 
-export const verifyReleaseArtifact = ({ deployRoot, revision, releaseName }) => {
+const validatedReleaseArtifact = ({ deployRoot, revision, releaseName }) => {
   if (!SHA.test(revision ?? "")) fail("release-artifact-invalid", "target-commit-invalid");
   const identity = RELEASE.exec(releaseName ?? "")?.groups;
   if (!identity || identity.commit !== revision) fail("release-artifact-invalid", "release-name-target-mismatch");
@@ -150,8 +154,12 @@ export const verifyReleaseArtifact = ({ deployRoot, revision, releaseName }) => 
   if (!existsSync(releaseDirectory)) fail("release-artifact-missing", releaseName);
   const status = lstatSync(releaseDirectory);
   if (status.isSymbolicLink() || !status.isDirectory()) fail("release-artifact-invalid", "release-path-not-directory");
+  return Object.freeze({ deployRoot, revision, releaseName, releaseDirectory, digest: identity.digest });
+};
+
+const verifyReleaseArtifactContents = ({ releaseDirectory, revision, digest }) => {
   try {
-    const verified = verifyReleaseDirectory({ releaseDirectory, revision, digest: identity.digest });
+    const verified = verifyReleaseDirectory({ releaseDirectory, revision, digest });
     const dbMaintenanceSourceImports = maintenanceSourceImports(verified.releaseDirectory);
     const runtimeTools = assertRuntimeToolInventory(verified.releaseDirectory);
     return Object.freeze({
@@ -167,6 +175,53 @@ export const verifyReleaseArtifact = ({ deployRoot, revision, releaseName }) => 
     }
     throw error;
   }
+};
+
+const loadTargetVerifier = (root) => {
+  const verifierPath = join(root, RELEASE_ARTIFACT_SCRIPT);
+  let status;
+  try {
+    status = lstatSync(verifierPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    fail("release-artifact-invalid", `target-verifier-${error?.code ?? "unreadable"}`);
+  }
+  if (status.isSymbolicLink() || !status.isFile()) {
+    fail("release-artifact-invalid", "target-verifier-not-a-regular-file");
+  }
+  let targetModule;
+  try {
+    targetModule = require(verifierPath);
+  } catch (error) {
+    fail("release-artifact-invalid", `target-verifier-${error?.code ?? "unreadable"}`);
+  }
+  if (typeof targetModule?.verifyReleaseArtifact !== "function") {
+    fail("release-artifact-invalid", "target-verifier-export-missing");
+  }
+  return targetModule.verifyReleaseArtifact;
+};
+
+/**
+ * Verify an artifact with the verifier shipped by the artifact's target
+ * commit. The deployed process starts from `current`, so its own module may
+ * describe an older runtime-tool inventory. `useTargetVerifier: false` is an
+ * internal handoff flag used by the target module to run its local verifier
+ * after this loader has selected it.
+ */
+export const verifyReleaseArtifact = (options = {}) => {
+  const validated = validatedReleaseArtifact(options);
+  if (options.useTargetVerifier !== false) {
+    const verifier = loadTargetVerifier(options.verifierRoot ?? validated.releaseDirectory);
+    if (verifier && verifier !== verifyReleaseArtifact) {
+      return verifier({
+        deployRoot: validated.deployRoot,
+        revision: validated.revision,
+        releaseName: validated.releaseName,
+        useTargetVerifier: false,
+      });
+    }
+  }
+  return verifyReleaseArtifactContents(validated);
 };
 
 export const findReleaseArtifact = ({ deployRoot, revision }) => {
@@ -236,7 +291,12 @@ export const buildReleaseArtifact = ({
       retention: false,
       probeImmutability: true,
     });
-    return verify({ deployRoot, revision, releaseName: result.releaseName });
+    return verify({
+      deployRoot,
+      revision,
+      releaseName: result.releaseName,
+      ...(verify === verifyReleaseArtifact ? { verifierRoot: buildRoot } : {}),
+    });
   } finally {
     rmSync(buildRoot, { recursive: true, force: true });
   }

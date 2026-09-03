@@ -867,6 +867,37 @@ test("standalone builder creates a verified exact-commit release", () => {
   removeTree(deployRoot);
 });
 
+test("artifact verification loads the verifier shipped by the target release", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-target-verifier-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  mkdirSync(join(source, "scripts/deploy"), { recursive: true });
+  writeFileSync(join(source, "scripts/deploy/release-artifact.mjs"), [
+    "export const verifyReleaseArtifact = ({ revision, releaseName }) => ({",
+    '  verifier: "target",',
+    "  revision,",
+    "  releaseName,",
+    "});",
+    "",
+  ].join("\n"));
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src", "scripts/deploy"],
+      optionalArtifactPaths: [],
+    });
+    assert.deepEqual(
+      verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+      { verifier: "target", revision: revisions.to, releaseName: assembled.releaseName },
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
 const assertRuntimeInventoryFailure = ({ artifactPaths, mutate }) => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-runtime-tools-"));
   const source = join(deployRoot, "source");
