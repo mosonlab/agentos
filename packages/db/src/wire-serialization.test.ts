@@ -13,6 +13,7 @@ type Report<DateTime = string, DecimalValue = string> = {
   usd: DecimalValue;
   tags: string[];
   nested: { at: DateTime };
+  strandedSalvageBranches: Array<{ branch: string; lostRunNumber: number }>;
 };
 
 type NativeReport = Report<Date, Prisma.Decimal>;
@@ -23,6 +24,7 @@ const nativeReport = (): NativeReport => ({
   usd: new Prisma.Decimal("1.25"),
   tags: ["merge"],
   nested: { at: new Date(0) },
+  strandedSalvageBranches: [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }],
 });
 
 const wireReport: Report = {
@@ -31,6 +33,7 @@ const wireReport: Report = {
   usd: "1.25",
   tags: ["merge"],
   nested: { at: "1970-01-01T00:00:00.000Z" },
+  strandedSalvageBranches: [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }],
 };
 
 test("the serialized form the proof claims is the one JSON.stringify produces", () => {

@@ -15,6 +15,7 @@ import {
   readBoard,
   repairBinding,
   repairChainBindingsFromRows,
+  strandedSalvageBranchesFromRuns,
   taskChainName,
 } from "./board.js";
 import { chainProgress, type ChainRow } from "./chain.js";
@@ -199,8 +200,33 @@ test("the board projection carries every field the board consumes and nothing el
   assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
     "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron", "displayName",
     "failureReason", "id", "latestRun", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
-    "taskCost", "templateId", "timezone", "updatedAt",
+    "strandedSalvageBranches", "taskCost", "templateId", "timezone", "updatedAt",
   ]);
+});
+
+test("the projection derives stranded salvage only when a later Run kept the LOST base", () => {
+  const baseSha = "a".repeat(40);
+  assert.deepEqual(strandedSalvageBranchesFromRuns([
+    { runNumber: 3, status: "RUNNING", pushedBranch: null, baseSha },
+    { runNumber: 2, status: "LOST", pushedBranch: "agentos/task-1/run-2", baseSha },
+    { runNumber: 1, status: "LOST", pushedBranch: "agentos/task-1/run-1", baseSha: "b".repeat(40) },
+  ]), [{ branch: "agentos/task-1/run-2", lostRunNumber: 2 }]);
+  assert.deepEqual(strandedSalvageBranchesFromRuns([
+    { runNumber: 2, status: "RUNNING", pushedBranch: null, baseSha: "b".repeat(40) },
+    { runNumber: 1, status: "LOST", pushedBranch: "agentos/task-1/run-1", baseSha },
+  ]), []);
+  assert.deepEqual(strandedSalvageBranchesFromRuns([
+    { runNumber: 1, status: "FAILED", pushedBranch: "agentos/task-1/run-1", baseSha },
+  ]), []);
+});
+
+test("a board card carries the stranded salvage branch and LOST Run number", () => {
+  const baseSha = "a".repeat(40);
+  const card = boardCard(row({ runs: [
+    { id: "run-2", runNumber: 2, status: "RUNNING", model: "claude", codexServiceTier: "DEFAULT", budgetGrants: 0, pullRequestUrl: null, pushedBranch: null, baseSha, session: null },
+    { id: "run-1", runNumber: 1, status: "LOST", model: "claude", codexServiceTier: "DEFAULT", budgetGrants: 0, pullRequestUrl: null, pushedBranch: "agentos/task-1/run-1", baseSha, session: null },
+  ]}), null, moveContext);
+  assert.deepEqual(card.strandedSalvageBranches, [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }]);
 });
 
 test("the board projection carries the operator transition matrix", () => {
@@ -586,6 +612,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     chainProgress: null,
     moveTargets: [{ status: "BACKLOG", via: "patch" }],
     latestRun: null,
+    strandedSalvageBranches: [],
     taskCost: null,
     mergeOutcome: null,
     repairOf: null,
