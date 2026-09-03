@@ -93,11 +93,6 @@ export const mergeTailRequeueContextForRun = async (
  * Activity metadata authored by agents or operators is never control-plane
  * authority, and an exact Run binding avoids propagating a prior requeue.
  */
-export const mergeTailRequeueForRun = async (
-  tx: DbTx,
-  input: { taskId: string; runId: string },
-): Promise<boolean> => (await mergeTailRequeueContextForRun(tx, input)) !== null;
-
 type RegressionTaskIdentity = {
   id: string;
   templateStep?: {
@@ -231,6 +226,29 @@ export const baseDriftRecoveryContext = async (
     orderBy: [{ attempt: "desc" }, { id: "desc" }],
   });
   return recoveryContext(row);
+};
+
+/** Resolves whether a genuine repair completion belongs to an active recovery.
+ * No aggregate means this is an ordinary merge-tail repair. Once an aggregate
+ * exists, incomplete or stale identity is a state-machine fault, not an
+ * ordinary repair fallback. */
+export const activeRepairRecoverySourceRun = async (
+  tx: DbTx,
+  input: { regressionTaskId: string; sourceRunId: string },
+): Promise<string | null> => {
+  const row = await tx.mergeRecoveryAttempt.findFirst({
+    where: { regressionTaskId: input.regressionTaskId },
+    orderBy: [{ attempt: "desc" }, { id: "desc" }],
+  });
+  if (!row) return null;
+  const recovery = recoveryContext(row);
+  if (row.status !== MergeRecoveryStatus.REPAIRING || !recovery) {
+    throw new Error(`Merge recovery ${row.id} is not a complete REPAIRING aggregate`);
+  }
+  if (recovery.recoveryRunId !== input.sourceRunId) {
+    throw new Error(`Merge recovery ${row.id} is not bound to repaired Run ${input.sourceRunId}`);
+  }
+  return recovery.recoveryRunId;
 };
 
 type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateManyMutationInput;

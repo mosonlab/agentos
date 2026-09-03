@@ -1398,8 +1398,9 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   effect:
 
   - `merge_tail_repair_not_blocked`: the task has no matching latest recovery
-    attempt in `BLOCKED_DOWNSTREAM`, including an inconsistent aggregate with
-    no repair bound to its recovery Run.
+    attempt in `BLOCKED_DOWNSTREAM`, including an aggregate already in
+    `REPAIRING` with no open repair task or an aggregate missing required
+    recovery identity.
   - `merge_tail_repair_verdict_missing`: the stored output is absent, is a
     pass/unsupported verdict, or was produced by a Run other than
     `recoveryRunId`.
@@ -1412,6 +1413,9 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   - `merge_tail_repair_already_open`: a repair attempt for this recovery
     `sourceRunId` is already present. This takes precedence over the aggregate
     having already moved to `REPAIRING`.
+  - `merge_tail_repair_creation_failed`: the fixed-implementation agent is
+    unavailable, lacks the repository grant, or the detached repair task cannot
+    resolve the Chain repository, position, and shared branch.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \

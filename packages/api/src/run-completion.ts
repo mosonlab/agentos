@@ -57,6 +57,7 @@ import {
   retryDelayMs,
 } from "./execution.js";
 import {
+  activeRepairRecoverySourceRun,
   handleRegressionCompletion,
   mergeTailRequeueContextForRun,
   recordMergeTailRequeue,
@@ -1152,11 +1153,17 @@ export const completeRun = async (
               }, now);
             }
             if (auxiliaryTargetTaskId) {
-              const recoverySourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
+              const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
                 ? repairMarker.raw.sourceRunId
-                : undefined;
+                : null;
+              const recoverySourceRunId = repairSourceRunId && repairMarker?.regressionTaskId
+                ? await activeRepairRecoverySourceRun(tx, {
+                    regressionTaskId: repairMarker.regressionTaskId,
+                    sourceRunId: repairSourceRunId,
+                  })
+                : null;
               await activateMergeTailTarget(tx, auxiliaryTargetTaskId, now, {
-                ...(recoverySourceRunId === undefined ? {} : { recoverySourceRunId }),
+                ...(recoverySourceRunId === null ? {} : { recoverySourceRunId }),
               });
             }
           }

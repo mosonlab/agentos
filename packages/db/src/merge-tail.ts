@@ -133,18 +133,23 @@ export async function transitionMergeRecovery(
   });
 }
 
-/** Carries an in-progress recovery onto the Regression Run born after a
- * genuine repair completion. Ordinary merge-tail repairs have no matching
- * aggregate and deliberately leave nothing behind. */
+/** Carries an expected in-progress recovery onto the Regression Run born after
+ * genuine repair completion. Callers qualify ordinary repairs before this
+ * point, so a missing or inactive aggregate is a state-machine fault. */
 export const carryMergeRecoveryRun = async (
   tx: Prisma.TransactionClient,
   input: { regressionTaskId: string; recoveryRunId: string; previousRecoveryRunId: string },
-): Promise<boolean> => {
+): Promise<void> => {
   const aggregate = await tx.mergeRecoveryAttempt.findFirst({
     where: { regressionTaskId: input.regressionTaskId },
     orderBy: [{ attempt: "desc" }, { id: "desc" }],
   });
-  if (!aggregate || aggregate.status !== MergeRecoveryStatus.REPAIRING) return false;
+  if (!aggregate) {
+    throw new Error(`Merge recovery for Regression task ${input.regressionTaskId} is absent`);
+  }
+  if (aggregate.status !== MergeRecoveryStatus.REPAIRING) {
+    throw new Error(`Merge recovery ${aggregate.id} is ${aggregate.status}, not REPAIRING`);
+  }
   if (aggregate.recoveryRunId !== input.previousRecoveryRunId) {
     throw new Error(`Merge recovery ${aggregate.id} is not bound to repaired Run ${input.previousRecoveryRunId}`);
   }
@@ -162,7 +167,6 @@ export const carryMergeRecoveryRun = async (
   if (!transitioned) {
     throw new Error(`Merge recovery ${aggregate.id} changed while carrying its repaired Regression Run`);
   }
-  return true;
 };
 
 export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPhase => (

@@ -10,6 +10,7 @@ import {
 } from "@anneal/db";
 
 import {
+  activeRepairRecoverySourceRun,
   handleRegressionCompletion,
   openDefenseAuditNotice,
   openMergeTailStopNotice,
@@ -36,6 +37,66 @@ const recoveryContext: RecoveryContext = {
   integratorTaskId: "integrator-1",
   recoveryRunId: "recovery-run-1",
 };
+
+const recoveryRow = (overrides: Record<string, unknown> = {}) => ({
+  id: recoveryContext.aggregateId,
+  attempt: recoveryContext.attempt,
+  sourceStopId: recoveryContext.sourceStopId,
+  boundSourceRunId: recoveryContext.sourceRunId,
+  authorizationActivityId: recoveryContext.authorizationActivityId,
+  repository: recoveryContext.repository,
+  prNumber: recoveryContext.prNumber,
+  targetBranch: recoveryContext.targetBranch,
+  authorizedHeadSha: recoveryContext.authorizedHeadSha,
+  authorizedBaseSha: recoveryContext.authorizedBaseSha,
+  observedBaseSha: recoveryContext.observedBaseSha,
+  currentBaseSha: recoveryContext.currentBaseSha,
+  readinessTaskId: recoveryContext.readinessTaskId,
+  regressionTaskId: recoveryContext.regressionTaskId,
+  integratorTaskId: recoveryContext.integratorTaskId,
+  recoveryRunId: recoveryContext.recoveryRunId,
+  status: MergeRecoveryStatus.REPAIRING,
+  refusalCode: null,
+  failureReason: null,
+  validationAttempts: 0,
+  startedAt: new Date(),
+  updatedAt: new Date(),
+  endedAt: null,
+  ...overrides,
+});
+
+test("repair completion carries context only for a complete active recovery", async () => {
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => recoveryRow() },
+  } as unknown as Prisma.TransactionClient;
+
+  assert.equal(await activeRepairRecoverySourceRun(tx, {
+    regressionTaskId: recoveryContext.regressionTaskId,
+    sourceRunId: recoveryContext.recoveryRunId,
+  }), recoveryContext.recoveryRunId);
+});
+
+test("ordinary repairs do not fabricate recovery context", async () => {
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => null },
+  } as unknown as Prisma.TransactionClient;
+
+  assert.equal(await activeRepairRecoverySourceRun(tx, {
+    regressionTaskId: recoveryContext.regressionTaskId,
+    sourceRunId: recoveryContext.recoveryRunId,
+  }), null);
+});
+
+test("an existing but incomplete recovery fails loudly during repair completion", async () => {
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => recoveryRow({ currentBaseSha: null }) },
+  } as unknown as Prisma.TransactionClient;
+
+  await assert.rejects(activeRepairRecoverySourceRun(tx, {
+    regressionTaskId: recoveryContext.regressionTaskId,
+    sourceRunId: recoveryContext.recoveryRunId,
+  }), /not a complete REPAIRING aggregate/u);
+});
 
 const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
   const activities: Array<Record<string, any>> = [];
@@ -409,7 +470,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       status: MergeRecoveryStatus.REPAIRING,
       input: { phase: "regression", regressionTaskId: "regression-1", reason: "bad verdict", at, recovery: recoveryContext, agentId: "agent-1" },
       markerStates: ["tail-stopped", "tail-stopped"],
-      noticeKey: /:stop-1:regression$/u,
+      noticeKey: /:stop-1:regression:recovery-run-1$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
       result: undefined,
     },
@@ -427,7 +488,7 @@ test("stopMergeTail owns the phase by recovery matrix", async () => {
       status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
       input: { phase: "readiness", readinessTaskId: "readiness-1", regressionTaskId: "regression-1", reason: "head drift", at, recovery: recoveryContext },
       markerStates: ["tail-stopped", "tail-stopped", "stopped"],
-      noticeKey: /:stop-1:readiness$/u,
+      noticeKey: /:stop-1:readiness:recovery-run-1$/u,
       recoveryTarget: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
       result: { leaseOutcome: { kind: "stop", taskId: "regression-1" } },
     },

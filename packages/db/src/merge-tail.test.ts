@@ -74,11 +74,11 @@ test("a repaired Regression Run is carried onto the active recovery aggregate", 
     },
   } as unknown as Prisma.TransactionClient;
 
-  assert.equal(await carryMergeRecoveryRun(tx, {
+  await carryMergeRecoveryRun(tx, {
     regressionTaskId: "regression-1",
     recoveryRunId: "regression-run-2",
     previousRecoveryRunId: "regression-run-1",
-  }), true);
+  });
   assert.equal(updates[0]?.data.status, MergeRecoveryStatus.REPAIRING);
   assert.equal(updates[0]?.data.recoveryRunId, "regression-run-2");
   assert.equal(updates[0]?.where.AND[1].regressionTaskId, "regression-1");
@@ -106,16 +106,16 @@ test("a repaired Regression Run cannot retarget an unrelated recovery", async ()
   assert.equal(updates, 0);
 });
 
-test("an ordinary repair creates no recovery binding", async () => {
+test("an expected recovery carry fails loudly when its aggregate is absent", async () => {
   const tx = {
     mergeRecoveryAttempt: { findFirst: async () => null },
   } as unknown as Prisma.TransactionClient;
 
-  assert.equal(await carryMergeRecoveryRun(tx, {
+  await assert.rejects(carryMergeRecoveryRun(tx, {
     regressionTaskId: "regression-1",
     recoveryRunId: "regression-run-2",
     previousRecoveryRunId: "regression-run-1",
-  }), false);
+  }), /is absent/u);
 });
 
 test("regression verdicts are exact-head, versioned, and fail closed", () => {

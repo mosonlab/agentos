@@ -10,6 +10,7 @@ import {
   MergeRecoveryStatus,
   Prisma,
   readMarkerHistory,
+  recoveryContext,
   TaskStatus,
   transitionMergeRecovery,
 } from "@anneal/db";
@@ -64,8 +65,9 @@ const priorRequestResult = async (
   tx: DbTx,
   taskId: string,
   requestId: string,
+  markers: Awaited<ReturnType<typeof readMarkerHistory>>,
 ): Promise<MergeTailRepairRequestResult | null> => {
-  const row = await tx.taskActivity.findFirst({
+  const rows = await tx.taskActivity.findMany({
     where: {
       taskId,
       actorType: "operator",
@@ -77,19 +79,36 @@ const priorRequestResult = async (
     select: { metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
-  const metadata = asJsonObject(row?.metadata);
-  if (metadata?.action !== MERGE_TAIL_REPAIR_REQUEST_ACTION
-    || metadata.requestId !== requestId
-    || (metadata.repairKind !== "gate-fix" && metadata.repairKind !== "review-fix")
-    || typeof metadata.repairTaskId !== "string"
-    || typeof metadata.headSha !== "string"
-    || typeof metadata.baseHeadSha !== "string") return null;
-  return {
-    repairTaskId: metadata.repairTaskId,
-    repairKind: metadata.repairKind,
-    headSha: metadata.headSha,
-    baseHeadSha: metadata.baseHeadSha,
-  };
+  for (const row of rows) {
+    const metadata = asJsonObject(row.metadata);
+    if (metadata?.operatorNote === true
+      || metadata?.action !== MERGE_TAIL_REPAIR_REQUEST_ACTION
+      || metadata.requestId !== requestId
+      || (metadata.repairKind !== "gate-fix" && metadata.repairKind !== "review-fix")
+      || typeof metadata.repairTaskId !== "string"
+      || typeof metadata.sourceRunId !== "string"
+      || typeof metadata.headSha !== "string"
+      || typeof metadata.baseHeadSha !== "string") continue;
+    const matchingAttempt = markers.some((marker) => marker.kind === "repairAttempt"
+      && marker.repairTaskId === metadata.repairTaskId
+      && marker.repairKind === metadata.repairKind
+      && marker.headSha === metadata.headSha
+      && marker.baseHeadSha === metadata.baseHeadSha
+      && marker.raw.sourceRunId === metadata.sourceRunId);
+    if (!matchingAttempt) continue;
+    const repairTask = await tx.task.findUnique({
+      where: { id: metadata.repairTaskId },
+      select: { id: true },
+    });
+    if (!repairTask) continue;
+    return {
+      repairTaskId: metadata.repairTaskId,
+      repairKind: metadata.repairKind,
+      headSha: metadata.headSha,
+      baseHeadSha: metadata.baseHeadSha,
+    };
+  }
+  return null;
 };
 
 /**
@@ -112,7 +131,8 @@ export const requestMergeTailRepair = async (
   }
   await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
 
-  const duplicate = await priorRequestResult(tx, input.taskId, input.requestId);
+  const markers = await dependencies.readHistory(tx, input.taskId);
+  const duplicate = await priorRequestResult(tx, input.taskId, input.requestId, markers);
   if (duplicate) return duplicate;
 
   const regressionTask = await tx.task.findUnique({
@@ -140,28 +160,30 @@ export const requestMergeTailRepair = async (
     where: { regressionTaskId: input.taskId },
     orderBy: [{ attempt: "desc" }, { id: "desc" }],
   });
-  if (!aggregate || aggregate.regressionTaskId !== input.taskId) {
+  if (!aggregate) {
     return refused("merge_tail_repair_not_blocked", "No merge-tail recovery is blocked for this Regression task");
   }
   if (aggregate.refusalCode !== null) {
     return refused("merge_tail_repair_refusal_pending", "The blocked recovery has a pending head-adoption refusal");
   }
 
-  const markers = await dependencies.readHistory(tx, input.taskId);
   if (aggregate.recoveryRunId && markers.some((marker) => (
     marker.kind === "repairAttempt" && marker.raw.sourceRunId === aggregate.recoveryRunId
   ))) {
     return refused("merge_tail_repair_already_open", "A repair is already open for this recovery Run");
   }
-  if (aggregate.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
+  const recovery = recoveryContext(aggregate);
+  if (!recovery
+    || recovery.regressionTaskId !== input.taskId
+    || aggregate.status !== MergeRecoveryStatus.BLOCKED_DOWNSTREAM
     || regressionTask.status !== TaskStatus.REVIEW
-    || !aggregate.readinessTaskId
-    || !aggregate.integratorTaskId) {
+    || recovery.readinessTaskId !== aggregate.readinessTaskId
+    || recovery.integratorTaskId !== aggregate.integratorTaskId) {
     return refused("merge_tail_repair_not_blocked", "The merge-tail recovery and its tasks are not parked for repair");
   }
 
   const relatedTasks = await tx.task.findMany({
-    where: { id: { in: [input.taskId, aggregate.readinessTaskId, aggregate.integratorTaskId] } },
+    where: { id: { in: [input.taskId, recovery.readinessTaskId, recovery.integratorTaskId] } },
     select: {
       id: true,
       projectId: true,
@@ -173,13 +195,12 @@ export const requestMergeTailRepair = async (
     },
   });
   const taskById = new Map(relatedTasks.map((task) => [task.id, task]));
-  const readinessTask = taskById.get(aggregate.readinessTaskId);
-  const integratorTask = taskById.get(aggregate.integratorTaskId);
+  const readinessTask = taskById.get(recovery.readinessTaskId);
+  const integratorTask = taskById.get(recovery.integratorTaskId);
   const relatedIdentityIsValid = relatedTasks.length === 3 && relatedTasks.every((task) => (
     task.projectId === identity.projectId && task.chainId === identity.chainId
   ));
   if (!relatedIdentityIsValid
-    || taskById.get(input.taskId)?.status !== TaskStatus.REVIEW
     || readinessTask?.status !== TaskStatus.REVIEW
     || !isMergeReadinessStep(readinessTask?.templateStep)
     || integratorTask?.status !== TaskStatus.REVIEW
@@ -188,18 +209,15 @@ export const requestMergeTailRepair = async (
   }
   const activeRuns = await tx.run.count({
     where: {
-      taskId: { in: [input.taskId, aggregate.readinessTaskId, aggregate.integratorTaskId] },
+      taskId: { in: [input.taskId, recovery.readinessTaskId, recovery.integratorTaskId] },
       status: { in: ACTIVE_RUN_STATUSES },
     },
   });
   if (activeRuns > 0) {
     return refused("merge_tail_repair_active_run", "A merge-tail task still has an active Run");
   }
-  if (!aggregate.recoveryRunId) {
-    return refused("merge_tail_repair_verdict_missing", "The blocked recovery has no Regression Run verdict");
-  }
   const sourceRun = await tx.run.findUnique({
-    where: { id: aggregate.recoveryRunId },
+    where: { id: recovery.recoveryRunId },
     select: { id: true, taskId: true, branch: true, headSha: true },
   });
   if (!sourceRun || sourceRun.taskId !== input.taskId) {
@@ -241,7 +259,7 @@ export const requestMergeTailRepair = async (
     now: input.now,
   });
   if ("refusal" in repair) {
-    return refused("merge_tail_repair_not_blocked", `The repair task could not be created: ${repair.refusal}`);
+    return refused("merge_tail_repair_creation_failed", `The repair task could not be created: ${repair.refusal}`);
   }
   await transitionMergeRecovery(tx, aggregate.id, MergeRecoveryStatus.REPAIRING, {
     failureReason: null,
@@ -262,6 +280,7 @@ export const requestMergeTailRepair = async (
       action: MERGE_TAIL_REPAIR_REQUEST_ACTION,
       requestId: input.requestId,
       reason: input.reason ?? null,
+      sourceRunId: sourceRun.id,
       repairKind,
       headSha: verdict.headSha,
       baseHeadSha: verdict.baseHeadSha,
