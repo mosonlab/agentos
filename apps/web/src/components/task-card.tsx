@@ -117,7 +117,7 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
-  const strandedSalvageBranches = task.strandedSalvageBranches ?? [];
+  const strandedSalvageBranches = task.strandedSalvageBranches;
   const assignee = task.assigneeAgent?.title ?? null;
   const schedule = scheduleLabel(task);
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";

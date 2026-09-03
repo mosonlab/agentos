@@ -59,7 +59,7 @@ test("a board card marks stranded salvage only when the projected count is non-z
   const withSalvage = card({
     id: "t1",
     strandedSalvageBranches: [{ branch: "agentos/t1/run-1", lostRunNumber: 1 }],
-  } as Partial<BoardTask>);
+  });
   assert.match(withSalvage, /data-card-stranded-salvage=""/u);
   assert.match(withSalvage.replace(/<[^>]*>/gu, ""), /Salvage 1/u);
   assert.doesNotMatch(card(), /data-card-stranded-salvage/u);

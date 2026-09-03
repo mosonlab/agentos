@@ -11,6 +11,60 @@ import {
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
 
+test("salvage publication records the stranded branch and preserves the already-started 409", async () => {
+  await withTokens(async () => {
+    const activities: Array<Record<string, unknown>> = [];
+    const lost = {
+      id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+      status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null,
+      pushedBranch: null, branch: "feat/salvage",
+    };
+    const replacement = {
+      id: "run-4", runNumber: 4, status: RunStatus.RUNNING,
+      startedAt: new Date(), baseSha: "base-before-salvage",
+    };
+    const tx = {
+      $queryRaw: async () => [{ id: "task-1" }],
+      run: {
+        findUnique: async () => lost,
+        findFirst: async () => replacement,
+        updateMany: async () => ({ count: 1 }),
+      },
+      task: {
+        findUnique: async () => ({ projectId: "project-1", chainId: null }),
+        findUniqueOrThrow: async () => ({ id: "task-1" }),
+      },
+      taskActivity: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          activities.push(data);
+          return {};
+        },
+      },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request("/runner/workspaces/salvaged", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1", runId: "run-3", pushedBranch: "agentos/task-1/run-3",
+      }),
+    });
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Salvage is durable, but the replacement already started from its prior base",
+    });
+    assert.deepEqual(activities, [{
+      taskId: "task-1",
+      actorType: "control-plane",
+      body: "Salvage branch agentos/task-1/run-3 from LOST Run 3 was not consumed by replacement Run 4 (RUNNING) from baseSha base-before-salvage",
+    }]);
+  });
+});
+
 test("starting a run without an exact dispatched prompt hash is refused before database access", async () => {
   await withTokens(async () => {
     const response = await createApp({} as PrismaClient).request("/runner/runs/run-1/start", {

@@ -153,7 +153,7 @@ test("an aggregate board card carries the stranded salvage count from its member
   const member = task({
     id: "step-with-salvage",
     strandedSalvageBranches: [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }],
-  } as Partial<BoardTask>);
+  });
   const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={[member]} />);
   assert.match(markup, /data-card-stranded-salvage=""/u);
   assert.match(visibleText(markup), /Salvage 1/u);

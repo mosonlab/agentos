@@ -121,12 +121,10 @@ export type BoardRow = {
      *  let a select that forgets it type-check and project null, dropping the
      *  card's pull request link with no compile error. */
     pullRequestUrl: string | null;
-    /** Salvage evidence is loaded for the per-task stranded-salvage
-     * projection. It is optional here so pure board-card callers can keep
-     * supplying their minimal historical Run fixtures. The database selects
-     * below always include both columns. */
-    pushedBranch?: string | null;
-    baseSha?: string | null;
+    /** Salvage evidence is required so a select that forgets either column
+     * cannot silently erase the operator-facing stranded-salvage signal. */
+    pushedBranch: string | null;
+    baseSha: string | null;
     session: {
       nativeChildUsed: boolean;
       costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
@@ -1134,6 +1132,7 @@ const taskListInclude = {
   // Run.output is forensic bulk and no list caller reads it.
   runs: {
     orderBy: { runNumber: "desc" },
+    take: 1,
     omit: { output: true },
     include: { session: true },
   },
@@ -1152,6 +1151,23 @@ export const readTaskList = async (
     orderBy: taskOrderBy,
     include: taskListInclude,
   });
+  const salvageRuns = tasks.length === 0 ? [] : await db.run.findMany({
+    where: { taskId: { in: tasks.map((task) => task.id) } },
+    select: {
+      taskId: true,
+      runNumber: true,
+      status: true,
+      pushedBranch: true,
+      baseSha: true,
+    },
+  });
+  const salvageRunsByTask = new Map<string, typeof salvageRuns>();
+  for (const run of salvageRuns) {
+    if (run.taskId === null) continue;
+    const grouped = salvageRunsByTask.get(run.taskId) ?? [];
+    grouped.push(run);
+    salvageRunsByTask.set(run.taskId, grouped);
+  }
   const progressFor = await chainProgressLookup(db, tasks, scope, options.enrich);
   const cronIds = !options.enrich ? [] : tasks
     .filter((task) => task.scheduleKind === "CRON")
@@ -1166,10 +1182,7 @@ export const readTaskList = async (
 
   return tasks.map((task) => ({
     ...task,
-    // `taskListInclude` reads every Run to derive salvage evidence, while the
-    // established full-list response continues to expose only its newest Run.
-    runs: task.runs.slice(0, 1),
-    strandedSalvageBranches: strandedSalvageBranchesFromRuns(task.runs),
+    strandedSalvageBranches: strandedSalvageBranchesFromRuns(salvageRunsByTask.get(task.id) ?? []),
     executionOwner: chainExecutionOwner(task),
     chainProgress: progressFor(task),
     recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,

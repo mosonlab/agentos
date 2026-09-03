@@ -178,8 +178,66 @@ test("reclaim salvage ACK records when a started replacement leaves the branch u
   assert.deepEqual(activities[0], {
     taskId: "task-1",
     actorType: "control-plane",
-    body: "Salvage branch agentos/task-1/run-3 from LOST Run 3 was not consumed by replacement Run 4, which already started from baseSha base-before-salvage",
+    body: "Salvage branch agentos/task-1/run-3 from LOST Run 3 was not consumed by replacement Run 4 (RUNNING) from baseSha base-before-salvage",
   });
+});
+
+test("reclaim salvage ACK describes an unstarted replacement without claiming it started", async () => {
+  const activities: Array<Record<string, unknown>> = [];
+  const stored = {
+    id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+    status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null,
+    pushedBranch: null, branch: "feat/salvage",
+  };
+  const replacement = {
+    id: "run-4", runNumber: 4, status: RunStatus.QUEUED, startedAt: null, baseSha: null,
+  };
+  const db: any = {
+    run: {
+      findUnique: async () => stored,
+      findFirst: async () => replacement,
+      updateMany: async () => ({ count: 1 }),
+    },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+    },
+  };
+  db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
+
+  assert.equal(await acknowledgeReclaimSalvage(db, {
+    runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
+  }, async () => "already-started"), "already-started");
+  assert.equal(activities.length, 1);
+  assert.equal(
+    activities[0]?.body,
+    "Salvage branch agentos/task-1/run-3 from LOST Run 3 was not consumed by replacement Run 4 (QUEUED), which has no recorded baseSha",
+  );
+});
+
+test("repaired and requeued salvage replacements write no stranded-salvage activity", async () => {
+  for (const outcome of ["repaired", "requeued"] as const) {
+    const activities: Array<Record<string, unknown>> = [];
+    const stored = {
+      id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+      status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null,
+      pushedBranch: null, branch: "feat/salvage",
+    };
+    const db: any = {
+      run: {
+        findUnique: async () => stored,
+        updateMany: async () => ({ count: 1 }),
+      },
+      taskActivity: {
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+      },
+    };
+    db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
+
+    assert.equal(await acknowledgeReclaimSalvage(db, {
+      runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
+    }, async () => outcome), outcome);
+    assert.deepEqual(activities, [], outcome);
+  }
 });
 
 test("a directory the database has never heard of is kept, never offered", async () => {
