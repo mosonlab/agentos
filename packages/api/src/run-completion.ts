@@ -31,6 +31,7 @@ import {
   PushStatus,
   readMarkers,
   recordIntegratorStop,
+  REGRESSION_VERIFICATION_OUTPUT_KIND,
   runBudgetCeiling,
   type RunOutcome,
   runOutcomeVerdict,
@@ -188,7 +189,7 @@ export const completionOutputFailurePolicy = ({
   externalFailure: boolean;
   cappedExternalFailure: boolean;
 } => {
-  const targetFetchFailed = isRegressionVerificationOutputKind(outputKind)
+  const targetFetchFailed = outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
     && outcome.case === "required-output-unsatisfied"
     && outcome.reason.includes(TARGET_FETCH_BLOCK_REASON);
   return {

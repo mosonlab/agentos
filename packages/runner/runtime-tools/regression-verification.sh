@@ -112,8 +112,20 @@ fetch_base() {
       2>&1 >/dev/null)" || status=$?
     if [ "$status" -eq 0 ]; then
       local fetched
-      fetched="$(git rev-parse FETCH_HEAD)" || return 1
-      valid_sha "$fetched" || return 1
+      status=0
+      fetched="$(git rev-parse FETCH_HEAD 2>&1)" || status=$?
+      if [ "$status" -ne 0 ]; then
+        persist_target_fetch_block "$fetched"
+        printf 'regression-verification: cannot read fetched target (exit %s): %s\n' \
+          "$status" "$fetched" >&2
+        return 1
+      fi
+      if ! valid_sha "$fetched"; then
+        error="fetched target is not an object id: $fetched"
+        persist_target_fetch_block "$error"
+        printf 'regression-verification: %s\n' "$error" >&2
+        return 1
+      fi
       printf '%s' "$fetched"
       return 0
     fi

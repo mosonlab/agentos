@@ -183,6 +183,20 @@ test("a Regression target-fetch block keeps its git diagnostic and is externally
   assert.match(policy.failureReason ?? "", /could not read Username/);
 });
 
+test("a legacy Regression target-fetch text remains non-external", () => {
+  const policy = completionOutputFailurePolicy({
+    outputKind: "regression-verification",
+    missingOutputReason: null,
+    outcome: {
+      case: "required-output-unsatisfied",
+      reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username",
+    },
+  });
+
+  assert.equal(policy.externalFailure, false);
+  assert.equal(policy.cappedExternalFailure, false);
+});
+
 test("an ordinary missing-output refusal remains non-external and byte-for-byte unchanged", () => {
   const missingOutputReason = "missing implementation task output for current Run run-2";
   const policy = completionOutputFailurePolicy({

@@ -85,6 +85,16 @@ if [ "$1" = "fetch" ] && [ "${"$"}{REGRESSION_FIXTURE_FETCH_FAILURES:-0}" -gt 0 
     exit 128
   fi
 fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "FETCH_HEAD" ]; then
+  if [ "${"$"}{REGRESSION_FIXTURE_FETCH_HEAD_FAILURE:-0}" -eq 1 ]; then
+    printf 'fatal: ambiguous argument FETCH_HEAD: unknown revision\n' >&2
+    exit 128
+  fi
+  if [ "${"$"}{REGRESSION_FIXTURE_FETCH_HEAD_MALFORMED:-0}" -eq 1 ]; then
+    printf 'not-an-object-id\n'
+    exit 0
+  fi
+fi
 exec "$REGRESSION_FIXTURE_GIT" "$@"
 `);
   executable(join(bin, "node"), `#!/bin/sh
@@ -300,6 +310,32 @@ test("a target fetch failure leaves a machine-readable block record", () => {
     block.stderr,
     "fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443",
   );
+});
+
+test("an unreadable fetched target leaves a machine-readable block record", () => {
+  const seeded = fixture();
+  seeded.env.REGRESSION_FIXTURE_FETCH_HEAD_FAILURE = "1";
+
+  const prepared = run(seeded, "prepare");
+
+  assert.notEqual(prepared.status, 0);
+  assert.match(prepared.stderr, /cannot read fetched target \(exit 128\): .*unknown revision/u);
+  const block = JSON.parse(readFileSync(seeded.output, "utf8")) as Record<string, unknown>;
+  assert.equal(block.reason, "target-fetch-failed");
+  assert.equal(block.stderr, "fatal: ambiguous argument FETCH_HEAD: unknown revision");
+});
+
+test("a malformed fetched target leaves a machine-readable block record", () => {
+  const seeded = fixture();
+  seeded.env.REGRESSION_FIXTURE_FETCH_HEAD_MALFORMED = "1";
+
+  const prepared = run(seeded, "prepare");
+
+  assert.notEqual(prepared.status, 0);
+  assert.match(prepared.stderr, /fetched target is not an object id: not-an-object-id/u);
+  const block = JSON.parse(readFileSync(seeded.output, "utf8")) as Record<string, unknown>;
+  assert.equal(block.reason, "target-fetch-failed");
+  assert.equal(block.stderr, "fetched target is not an object id: not-an-object-id");
 });
 
 test("a successful target fetch leaves no block record", () => {
