@@ -1435,7 +1435,8 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
    the primary Chain rows but omits its chain-detached merge-tail repair tasks.
    Find those tasks with `GET /tasks?view=board`: their `repairOf.chainId`
    contains the Chain binding derived from the same repair markers that
-   `DELETE /tasks/:taskId/chain` covers. Archive both sets of task IDs.
+   `DELETE /tasks/:taskId/chain` covers. Archive both sets of task IDs; this
+   closes any OPEN merge-tail stop notices for those tasks.
 
    ```sh
    OLD_CHAIN=$(curl "$BASE_URL/tasks/$OLD_CHAIN_TASK_ID/chain" \
@@ -1534,6 +1535,8 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATO
 
 - Required path parameter: `taskId`.
 - If the task belongs to a Chain, archives every task in that Chain atomically.
+- OPEN merge-tail stop notices on the archived tasks are closed atomically;
+  other Inbox messages are unchanged.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
