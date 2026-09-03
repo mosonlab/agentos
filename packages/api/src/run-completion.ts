@@ -173,19 +173,15 @@ const TARGET_FETCH_BLOCK_REASON = "target-fetch-failed";
 
 type OutputFailurePolicyInput = {
   outputKind: string | null | undefined;
-  missingOutputReason: string | null;
   outcome: RunOutcome;
 };
 
-/** Preserve the runner's diagnostic only for the one machine-readable
- * Regression block that converts an absent output from agent failure into an
- * external git failure. Every other missing-output refusal remains unchanged. */
+/** Convert only Regression's machine-readable target-fetch block from an
+ * absent-output agent failure into an external git failure. */
 export const completionOutputFailurePolicy = ({
   outputKind,
-  missingOutputReason,
   outcome,
 }: OutputFailurePolicyInput): {
-  failureReason: string | null;
   externalFailure: boolean;
   cappedExternalFailure: boolean;
 } => {
@@ -193,7 +189,6 @@ export const completionOutputFailurePolicy = ({
     && outcome.case === "required-output-unsatisfied"
     && outcome.reason.includes(TARGET_FETCH_BLOCK_REASON);
   return {
-    failureReason: targetFetchFailed ? outcome.reason : missingOutputReason,
     externalFailure: targetFetchFailed,
     cappedExternalFailure: targetFetchFailed,
   };
@@ -226,6 +221,23 @@ export type ExternalFailureRefundDecision = {
   activity: RefundActivity | null;
 };
 
+const refundActivity = (
+  body: string,
+  policy: RefundActivity["metadata"]["policy"],
+  granted: boolean,
+  capReached: boolean,
+): RefundActivity => ({
+  body,
+  metadata: {
+    kind: granted ? "externalFailureRefund.granted" : "externalFailureRefund.refused",
+    schemaVersion: 1,
+    policy,
+    granted,
+    cap: EXTERNAL_FAILURE_REFUND_CAP,
+    capReached,
+  },
+});
+
 export const completionBudgetAfterRefund = (
   maxRunsPerTask: number,
   budgetGrants: number,
@@ -252,70 +264,50 @@ export const externalFailureRefundDecision = ({
     return {
       refunded: 0,
       capReached: false,
-      activity: {
-        body: `Run ${runNumber} external failure was not refunded because the step is mechanical`,
-        metadata: {
-          kind: "externalFailureRefund.refused",
-          schemaVersion: 1,
-          policy,
-          granted: false,
-          cap: EXTERNAL_FAILURE_REFUND_CAP,
-          capReached: false,
-        },
-      },
+      activity: refundActivity(
+        `Run ${runNumber} external failure was not refunded because the step is mechanical`,
+        policy,
+        false,
+        false,
+      ),
     };
   }
   if (!refundable) {
     return {
       refunded: 0,
       capReached: false,
-      activity: {
-        body: `Run ${runNumber} external failure was not eligible for a budget refund`,
-        metadata: {
-          kind: "externalFailureRefund.refused",
-          schemaVersion: 1,
-          policy,
-          granted: false,
-          cap: EXTERNAL_FAILURE_REFUND_CAP,
-          capReached: false,
-        },
-      },
+      activity: refundActivity(
+        `Run ${runNumber} external failure was not eligible for a budget refund`,
+        policy,
+        false,
+        false,
+      ),
     };
   }
   if (capped && priorCappedRefunds >= EXTERNAL_FAILURE_REFUND_CAP) {
     return {
       refunded: 0,
       capReached: true,
-      activity: {
-        body: `Run ${runNumber} external-failure refund cap was reached (${EXTERNAL_FAILURE_REFUND_CAP})`,
-        metadata: {
-          kind: "externalFailureRefund.refused",
-          schemaVersion: 1,
-          policy,
-          granted: false,
-          cap: EXTERNAL_FAILURE_REFUND_CAP,
-          capReached: true,
-        },
-      },
+      activity: refundActivity(
+        `Run ${runNumber} external-failure refund cap was reached (${EXTERNAL_FAILURE_REFUND_CAP})`,
+        policy,
+        false,
+        true,
+      ),
     };
   }
   const ordinal = capped ? priorCappedRefunds + 1 : null;
   return {
     refunded: 1,
     capReached: false,
-    activity: {
-      body: capped
+    activity: refundActivity(
+      capped
         ? `Run ${runNumber} received external-failure budget refund ${ordinal} of ${EXTERNAL_FAILURE_REFUND_CAP}`
         : `Run ${runNumber} received an external-failure budget refund`,
-      metadata: {
-        kind: "externalFailureRefund.granted",
-        schemaVersion: 1,
-        policy,
-        granted: true,
-        cap: EXTERNAL_FAILURE_REFUND_CAP,
-        capReached: false,
-      },
-    },
+      policy,
+      true,
+      false,
+    ),
   };
 };
 
@@ -648,7 +640,6 @@ export const completeRun = async (
     );
     const outputFailurePolicy = completionOutputFailurePolicy({
       outputKind: run.task?.templateStep?.outputKind,
-      missingOutputReason,
       outcome: body.outcome,
     });
     // A valid, same-Run mechanical result is terminal protocol success even
@@ -708,7 +699,7 @@ export const completeRun = async (
     // reported success still carries no failure reason.
     const failureReason = succeeded && reported.succeeded
       ? null
-      : outputFailurePolicy.failureReason ?? reported.failureReason ?? "Execution failed";
+      : missingOutputReason ?? reported.failureReason ?? "Execution failed";
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
     // before reading capped-refund history so two completion decisions cannot

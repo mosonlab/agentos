@@ -100,7 +100,9 @@ const RATE_LIMIT_PATTERN = /\b429\b|rate.?limit|usage.?limit|quota/iu;
  *  error only — the same channel and the same terms adapters.ts checked first. */
 const PROVIDER_RETRY_PATTERN = /connection lost|server_error/iu;
 
-const PROVIDER_OUTAGE_PATTERN = /provider outage|\b(?:HTTP(?:\s+response)?|status(?:\s+code)?)\s*[:=]?\s*5\d\d\b/iu;
+const PROVIDER_OUTAGE_PATTERN = /provider outage|\b(?:(?:API\s+)?Error|failed with|HTTP(?:\s+response)?|status(?:\s+code)?)\s*[:=]?\s*5\d\d\b/iu;
+
+const PROVIDER_TRY_AGAIN_PATTERN = /try again later/iu;
 
 /**
  * Ported from `packages/runner/src/network-retry.ts` (`TRANSIENT_NETWORK_PATTERNS`
@@ -128,7 +130,6 @@ const TRANSIENT_NETWORK_PATTERNS = [
   /unexpected EOF/i,
   /\bPost\s+"[^\"]+"\s*:\s*EOF\b/i,
   /our servers are currently overloaded/i,
-  /try again later/i,
   /connection (?:reset|closed|timed out|lost)/i,
   /ECONNRESET/i,
   /ETIMEDOUT/i,
@@ -158,6 +159,14 @@ export const transientNetworkText = (text: string): boolean => {
 const envelopeVerdictText = (envelope: FailureEnvelope): string =>
   `${envelope.providerError ?? ""}\n${envelope.stderrSummary ?? ""}`;
 
+const transientProviderText = (envelope: FailureEnvelope): boolean =>
+  transientNetworkText(envelopeVerdictText(envelope))
+  || PROVIDER_OUTAGE_PATTERN.test(envelopeVerdictText(envelope))
+  // This generic provider prompt is authoritative only on the structured
+  // provider channel. Agent stderr can contain the same words from any tool
+  // the task invoked and must not decide a budget refund by itself.
+  || PROVIDER_TRY_AGAIN_PATTERN.test(envelope.providerError ?? "");
+
 /**
  * Whether a TRANSIENT_PROVIDER verdict was reached from one of the external
  * transport/outage phrases, rather than from a typed runner marker. The
@@ -168,8 +177,7 @@ export const isTextMatchedTransientProviderFailure = (
   envelope: FailureEnvelope,
   failureClass: FailureClass,
 ): boolean => failureClass === FailureClass.TRANSIENT_PROVIDER
-  && (transientNetworkText(envelopeVerdictText(envelope))
-    || PROVIDER_OUTAGE_PATTERN.test(envelopeVerdictText(envelope)));
+  && transientProviderText(envelope);
 
 const TOOL_FAILURE_PATTERN = /"isError"\s*:\s*true|"command_execution"[\s\S]{0,500}"status"\s*:\s*"failed"/u;
 const DEPENDENCY_PROVISIONING_MANIFEST_MISSING = "dependency-provisioning-manifest-missing";
@@ -228,7 +236,7 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // connection, and backing off for the rate-limit interval would be wrong.
   if (PROVIDER_RETRY_PATTERN.test(envelope.providerError ?? "")) return FailureClass.TRANSIENT_PROVIDER;
   if (RATE_LIMIT_PATTERN.test(verdict)) return FailureClass.RATE_LIMITED;
-  if (transientNetworkText(verdict) || PROVIDER_OUTAGE_PATTERN.test(verdict)) return FailureClass.TRANSIENT_PROVIDER;
+  if (transientProviderText(envelope)) return FailureClass.TRANSIENT_PROVIDER;
   // The one place stdout is consulted, and it is safe precisely because
   // TOOL_FAILED is neither retryable nor external: a false positive here can
   // only change the label an operator reads, never the budget or the retry

@@ -121,6 +121,23 @@ test("provider overload wording is retryable transience", () => {
   assert.equal(verdict.retryable, true);
 });
 
+test("provider 5xx errors remain retryable without matching stack-trace locations", () => {
+  for (const providerError of [
+    'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
+    'API Error: 500 {"type":"error","error":{"type":"api_error"}}',
+  ]) {
+    const verdict = classifyEnvelope(envelope({ providerError }));
+    assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+    assert.equal(failureIsRetryable(verdict.failureClass), true);
+  }
+});
+
+test("a generic retry prompt on agent stderr does not earn a refund", () => {
+  const verdict = classifyEnvelope(envelope({ stderrSummary: "please try again later" }));
+  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(verdict.externalFailure, false);
+});
+
 test("an unrelated stack-trace line is not a provider outage", () => {
   const verdict = classifyEnvelope(envelope({ stderrSummary: "node:events:526:24" }));
   assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
