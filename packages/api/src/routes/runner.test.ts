@@ -316,6 +316,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
     let closed: Record<string, unknown> | undefined;
     let retry: Record<string, unknown> | undefined;
     const taskWrites: Record<string, unknown>[] = [];
+    const activities: Record<string, unknown>[] = [];
     const inbox: Record<string, unknown>[] = [];
     const archivedAt = new Date("2026-08-16T06:00:00.000Z");
     const run = {
@@ -350,7 +351,11 @@ test("completion refunds an external failure but refuses an automatic retry for 
         }),
         findUniqueOrThrow: async () => run.task,
       },
-      taskActivity: { findMany: async () => [], create: async () => ({}) },
+      taskActivity: {
+        findMany: async () => [],
+        count: async () => 0,
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+      },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     };
@@ -381,6 +386,21 @@ test("completion refunds an external failure but refuses an automatic retry for 
     });
     assert.equal(response.status, 200);
     assert.equal(closed?.maxRunsPerTask, 4);
+    assert.deepEqual(
+      activities.find(({ metadata }) => (metadata as { kind?: string })?.kind === "externalFailureRefund.granted")?.metadata,
+      {
+        kind: "externalFailureRefund.granted",
+        schemaVersion: 1,
+        policy: "capped",
+        granted: true,
+        cap: 3,
+        capReached: false,
+        runId: "run-3",
+        priorCappedRefunds: 0,
+        budgetGrantsBefore: 0,
+        budgetGrantsAfter: 1,
+      },
+    );
     assert.equal(retry, undefined);
     assert.match(String(taskWrites.at(-1)?.failureReason), /Automatic retry refused.*Archived Retry Agent/);
     assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived Retry Agent/);

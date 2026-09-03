@@ -800,6 +800,219 @@ const removeRetainedSessionConfig = async (completion: { body: Record<string, un
   if (retained) await rm(dirname(retained), { recursive: true, force: true });
 };
 
+const regressionBlockClaim = (remoteUrl: string): ClaimedTask => ({
+  ...agentClaim,
+  runner: "CLAUDE",
+  repo: { ...mechanicalClaim.repo, remoteUrl, defaultBranch: "master" },
+  task: {
+    ...mechanicalClaim.task,
+    chainId: "chain-1",
+    chainIndex: 5,
+    templateStep: {
+      name: "Regression verification",
+      outputKind: "regression-verification-v2",
+      provisionDependencies: false,
+      taskTemplate: { name: "regression-workflow" },
+    },
+  },
+  run: {
+    ...mechanicalClaim.run,
+    requiresCommit: false,
+    opensPullRequest: false,
+    targetBranch: "master",
+    maxRunsPerTask: 3,
+  },
+});
+
+const regressionBlockRecord = (runId: string): string => JSON.stringify({
+  schemaVersion: 1,
+  runId,
+  kind: "regression-verification-v2",
+  reason: "target-fetch-failed",
+  stderr: "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+});
+
+const regressionBlockAdapter = async (
+  workingDirectory: string,
+  runId: string,
+): Promise<ReturnType<CliAdapter["start"]> extends Promise<infer T> ? T : never> => {
+  await mkdir(join(workingDirectory, ".agentos"), { recursive: true });
+  await writeFile(join(workingDirectory, ".agentos", "regression-output.json"), regressionBlockRecord(runId), { mode: 0o600 });
+  const now = new Date();
+  return {
+    runId,
+    runner: "CLAUDE",
+    child: null as never,
+    pid: null,
+    startedAt: now,
+    lastProcessAliveAt: now,
+    lastProgressEventAt: now,
+    inFlightTool: null,
+    providerConversationId: null,
+    terminalEventSeen: true,
+    terminalSuccess: true,
+    terminationReason: null,
+    sawError: false,
+    providerError: null,
+    providerState: null,
+    finalOutput: null,
+    stdout: "",
+    stderr: "",
+    exit: Promise.resolve({
+      exitCode: 0,
+      signal: null,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      terminationReason: null,
+      finalOutput: null,
+      providerError: null,
+      stdout: "",
+      stderr: "",
+    }),
+  };
+};
+
+test("a Regression target-fetch block record is reported in the terminal reason and remediation event", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-target-fetch-block-"));
+  try {
+    const remote = await seedRemote(root);
+    const claim = { ...regressionBlockClaim(remote), session: testSession(root) };
+    const controlPlane = createControlPlaneDouble({
+      outputStatus: async () => ({
+        satisfaction: {
+          case: "absent",
+          outputKind: "regression-verification-v2",
+          remediable: false,
+        },
+        prHandoff: { case: "not-a-pr-delivery" },
+      }),
+    });
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async ({ workingDirectory }) => regressionBlockAdapter(workingDirectory, claim.run.id),
+      heartbeat: async () => ({
+        processAlive: false,
+        lastProcessAliveAt: new Date(),
+        lastProgressEventAt: new Date(),
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+
+    await executeClaimProduction({ ...config(join(root, "workspaces")), home: root }, claim, {
+      materializeRuntimeTools: async () => undefined,
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      provisionSessionConfig: async () => undefined,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.outcome.case, "required-output-unsatisfied");
+    assert.match(failureReasonOf(completion?.outcome), /target-fetch-failed/u);
+    assert.match(failureReasonOf(completion?.outcome), /could not read Username/u);
+    const unavailable = controlPlane.eventBatches.flat()
+      .find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_UNAVAILABLE");
+    assert.deepEqual(unavailable?.payload, {
+      outputKind: "regression-verification-v2",
+      outputRemediationAllowed: false,
+      providerConversationIdAvailable: false,
+      reason: "target-fetch-failed",
+      stderr: "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Regression missing-output refusal without a block record keeps its existing message and payload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-no-target-fetch-block-"));
+  try {
+    const remote = await seedRemote(root);
+    const claim = { ...regressionBlockClaim(remote), session: testSession(root) };
+    const controlPlane = createControlPlaneDouble({
+      outputStatus: async () => ({
+        satisfaction: {
+          case: "absent",
+          outputKind: "regression-verification-v2",
+          remediable: false,
+        },
+        prHandoff: { case: "not-a-pr-delivery" },
+      }),
+    });
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async () => {
+        const now = new Date();
+        return {
+          runId: claim.run.id,
+          runner: "CLAUDE",
+          child: null as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          providerState: null,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            terminalEventSeen: true,
+            terminalSuccess: true,
+            terminationReason: null,
+            finalOutput: null,
+            providerError: null,
+            stdout: "",
+            stderr: "",
+          }),
+        };
+      },
+      heartbeat: async () => ({
+        processAlive: false,
+        lastProcessAliveAt: new Date(),
+        lastProgressEventAt: new Date(),
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+
+    await executeClaimProduction({ ...config(join(root, "workspaces")), home: root }, claim, {
+      materializeRuntimeTools: async () => undefined,
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      provisionSessionConfig: async () => undefined,
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(
+      failureReasonOf(completion?.outcome),
+      `A step declaring output kind 'regression-verification-v2' finished without a current-Run mechanical output handoff for Run ${claim.run.id}`,
+    );
+    const unavailable = controlPlane.eventBatches.flat()
+      .find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_UNAVAILABLE");
+    assert.deepEqual(unavailable?.payload, {
+      outputKind: "regression-verification-v2",
+      outputRemediationAllowed: false,
+      providerConversationIdAvailable: false,
+      reason: "mechanical-handoff-absent",
+    });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex provision auth failure is PROVISION, retains its root, and never spawns the CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-provision-failure-"));
   try {

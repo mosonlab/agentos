@@ -86,7 +86,7 @@ export const normalizeSessionEventValue = (value: unknown): unknown => {
 
 /** Auth vocabulary of the agent CLIs. Read off the provider error and stderr
  *  only — never stdout, which is where the agent's own work appears. */
-const CLI_AUTH_PATTERN = /authentication_failed|\b401\b|Missing authentication|No API key found|not logged in/iu;
+const CLI_AUTH_PATTERN = /authentication_failed|\b401\b|Missing authentication|No API key found|not logged in|not-authenticated:\s*the CLI's own login check did not pass/iu;
 
 /** Auth vocabulary of `git push` and `gh`, which is a different one. `\bauth\w*`
  *  would swallow "Author identity unknown" — git's error for a missing
@@ -100,7 +100,9 @@ const RATE_LIMIT_PATTERN = /\b429\b|rate.?limit|usage.?limit|quota/iu;
  *  error only — the same channel and the same terms adapters.ts checked first. */
 const PROVIDER_RETRY_PATTERN = /connection lost|server_error/iu;
 
-const PROVIDER_OUTAGE_PATTERN = /provider outage|\b5\d\d\b/iu;
+const PROVIDER_OUTAGE_PATTERN = /provider outage|\b(?:(?:API\s+)?Error|failed with|HTTP(?:\s+response)?|status(?:\s+code)?)\s*[:=]?\s*5\d\d\b/iu;
+
+const PROVIDER_TRY_AGAIN_PATTERN = /try again later/iu;
 
 /**
  * Ported from `packages/runner/src/network-retry.ts` (`TRANSIENT_NETWORK_PATTERNS`
@@ -126,6 +128,8 @@ const TRANSIENT_NETWORK_PATTERNS = [
   /fetch failed/i,
   /SSL_ERROR_SYSCALL/i,
   /unexpected EOF/i,
+  /\bPost\s+"[^\"]+"\s*:\s*EOF\b/i,
+  /our servers are currently overloaded/i,
   /connection (?:reset|closed|timed out|lost)/i,
   /ECONNRESET/i,
   /ETIMEDOUT/i,
@@ -151,6 +155,29 @@ export const transientNetworkText = (text: string): boolean => {
   if (DETERMINISTIC_ACCESS_PATTERNS.some((pattern) => pattern.test(text))) return false;
   return TRANSIENT_NETWORK_PATTERNS.some((pattern) => pattern.test(text));
 };
+
+const envelopeVerdictText = (envelope: FailureEnvelope): string =>
+  `${envelope.providerError ?? ""}\n${envelope.stderrSummary ?? ""}`;
+
+const transientProviderText = (envelope: FailureEnvelope): boolean =>
+  transientNetworkText(envelopeVerdictText(envelope))
+  || PROVIDER_OUTAGE_PATTERN.test(envelopeVerdictText(envelope))
+  // This generic provider prompt is authoritative only on the structured
+  // provider channel. Agent stderr can contain the same words from any tool
+  // the task invoked and must not decide a budget refund by itself.
+  || PROVIDER_TRY_AGAIN_PATTERN.test(envelope.providerError ?? "");
+
+/**
+ * Whether a TRANSIENT_PROVIDER verdict was reached from one of the external
+ * transport/outage phrases, rather than from a typed runner marker. The
+ * completion path uses this evidence to cap the new EXECUTE-phase refunds;
+ * keeping it as a helper leaves the completion wire verdict unchanged.
+ */
+export const isTextMatchedTransientProviderFailure = (
+  envelope: FailureEnvelope,
+  failureClass: FailureClass,
+): boolean => failureClass === FailureClass.TRANSIENT_PROVIDER
+  && transientProviderText(envelope);
 
 const TOOL_FAILURE_PATTERN = /"isError"\s*:\s*true|"command_execution"[\s\S]{0,500}"status"\s*:\s*"failed"/u;
 const DEPENDENCY_PROVISIONING_MANIFEST_MISSING = "dependency-provisioning-manifest-missing";
@@ -195,7 +222,7 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   if (envelope.exitCode === 127) return FailureClass.BINARY_NOT_FOUND;
   // The verdict channels. `stdoutSummary` is deliberately absent: it is
   // evidence, kept for the operator and for #114, and never a verdict.
-  const verdict = `${envelope.providerError ?? ""}\n${envelope.stderrSummary ?? ""}`;
+  const verdict = envelopeVerdictText(envelope);
   // Auth outranks transience. A provider error that names an auth failure must
   // not be retried into a lockout just because the same message also mentions a
   // dropped connection.
@@ -209,7 +236,7 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // connection, and backing off for the rate-limit interval would be wrong.
   if (PROVIDER_RETRY_PATTERN.test(envelope.providerError ?? "")) return FailureClass.TRANSIENT_PROVIDER;
   if (RATE_LIMIT_PATTERN.test(verdict)) return FailureClass.RATE_LIMITED;
-  if (transientNetworkText(verdict) || PROVIDER_OUTAGE_PATTERN.test(verdict)) return FailureClass.TRANSIENT_PROVIDER;
+  if (transientProviderText(envelope)) return FailureClass.TRANSIENT_PROVIDER;
   // The one place stdout is consulted, and it is safe precisely because
   // TOOL_FAILED is neither retryable nor external: a false positive here can
   // only change the label an operator reads, never the budget or the retry
@@ -238,6 +265,11 @@ const envelopeExternalFailure = (envelope: FailureEnvelope, failureClass: Failur
   // anything. This replaces trusting the runner's `externalFailure` claim with
   // two facts it reports and the API can reason about.
   if (!envelope.agentExited) return true;
+  // Textual transport/outage evidence is an environment failure even when an
+  // agent process exited cleanly in EXECUTE. Typed transience alone is not
+  // enough here: it may describe a runner-side timeout or another condition
+  // whose refund policy remains phase-bound.
+  if (isTextMatchedTransientProviderFailure(envelope, failureClass)) return true;
   // EXECUTE is the only phase that is the agent's own work. PROVISION (clone,
   // workspace, preflight), DELIVER and COMPLETE are all this runner's plumbing,
   // and a task must not pay a session for them — issue #113's case is a `git
