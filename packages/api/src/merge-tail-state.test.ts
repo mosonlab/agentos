@@ -176,7 +176,7 @@ test("blockDownstream atomically parks all three Tasks and writes its deduped ma
   assert.deepEqual(observed.activities.map((activity) => activity.metadata.state), ["tail-stopped", "tail-stopped"]);
   assert.equal(
     observed.notices[0]?.where.dedupeKey,
-    `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:readiness`,
+    `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:readiness:${recovery.recoveryRunId}`,
   );
 });
 

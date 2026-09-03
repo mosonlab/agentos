@@ -79,10 +79,11 @@ import { jsonValue } from "../execution.js";
 import { refusalFor, type Refusal } from "../refusal.js";
 import { activityInput } from "../run-lifecycle.js";
 import { OPERATOR_NOTE_METADATA_FIELD } from "../run-claim.js";
+import { requestMergeTailRepair } from "../merge-tail-repair-reentry.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
 import { isLiveStatus, lockTask, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
-import { readCommitted } from "../transaction.js";
+import { readCommitted, serializable } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
   id,
@@ -168,6 +169,10 @@ const chainHoldInput = z.object({
 }).strict();
 const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
+}).strict();
+const mergeTailRepairInput = z.object({
+  requestId: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(4_000).optional(),
 }).strict();
 
 /** Each response names both its native projection and the browser contract that
@@ -450,6 +455,18 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const address = await resolveDirectChainAddress(db, taskId);
     if ("message" in address) return refusalJson(context, address);
     const result = await readCommitted(db, (tx) => resumeChain(tx, { ...address, ...body }, new Date()));
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result);
+  });
+  app.post("/tasks/:taskId/merge-tail/repair", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const body = await readJson(context.req.raw, mergeTailRepairInput);
+    const result = await serializable(db, (tx) => requestMergeTailRepair(tx, {
+      taskId,
+      requestId: body.requestId,
+      ...(body.reason === undefined ? {} : { reason: body.reason }),
+      now: new Date(),
+    }));
     if ("message" in result) return refusalJson(context, result);
     return context.json(result);
   });

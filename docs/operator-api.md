@@ -1367,6 +1367,62 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   -d '{"requestId":"resume-001"}'
 ```
 
+### POST `/tasks/:taskId/merge-tail/repair`
+
+- Required path parameter: `taskId`, naming the Chain's Regression
+  verification task.
+- Required JSON field: `requestId` (a non-empty operator request identifier).
+- Optional JSON field: `reason` (the operator's explanation for re-entering
+  repair).
+- The request is accepted only for the latest `MergeRecoveryAttempt` bound to
+  this regression task when its aggregate is `BLOCKED_DOWNSTREAM`, its
+  `refusalCode` is `null`, and its `regressionTaskId` equals `taskId`. The
+  stored `TaskStepOutput` must be produced by that attempt's `recoveryRunId`
+  and carry a `review-fail` or `gate-fail` verdict. The regression, merge
+  readiness, and integrator tasks must all be in `REVIEW`, with no active Run
+  on any of them.
+- On success, the API returns `200 OK` with the repair result, including the
+  created detached `repairTaskId`, `repairKind` (`review-fix` or `gate-fix`),
+  verdict `headSha`, and `baseHeadSha`. The same `requestId` is idempotent: a
+  replay returns the original `200` result and creates no task, marker, or
+  activity. A request whose recovery `sourceRunId` already has a matching
+  `repairAttempt` marker is refused as already open.
+- The accepted operation is one serializable transaction under the Chain lock.
+  It charges the existing automatic repair budget, creates the ordinary
+  detached repair task assigned to the Chain's fixed-implementation agent,
+  writes the corresponding `repairAttempt` marker, transitions the aggregate
+  to `REPAIRING`, clears `failureReason`, and records the operator activity on
+  the regression task. It never writes a `repairResult`; the genuine repair
+  completion does that.
+- Refusals are `409 Conflict` JSON responses with a typed `code` and no side
+  effect:
+
+  - `merge_tail_repair_not_blocked`: the task has no matching latest recovery
+    attempt in `BLOCKED_DOWNSTREAM`, including an aggregate already in
+    `REPAIRING` with no open repair task or an aggregate missing required
+    recovery identity.
+  - `merge_tail_repair_verdict_missing`: the stored output is absent, is a
+    pass/unsupported verdict, or was produced by a Run other than
+    `recoveryRunId`.
+  - `merge_tail_repair_active_run`: the regression, readiness, or integrator
+    task has an active Run.
+  - `merge_tail_repair_refusal_pending`: the recovery attempt still has a
+    non-null `refusalCode`.
+  - `merge_tail_repair_budget_exhausted`: the existing repair-attempt count for
+    this repair kind has reached `MAX_MERGE_TAIL_REPAIR_ATTEMPTS`.
+  - `merge_tail_repair_already_open`: a repair attempt for this recovery
+    `sourceRunId` is already present. This takes precedence over the aggregate
+    having already moved to `REPAIRING`.
+  - `merge_tail_repair_creation_failed`: the fixed-implementation agent is
+    unavailable, lacks the repository grant, or the detached repair task cannot
+    resolve the Chain repository, position, and shared branch.
+
+```sh
+curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
+```
+
 ### Recovering a merge tail stopped after its repair budget
 
 When a regression verdict fails after the automatic repair budget is exhausted,
@@ -1385,6 +1441,22 @@ for a semantic regression stop, or
 for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
 is refused with `Chain task statuses are controlled by chain execution`. Both
 refusals are expected behaviour; do not use them to reopen the old Chain.
+
+#### Re-entering after a base-drift recovery FAIL
+
+If a semantic (`review-fail`) or merge-gate (`gate-fail`) regression FAIL
+occurs inside base-drift recovery, the merge tail is parked in
+`BLOCKED_DOWNSTREAM` with the recovery attempt's `recoveryRunId`. After
+confirming the failing output and stop notice, call
+`POST /tasks/:taskId/merge-tail/repair` on the regression task before
+considering a successor Chain. The route re-enters the ordinary `review-fix`
+or `gate-fix` round against the recorded head and base, charges the Chain's
+existing repair budget, and moves the aggregate to `REPAIRING`. Once that
+repair genuinely completes, the regression is rerun with the recovery context:
+a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
+`BLOCKED_DOWNSTREAM` again and can be re-entered with this route while budget
+remains. A refresh-conflict verdict keeps its existing recovery stop and is
+not re-entered by this route.
 
 Carry the delivered branch forward in this order. The brief used in step (c)
 must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).
