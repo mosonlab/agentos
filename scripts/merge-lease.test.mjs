@@ -154,7 +154,7 @@ const readLease = (fixture) => {
   return { sha, lease: JSON.parse(body), text: body };
 };
 
-const runLeaseAsync = (fixture, args, holder) =>
+const runLeaseAsync = (fixture, args, holder, options = {}) =>
   new Promise((resolve) => {
     const child = spawn("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
       cwd: fixture.root,
@@ -165,7 +165,10 @@ const runLeaseAsync = (fixture, args, holder) =>
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      options.onStderr?.(stderr);
+    });
     child.on("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
   });
 
@@ -302,14 +305,22 @@ test("merge lease acquire restamps acquiredAt on every attempt while it queues",
   };
   installLease(fixture, blocking);
 
+  let observedPoll;
+  const polled = new Promise((resolve) => { observedPoll = resolve; });
   const waiter = runLeaseAsync(
     fixture,
     ["acquire", "--reason", "Queued merge", "--task", "chain-99", "--poll-seconds", "1"],
     "waiter@fixture",
+    {
+      onStderr: (stderr) => {
+        if (stderr.includes("polling again")) observedPoll();
+      },
+    },
   );
-  // Let the first attempt lose and the poll loop turn over at least once, so the
-  // blob the winner installs is not the one it built at the head of the queue.
-  await new Promise((resolve) => setTimeout(resolve, 2500));
+  // Release only after the first attempt has demonstrably lost. A wall-clock
+  // delay races process scheduling when this fixture runs with the rest of the
+  // gate suite under load.
+  await polled;
   const queuedFor = Date.now();
   execFileSync("git", ["--git-dir", fixture.origin, "update-ref", "-d", "refs/merge-lease/holder"], {
     env: FIXTURE_ENV,
