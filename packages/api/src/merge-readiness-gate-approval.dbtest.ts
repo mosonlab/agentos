@@ -13,6 +13,7 @@ import {
   advanceTemplateTask,
   gateQuestion,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { persistSessionTaskOutput } from "./canonical-task-output.js";
@@ -264,7 +265,11 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
   process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-gated-happy";
   try {
     const claimed = await claimRun(db, {
-      body: { runnerId: "merge-executor-gated-happy", leaseSeconds: 60 },
+      body: {
+        runnerId: "merge-executor-gated-happy",
+        leaseSeconds: 60,
+        contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+      },
       claimantClass: "merge-executor",
       now: testTime(4),
       specificationReader: null,

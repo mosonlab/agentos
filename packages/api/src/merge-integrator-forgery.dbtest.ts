@@ -25,6 +25,7 @@ import {
   PrismaClient,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";
@@ -93,7 +94,10 @@ test("a plain runner bearer cannot claim the mechanical run by naming the execut
   // only RUNNER_TOKEN and simply writes the publicly configured executor id
   // into the body. Authority now comes from the bearer, so it is offered
   // nothing — and, crucially, is issued no session credential.
-  const forged = await call("POST", "/runner/tasks/claim", RUNNER, { runnerId: EXECUTOR_RUNNER });
+  const forged = await call("POST", "/runner/tasks/claim", RUNNER, {
+    runnerId: EXECUTOR_RUNNER,
+    contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+  });
   assert.equal(forged.status, 204, JSON.stringify(forged.body));
 
   const run = await db.run.findUniqueOrThrow({
@@ -154,7 +158,10 @@ test("positive control: the executor's own credential claims, writes and complet
   const chain = await seedIntegratorChain(db, { label: "forge-control" });
   const runId = await queueIntegratorRun(chain);
 
-  const claimed = await call("POST", "/runner/tasks/claim", EXECUTOR_TOKEN, { runnerId: EXECUTOR_RUNNER });
+  const claimed = await call("POST", "/runner/tasks/claim", EXECUTOR_TOKEN, {
+    runnerId: EXECUTOR_RUNNER,
+    contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+  });
   assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
   assert.equal(claimed.body.run.id, runId);
   assert.equal(claimed.body.executionMode, "mechanical");
@@ -187,7 +194,7 @@ test("an executor token aliased onto the runner token authenticates no executor 
       const response = await createApp(db).request("/runner/tasks/claim", {
         method: "POST",
         headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ runnerId: EXECUTOR_RUNNER }),
+        body: JSON.stringify({ runnerId: EXECUTOR_RUNNER, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }),
       });
       assert.equal(response.status, 204);
     });

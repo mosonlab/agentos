@@ -1,12 +1,30 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { FailureClass, type FailureEnvelope, type RunOutcome, runOutcomeVerdict } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import { z } from "zod";
 
 import { classifyEnvelope } from "./execution.js";
-import { completionEvidenceRefusal } from "./run-completion.js";
+import { completionEvidenceRefusal, completionInput } from "./run-completion.js";
 
 const baseSha = "5".repeat(40);
+
+test("the completion input schema references the shared contract version", () => {
+  assert.equal(completionInput.description, `Run completion contract version ${RUN_COMPLETION_CONTRACT_VERSION}`);
+});
+
+test("the completion input shape is pinned to its shared contract version", () => {
+  const schemaHash = createHash("sha256")
+    .update(JSON.stringify(z.toJSONSchema(completionInput, { unrepresentable: "any" })))
+    .digest("hex");
+  const schemaHashesByVersion: Record<number, string> = {
+    1: "fb27fe3f07d0dce703452f1706186bfe61521eb3bcd41fad9d193b51876ad9b7",
+  };
+
+  assert.equal(schemaHash, schemaHashesByVersion[RUN_COMPLETION_CONTRACT_VERSION]);
+});
 
 const implementationStep = {
   outputKind: "implementation",
