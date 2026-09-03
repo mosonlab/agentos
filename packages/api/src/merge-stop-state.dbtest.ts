@@ -23,6 +23,7 @@ import {
   PrismaClient,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { type PullRequestSnapshot } from "./github-read.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
@@ -156,7 +157,10 @@ const stoppedChain = async (
 
 const claimIntegratorRun = async (chain: IntegratorChain) => {
   const queued = await db.$transaction((tx) => enqueueTaskRun(tx, chain.integratorTask!.id));
-  const claimed = await call("POST", "/runner/tasks/claim", { runnerId: "merge-executor-1" }, EXECUTOR);
+  const claimed = await call("POST", "/runner/tasks/claim", {
+    runnerId: "merge-executor-1",
+    contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+  }, EXECUTOR);
   assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
   assert.equal(claimed.body.run.id, queued.id);
   assert.equal(claimed.body.executionMode, "mechanical");

@@ -1781,6 +1781,17 @@ field is report-only; omitted or empty means no observation and never changes
 the Run outcome. A late cancellation acknowledgement backfills this evidence
 when reconciliation terminalized the Run first.
 
+The machine-only `POST /runner/tasks/claim` request used by the merge executor
+also carries the required `contractVersion` field. It is the completion
+contract version exported by `@anneal/db`; the mechanical executor and API
+must agree on this value. A mechanical claim with an omitted or mismatched
+`contractVersion` is refused with `409 Conflict`, code
+`mechanical_contract_mismatch`, and a message naming both the executor's
+version and the API's version. The refusal claims or creates no Run and writes
+one TaskActivity on the Task that would have been claimed, recording both
+versions so the board shows why the step did not move. This version check is
+fail-closed; ordinary agent claims are unaffected.
+
 ### GET `/sessions`
 
 - Required parameters: none.
