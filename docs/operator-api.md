@@ -1747,6 +1747,19 @@ The two revalidation routes below are session-only capabilities; they are
 listed here so their authorization boundary is explicit even though operators
 cannot call them directly. A `spec-revalidator` session on a bound direct chain
 is the only caller accepted.
+
+### Lost-Run reconciliation
+
+When lease reconciliation loses a mechanical Run, a durable completion-rejection
+TaskActivity for that exact Run makes the loss terminal: automatic retry is
+refused, the Run's `failureReason` includes the rejection's HTTP status and
+response body, and the Task moves to `REVIEW` with an activity stating that the
+completion was rejected and operator action is required. The lost-lease budget
+refund is preserved. After fixing the cause of the rejected completion, recover
+by calling `POST /tasks/:taskId/retry`; the new Run does not require increasing
+`maxSessionsPerTask`. Mechanical Runs without that rejection record and agent
+Runs continue through the normal lost-Run retry path.
+
 The machine-only `/session/runs/:runId/status` projection is run-bound and is
 not an operator read route. Its `task.outputEvidence` is the server's decided
 answer about this Run's deliverables, and the runner reads it rather than
