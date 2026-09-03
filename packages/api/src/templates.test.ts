@@ -33,10 +33,12 @@ import { refusalFor, refusalResponse } from "./refusal.js";
 const assertTemplateRefusal = async (
   operation: () => Promise<unknown>,
   code: TemplateInstantiationRefusalCode,
+  message?: RegExp,
 ): Promise<void> => {
   await assert.rejects(operation, (error: unknown) => {
     assert.ok(isTemplateInstantiationRefusal(error));
     assert.equal(error.code, code);
+    if (message) assert.match(error.message, message);
     const refused = refusalFor(error);
     assert.ok(refused);
     assert.equal(refusalResponse(refused).status, 400);
@@ -737,16 +739,15 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
           description: `Route: implementation=${route}`,
         }),
         "implementation_route_template_unsupported",
+        /remove the Route line from the description or use stepOverrides/u,
       );
     }
-    await assertTemplateRefusal(
-      () => instantiateTemplate(db, "project-1", "template-1", {
-        repoId: "repo-1",
-        variables: {},
-        description: "Route: senior-dev - Route-looking prose is malformed",
-      }),
-      "implementation_route_malformed",
-    );
+    const malformedTolerated = await instantiateTemplate(db, "project-1", "template-1", {
+      repoId: "repo-1",
+      variables: {},
+      description: "Route: senior-dev - Route-looking prose is not parsed here",
+    });
+    assert.equal(malformedTolerated.tasks.length, 3, `${nonDirectName} must ignore malformed Route prose`);
     steps[1]!.outputKind = originalOutputKind;
   }
 });

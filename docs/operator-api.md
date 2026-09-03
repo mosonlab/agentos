@@ -1086,8 +1086,10 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   `direct-engineer-workflow`. Any other
   template returns `400 Bad Request` with code
   `implementation_route_template_unsupported` instead of silently using its
-  configured assignee. A route-shaped line that does not match the grammar
-  returns `implementation_route_malformed` for every template.
+  configured assignee; remove the line or use `stepOverrides` to assign that
+  template. On `direct-engineer-workflow`, a route-shaped line that does not
+  match the grammar returns `implementation_route_malformed`. Other templates
+  do not parse malformed Route-looking prose.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 
