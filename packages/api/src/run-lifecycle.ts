@@ -14,6 +14,7 @@ import {
 import { z } from "zod";
 
 import type { Principal } from "./auth.js";
+import { COMPLETION_REJECTION_ACTIVITY_KIND } from "./completion-rejection.js";
 import { jsonValue, normalizeSessionEventValue } from "./execution.js";
 import type { Refusal } from "./refusal.js";
 import { runnerTelemetryFields } from "./run-claim.js";
@@ -394,7 +395,8 @@ export const appendRunActivity = async (
       ? {
           ...input.body.metadata,
           ...(((input.body.metadata.kind === MERGE_INTEGRATOR_KIND.intent
-            || input.body.metadata.kind === MERGE_INTEGRATOR_KIND.result)
+            || input.body.metadata.kind === MERGE_INTEGRATOR_KIND.result
+            || input.body.metadata.kind === COMPLETION_REJECTION_ACTIVITY_KIND)
             && executionModeFor(run.task?.templateStep ?? null) === "mechanical")
             ? { sourceRunId: input.runId }
             : {}),

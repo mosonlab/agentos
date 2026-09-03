@@ -541,6 +541,63 @@ test("activity persists the authenticated principal through the lifecycle interf
   });
 });
 
+test("completion-rejection activity is bound to the authenticated Run", async () => {
+  let fencedRead = 0;
+  const writes: Array<Record<string, unknown>> = [];
+  const tx = {
+    $queryRaw: async (query: TemplateStringsArray) => query.join("?").includes('FROM "Run"')
+      ? [{ id: "run-1" }]
+      : [{ id: "task-1", archivedAt: null }],
+    run: { findFirst: async () => {
+      fencedRead += 1;
+      return fencedRead === 1
+        ? { taskId: "task-1" }
+        : {
+            taskId: "task-1",
+            leaseGeneration: 1,
+            task: {
+              templateStep: {
+                stepIndex: 7,
+                outputKind: "merge-result",
+                taskTemplate: { name: "direct-engineer-workflow" },
+              },
+            },
+          };
+    } },
+    taskActivity: { create: async ({ data }: { data: Record<string, unknown> }) => {
+      writes.push(data);
+      return { id: "activity-1", ...data };
+    } },
+  };
+
+  const result = await appendRunActivity(databaseFor(tx), {
+    runId: "run-1",
+    now,
+    principal: { kind: "session", runId: "run-1", leaseGeneration: 1 },
+    body: {
+      actorType: "operator",
+      fencingToken: "fence-1",
+      body: "Mechanical completion rejected with HTTP 400: incompatible payload",
+      metadata: {
+        kind: "mergeExecutor.completionRejected",
+        schemaVersion: 1,
+        status: 400,
+        responseBody: "incompatible payload",
+        sourceRunId: "spoofed-run",
+      },
+    },
+  });
+
+  assert.equal("message" in result, false);
+  assert.deepEqual(writes[0]?.metadata, {
+    kind: "mergeExecutor.completionRejected",
+    schemaVersion: 1,
+    status: 400,
+    responseBody: "incompatible payload",
+    sourceRunId: "run-1",
+  });
+});
+
 test("a fenced SESSION or merge-executor stopped result lands its question in the activity transaction", async () => {
   const taskUpdates: Array<Record<string, unknown>> = [];
   const questions: Array<Record<string, unknown>> = [];
