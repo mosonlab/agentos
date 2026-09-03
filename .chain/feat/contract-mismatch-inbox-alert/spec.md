@@ -1,0 +1,23 @@
+Goal: A mechanical claim refused for a completion contract version mismatch opens an operator alert in the Inbox, and the alert closes when a matching mechanical claim later succeeds.
+
+Background: `claimRun` in packages/api/src/run-claim.ts refuses a mechanical claim whose `contractVersion` differs from `RUN_COMPLETION_CONTRACT_VERSION` with `MECHANICAL_CONTRACT_MISMATCH_CODE`, and records one control-plane TaskActivity per (task, apiVersion, executorVersion), deduplicated on `metadata`. Nothing reaches the Inbox. On 2026-09-03 the merge executor, deployed outside auto-deploy, lagged the API's contract bump from 33457e9a: every Merge execution step sat queued for about five hours while the readiness worker handed the chain lease to a Run that was never claimed, and the only signals were per-task activity rows. The runner circuit breaker already has the pattern this brief wants: packages/api/src/runner-backend-health.ts opens an operator alert through `openOperatorAlert` with a `dedupeKey` built from a stable prefix plus a timestamp, checks for an OPEN message with that prefix before opening another, and closes OPEN messages by prefix when the backend reports healthy again. `InboxMessage.dedupeKey` is unique.
+
+Changes:
+1. In the mismatch branch of `claimRun`, alongside the existing TaskActivity and in the same transaction, open an operator Inbox alert whose body starts with a fixed prefix and names both versions and the refused task, for example `merge executor completion contract mismatch: executor version missing; API version 1; task <taskId>`. Build the `dedupeKey` from a stable prefix constant plus `apiVersion` and `executorVersion` (`missing` when null) plus the current timestamp, and open a new message only when no OPEN message with that prefix-and-versions key start exists, so repeated refusals across polls and across tasks keep exactly one OPEN alert per version pair.
+2. Move `openOperatorAlert` (and the prefix-check helper if one is extracted) out of runner-backend-health.ts into a module both call sites import, without changing the runner preflight alert's body, key, or close behavior.
+3. When a mechanical claim succeeds with a matching `contractVersion`, close every OPEN Inbox message whose `dedupeKey` starts with the mismatch prefix (status CLOSED, `answeredAt` set), inside the claim transaction; do nothing when there is none.
+4. Extend packages/api/src/routes/runner.test.ts: two refused mechanical claims with `executorVersion` null against the current API version leave exactly one OPEN InboxMessage with the alert prefix; a refused claim with a different executorVersion leaves a second message; a refused claim followed by a matching mechanical claim leaves the alert CLOSED with `answeredAt` set; the existing TaskActivity assertions stay unchanged.
+5. Document the alert in docs/operator-api.md next to the existing description of the mismatch refusal on the runner claim route; no route is added or changed.
+
+Out of scope: deploy-time version comparison or refusing deployment; version stamp files or any second source of version truth; changes under packages/merge-executor; changes to `RUN_COMPLETION_CONTRACT_VERSION`, the claim request schema, or the existing TaskActivity dedupe; Inbox UI changes beyond what the existing Inbox already renders; Feishu delivery behavior.
+
+Constraints: The alert write and the TaskActivity write commit together or not at all; a failed Inbox write surfaces as a claim error rather than being swallowed. No new configuration or environment variable. The prefix constant lives beside `MECHANICAL_CONTRACT_MISMATCH_CODE`. Keep the runner preflight alert behavior byte-identical in body and key.
+
+Acceptance:
+- `npm run test -w @anneal/api` is green including the four new runner.test.ts cases in Change 4.
+- `npm run typecheck -w @anneal/api` and `npm run lint -w @anneal/api` pass.
+- With two refused mechanical claims (executorVersion null, API version 1), `SELECT count(*) FROM "InboxMessage" WHERE status='OPEN' AND "dedupeKey" LIKE '<prefix>%'` is 1 and that message's body contains `executor version missing; API version 1`.
+- After a subsequent matching mechanical claim, that message has status CLOSED and non-null `answeredAt`.
+- The runner preflight alert tests in runner-backend-health tests still pass unchanged.
+
+Route: implementation=senior-dev - claim path is merge automation and the change writes persisted InboxMessage rows inside the claim transaction
