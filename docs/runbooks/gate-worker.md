@@ -334,8 +334,9 @@ ssh primary-worker 'bash /tmp/provision.sh --apply'
 
 It pins Node to the version in `.nvmrc` (`v22.17.0`; a repository test keeps the
 standalone script's repeated default synchronized), installs Docker with
-registry mirrors, the native Node build dependencies, and a Git fixture
-identity when the account has none; it points npm at
+registry mirrors, the native Node build dependencies, `jq` (the gate's tests
+invoke it directly, and `run-gate.sh` refuses to return a verdict without it),
+and a Git fixture identity when the account has none; it points npm at
 `registry.npmmirror.com`, pre-pulls `postgres:16-alpine`, and creates `~/gate/`.
 On a VMware guest it also disables VMware's time synchronization and enables
 Ubuntu NTP. Two independent time disciplines caused the guest wall clock to

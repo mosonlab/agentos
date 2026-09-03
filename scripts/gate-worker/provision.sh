@@ -150,7 +150,7 @@ fi
 
 step "Base packages"
 missing_pkgs=""
-for pkg in git curl ca-certificates xz-utils util-linux python3 build-essential libatomic1; do
+for pkg in git curl ca-certificates xz-utils util-linux jq python3 build-essential libatomic1; do
   if dpkg -s "$pkg" >/dev/null 2>&1; then
     ok "$pkg"
   else

@@ -159,6 +159,7 @@ no_verdict() {
 command -v git >/dev/null 2>&1 || no_verdict "git is not installed on the worker"
 command -v node >/dev/null 2>&1 || no_verdict "node is not installed on the worker"
 command -v flock >/dev/null 2>&1 || no_verdict "flock is not installed on the worker"
+command -v jq >/dev/null 2>&1 || no_verdict "jq is not installed on the worker"
 # Docker is deliberately not pre-checked here. merge-gate.sh requires it too, and
 # does so after the frozen-record rules, which need neither a daemon nor an
 # install: a documentation branch that rewrites history should be told that,
