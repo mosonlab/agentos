@@ -18,6 +18,7 @@ export const templateInstantiationRefusalStatus = {
   implementation_route_agent_renamed: 400,
   implementation_route_conflicts_with_step_override: 400,
   implementation_route_malformed: 400,
+  implementation_route_template_unsupported: 400,
   repo_not_found: 400,
   step_override_agent_archived: 400,
   step_override_agent_not_found: 400,

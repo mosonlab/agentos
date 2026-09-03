@@ -21,8 +21,9 @@ const BRANCH = "feature/pr-workflow";
 const BRIEF = [
   "Implement the pull-request workflow acceptance fixture.",
   "",
-  "Route: implementation=senior-dev - this line is ordinary PR-workflow specification text.",
+  "Keep the pull-request workflow's configured implementation assignee.",
 ].join("\n");
+const ROUTED_BRIEF = `${BRIEF}\n\nRoute: implementation=senior-dev - unsupported on the PR workflow.`;
 
 let db: PrismaClient;
 let priorOperatorToken: string | undefined;
@@ -110,13 +111,14 @@ const instantiate = async (
   repoId: string,
   variables: Record<string, string>,
   autoStart = false,
+  description = BRIEF,
 ) => request(
   "POST",
   `/projects/${projectId}/task-templates/${templateId}/instantiate`,
-  { repoId, variables, autoStart, description: BRIEF },
+  { repoId, variables, autoStart, description },
 );
 
-test("the bootstrapped PR workflow instantiates four direct tasks and enforces its variable contract", async () => {
+test("the bootstrapped PR workflow refuses implementation routing and otherwise enforces its variable contract", async () => {
   const { projectId, template } = await bootstrap();
   const repo = await addRepoAndGrants(projectId);
 
@@ -131,6 +133,10 @@ test("the bootstrapped PR workflow instantiates four direct tasks and enforces i
   assert.equal(unknown.status, 400, JSON.stringify(unknown.body));
   assert.equal(unknown.body.code, "template_variables_unknown");
 
+  const routed = await instantiate(projectId, template.id, repo.id, { branchName: BRANCH }, false, ROUTED_BRIEF);
+  assert.equal(routed.status, 400, JSON.stringify(routed.body));
+  assert.equal(routed.body.code, "implementation_route_template_unsupported");
+
   const created = await instantiate(projectId, template.id, repo.id, { branchName: BRANCH });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const tasks = await db.task.findMany({
@@ -140,7 +146,7 @@ test("the bootstrapped PR workflow instantiates four direct tasks and enforces i
   assert.deepEqual(tasks.map(({ chainIndex }) => chainIndex), [1, 2, 3, 4]);
   assert.equal(tasks.some(({ name }) => name.toLowerCase().includes("revalidat")), false);
   assert.equal(tasks[0]!.assigneeAgentId, template.steps[0]!.assigneeAgentId);
-  assert.match(tasks[0]!.description, /Route: implementation=senior-dev/u);
+  assert.match(tasks[0]!.description, /configured implementation assignee/u);
 });
 
 type Claim = {

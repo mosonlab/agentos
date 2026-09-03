@@ -609,7 +609,7 @@ test("step override structural refusals happen before template reads and carry s
   }
 });
 
-test("an unbound direct chain omits revalidation while Route overrides the renumbered implementation", async () => {
+test("direct Route overrides implementation while non-direct templates refuse Route lines", async () => {
   let templateName = "direct-engineer-workflow";
   let lockedRouteAgentName = "senior-dev";
   const revalidator = {
@@ -730,19 +730,23 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
     const originalOutputKind = steps[1]!.outputKind;
     if (nonDirectName === "compound-engineer-workflow") steps[1]!.outputKind = "documentation";
     for (const route of ["senior-dev", "unknown-agent"]) {
-      const nonDirect = await instantiateTemplate(db, "project-1", "template-1", {
+      await assertTemplateRefusal(
+        () => instantiateTemplate(db, "project-1", "template-1", {
+          repoId: "repo-1",
+          variables: {},
+          description: `Route: implementation=${route}`,
+        }),
+        "implementation_route_template_unsupported",
+      );
+    }
+    await assertTemplateRefusal(
+      () => instantiateTemplate(db, "project-1", "template-1", {
         repoId: "repo-1",
         variables: {},
-        description: `Route: implementation=${route}`,
-      });
-      assert.equal(nonDirect.tasks.length, 3, `${nonDirectName} must ignore ${route}`);
-    }
-    const malformedTolerated = await instantiateTemplate(db, "project-1", "template-1", {
-      repoId: "repo-1",
-      variables: {},
-      description: "Route: senior-dev - Route-looking prose is not parsed here",
-    });
-    assert.equal(malformedTolerated.tasks.length, 3, `${nonDirectName} must ignore malformed Route prose`);
+        description: "Route: senior-dev - Route-looking prose is malformed",
+      }),
+      "implementation_route_malformed",
+    );
     steps[1]!.outputKind = originalOutputKind;
   }
 });

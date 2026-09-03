@@ -306,14 +306,18 @@ export const instantiateTemplate = async (
       }
       const repo = await tx.repo.findFirst({ where: { id: input.repoId, projectId } });
       if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
-      if (template.name === "direct-engineer-workflow") {
-        const malformedRouteLine = findMalformedRouteLine(input.description);
-        if (malformedRouteLine !== null) {
-          throw templateRefusal(
-            "implementation_route_malformed",
-            `Malformed Route line ${JSON.stringify(malformedRouteLine)}; expected "Route: implementation=<agent> - <reason>"`,
-          );
-        }
+      const malformedRouteLine = findMalformedRouteLine(input.description);
+      if (malformedRouteLine !== null) {
+        throw templateRefusal(
+          "implementation_route_malformed",
+          `Malformed Route line ${JSON.stringify(malformedRouteLine)}; expected "Route: implementation=<agent> - <reason>"`,
+        );
+      }
+      if (template.name !== "direct-engineer-workflow" && requestedImplementationRoute !== null) {
+        throw templateRefusal(
+          "implementation_route_template_unsupported",
+          `Implementation routing is not supported by template ${template.name}`,
+        );
       }
       const implementationRoute = template.name === "direct-engineer-workflow"
         ? requestedImplementationRoute

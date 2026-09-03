@@ -1081,6 +1081,13 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   template. If both supplied keys address missing slots, the specification
   refusal is reported first. No task is created for either refusal. Unknown
   fields inside `gates` are rejected by the strict request schema.
+- A machine-readable `Route: implementation=<agent>` line (optionally followed
+  by ` - <reason>`) in `description` is consumed only by
+  `direct-engineer-workflow`. Any other
+  template returns `400 Bad Request` with code
+  `implementation_route_template_unsupported` instead of silently using its
+  configured assignee. A route-shaped line that does not match the grammar
+  returns `implementation_route_malformed` for every template.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 
