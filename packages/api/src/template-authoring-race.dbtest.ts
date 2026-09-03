@@ -276,8 +276,8 @@ test("replace wins a held old-step lock and instantiate reads the committed new 
       });
       assert.equal(tasks.length, replacement.length);
       assert.deepEqual(tasks.map((task) => task.name), [
-        "race-template: New implementation",
-        "race-template: New review",
+        "template authoring race: New implementation",
+        "template authoring race: New review",
       ]);
       assert.deepEqual(tasks.map((task) => task.chainLayer), [1, 2]);
       assert.deepEqual(tasks.map((task) => task.templateStepId), liveSteps.map((step) => step.id));
