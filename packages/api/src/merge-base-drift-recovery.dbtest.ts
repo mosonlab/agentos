@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
@@ -10,12 +11,15 @@ import {
   MergeRecoveryRefusalCode,
   Prisma,
   PrismaClient,
+  readMarkers,
+  latestMarker,
   recordIntegratorStop,
   TaskStatus,
 } from "@anneal/db";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
 import { baseDriftRecoveryTick, readCandidateFacts } from "./merge-base-drift-worker.js";
+import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import {
   withMergeLease,
@@ -236,6 +240,342 @@ const recordRecoveryPass = async (
     data: { status: TaskStatus.DONE },
   });
 };
+
+const addRepairTailFixtures = async (
+  seeded: Awaited<ReturnType<typeof seedStopped>>,
+  withDocumentation: boolean,
+) => {
+  const regressionIndex = seeded.gateStep.stepIndex;
+  const fixedIndex = regressionIndex - (withDocumentation ? 2 : 1);
+  const fixedStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: seeded.template.id,
+    stepIndex: fixedIndex,
+    layer: fixedIndex,
+    name: "Apply review fixes",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.agent.id,
+    prompt: "fix",
+    approvalGate: false,
+    outputKind: "fixed-implementation",
+  } });
+  await db.task.create({ data: {
+    projectId: seeded.project.id,
+    repoId: seeded.repo.id,
+    templateId: seeded.template.id,
+    templateStepId: fixedStep.id,
+    name: "Apply review fixes",
+    description: "fix",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.agent.id,
+    status: TaskStatus.DONE,
+    chainId: seeded.chainId,
+    chainIndex: fixedIndex,
+    chainLayer: fixedIndex,
+    targetBranch: "master",
+  } });
+  if (!withDocumentation) return null;
+  const documentationIndex = regressionIndex - 1;
+  const documentationStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: seeded.template.id,
+    stepIndex: documentationIndex,
+    layer: documentationIndex,
+    name: "Documentation",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.agent.id,
+    prompt: "document",
+    approvalGate: false,
+    outputKind: "documentation",
+  } });
+  return db.task.create({ data: {
+    projectId: seeded.project.id,
+    repoId: seeded.repo.id,
+    templateId: seeded.template.id,
+    templateStepId: documentationStep.id,
+    name: "Documentation",
+    description: "document",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.agent.id,
+    status: TaskStatus.DONE,
+    chainId: seeded.chainId,
+    chainIndex: documentationIndex,
+    chainLayer: documentationIndex,
+    targetBranch: "master",
+  } });
+};
+
+const prepareBlockedRecovery = async (
+  shape: "canonical-direct" | "canonical-compound-readiness",
+  label: string,
+) => {
+  const seeded = await seedStopped(shape, label);
+  const documentation = await addRepairTailFixtures(seeded, shape === "canonical-compound-readiness");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const recoveryRun = await db.run.findUniqueOrThrow({ where: { id: aggregate.recoveryRunId! } });
+  await db.run.update({ where: { id: recoveryRun.id }, data: {
+    status: "SUCCEEDED",
+    branch: "agentos/chain/recovery",
+    pushedBranch: "agentos/chain/recovery",
+    targetBranch: "master",
+    headSha: HEAD,
+  } });
+  await db.taskStepOutput.upsert({
+    where: { taskId: seeded.gateTask.id },
+    create: {
+      taskId: seeded.gateTask.id,
+      runId: recoveryRun.id,
+      kind: "regression-verification",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        outcome: "review-fail",
+        headSha: HEAD,
+        baseHeadSha: BASE_2,
+        summary: "recovery exposed a semantic defect",
+      }),
+      commitSha: HEAD,
+    },
+    update: {
+      runId: recoveryRun.id,
+      kind: "regression-verification",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        outcome: "review-fail",
+        headSha: HEAD,
+        baseHeadSha: BASE_2,
+        summary: "recovery exposed a semantic defect",
+      }),
+      commitSha: HEAD,
+    },
+  });
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: {
+      id: recoveryRun.id,
+      agentId: seeded.agent.id,
+      branch: "agentos/chain/recovery",
+      headSha: HEAD,
+      sessionId: seeded.gateSession.id,
+    },
+    now: new Date(),
+  })), "handled");
+  return { ...seeded, documentation, aggregateId: aggregate.id, recoveryRun };
+};
+
+const requestRecoveryRepair = async (taskId: string, requestId: string) => {
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  try {
+    return await createApp(db).request(`/tasks/${taskId}/merge-tail/repair`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, reason: "operator accepted the recovery finding" }),
+    });
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+const completeQueuedTask = async (taskId: string, headSha: string, output?: { kind: string; body: string }) => {
+  const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
+  const run = await db.run.findFirstOrThrow({ where: { taskId, status: "QUEUED" }, orderBy: { runNumber: "desc" } });
+  const runnerId = `recovery-repair-runner-${run.id}`;
+  const fencingToken = `recovery-repair:${run.id}:1`;
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING",
+    runnerId,
+    fencingToken,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: task.projectId,
+    agentId: task.assigneeAgentId!,
+    taskId,
+    runner: run.runner,
+    executionStatus: "RUNNING",
+  } });
+  await db.task.update({ where: { id: taskId }, data: { status: TaskStatus.DOING } });
+  if (output) {
+    await db.taskStepOutput.upsert({
+      where: { taskId },
+      create: { taskId, runId: run.id, kind: output.kind, body: output.body, commitSha: headSha },
+      update: { runId: run.id, kind: output.kind, body: output.body, commitSha: headSha },
+    });
+  }
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "recovery-repair-runner-token";
+  try {
+    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer recovery-repair-runner-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId,
+        fencingToken,
+        exitCode: 0,
+        outcome: { case: "succeeded" },
+        cleanupStatus: "SUCCEEDED",
+        branch: "agentos/chain/recovery",
+        pushedBranch: "agentos/chain/recovery",
+        pushStatus: "SUCCEEDED",
+        headSha,
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+  return run;
+};
+
+const openRecoveryRepair = async (
+  shape: "canonical-direct" | "canonical-compound-readiness",
+  label: string,
+) => {
+  const seeded = await prepareBlockedRecovery(shape, label);
+  await db.taskActivity.create({ data: {
+    taskId: seeded.gateTask.id,
+    actorType: "operator",
+    body: "ordinary note with colliding metadata",
+    metadata: {
+      operatorNote: true,
+      action: "merge-tail-repair-request",
+      requestId: "recovery-repair-1",
+      repairTaskId: "invented-repair",
+      repairKind: "review-fix",
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+    },
+  } });
+  const first = await requestRecoveryRepair(seeded.gateTask.id, "recovery-repair-1");
+  const result = await first.json() as { repairTaskId: string; repairKind: string };
+  assert.equal(first.status, 200, JSON.stringify(result));
+  const repair = await db.task.findUniqueOrThrow({
+    where: { id: result.repairTaskId },
+    include: { assigneeAgent: { select: { id: true } } },
+  });
+  assert.equal(result.repairKind, "review-fix");
+  assert.equal(repair.assigneeAgent?.id, seeded.agent.id);
+  const attempt = latestMarker(await readMarkers(db, seeded.gateTask.id), "repairAttempt");
+  assert.equal(attempt?.raw.sourceRunId, seeded.recoveryRun.id);
+  assert.equal(attempt?.repairTaskId, repair.id);
+  const repairing = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: seeded.aggregateId } });
+  assert.equal(repairing.status, "REPAIRING");
+  assert.equal(repairing.failureReason, null);
+  await db.taskActivity.create({ data: {
+    taskId: seeded.gateTask.id,
+    actorType: "operator",
+    body: "malformed newer replay record",
+    metadata: {
+      action: "merge-tail-repair-request",
+      requestId: "recovery-repair-1",
+      repairTaskId: "invented-repair",
+      repairKind: "review-fix",
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+    },
+  } });
+  const replay = await requestRecoveryRepair(seeded.gateTask.id, "recovery-repair-1");
+  const replayResult = await replay.json();
+  assert.equal(replay.status, 200, JSON.stringify(replayResult));
+  assert.deepEqual(replayResult, result);
+  assert.equal(await db.task.count({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" } }), 1);
+  return { ...seeded, repair };
+};
+
+test("operator recovery repair reentry carries a direct Regression rerun through authorization", async () => {
+  const seeded = await openRecoveryRepair("canonical-direct", "operator-repair-direct");
+  await completeQueuedTask(seeded.repair.id, HEAD_2);
+  const repairResult = latestMarker(await readMarkers(db, seeded.gateTask.id), "repairResult");
+  assert.equal(repairResult?.repairTaskId, seeded.repair.id);
+  assert.equal(repairResult?.resolvedHeadSha, HEAD_2);
+  const rerun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" },
+  });
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).recoveryRunId, rerun.id);
+
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: {
+      id: rerun.id,
+      agentId: seeded.agent.id,
+      branch: "agentos/chain/recovery",
+      headSha: HEAD_2,
+      sessionId: seeded.gateSession.id,
+    },
+    qualifiedVerdict: {
+      schemaVersion: 1,
+      outcome: "pass",
+      headSha: HEAD_2,
+      baseHeadSha: BASE_2,
+      gateVerdict: "PASS",
+    },
+    now: new Date(),
+  })), "advance");
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).status, "AWAITING_AUTHORIZATION");
+});
+
+test("operator recovery repair reentry carries the Documentation hop and surfaces a fresh second FAIL", async () => {
+  const seeded = await openRecoveryRepair("canonical-compound-readiness", "operator-repair-documentation");
+  assert.ok(seeded.documentation);
+  await completeQueuedTask(seeded.repair.id, HEAD_2);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).recoveryRunId, seeded.recoveryRun.id);
+  await completeQueuedTask(seeded.documentation.id, HEAD_2, {
+    kind: "documentation",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: HEAD_2,
+      summary: "Documentation refreshed for the recovery repair.",
+      changes: [],
+    }),
+  });
+  const rerun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" },
+  });
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).recoveryRunId, rerun.id);
+
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: {
+      id: rerun.id,
+      agentId: seeded.agent.id,
+      branch: "agentos/chain/recovery",
+      headSha: HEAD_2,
+      sessionId: seeded.gateSession.id,
+    },
+    qualifiedVerdict: {
+      schemaVersion: 1,
+      outcome: "review-fail",
+      headSha: HEAD_2,
+      baseHeadSha: BASE_2,
+      summary: "the completed repair exposed a second current defect",
+    },
+    now: new Date(),
+  })), "handled");
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).status, "BLOCKED_DOWNSTREAM");
+  const notices = await db.inboxMessage.findMany({
+    where: { taskId: seeded.gateTask.id },
+    orderBy: { createdAt: "asc" },
+  });
+  assert.equal(notices.length, 2);
+  assert.match(notices[1]!.body, /second current defect/u);
+  assert.match(notices[1]!.dedupeKey ?? "", new RegExp(`${rerun.id}$`, "u"));
+});
 
 test("the durable reader selects the direct and compound recovery facts", async () => {
   for (const shape of ["canonical-direct", "canonical-compound-readiness"] as const) {

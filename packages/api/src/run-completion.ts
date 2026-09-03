@@ -5,6 +5,7 @@ import {
   advanceTemplateTask,
   attemptRunBirth,
   budgetGates,
+  carryMergeRecoveryRun,
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
   CleanupStatus,
@@ -56,8 +57,9 @@ import {
   retryDelayMs,
 } from "./execution.js";
 import {
+  activeRepairRecoverySourceRun,
   handleRegressionCompletion,
-  mergeTailRequeueForRun,
+  mergeTailRequeueContextForRun,
   recordMergeTailRequeue,
   regressionVerdictForRun,
   settleMergeTailCompletion,
@@ -325,6 +327,7 @@ const activateMergeTailTarget = async (
   tx: Prisma.TransactionClient,
   taskId: string,
   now: Date,
+  options: { recoverySourceRunId?: string } = {},
 ): Promise<void> => {
   if (!await lockTaskMutationRows(tx, taskId)) return;
   const target = await tx.task.findUnique({
@@ -414,7 +417,19 @@ const activateMergeTailTarget = async (
     }
   }
   if (isDocumentationStep(target.templateStep)) {
-    await recordMergeTailRequeue(tx, { taskId, runId: attempt.run.id });
+    await recordMergeTailRequeue(tx, {
+      taskId,
+      runId: attempt.run.id,
+      ...options,
+    });
+  }
+  if (isRegressionVerificationOutputKind(target.templateStep?.outputKind)
+    && options.recoverySourceRunId !== undefined) {
+    await carryMergeRecoveryRun(tx, {
+      regressionTaskId: taskId,
+      recoveryRunId: attempt.run.id,
+      previousRecoveryRunId: options.recoverySourceRunId,
+    });
   }
   await tx.taskActivity.create({ data: {
     taskId,
@@ -763,11 +778,10 @@ export const completeRun = async (
       ? await readMarkers(tx, run.task.id)
       : [];
     const succeededMarkers = succeeded ? tailMarkers : [];
-    const mergeTailSuccessorRequeue = Boolean(
-      documentationStepSucceeded
-      && run.task
-      && await mergeTailRequeueForRun(tx, { taskId: run.task.id, runId: run.id }),
-    );
+    const mergeTailRequeueContext = documentationStepSucceeded && run.task
+      ? await mergeTailRequeueContextForRun(tx, { taskId: run.task.id, runId: run.id })
+      : null;
+    const mergeTailSuccessorRequeue = mergeTailRequeueContext !== null;
     const repairMarker = latestMarker(succeededMarkers, "repairAttempt");
     const repairRegression = repairMarker?.regressionTaskId
       ? await tx.task.findUnique({
@@ -1112,7 +1126,12 @@ export const completeRun = async (
             process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
             now,
             completionTaskStatus,
-            { mergeTailRequeue: mergeTailSuccessorRequeue },
+            {
+              mergeTailRequeue: mergeTailSuccessorRequeue,
+              ...(mergeTailRequeueContext?.recoverySourceRunId
+                ? { mergeTailRecoverySourceRunId: mergeTailRequeueContext.recoverySourceRunId }
+                : {}),
+            },
           );
         }
       } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
@@ -1133,7 +1152,20 @@ export const completeRun = async (
                 chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
               }, now);
             }
-            if (auxiliaryTargetTaskId) await activateMergeTailTarget(tx, auxiliaryTargetTaskId, now);
+            if (auxiliaryTargetTaskId) {
+              const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
+                ? repairMarker.raw.sourceRunId
+                : null;
+              const recoverySourceRunId = repairSourceRunId && repairMarker?.regressionTaskId
+                ? await activeRepairRecoverySourceRun(tx, {
+                    regressionTaskId: repairMarker.regressionTaskId,
+                    sourceRunId: repairSourceRunId,
+                  })
+                : null;
+              await activateMergeTailTarget(tx, auxiliaryTargetTaskId, now, {
+                ...(recoverySourceRunId === null ? {} : { recoverySourceRunId }),
+              });
+            }
           }
         }
       } else {

@@ -330,7 +330,7 @@ export const blockDownstream = async (
     where: { id: recovery.integratorTaskId },
     data: { status: TaskStatus.REVIEW, failureReason: body },
   });
-  const dedupeKey = `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:${input.phase}`;
+  const dedupeKey = `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:${input.phase}:${recovery.recoveryRunId}`;
   const metadata = { ...recovery, state: "tail-stopped", phase: input.phase, reason: input.reason, dedupeKey };
   for (const taskId of [recovery.integratorTaskId, recovery.regressionTaskId]) {
     await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });

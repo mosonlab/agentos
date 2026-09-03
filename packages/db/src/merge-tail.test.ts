@@ -3,9 +3,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { MergeRecoveryStatus } from "@prisma/client";
+import { MergeRecoveryStatus, type Prisma } from "@prisma/client";
 
 import {
+  carryMergeRecoveryRun,
   defenseListReason,
   defenseTriggers,
   isMergeReadinessStep,
@@ -52,6 +53,69 @@ test("merge recovery state transitions and operator phases are explicit", () => 
     "succeeded",
     "actual-failure",
   ]);
+});
+
+test("a repaired Regression Run is carried onto the active recovery aggregate", async () => {
+  const updates: Array<Record<string, any>> = [];
+  const aggregate = {
+    id: "recovery-1",
+    status: MergeRecoveryStatus.REPAIRING,
+    recoveryRunId: "regression-run-1",
+  };
+  const tx = {
+    mergeRecoveryAttempt: {
+      findFirst: async () => aggregate,
+      findUnique: async () => aggregate,
+      updateMany: async (args: Record<string, any>) => {
+        updates.push(args);
+        return { count: 1 };
+      },
+      findUniqueOrThrow: async () => ({ ...aggregate, recoveryRunId: "regression-run-2" }),
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  await carryMergeRecoveryRun(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-2",
+    previousRecoveryRunId: "regression-run-1",
+  });
+  assert.equal(updates[0]?.data.status, MergeRecoveryStatus.REPAIRING);
+  assert.equal(updates[0]?.data.recoveryRunId, "regression-run-2");
+  assert.equal(updates[0]?.where.AND[1].regressionTaskId, "regression-1");
+  assert.equal(updates[0]?.where.AND[1].recoveryRunId, "regression-run-1");
+});
+
+test("a repaired Regression Run cannot retarget an unrelated recovery", async () => {
+  let updates = 0;
+  const tx = {
+    mergeRecoveryAttempt: {
+      findFirst: async () => ({
+        id: "recovery-2",
+        status: MergeRecoveryStatus.REPAIRING,
+        recoveryRunId: "different-source-run",
+      }),
+      updateMany: async () => { updates += 1; return { count: 1 }; },
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  await assert.rejects(carryMergeRecoveryRun(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-2",
+    previousRecoveryRunId: "regression-run-1",
+  }), /is not bound to repaired Run regression-run-1/u);
+  assert.equal(updates, 0);
+});
+
+test("an expected recovery carry fails loudly when its aggregate is absent", async () => {
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => null },
+  } as unknown as Prisma.TransactionClient;
+
+  await assert.rejects(carryMergeRecoveryRun(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-2",
+    previousRecoveryRunId: "regression-run-1",
+  }), /is absent/u);
 });
 
 test("regression verdicts are exact-head, versioned, and fail closed", () => {
