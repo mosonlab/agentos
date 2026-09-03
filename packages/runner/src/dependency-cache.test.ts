@@ -983,13 +983,16 @@ test("dependency-cache audit payloads retain stable event names and fields", asy
     const serialized = events.map((candidate) => JSON.stringify({ audit: "dependency-cache", ...candidate }));
     const parsed = serialized.map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.deepEqual(new Set(parsed.map(({ event: name }) => name)), new Set(events.map(({ event: name }) => name)));
-    const tally = execFileSync("/bin/sh", ["-c", "jq -r .event | sort | uniq -c"], {
+    // jq itself, not a shell pipeline: a missing jq must throw ENOENT here rather
+    // than leave an empty tally behind the exit status of the last pipeline stage.
+    const names = execFileSync("jq", ["-r", ".event"], {
       encoding: "utf8",
       input: `${serialized.join("\n")}\n`,
-    });
-    assert.match(tally, /\bhit\b/u);
-    assert.match(tally, /\bmiss\b/u);
-    assert.match(tally, /\bpublication\b/u);
+    }).split("\n").filter((line) => line !== "");
+    const tally = new Set(names);
+    assert.ok(tally.has("hit"));
+    assert.ok(tally.has("miss"));
+    assert.ok(tally.has("publication"));
   } finally {
     await cleanupRoot(root);
   }
