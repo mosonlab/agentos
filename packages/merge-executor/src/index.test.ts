@@ -8,11 +8,12 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { RunOutcome } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { makeAgentOsClient, type MechanicalClaim } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
-import { claimOnce, runClaim } from "./index.js";
+import { claimOnce, pollClaims, runClaim } from "./index.js";
 import { makeLog, makeRedactor } from "./redaction.js";
 
 const config: ExecutorConfig = {
@@ -59,6 +60,63 @@ test("an idle claim poll never enters the run-scoped mint path", async () => {
   const result = await claimOnce(config, "/private/app.pem", log, fetchImpl, async () => { runCalls += 1; });
   assert.equal(result, "idle");
   assert.equal(runCalls, 0);
+});
+
+test("a completion-contract mismatch stops claim polling with one error and no retry", async () => {
+  const requests: Array<{ url: string; body: string }> = [];
+  const errors: string[] = [];
+  const capturedLog = makeLog(makeRedactor(), {
+    log: () => {},
+    warn: () => {},
+    error: (line: string) => errors.push(line),
+  });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requests.push({ url: String(input), body: String(init?.body ?? "") });
+    return new Response(JSON.stringify({
+      error: `Mechanical completion contract mismatch: executor version ${RUN_COMPLETION_CONTRACT_VERSION - 1}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`,
+      code: "mechanical_contract_mismatch",
+      expectedVersion: RUN_COMPLETION_CONTRACT_VERSION,
+      receivedVersion: RUN_COMPLETION_CONTRACT_VERSION - 1,
+    }), { status: 409, headers: { "content-type": "application/json" } });
+  };
+  let runCalls = 0;
+
+  const result = await claimOnce(config, "/private/app.pem", capturedLog, fetchImpl, async () => { runCalls += 1; });
+
+  assert.equal(result, "contract-mismatch");
+  assert.equal(runCalls, 0);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(requests[0]!.body), {
+    runnerId: "merge-executor-1",
+    leaseSeconds: 120,
+    contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, new RegExp(`executorVersion.*${RUN_COMPLETION_CONTRACT_VERSION - 1}`, "u"));
+  assert.match(errors[0]!, new RegExp(`apiVersion.*${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+});
+
+test("a completion-contract mismatch parks the daemon until shutdown", async () => {
+  const controller = new AbortController();
+  let claimCalls = 0;
+  let settled = false;
+  const polling = pollClaims({
+    signal: controller.signal,
+    pollIntervalMs: 1,
+    log,
+    claim: async () => {
+      claimCalls += 1;
+      return "contract-mismatch";
+    },
+  }).then(() => { settled = true; });
+
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  assert.equal(claimCalls, 1);
+  assert.equal(settled, false);
+
+  controller.abort();
+  await polling;
+  assert.equal(settled, true);
 });
 
 test("the mechanical start request matches the promptless API contract", async () => {
@@ -299,6 +357,112 @@ test("a minted installation token cannot escape through run evidence or completi
   assert.ok(completion);
   assert.equal(completion.body.includes(installationToken), false);
   assert.match(completion.body, /crashed during mechanical execution/u);
+});
+
+test("a rejected completion is recorded once and is not submitted again", async () => {
+  const requests: Array<{ url: string; body: string }> = [];
+  const errors: string[] = [];
+  const responseBody = JSON.stringify({ error: "completion payload is incompatible" });
+  const capturedLog = makeLog(makeRedactor(), {
+    log: () => {},
+    warn: () => {},
+    error: (line: string) => errors.push(line),
+  });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    requests.push({ url, body: String(init?.body ?? "") });
+    if (url.endsWith("/complete")) {
+      return new Response(responseBody, { status: 400, headers: { "content-type": "application/json" } });
+    }
+    return compatibleAgentOsResponse(input);
+  };
+
+  await runClaim(config, "/private/app.pem", claimed("rejected-completion"), capturedLog, fetchImpl, {
+    mintToken: async () => ({ ok: true, token: `installation_${"R".repeat(32)}`, expiresAt: new Date(Date.now() + 60 * 60_000) }),
+    makeGitHub: (() => ({})) as never,
+    executeDecision: async () => ({ outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" }),
+  });
+
+  assert.equal(requests.filter(({ url }) => url.endsWith("/complete")).length, 1);
+  const rejectionActivities = requests.filter(({ url, body }) => url.endsWith("/activity") && body.includes("completionRejected"));
+  assert.equal(rejectionActivities.length, 1);
+  const activity = JSON.parse(rejectionActivities[0]!.body) as { body: string; metadata: Record<string, unknown> };
+  assert.equal(activity.metadata.status, 400);
+  assert.equal(activity.metadata.responseBody, responseBody);
+  assert.match(activity.body, /HTTP 400/u);
+  assert.match(activity.body, /completion payload is incompatible/u);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /HTTP 400/u);
+  assert.match(errors[0]!, /completion payload is incompatible/u);
+});
+
+test("a completion network failure is retried exactly once", async () => {
+  let completionAttempts = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith("/complete")) {
+      completionAttempts += 1;
+      if (completionAttempts === 1) throw new TypeError("network disconnected");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return compatibleAgentOsResponse(input);
+  };
+
+  await makeAgentOsClient(config, fetchImpl).complete(claimed("network-retry"), {
+    succeeded: true,
+    outcome: { outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" },
+  }, makeRedactor());
+
+  assert.equal(completionAttempts, 2);
+});
+
+test("a non-network completion exception is not retried", async () => {
+  let completionAttempts = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith("/complete")) {
+      completionAttempts += 1;
+      throw new Error("programming failure in fetch adapter");
+    }
+    return compatibleAgentOsResponse(input);
+  };
+
+  await assert.rejects(
+    makeAgentOsClient(config, fetchImpl).complete(claimed("no-programming-retry"), {
+      succeeded: true,
+      outcome: { outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" },
+    }, makeRedactor()),
+    /programming failure/u,
+  );
+  assert.equal(completionAttempts, 1);
+});
+
+test("completion rejection evidence redacts the run-scoped installation token", async () => {
+  const installationToken = `installation_${"Z".repeat(32)}`;
+  const requests: Array<{ url: string; body: string }> = [];
+  const lines: string[] = [];
+  const capturedLog = makeLog(makeRedactor(), {
+    log: (line: string) => lines.push(line),
+    warn: (line: string) => lines.push(line),
+    error: (line: string) => lines.push(line),
+  });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    requests.push({ url, body: String(init?.body ?? "") });
+    if (url.endsWith("/complete")) {
+      return new Response(JSON.stringify({ error: `rejected ${installationToken}` }), { status: 400 });
+    }
+    return compatibleAgentOsResponse(input);
+  };
+
+  await runClaim(config, "/private/app.pem", claimed("redacted-rejection"), capturedLog, fetchImpl, {
+    mintToken: async () => ({ ok: true, token: installationToken, expiresAt: new Date(Date.now() + 60 * 60_000) }),
+    makeGitHub: (() => ({})) as never,
+    executeDecision: async () => ({ outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" }),
+  });
+
+  assert.equal(requests.some(({ body }) => body.includes(installationToken)), false);
+  assert.equal(lines.some((line) => line.includes(installationToken)), false);
+  assert.ok(requests.some(({ body }) => body.includes("[redacted-merge-credential]")));
+  assert.ok(lines.some((line) => line.includes("[redacted-merge-credential]")));
 });
 
 test("the daemon still starts when it is reached through a symlinked release directory", () => {

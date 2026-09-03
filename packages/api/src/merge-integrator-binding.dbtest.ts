@@ -30,6 +30,7 @@ import {
   PrismaClient,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { fireAtTask, fireCronTask } from "./scheduler.js";
 import { instantiateTemplate } from "./templates.js";
@@ -86,7 +87,7 @@ const call = async (
 const claim = async (
   runnerId: string, token = runnerId === EXECUTOR_RUNNER ? EXECUTOR_TOKEN : RUNNER,
 ): Promise<{ status: number; body: any }> =>
-  call("POST", "/runner/tasks/claim", { runnerId }, token);
+  call("POST", "/runner/tasks/claim", { runnerId, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }, token);
 
 /* --------------------------------------------------- creation and reassignment */
 
@@ -270,7 +271,7 @@ const concurrentExecutorClaims = async (): Promise<Response[]> => withTokens(asy
   const request = () => app.request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${EXECUTOR_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId: EXECUTOR_RUNNER }),
+    body: JSON.stringify({ runnerId: EXECUTOR_RUNNER, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }),
   });
   return Promise.all([request(), request()]);
 });
@@ -363,7 +364,7 @@ test("with no allowlist configured the integrator step is claimable by nobody", 
       const response = await createApp(db).request("/runner/tasks/claim", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ runnerId }),
+        body: JSON.stringify({ runnerId, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }),
       });
       assert.equal(response.status, 204, runnerId);
     }

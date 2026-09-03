@@ -4,6 +4,7 @@ import {
   AssigneeType,
   canonicalIntegratorBindingRefusal,
   compoundImplementationAssigneeValid,
+  DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
   gateSlotOf,
   isDirectImplementationStep,
@@ -306,7 +307,8 @@ export const instantiateTemplate = async (
       }
       const repo = await tx.repo.findFirst({ where: { id: input.repoId, projectId } });
       if (!repo) throw templateRefusal("repo_not_found", "Repo not found in project");
-      if (template.name === "direct-engineer-workflow") {
+      const consumesImplementationRoute = template.name === DIRECT_TEMPLATE_NAME;
+      if (consumesImplementationRoute) {
         const malformedRouteLine = findMalformedRouteLine(input.description);
         if (malformedRouteLine !== null) {
           throw templateRefusal(
@@ -315,9 +317,13 @@ export const instantiateTemplate = async (
           );
         }
       }
-      const implementationRoute = template.name === "direct-engineer-workflow"
-        ? requestedImplementationRoute
-        : null;
+      if (!consumesImplementationRoute && requestedImplementationRoute !== null) {
+        throw templateRefusal(
+          "implementation_route_template_unsupported",
+          `Implementation routing is not supported by template ${template.name}; remove the Route line from the description or use stepOverrides`,
+        );
+      }
+      const implementationRoute = requestedImplementationRoute;
       const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
       const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
       if (missing.length > 0) {
@@ -331,7 +337,7 @@ export const instantiateTemplate = async (
       }
       assertValidBaseReferences(template.steps);
 
-      const conditionalRevalidation = template.name === "direct-engineer-workflow"
+      const conditionalRevalidation = consumesImplementationRoute
         ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
         : null;
       const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;

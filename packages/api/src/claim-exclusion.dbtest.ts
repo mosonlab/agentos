@@ -14,6 +14,7 @@ import {
   TaskStatus,
 } from "@anneal/db";
 import { heldPredicate } from "@anneal/db/chain-hold";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";
@@ -141,7 +142,7 @@ const claim = async (
   const response = await createApp(client).request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId, leaseSeconds: 60 }),
+    body: JSON.stringify({ runnerId, leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }),
   });
   return {
     status: response.status,

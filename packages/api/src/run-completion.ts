@@ -39,6 +39,7 @@ import {
   stepRole,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import {
@@ -165,7 +166,7 @@ export const completionInput = z.object({
   // runner observed no worktree outside its run workspace; it never changes
   // terminal outcome classification.
   worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
-});
+}).describe(`Run completion contract version ${RUN_COMPLETION_CONTRACT_VERSION}`);
 
 export type CompletionInput = z.infer<typeof completionInput>;
 

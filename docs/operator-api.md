@@ -1081,6 +1081,15 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   template. If both supplied keys address missing slots, the specification
   refusal is reported first. No task is created for either refusal. Unknown
   fields inside `gates` are rejected by the strict request schema.
+- A machine-readable `Route: implementation=<agent>` line (optionally followed
+  by ` - <reason>`) in `description` is consumed only by
+  `direct-engineer-workflow`. Any other
+  template returns `400 Bad Request` with code
+  `implementation_route_template_unsupported` instead of silently using its
+  configured assignee; remove the line or use `stepOverrides` to assign that
+  template. On `direct-engineer-workflow`, a route-shaped line that does not
+  match the grammar returns `implementation_route_malformed`. Other templates
+  do not parse malformed Route-looking prose.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 
@@ -1771,6 +1780,17 @@ paths registered by the Run's checkout that lie outside its run workspace. The
 field is report-only; omitted or empty means no observation and never changes
 the Run outcome. A late cancellation acknowledgement backfills this evidence
 when reconciliation terminalized the Run first.
+
+The machine-only `POST /runner/tasks/claim` request used by the merge executor
+also carries the required `contractVersion` field. It is the completion
+contract version exported by `@anneal/db`; the mechanical executor and API
+must agree on this value. A mechanical claim with an omitted or mismatched
+`contractVersion` is refused with `409 Conflict`, code
+`mechanical_contract_mismatch`, and a message naming both the executor's
+version and the API's version. The refusal claims or creates no Run and writes
+one TaskActivity on the Task that would have been claimed, recording both
+versions so the board shows why the step did not move. This version check is
+fail-closed; ordinary agent claims are unaffected.
 
 ### GET `/sessions`
 

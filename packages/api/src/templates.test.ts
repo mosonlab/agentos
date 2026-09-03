@@ -33,10 +33,12 @@ import { refusalFor, refusalResponse } from "./refusal.js";
 const assertTemplateRefusal = async (
   operation: () => Promise<unknown>,
   code: TemplateInstantiationRefusalCode,
+  message?: RegExp,
 ): Promise<void> => {
   await assert.rejects(operation, (error: unknown) => {
     assert.ok(isTemplateInstantiationRefusal(error));
     assert.equal(error.code, code);
+    if (message) assert.match(error.message, message);
     const refused = refusalFor(error);
     assert.ok(refused);
     assert.equal(refusalResponse(refused).status, 400);
@@ -609,7 +611,7 @@ test("step override structural refusals happen before template reads and carry s
   }
 });
 
-test("an unbound direct chain omits revalidation while Route overrides the renumbered implementation", async () => {
+test("direct Route overrides implementation while non-direct templates refuse Route lines", async () => {
   let templateName = "direct-engineer-workflow";
   let lockedRouteAgentName = "senior-dev";
   const revalidator = {
@@ -730,12 +732,15 @@ test("an unbound direct chain omits revalidation while Route overrides the renum
     const originalOutputKind = steps[1]!.outputKind;
     if (nonDirectName === "compound-engineer-workflow") steps[1]!.outputKind = "documentation";
     for (const route of ["senior-dev", "unknown-agent"]) {
-      const nonDirect = await instantiateTemplate(db, "project-1", "template-1", {
-        repoId: "repo-1",
-        variables: {},
-        description: `Route: implementation=${route}`,
-      });
-      assert.equal(nonDirect.tasks.length, 3, `${nonDirectName} must ignore ${route}`);
+      await assertTemplateRefusal(
+        () => instantiateTemplate(db, "project-1", "template-1", {
+          repoId: "repo-1",
+          variables: {},
+          description: `Route: implementation=${route}`,
+        }),
+        "implementation_route_template_unsupported",
+        /remove the Route line from the description or use stepOverrides/u,
+      );
     }
     const malformedTolerated = await instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",

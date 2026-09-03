@@ -17,7 +17,14 @@ import { pathToFileURL } from "node:url";
 
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
-import { makeAgentOsClient, type MechanicalCancellation, type MechanicalClaim } from "./agentos.js";
+import {
+  CompletionRejectedError,
+  CompletionTransportError,
+  makeAgentOsClient,
+  MechanicalContractMismatchError,
+  type MechanicalCancellation,
+  type MechanicalClaim,
+} from "./agentos.js";
 import { loadExecutorConfig, type ExecutorConfig } from "./config.js";
 import { execute, type Deps } from "./decision-table.js";
 import { mintInstallationToken } from "./github-app-auth.js";
@@ -52,16 +59,41 @@ export const runClaim = async (
   } = {},
 ): Promise<void> => {
   const agentos = makeAgentOsClient(config, fetchImpl);
+  let runLog = log;
+  let redactCompletionEvidence = makeRedactor();
+  const complete = async (
+    completion: { succeeded: boolean; outcome: Awaited<ReturnType<typeof execute>> | null; failureReason?: string },
+  ): Promise<boolean> => {
+    try {
+      await agentos.complete(claimed, completion, redactCompletionEvidence);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof CompletionRejectedError) {
+        runLog.error(`mechanical completion rejected with HTTP ${error.status}: ${error.responseBody}`, {
+          runId: claimed.run.id,
+          status: error.status,
+          responseBody: error.responseBody,
+          ...(error.activityError === null ? {} : { activityError: error.activityError }),
+        });
+        return false;
+      }
+      if (error instanceof CompletionTransportError) {
+        runLog.error("mechanical completion failed after network retry", { runId: claimed.run.id, error: error.cause });
+        return false;
+      }
+      runLog.error("mechanical completion failed without retry", { runId: claimed.run.id, error });
+      return false;
+    }
+  };
   const chainIndex = claimed.task.chainIndex ?? null;
   if (chainIndex === null) {
     // Fail closed and loudly: a mechanical run outside a chain has no
     // predecessor to read an authorization from, so there is nothing to execute.
-    await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason: "mechanical run is not part of a chain" });
+    await complete({ succeeded: false, outcome: null, failureReason: "mechanical run is not part of a chain" });
     return;
   }
 
   const startedAt = new Date();
-  let runLog = log;
   let pendingCancellation: MechanicalCancellation | null = null;
   const checkCancellation = async (): Promise<void> => {
     if (pendingCancellation) throw new MechanicalCancellationObserved(pendingCancellation);
@@ -102,12 +134,13 @@ export const runClaim = async (
       const suffix = minted.httpStatus === undefined ? "" : ` (HTTP ${minted.httpStatus})`;
       const failureReason = `GitHub App installation-token mint failed: ${minted.failure}${suffix}`;
       log.error("GitHub App installation-token mint failed", { runId: claimed.run.id, failure: minted.failure, ...(minted.httpStatus === undefined ? {} : { httpStatus: minted.httpStatus }) });
-      await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason });
+      await complete({ succeeded: false, outcome: null, failureReason });
       return;
     }
 
     runLog = log.withSecrets(minted.token);
     const redactInstallationToken = makeRedactor(minted.token);
+    redactCompletionEvidence = redactInstallationToken;
     // The installation token is run-scoped: construct the GitHub surface only
     // after this Run's successful mint, and never retain it outside this call.
     const github = (overrides.makeGitHub ?? makeGitHubClient)({
@@ -173,7 +206,7 @@ export const runClaim = async (
     );
     // Every executed contract ends SUCCESS, stop or merge alike. FAILURE is for
     // crashes only, so a recorded stop is never automatically retried.
-    await agentos.complete(claimed, { succeeded: true, outcome });
+    if (!await complete({ succeeded: true, outcome })) return;
     runLog.info("mechanical run completed", { runId: claimed.run.id, outcome: outcome.outcome });
   } catch (error: unknown) {
     if (error instanceof MechanicalCancellationObserved) {
@@ -183,7 +216,7 @@ export const runClaim = async (
     }
     if (error instanceof MechanicalApiIncompatible) {
       runLog.error("mechanical run refused incompatible control plane", { runId: claimed.run.id });
-      await agentos.complete(claimed, {
+      await complete({
         succeeded: false,
         outcome: null,
         failureReason: "control plane does not enforce mechanical cancellation refusal",
@@ -194,8 +227,7 @@ export const runClaim = async (
     // Deep transport errors can contain request headers. The run record names
     // the failed phase without serialising the thrown value into control-plane
     // evidence; the token-aware logger above remains the diagnostic backstop.
-    await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason: "merge executor crashed during mechanical execution" })
-      .catch((completionError: unknown) => { runLog.error("completion after crash failed", { error: completionError }); });
+    await complete({ succeeded: false, outcome: null, failureReason: "merge executor crashed during mechanical execution" });
   } finally {
     clearInterval(heartbeat);
   }
@@ -207,19 +239,70 @@ export const claimOnce = async (
   log: ExecutorLog,
   fetchImpl: typeof fetch = fetch,
   runClaimImpl: typeof runClaim = runClaim,
-): Promise<"idle" | "handled"> => {
+): Promise<"idle" | "handled" | "contract-mismatch"> => {
   const agentos = makeAgentOsClient(config, fetchImpl);
-  const claimed = await agentos.claim();
+  let claimed: MechanicalClaim | null;
+  try {
+    claimed = await agentos.claim();
+  } catch (error: unknown) {
+    if (!(error instanceof MechanicalContractMismatchError)) throw error;
+    log.error("mechanical completion contract mismatch", {
+      executorVersion: error.executorVersion,
+      apiVersion: error.apiVersion,
+    });
+    return "contract-mismatch";
+  }
   if (!claimed) return "idle";
   if (claimed.executionMode !== "mechanical") {
     // Symmetric to the ordinary runner's refusal: an allowlisted runner id
     // should be offered nothing else, so being handed an agent run means the
     // allowlist is misconfigured. Refuse it rather than execute it.
-    await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason: "the merge executor does not execute model runs" });
+    await agentos.complete(
+      claimed,
+      { succeeded: false, outcome: null, failureReason: "the merge executor does not execute model runs" },
+      makeRedactor(),
+    );
     return "handled";
   }
   await runClaimImpl(config, privateKeyFile, claimed, log, fetchImpl);
   return "handled";
+};
+
+type ClaimOnceResult = Awaited<ReturnType<typeof claimOnce>>;
+
+const waitForAbort = async (signal: AbortSignal): Promise<void> => {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+};
+
+/**
+ * Poll until shutdown. A contract mismatch parks the daemon without issuing
+ * another claim, so unconditional service-manager restart policies cannot
+ * turn incompatibility into a slower claim loop.
+ */
+export const pollClaims = async (input: {
+  signal: AbortSignal;
+  pollIntervalMs: number;
+  log: ExecutorLog;
+  claim: () => Promise<ClaimOnceResult>;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<void> => {
+  const sleepImpl = input.sleep ?? sleep;
+  while (!input.signal.aborted) {
+    try {
+      const result = await input.claim();
+      if (result === "contract-mismatch") {
+        await waitForAbort(input.signal);
+        return;
+      }
+      if (result === "idle") await sleepImpl(input.pollIntervalMs);
+    } catch (error: unknown) {
+      input.log.error("claim loop error", { error });
+      await sleepImpl(input.pollIntervalMs);
+    }
+  }
 };
 
 export const main = async (): Promise<void> => {
@@ -236,22 +319,17 @@ export const main = async (): Promise<void> => {
   const config = loadExecutorConfig();
   log.info("merge executor started", { osUser: gate.osUser, runnerId: config.runnerId, privateKeyFile: gate.privateKeyFile });
 
-  let running = true;
-  const stop = (): void => { running = false; };
+  const shutdown = new AbortController();
+  const stop = (): void => { shutdown.abort(); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  while (running) {
-    try {
-      const result = await claimOnce(config, gate.privateKeyFile, log);
-      if (result === "idle") {
-        await sleep(config.pollIntervalMs);
-      }
-    } catch (error: unknown) {
-      log.error("claim loop error", { error });
-      await sleep(config.pollIntervalMs);
-    }
-  }
+  await pollClaims({
+    signal: shutdown.signal,
+    pollIntervalMs: config.pollIntervalMs,
+    log,
+    claim: () => claimOnce(config, gate.privateKeyFile, log),
+  });
   log.info("merge executor stopped");
 };
 
