@@ -27,6 +27,16 @@ import type {
 import type { ExecutionMode } from "./merge-integrator-db.js";
 import type { RegressionRepairHandoff } from "./merge-tail.js";
 
+/**
+ * The version shared by the mechanical claim and completion request contracts.
+ *
+ * The merge executor is released independently from the API, so any change to
+ * the completion input shape must bump this value. The API refuses a
+ * mechanical claim whose caller does not send this exact version rather than
+ * allowing the two separately built processes to drift silently.
+ */
+export const RUN_COMPLETION_CONTRACT_VERSION = 1;
+
 /** The step identity a runner needs: title the delivery, and decide provisioning. */
 export type ClaimTemplateStep = {
   name: string;
