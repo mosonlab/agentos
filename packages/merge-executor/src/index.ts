@@ -257,11 +257,52 @@ export const claimOnce = async (
     // Symmetric to the ordinary runner's refusal: an allowlisted runner id
     // should be offered nothing else, so being handed an agent run means the
     // allowlist is misconfigured. Refuse it rather than execute it.
-    await agentos.complete(claimed, { succeeded: false, outcome: null, failureReason: "the merge executor does not execute model runs" });
+    await agentos.complete(
+      claimed,
+      { succeeded: false, outcome: null, failureReason: "the merge executor does not execute model runs" },
+      makeRedactor(),
+    );
     return "handled";
   }
   await runClaimImpl(config, privateKeyFile, claimed, log, fetchImpl);
   return "handled";
+};
+
+type ClaimOnceResult = Awaited<ReturnType<typeof claimOnce>>;
+
+const waitForAbort = async (signal: AbortSignal): Promise<void> => {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+};
+
+/**
+ * Poll until shutdown. A contract mismatch parks the daemon without issuing
+ * another claim, so unconditional service-manager restart policies cannot
+ * turn incompatibility into a slower claim loop.
+ */
+export const pollClaims = async (input: {
+  signal: AbortSignal;
+  pollIntervalMs: number;
+  log: ExecutorLog;
+  claim: () => Promise<ClaimOnceResult>;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<void> => {
+  const sleepImpl = input.sleep ?? sleep;
+  while (!input.signal.aborted) {
+    try {
+      const result = await input.claim();
+      if (result === "contract-mismatch") {
+        await waitForAbort(input.signal);
+        return;
+      }
+      if (result === "idle") await sleepImpl(input.pollIntervalMs);
+    } catch (error: unknown) {
+      input.log.error("claim loop error", { error });
+      await sleepImpl(input.pollIntervalMs);
+    }
+  }
 };
 
 export const main = async (): Promise<void> => {
@@ -278,26 +319,17 @@ export const main = async (): Promise<void> => {
   const config = loadExecutorConfig();
   log.info("merge executor started", { osUser: gate.osUser, runnerId: config.runnerId, privateKeyFile: gate.privateKeyFile });
 
-  let running = true;
-  const stop = (): void => { running = false; };
+  const shutdown = new AbortController();
+  const stop = (): void => { shutdown.abort(); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  while (running) {
-    try {
-      const result = await claimOnce(config, gate.privateKeyFile, log);
-      if (result === "contract-mismatch") {
-        running = false;
-        continue;
-      }
-      if (result === "idle") {
-        await sleep(config.pollIntervalMs);
-      }
-    } catch (error: unknown) {
-      log.error("claim loop error", { error });
-      await sleep(config.pollIntervalMs);
-    }
-  }
+  await pollClaims({
+    signal: shutdown.signal,
+    pollIntervalMs: config.pollIntervalMs,
+    log,
+    claim: () => claimOnce(config, gate.privateKeyFile, log),
+  });
   log.info("merge executor stopped");
 };
 

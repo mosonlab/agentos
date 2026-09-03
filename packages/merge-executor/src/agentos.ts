@@ -11,7 +11,10 @@
  */
 
 import type { MergeOutcome } from "@anneal/db/merge-integrator";
-import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import {
+  MECHANICAL_CONTRACT_MISMATCH_CODE,
+  RUN_COMPLETION_CONTRACT_VERSION,
+} from "@anneal/db/claim-contract";
 
 import type { ExecutorConfig } from "./config.js";
 import type { ChainEnvelope, IntentRecord } from "./decision-table.js";
@@ -142,7 +145,7 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
           // A malformed refusal is not the named compatibility result; surface
           // the original response error through the ordinary claim-loop path.
         }
-        if (refusal?.code === "mechanical_contract_mismatch"
+        if (refusal?.code === MECHANICAL_CONTRACT_MISMATCH_CODE
           && typeof refusal.expectedVersion === "number"
           && (typeof refusal.receivedVersion === "number" || refusal.receivedVersion === null)) {
           throw new MechanicalContractMismatchError(
@@ -265,7 +268,7 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
   const complete = async (
     claimed: MechanicalClaim,
     completion: { succeeded: boolean; outcome: MergeOutcome | null; failureReason?: string },
-    redact: (value: unknown) => string = (value) => String(value),
+    redact: (value: unknown) => string,
   ): Promise<void> => {
     const body = {
       runnerId: config.runnerId,

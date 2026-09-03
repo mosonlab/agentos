@@ -28,7 +28,10 @@ import {
 } from "@anneal/db";
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
-import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import {
+  MECHANICAL_CONTRACT_MISMATCH_CODE,
+  RUN_COMPLETION_CONTRACT_VERSION,
+} from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import { issueSessionToken } from "./auth.js";
@@ -582,21 +585,40 @@ export const claimRun = async (
         const receivedVersion = body.contractVersion ?? null;
         const displayedVersion = receivedVersion ?? "missing";
         const message = `Mechanical completion contract mismatch: executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`;
-        await tx.taskActivity.create({
-          data: {
+        const existingActivity = await tx.taskActivity.findFirst({
+          where: {
             taskId: candidate.task.id,
             actorType: "control-plane",
-            body: message,
-            metadata: {
-              code: "mechanical_contract_mismatch",
-              executorVersion: receivedVersion,
-              apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
-            },
+            AND: [
+              { metadata: { path: ["code"], equals: MECHANICAL_CONTRACT_MISMATCH_CODE } },
+              { metadata: { path: ["apiVersion"], equals: RUN_COMPLETION_CONTRACT_VERSION } },
+              {
+                metadata: {
+                  path: ["executorVersion"],
+                  equals: receivedVersion === null ? Prisma.JsonNull : receivedVersion,
+                },
+              },
+            ],
           },
+          select: { id: true },
         });
+        if (!existingActivity) {
+          await tx.taskActivity.create({
+            data: {
+              taskId: candidate.task.id,
+              actorType: "control-plane",
+              body: message,
+              metadata: {
+                code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+                executorVersion: receivedVersion,
+                apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
+              },
+            },
+          });
+        }
         return {
           error: message,
-          reason: "mechanical_contract_mismatch",
+          reason: MECHANICAL_CONTRACT_MISMATCH_CODE,
           expectedVersion: RUN_COMPLETION_CONTRACT_VERSION,
           receivedVersion,
         };

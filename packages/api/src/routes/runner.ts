@@ -1,4 +1,5 @@
 import { RunnerKind } from "@anneal/db";
+import { MECHANICAL_CONTRACT_MISMATCH_CODE } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import { fence, id, readJson, refusal, refusalJson } from "./support.js";
@@ -199,7 +200,7 @@ export const registerRunnerRoutes = (
       if (typeof claimed.reason !== "string") throw new TypeError("Run claim refusal has no reason");
       return refusalJson(context, refusal("conflict", claimed.error, {
         reason: claimed.reason,
-        ...(claimed.reason === "mechanical_contract_mismatch"
+        ...(claimed.reason === MECHANICAL_CONTRACT_MISMATCH_CODE
           ? {
             code: claimed.reason,
             expectedVersion: claimed.expectedVersion,

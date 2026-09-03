@@ -13,7 +13,7 @@ import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 import { makeAgentOsClient, type MechanicalClaim } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
-import { claimOnce, runClaim } from "./index.js";
+import { claimOnce, pollClaims, runClaim } from "./index.js";
 import { makeLog, makeRedactor } from "./redaction.js";
 
 const config: ExecutorConfig = {
@@ -94,6 +94,29 @@ test("a completion-contract mismatch stops claim polling with one error and no r
   assert.equal(errors.length, 1);
   assert.match(errors[0]!, new RegExp(`executorVersion.*${RUN_COMPLETION_CONTRACT_VERSION - 1}`, "u"));
   assert.match(errors[0]!, new RegExp(`apiVersion.*${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+});
+
+test("a completion-contract mismatch parks the daemon until shutdown", async () => {
+  const controller = new AbortController();
+  let claimCalls = 0;
+  let settled = false;
+  const polling = pollClaims({
+    signal: controller.signal,
+    pollIntervalMs: 1,
+    log,
+    claim: async () => {
+      claimCalls += 1;
+      return "contract-mismatch";
+    },
+  }).then(() => { settled = true; });
+
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  assert.equal(claimCalls, 1);
+  assert.equal(settled, false);
+
+  controller.abort();
+  await polling;
+  assert.equal(settled, true);
 });
 
 test("the mechanical start request matches the promptless API contract", async () => {
@@ -387,7 +410,7 @@ test("a completion network failure is retried exactly once", async () => {
   await makeAgentOsClient(config, fetchImpl).complete(claimed("network-retry"), {
     succeeded: true,
     outcome: { outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" },
-  });
+  }, makeRedactor());
 
   assert.equal(completionAttempts, 2);
 });
@@ -406,7 +429,7 @@ test("a non-network completion exception is not retried", async () => {
     makeAgentOsClient(config, fetchImpl).complete(claimed("no-programming-retry"), {
       succeeded: true,
       outcome: { outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" },
-    }),
+    }, makeRedactor()),
     /programming failure/u,
   );
   assert.equal(completionAttempts, 1);

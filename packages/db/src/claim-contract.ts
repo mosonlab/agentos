@@ -37,6 +37,9 @@ import type { RegressionRepairHandoff } from "./merge-tail.js";
  */
 export const RUN_COMPLETION_CONTRACT_VERSION = 1;
 
+/** Stable refusal discriminator shared by the API and mechanical executor. */
+export const MECHANICAL_CONTRACT_MISMATCH_CODE = "mechanical_contract_mismatch";
+
 /** The step identity a runner needs: title the delivery, and decide provisioning. */
 export type ClaimTemplateStep = {
   name: string;
