@@ -80,7 +80,7 @@ const git = (cwd, ...args) =>
 
 test("provisioning includes the native Node build/runtime dependencies and Git identity", () => {
   const source = readFileSync(provisionPath, "utf8");
-  for (const pkg of ["python3", "build-essential", "libatomic1"]) {
+  for (const pkg of ["jq", "python3", "build-essential", "libatomic1"]) {
     assert.match(source, new RegExp(`for pkg in [^\\n]*\\b${pkg}\\b`), `${pkg} is not provisioned`);
   }
   assert.match(source, /git config --global user\.name/);

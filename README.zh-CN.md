@@ -121,7 +121,7 @@ Linux 与 Intel macOS 预计可运行，但尚未完成 release-level 验证；�
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.6.0
+git checkout v0.7.0
 npm ci
 npm run setup:local
 npm run build
@@ -135,7 +135,7 @@ npm run db:migrate:release -- --fresh
 
 ## 当前状态
 
-Developer Preview 6（v0.6.0）：接口与存储数据形态在 preview 之间可能
+Developer Preview 7（v0.7.0）：接口与存储数据形态在 preview 之间可能
 变化，唯一升级路径是全新安装。已验证的目标平台是 Apple Silicon macOS；
 Linux 与 Intel macOS 预计可运行，但尚未完成 release-level 验证；Windows
 不支持。
@@ -155,7 +155,7 @@ Provider CLI、它们的认证与套餐条款始终在你和 provider 之间；�
 [安装](docs/install.md) ·
 [安全](docs/release/security.md) ·
 [迁移与恢复](docs/release/migration-and-recovery.md) ·
-[发布说明](docs/release/v0.6.0-release-notes.md) ·
+[发布说明](docs/release/v0.7.0-release-notes.md) ·
 [贡献指南](CONTRIBUTING.md) ·
 [支持](SECURITY.md)
 

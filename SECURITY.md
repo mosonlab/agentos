@@ -4,8 +4,8 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.6.0 (Developer Preview) | Yes, on the target platform only — see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) |
-| 0.5.0 and earlier | No. A developer preview is superseded by the next one; there is no backport path. |
+| 0.7.0 (Developer Preview) | Yes, on the target platform only — see [`docs/release/support-matrix.md`](docs/release/support-matrix.md) |
+| 0.6.0 and earlier | No. A developer preview is superseded by the next one; there is no backport path. |
 
 There is no patch stream and no backport path. A fix ships as the next release; published
 tags and release assets are immutable and are never rewritten in place.
