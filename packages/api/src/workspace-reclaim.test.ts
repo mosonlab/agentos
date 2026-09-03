@@ -105,6 +105,7 @@ test("the control plane derives required pinned checkout evidence from the templ
 
 test("reclaim salvage ACK accepts only the owner's deterministic ref while the intent is open", async () => {
   let written: string | null = null;
+  const activities: Array<Record<string, unknown>> = [];
   const stored = {
     id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
     status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null, pushedBranch: null,
@@ -120,6 +121,12 @@ test("reclaim salvage ACK accepts only the owner's deterministic ref while the i
       findUnique: async () => ({ projectId: "project-1", chainId: null }),
       findUniqueOrThrow: async () => ({ id: "task-1" }),
     },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        activities.push(data);
+        return {};
+      },
+    },
   };
   db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
   assert.equal(await acknowledgeReclaimSalvage(db, {
@@ -132,6 +139,47 @@ test("reclaim salvage ACK accepts only the owner's deterministic ref while the i
     runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
   }), "none");
   assert.equal(written, "agentos/task-1/run-3");
+  assert.deepEqual(activities, []);
+});
+
+test("reclaim salvage ACK records when a started replacement leaves the branch unconsumed", async () => {
+  const activities: Array<Record<string, unknown>> = [];
+  const stored = {
+    id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+    status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null, pushedBranch: null,
+  };
+  const replacement = {
+    id: "run-4", runNumber: 4, status: RunStatus.RUNNING, startedAt: new Date(), baseSha: "base-before-salvage",
+  };
+  const db: any = {
+    $queryRaw: async () => [{ id: "task-1" }],
+    run: {
+      findUnique: async () => ({ ...stored, pushedBranch: "agentos/task-1/run-3" }),
+      findFirst: async () => replacement,
+      updateMany: async () => ({ count: 1 }),
+    },
+    task: {
+      findUnique: async () => ({ projectId: "project-1", chainId: null }),
+      findUniqueOrThrow: async () => ({ id: "task-1" }),
+    },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        activities.push(data);
+        return {};
+      },
+    },
+  };
+  db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
+
+  assert.equal(await acknowledgeReclaimSalvage(db, {
+    runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
+  }), "already-started");
+  assert.equal(activities.length, 1);
+  assert.deepEqual(activities[0], {
+    taskId: "task-1",
+    actorType: "control-plane",
+    body: "Salvage branch agentos/task-1/run-3 from LOST Run 3 was not consumed by replacement Run 4, which already started from baseSha base-before-salvage",
+  });
 });
 
 test("a directory the database has never heard of is kept, never offered", async () => {

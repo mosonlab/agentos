@@ -432,11 +432,25 @@ export const acknowledgeReclaimSalvage = async (
       data: { pushedBranch: input.pushedBranch },
     });
     if (updated.count !== 1 || !run.taskId) return false;
-    return repairReplacementAfterSalvage(tx, {
+    const repair = await repairReplacementAfterSalvage(tx, {
       taskId: run.taskId,
       runNumber: run.runNumber,
       branch: run.branch,
     });
+    if (repair === "already-started") {
+      const replacement = await tx.run.findFirst({
+        where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
+        select: { runNumber: true, baseSha: true },
+      });
+      if (replacement) {
+        await tx.taskActivity.create({ data: {
+          taskId: run.taskId,
+          actorType: "control-plane",
+          body: `Salvage branch ${input.pushedBranch} from LOST Run ${run.runNumber} was not consumed by replacement Run ${replacement.runNumber}, which already started from baseSha ${replacement.baseSha}`,
+        } });
+      }
+    }
+    return repair;
   });
 };
 
