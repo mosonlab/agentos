@@ -9,6 +9,198 @@ written.
 
 ## Unreleased
 
+## v0.7.0 — Developer Preview 7
+
+The seventh preview opens Anneal to more than one project: a documented
+onboarding path takes a new repository from `POST /projects` to an open pull
+request, approval gates become a per-project setting instead of a fixed
+property of the workflow, and the Board gains direct Hold and Resume control
+over a running chain. As with every 0.x minor, behaviour changes below are
+breaking-eligible. There is still no supported upgrade path between previews
+other than a fresh install. This release adds five migrations.
+
+### Multiple projects and onboarding
+
+- A project can be brought up end to end from the API. `POST /projects`
+  bootstraps a Project with the canonical `pr-engineer-workflow` template,
+  which implements, reviews and applies fixes, then hands over an open pull
+  request with its evidence for you to review and merge yourself. The whole
+  path is written up in
+  [Add a project](docs/runbooks/add-a-project.md), which is the one onboarding
+  page for both the pull-request tier and the full Direct and Full Assurance
+  tier.
+- `POST /projects/:projectId/repos` runs a repository preflight before the Repo
+  row exists, checks Git identity, remote reachability, default branch, fetch
+  and dry-run push, and can grant every active Project Agent `GIT_WRITE` in the
+  same transaction with `grantAgents: true`. Preflight is never skipped as a
+  success fallback. The Inbox is scoped per project.
+- **`dependencyProvisioning` is now a required field on a Repo, declared as
+  exactly `NONE` or `NPM_CI`.** Anneal no longer infers it. The declaration is
+  preflighted on create and on `PATCH /repos/:repoId`: `NPM_CI` without a root
+  `package-lock.json` on the fetched default branch, and `NONE` with one
+  present, are each refused with a named code and a remedy rather than
+  producing a Run that fails later.
+- The regression tooling a Run needs is supplied by the runner into a per-run
+  directory outside the checkout, so a project does not have to carry Anneal's
+  gate scripts in its own repository. The canonical Regression steps and the
+  reference merge gate both read the runner-provided tooling.
+- Canonical Agent, role and template sync runs per project in its own
+  transaction and reports each project's refusals instead of failing the whole
+  sync silently. `npm run db:sync-canonical-prompts -- --install-full
+  <projectId>` completes the canonical inventory for the full-tail tiers, and a
+  partial verifier reports what a partially installed project is still missing.
+
+### Approval gates
+
+- **Approval gates are configurable per project.** A Project carries
+  `specGateDefault` and `mergeGateDefault`; template instantiation accepts a
+  `gates` object with optional `spec` and `merge` booleans. For the
+  specification and merge-readiness slots the created Task's `approvalGate`
+  resolves in exactly this order: the dispatch override, then the project
+  default, then the template step's frontmatter. An explicit `false` is an
+  override. Every other step keeps its template value.
+- Resolved gate values are persisted onto the created Tasks, so changing a
+  project default later does not change a Chain that is already running. A
+  `gates.spec` or `gates.merge` sent to a template that has no such step is
+  refused with `gates_spec_step_absent` or `gates_merge_step_absent` and
+  creates no Task. Factory defaults leave both gates off.
+- A malformed `Route:` line in a brief is refused at direct instantiation with
+  a `400` instead of silently falling back to a default assignee and
+  misrouting the chain.
+
+### Board, task detail and Inbox
+
+- Chain aggregate cards carry Hold and Resume directly, show a held state, and
+  can be held before their first layer has started. The Doing column can hold
+  every chain it shows in one action. A hold is layer-granular and never
+  cancels a Run that is already going.
+- Board cards are more compact, every column reads newest first, and a card
+  footer links the newest Run's pull request and shows its cost. The run line
+  on an aggregate card wraps instead of being truncated.
+- Task detail opens on the frontier step rather than the first one, adds a
+  session column, makes the Details block collapsible, and shows a Now block
+  carrying the newest Run's latest agent message.
+- Archiving a chain from a card is applied to the whole chain atomically
+  instead of one request per member.
+- Every open Inbox card accepts a free-text answer, and an approve or reject
+  decision on a gate can carry an operator note.
+
+### Costs
+
+- The Costs page reports per-chain lead and busy time, repair counts, longest
+  idle gap and priced spend by step role, alongside the existing totals. Waste
+  is partitioned exactly into operator-cancelled and failed spend, and failed
+  spend is partitioned further by failure class.
+- Cache accounting has one completeness rule across the views. Runs whose cache
+  split is unknown are counted and excluded from cache metrics rather than
+  being folded in, and an unpriced Run is never given a fabricated cost.
+
+### Template authoring
+
+- A canonical template can be cloned under a project-local name with
+  `POST /projects/:projectId/task-templates/:templateId/clone` and edited with
+  `PUT /projects/:projectId/task-templates/:templateId/steps`, so a workflow
+  can be adjusted without hand-authoring one from scratch. A template already
+  in use refuses the edit; the recovery is to clone again.
+
+### Host load and gate stability
+
+- The runner stops claiming new work while the host's one-minute load average
+  is above cores times 1.5, and resumes claiming when it drops. Running work is
+  not interrupted. The threshold is `RUNNER_CLAIM_MAX_LOAD_AVERAGE`.
+- Per-workspace verification inside Runs shares a host-wide proof-slot ceiling,
+  Node test concurrency is capped inside Run proofs, and a proof-slot wait of
+  60 seconds or more is reported rather than being silent.
+- The merge gate defaults to half the host when it is not running on a
+  dedicated gate worker.
+- The runner dependency cache is retained against a fixed byte budget rather
+  than an entry count.
+- A gate failure excerpt keeps its stage attribution through nested workspace
+  headings, and a gate-fix repair brief names the failing tests rather than
+  only the failed stage.
+
+### Runner and delivery reliability
+
+- **Runs against a private repository can authenticate.** The session answers
+  git credential requests from the runner account's home even when the provider
+  relocates `HOME`, and the credential helper is materialized into the Run's
+  tools. Before this, every fetch in such a Run failed with
+  `could not read Username`.
+- Delivered work is no longer thrown away by what happens after delivery. A
+  provider stream that dies after the work is delivered is accepted, an
+  explicit terminal failure is not promoted over a completed delivery, and a
+  reconnect notice that names its own cause is no longer misread as
+  `PROTOCOL_ERROR`.
+- A merge-tail repair card gets a second Run instead of stopping the whole
+  merge tail when its first Run is lost after delivering.
+- A Run's target branch is resolved inside the run workspace, so a workspace
+  cloned from its own salvaged head no longer retries a revision lookup that
+  cannot succeed. A salvage continuation that correctly produces no new commit
+  no longer dead-ends in `REVIEW`.
+- A failed regression target fetch reports git's own error and retries only
+  genuinely transient network failures, and merge-lease git operations use the
+  canonical retry and backoff budget instead of three fixed one-second
+  attempts.
+- A required-output status failure is terminal, prior-Run immutable findings
+  output is accepted at Run completion and by the sibling review validator, and
+  the merge integrator raises a stop question only when it has to: a definitive
+  merge result outranks a failed completion.
+- A malformed or empty JSON body returns `400` on every JSON route instead of
+  `500`, and a failed startup health count is reported as unavailable rather
+  than as `0`.
+- [`docs/operator-api.md`](docs/operator-api.md) now documents the operator exit
+  for a merge tail that stopped after exhausting its repair budget, and the
+  route handbook is checked against the registered routes so it cannot drift.
+
+### Maintainer deployment
+
+- A transient deploy failure that raised an escalation is retried and can
+  self-clear within its bounded budget, rather than latching and waiting for a
+  maintainer.
+- `--clear-escalation` now clears the escalation marker instead of reporting
+  success without removing it.
+- These changes apply to the maintainer appliance. The public Developer Preview
+  continues to use the foreground fresh-install sequence in the README.
+
+### Internal structure
+
+- Route registration is split out of `app.ts` into per-prefix route modules,
+  and a large refactor wave gives single owners to the runner's claim payload,
+  run session, run outcome, delivery receipt, dependency-provisioning decision
+  and dependency-cache store; to the API's refusal-code status families and Run
+  output evidence; to the database's canonical drift adoption, canonical sync
+  report, operator console wire contract and refused-Run disposition; to the
+  web client's Chain control admissibility and run liveness; and to the
+  deployment escalation marker and invocation decision. Every native projection
+  is now proved to serialize to its browser contract. These changes are
+  intended to preserve their existing external behaviour.
+- Session events no longer persist `message_update` and `tool_execution_update`
+  chunks. The runtime-tools bundle is byte-identical across builds, and
+  `verify-test-no-build` is retired.
+- No HTTP route or configuration key is intentionally removed in this release.
+  The breaking change is the required `dependencyProvisioning` declaration on a
+  Repo; the observable additions are the project gate defaults and the
+  `gates` dispatch override, the template clone and steps routes, the per-chain
+  Costs fields, and the Board hold fields.
+
+### Known limitations
+
+- There is no supported in-place upgrade from v0.6.0. Install v0.7.0 against an
+  empty schema with `npm run db:migrate:release -- --fresh`.
+- The delivery symptom in [Issue #305](https://github.com/mosonlab/anneal/issues/305)
+  is classified accurately, but the provider-side cause is not eliminated: a
+  code-producing provider can still end a successful session without writing or
+  committing its announced work. A manual Task's final prose remains in its
+  Session events and is not promoted to retry handoff output.
+- The pull-request tier stops at an open pull request. Anneal does not review or
+  merge it for you, and onboarding a project does not provision another
+  workflow or create a Secret.
+- macOS on Apple Silicon remains the only release-verified target. Linux and
+  macOS on Intel are expected to work but have not been exercised; Windows is
+  unsupported by design.
+- Anneal still launches coding CLIs with the operator account's authority and
+  is not a sandbox.
+
 ## v0.6.0 — Developer Preview 6
 
 The sixth preview adds wave activation and live repair visibility to the chain

@@ -139,7 +139,7 @@ release-verified. This quick start documents the verified Apple Silicon path.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.6.0
+git checkout v0.7.0
 npm ci
 npm run setup:local
 npm run build
@@ -154,7 +154,7 @@ The full sequence with its preflights is in
 
 ## Status
 
-Developer Preview 6 (v0.6.0): interfaces and stored data shapes may
+Developer Preview 7 (v0.7.0): interfaces and stored data shapes may
 change between previews, and the only upgrade path is a fresh install.
 The verified target is macOS on Apple Silicon. Linux and macOS on Intel
 are expected to work but are not yet release-verified; Windows is unsupported.
@@ -177,7 +177,7 @@ you and the provider; the authoritative support statement is
 [Install](docs/install.md) ·
 [Security](docs/release/security.md) ·
 [Migration and recovery](docs/release/migration-and-recovery.md) ·
-[Release notes](docs/release/v0.6.0-release-notes.md) ·
+[Release notes](docs/release/v0.7.0-release-notes.md) ·
 [Contributing](CONTRIBUTING.md) ·
 [Support](SECURITY.md)
 
