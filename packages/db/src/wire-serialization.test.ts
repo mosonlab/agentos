@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { Prisma } from "@prisma/client";
 
+import type { BoardCard, TaskDetail, TaskList } from "./board-contract.js";
 import type { JsonSerialized, SerializesTo } from "./wire-serialization.js";
 
 /** A contract written the way the shared ones are: wire forms by default, and
@@ -77,4 +78,161 @@ test("a key the projection makes optional and the contract requires is refused",
   // which is why the proof compares type identity and not assignability.
   const projection = optional satisfies SerializesTo<OptionalTagsReport, Report>;
   assert.deepEqual(projection.tags, ["merge"]);
+});
+
+const strandedSalvageBranches = [{
+  branch: "agentos/task-1/run-2",
+  lostRunNumber: 2,
+}];
+
+const projectionDate = new Date("2026-09-02T12:00:00.000Z");
+
+type NativeBoardCard = BoardCard<Date>;
+type NativeTaskList = TaskList<Date, Prisma.Decimal>;
+type NativeTaskDetail = TaskDetail<Date, Prisma.Decimal>;
+
+const nativeBoardCard = (): NativeBoardCard => ({
+  id: "task-1",
+  name: "Repair the board",
+  displayName: "Repair the board",
+  status: "TODO",
+  moveTargets: [],
+  assigneeType: "HUMAN",
+  failureReason: null,
+  scheduleKind: "NOW",
+  runAt: null,
+  cron: null,
+  timezone: null,
+  approvalGate: false,
+  templateId: null,
+  source: "MANUAL",
+  chainId: null,
+  chainIndex: null,
+  chainName: null,
+  blockedOn: null,
+  createdAt: projectionDate,
+  updatedAt: projectionDate,
+  assigneeAgent: null,
+  chainProgress: null,
+  latestRun: null,
+  strandedSalvageBranches,
+  taskCost: null,
+  mergeOutcome: null,
+  repairOf: null,
+  chainAggregate: null,
+});
+
+const nativeRun: NativeTaskList["runs"][number] = {
+  id: "run-2",
+  projectId: "project-1",
+  taskId: "task-1",
+  goalId: null,
+  agentId: "agent-1",
+  repoId: null,
+  runNumber: 2,
+  status: "LOST",
+  runner: "CODEX",
+  runnerId: null,
+  model: "gpt-5.6-sol",
+  codexServiceTier: "DEFAULT",
+  subagentModel: null,
+  subagentMaxConcurrent: null,
+  leaseGeneration: 1,
+  cancelRequestId: null,
+  cancelReason: null,
+  cancelRequestedAt: null,
+  cancelAcknowledgedAt: null,
+  workspacePath: null,
+  workspaceRetained: false,
+  targetBranch: null,
+  branch: null,
+  baseSha: null,
+  headSha: null,
+  pushStatus: "NOT_REQUESTED",
+  pullRequestUrl: null,
+  maxDurationMin: 30,
+  stallTimeoutMin: 10,
+  maxRunsPerTask: 3,
+  failureClass: null,
+  failureReason: null,
+  retryable: null,
+  retryAt: null,
+  terminationReason: null,
+  queuedAt: projectionDate,
+  claimedAt: null,
+  startedAt: null,
+  endedAt: null,
+  session: null,
+  mergeOutcome: null,
+  mergeRecovery: null,
+};
+
+const nativeTaskBase = {
+  id: "task-1",
+  projectId: "project-1",
+  assigneeAgentId: null,
+  repoId: null,
+  templateId: null,
+  templateStepId: null,
+  name: "Repair the board",
+  description: "Keep the durable salvage visible.",
+  workingDirectory: null,
+  targetBranch: null,
+  failureReason: null,
+  status: "TODO",
+  assigneeType: "HUMAN",
+  executionOwner: "human",
+  approvalGate: false,
+  scheduleKind: "NOW",
+  runAt: null,
+  cron: null,
+  timezone: null,
+  maxDurationMin: 30,
+  stallTimeoutMin: 10,
+  maxSessionsPerTask: 3,
+  createdAt: projectionDate,
+  updatedAt: projectionDate,
+  assigneeAgent: null,
+  repo: null,
+  runs: [nativeRun],
+  strandedSalvageBranches,
+  chainId: null,
+  chainIndex: null,
+  source: "MANUAL",
+  archivedAt: null,
+  schedulePausedAt: null,
+  recurringSourceTaskId: null,
+  templateStep: null,
+} satisfies Omit<NativeTaskList, "chainProgress" | "recurringLastFiredAt" | "recurringFireCount">;
+
+const nativeTaskList = (): NativeTaskList => ({
+  ...nativeTaskBase,
+  chainProgress: null,
+  recurringLastFiredAt: null,
+  recurringFireCount: 0,
+});
+
+const nativeTaskDetail = (): NativeTaskDetail => ({
+  ...nativeTaskBase,
+  moveTargets: [],
+  taskCost: null,
+  mergeOutcome: null,
+  mergeRecovery: null,
+});
+
+test("native board, task-list, and task-detail salvage fields serialize to the browser shape", () => {
+  const boardProjection = nativeBoardCard() satisfies SerializesTo<NativeBoardCard, BoardCard>;
+  const serializedBoard: JsonSerialized<NativeBoardCard> = JSON.parse(JSON.stringify(boardProjection));
+  assert.equal(serializedBoard.createdAt, projectionDate.toISOString());
+  assert.deepEqual(serializedBoard.strandedSalvageBranches, strandedSalvageBranches);
+
+  const taskListProjection = nativeTaskList() satisfies SerializesTo<NativeTaskList, TaskList>;
+  const serializedTaskList: JsonSerialized<NativeTaskList> = JSON.parse(JSON.stringify(taskListProjection));
+  assert.equal(serializedTaskList.createdAt, projectionDate.toISOString());
+  assert.deepEqual(serializedTaskList.strandedSalvageBranches, strandedSalvageBranches);
+
+  const taskDetailProjection = nativeTaskDetail() satisfies SerializesTo<NativeTaskDetail, TaskDetail>;
+  const serializedTaskDetail: JsonSerialized<NativeTaskDetail> = JSON.parse(JSON.stringify(taskDetailProjection));
+  assert.equal(serializedTaskDetail.createdAt, projectionDate.toISOString());
+  assert.deepEqual(serializedTaskDetail.strandedSalvageBranches, strandedSalvageBranches);
 });

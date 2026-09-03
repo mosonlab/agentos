@@ -338,6 +338,12 @@ export type BoardLatestRun<DateTime = string> = {
   pullRequestUrl: string | null;
 };
 
+/** A durable salvage ref from a LOST Run that a later Run did not consume. */
+export type StrandedSalvageBranch = {
+  branch: string;
+  lostRunNumber: number;
+};
+
 export type RepairBinding = {
   chainId: string;
   chainName: string | null;
@@ -425,6 +431,7 @@ export type BoardCard<DateTime = string> = {
   assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: ChainProgress | null;
   latestRun: BoardLatestRun<DateTime> | null;
+  strandedSalvageBranches: StrandedSalvageBranch[];
   taskCost: UsageCost | null;
   mergeOutcome: MergeOutcome | null;
   repairOf: RepairBinding | null;
@@ -573,6 +580,7 @@ type TaskBase<DateTime, DecimalValue> = {
   assigneeAgent: Agent<DateTime> | null;
   repo: Repo<DateTime> | null;
   runs: Run<DateTime, DecimalValue>[];
+  strandedSalvageBranches: StrandedSalvageBranch[];
   chainId: string | null;
   chainIndex: number | null;
   source: TaskSource;

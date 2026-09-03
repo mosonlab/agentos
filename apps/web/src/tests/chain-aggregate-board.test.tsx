@@ -19,7 +19,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   assigneeType: "AGENT", createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false, templateId: null,
   source: "MANUAL", chainId: null, chainIndex: null, chainName: null, assigneeAgent: null,
-  chainProgress: null, latestRun: null, taskCost: null, blockedOn: null, mergeOutcome: null,
+  chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null, blockedOn: null, mergeOutcome: null,
   repairOf: null, chainAggregate: null, ...overrides,
 });
 
@@ -146,6 +146,20 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.match(waitingMarkup, /Locked by/);
   assert.match(waitingMarkup, />Hold<\/button>/);
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
+});
+
+test("an aggregate board card carries the stranded salvage count from its members", () => {
+  const projection = aggregate();
+  const member = task({
+    id: "step-with-salvage",
+    strandedSalvageBranches: [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }],
+  });
+  const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={[member]} />);
+  assert.match(markup, /data-card-stranded-salvage=""/u);
+  assert.match(visibleText(markup), /Salvage 1/u);
+
+  const ordinary = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={[task()]} />);
+  assert.doesNotMatch(ordinary, /data-card-stranded-salvage=""/u);
 });
 
 test("the hold pill and Resume follow the persisted hold, running or held", () => {
