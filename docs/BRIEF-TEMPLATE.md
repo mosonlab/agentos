@@ -79,11 +79,14 @@ is — a brief that cannot reach mechanical Acceptance is compound-shaped
 regardless of tier.
 
 Direct-template instantiation parses and validates the `Route:` line and applies
-it to the implementation step. A line starting with `Route:` that does not
-match the grammar exactly is refused at instantiation rather than silently
-ignored. Explicit `stepOverrides` are a separate API
-mechanism; do not supply both for that step. Compound and custom templates do
-not interpret Route-looking prose.
+it to the implementation step. On that template, a line starting with `Route:`
+that does not match the grammar exactly is refused at instantiation rather than
+silently ignored. Explicit `stepOverrides` are a separate API
+mechanism; do not supply both for that step. A well-formed `Route:` line on a
+template that does not consume implementation routes refuses instantiation with
+`implementation_route_template_unsupported`; remove the line or route that
+template through `stepOverrides`. Those templates do not interpret malformed
+Route-looking prose.
 
 ## Skeleton
 
