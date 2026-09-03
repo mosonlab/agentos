@@ -278,17 +278,20 @@ const readLog = async () => {
   // Node's TAP reporter uses `# Subtest`, while the default reporter prints
   // `test at ...`/`location: ...` and a marked failure. Accept either shape so
   // a file path is retained even when the worker forwards only a short tail.
-  const isFileContext = /\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b/u.test(visible);
+  const isFileContext = /(?:\b(?:test|spec|dbtest)\.[cm]?[jt]sx?(?::\d+(?::\d+)?)?\b|\S+\.py::\S+)/u.test(visible);
   if (isSubtestContext || isFileContext) {
     pendingContexts.push({ line: visible, index, stage: currentStage });
     if (pendingContexts.length > 12) pendingContexts.shift();
   }
 
   const isNotOk = /\bnot ok\b/u.test(visible);
+  const isPytestFailure = /^\s*(?:FAILED|ERROR)\s+\S+\.py::/u.test(visible);
+  const isRepositoryFailure = /^[A-Z][A-Z0-9-]*: (?:UNMET|FAIL|FAILED|ERROR)\b/u.test(visible);
   const isFailureMarker = /^\s*[✖×]\s+(?!failing tests?:)/u.test(visible);
   const isAssertion = /\bAssertionError\b/u.test(visible);
   const isError = /\bError:/u.test(visible);
-  if (isNotOk || isFailureMarker) {
+  const isPytestAssertion = /^E {3}/u.test(visible);
+  if (isNotOk || isFailureMarker || isPytestFailure || isRepositoryFailure) {
     const failureStage = currentStage;
     for (const context of pendingContexts) {
       if (context.stage === failureStage || !context.stage || !failureStage) {
@@ -299,7 +302,7 @@ const readLog = async () => {
     addRecord(visible, index, failureStage);
     failureOpen = true;
     failureAge = 0;
-  } else if (isAssertion || (failureOpen && isError)) {
+  } else if (isAssertion || (failureOpen && (isError || isPytestAssertion))) {
     addRecord(visible, index, currentStage);
   }
 
