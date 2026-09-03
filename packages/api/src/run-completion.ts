@@ -49,6 +49,7 @@ import {
 } from "./canonical-task-output.js";
 import {
   classifyEnvelope,
+  isTextMatchedTransientProviderFailure,
   jsonValue,
   retryDelayMs,
 } from "./execution.js";
@@ -670,8 +671,8 @@ export const completeRun = async (
     const cappedExternalFailure = outputFailurePolicy.cappedExternalFailure
       || (body.outcome.case === "provider-failure"
         && body.outcome.envelope.phase === "EXECUTE"
-        && failureClass === FailureClass.TRANSIENT_PROVIDER
-        && reported.externalFailure);
+        && failureClass !== null
+        && isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass));
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
     // A negative Regression verdict is durable control-plane evidence even
     // when the provider stream drops before its terminal event. Qualify this
