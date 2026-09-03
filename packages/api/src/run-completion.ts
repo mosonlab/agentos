@@ -10,6 +10,7 @@ import {
   CleanupStatus,
   decideRunOutputSatisfaction,
   executionModeFor,
+  EXTERNAL_FAILURE_REFUND_CAP,
   FailureClass,
   failurePhases,
   gateQuestion,
@@ -30,6 +31,7 @@ import {
   PushStatus,
   readMarkers,
   recordIntegratorStop,
+  REGRESSION_VERIFICATION_OUTPUT_KIND,
   runBudgetCeiling,
   type RunOutcome,
   runOutcomeVerdict,
@@ -37,6 +39,7 @@ import {
   stepRole,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import {
@@ -48,6 +51,7 @@ import {
 } from "./canonical-task-output.js";
 import {
   classifyEnvelope,
+  isTextMatchedTransientProviderFailure,
   jsonValue,
   retryDelayMs,
 } from "./execution.js";
@@ -162,9 +166,151 @@ export const completionInput = z.object({
   // runner observed no worktree outside its run workspace; it never changes
   // terminal outcome classification.
   worktreeContainmentViolations: worktreeContainmentViolationsInput.optional(),
-});
+}).describe(`Run completion contract version ${RUN_COMPLETION_CONTRACT_VERSION}`);
 
 export type CompletionInput = z.infer<typeof completionInput>;
+
+const TARGET_FETCH_BLOCK_REASON = "target-fetch-failed";
+
+type OutputFailurePolicyInput = {
+  outputKind: string | null | undefined;
+  outcome: RunOutcome;
+};
+
+/** Convert only Regression's machine-readable target-fetch block from an
+ * absent-output agent failure into an external git failure. */
+export const completionOutputFailurePolicy = ({
+  outputKind,
+  outcome,
+}: OutputFailurePolicyInput): {
+  externalFailure: boolean;
+  cappedExternalFailure: boolean;
+} => {
+  const targetFetchFailed = outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
+    && outcome.case === "required-output-unsatisfied"
+    && outcome.reason.includes(TARGET_FETCH_BLOCK_REASON);
+  return {
+    externalFailure: targetFetchFailed,
+    cappedExternalFailure: targetFetchFailed,
+  };
+};
+
+type RefundDecisionInput = {
+  runNumber: number;
+  external: boolean;
+  refundable: boolean;
+  mechanical: boolean;
+  capped: boolean;
+  priorCappedRefunds: number;
+};
+
+type RefundActivity = {
+  body: string;
+  metadata: {
+    kind: "externalFailureRefund.granted" | "externalFailureRefund.refused";
+    schemaVersion: 1;
+    policy: "capped" | "uncapped";
+    granted: boolean;
+    cap: number;
+    capReached: boolean;
+  };
+};
+
+export type ExternalFailureRefundDecision = {
+  refunded: 0 | 1;
+  capReached: boolean;
+  activity: RefundActivity | null;
+};
+
+const refundActivity = (
+  body: string,
+  policy: RefundActivity["metadata"]["policy"],
+  granted: boolean,
+  capReached: boolean,
+): RefundActivity => ({
+  body,
+  metadata: {
+    kind: granted ? "externalFailureRefund.granted" : "externalFailureRefund.refused",
+    schemaVersion: 1,
+    policy,
+    granted,
+    cap: EXTERNAL_FAILURE_REFUND_CAP,
+    capReached,
+  },
+});
+
+export const completionBudgetAfterRefund = (
+  maxRunsPerTask: number,
+  budgetGrants: number,
+  refunded: 0 | 1,
+): { maxRunsPerTask: number; budgetGrants: number } => ({
+  maxRunsPerTask: runBudgetCeiling(maxRunsPerTask, refunded),
+  budgetGrants: budgetGrants + refunded,
+});
+
+/** Decide and narrate one budget refund. `priorCappedRefunds` counts only the
+ * grants emitted with the capped policy; legacy plumbing refunds do not
+ * consume this allowance. */
+export const externalFailureRefundDecision = ({
+  runNumber,
+  external,
+  refundable,
+  mechanical,
+  capped,
+  priorCappedRefunds,
+}: RefundDecisionInput): ExternalFailureRefundDecision => {
+  if (!external) return { refunded: 0, capReached: false, activity: null };
+  const policy = capped ? "capped" : "uncapped";
+  if (mechanical) {
+    return {
+      refunded: 0,
+      capReached: false,
+      activity: refundActivity(
+        `Run ${runNumber} external failure was not refunded because the step is mechanical`,
+        policy,
+        false,
+        false,
+      ),
+    };
+  }
+  if (!refundable) {
+    return {
+      refunded: 0,
+      capReached: false,
+      activity: refundActivity(
+        `Run ${runNumber} external failure was not eligible for a budget refund`,
+        policy,
+        false,
+        false,
+      ),
+    };
+  }
+  if (capped && priorCappedRefunds >= EXTERNAL_FAILURE_REFUND_CAP) {
+    return {
+      refunded: 0,
+      capReached: true,
+      activity: refundActivity(
+        `Run ${runNumber} external-failure refund cap was reached (${EXTERNAL_FAILURE_REFUND_CAP})`,
+        policy,
+        false,
+        true,
+      ),
+    };
+  }
+  const ordinal = capped ? priorCappedRefunds + 1 : null;
+  return {
+    refunded: 1,
+    capReached: false,
+    activity: refundActivity(
+      capped
+        ? `Run ${runNumber} received external-failure budget refund ${ordinal} of ${EXTERNAL_FAILURE_REFUND_CAP}`
+        : `Run ${runNumber} received an external-failure budget refund`,
+      policy,
+      true,
+      false,
+    ),
+  };
+};
 
 const isDocumentationStep = (step: { outputKind: string } | null | undefined): boolean =>
   Boolean(step && stepRole(step) === "documentation");
@@ -493,6 +639,10 @@ export const completeRun = async (
       body.headSha ?? null,
       persistedOutput,
     );
+    const outputFailurePolicy = completionOutputFailurePolicy({
+      outputKind: run.task?.templateStep?.outputKind,
+      outcome: body.outcome,
+    });
     // A valid, same-Run mechanical result is terminal protocol success even
     // when the later completion envelope says exit 1/PROTOCOL_ERROR. This is
     // deliberately narrower than trusting the envelope: malformed, foreign,
@@ -515,9 +665,16 @@ export const completeRun = async (
     // two follow it rather than re-testing `succeeded`.
     const retryable = missingOutputReason ? true : failureClass !== null && reported.retryable;
     // An external failure buys the task one more attempt rather than spending
-    // one. A missing deliverable is the agent's own attempt, not the
-    // environment's, so it spends the attempt like any other failed one.
-    const external = missingOutputReason ? false : failureClass !== null && reported.externalFailure;
+    // one. Missing deliverables remain agent failures except for Regression's
+    // machine-readable target-fetch block, where git failed before the script
+    // could produce its mechanical handoff.
+    const external = outputFailurePolicy.externalFailure
+      || (missingOutputReason ? false : failureClass !== null && reported.externalFailure);
+    const cappedExternalFailure = outputFailurePolicy.cappedExternalFailure
+      || (body.outcome.case === "provider-failure"
+        && body.outcome.envelope.phase === "EXECUTE"
+        && failureClass !== null
+        && isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass));
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
     // A negative Regression verdict is durable control-plane evidence even
     // when the provider stream drops before its terminal event. Qualify this
@@ -544,6 +701,38 @@ export const completeRun = async (
     const failureReason = succeeded && reported.succeeded
       ? null
       : missingOutputReason ?? reported.failureReason ?? "Execution failed";
+    // Completion always mutates its Task, including terminal non-retryable
+    // failures. Run is already locked above; acquire the Task/chain mutex now
+    // before reading capped-refund history so two completion decisions cannot
+    // grant the same final allowance.
+    if (run.task) {
+      if (run.task.chainId) {
+        await lockChainRows(tx, { projectId: run.task.projectId, chainId: run.task.chainId });
+      } else {
+        await lockTask(tx, run.task.id);
+      }
+    }
+    const priorCappedRefunds = cappedExternalFailure && external && !mechanical && run.taskId
+      ? await tx.taskActivity.count({
+          where: {
+            taskId: run.taskId,
+            AND: [
+              { metadata: { path: ["kind"], equals: "externalFailureRefund.granted" } },
+              { metadata: { path: ["policy"], equals: "capped" } },
+            ],
+          },
+        })
+      : 0;
+    const refundDecision = externalFailureRefundDecision({
+      runNumber: run.runNumber,
+      external,
+      refundable: failureClass !== FailureClass.NO_CHANGES_PRODUCED
+        && failureClass !== FailureClass.BUDGET_EXCEEDED
+        && failureClass !== FailureClass.TASK_FAILED,
+      mechanical,
+      capped: cappedExternalFailure,
+      priorCappedRefunds,
+    });
     // §D-P5 / MF-5. For the integrator step that compensation is switched off
     // entirely, so the answer transaction is the *only* writer of a ceiling
     // above the task's original. Otherwise a run authorized once could buy
@@ -552,8 +741,13 @@ export const completeRun = async (
     // reachable interleaving rather than merely hard to reach. The failure
     // envelope's verdict decides *whether* the failure was external; it does
     // not get to raise the ceiling on this step either.
-    const refunded = external && !mechanical ? 1 : 0;
-    const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, refunded);
+    const refunded = refundDecision.refunded;
+    const completionBudget = completionBudgetAfterRefund(
+      run.maxRunsPerTask,
+      run.budgetGrants,
+      refunded,
+    );
+    const budgetCeiling = completionBudget.maxRunsPerTask;
     // One marker read for both completion outcomes; this handler used to
     // declare `tailRows` twice and scan twice. The success path consults it
     // only for a standalone auxiliary task — an automatic repair, which is not
@@ -631,19 +825,8 @@ export const completeRun = async (
     // budget changes. The in-flight ceiling stays derived from the run's own
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
-    const budgetGrants = run.budgetGrants + refunded;
+    const budgetGrants = completionBudget.budgetGrants;
     let leaseOutcome: "continue" | "stop" = "continue";
-    // Completion always mutates its Task, including terminal non-retryable
-    // failures. Run is already locked above; acquire the Task/chain mutex now
-    // for every outcome rather than only the branches that may retry or
-    // advance.
-    if (run.task) {
-      if (run.task.chainId) {
-        await lockChainRows(tx, { projectId: run.task.projectId, chainId: run.task.chainId });
-      } else {
-        await lockTask(tx, run.task.id);
-      }
-    }
     if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
       await lockTaskMutationRows(tx, auxiliaryTargetTaskId);
     }
@@ -742,6 +925,22 @@ export const completeRun = async (
       else retryRefusal = opened.refusal;
     }
     if (run.taskId) {
+      if (refundDecision.activity) {
+        await tx.taskActivity.create({
+          data: {
+            taskId: run.taskId,
+            actorType: "control-plane",
+            body: refundDecision.activity.body,
+            metadata: jsonValue({
+              ...refundDecision.activity.metadata,
+              runId: run.id,
+              priorCappedRefunds,
+              budgetGrantsBefore: run.budgetGrants,
+              budgetGrantsAfter: budgetGrants,
+            }),
+          },
+        });
+      }
       const budgetExhausted = !succeeded && retryable && !durableNegativeRegressionVerdict
         && !retryCreated && !retryRefusal;
       let canonicalOutputFailure: string | null = null;

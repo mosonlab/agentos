@@ -1,12 +1,47 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { FailureClass, type FailureEnvelope, type RunOutcome, runOutcomeVerdict } from "@anneal/db";
+import {
+  CleanupStatus,
+  EXTERNAL_FAILURE_REFUND_CAP,
+  FailureClass,
+  PushStatus,
+  RunStatus,
+  type PrismaClient,
+  type FailureEnvelope,
+  type RunOutcome,
+  runOutcomeVerdict,
+} from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import { z } from "zod";
 
 import { classifyEnvelope } from "./execution.js";
-import { completionEvidenceRefusal } from "./run-completion.js";
+import {
+  completionBudgetAfterRefund,
+  completionEvidenceRefusal,
+  completionInput,
+  completionOutputFailurePolicy,
+  completeRun,
+  externalFailureRefundDecision,
+} from "./run-completion.js";
 
 const baseSha = "5".repeat(40);
+
+test("the completion input schema references the shared contract version", () => {
+  assert.equal(completionInput.description, `Run completion contract version ${RUN_COMPLETION_CONTRACT_VERSION}`);
+});
+
+test("the completion input shape is pinned to its shared contract version", () => {
+  const schemaHash = createHash("sha256")
+    .update(JSON.stringify(z.toJSONSchema(completionInput, { unrepresentable: "any" })))
+    .digest("hex");
+  const schemaHashesByVersion: Record<number, string> = {
+    1: "fb27fe3f07d0dce703452f1706186bfe61521eb3bcd41fad9d193b51876ad9b7",
+  };
+
+  assert.equal(schemaHash, schemaHashesByVersion[RUN_COMPLETION_CONTRACT_VERSION]);
+});
 
 const implementationStep = {
   outputKind: "implementation",
@@ -76,6 +111,285 @@ test("a configured non-committing Step keeps its ordinary completion semantics",
   });
 
   assert.equal(completionEvidenceRefusal(run, true, baseSha, null), null);
+});
+
+test("three capped external failures refund the task and the fourth records the cap", () => {
+  let cappedRefunds = 0;
+  let completionBudget = { maxRunsPerTask: 1, budgetGrants: 0 };
+
+  for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP; runNumber += 1) {
+    const decision = externalFailureRefundDecision({
+      runNumber,
+      external: true,
+      refundable: true,
+      mechanical: false,
+      capped: true,
+      priorCappedRefunds: cappedRefunds,
+    });
+    assert.equal(decision.refunded, 1);
+    assert.equal(decision.capReached, false);
+    assert.match(decision.activity?.body ?? "", new RegExp(`${runNumber} of ${EXTERNAL_FAILURE_REFUND_CAP}`));
+    cappedRefunds += decision.refunded;
+    completionBudget = completionBudgetAfterRefund(
+      completionBudget.maxRunsPerTask,
+      completionBudget.budgetGrants,
+      decision.refunded,
+    );
+    assert.equal(completionBudget.budgetGrants, runNumber);
+    assert.equal(completionBudget.maxRunsPerTask, runNumber + 1);
+  }
+
+  assert.equal(completionBudget.budgetGrants, EXTERNAL_FAILURE_REFUND_CAP);
+  const fourth = externalFailureRefundDecision({
+    runNumber: EXTERNAL_FAILURE_REFUND_CAP + 1,
+    external: true,
+    refundable: true,
+    mechanical: false,
+    capped: true,
+    priorCappedRefunds: cappedRefunds,
+  });
+  assert.equal(fourth.refunded, 0);
+  assert.equal(fourth.capReached, true);
+  assert.match(fourth.activity?.body ?? "", /external-failure refund cap was reached/i);
+  assert.deepEqual(
+    completionBudgetAfterRefund(
+      completionBudget.maxRunsPerTask,
+      completionBudget.budgetGrants,
+      fourth.refunded,
+    ),
+    completionBudget,
+  );
+});
+
+test("legacy external refunds do not consume the capped allowance", () => {
+  const decision = externalFailureRefundDecision({
+    runNumber: 8,
+    external: true,
+    refundable: true,
+    mechanical: false,
+    capped: false,
+    priorCappedRefunds: EXTERNAL_FAILURE_REFUND_CAP,
+  });
+  assert.equal(decision.refunded, 1);
+  assert.equal(decision.capReached, false);
+  assert.equal(decision.activity?.metadata.policy, "uncapped");
+});
+
+test("ineligible and mechanical failures never receive a refund", () => {
+  for (const input of [
+    { refundable: false, mechanical: false },
+    { refundable: true, mechanical: true },
+  ]) {
+    const decision = externalFailureRefundDecision({
+      runNumber: 2,
+      external: true,
+      capped: false,
+      priorCappedRefunds: 0,
+      ...input,
+    });
+    assert.equal(decision.refunded, 0);
+    assert.equal(decision.activity?.metadata.granted, false);
+  }
+});
+
+test("a Regression target-fetch block keeps its git diagnostic and is externally refundable", () => {
+  const policy = completionOutputFailurePolicy({
+    outputKind: "regression-verification-v2",
+    outcome: {
+      case: "required-output-unsatisfied",
+      reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username for 'https://github.com'",
+    },
+  });
+  assert.equal(policy.externalFailure, true);
+  assert.equal(policy.cappedExternalFailure, true);
+});
+
+test("a legacy Regression target-fetch text remains non-external", () => {
+  const policy = completionOutputFailurePolicy({
+    outputKind: "regression-verification",
+    outcome: {
+      case: "required-output-unsatisfied",
+      reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username",
+    },
+  });
+
+  assert.equal(policy.externalFailure, false);
+  assert.equal(policy.cappedExternalFailure, false);
+});
+
+test("an ordinary missing-output refusal remains non-external", () => {
+  const policy = completionOutputFailurePolicy({
+    outputKind: "implementation",
+    outcome: {
+      case: "required-output-unsatisfied",
+      reason: "A step finished without a handoff",
+    },
+  });
+  assert.equal(policy.externalFailure, false);
+  assert.equal(policy.cappedExternalFailure, false);
+});
+
+type RecordedActivity = { taskId: string; body: string; metadata?: Record<string, unknown> };
+type MetadataClause = { metadata?: { path?: unknown; equals?: unknown } };
+type HarnessRun = Record<string, unknown> & { id: string; fencingToken: string };
+
+const statefulCompletionHarness = () => {
+  const activities: RecordedActivity[] = [];
+  const closedRuns = new Map<string, Record<string, unknown>>();
+  const archivedAt = new Date("2026-08-16T06:00:00.000Z");
+  let currentRun: HarnessRun;
+
+  const task = {
+    id: "task-refunds", projectId: "project-1", name: "Refund cap", description: "test",
+    assigneeType: "AGENT", assigneeAgentId: "agent-1",
+    assigneeAgent: { id: "agent-1", name: "Archived test agent", archivedAt },
+    repoId: "repo-1", repo: null, chainId: null, chainIndex: null, chainLayer: null,
+    templateId: null, templateStepId: null, templateStep: null as Record<string, unknown> | null,
+    targetBranch: "main", opensPullRequest: true, maxDurationMin: 120, stallTimeoutMin: 10,
+    maxSessionsPerTask: 1, status: "DOING", archivedAt: null, approvalGate: false,
+  };
+
+  const metadataMatches = (metadata: Record<string, unknown> | undefined, clause: MetadataClause): boolean => {
+    const filter = clause.metadata;
+    if (!filter || !Array.isArray(filter.path)) return true;
+    let value: unknown = metadata;
+    for (const part of filter.path) value = (value as Record<string, unknown> | undefined)?.[String(part)];
+    return value === filter.equals;
+  };
+  const tx = {
+    $queryRaw: async () => [{ id: task.id }],
+    run: {
+      findFirst: async () => currentRun,
+      updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+        Object.assign(currentRun, data);
+        closedRuns.set(currentRun.id, { ...currentRun });
+        return { count: 1 };
+      },
+      create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "unexpected-retry", ...data }),
+    },
+    agent: { findUnique: async () => task.assigneeAgent },
+    session: { update: async () => ({}) },
+    task: {
+      updateMany: async () => ({ count: 1 }),
+      findUnique: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
+      findUniqueOrThrow: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
+    },
+    taskStepOutput: { findUnique: async () => null },
+    taskActivity: {
+      findMany: async () => [],
+      count: async ({ where }: { where: { taskId: string; AND?: MetadataClause[] } }) => activities.filter((activity) =>
+        activity.taskId === where.taskId
+        && (where.AND ?? []).every((clause) => metadataMatches(activity.metadata, clause))).length,
+      create: async ({ data }: { data: RecordedActivity }) => { activities.push(data); return data; },
+    },
+    runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
+    inboxMessage: { create: async () => ({}) },
+  };
+  const database = {
+    $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation(tx),
+    run: { findUnique: async () => ({ runnerId: "runner-1", task: { templateStep: task.templateStep } }) },
+  } as unknown as PrismaClient;
+
+  const complete = async ({
+    runNumber,
+    maxRunsPerTask,
+    budgetGrants,
+    outcome,
+    templateStep = null,
+  }: {
+    runNumber: number;
+    maxRunsPerTask: number;
+    budgetGrants: number;
+    outcome: RunOutcome;
+    templateStep?: Record<string, unknown> | null;
+  }) => {
+    task.templateStep = templateStep;
+    currentRun = {
+      id: `run-${runNumber}`, projectId: task.projectId, taskId: task.id, goalId: null,
+      agentId: task.assigneeAgentId, repoId: task.repoId, runNumber, maxRunsPerTask, budgetGrants,
+      runner: "CODEX", model: "gpt-5.6-sol:high", targetBranch: "main", branch: "feat/refunds",
+      pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
+      requiresCommit: false, opensPullRequest: true, codexServiceTier: "DEFAULT",
+      subagentModel: null, subagentMaxConcurrent: null, promptHash: "hash",
+      maxDurationMin: 120, stallTimeoutMin: 10, task: { ...task }, session: { id: `session-${runNumber}` },
+      status: RunStatus.RUNNING,
+    };
+    const result = await completeRun(database, {
+      runId: currentRun.id,
+      claimantClass: "runner",
+      body: {
+        runnerId: "runner-1",
+        fencingToken: currentRun.fencingToken,
+        outcome,
+        exitCode: outcome.case === "succeeded" ? 0 : 1,
+        pushStatus: PushStatus.NOT_REQUESTED,
+        cleanupStatus: CleanupStatus.SUCCEEDED,
+        workspaceRetained: false,
+      },
+    });
+    assert.ok(result && !("reason" in result));
+    return closedRuns.get(currentRun.id)!;
+  };
+
+  return { activities, complete };
+};
+
+const fetchFailureOutcome = (): RunOutcome => ({
+  case: "provider-failure",
+  reason: "fetch failed",
+  envelope: {
+    version: 1, phase: "EXECUTE", runnerClass: null, exitCode: 0, signal: null,
+    terminationReason: null, terminalEventSeen: true, terminalSuccess: false, agentExited: true,
+    providerError: null, stderrSummary: "fetch failed", stdoutSummary: null, timedOut: false,
+    transient: false, timeoutMs: null,
+  },
+});
+
+test("completeRun persists three capped refunds and refuses the fourth", async () => {
+  const harness = statefulCompletionHarness();
+  let budget = { maxRunsPerTask: 1, budgetGrants: 0 };
+  for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP + 1; runNumber += 1) {
+    const closed = await harness.complete({ runNumber, ...budget, outcome: fetchFailureOutcome() });
+    const expectedGrants = Math.min(runNumber, EXTERNAL_FAILURE_REFUND_CAP);
+    assert.equal(closed.budgetGrants, expectedGrants);
+    assert.equal(closed.maxRunsPerTask, 1 + expectedGrants);
+    budget = { maxRunsPerTask: Number(closed.maxRunsPerTask), budgetGrants: Number(closed.budgetGrants) };
+  }
+  assert.equal(harness.activities.filter(({ metadata }) => metadata?.kind === "externalFailureRefund.granted").length, 3);
+  assert.match(harness.activities.find(({ metadata }) => metadata?.capReached === true)?.body ?? "", /refund cap was reached/i);
+});
+
+test("completeRun refunds a target-fetch block and preserves its git diagnostic", async () => {
+  const harness = statefulCompletionHarness();
+  const reason = "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username";
+  const closed = await harness.complete({
+    runNumber: 1,
+    maxRunsPerTask: 1,
+    budgetGrants: 0,
+    outcome: { case: "required-output-unsatisfied", reason },
+    templateStep: {
+      outputKind: "regression-verification-v2", requiresCommit: false,
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  });
+  assert.equal(closed.budgetGrants, 1);
+  assert.equal(closed.failureReason, reason);
+});
+
+test("completeRun neither refunds nor rewrites an ordinary missing-output refusal", async () => {
+  const harness = statefulCompletionHarness();
+  const closed = await harness.complete({
+    runNumber: 1,
+    maxRunsPerTask: 2,
+    budgetGrants: 0,
+    outcome: { case: "succeeded" },
+    templateStep: {
+      outputKind: "implementation", requiresCommit: true,
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  });
+  assert.equal(closed.budgetGrants, 0);
+  assert.equal(closed.failureReason, "missing implementation task output for current Run run-1");
 });
 
 // --- Run outcome -----------------------------------------------------------

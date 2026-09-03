@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import { DependencyProvisioning, enqueueTaskRun, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { createApp } from "./test-app.js";
@@ -123,7 +124,7 @@ const claim = async (runnerId: string, token = RUNNER_TOKEN) => {
   const response = await createApp(db).request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId, leaseSeconds: 60 }),
+    body: JSON.stringify({ runnerId, leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }),
   });
   if (response.status !== 200) assert.fail(`claim returned ${response.status}: ${await response.text()}`);
   return response.json() as Promise<{ run: { id: string; taskId: string } }>;

@@ -6,8 +6,12 @@
  * completion: tls handshake eof)`. An anchored counter-only pattern rejected
  * that, so an ordinary reconnect notice latched the session's error flag and a
  * run that reconnected, finished its turn, and committed its work was completed
- * as PROTOCOL_ERROR. Only the trailing cause is optional; anything that does not
- * open with the counter is still a real provider error.
+ * as PROTOCOL_ERROR. Codex can also report a reconnect while it waits for the
+ * network without a retry counter. Both forms are status events, so they must
+ * not latch the session's error flag. Anything else is still a real provider
+ * error.
  */
 export const isCodexReconnectStatus = (message: string | null): boolean =>
-  /^Reconnecting\.\.\. \d+\/\d+(?: \([^\n]*\))?$/u.test(message?.trim() ?? "");
+  /^Reconnecting\.\.\. (?:\d+\/\d+(?: \([^\n]*\))?|waiting for network \([^\n]*\))$/u.test(
+    message?.trim() ?? "",
+  );

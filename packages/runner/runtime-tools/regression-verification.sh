@@ -73,6 +73,37 @@ fetch_backoff() {
   sleep "$(awk -v ceiling="$ceiling" 'BEGIN { srand(); printf "%.2f", rand() * ceiling }')"
 }
 
+persist_block_record() {
+  local stderr_line="$1" output_dir temporary
+  output_dir="$(dirname "$OUTPUT_FILE")"
+  if [ -L "$output_dir" ]; then
+    die "refusing symlinked regression output directory"
+  fi
+  umask 077
+  mkdir -p -- "$output_dir" || die "cannot create regression output directory"
+  [ -d "$output_dir" ] || die "regression output directory is not a directory"
+  temporary="$(mktemp "${OUTPUT_FILE}.XXXXXXXX")" \
+    || die "cannot create regression block record"
+  printf '%s\0%s\0%s' "$AGENTOS_RUN_ID" "$OUTPUT_KIND" "$stderr_line" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+const [runId, kind, stderr] = input.split("\0");
+process.stdout.write(JSON.stringify({ schemaVersion: 1, runId, kind, reason: "target-fetch-failed", stderr }));
+});
+' > "$temporary" || { rm -f -- "$temporary"; die "cannot encode regression block record"; }
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; die "cannot protect regression block record"; }
+  mv -f -- "$temporary" "$OUTPUT_FILE" \
+    || { rm -f -- "$temporary"; die "cannot publish regression block record"; }
+}
+
+persist_target_fetch_block() {
+  local error="$1" stderr_line
+  stderr_line="$(printf '%s\n' "$error" | tail -n 1)"
+  persist_block_record "$stderr_line"
+}
+
 fetch_base() {
   local attempt error status
   for attempt in $(seq 1 "$FETCH_ATTEMPTS"); do
@@ -81,12 +112,25 @@ fetch_base() {
       2>&1 >/dev/null)" || status=$?
     if [ "$status" -eq 0 ]; then
       local fetched
-      fetched="$(git rev-parse FETCH_HEAD)" || return 1
-      valid_sha "$fetched" || return 1
+      status=0
+      fetched="$(git rev-parse FETCH_HEAD 2>&1)" || status=$?
+      if [ "$status" -ne 0 ]; then
+        persist_target_fetch_block "$fetched"
+        printf 'regression-verification: cannot read fetched target (exit %s): %s\n' \
+          "$status" "$fetched" >&2
+        return 1
+      fi
+      if ! valid_sha "$fetched"; then
+        error="fetched target is not an object id: $fetched"
+        persist_target_fetch_block "$error"
+        printf 'regression-verification: %s\n' "$error" >&2
+        return 1
+      fi
       printf '%s' "$fetched"
       return 0
     fi
     if [[ ! "$error" =~ $FETCH_TRANSIENT_RE ]]; then
+      persist_target_fetch_block "$error"
       printf 'regression-verification: target fetch failed (exit %s): %s\n' "$status" "$error" >&2
       return 1
     fi
@@ -95,6 +139,7 @@ fetch_base() {
       "$((attempt + 1))" "$FETCH_ATTEMPTS" >&2
     fetch_backoff "$attempt"
   done
+  persist_target_fetch_block "$error"
   printf 'regression-verification: target fetch failed after %s attempts: %s\n' \
     "$FETCH_ATTEMPTS" "$error" >&2
   return 1

@@ -64,6 +64,7 @@ export {
   compoundImplementationAssigneeValid,
   deriveRunConfig,
   enqueueTaskRun,
+  EXTERNAL_FAILURE_REFUND_CAP,
   gateQuestion,
   isArchivedAssigneeError,
   isArchivedTaskError,

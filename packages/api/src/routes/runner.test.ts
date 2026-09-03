@@ -7,9 +7,64 @@ import {
   RunnerKind,
   type PrismaClient,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
+
+test("salvage publication records the stranded branch and preserves the already-started 409", async () => {
+  await withTokens(async () => {
+    const activities: Array<Record<string, unknown>> = [];
+    const lost = {
+      id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+      status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null,
+      pushedBranch: null, branch: "feat/salvage",
+    };
+    const replacement = {
+      id: "run-4", runNumber: 4, status: RunStatus.RUNNING,
+      startedAt: new Date(), baseSha: "base-before-salvage",
+    };
+    const tx = {
+      $queryRaw: async () => [{ id: "task-1" }],
+      run: {
+        findUnique: async () => lost,
+        findFirst: async () => replacement,
+        updateMany: async () => ({ count: 1 }),
+      },
+      task: {
+        findUnique: async () => ({ projectId: "project-1", chainId: null }),
+        findUniqueOrThrow: async () => ({ id: "task-1" }),
+      },
+      taskActivity: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          activities.push(data);
+          return {};
+        },
+      },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request("/runner/workspaces/salvaged", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1", runId: "run-3", pushedBranch: "agentos/task-1/run-3",
+      }),
+    });
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Salvage is durable, but the replacement already started from its prior base",
+    });
+    assert.deepEqual(activities, [{
+      taskId: "task-1",
+      actorType: "control-plane",
+      body: "Salvage branch agentos/task-1/run-3 from LOST Run 3 was not consumed by replacement Run 4 (RUNNING) from baseSha base-before-salvage",
+    }]);
+  });
+});
 
 test("starting a run without an exact dispatched prompt hash is refused before database access", async () => {
   await withTokens(async () => {
@@ -65,6 +120,194 @@ test("merge-executor start maps an omitted promptHash to null and dispatches", a
   });
 });
 
+for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) {
+  test(`a mechanical claim with ${contractVersion === undefined ? "no" : "a mismatched"} completion contract version is visibly refused`, async () => {
+    await withTokens(async () => {
+      const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+      process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
+      const activities: Array<Record<string, unknown>> = [];
+      let runMutations = 0;
+      const candidate = {
+        id: "run-mechanical", projectId: "project-1", taskId: "task-mechanical", repoId: "repo-1",
+        leaseGeneration: 0,
+        task: {
+          id: "task-mechanical",
+          targetBranch: "main",
+          templateStep: {
+            stepIndex: 7,
+            outputKind: "merge-result",
+            taskTemplate: { name: "direct-engineer-workflow" },
+          },
+        },
+        repo: { id: "repo-1", defaultBranch: "main" },
+        agent: {
+          id: "agent-mechanical",
+          name: "merge-integrator",
+          repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
+        },
+      };
+      const tx = {
+        $queryRaw: async () => [{ granted: true }],
+        $executeRawUnsafe: async () => 0,
+        chainControl: { findMany: async () => [] },
+        mergeLeaseEvent: { findMany: async () => [] },
+        run: {
+          findMany: async () => [candidate],
+          updateMany: async () => { runMutations += 1; return { count: 1 }; },
+          create: async () => { runMutations += 1; return {}; },
+        },
+        taskActivity: {
+          findFirst: async () => activities.length === 0 ? null : { metadata: activities.at(-1)?.metadata },
+          create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+        },
+      };
+      const database = {
+        run: { findMany: async () => [] },
+        taskActivity: { createMany: async () => ({ count: 0 }) },
+        $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      } as unknown as PrismaClient;
+      try {
+        const app = createApp(database);
+        const request = () => app.request("/runner/tasks/claim", {
+          method: "POST",
+          headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runnerId: "merge-executor-1",
+            leaseSeconds: 60,
+            ...(contractVersion === undefined ? {} : { contractVersion }),
+          }),
+        });
+
+        const response = await request();
+        assert.equal(response.status, 409);
+        const refusal = await response.json() as Record<string, unknown>;
+        assert.equal(refusal.code, "mechanical_contract_mismatch");
+        assert.equal(refusal.expectedVersion, RUN_COMPLETION_CONTRACT_VERSION);
+        assert.equal(refusal.receivedVersion, contractVersion ?? null);
+        assert.match(String(refusal.error), new RegExp(`executor version ${contractVersion ?? "missing"}`, "u"));
+        assert.match(String(refusal.error), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.equal(runMutations, 0);
+        assert.equal(activities.length, 1);
+        assert.equal(activities[0]?.taskId, "task-mechanical");
+        assert.match(String(activities[0]?.body), new RegExp(`executor version ${contractVersion ?? "missing"}`, "u"));
+        assert.match(String(activities[0]?.body), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.equal((await request()).status, 409);
+        assert.equal(activities.length, 1);
+      } finally {
+        if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+        else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+      }
+    });
+  });
+}
+
+test("a mechanical claim with the matching completion contract version claims normally", async () => {
+  await withTokens(async () => {
+    const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
+    const now = new Date("2026-09-02T23:00:00.000Z");
+    const task = {
+      id: "task-mechanical", projectId: "project-1", repoId: "repo-1",
+      status: "TODO", assigneeType: "AGENT", archivedAt: null,
+      chainId: null, chainIndex: null, chainLayer: null, templateId: null,
+      createdAt: now, name: "Merge execution", description: "Mechanical merge",
+      targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3,
+      templateStep: {
+        name: "Merge execution", stepIndex: 7, outputKind: "merge-result",
+        provisionDependencies: false, priorOutputKinds: [], baseFromStepIndex: null,
+        taskTemplate: { name: "direct-engineer-workflow" },
+      },
+    };
+    const candidate = {
+      id: "run-mechanical", projectId: "project-1", taskId: task.id, goalId: null,
+      agentId: "agent-mechanical", repoId: "repo-1", runNumber: 1,
+      runner: RunnerKind.CLAUDE, leaseGeneration: 0, maxDurationMin: 120, stallTimeoutMin: 10,
+      readyAt: now, createdAt: now, session: null, branch: "fix/merge", targetBranch: "main",
+      task,
+      repo: {
+        id: "repo-1", remoteUrl: "https://github.test/acme/repo.git", defaultBranch: "main",
+        mountPath: "repo", dependencyProvisioning: "NONE",
+      },
+      agent: {
+        id: "agent-mechanical", name: "merge-integrator", model: "mechanical/merge-executor-v1",
+        foundationalPrompt: "", rolePrompt: "", disabledTools: [], archivedAt: null,
+        repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
+        environment: { secrets: [] }, secretGrants: [],
+      },
+    };
+    const activities: Array<Record<string, unknown>> = [];
+    let runMutations = 0;
+    const claimedRun = {
+      ...candidate,
+      opensPullRequest: false, requiresCommit: false, maxRunsPerTask: 3,
+      model: candidate.agent.model, codexServiceTier: "DEFAULT",
+      subagentModel: null, subagentMaxConcurrent: null, promptHash: null,
+      workspacePath: null, baseSha: null,
+    };
+    const tx = {
+      $queryRaw: async (query: unknown) => {
+        const sql = Array.isArray(query)
+          ? query.join("?")
+          : (query as { strings?: string[] }).strings?.join("?") ?? "";
+        if (sql.includes("pg_try_advisory_xact_lock_shared")) return [{ granted: true }];
+        if (sql.includes("pg_try_advisory_xact_lock")) return [{ locked: true }];
+        if (sql.includes('SELECT "id" FROM "Task"')) return [{ id: task.id }];
+        return [];
+      },
+      $executeRawUnsafe: async () => 0,
+      chainControl: { findMany: async () => [] },
+      mergeLeaseEvent: { findMany: async () => [] },
+      run: {
+        findMany: async ({ where }: { where: { id?: { not?: string } } }) => where.id?.not ? [] : [candidate],
+        updateMany: async () => { runMutations += 1; return { count: 1 }; },
+        findFirst: async () => null,
+        findUniqueOrThrow: async () => claimedRun,
+      },
+      session: { create: async () => ({ id: "session-mechanical" }) },
+      sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
+      task: {
+        findUnique: async () => task,
+        findUniqueOrThrow: async () => task,
+        update: async () => ({}),
+      },
+      taskActivity: {
+        findMany: async () => [],
+        findFirst: async () => null,
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+      },
+    };
+    const database = {
+      run: { findMany: async () => [] },
+      chainControl: { findUnique: async () => null },
+      taskActivity: { createMany: async () => ({ count: 0 }) },
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    try {
+      const response = await createApp(database).request("/runner/tasks/claim", {
+        method: "POST",
+        headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runnerId: "merge-executor-1",
+          leaseSeconds: 60,
+          contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      const claim = await response.json() as { executionMode: string; run: { id: string } };
+      assert.equal(claim.executionMode, "mechanical");
+      assert.equal(claim.run.id, candidate.id);
+      assert.equal(runMutations, 1);
+      assert.equal(activities.filter((activity) => (
+        (activity.metadata as Record<string, unknown> | undefined)?.code === "mechanical_contract_mismatch"
+      )).length, 0);
+    } finally {
+      if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+      else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+    }
+  });
+});
+
 test("completion refunds an external failure but refuses an automatic retry for an archived Agent", async () => {
   const previousRoot = process.env.RUNNER_WORKSPACE_ROOT;
   process.env.RUNNER_WORKSPACE_ROOT = `/tmp/agentos-missing-${Date.now()}`;
@@ -73,6 +316,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
     let closed: Record<string, unknown> | undefined;
     let retry: Record<string, unknown> | undefined;
     const taskWrites: Record<string, unknown>[] = [];
+    const activities: Record<string, unknown>[] = [];
     const inbox: Record<string, unknown>[] = [];
     const archivedAt = new Date("2026-08-16T06:00:00.000Z");
     const run = {
@@ -107,7 +351,11 @@ test("completion refunds an external failure but refuses an automatic retry for 
         }),
         findUniqueOrThrow: async () => run.task,
       },
-      taskActivity: { findMany: async () => [], create: async () => ({}) },
+      taskActivity: {
+        findMany: async () => [],
+        count: async () => 0,
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+      },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     };
@@ -138,6 +386,21 @@ test("completion refunds an external failure but refuses an automatic retry for 
     });
     assert.equal(response.status, 200);
     assert.equal(closed?.maxRunsPerTask, 4);
+    assert.deepEqual(
+      activities.find(({ metadata }) => (metadata as { kind?: string })?.kind === "externalFailureRefund.granted")?.metadata,
+      {
+        kind: "externalFailureRefund.granted",
+        schemaVersion: 1,
+        policy: "capped",
+        granted: true,
+        cap: 3,
+        capReached: false,
+        runId: "run-3",
+        priorCappedRefunds: 0,
+        budgetGrantsBefore: 0,
+        budgetGrantsAfter: 1,
+      },
+    );
     assert.equal(retry, undefined);
     assert.match(String(taskWrites.at(-1)?.failureReason), /Automatic retry refused.*Archived Retry Agent/);
     assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived Retry Agent/);

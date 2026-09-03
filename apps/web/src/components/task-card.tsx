@@ -117,6 +117,7 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
+  const strandedSalvageBranches = task.strandedSalvageBranches;
   const assignee = task.assigneeAgent?.title ?? null;
   const schedule = scheduleLabel(task);
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
@@ -136,6 +137,9 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const chainLabel = chain === null ? null : chainBindingLabel(chain);
   const repair = task.repairOf ?? null;
   const metaRows: ReactNode[] = [
+    ...(strandedSalvageBranches.length === 0 ? [] : [<span data-card-stranded-salvage="">
+      <Pill tone="amber" className={TASK_PILL}>{t("tasks.card.strandedSalvage", { n: strandedSalvageBranches.length })}</Pill>
+    </span>]),
     ...(hasScheduleRow ? [<span data-card-schedule="" className="contents">
         {/* Two lines, not one ellipsized one. Measured in a 170px content box:
             "Waiting for previous step" came out as "Waiting for previous st…"

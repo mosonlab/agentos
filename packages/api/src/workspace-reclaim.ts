@@ -407,6 +407,10 @@ export type ReplacementRepair = "none" | "repaired" | "requeued" | "already-star
 export const acknowledgeReclaimSalvage = async (
   db: PrismaClient,
   input: { runnerId: string; runId: string; pushedBranch: string },
+  repairReplacement: (
+    tx: Prisma.TransactionClient,
+    run: { taskId: string; runNumber: number; branch: string | null },
+  ) => Promise<ReplacementRepair> = repairReplacementAfterSalvage,
 ): Promise<false | ReplacementRepair> => {
   return db.$transaction(async (tx) => {
     const run = await tx.run.findUnique({
@@ -432,11 +436,27 @@ export const acknowledgeReclaimSalvage = async (
       data: { pushedBranch: input.pushedBranch },
     });
     if (updated.count !== 1 || !run.taskId) return false;
-    return repairReplacementAfterSalvage(tx, {
+    const repair = await repairReplacement(tx, {
       taskId: run.taskId,
       runNumber: run.runNumber,
       branch: run.branch,
     });
+    if (repair === "already-started") {
+      const replacement = await tx.run.findFirst({
+        where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
+        select: { runNumber: true, status: true, baseSha: true },
+      });
+      if (replacement) {
+        await tx.taskActivity.create({ data: {
+          taskId: run.taskId,
+          actorType: "control-plane",
+          body: replacement.baseSha === null
+            ? `Salvage branch ${input.pushedBranch} from LOST Run ${run.runNumber} was not consumed by replacement Run ${replacement.runNumber} (${replacement.status}), which has no recorded baseSha`
+            : `Salvage branch ${input.pushedBranch} from LOST Run ${run.runNumber} was not consumed by replacement Run ${replacement.runNumber} (${replacement.status}) from baseSha ${replacement.baseSha}`,
+        } });
+      }
+    }
+    return repair;
   });
 };
 
